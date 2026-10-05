@@ -38,6 +38,24 @@ from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
 
 
+def _sea_tools(agent: Any) -> list[Any]:
+    """Return the tools a stubbed run gets from its SEA's ``tools()``.
+
+    The daemon hands ``SorcarAgent.run`` the SEA's ``tools`` method as
+    its ``tools_hook`` (kept on the agent, applied by ``perform_task``
+    to the built-in toolset plus the inherited tools); the stub that
+    replaces the parent ``run`` applies it the way ``perform_task``
+    does, to the inherited tools alone (a stub never builds the
+    built-ins).
+
+    Args:
+        agent: The :class:`SorcarAgent` whose parent ``run`` is stubbed.
+    """
+    tools = list(agent._inherited_tools)
+    hook = agent._tools_hook
+    return hook(tools) if hook is not None else tools
+
+
 def _task_chat_id(task_id: str) -> str:
     """Return the persisted chat_id of *task_id* via ``_load_history``."""
     for row in _persistence._load_history():
@@ -382,11 +400,12 @@ class SorcarRunApiTest(unittest.TestCase):
         return str(path)
 
     def test_agent_script_tools_become_agent_tools(self) -> None:
-        """The tools returned by ``add_to_tools()`` become agent tools.
+        """The tools returned by the SEA's ``tools()`` become agent tools.
 
         The daemon must import the client-supplied agent script itself
-        (no serialization by the client), call its ``add_to_tools()``,
-        and hand every returned function to the agent AS-IS: original
+        (no serialization by the client), hand the run its ``tools()``
+        as the tools hook, and that hook must return every function
+        AS-IS: original
         object identity semantics (docstring, exact signature
         including keyword-only markers and the return annotation),
         native return values (an ``int`` stays an ``int`` — no string
@@ -398,6 +417,7 @@ class SorcarRunApiTest(unittest.TestCase):
             """Example tools module."""
 
             import threading
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
             def get_temperature(city: str, unit: str = "C", *, note: str = "") -> str:
@@ -426,15 +446,18 @@ class SorcarRunApiTest(unittest.TestCase):
                 return threading.current_thread().name
 
 
-            def add_to_tools():
-                """Return the tools the agent may call."""
-                return [get_temperature, magic_number, which_thread]
+            class Sea(BaseSea):
+                def tools(self, tools):
+                    """Return the tools the agent may call."""
+                    return tools + [get_temperature, magic_number, which_thread]
+
+
             ''',
         )
         seen: dict[str, Any] = {}
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
-            tools = {t.__name__: t for t in kwargs.get("tools") or []}
+            tools = {t.__name__: t for t in _sea_tools(self_agent)}
             seen["names"] = sorted(tools)
             temp = tools["get_temperature"]
             seen["doc"] = inspect.getdoc(temp)
@@ -480,18 +503,20 @@ class SorcarRunApiTest(unittest.TestCase):
         assert seen["thread"] != threading.current_thread().name
 
     def test_add_to_tools_selects_exactly_the_returned_functions(self) -> None:
-        """``add_to_tools()`` alone decides which functions become tools.
+        """The SEA's ``tools()`` alone decides which functions become tools.
 
         The daemon must not scan the module: functions the file
-        defines but ``add_to_tools()`` does not return (helpers,
-        private functions) never become tools, and the returned list's
-        order is preserved.  With ``tool_profile: "none"`` the returned
-        list is the whole tool set: the basic toolset is switched off.
+        defines but ``tools()`` does not return (helpers, private
+        functions) never become tools, and the returned list's order
+        is preserved.  With ``tool_profile: "none"`` the returned list
+        is the whole tool set: the basic toolset is switched off.
         """
         tools_path = self._write_agent_script(
             "selected_tools.py",
             '''
             """Selection tools module."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
             def good(x: str = "a") -> str:
@@ -513,24 +538,26 @@ class SorcarRunApiTest(unittest.TestCase):
 
 
             def helper_not_a_tool(x: str) -> str:
-                """Defined at top level but NOT returned by add_to_tools()."""
+                """Defined at top level but NOT returned by tools()."""
                 return x
 
 
-            def settings():
-                """Switch the basic toolset off."""
-                return {"tool_profile": "none"}
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    """Switch the basic toolset off."""
+                    return settings | {"tool_profile": "none"}
+
+                def tools(self, tools):
+                    """Return only the selected tools, in this order."""
+                    return tools + [also_good, good]
 
 
-            def add_to_tools():
-                """Return only the selected tools, in this order."""
-                return [also_good, good]
             ''',
         )
         seen: dict[str, Any] = {}
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
-            seen["names"] = [t.__name__ for t in kwargs.get("tools") or []]
+            seen["names"] = [t.__name__ for t in _sea_tools(self_agent)]
             seen["append_basic_tools"] = self_agent._append_basic_tools
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.001
@@ -564,6 +591,8 @@ class SorcarRunApiTest(unittest.TestCase):
             '''
             """Relative-path tools module."""
 
+            from kiss.agents.seas.base.base_sea import BaseSea
+
 
             def greet(name: str) -> str:
                 """Greet.
@@ -574,15 +603,18 @@ class SorcarRunApiTest(unittest.TestCase):
                 return f"hi {name}"
 
 
-            def add_to_tools():
-                """Return the tools the agent may call."""
-                return [greet]
+            class Sea(BaseSea):
+                def tools(self, tools):
+                    """Return the tools the agent may call."""
+                    return tools + [greet]
+
+
             ''',
         )
         seen: dict[str, Any] = {}
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
-            (tool,) = cast(list[Any], kwargs.get("tools"))
+            (tool,) = _sea_tools(self_agent)
             seen["result"] = tool(name="bob")
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.001
@@ -624,7 +656,7 @@ class SorcarRunApiTest(unittest.TestCase):
         """
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
-            tools = list(kwargs.get("tools") or [])
+            tools = _sea_tools(self_agent)
             seen.setdefault("tool_lists", []).append([t.__name__ for t in tools])
             seen["tools"] = tools
             self_agent.total_tokens_used = 1
@@ -659,14 +691,19 @@ class SorcarRunApiTest(unittest.TestCase):
         tools_path = self._write_agent_script(
             "editable_tools.py",
             '''
+            from kiss.agents.seas.base.base_sea import BaseSea
+
             def version() -> str:
                 """Report the agent script version."""
                 return "ONE"
 
 
-            def add_to_tools():
-                """Return the tools the agent may call."""
-                return [version]
+            class Sea(BaseSea):
+                def tools(self, tools):
+                    """Return the tools the agent may call."""
+                    return tools + [version]
+
+
             ''',
         )
         seen: dict[str, Any] = {}
@@ -676,14 +713,19 @@ class SorcarRunApiTest(unittest.TestCase):
         self._write_agent_script(
             "editable_tools.py",
             '''
+            from kiss.agents.seas.base.base_sea import BaseSea
+
             def version() -> str:
                 """Report the agent script version."""
                 return "TWO"
 
 
-            def add_to_tools():
-                """Return the tools the agent may call."""
-                return [version]
+            class Sea(BaseSea):
+                def tools(self, tools):
+                    """Return the tools the agent may call."""
+                    return tools + [version]
+
+
             ''',
         )
         self._run_with_agent_script(tools_path, seen)
@@ -692,71 +734,90 @@ class SorcarRunApiTest(unittest.TestCase):
         assert not (Path(self.tmpdir) / "__pycache__").exists()
 
     def test_misbehaving_tool_getter_fails_task(self) -> None:
-        """An agent script with a bad tool getter fails the task loudly.
+        """An agent script with a bad ``tools()`` fails the task loudly.
 
-        The contract requires ``add_to_tools()``, when defined, to be a
-        callable returning a list/tuple of callables, and
-        ``settings()['tool_profile']`` to be a string.  A module that
-        binds the getter to a non-callable, raises inside it, returns
-        a non-sequence (e.g. a file path) or non-callable entries, or
-        names a wrong-typed tool profile must stop the task with an
-        ``AgentFileError`` diagnostic — never invoke the agent.
+        The contract requires ``tools()``, when defined, to return a
+        list of callables, and ``settings()['tool_profile']`` to be a
+        string.  A file that defines no SEA class or names a
+        wrong-typed tool profile is rejected when the daemon loads it:
+        the task stops with an ``AgentFileError`` diagnostic and the
+        agent never runs.  A ``tools()`` that raises, returns a
+        non-list (e.g. a file path) or non-callable entries is caught
+        when the run builds its toolset (the hook the daemon hands the
+        run raises the diagnostic), so the stubbed run applies the
+        hook the way ``perform_task`` does and must never get past it.
         """
-        not_callable = self._write_agent_script(
+        no_sea_class = self._write_agent_script(
             "not_callable_add_to_tools.py",
             "add_to_tools = 42\n",
         )
         raising_getter = self._write_agent_script(
             "raising_add_to_tools.py",
             '''
-            def add_to_tools():
-                """Raise instead of returning tools."""
-                raise RuntimeError("boom in add_to_tools")
+            from kiss.agents.seas.base.base_sea import BaseSea
+
+            class Sea(BaseSea):
+                def tools(self, tools):
+                    """Raise instead of returning tools."""
+                    raise RuntimeError("boom in add_to_tools")
+
+
             ''',
         )
         bad_return = self._write_agent_script(
             "bad_return_tools.py",
             '''
-            def add_to_tools():
-                """Return a path instead of a list."""
-                return "/some/tools_file.py"
+            from kiss.agents.seas.base.base_sea import BaseSea
+
+            class Sea(BaseSea):
+                def tools(self, tools):
+                    """Return a path instead of a list."""
+                    return "/some/tools_file.py"
+
+
             ''',
         )
         non_callable_entry = self._write_agent_script(
             "non_callable_entry_add_to_tools.py",
             '''
-            def add_to_tools():
-                """Return a list with a non-callable entry."""
-                return [42]
+            from kiss.agents.seas.base.base_sea import BaseSea
+
+            class Sea(BaseSea):
+                def tools(self, tools):
+                    """Return a list with a non-callable entry."""
+                    return tools + [42]
+
+
             ''',
         )
         bad_profile = self._write_agent_script(
             "bad_tool_profile.py",
             '''
-            def settings():
-                """Name a tool profile of the wrong type."""
-                return {"tool_profile": 7}
+            from kiss.agents.seas.base.base_sea import BaseSea
+
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    """Name a tool profile of the wrong type."""
+                    return settings | {"tool_profile": 7}
+
+                def tools(self, tools):
+                    """Additions to the basic toolset."""
+                    return tools + []
 
 
-            def add_to_tools():
-                """Additions to the basic toolset."""
-                return []
             ''',
         )
         seen: dict[str, Any] = {}
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
-            seen.setdefault("tool_lists", []).append(
-                [t.__name__ for t in kwargs.get("tools") or []],
-            )
+            seen.setdefault("hooks", []).append(self_agent._tools_hook is not None)
+            names = [t.__name__ for t in _sea_tools(self_agent)]
+            seen.setdefault("tool_lists", []).append(names)
             raise AssertionError("agent must not run with a broken agent script")
 
         self._parent_class.run = stub_run
         for agent_path, diagnostic in (
-            (not_callable, "add_to_tools of agent script"),
-            (raising_getter, "RuntimeError: boom in add_to_tools"),
-            (bad_return, "must return a list of tool callables"),
-            (non_callable_entry, "must return a list of tool callables"),
+            (no_sea_class, "must define exactly one subclass of BaseSea"),
             (bad_profile, "settings()['tool_profile'] must be str, got int"),
         ):
             result_event = self._raw_daemon_run(agent_path)
@@ -764,7 +825,27 @@ class SorcarRunApiTest(unittest.TestCase):
             assert result_event["success"] is False, f"for {agent_path!r}"
             assert "AgentFileError" in result_event["text"], f"for {agent_path!r}"
             assert diagnostic in result_event["text"], f"for {agent_path!r}"
-        assert "tool_lists" not in seen
+        assert "hooks" not in seen, "the agent must not run with a broken agent script"
+        for agent_path, diagnostic in (
+            (raising_getter, "tools() of agent script"),
+            (raising_getter, "raised: RuntimeError: boom in add_to_tools"),
+            (bad_return, "must return a list of tool callables (not a file path), got str"),
+            (non_callable_entry, "must return a list of tool callables"),
+        ):
+            seen.clear()
+            events: list[dict[str, Any]] = []
+            self._raw_daemon_run(agent_path, events_out=events)
+            assert seen["hooks"] == [True], f"for {agent_path!r}"
+            assert "tool_lists" not in seen, f"the hook must raise for {agent_path!r}"
+            # The run ends as a failed task (a ``task_error`` event
+            # carrying the diagnostic) whose persisted result carries
+            # the diagnostic too.
+            (end_event,) = [e for e in events if e.get("type") == "task_error"]
+            assert diagnostic in end_event["text"], f"for {agent_path!r}: {end_event!r}"
+            (task_id,) = {e["taskId"] for e in events if e.get("type") == "task_settings"}
+            (row,) = [r for r in _persistence._load_history() if r["id"] == task_id]
+            assert "Task failed" in str(row["result"]), f"for {agent_path!r}: {row!r}"
+            assert diagnostic in str(row["result"]), f"for {agent_path!r}: {row!r}"
 
     def test_sys_exit_in_agent_script_fails_task_with_diagnostic(self) -> None:
         """An agent script calling ``sys.exit()`` fails the task loudly.
@@ -1479,8 +1560,11 @@ class SorcarRunApiTest(unittest.TestCase):
         override_dir = str(Path(self.tmpdir) / "script_work")
         agent_script = Path(self.tmpdir) / "scoped_agent.py"
         agent_script.write_text(
-            "def settings() -> dict:\n"
-            f"    return {{'work_dir': {override_dir!r}}}\n"
+            "from kiss.agents.seas.base.base_sea import BaseSea\n"
+            "\n"
+            "class Sea(BaseSea):\n"
+            "    def settings(self, settings):\n"
+            f"        return settings | {{'work_dir': {override_dir!r}}}\n"
         )
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
@@ -1526,18 +1610,21 @@ class SorcarRunApiTest(unittest.TestCase):
         )
 
     def test_scope_work_dir_is_not_an_agent_script_getter(self) -> None:
-        """A script-level ``scope_work_dir()`` is a plain function: the client scope stays.
+        """A SEA's ``scope_work_dir()`` is a plain method: the client scope stays.
 
         The calling workspace recorded on the tab is the caller's
         identity, not the script's, so the dispatch handler's pin from
-        the client-sent ``tabScopeWorkDir`` must survive a script that
-        happens to define ``scope_work_dir()``.
+        the client-sent ``tabScopeWorkDir`` must survive a SEA class
+        that happens to define ``scope_work_dir()``.
         """
         captured: dict[str, Any] = {}
         agent_script = Path(self.tmpdir) / "scope_agent.py"
         agent_script.write_text(
-            "def scope_work_dir() -> str:\n"
-            f"    return {str(Path(self.tmpdir) / 'script_workspace')!r}\n"
+            "from kiss.agents.seas.base.base_sea import BaseSea\n"
+            "\n"
+            "class Sea(BaseSea):\n"
+            "    def scope_work_dir(self) -> str:\n"
+            f"        return {str(Path(self.tmpdir) / 'script_workspace')!r}\n"
         )
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
@@ -1631,7 +1718,12 @@ class SorcarRunApiTest(unittest.TestCase):
         # is stubbed, so no model API call ever happens, but the model
         # name must pass the runner's availability guard).
         script = Path(self.tmpdir) / "noop_dispatch_agent.py"
-        script.write_text("# intentionally empty agent script\n")
+        script.write_text(
+            "from kiss.agents.seas.base.base_sea import BaseSea\n"
+            "\n"
+            "class Sea(BaseSea):\n"
+            '    """An agent script that changes nothing."""\n'
+        )
         saved_endpoint = cron_agent._daemon_endpoint_file
         cron_agent._daemon_endpoint_file = self.endpoint_file
         try:

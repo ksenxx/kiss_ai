@@ -13,7 +13,7 @@ connects to a daemon's local endpoint, sends the documented ``run``
 command, and supplies the agent's channel tools through the API's
 ``extension_agent_path`` agent-script contract: the agent's OWN
 module is the agent script, and the daemon imports it and calls its
-top-level ``add_to_tools()`` to build a fresh agent from the
+SEA class's ``tools()`` to build a fresh agent from the
 credentials persisted under the active kiss home.  No bridge,
 registry, wrapper, or generated file is involved.  The task is executed
 by a daemon-built chat agent, NOT by the passed instance.
@@ -60,6 +60,24 @@ from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 
 STUB_SUMMARY = "stub summary done"
+
+
+def _sea_tools(agent: Any) -> list[Any]:
+    """Return the tools a stubbed run gets from its SEA's ``tools()``.
+
+    The daemon hands ``SorcarAgent.run`` the SEA's ``tools`` method as
+    its ``tools_hook`` (kept on the agent, applied by ``perform_task``
+    to the built-in toolset plus the inherited tools); the stub that
+    replaces the parent ``run`` applies it the way ``perform_task``
+    does, to the inherited tools alone (a stub never builds the
+    built-ins).
+
+    Args:
+        agent: The :class:`SorcarAgent` whose parent ``run`` is stubbed.
+    """
+    tools = list(agent._inherited_tools)
+    hook = agent._tools_hook
+    return hook(tools) if hook is not None else tools
 
 
 def _init_repo(repo: str) -> None:
@@ -316,7 +334,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         """The channel guidance reaches the run as system-prompt text, not task text.
 
         The launcher sends the task verbatim; the daemon applies the
-        channel module's ``add_to_system_prompt()`` (the agent class's
+        channel module's ``system_prompt()`` hook (the agent class's
         ``channel_system_prompt``) to the run's system prompt.
         """
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
@@ -347,7 +365,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert not hasattr(agent, "tools_file")
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
-            tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
+            tools = {t.__name__: t for t in _sea_tools(self_agent)}
             for expected in (
                 "check_slack_auth",
                 "authenticate_slack",
@@ -396,6 +414,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         agent_py.write_text(
             "from pathlib import Path\n"
             "\n"
+            "from kiss.agents.seas.base.base_sea import BaseSea\n"
             "from kiss.agents.third_party_agents._channel_agent_utils import (\n"
             "    BaseChannelAgent,\n"
             "    ToolMethodBackend,\n"
@@ -428,17 +447,18 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "        return []\n"
             "\n"
             "\n"
-            "def add_to_tools() -> list:\n"
-            '    """Return the note-channel tools."""\n'
-            "    return NoteAgent()._get_tools()\n",
+            "class Sea(BaseSea):\n"
+            "    def tools(self, tools: list) -> list:\n"
+            '        """Add the note-channel tools."""\n'
+            "        return tools + NoteAgent()._get_tools()\n",
             encoding="utf-8",
         )
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
-            tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
+            tools = {t.__name__: t for t in _sea_tools(self_agent)}
             assert "add_note" in tools, (
                 "the authenticated backend's tool must come from the "
-                "module's add_to_tools()"
+                "SEA's tools()"
             )
             return str(tools["add_note"](note="from daemon"))
 
@@ -542,7 +562,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
-            names = {t.__name__ for t in (kwargs.get("tools") or [])}
+            names = {t.__name__ for t in _sea_tools(self_agent)}
             assert "post_message" not in names, (
                 "backend tools must not be exposed when unauthenticated"
             )
@@ -584,27 +604,32 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert getattr(call["agent"], "_is_parallel", None) is False
 
     def test_carrier_tools_getter_restricts_the_daemon_built_agent(self) -> None:
-        """A carrier's ``sea_path`` script restricts the run to its ``add_to_tools()``.
+        """A carrier's ``sea_path`` script restricts the run to its ``tools()``.
 
         The channel runner hands its channel module to the
         :class:`KissWebChatAgent` carrier as ``sea_path``; the launcher
         must pass it on as ``extension_agent_path`` so the daemon-built
         agent gets exactly what that script decides: the ``none`` tool
-        profile drops the built-in tools and ``add_to_tools()`` adds
+        profile drops the built-in tools and ``tools()`` adds
         the script's own.
         """
         agent_py = Path(self.tmpdir) / "restricting_agent.py"
         agent_py.write_text(
-            "def only_tool() -> str:\n"
-            '    """Return a marker."""\n'
-            "    return 'only'\n"
-            "\n"
-            "def settings() -> dict:\n"
-            '    """Run with only finish and only_tool."""\n'
-            "    return {'tool_profile': 'none'}\n"
-            "\n"
-            "def add_to_tools() -> list:\n"
-            "    return [only_tool]\n",
+            '''
+from kiss.agents.seas.base.base_sea import BaseSea
+
+def only_tool() -> str:
+    """Return a marker."""
+    return 'only'
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        """Run with only finish and only_tool."""
+        return settings | {'tool_profile': 'none'}
+
+    def tools(self, tools):
+        return tools + [only_tool]
+''',
             encoding="utf-8",
         )
         self._install_stub()
@@ -616,7 +641,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         )
         call = self.stub_calls[0]
         assert getattr(call["agent"], "_append_basic_tools", None) is False
-        assert [t.__name__ for t in call["kwargs"].get("tools") or []] == ["only_tool"]
+        assert [t.__name__ for t in _sea_tools(call["agent"])] == ["only_tool"]
 
     def test_append_to_prompts_forwarded(self) -> None:
         """Both append suffixes reach the daemon-built agent's run.
@@ -946,7 +971,7 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         prompt = str(call["kwargs"].get("prompt_template", ""))
         assert "direct slack" in prompt
         assert "Slack Authentication" not in prompt
-        # The daemon applies the module's ``add_to_system_prompt()``.
+        # The daemon applies the module's ``system_prompt()`` hook.
         assert "Slack Authentication" in str(call["kwargs"].get("system_prompt", ""))
 
     def test_direct_run_without_channel_prompt(self) -> None:
@@ -979,7 +1004,7 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
         def on_run(self_agent, kwargs):
-            names = {t.__name__ for t in (kwargs.get("tools") or [])}
+            names = {t.__name__ for t in _sea_tools(self_agent)}
             assert "check_slack_auth" in names
             return "auth tools bridged"
 
@@ -1115,23 +1140,28 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
     def test_handle_message_passes_sea_path_and_context(self) -> None:
         tools_py = Path(self.tmpdir) / "chan_tools.py"
         tools_py.write_text(
-            "def shout(text: str) -> str:\n"
-            '    """Return *text* uppercased.\n'
-            "\n"
-            "    Args:\n"
-            "        text: The text to uppercase.\n"
-            '    """\n'
-            "    return text.upper()\n"
-            "\n"
-            "def add_to_tools():\n"
-            '    """Return the channel tools."""\n'
-            "    return [shout]\n",
+            '''
+from kiss.agents.seas.base.base_sea import BaseSea
+
+def shout(text: str) -> str:
+    """Return *text* uppercased.
+
+    Args:
+        text: The text to uppercase.
+    """
+    return text.upper()
+
+class Sea(BaseSea):
+    def tools(self, tools):
+        """Return the channel tools."""
+        return tools + [shout]
+''',
             encoding="utf-8",
         )
         runner, outbox = self._make_runner(sea_path=str(tools_py))
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
-            tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
+            tools = {t.__name__: t for t in _sea_tools(self_agent)}
             assert "shout" in tools, (
                 "the runner's agent script must supply the task's tools"
             )
@@ -1169,13 +1199,18 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
     def test_context_promises_suppression_only_with_thread_polling(self) -> None:
         tools_py = Path(self.tmpdir) / "noop_tools.py"
         tools_py.write_text(
-            "def ping() -> str:\n"
-            '    """Return pong."""\n'
-            "    return 'pong'\n"
-            "\n"
-            "def add_to_tools():\n"
-            '    """Return the channel tools."""\n'
-            "    return [ping]\n",
+            '''
+from kiss.agents.seas.base.base_sea import BaseSea
+
+def ping() -> str:
+    """Return pong."""
+    return 'pong'
+
+class Sea(BaseSea):
+    def tools(self, tools):
+        """Return the channel tools."""
+        return tools + [ping]
+''',
             encoding="utf-8",
         )
         runner, outbox = self._make_runner(

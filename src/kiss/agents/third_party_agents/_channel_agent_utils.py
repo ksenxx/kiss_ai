@@ -21,6 +21,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
@@ -831,26 +832,31 @@ def filter_launch_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def agent_sea_path(agent_cls: type) -> str:
-    """Return the agent-script (SEA) path for a channel agent class.
+    """Return the SEA file path for a channel agent class.
 
-    The ``kiss.server.sorcar.run`` API takes extra agent tools from
-    the agent script named by ``extension_agent_path``, whose top-level
-    ``add_to_tools()`` returns the tool callables.  For channel agents
-    that script is the agent's OWN defining module: each agent module
-    defines an ``add_to_tools()`` that builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
-    authentication and backend tools.
+    The ``kiss.server.sorcar.run`` API configures the run from the SEA
+    named by ``extension_agent_path``: a file defining a subclass of
+    :class:`~kiss.agents.seas.base.base_sea.BaseSea` whose ``tools``
+    method returns the tool callables.  For channel agents that file is
+    the agent's OWN defining module: each agent module defines a SEA
+    class whose ``tools`` builds a fresh agent from the credentials
+    persisted under the KISS home and adds its authentication and
+    backend tools.
 
     Args:
         agent_cls: The channel agent class (e.g. ``SlackAgent``).
 
     Returns:
         The absolute path of the module defining *agent_cls*, or ``""``
-        when that module does not define a callable ``add_to_tools()``
-        (e.g. ``BaseChannelAgent`` itself or test-local classes).
+        when that module defines no :class:`BaseSea` subclass (e.g.
+        ``BaseChannelAgent`` itself or test-local classes).
     """
     module = sys.modules.get(agent_cls.__module__)
-    if module is None or not callable(getattr(module, "add_to_tools", None)):
+    if module is None or not any(
+        isinstance(value, type) and issubclass(value, BaseSea) and value is not BaseSea
+        and value.__module__ == module.__name__
+        for value in vars(module).values()
+    ):
         return ""
     return str(getattr(module, "__file__", "") or "")
 
@@ -865,8 +871,8 @@ class BaseChannelAgent:
     and the daemon builds and executes its own chat agent with the
     standard tools (bash, file editing, browser automation).  The
     channel agent instance is the *carrier* of channel identity: the
-    :attr:`sea_path` naming the module whose ``add_to_tools()`` the
-    daemon calls to build the channel tools, the :attr:`workspace`
+    :attr:`sea_path` naming the module whose SEA ``tools()`` the
+    daemon runs to build the channel tools, the :attr:`workspace`
     those tools authenticate under, the :attr:`channel_system_prompt`
     guidance, and the run results the launcher writes back
     (:attr:`last_run_result`, :attr:`budget_used`,
@@ -874,13 +880,17 @@ class BaseChannelAgent:
 
     Subclasses must set ``self._backend`` (a ``ToolMethodBackend``
     instance), override :meth:`_is_authenticated` and
-    :meth:`_get_auth_tools`, and define a module-level ``add_to_tools()``
-    in their own module::
+    :meth:`_get_auth_tools`, and define a SEA class in their own
+    module::
 
         class SlackAgent(BaseChannelAgent): ...
 
-        def add_to_tools() -> list:
-            return SlackAgent()._get_tools()
+        class SlackSea(BaseSea):
+            def settings(self, settings):
+                return settings | {"kind": "channel"}
+
+            def tools(self, tools):
+                return tools + SlackAgent()._get_tools()
     """
 
     _backend: Any
@@ -897,12 +907,11 @@ class BaseChannelAgent:
 
     @property
     def sea_path(self) -> str:
-        """Path of the module whose ``add_to_tools()`` supplies this agent's tools.
+        """Path of the module whose SEA ``tools()`` supplies this agent's tools.
 
         Passed to the daemon as the run's ``extension_agent_path``.
-        ``""`` when the agent's defining module has no ``add_to_tools()``
-        (plain carriers such as ``KissWebChatAgent`` add no channel
-        tools).
+        ``""`` when the agent's defining module has no SEA class (plain
+        carriers such as ``KissWebChatAgent`` add no channel tools).
         """
         return agent_sea_path(type(self))
 
@@ -941,7 +950,7 @@ class BaseChannelAgent:
         :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`,
         which supplies this agent's channel tools through the API's
         ``extension_agent_path`` contract (:attr:`sea_path` — the agent
-        module whose ``add_to_tools()`` the daemon calls), appends
+        module whose SEA ``tools()`` the daemon runs), appends
         :attr:`channel_system_prompt` to the prompt, and records the
         YAML result in :attr:`last_run_result` along with the cost /
         token / step totals.  Keyword arguments outside the launcher's
@@ -1494,7 +1503,7 @@ class ChannelRunner:
         :func:`run_agent_via_kiss_web` (``_cmd_run``) so the task is
         live-visible and interactable from any connected remote
         webview while it runs.  The channel tools come from the
-        runner's agent script (the agent module's ``add_to_tools()``,
+        runner's SEA (the agent module's SEA ``tools()``,
         passed as the ``kiss.server.sorcar.run`` ``extension_agent_path``); after the
         run the task summary is posted to the message's thread unless
         the agent already replied there itself.  With persistent state

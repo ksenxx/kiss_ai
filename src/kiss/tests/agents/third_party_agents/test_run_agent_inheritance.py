@@ -35,7 +35,7 @@ import yaml
 
 from kiss.agents.sorcar import agent_dispatch, daemon_client
 from kiss.agents.sorcar.agent_dispatch import RunOptions, dispatch_result, make_run_agent_tool
-from kiss.agents.sorcar.agent_file import apply_agent_overrides
+from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cron_agent import UNATTENDED_CHILD_PREAMBLE, unattended_child_suffix
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
@@ -149,7 +149,7 @@ class TestDispatchResultInheritance:
         assert call["use_web_tools"] is False
         assert call["use_memory"] is True
         assert call["docker_image"] == ""
-        # The caller's ``add_to_tools()`` tools are resolved on the
+        # The caller's ``tools()`` tools are resolved on the
         # daemon (callables cannot travel the wire): the flag asks for them.
         assert call["inherit_tools"] is True
         # The parent's EFFECTIVE choices beat the persisted settings.
@@ -159,18 +159,26 @@ class TestDispatchResultInheritance:
     def test_script_prompt_getters_win_over_the_inherited_prompts(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],
     ) -> None:
-        """The daemon applies the script's getters to the wire fields the parent filled.
+        """The daemon applies the SEA's methods over the wire fields the parent filled.
 
-        ``system_prompt()`` replaces the inherited base prompt;
-        ``add_to_system_prompt()`` is added after the inherited suffix;
         ``prompt(task)`` shapes the prompt body and leaves the inherited
-        prompt suffix as sent.
+        prompt suffix as sent; ``system_prompt()`` is staged as the
+        run's hook (applied to the inherited base prompt plus suffix
+        once the run assembles them), the inherited wire fields
+        themselves stay as sent.
         """
         script = env.repo / "prompts_sea.py"
         script.write_text(
-            "def system_prompt() -> str:\n    return 'script base'\n\n"
-            "def add_to_system_prompt() -> str:\n    return 'script addition'\n\n"
-            "def prompt(task: str) -> str:\n    return task + ' script prompt suffix'\n"
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        return 'script base\\n\\n' + system_prompt + '\\n\\nscript addition'
+
+    def prompt(self, task):
+        return task + ' script prompt suffix'
+"""
         )
         parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
         result = dispatch_result(
@@ -189,9 +197,15 @@ class TestDispatchResultInheritance:
             "appendToSystemPrompt": call["append_to_system_prompt"],
             "appendToPrompt": call["append_to_prompt"],
         }
-        assert apply_agent_overrides(cmd) == {"systemPrompt", "appendToSystemPrompt", "prompt"}
-        assert cmd["systemPrompt"] == "script base"
-        assert cmd["appendToSystemPrompt"] == f"{PARENT_SUFFIX}\n\nscript addition"
+        assert apply_agent_overrides(cmd) == {"systemPromptHook", "prompt"}
+        assert cmd["systemPrompt"] == PARENT_BASE_PROMPT
+        assert cmd["appendToSystemPrompt"] == PARENT_SUFFIX
+        # The run assembles ``systemPrompt + appendToSystemPrompt`` and
+        # applies the hook to that.
+        assembled = cmd["systemPrompt"] + cmd["appendToSystemPrompt"]
+        assert cmd["systemPromptHook"](assembled) == (
+            f"script base\n\n{PARENT_BASE_PROMPT}{PARENT_SUFFIX}\n\nscript addition"
+        )
         assert cmd["prompt"] == "say hi script prompt suffix"
         assert cmd["appendToPrompt"] == PARENT_PROMPT_SUFFIX
 
@@ -259,17 +273,33 @@ class TestDispatchResultInheritance:
         scripts = env.repo / "scripts"
         scripts.mkdir()
         picks_model = {
-            "settings": "def settings():\n    return {'model': 'claude-sonnet-4-5'}\n",
+            "settings": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'claude-sonnet-4-5'}
+""",
             "worker": (
-                "def settings():\n"
-                "    return {'kind': 'worker', 'model': 'claude-sonnet-4-5'}\n"
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'kind': 'worker', 'model': 'claude-sonnet-4-5'}
+"""
             ),
-            # ``settings`` defined under a condition the script evaluates
+            # The SEA class defined under a condition the script evaluates
             # at import time (true on every platform the suite runs on).
-            "conditional": (
-                "import os\nif os.name in ('posix', 'nt'):\n"
-                "    def settings():\n        return {'model': 'claude-sonnet-4-5'}\n"
-            ),
+            "conditional": """
+import os
+from kiss.agents.seas.base.base_sea import BaseSea
+
+if os.name in ('posix', 'nt'):
+    class Sea(BaseSea):
+        def settings(self, settings):
+            return settings | {'model': 'claude-sonnet-4-5'}
+""",
         }
         for label, body in picks_model.items():
             script = scripts / f"{label}_sea.py"
@@ -282,10 +312,31 @@ class TestDispatchResultInheritance:
             # override replaces it with the script's choice.
             assert captured[0]["model"] == PARENT_MODEL, label
         leaves_inheritance = {
-            "none": "def settings():\n    return {'model': None}\n",
-            "other": "def model_name() -> str:\n    return 'x'\n\nmodels = []\n",
-            "legacy_getter": "def model() -> str:\n    return 'claude-sonnet-4-5'\n",
-            "empty": "def settings():\n    return {}\n",
+            "none": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': None}
+""",
+            # A SEA with no ``settings`` and a module-level ``model()``
+            # (an ordinary function, not a method of the SEA).
+            "legacy_getter": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+def model() -> str:
+    return 'claude-sonnet-4-5'
+
+class Sea(BaseSea):
+    pass
+""",
+            "empty": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {}
+""",
         }
         for label, body in leaves_inheritance.items():
             script = scripts / f"{label}_sea.py"
@@ -308,16 +359,40 @@ class TestDispatchResultInheritance:
         assert captured[0]["provenance"]["model"] == "explicit"
         assert captured[0]["provenance"]["timeout"] == "explicit"
         # A script whose settings cannot be evaluated — a syntax error,
-        # a ``settings`` that is not a zero-argument callable returning
-        # a dict — is a clean error and dispatches nothing.
+        # no SEA class (module-level getters of the old contract), a
+        # ``settings`` method that does not return a dict — is a clean
+        # error and dispatches nothing.
         broken = {
             "unparsable": "def settings(:\n",
-            "async": "async def settings():\n    return {}\n",  # a coroutine, not a dict
-            "class": "class settings:\n    pass\n",  # an instance, not a dict
-            "import": "from os.path import basename as settings\n",  # needs an argument
-            "raising": "def settings():\n    raise RuntimeError('boom')\n",
-            "unknown_key": "def settings():\n    return {'models': 'x'}\n",
-            "wrong_type": "def settings():\n    return {'model': 5}\n",
+            "no_class": "def settings():\n    return {'model': 'claude-sonnet-4-5'}\n",
+            "async": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    async def settings(self, settings):  # a coroutine, not a dict
+        return settings
+""",
+            "raising": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        raise RuntimeError('boom')
+""",
+            "unknown_key": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'models': 'x'}
+""",
+            "wrong_type": """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 5}
+""",
         }
         for label, body in broken.items():
             script = scripts / f"{label}_sea.py"
@@ -331,10 +406,25 @@ class TestDispatchResultInheritance:
             # macOS differs from the ``/var`` spelling of ``tmp_path``, and
             # quotes it with ``!r`` (doubled backslashes on Windows).
             canonical = str(script.resolve())
-            expected = (
-                f"Error: agent script {canonical!r} failed to import" if label == "unparsable"
-                else f"Error: agent script {canonical!r}: settings()"
-            )
+            if label == "unparsable":
+                expected = f"Error: agent script {canonical!r} failed to import"
+            elif label == "no_class":
+                expected = (
+                    f"Error: agent script {canonical!r} must define exactly one subclass "
+                    "of BaseSea (kiss.agents.seas.base.base_sea); found none"
+                )
+            elif label == "async":
+                expected = (
+                    f"Error: settings() of agent script {canonical!r} must return a dict, "
+                    "got coroutine"
+                )
+            elif label == "raising":
+                expected = (
+                    f"Error: settings() of agent script {canonical!r} raised: "
+                    "RuntimeError: boom"
+                )
+            else:
+                expected = f"Error: agent script {canonical!r}: settings()"
             assert text.startswith(expected), (label, text)
             assert captured == [], label
         # ``dispatch_result`` itself: the ``settings`` argument decides.
@@ -457,7 +547,7 @@ class TestDispatchResultInheritance:
 
         The channel module's path is dispatched with ``inherit=False``
         and the task text verbatim (no prompt preamble: the daemon adds
-        the channel preamble and the module's ``add_to_system_prompt()``
+        the channel preamble and the module's ``system_prompt()``
         to the system prompt), in the shared ``channel_work`` scratch
         directory.  Worktree and auto-commit follow the persisted
         settings on the wire, not the parent's run, and the module's
@@ -498,7 +588,10 @@ class TestDispatchResultInheritance:
         apply_agent_overrides(cmd)
         assert cmd["useWorktree"] is False
         assert cmd["autoCommit"] is False
-        assert cmd["appendToSystemPrompt"].endswith(slack_sea.SlackAgent.channel_system_prompt)
+        assert cmd["appendToSystemPrompt"] == CHANNEL_PREAMBLE.format(name="slack")
+        assert cmd["systemPromptHook"]("ASSEMBLED").endswith(
+            "ASSEMBLED\n\n" + slack_sea.SlackAgent.channel_system_prompt,
+        )
 
 
 def _run_parent(

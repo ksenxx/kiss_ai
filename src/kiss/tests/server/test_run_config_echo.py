@@ -44,19 +44,29 @@ OTHER_MODEL = MODELS[-1]
 """Models the daemon accepts (the LLM boundary is stubbed, so none is ever called)."""
 
 SEA_SOURCE = textwrap.dedent("""
-    def description():
-        return "Echo test SEA: pins the shell tool profile and a budget."
+    from kiss.agents.seas.base.base_sea import BaseSea
 
-    def settings():
-        return {"tool_profile": "shell", "max_budget": 0.75, "use_memory": False}
+    class Sea(BaseSea):
+        def description(self):
+            return "Echo test SEA: pins the shell tool profile and a budget."
+
+        def settings(self, settings):
+            return settings | {"tool_profile": "shell", "max_budget": 0.75, "use_memory": False}
+
+
 """)
 
 LOCKED_SEA_SOURCE = textwrap.dedent("""
-    def description():
-        return "Echo test SEA that locks its tool profile."
+    from kiss.agents.seas.base.base_sea import BaseSea
 
-    def settings():
-        return {"tool_profile": "shell", "locked": ["tool_profile"]}
+    class Sea(BaseSea):
+        def description(self):
+            return "Echo test SEA that locks its tool profile."
+
+        def settings(self, settings):
+            return settings | {"tool_profile": "shell", "locked": ["tool_profile"]}
+
+
 """)
 
 
@@ -84,7 +94,13 @@ class RunConfigEchoTest(DaemonLocalHarness):
         self.sea = Path(self.tmpdir) / "echo_sea.py"
         self.sea.write_text(SEA_SOURCE)
         self.plain_sea = Path(self.tmpdir) / "plain_sea.py"
-        self.plain_sea.write_text("def description():\n    return 'A plain SEA.'\n")
+        self.plain_sea.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'A plain SEA.'
+""")
         self.locked_sea = Path(self.tmpdir) / "locked_sea.py"
         self.locked_sea.write_text(LOCKED_SEA_SOURCE)
         self._stub_model()
@@ -401,12 +417,19 @@ def test_note_pinned_reduces_dicts_to_their_keys_and_skips_unasked() -> None:
     assert "SECRET" not in run_config_line({"pinned": pinned})
 
 
-def test_locked_conflicts_covers_dispatcher_keys_paths_and_extends(tmp_path: Path) -> None:
-    """``timeout`` and ``inherit`` lock; relative ``work_dir`` compares resolved; locks union."""
+def test_locked_conflicts_covers_dispatcher_keys_paths_and_inheritance(tmp_path: Path) -> None:
+    """``timeout`` and ``inherit`` lock; relative ``work_dir`` compares resolved; locks inherit.
+
+    A SEA extends another by Python inheritance: the derived class's
+    ``settings`` receives the base's dict, so a base's lock survives
+    unless the derived class rewrites ``locked`` — and joins its own
+    lock by extending the list it was handed.
+    """
+    from kiss.agents.seas.base.base_sea import BaseSea
+    from kiss.agents.sorcar.sea_commands import base_settings, declared_settings
     from kiss.agents.sorcar.sea_settings import (
         SettingsError,
         locked_conflicts,
-        merge_settings,
         resolve_settings,
     )
 
@@ -428,18 +451,34 @@ def test_locked_conflicts_covers_dispatcher_keys_paths_and_extends(tmp_path: Pat
     assert locked_conflicts(settings, {"work_dir": "sub"}, str(tmp_path)).startswith(
         "the script locks work_dir='.'"
     )
-    # A lock set by a base survives the extending script; its own lock joins it.
-    base = resolve_settings(
-        {"settings": lambda: {"tool_profile": "bash", "locked": ["tool_profile"]}}
+    # A lock set by a base survives the derived SEA that leaves ``locked``
+    # alone; a derived SEA that extends the list it is handed joins its own.
+    class LockingBase(BaseSea):
+        def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+            return settings | {"tool_profile": "bash", "locked": ["tool_profile"]}
+
+    class KeepsLock(LockingBase):
+        def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+            return settings | {"max_budget": 1}
+
+    class JoinsLock(LockingBase):
+        def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+            return settings | {"max_budget": 1, "locked": [*settings["locked"], "max_budget"]}
+
+    assert declared_settings([KeepsLock()]) == {
+        "tool_profile": "bash", "locked": ["tool_profile"], "max_budget": 1,
+    }
+    assert base_settings([KeepsLock()])["locked"] == ["tool_profile"]
+    assert base_settings([JoinsLock()])["locked"] == ["max_budget", "tool_profile"]
+    assert locked_conflicts(base_settings([JoinsLock()]), {"max_budget": 2}) == (
+        "the script locks max_budget=1.0 (asked for 2)"
     )
-    child = resolve_settings({"settings": lambda: {"max_budget": 1, "locked": ["max_budget"]}})
-    assert merge_settings([base, child])["locked"] == ["max_budget", "tool_profile"]
     with pytest.raises(
         SettingsError, match=r"settings\(\)\['locked'\] may only name settings keys"
     ):
-        resolve_settings({"settings": lambda: {"locked": ["kind", "nope"]}})
+        resolve_settings({"locked": ["kind", "nope"]})
     with pytest.raises(SettingsError, match="must be a positive number of seconds, got 0"):
-        resolve_settings({"settings": lambda: {"timeout": 0}})
+        resolve_settings({"timeout": 0})
 
 
 def test_sea_run_kwargs_keeps_an_explicit_model_config(tmp_path: Path) -> None:
@@ -449,8 +488,13 @@ def test_sea_run_kwargs_keeps_an_explicit_model_config(tmp_path: Path) -> None:
 
     sea = tmp_path / "cfg_sea.py"
     sea.write_text(
-        "def settings():\n"
-        "    return {'model': 'sea-model', 'model_config': {'base_url': 'https://sea.invalid'}}\n"
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'sea-model', 'model_config': {'base_url': 'https://sea.invalid'}}
+"""
     )
     layers = sea_layers(sea)
     defaults = {

@@ -6,7 +6,8 @@
 """End-to-end tests of the coding SEA (:mod:`kiss.agents.seas.coding.coding_sea`).
 
 The tests build a :class:`~kiss.agents.seas.coding.coding_sea.ContainerHarness`
-from a JSON config and drive its SEA getters and hooks directly: the
+from a JSON config and drive the methods the generated trial SEA
+delegates to it directly: the
 trajectory log, the human-only tool answers, the destructive-command
 guard, the finish gate, the test-context notes of the Edit tool and the
 shell notes.  Tests that need a container start one with the Docker SDK
@@ -15,6 +16,7 @@ and skip when Docker is not available.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import time
@@ -23,7 +25,10 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.core.kiss_error import BudgetExceededError
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 
 MODEL = "gpt-5.6-luna"
@@ -81,15 +86,22 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     assert harness.on_tool_call("ask_user_question", {"question": "?"}) != "OK"
     assert harness.on_tool_call("talk", {"text": "hi", "language": "en"}) != "OK"
     assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != "OK"
-    settings = resolve_settings({"settings": harness.settings})
+    settings = resolve_settings(harness.settings())
     assert settings["docker_image"] == f"container:{container_name}"
     # The trial adds no tools of its own (the container's shell is the
     # toolset); neither the module nor the harness, whose methods the
-    # generated trial SEA exports as its getters, carries a removed name.
+    # generated trial SEA delegates to, carries a removed name.
     assert not hasattr(coding_sea, "add_to_tools")
     assert_no_removed_getters(coding_sea)
-    assert not hasattr(harness, "if_append_basic_tools")
+    assert not hasattr(harness, "if_append_basic_tools") and not hasattr(harness, "tools")
     assert not settings["use_memory"] and not settings["use_web_tools"]
+    # The bundled ``coding`` SEA itself is hidden: it is a factory of trial
+    # SEAs, never a slash command of its own.
+    assert coding_sea.CodingSea().settings({"model": "m"}) == {"model": "m", "hidden": True}
+    assert sea_commands.get_command("coding") is None
+    assert sea_commands.sea_settings(Path(coding_sea.__file__).resolve()) == {
+        "kind": "session", "hidden": True,
+    }
     assert "/app" in harness.system_prompt() and "wall-clock" not in harness.system_prompt()
     events = [
         json.loads(line)
@@ -382,7 +394,14 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
 
 
 def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
-    """The generated ``sea.py`` imports this package and exposes the harness's getters and hooks."""
+    """The generated ``sea.py`` defines one ``BaseSea`` class delegating to the shared harness.
+
+    The file is loaded twice: once as a plain module (to check the class
+    it defines and the harness instance it binds) and once through the
+    daemon's ``load_sea`` / ``evaluate_sea`` (to check what the run gets:
+    the config's prompt, the harness's system prompt as a replacement,
+    both hooks, no tools hook).
+    """
     from kiss.agents.seas.coding import coding_sea
 
     trial = {"container": "kiss-test-trial", "workdir": "/app", "prompt": "p", "model": MODEL}
@@ -392,24 +411,56 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     assert config["work_dir"] == str(tmp_path / "sea-trial")
     spec = importlib.util.spec_from_file_location("generated_trial_sea", sea_path)
     assert spec is not None and spec.loader is not None
-    sea = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(sea)
-    # ``prompt(task)`` is the SEA getter: the config's instruction wins
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sea = module.TrialSea()
+    assert isinstance(sea, BaseSea)
+    harness = coding_sea.ContainerHarness.shared(str(tmp_path / "sea-trial" / "config.json"))
+    assert module._harness is harness
+    # ``prompt(task)`` is the SEA method: the config's instruction wins
     # over the runner's task label.
     assert sea.prompt("label") == "p"
-    settings = sea.settings()
+    settings = sea.settings({"chat_id": "c1", "model": "x"})
     assert "prompt" not in settings
-    assert settings["model"] == MODEL
+    assert settings["chat_id"] == "c1"  # the caller's key survives
+    assert settings["model"] == MODEL  # the harness's key wins
     assert settings["docker_image"] == "container:kiss-test-trial"
     assert settings["work_dir"] == str(tmp_path / "sea-trial")
     assert settings["model_config"] is None
-    assert resolve_settings(vars(sea))["use_web_tools"] is False
-    assert resolve_settings(vars(sea))["use_memory"] is False
-    assert resolve_settings(vars(sea))["allow_fan_out"] is True
-    assert sea.tool_call_hook()("Bash", {"command": "ls"}) == "OK"
-    harness = coding_sea.ContainerHarness.shared(str(tmp_path / "sea-trial" / "config.json"))
-    assert sea._harness is harness
-    assert sea.llm_call_hook() == harness.on_llm_call
+    resolved = resolve_settings(sea.settings({}))
+    assert resolved["use_web_tools"] is False
+    assert resolved["use_memory"] is False
+    assert resolved["allow_fan_out"] is True
+    assert sea.tool_call_hook("Bash", {"command": "ls"}) == "OK"
+    # ``llm_call_hook`` delegates to the harness: the call is counted and
+    # logged before the liveness check, which ends the trial when a Docker
+    # daemon is running and "kiss-test-trial" (never started) is not found.
+    assert harness.turns == 0
+    with contextlib.suppress(BudgetExceededError):
+        assert sea.llm_call_hook([{"role": "user", "content": "x"}]) == [
+            {"role": "user", "content": "x"}
+        ]
+    assert harness.turns == 1
+    trajectory = (tmp_path / "sea-trial" / "trajectory.jsonl").read_text().splitlines()
+    events = [json.loads(line) for line in trajectory]
+    assert [e["event"] for e in events if e["event"] != "container_gone"] == [
+        "tool_call", "llm_call",
+    ]
+    assert events[1]["turn"] == 1
+    assert sea.system_prompt("ASSEMBLED") == harness.system_prompt()
+    assert "ASSEMBLED" not in sea.system_prompt("ASSEMBLED")
+
+    loaded = sea_commands.load_sea(sea_path)
+    assert type(loaded).__name__ == "TrialSea" and loaded.path == sea_path
+    run = sea_commands.evaluate_sea([loaded], "label", "task-1")
+    assert run.prompt == "p"
+    assert run.settings == resolved
+    assert run.tools_hook is None
+    assert run.system_prompt_hook is not None and run.llm_call_hook is not None
+    assert run.tool_call_hook is not None
+    assert run.system_prompt_hook("ASSEMBLED") == harness.system_prompt()
+    assert run.tool_call_hook("ask_user_question", {"question": "?"}) != "OK"
+    assert run.tool_call_hook("Bash", {"command": "ls"}) == "OK"
 
 
 def _live_container(image: str, setup: str) -> Any:

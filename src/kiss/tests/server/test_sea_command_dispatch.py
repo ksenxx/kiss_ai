@@ -243,11 +243,20 @@ class SlashCommandRunTest(DaemonRunApiHarness):
         """The LLM's task is the trailing text; tab, state and history keep ``/xxx text``."""
         _seed_seas_md(
             Path(self.tmpdir) / "user-seas", "notify",
-            "def description():\n    return 'notify'\n"
-            "def add_to_system_prompt():\n    return 'NOTIFY-PROTOCOL'\n"
-            "def add_to_tools():\n"
-            "    from kiss.tests.server.test_sea_command_dispatch import _marker_tool\n"
-            "    return [_marker_tool]\n",
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'notify'
+
+    def system_prompt(self, system_prompt):
+        return system_prompt + '\\n\\nNOTIFY-PROTOCOL'
+
+    def tools(self, tools):
+        from kiss.tests.server.test_sea_command_dispatch import _marker_tool
+        return tools + [_marker_tool]
+""",
         )
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)

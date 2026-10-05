@@ -6,7 +6,7 @@
 
 Channel agent modules read their multi-account workspace identifier
 from the process-global ``KISS_CHANNEL_WORKSPACE`` environment
-variable when their ``add_to_tools()`` runs on the daemon.  The
+variable when their ``tools()`` runs on the daemon.  The
 daemon's task runner publishes the workspace through the helpers here
 for every ``channel``-kind run (``/slack ...``, ``run_agent("slack")``,
 ``run_agent(".../slack_sea.py")``, a channel CLI's launch; see
@@ -69,7 +69,7 @@ def enter_workspace(workspace: str, timeout: float | None = None) -> bool:
     The env var is process-global, so a launch that exported a
     DIFFERENT workspace and is still running must finish first:
     overwriting its value would make that launch's daemon-side channel
-    ``add_to_tools()`` read THIS launch's workspace and load the wrong
+    ``tools()`` read THIS launch's workspace and load the wrong
     account's credentials.  This call therefore blocks until no other
     workspace is active (same-workspace launches overlap freely via
     the reference count) or *timeout* expires.

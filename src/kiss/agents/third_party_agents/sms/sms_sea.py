@@ -19,6 +19,7 @@ import json
 import sys
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -40,15 +41,38 @@ _config = ChannelConfig(
 )
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/sms help``."""
-    return (
-        "Sends and lists SMS, MMS and WhatsApp messages and places or lists voice calls through "
-        "a Twilio account (account SID, auth token and from-number stored in "
-        f"~/{HOME_DIR}/third_party_agents/sms/config.json); use it with "
-        "`run_agent(agent=\"sms\", task=\"Send 'Hello!' to +14155238886\")` or the "
-        "`kiss-sms -t '<task>'` CLI (`kiss-sms --channel <number>` runs one inbound poll tick)."
-    )
+class SmsSea(BaseSea):
+    """The ``/sms`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/sms help``."""
+        return (
+            "Sends and lists SMS, MMS and WhatsApp messages and places or lists voice calls "
+            "through "
+            "a Twilio account (account SID, auth token and from-number stored in "
+            f"~/{HOME_DIR}/third_party_agents/sms/config.json); use it with "
+            "`run_agent(agent=\"sms\", task=\"Send 'Hello!' to +14155238886\")` or the "
+            "`kiss-sms -t '<task>'` CLI (`kiss-sms --channel <number>` runs one inbound poll tick)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the SMS channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + SMSAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
 
 
 class SMSChannelBackend(ToolMethodBackend):
@@ -521,27 +545,6 @@ def main() -> None:
         channel_name="SMS",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the SMS channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return SMSAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

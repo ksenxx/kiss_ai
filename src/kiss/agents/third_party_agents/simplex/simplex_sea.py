@@ -30,6 +30,7 @@ from typing import Any
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect as ws_connect
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._backend_utils import drain_queue_messages
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -49,13 +50,39 @@ _SIMPLEX_DIR = kiss_home() / "third_party_agents" / "simplex"
 _config = ChannelConfig(_SIMPLEX_DIR, ("ws_url",))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/simplex help``."""
-    return (
-        "Sends and receives SimpleX Chat messages and lists contacts through a locally "
-        "running `simplex-chat` CLI's WebSocket API (default ws://127.0.0.1:5225); use "
-        'run_agent(agent="simplex", task="...") or the `kiss-simplex` CLI.'
-    )
+class SimplexSea(BaseSea):
+    """The ``/simplex`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/simplex help``."""
+        return (
+            "Sends and receives SimpleX Chat messages and lists contacts through a locally "
+            "running `simplex-chat` CLI's WebSocket API (default ws://127.0.0.1:5225); use "
+            'run_agent(agent="simplex", task="...") or the `kiss-simplex` CLI.'
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the SimpleX Chat channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + SimpleXAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + SimpleXAgent.channel_system_prompt
 
 
 def _resp_of(frame: dict[str, Any]) -> dict[str, Any]:
@@ -502,32 +529,6 @@ def main() -> None:
         channel_name="SimpleX Chat",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the SimpleX Chat channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return SimpleXAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return SimpleXAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

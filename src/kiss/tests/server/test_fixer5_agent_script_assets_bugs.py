@@ -29,18 +29,31 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from kiss.agents.sorcar.agent_file import AgentFileError, apply_agent_overrides
+from kiss.agents.sorcar.sea_commands import SeaScriptError
 from kiss.server.user_assets import ensure_user_asset_from_default
 
 
 def _load_tools(agent_path: Any) -> list:
-    """Apply *agent_path*'s overrides and return the staged tool list."""
+    """Apply *agent_path*'s overrides and return what its staged ``tools`` hook yields.
+
+    The hook (the SEA's ``tools`` method) is applied to an empty
+    toolset, as the daemon applies it to the run's own; a SEA without
+    the method stages no hook and yields no tools.
+    """
     cmd: dict[str, Any] = {"agentPath": agent_path}
     apply_agent_overrides(cmd)
-    return list(cmd.get("tools") or [])
+    hook = cmd.get("toolsHook")
+    return list(hook([])) if hook is not None else []
 
 
 class TestBrokenAgentScriptRaisesDiagnostic(unittest.TestCase):
-    """F5-07: every broken agent script raises AgentFileError, only that."""
+    """F5-07: every broken agent script raises a diagnostic error, only that.
+
+    Loading and staging the script raises ``AgentFileError``; the
+    staged ``tools`` hook, run later by the agent, raises
+    ``SeaScriptError`` (an ``Exception``, never the raw
+    ``BaseException`` the script threw).
+    """
 
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
@@ -111,54 +124,73 @@ class TestBrokenAgentScriptRaisesDiagnostic(unittest.TestCase):
 
     def test_healthy_script_stages_its_tools(self) -> None:
         path = self._write(
-            "def greet(name: str) -> str:\n"
-            "    \"\"\"Say hi.\"\"\"\n"
-            "    return f'hi {name}'\n"
-            "\n"
-            "def add_to_tools():\n"
-            "    \"\"\"Return the tools.\"\"\"\n"
-            "    return [greet]\n"
+            '''
+from kiss.agents.seas.base.base_sea import BaseSea
+
+def greet(name: str) -> str:
+    """Say hi."""
+    return f'hi {name}'
+
+class Sea(BaseSea):
+    def tools(self, tools):
+        """Return the tools."""
+        return tools + [greet]
+'''
         )
-        # ``add_to_tools()`` ADDS to the built-in toolset: only ``tools``
-        # is staged; the caller's tool profile is left alone (no
+        # ``tools()`` ADDS to the built-in toolset: only the ``toolsHook``
+        # callable is staged; the caller's tool profile is left alone (no
         # ``toolProfile`` override, no legacy ``appendBasicTools`` field).
         cmd: dict[str, Any] = {"agentPath": path}
-        self.assertEqual(apply_agent_overrides(cmd), {"tools"})
-        self.assertEqual([t.__name__ for t in cmd["tools"]], ["greet"])
-        self.assertEqual(cmd["tools"][0](name="bob"), "hi bob")
+        self.assertEqual(apply_agent_overrides(cmd), {"toolsHook"})
+        staged = cmd["toolsHook"]([])
+        self.assertEqual([t.__name__ for t in staged], ["greet"])
+        self.assertEqual(staged[0](name="bob"), "hi bob")
+        self.assertNotIn("tools", cmd)
         self.assertNotIn("toolProfile", cmd)
         self.assertNotIn("appendBasicTools", cmd)
         self.assertNotIn("toolsFile", cmd)
 
-    def test_script_without_tool_getter_stages_no_tools(self) -> None:
+    def test_script_without_tools_method_stages_no_hook(self) -> None:
         path = self._write(
+            "from kiss.agents.seas.base.base_sea import BaseSea\n"
+            "\n"
+            "class Sea(BaseSea):\n"
+            "    pass\n"
+            "\n"
             "def greet(name: str) -> str:\n"
             "    \"\"\"Say hi.\"\"\"\n"
             "    return f'hi {name}'\n"
         )
         cmd: dict[str, Any] = {"agentPath": path}
         self.assertEqual(apply_agent_overrides(cmd), set())
+        self.assertNotIn("toolsHook", cmd)
         self.assertNotIn("tools", cmd)
         self.assertNotIn("appendBasicTools", cmd)
+        self.assertEqual(_load_tools(path), [])
 
-    def test_raising_repr_in_tools_result_raises_agent_file_error(
+    def test_raising_repr_in_tools_result_raises_sea_script_error(
         self,
     ) -> None:
         # Validating the returned entries must never run user code
         # (e.g. a raising ``__repr__``) unguarded: any escape from the
-        # validation must surface as AgentFileError, not as the raw
+        # validation must surface as SeaScriptError, not as the raw
         # BaseException (which the task runner may misread as a
         # cancellation).
         path = self._write(
-            "class _EvilRepr:\n"
-            "    def __repr__(self):\n"
-            "        raise KeyboardInterrupt('evil repr')\n"
-            "\n"
-            "def add_to_tools():\n"
-            "    \"\"\"Return a broken entry.\"\"\"\n"
-            "    return [_EvilRepr()]\n"
+            '''
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class _EvilRepr:
+    def __repr__(self):
+        raise KeyboardInterrupt('evil repr')
+
+class Sea(BaseSea):
+    def tools(self, tools):
+        """Return a broken entry."""
+        return tools + [_EvilRepr()]
+'''
         )
-        with self.assertRaisesRegex(AgentFileError, "list of tool callables"):
+        with self.assertRaisesRegex(SeaScriptError, "list of tool callables"):
             _load_tools(path)
 
     def test_raising_exception_str_still_yields_agent_file_error(self) -> None:
@@ -183,23 +215,28 @@ class TestBrokenAgentScriptRaisesDiagnostic(unittest.TestCase):
         with self.assertRaisesRegex(AgentFileError, "not an existing"):
             _load_tools("bad\x00tools.py")
 
-    def test_raising_iter_in_tools_result_raises_agent_file_error(
+    def test_raising_iter_in_tools_result_raises_sea_script_error(
         self,
     ) -> None:
         path = self._write(
-            "class _EvilList(list):\n"
-            "    def __iter__(self):\n"
-            "        raise SystemExit(9)\n"
-            "\n"
-            "def ok() -> str:\n"
-            "    \"\"\"Return ok.\"\"\"\n"
-            "    return 'ok'\n"
-            "\n"
-            "def add_to_tools():\n"
-            "    \"\"\"Return a list whose iteration raises.\"\"\"\n"
-            "    return _EvilList([ok])\n"
+            '''
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class _EvilList(list):
+    def __iter__(self):
+        raise SystemExit(9)
+
+def ok() -> str:
+    """Return ok."""
+    return 'ok'
+
+class Sea(BaseSea):
+    def tools(self, tools):
+        """Return a list whose iteration raises."""
+        return _EvilList(tools + [ok])
+'''
         )
-        with self.assertRaisesRegex(AgentFileError, "add_to_tools.*broken list.*SystemExit"):
+        with self.assertRaisesRegex(SeaScriptError, r"tools\(\).*broken list.*SystemExit"):
             _load_tools(path)
 
 

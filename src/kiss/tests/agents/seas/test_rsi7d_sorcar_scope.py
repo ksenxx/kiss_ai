@@ -29,7 +29,7 @@ import yaml
 
 from kiss.agents.seas import agents_md
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
-from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar import cron_agent, sea_commands
 from kiss.agents.sorcar.persistence import _add_task, _flush_chat_events, _save_task_result
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
@@ -40,12 +40,17 @@ _SEA_PATH = Path(sea.__file__).resolve()
 
 _DEMO_SEA = '''"""Demo SEA."""
 
+from kiss.agents.seas.base.base_sea import BaseSea
+
 SYSTEM_PROMPT = "You run demo tasks. " * 20
 
 
-def system_prompt() -> str:
-    """Replace the default prompt."""
-    return SYSTEM_PROMPT
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        """Replace the default prompt."""
+        return SYSTEM_PROMPT
+
+
 '''
 
 _SYSTEM_MD = (
@@ -130,7 +135,9 @@ def test_plain_top_level_runs_are_mined_as_the_sorcar_pseudo_sea(checkout: Path)
     entry = json.loads(sea.sea_runs(name=sea.SORCAR))["seas"].get(sea.SORCAR)
     runs_before = entry["stats"]["runs"] if entry else 0
     plain = _persist("Refactor the parser", startTs=int(time.time() * 1000) + 3_600_000)
-    sea_run = _persist("Review this paper", sea="demo_sea")
+    # A SEA name no other test records: the shared DB would otherwise show
+    # this row as a "(recorded sea)" run of ``demo`` in test_rsi7d_sea.py.
+    sea_run = _persist("Review this paper", sea="scopedemo_sea")
     child = _persist("Reviewer sub-task", parent_task_id=plain)
     runs = json.loads(sea.sea_runs(name=sea.SORCAR))["seas"][sea.SORCAR]
     mine = [r for r in runs["runs"] if r["task_id"] == plain]
@@ -142,8 +149,9 @@ def test_plain_top_level_runs_are_mined_as_the_sorcar_pseudo_sea(checkout: Path)
     assert plain in listed and child not in listed
     # A run that records a SEA but no dispatch or signature matched it is
     # that SEA's (a replay), never KISS Sorcar's own.
-    demo = [r for r in everything["demo"]["runs"] if r["task_id"] == sea_run]
-    assert len(demo) == 1 and "(recorded sea)" in everything["demo"]["agents"], everything["demo"]
+    recorded = everything["scopedemo"]
+    assert [r["task_id"] for r in recorded["runs"]] == [sea_run], recorded
+    assert recorded["agents"] == ["(recorded sea)"], recorded
     scanned = json.loads(sea.sea_findings(sea.SORCAR, runs=1000))["runs_scanned"]
     assert plain in scanned and sea_run not in scanned and child not in scanned
 
@@ -432,6 +440,7 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
         ),
         finish_body("<p>Patched SYSTEM.md.</p>", prompt_tokens=800),
     ]
+    run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "all")
     with serve(script) as (url, requests):
         agent = WorktreeSorcarAgent("rsi7d-sorcar-scope-run")
         state = agent_state.AgentState(
@@ -441,15 +450,15 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
         agent_state.register(state)
         try:
             result = agent.run(
-                prompt_template="all",
+                prompt_template=run.prompt,
                 model_name=MODEL,
                 work_dir=str(checkout),
                 max_steps=6,
-                max_budget=sea.settings()["max_budget"],
+                max_budget=run.settings["max_budget"],
                 model_config={"base_url": url, "api_key": "local"},
-                tools=sea.add_to_tools(),
-                base_system_prompt=sea.system_prompt(),
-                web_tools=False,
+                system_prompt_hook=run.system_prompt_hook,
+                tools_hook=run.tools_hook,
+                web_tools=run.settings["use_web_tools"],
                 use_memory=False,
                 is_parallel=False,
                 verbose=False,

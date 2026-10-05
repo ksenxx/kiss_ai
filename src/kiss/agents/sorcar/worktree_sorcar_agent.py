@@ -33,6 +33,7 @@ from kiss.agents.sorcar.git_worktree import (
     _reclaim_process_lock,
     repo_lock,
 )
+from kiss.agents.sorcar.sea_settings import SeaError
 from kiss.agents.sorcar.sorcar_agent import (
     _generate_commit_message,
     auto_commit_changes,
@@ -1721,7 +1722,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # copy silently misses the other).
         try:
             return super().run(prompt_template=prompt_template, **kwargs)
-        except KISSError:
+        except (KISSError, SeaError):
+            # A broken SEA method (its ``system_prompt`` or ``tools``
+            # run inside the agent) is a setup failure the caller must
+            # see as a diagnostic, not a summarised task result.
             raise
         except Exception as exc:
             return str(

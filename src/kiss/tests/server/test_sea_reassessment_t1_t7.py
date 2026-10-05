@@ -160,7 +160,7 @@ def test_ask_and_sh_lock_their_tool_profile() -> None:
     for name, profile in [("sh", "bash"), ("ask", "none")]:
         path = sea_commands.get_command(name)
         assert path is not None
-        declared = sea_commands.sea_getter_value(path, "settings")
+        declared = sea_commands.own_settings(sea_commands.load_sea(path))
         assert declared["tool_profile"] == profile and declared["locked"] == ["tool_profile"]
         run_agent = make_run_agent_tool("/tmp")
         assert run_agent("ls", agent=name, tool_profile="review") == (
@@ -180,8 +180,9 @@ def test_the_plain_sub_agent_sea_is_named_sorcar() -> None:
     # No source may remain under the old ``dummy`` name; an ignored ``dummy/__pycache__``
     # left behind by a checkout that predates the rename is not a SEA.
     assert default.is_file() and not list((default.parents[1] / "dummy").glob("*.py"))
-    assert sea_commands.sea_getter_value(default, "settings") == {"hidden": True}
-    assert "`agent=\"sorcar\"`" in sea_commands.sea_getter_value(default, "description")
+    default_sea = sea_commands.load_sea(default)
+    assert sea_commands.own_settings(default_sea) == {"hidden": True}
+    assert "`agent=\"sorcar\"`" in default_sea.description()
     for spelling in ("", "sorcar", "general", "assistant"):
         assert resolve_agent(spelling, "") == (DEFAULT_AGENT_PATH, "sorcar"), spelling
     # A reviewer is a toolset, not an agent: the name is refused with the spelling.
@@ -333,8 +334,13 @@ class ReassessmentDaemonTest(DaemonLocalHarness):
             self.skipTest("the daemon accepts a run only with a configured model")
         self.local_sea = Path(self.tmpdir) / "local_sea.py"
         self.local_sea.write_text(textwrap.dedent("""
-            def description():
-                return "A SEA that is not a command."
+            from kiss.agents.seas.base.base_sea import BaseSea
+
+            class Sea(BaseSea):
+                def description(self):
+                    return "A SEA that is not a command."
+
+
         """))
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:

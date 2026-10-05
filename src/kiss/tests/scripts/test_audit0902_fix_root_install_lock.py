@@ -155,6 +155,12 @@ case "$1" in
         sleep 60 >/dev/null 2>&1 &
         echo "$!" >> "$KISS_TEST_MARK_DIR/daemon"
         ;;
+    serve-web)
+        # ``code serve-web``: VS Code in the browser, launched via nohup.
+        echo "Web UI available at http://127.0.0.1:8000?tkn=test"
+        echo "$$" >> "$KISS_TEST_MARK_DIR/daemon"
+        exec sleep 60
+        ;;
     *)
         # ``code <workspace>``: the editor itself, launched via nohup.
         echo "$$" >> "$KISS_TEST_MARK_DIR/daemon"
@@ -593,10 +599,11 @@ class RootInstallLockTest(unittest.TestCase):
         self.assertTrue(_lock_is_free(self.lock_file))
 
     def test_launched_background_children_do_not_keep_the_lock(self) -> None:
-        # A complete run: npm ci, code --install-extension, the final
-        # VS Code launch and the browser opened on the webapp each leave
-        # a process behind.  None of them may inherit fd 9, or the lock
-        # would stay held until they exit.
+        # A complete run: npm ci, code --install-extension (desktop and VS
+        # Code Server directories), the final VS Code launch, ``code
+        # serve-web`` and the browser opened on VS Code web and on the
+        # webapp each leave a process behind.  None of them may inherit
+        # fd 9, or the lock would stay held until they exit.
         for name, body in (
             ("node", STUB_NODE),
             ("npm", STUB_NPM),
@@ -632,11 +639,15 @@ class RootInstallLockTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, out)
         self.assertIn("=== Source bootstrap complete ===", out)
         self.assertIn("Launched VS Code from", out)
+        self.assertIn(
+            "Opening VS Code in the browser at http://127.0.0.1:8000?tkn=test", out
+        )
         self.assertIn("Opening the webapp at https://127.0.0.1:8443", out)
 
-        # xdg-open is detached (nohup, in a subshell), so its pid can
-        # land in the mark just after the installer has exited.
-        self._wait_for(lambda: self._count("daemon") == 4, "the browser stub")
+        # xdg-open is detached (nohup, in a subshell), so its pids can
+        # land in the mark just after the installer has exited: npm ci,
+        # two --install-extension, the editor, serve-web and two browsers.
+        self._wait_for(lambda: self._count("daemon") == 7, "the browser stubs")
         daemons = [int(pid) for pid in (self.marks / "daemon").read_text().split()]
         for pid in daemons:
             self.assertTrue(_alive(pid), f"leftover {pid} should still be running")

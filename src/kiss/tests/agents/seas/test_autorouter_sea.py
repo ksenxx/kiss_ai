@@ -24,12 +24,14 @@ import pytest
 import yaml
 
 from kiss.agents.seas.autorouter import autorouter_sea
+from kiss.agents.seas.autorouter.autorouter_sea import AutorouterSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
 from kiss.server import agent_state
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -49,12 +51,13 @@ def _runnable_candidates(tier: str) -> list[str]:
     return [model for model, _ in autorouter_sea.TIERS[tier] if model in available]
 
 
-def test_sea_getters_follow_the_contract() -> None:
-    """The getters pin the run: added protocol, picker entry, five tools, run_parallel off."""
-    prompt = autorouter_sea.add_to_system_prompt()
-    assert prompt == autorouter_sea.SYSTEM_PROMPT
+def test_sea_methods_follow_the_contract() -> None:
+    """The methods pin the run: added protocol, picker entry, five tools, run_parallel off."""
+    sea = AutorouterSea()
+    assert sea.system_prompt("ASSEMBLED") == "ASSEMBLED\n\n" + autorouter_sea.SYSTEM_PROMPT
+    prompt = autorouter_sea.SYSTEM_PROMPT
     assert prompt.startswith("## Model routing protocol (autorouter)")
-    assert autorouter_sea.register_as_model() is True
+    assert sea.register_as_model() is True
     flat = " ".join(prompt.split())
     for phrase in (
         "cost per accepted task",
@@ -75,28 +78,29 @@ def test_sea_getters_follow_the_contract() -> None:
     assert len(prompt) <= 5_000 + autorouter_sea.EVIDENCE_MAX_CHARS + len(
         autorouter_sea.EVIDENCE_CUT
     )
-    assert {tool.__name__ for tool in autorouter_sea.add_to_tools()} == _TOOL_NAMES
+    assert [tool.__name__ for tool in sea.tools([print])][0] == "print"
+    assert {tool.__name__ for tool in sea.tools([])} == _TOOL_NAMES
     # run_parallel workers inherit the parent's custom system prompt, which
     # would make every routed unit a router; dispatch goes through run_agent.
-    assert autorouter_sea.settings() == {
+    assert sea.settings({}) == {
         "model": autorouter_sea.orchestrator_model(),
         "allow_fan_out": False,
         "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,
     }
+    # The SEA's keys win over what the caller declared below it.
+    assert sea.settings({"model": "x", "max_budget": 3.0}) == {
+        "max_budget": 3.0, **sea.settings({})
+    }
     # No preset named: the resolved settings are the five keys above under
     # the default ``session`` preset (which adds no defaults), so the
     # caller's budget, worktree, auto-commit and tool profile win.  The
     # protocol is ADDED to the default prompt, never a replacement.
-    assert resolve_settings(vars(autorouter_sea)) == {
-        "kind": "session", **autorouter_sea.settings()
+    assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == {
+        "kind": "session", **sea.settings({})
     }
-    for name in (
-        "system_prompt", "max_budget", "use_worktree", "auto_commit", "tool_profile",
-        "model", "allow_fan_out", "auto_classify", "use_web_tools", "use_memory",
-    ):
-        assert not hasattr(autorouter_sea, name), name
+    assert_no_removed_getters(autorouter_sea)
 
 
 def test_autorouter_is_a_model_picker_sea() -> None:
@@ -113,11 +117,12 @@ def test_slash_autorouter_resolves_to_the_bundled_sea() -> None:
     task_text, path = hit
     assert path == _SEA_PATH
     assert task_text == "add a --json flag"
-    assert sea_commands.sea_settings(path) == {"kind": "session", **autorouter_sea.settings()}
+    assert sea_commands.sea_settings(path) == {"kind": "session", **AutorouterSea().settings({})}
+    assert sea_commands.help_text_if_command("/autorouter help") == AutorouterSea().description()
 
 
 def test_agent_file_loader_stages_the_sea_tools() -> None:
-    """The daemon-side loader applies the getters and stages the four tools from the file."""
+    """The daemon-side loader applies the settings and stages the prompt and tools hooks."""
     cmd: dict[str, Any] = {
         "agentPath": str(_SEA_PATH),
         "toolProfile": "full",
@@ -126,27 +131,32 @@ def test_agent_file_loader_stages_the_sea_tools() -> None:
     }
     overridden = apply_agent_overrides(cmd)
     assert overridden == {
-        "appendToSystemPrompt",
+        "systemPromptHook",
         "model",
-        "tools",
+        "toolsHook",
         "isParallel",
         "classifyTasks",
         "useWebTools",
         "useMemory",
     }
-    assert cmd["appendToSystemPrompt"] == "CALLER TEXT\n\n" + autorouter_sea.SYSTEM_PROMPT
+    # The caller's suffix stays on the wire; the hook appends the protocol
+    # to whatever prompt the run assembles (default + that suffix).
+    assert cmd["appendToSystemPrompt"] == "CALLER TEXT"
+    assert cmd["systemPromptHook"]("BASE\n\nCALLER TEXT") == (
+        "BASE\n\nCALLER TEXT\n\n" + autorouter_sea.SYSTEM_PROMPT
+    )
     assert "systemPrompt" not in cmd
     assert cmd["model"] == autorouter_sea.orchestrator_model()
-    assert "toolsFile" not in cmd
-    # ``add_to_tools()``: the router's tools come on top of the basic
-    # toolset; only a ``none`` tool profile removes it, and nothing
-    # stages ``appendBasicTools`` any more.
+    assert "toolsFile" not in cmd and "tools" not in cmd
+    # ``tools()``: the router's tools come on top of the basic toolset;
+    # only a ``none`` tool profile removes it, and nothing stages
+    # ``appendBasicTools`` any more.
     assert "appendBasicTools" not in cmd
     assert cmd["isParallel"] is False
     assert cmd["classifyTasks"] is False and cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
     assert cmd["toolProfile"] == "full"
-    assert {tool.__name__ for tool in cmd["tools"]} == _TOOL_NAMES
+    assert {tool.__name__ for tool in cmd["toolsHook"]([])} == _TOOL_NAMES
 
 
 def test_tier_candidates_are_distinct_catalog_models() -> None:
@@ -334,7 +344,10 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
     monkeypatch.setenv("KISS_HOME", str(home))
     runnable = _runnable_candidates("medium")
     model = runnable[0] if runnable else autorouter_sea.TIERS["medium"][0][0]
-    settings = autorouter_sea.settings()
+    run = sea_commands.evaluate_sea(
+        [AutorouterSea()], "add a --json flag to the export command"
+    )
+    settings = run.settings
     script = [
         tool_call_body("pick_model", {"tier": "medium"}, prompt_tokens=500),
         tool_call_body(
@@ -357,15 +370,15 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
     try:
         with serve(script) as (url, requests):
             result = agent.run(
-                prompt_template="add a --json flag to the export command",
+                prompt_template=run.prompt,
                 model_name=MODEL,
                 work_dir=str(tmp_path),
                 use_worktree=False,
                 max_steps=5,
                 max_budget=1.0,
                 model_config={"base_url": url, "api_key": "local"},
-                system_prompt=autorouter_sea.add_to_system_prompt(),
-                tools=autorouter_sea.add_to_tools(),
+                system_prompt_hook=run.system_prompt_hook,
+                tools_hook=run.tools_hook,
                 web_tools=settings["use_web_tools"],
                 use_memory=settings["use_memory"],
                 is_parallel=settings["allow_fan_out"],
@@ -453,7 +466,7 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
     monkeypatch.setenv("KISS_HOME", str(home))
     assert load_jobs() == []
 
-    created = autorouter_sea.on_picked_as_model(str(_SEA_PATH.parent))
+    created = AutorouterSea().on_picked_as_model(str(_SEA_PATH.parent))
     assert created.startswith("created:"), created
     (job,) = load_jobs()
     assert job["name"] == autorouter_sea.RSI7D_JOB_NAME
@@ -478,14 +491,14 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
     assert scope.names == ("autorouter",) and scope.error == ""
 
     # A second pick (from another directory of the checkout) changes nothing.
-    again = autorouter_sea.on_picked_as_model(str(_CHECKOUT / "src"))
+    again = AutorouterSea().on_picked_as_model(str(_CHECKOUT / "src"))
     assert yaml.safe_load(again)["exists"]["id"] == job["id"], again
     assert [j["id"] for j in load_jobs()] == [job["id"]]
 
     # A paused job is resumed rather than duplicated.
     assert cron_job("pause", job_id=job["id"]).startswith("pause:")
     assert load_jobs()[0]["enabled"] is False
-    resumed = autorouter_sea.on_picked_as_model(str(_CHECKOUT))
+    resumed = AutorouterSea().on_picked_as_model(str(_CHECKOUT))
     assert yaml.safe_load(resumed)["resumed"]["id"] == job["id"], resumed
     (job_after,) = load_jobs()
     assert job_after["enabled"] is True and job_after["next_run_at"]
@@ -498,7 +511,7 @@ def test_picking_autorouter_outside_a_checkout_schedules_a_scratch_dir_job(
     from kiss.agents.sorcar.cron_agent import load_jobs
 
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
-    assert autorouter_sea.on_picked_as_model(str(tmp_path)).startswith("created:")
+    assert AutorouterSea().on_picked_as_model(str(tmp_path)).startswith("created:")
     (job,) = load_jobs()
     assert job["work_dir"] == "" and job["use_worktree"] is False and job["auto_commit"] is False
     installed = _SEA_PATH.parents[1] / "rsi7d" / "rsi7d_sea.py"

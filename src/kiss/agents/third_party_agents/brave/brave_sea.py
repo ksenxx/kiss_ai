@@ -28,6 +28,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -47,14 +48,40 @@ _BRAVE_SEARCH_DIR = kiss_home() / "third_party_agents" / "brave_search"
 _config = ChannelConfig(_BRAVE_SEARCH_DIR, ("api_key",))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/brave help``."""
-    return (
-        "Runs web, news, image and video searches through the Brave Search REST API with a "
-        "stored subscription token; use it with "
-        '`run_agent(agent="brave", task="Find recent news about quantum computing")` or the '
-        "`kiss-brave -t '<task>'` CLI (outbound-only, no --channel poll mode)."
-    )
+class BraveSea(BaseSea):
+    """The ``/brave`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/brave help``."""
+        return (
+            "Runs web, news, image and video searches through the Brave Search REST API with a "
+            "stored subscription token; use it with "
+            '`run_agent(agent="brave", task="Find recent news about quantum computing")` or the '
+            "`kiss-brave -t '<task>'` CLI (outbound-only, no --channel poll mode)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Brave Search channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + BraveSearchAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + BraveSearchAgent.channel_system_prompt
 
 
 def _clamp(value: int, low: int, high: int) -> int:
@@ -466,32 +493,6 @@ def main() -> None:
         channel_name="Brave Search",
         make_backend=None,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Brave Search channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return BraveSearchAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return BraveSearchAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

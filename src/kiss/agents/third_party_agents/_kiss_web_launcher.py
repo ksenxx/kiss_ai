@@ -15,16 +15,16 @@ follow-up message injection, stop support, chat persistence — exactly
 like a task started from the chat UI.
 
 The agent's channel tools are supplied through the API's
-``extension_agent_path`` agent-script contract directly: each agent
-module is a SEA defining a top-level ``add_to_tools()`` that builds a
-fresh agent from the credentials persisted under ``~/.kiss`` and
-returns its authentication and backend tools, so the agent's OWN
-module file (``agent.sea_path``) is passed as ``extension_agent_path``
-and the daemon imports it and calls its ``add_to_tools()``.  No
-bridge, registry, wrapper, or generated file is involved.  The agent's
-workspace travels on the ``run`` command's ``workspace`` field; the
-daemon holds it for the run's lifetime and publishes it to the
-daemon-side ``add_to_tools()`` through ``KISS_CHANNEL_WORKSPACE``.
+``extension_agent_path`` SEA contract directly: each agent module
+defines a SEA class whose ``tools()`` builds a fresh agent from the
+credentials persisted under the KISS home and adds its authentication
+and backend tools, so the agent's OWN module file (``agent.sea_path``)
+is passed as ``extension_agent_path`` and the daemon loads it and runs
+its ``tools()``.  No bridge, registry, wrapper, or generated file is
+involved.  The agent's workspace travels on the ``run`` command's
+``workspace`` field; the daemon holds it for the run's lifetime and
+publishes it to the daemon-side ``tools()`` through
+``KISS_CHANNEL_WORKSPACE``.
 """
 
 from __future__ import annotations
@@ -225,8 +225,8 @@ class KissWebChatAgent(BaseChannelAgent):
     anything itself — the inherited ``run()`` submits the task through
     :func:`kiss.server.sorcar.run` via :func:`run_agent_via_kiss_web`,
     which records the YAML result in ``last_run_result`` plus the
-    cost / token / step totals.  This module defines no
-    ``add_to_tools()``, so the carrier adds no channel tools of its own;
+    cost / token / step totals.  This module defines no SEA class, so
+    the carrier adds no channel tools of its own;
     the channel runner passes the channel module's path as *sea_path*
     so the launch still gets that channel's tools.
     """
@@ -238,7 +238,7 @@ class KissWebChatAgent(BaseChannelAgent):
 
     @property
     def sea_path(self) -> str:
-        """Path of the agent script whose ``add_to_tools()`` supplies the launch's tools.
+        """Path of the SEA file whose ``tools()`` supplies the launch's tools.
 
         The *sea_path* given at construction (a channel module, for the
         channel runner's launches), or ``""`` for no extra tools.
@@ -283,10 +283,10 @@ def run_agent_via_kiss_web(
     """Launch *agent*'s task through :func:`kiss.server.sorcar.run`.
 
     Supplies the agent's channel tools through the API's
-    ``extension_agent_path`` agent-script contract (``agent.sea_path``
-    — the agent's own module, whose top-level ``add_to_tools()`` the
-    daemon calls to build a fresh agent from the credentials persisted
-    under ``~/.kiss`` and whose ``settings()`` / ``add_to_system_prompt()``
+    ``extension_agent_path`` SEA contract (``agent.sea_path`` — the
+    agent's own module, whose SEA class's ``tools()`` the daemon runs
+    to build a fresh agent from the credentials persisted under the
+    KISS home and whose ``settings()`` / ``system_prompt()``
     make the run a ``channel``-kind session with the channel's
     guidance in its system prompt), and submits the task to the in-process kiss-web daemon over its
     Unix-domain socket.  Blocks until the daemon reports the task
@@ -295,7 +295,7 @@ def run_agent_via_kiss_web(
     ``agent.workspace`` is sent as the run's ``workspace``; the daemon
     holds it while the task runs (a launch whose workspace differs from
     a running channel task's waits for that task to finish) and exports
-    it as ``KISS_CHANNEL_WORKSPACE`` so the daemon-side ``add_to_tools()``
+    it as ``KISS_CHANNEL_WORKSPACE`` so the daemon-side SEA ``tools()``
     authenticates under the same workspace.
 
     The passed *agent* instance is never executed — the daemon builds
@@ -356,7 +356,7 @@ def run_agent_via_kiss_web(
     chat_id = agent.chat_id if isinstance(agent, KissWebChatAgent) else ""
     # The agent's channel tools (auth tools + authenticated backend
     # methods) are built inside the daemon: it imports the agent's
-    # module as the run's agent script and calls its add_to_tools();
+    # module as the run's SEA and runs its tools() method;
     # the daemon-built agent supplies the standard tools itself.
     endpoint = endpoint_file or _ENDPOINT_FILE_OVERRIDE or _ensure_api_server()
     # The workspace travels on the wire; the daemon holds it (and

@@ -40,8 +40,8 @@ Three tools make the mechanical steps deterministic:
 * :func:`loop_status` parses the ``Recommendation:`` and score lines
   of every round's review and says whether to stop or continue.
 
-Module-level getters (``add_to_system_prompt()``, ``add_to_tools()``,
-...) follow the SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
+The SEA class's methods (``system_prompt()``, ``tools()``, ...) follow
+the SEA contract in :mod:`kiss.agents.seas.base.base_sea`.
 """
 
 from __future__ import annotations
@@ -51,6 +51,8 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+
+from kiss.agents.seas.base.base_sea import BaseSea
 
 WRITE_PAPER_SEA = str(Path(__file__).resolve().parents[1] / "write_paper" / "write_paper_sea.py")
 """Absolute path of the bundled ``/write_paper`` SEA, the writer of every round."""
@@ -247,15 +249,43 @@ Rules for this round:
 """
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/revise_and_review_paper help``."""
-    return (
-        "Writes a research paper with /write_paper from your writing instructions, has "
-        "/review_paper review it as a fresh reviewer under your review instructions, and "
-        "repeats the revise-and-review loop (with experiments, ablations or AI discovery when "
-        "the review asks for evidence) until the review says strong accept or the paper cannot "
-        "improve further; use `/revise_and_review_paper Writing: <...> Review: <...>`."
-    )
+class ReviseAndReviewPaperSea(BaseSea):
+    """The ``/revise_and_review_paper`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/revise_and_review_paper help``."""
+        return (
+            "Writes a research paper with /write_paper from your writing instructions, has "
+            "/review_paper review it as a fresh reviewer under your review instructions, and "
+            "repeats the revise-and-review loop (with experiments, ablations or AI discovery when "
+            "the review asks for evidence) until the review says strong accept or the paper cannot "
+            "improve further; use `/revise_and_review_paper Writing: <...> Review: <...>`."
+        )
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Append the coordinator's rules to the default system prompt."""
+        return system_prompt + "\n\n" + SYSTEM_PROMPT
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Expose the task builders and the loop decision to the model."""
+        return tools + [writer_task, reviewer_task, loop_status]
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """A sequential coordinator with the full toolset that may run for a day.
+
+        The rounds run as ``run_agent`` sub-tasks, so fan-out stays off; the
+        ``full`` profile keeps ``run_agent`` available even when a reviewer
+        dispatches the loop (the read-only ``review`` profile has none).  The
+        ``timeout`` tells the dispatcher a ``/revise_and_review_paper`` run
+        may take up to a day.
+        """
+        return settings | {
+            "use_web_tools": False,
+            "allow_fan_out": False,
+            "auto_classify": False,
+            "tool_profile": "full",
+            "timeout": DISPATCH_TIMEOUT_SECONDS,
+        }
 
 
 def writer_task(
@@ -499,33 +529,5 @@ def loop_status(reviews: str, max_rounds: int = DEFAULT_MAX_ROUNDS, overrides: s
     else:
         lines.append(_decision(progress, max_rounds))
     return "\n".join(lines)
-
-
-def add_to_system_prompt() -> str:
-    """Append the coordinator's rules to the default system prompt."""
-    return SYSTEM_PROMPT
-
-
-def add_to_tools() -> list[Any]:
-    """Expose the task builders and the loop decision to the model."""
-    return [writer_task, reviewer_task, loop_status]
-
-
-def settings() -> dict[str, Any]:
-    """A sequential coordinator with the full toolset that may run for a day.
-
-    The rounds run as ``run_agent`` sub-tasks, so fan-out stays off; the
-    ``full`` profile keeps ``run_agent`` available even when a reviewer
-    dispatches the loop (the read-only ``review`` profile has none).  The
-    ``timeout`` tells the dispatcher a ``/revise_and_review_paper`` run
-    may take up to a day.
-    """
-    return {
-        "use_web_tools": False,
-        "allow_fan_out": False,
-        "auto_classify": False,
-        "tool_profile": "full",
-        "timeout": DISPATCH_TIMEOUT_SECONDS,
-    }
 
 

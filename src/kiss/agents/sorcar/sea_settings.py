@@ -2,40 +2,34 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The contract of an SEA and the loader that executes one.
+"""The settings of a SEA and the loader that executes one.
 
-A SEA configures the session that runs it with optional
-module-level functions.  The run parameters come from ``settings()``::
+A SEA is a class deriving from
+:class:`kiss.agents.seas.base.base_sea.BaseSea`.  Its run parameters
+come from its ``settings`` method, which lays the SEA's keys over what
+its base classes declared::
 
-    def settings() -> dict:
-        return {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
+    def settings(self, settings: dict) -> dict:
+        return settings | {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
 
-``settings()`` is data: a ``kind`` (``session``, the default, ``worker``
+The result is data: a ``kind`` (``session``, the default, ``worker``
 or ``channel``: a named dict of defaults laid under the explicit keys,
-see :func:`kind_defaults`), optionally ``extends`` (the command name or
-path of a base script whose configuration this one refines, see
-:func:`kiss.agents.sorcar.sea_commands.sea_layers`), any of the
-per-run parameters of :func:`kiss.server.sorcar.run` listed in
-:data:`SETTING_TYPES`, and two keys read by the dispatcher:
-``timeout`` (seconds the sub-task may take: the call's value, else
-this setting, else 3600 for ``run_agent`` and no own limit for a
-``run_parallel`` child) and ``locked``
-(the keys an explicit caller argument may not replace).  Against the
-caller there is one precedence rule, :data:`PRECEDENCE_RULE`, enforced
-by :func:`locked_conflicts` and rendered by ``sea docs`` into every
-page that states it.
+see :func:`kind_defaults`), any of the per-run parameters of
+:func:`kiss.server.sorcar.run` listed in :data:`SETTING_TYPES`, and
+three keys read by the launcher: ``timeout`` (seconds the sub-task may
+take: the call's value, else this setting, else 3600 for ``run_agent``
+and no own limit for a ``run_parallel`` child), ``locked`` (the keys
+an explicit caller argument may not replace) and ``hidden`` (the file
+is no command).  Against the caller there is one precedence rule,
+:data:`PRECEDENCE_RULE`, enforced by :func:`locked_conflicts` and
+rendered by ``sea docs`` into every page that states it.
 
-Getters are text and code: ``system_prompt()`` replaces the base
-system prompt, ``add_to_system_prompt()`` appends to it, and
-``prompt(task)`` receives the task text and returns the prompt body
-(``{task_id}`` in the result is replaced by the calling task's id).  A
-script may further define ``add_to_tools()`` (extra tool callables),
-``description()`` (``/xxx help`` text), the hooks ``llm_call_hook`` /
-``tool_call_hook`` and the model-picker pair ``register_as_model()`` /
-``on_picked_as_model()``; :mod:`kiss.agents.sorcar.sea_commands`
-evaluates them.
+The other methods of the class — ``prompt``, ``system_prompt``,
+``tools``, ``tool_call_hook``, ``llm_call_hook`` — shape the run;
+:mod:`kiss.agents.sorcar.sea_commands` loads the class and applies
+them.
 
-A script runs in one of three ways; what differs is only where it runs
+A SEA runs in one of three ways; what differs is only where it runs
 and which settings apply:
 
 ==================  ====================  ======================  ========================
@@ -60,14 +54,13 @@ Parent inheritance  none (tab settings)   yes, unless the kind    yes; budget =
 
 ``kind: "channel"`` is the one key the daemon acts on beyond passing a
 value through: the run holds its channel workspace
-(``run_agent(options='{"workspace": ...}')``, default ``"default"``)
-for its lifetime, the channel preamble is added to its system prompt,
-and it can be neither a ``run_parallel`` child nor an ``extends``
-base.
+(``run_agent(options='{"workspace": ...}')``, default ``"default"``),
+the channel preamble is added to its system prompt, and it cannot be a
+``run_parallel`` child.
 
-:func:`execute_python_file` is the ONE loader every reader of a script
-uses: it compiles and executes the file into a throw-away module, so
-every run observes the file's current contents.
+:func:`execute_python_file` is the ONE loader every reader of a SEA
+file uses: it compiles and executes the file into a throw-away module,
+so every run observes the file's current contents.
 """
 
 from __future__ import annotations
@@ -103,7 +96,6 @@ docstrings quote it, so a change here changes every statement of it.
 
 SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
     "kind": str,
-    "extends": str,
     "work_dir": str,
     "model": str,
     "chat_id": str,
@@ -127,13 +119,10 @@ SETTING_DOCS: dict[str, str] = {
     "kind": "What the run is: `session` (the default, an ordinary Sorcar session), `worker` or "
             "`channel`; each is a dict of defaults laid under the explicit keys (see the kind "
             "table). A `channel` run holds its channel workspace, gets the channel preamble, "
-            "never inherits from a calling task and is never a `run_parallel` child or an "
-            "`extends` base.",
-    "extends": "A base script (command name or `.py` path) whose layers run under this one: "
-               "settings merge with the later layer winning, `prompt(task)` functions chain, "
-               "system-prompt additions concatenate, tools union.",
+            "never inherits from a calling task and is never a `run_parallel` child.",
     "work_dir": "The directory the run works in; default: the calling task's or the tab's. A "
-                "relative path is resolved against the script's own folder, not the caller's.",
+                "relative path is resolved against the script's own folder, not the caller's "
+                "(one a base class sets: against the base's file).",
     "model": "The LLM model, a catalogue name or a model-picker SEA; `\"\"` or `None` keeps "
              "the caller's.",
     "chat_id": "The chat the run's events go to; default under `run_agent`: the calling "
@@ -166,21 +155,20 @@ SETTING_DOCS: dict[str, str] = {
     "locked": "Keys an explicit `run_agent` / `run_parallel` argument or option may not change: "
               "a differing value is an error.",
     "hidden": "`True`: the script is no `/command` and no `run_agent` agent name (loadable by "
-              "path and as an `extends` base only). It must be the literal `True` in "
+              "path and as a base class only). It must be the literal `True` in the class's "
               "`settings()` because the command registry reads it from the source without "
               "running the script (a computed value is ignored).",
 }
 """One line of documentation per :data:`SETTING_TYPES` key (rendered by ``sea docs``)."""
 
-META_SETTINGS = ("kind", "extends", "locked", "hidden")
+META_SETTINGS = ("kind", "locked", "hidden")
 """Keys that shape the settings themselves rather than the run; never lockable."""
 
-DISPATCHER_SETTINGS = ("kind", "extends", "timeout", "locked", "hidden")
+DISPATCHER_SETTINGS = ("kind", "timeout", "locked", "hidden")
 """``settings()`` keys with no ``run`` command wire field.
 
-``kind`` and ``extends`` are resolved by :func:`resolve_settings` and
-:func:`~kiss.agents.sorcar.sea_commands.sea_layers` (the daemon reads
-``kind`` from the layers, :mod:`kiss.agents.sorcar.agent_file`); ``timeout``
+``kind`` is resolved by :func:`resolve_settings` (the daemon reads it
+from the SEA's settings, :mod:`kiss.agents.sorcar.agent_file`); ``timeout``
 is read by the dispatcher (:mod:`kiss.agents.sorcar.agent_dispatch`);
 ``locked`` names the keys an explicit caller argument may not replace
 (:func:`locked_conflicts`); ``hidden`` keeps the script out of the
@@ -243,6 +231,8 @@ REMOVED_SETTINGS = {
                "always does; the caller's `inherit` option opts out of inheriting",
     "append_basic_tools": "the built-in toolset is chosen by `tool_profile` (`none` gives a "
                           "run no built-in tools)",
+    "extends": "a SEA extends another by Python inheritance: derive the SEA class from the "
+               "base's class (import it, or `sea_class(\"name\")`)",
 }
 """Former settings keys with no replacement, and why; refused with the explanation."""
 
@@ -446,25 +436,25 @@ class SettingsError(SeaError, ValueError):
 
 
 def declares_hidden(path: Path) -> bool:
-    """Return whether the SEA at *path* writes ``"hidden": True`` in ``settings()``.
+    """Return whether the SEA at *path* writes ``"hidden": True`` in its ``settings`` method.
 
     Read from the source (``ast``), never by executing the script: the
     command registry calls this for every scanned folder, and a hidden
-    SEA (a test fixture, protocol plumbing, a base other SEAs extend)
-    must be excluded without running it.  Hence the contract that
-    ``hidden`` is a literal ``True`` in a dict inside ``settings()``; a
-    computed value is accepted by :func:`resolve_settings` but does not
-    hide the SEA.
+    SEA (a test fixture, protocol plumbing, a base class other SEAs
+    derive from) must be excluded without running it.  Hence the
+    contract that ``hidden`` is a literal ``True`` in a dict inside the
+    file's own ``settings`` method; a computed or inherited value is
+    accepted by :func:`resolve_settings` but does not hide the SEA.
     """
     return declared_literal(path, "hidden") is True
 
 
 def declared_literal(path: Path, key: str) -> Any:
-    """Return the literal value ``settings()`` of the SEA at *path* writes for *key*, or ``None``.
+    """Return the literal value the SEA at *path* writes for *key* in ``settings``, or ``None``.
 
     Parsed from the source, never executed (see :func:`declares_hidden`);
     only a constant value under a string-literal key in a dict inside
-    ``settings()`` counts.  The parse is cached per path until the
+    the file's own ``settings`` method counts.  The parse is cached per path until the
     file's size or mtime changes, so a registry refresh costs one
     ``stat`` per SEA.
     """
@@ -491,29 +481,39 @@ def _settings_literals(path: Path) -> dict[str, Any]:
     except (OSError, SyntaxError, ValueError):
         return {}
     literals: dict[str, Any] = {}
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "settings":
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Dict):
-                    for key, value in zip(sub.keys, sub.values, strict=True):
-                        if isinstance(key, ast.Constant) and isinstance(value, ast.Constant):
-                            literals[str(key.value)] = value.value
+    for node in settings_functions(tree):
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Dict):
+                for key, value in zip(sub.keys, sub.values, strict=True):
+                    if isinstance(key, ast.Constant) and isinstance(value, ast.Constant):
+                        literals[str(key.value)] = value.value
     return literals
 
 
-def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the effective settings of the SEA executed into *namespace*.
+def settings_functions(tree: ast.Module) -> list[ast.FunctionDef]:
+    """Return every ``def settings`` of *tree* (the SEA class's method, wherever the class is)."""
+    return [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "settings"
+    ]
 
-    Evaluates the script's ``settings()`` (when defined) and merges the
-    ``kind``'s defaults under its keys.  Every value is
-    type-checked against :data:`SETTING_TYPES`.  ``work_dir`` and
-    ``extends`` are kept as the script returned them; the daemon and
-    :func:`kiss.agents.sorcar.sea_commands.sea_layers` resolve them.
-    A ``tool_profile`` alias (``readonly``) becomes its key
-    (:func:`alias_free_profile`).
+
+def resolve_settings(declared: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the effective settings a SEA *declared*.
+
+    *declared* is what the SEA's ``settings`` methods returned, base
+    class first (:func:`kiss.agents.sorcar.sea_commands.sea_settings`
+    folds them).  The ``kind``'s defaults are merged under its keys,
+    every value is type-checked against :data:`SETTING_TYPES`, a
+    ``tool_profile`` alias (``readonly``) becomes its key
+    (:func:`alias_free_profile`), and a ``channel`` locks the keys of
+    its kind: it runs in its own scratch directory, never the caller's,
+    and no call may give it a worktree, auto-commit, the classifier,
+    fan-out, the browser or memory.  ``work_dir`` is kept as declared;
+    the launcher anchors a relative one at the SEA's folder.
 
     Args:
-        namespace: The script's module namespace (``module.__dict__``).
+        declared: The declared settings.
 
     Returns:
         A new dict: ``{"kind": name, <key>: value, ...}`` with the
@@ -523,24 +523,10 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
         persisted value stands.
 
     Raises:
-        SettingsError: When ``settings()`` is not a function returning a
-            dict, names an unknown, renamed or removed key or an
-            unknown ``kind``, a value has the wrong type, or
-            ``settings()`` raises (whatever it raises).
+        SettingsError: When *declared* names an unknown, renamed or
+            removed key or an unknown ``kind``, or a value has the
+            wrong type.
     """
-    declared: dict[str, Any] = {}
-    if "settings" in namespace:
-        settings_fn = namespace["settings"]
-        if not callable(settings_fn):
-            raise SettingsError(
-                f"settings must be a function returning a dict, got {type(settings_fn).__name__}"
-            )
-        declared = _call(settings_fn, "settings()")
-        if not isinstance(declared, dict):
-            raise SettingsError(
-                f"settings() must return a dict, got {type(declared).__name__}"
-            )
-        declared = dict(declared)
     sources = {key: f"settings()[{key!r}]" for key in declared}
     for key in declared:
         if key in RENAMED_SETTINGS:
@@ -558,13 +544,13 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
     # ``None`` means "no override": the caller's or persisted value
     # stands.  So does an empty ``model`` (the spelling of "no model" a
     # script computing its model may produce).
-    declared = {
+    settings = {
         key: value for key, value in declared.items()
         if value is not None and not (key == "model" and value == "")
     }
-    if isinstance(declared.get("tool_profile"), str):
-        declared["tool_profile"] = alias_free_profile(declared["tool_profile"])
-    for key, value in declared.items():
+    if isinstance(settings.get("tool_profile"), str):
+        settings["tool_profile"] = alias_free_profile(settings["tool_profile"])
+    for key, value in settings.items():
         expected = SETTING_TYPES[key]
         wrong_bool = isinstance(value, bool) and expected is not bool
         if wrong_bool or not isinstance(value, expected):
@@ -575,50 +561,14 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
             raise SettingsError(
                 f"{sources[key]} must be {names}, got {type(value).__name__}"
             )
-        declared[key] = _check_value(sources[key], key, value)
-    kind = declared.get("kind", "session")
-    return {"kind": kind, **kind_defaults()[kind], **declared}
-
-
-def merge_settings(chain: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return the effective settings of a script and the bases it extends.
-
-    *chain* lists resolved settings (:func:`resolve_settings`) from the
-    outermost base to the script itself; a later entry's key wins.  The
-    effective ``kind`` is the last one other than ``session``
-    (``session`` changes nothing, so it never masks a base's kind).
-    ``extends`` is dropped (the chain has resolved it) and ``hidden``
-    is the script's own, never a base's.
-
-    Args:
-        chain: The resolved settings, base first.
-
-    Returns:
-        The merged settings dict; ``{"kind": "session"}`` for an
-        empty chain.
-    """
-    merged: dict[str, Any] = {}
-    for settings in chain:
-        merged.update(settings)
-    merged["kind"] = next(
-        (s["kind"] for s in reversed(chain) if s["kind"] != "session"), "session",
-    )
-    merged.pop("extends", None)
-    # ``hidden`` describes one script, not what extends it: a hidden
-    # base is the normal case, and its children are ordinary commands.
-    merged.pop("hidden", None)
-    if chain and "hidden" in chain[-1]:
-        merged["hidden"] = chain[-1]["hidden"]
-    locks = {key for s in chain for key in s.get("locked", ())}
-    if merged.get("kind") == "channel":
-        # A channel is closed: it runs in its own scratch directory, never
-        # the caller's, and no call may give it a worktree, auto-commit,
-        # the classifier, fan-out, the browser or memory.
-        locks.update(key for key in kind_defaults()["channel"] if key in merged)
-    if locks:
-        # A base that locks a key keeps it locked in every script extending it.
-        merged["locked"] = sorted(locks)
-    return merged
+        settings[key] = _check_value(sources[key], key, value)
+    kind = settings.get("kind", "session")
+    resolved = {"kind": kind, **kind_defaults()[kind], **settings}
+    if kind == "channel":
+        resolved["locked"] = sorted(
+            {*resolved.get("locked", ()), *kind_defaults()["channel"]}
+        )
+    return resolved
 
 
 def locked_conflicts(
@@ -703,11 +653,3 @@ def _check_value(source: str, key: str, value: Any) -> Any:
         if key == "timeout" and value <= 0:
             raise SettingsError(f"{source} must be a positive number of seconds, got {value:g}")
     return value
-
-
-def _call(fn: Any, label: str) -> Any:
-    """Call *fn*; anything it raises becomes a :exc:`SettingsError` naming *label*."""
-    try:
-        return fn()
-    except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
-        raise SettingsError(f"{label} raised: {safe_message(exc)}") from exc

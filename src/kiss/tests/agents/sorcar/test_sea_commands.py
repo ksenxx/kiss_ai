@@ -551,6 +551,7 @@ from __future__ import annotations
 
 import typing
 from dataclasses import dataclass
+from kiss.agents.seas.base.base_sea import BaseSea
 
 
 @dataclass
@@ -561,10 +562,13 @@ class Verdict:
     note: typing.ClassVar[str] = "relay stays on the real checkout"
 
 
-def settings() -> dict:
-    hints = typing.get_type_hints(Verdict)
-    assert hints == {"worktree": bool, "note": typing.ClassVar[str]}, hints
-    return {"use_worktree": Verdict(worktree=False).worktree, "auto_commit": True}
+class Sea(BaseSea):
+    def settings(self, settings):
+        hints = typing.get_type_hints(Verdict)
+        assert hints == {"worktree": bool, "note": typing.ClassVar[str]}, hints
+        return settings | {"use_worktree": Verdict(worktree=False).worktree, "auto_commit": True}
+
+
 '''
 
 
@@ -590,14 +594,16 @@ def test_dataclass_sea_with_future_annotations_loads(tmp_path: Path) -> None:
     settings = sea_commands.sea_settings(sea)
     assert settings == {"kind": "session", "use_worktree": False, "auto_commit": True}
     loaded = sea_commands.load_sea(sea)
-    name = loaded["__name__"]
+    name = type(loaded).__module__
     assert name.startswith("_kiss_sea_verdict_sea_")
-    assert sys.modules[name].__dict__ is loaded
-    assert loaded["__file__"] == str(sea)
-    assert loaded["Verdict"].note == "relay stays on the real checkout"
+    module = sys.modules[name]
+    assert module.__dict__["Sea"] is type(loaded)
+    assert module.__file__ == str(sea)
+    assert loaded.path == sea
+    assert module.__dict__["Verdict"].note == "relay stays on the real checkout"
     # One module per script file, not one per run.
     again = sea_commands.load_sea(sea)
-    assert again["__name__"] == name and sys.modules[name].__dict__ is again
+    assert type(again).__module__ == name and sys.modules[name].__dict__["Sea"] is type(again)
     assert len([n for n in sys.modules if n.startswith("_kiss_sea_verdict_sea_")]) == 1
 
 
@@ -621,16 +627,20 @@ import typing
 from dataclasses import dataclass
 
 
+from kiss.agents.seas.base.base_sea import BaseSea
+
+
 @dataclass
 class {cls}:
     parent: {cls} | None = None
 
 
-def settings() -> dict:
-    time.sleep({delay})
-    hints = typing.get_type_hints({cls})
-    assert hints["parent"] == ({cls} | None), hints
-    return {{"use_worktree": False}}
+class Sea(BaseSea):
+    def settings(self, settings: dict) -> dict:
+        time.sleep({delay})
+        hints = typing.get_type_hints({cls})
+        assert hints["parent"] == ({cls} | None), hints
+        return settings | {{"use_worktree": False}}
 '''
 
 
@@ -673,13 +683,17 @@ def test_concurrent_same_stem_loads_do_not_clobber_each_other(
 _DESCRIBED_SEA = '''\
 """SEA with the mandatory description() getter."""
 
-
-def description() -> str:
-    return "  Echoes the task back; use it as /echo <text>.  "
+from kiss.agents.seas.base.base_sea import BaseSea
 
 
-def settings() -> dict:
-    return {"use_worktree": False}
+class Sea(BaseSea):
+    def description(self):
+        return "  Echoes the task back; use it as /echo <text>.  "
+
+    def settings(self, settings):
+        return settings | {"use_worktree": False}
+
+
 '''
 
 
@@ -700,7 +714,7 @@ def test_help_returns_stripped_description(tmp_path: Path) -> None:
     expected = "Echoes the task back; use it as /echo <text>."
     assert sea_commands.help_text_if_command("/echo help") == expected
     assert sea_commands.help_text_if_command("/echo   HELP ") == expected
-    assert sea_commands.sea_description(sea) == expected
+    assert sea_commands.sea_description(sea_commands.load_sea(sea)) == expected
     assert sea_commands.help_text_if_command("/echo help me") is None
     assert sea_commands.help_text_if_command("/echo") is None
     assert sea_commands.help_text_if_command("/unknown help") is None
@@ -713,31 +727,64 @@ def test_help_reports_missing_or_broken_description(tmp_path: Path) -> None:
     folder = tmp_path / "seas"
     _write_seas_md([str(folder)])
 
-    missing = _touch_sea(folder, "nodesc")
+    missing = _touch_sea(folder, "nodesc")  # no SEA class at all
     sea_commands.refresh_registry()
-    with pytest.raises(sea_commands.SeaScriptError, match="description.*must be"):
+    with pytest.raises(sea_commands.SeaScriptError, match="exactly one subclass.*found none"):
         sea_commands.help_text_if_command("/nodesc help")
 
-    missing.write_text("description = 'not callable'\n", encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="description.*must be"):
-        sea_commands.sea_description(missing)
+    missing.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
 
-    missing.write_text("def description():\n    return 42\n", encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="non-empty string, got int"):
-        sea_commands.sea_description(missing)
+class Sea(BaseSea):
+    pass
+""", encoding="utf-8")
+    with pytest.raises(sea_commands.SeaScriptError, match="description.*non-empty string"):
+        sea_commands.help_text_if_command("/nodesc help")
 
-    missing.write_text("def description():\n    return '   '\n", encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="non-empty string, got str"):
-        sea_commands.sea_description(missing)
+    # A class attribute shadowing the method: a SEA diagnostic, not a crash.
+    missing.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
 
-    missing.write_text("def description():\n    raise KeyError('k')\n", encoding="utf-8")
+class Sea(BaseSea):
+    description = 'not callable'
+""", encoding="utf-8")
+    with pytest.raises(sea_commands.SeaScriptError, match="description.*must be a method, got str"):
+        sea_commands.sea_description(sea_commands.load_sea(missing))
+
+    missing.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 42
+""", encoding="utf-8")
+    with pytest.raises(sea_commands.SeaScriptError, match="must return a string, got int"):
+        sea_commands.sea_description(sea_commands.load_sea(missing))
+
+    missing.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return '   '
+""", encoding="utf-8")
+    with pytest.raises(sea_commands.SeaScriptError, match="must return a non-empty string"):
+        sea_commands.sea_description(sea_commands.load_sea(missing))
+
+    missing.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        raise KeyError('k')
+""", encoding="utf-8")
     with pytest.raises(sea_commands.SeaScriptError, match="KeyError") as info:
-        sea_commands.sea_description(missing)
+        sea_commands.sea_description(sea_commands.load_sea(missing))
     assert isinstance(info.value.__cause__, KeyError)
 
     missing.write_text("raise SystemExit(2)\n", encoding="utf-8")
     with pytest.raises(sea_commands.SeaScriptError, match="SystemExit: 2"):
-        sea_commands.sea_description(missing)
+        sea_commands.load_sea(missing)
 
 
 def test_every_bundled_sea_has_a_description() -> None:
@@ -757,13 +804,32 @@ def test_every_bundled_sea_has_a_description() -> None:
             assert path.name == "cron_agent.py", path
         else:
             assert path.parent.name == name, path
-        text = sea_commands.sea_description(path)
+        text = sea_commands.sea_description(sea_commands.load_sea(path))
         assert text.rstrip(".").strip(), name
 
 
-_ROUTER_TRUE = "def description():\n    return 'r'\ndef register_as_model():\n    return True \n"
-_ROUTER_FALSE = "def description():\n    return 'r'\ndef register_as_model():\n    return False\n"
+_ROUTER_TRUE = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'r'
+
+    def register_as_model(self):
+        return 1 == 1
+"""
+_ROUTER_FALSE = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'r'
+
+    def register_as_model(self):
+        return 1 == 2
+"""
 """Same-length sources: an edit between them keeps the file size."""
+assert len(_ROUTER_TRUE) == len(_ROUTER_FALSE)
 
 
 def _write_router(folder: Path, name: str, source: str) -> Path:

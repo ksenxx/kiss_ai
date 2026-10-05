@@ -13,15 +13,23 @@ unattended run needs: no task classification (an unattended run must
 not stall on it).  It is not registered as a slash command.
 """
 
+from typing import Any
 
-def description() -> str:
-    """Return the help text of this script."""
-    return (
-        "Runs one scheduled execution of a cron prompt job; launched by the "
-        "cron agent, not meant to be invoked by hand."
-    )
+from kiss.agents.seas.base.base_sea import BaseSea
 
 
-def settings() -> dict:
-    """Return the run settings of a scheduled prompt job."""
-    return {"auto_classify": False}
+class CronPromptSea(BaseSea):
+    """The ``/cron_prompt`` SEA."""
+
+    def description(self) -> str:
+        """Return the help text of this script."""
+        return (
+            "Runs one scheduled execution of a cron prompt job; launched by the "
+            "cron agent, not meant to be invoked by hand."
+        )
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Return the run settings of a scheduled prompt job."""
+        return settings | {"auto_classify": False}
+
+

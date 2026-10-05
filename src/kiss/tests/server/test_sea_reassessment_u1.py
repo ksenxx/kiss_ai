@@ -297,8 +297,16 @@ def test_detached_channel_sub_task_holds_its_workspace_until_killed(
     release = threading.Event()
     sea = home.repo / "chan_sea.py"
     sea.write_text(
-        "def description():\n    return 'a channel'\n"
-        "def settings():\n    return {'kind': 'channel'}\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'a channel'
+
+    def settings(self, settings):
+        return settings | {'kind': 'channel'}
+""",
         encoding="utf-8",
     )
 
@@ -361,7 +369,13 @@ def test_wait_false_keeps_its_notice_and_the_daemon_wait_has_no_deadline(
     monkeypatch.setattr(daemon_client, "run", fake_run)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
     script = tmp_path / "helper.py"
-    script.write_text("def settings() -> dict:\n    return {'timeout': 45}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'timeout': 45}
+""")
     out = make_run_agent_tool(str(tmp_path))("say hi", str(script), wait="false")
     assert re.match(
         r"Started the helper agent task as job agent-[0-9a-f]{8}; its tab is open\. "
@@ -400,7 +414,11 @@ def test_timeout_bounds_the_whole_call_including_startup(
     daemon = _StopConfirmingDaemon(initial_running=False)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+        "class Sea(BaseSea):\n    def settings(self, settings):\n"
+        "        return settings | {'model': 'm'}\n"
+    )
     try:
         started = time.monotonic()
         out = make_run_agent_tool(str(tmp_path))("never starts", str(script), timeout="0.3")
@@ -424,7 +442,11 @@ def test_interrupting_wait_false_during_startup_cancels_the_job(
     daemon = _StopConfirmingDaemon(initial_running=False)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+        "class Sea(BaseSea):\n    def settings(self, settings):\n"
+        "        return settings | {'model': 'm'}\n"
+    )
     token = tool_interrupt.begin_tool_call("run_agent")
     caller = threading.get_ident()
     timer = threading.Timer(0.5, tool_interrupt.interrupt_tool_call, args=(caller, "run_agent"))
@@ -473,7 +495,11 @@ def test_a_stop_during_the_parent_end_join_still_ends_the_run_as_stopped(
     daemon = _StopConfirmingDaemon(confirm_delay=2.0)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+        "class Sea(BaseSea):\n    def settings(self, settings):\n"
+        "        return settings | {'model': 'm'}\n"
+    )
     agent = SorcarAgent("u1-parent")
     job = agent_dispatch.start_agent_job("helper", {
         "name": "helper", "prompt": "never finishes", "agent_path": str(script),
@@ -531,7 +557,11 @@ def test_interrupting_the_run_agent_call_kills_its_job(
     daemon = _StopConfirmingDaemon()
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+        "class Sea(BaseSea):\n    def settings(self, settings):\n"
+        "        return settings | {'model': 'm'}\n"
+    )
     token = tool_interrupt.begin_tool_call("run_agent")
     caller = threading.get_ident()
     timer = threading.Timer(0.5, tool_interrupt.interrupt_tool_call, args=(caller, "run_agent"))

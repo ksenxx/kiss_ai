@@ -65,6 +65,13 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             self.runs.append(cmd)
             self.started.set()
             self.release.wait(timeout=10)
+            # A real agent consumes the queued follow-ups during the run
+            # (``JsonPrinter.drain_pending_user_messages``); prompts still
+            # queued when the run ends are re-submitted by ``_run_task``
+            # as a hidden next run, which would race the follow-up ``run``
+            # the test sends after this one finishes.
+            with agent_state.STATE_LOCK:
+                state.pending_user_messages.clear()
 
         self.server._run_task_inner = fake_inner  # type: ignore[assignment]
 

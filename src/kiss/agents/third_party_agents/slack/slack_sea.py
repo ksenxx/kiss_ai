@@ -41,6 +41,7 @@ import requests
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
@@ -68,15 +69,44 @@ from kiss.core.config import kiss_home
 logger = logging.getLogger(__name__)
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/slack help``."""
-    return (
-        "Messages, channels, users, reactions and search in a Slack workspace the user "
-        "authorizes once in the browser (OAuth user token, refreshed automatically); use it "
-        "with `run_agent(agent=\"slack\", task=...)` or the `kiss-slack -t \"<task>\"` CLI "
-        "(`kiss-slack --channel <channel>` polls a channel and answers new messages, "
-        "`--workspace <name>` selects among several signed-in workspaces)."
-    )
+class SlackSea(BaseSea):
+    """The ``/slack`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/slack help``."""
+        return (
+            "Messages, channels, users, reactions and search in a Slack workspace the user "
+            "authorizes once in the browser (OAuth user token, refreshed automatically); use it "
+            "with `run_agent(agent=\"slack\", task=...)` or the `kiss-slack -t \"<task>\"` CLI "
+            "(`kiss-slack --channel <channel>` polls a channel and answers new messages, "
+            "`--workspace <name>` selects among several signed-in workspaces)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Slack channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the token
+        persisted under ``$KISS_HOME`` and returns its authentication and
+        backend tools.  The workspace comes from the
+        ``KISS_CHANNEL_WORKSPACE`` environment variable (set by the
+        launcher while the task runs), defaulting to ``"default"``.
+        """
+        workspace = os.environ.get("KISS_CHANNEL_WORKSPACE", "default") or "default"
+        return tools + SlackAgent(workspace=workspace)._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + SlackAgent.channel_system_prompt
 
 
 def _call_with_retry(fn: Any, what: str) -> Any:
@@ -1501,35 +1531,6 @@ def main() -> None:
         make_backend=_make_backend,
         extra_usage="[--list-workspaces] [--delete-workspace WS]",
     )
-
-
-def add_to_tools() -> list:
-    """Return the Slack channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the token
-    persisted under ``$KISS_HOME`` and returns its authentication and
-    backend tools.  The workspace comes from the
-    ``KISS_CHANNEL_WORKSPACE`` environment variable (set by the
-    launcher while the task runs), defaulting to ``"default"``.
-    """
-    workspace = os.environ.get("KISS_CHANNEL_WORKSPACE", "default") or "default"
-    return SlackAgent(workspace=workspace)._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return SlackAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

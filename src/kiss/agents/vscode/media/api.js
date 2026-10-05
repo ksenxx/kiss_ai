@@ -83,6 +83,10 @@
     'browserNavigate',
     'browserInput',
     'browserViewport',
+    'terminalOpen',
+    'terminalInput',
+    'terminalResize',
+    'terminalClose',
   ];
 
   function createSorcarApi(post) {

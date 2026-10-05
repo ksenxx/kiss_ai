@@ -32,8 +32,9 @@ from pathlib import Path, PurePath
 from kiss.agents.sorcar.agent_dispatch import OPTION_DOCS, OPTION_TYPES
 from kiss.agents.sorcar.sea_commands import (
     bundled_commands,
+    load_sea,
+    own_settings,
     sea_description,
-    sea_getter_value,
     sea_settings,
 )
 from kiss.agents.sorcar.sea_settings import (
@@ -90,7 +91,7 @@ def precedence_example() -> str:
     """
     name = "sh"
     path = bundled_commands()[name]
-    declared = sea_getter_value(path, "settings")
+    declared = own_settings(load_sea(path))
     refused = locked_conflicts(sea_settings(path), {"tool_profile": "review"})
     if not refused:
         raise ValueError(f"/{name} no longer locks tool_profile; the precedence example needs one")
@@ -160,7 +161,7 @@ def commands_table() -> str:
     rows = ["| Command | Script | Description |", "|---|---|---|"]
     for name, script in sorted(bundled_commands().items()):
         try:
-            text = sea_description(script) or ""
+            text = sea_description(load_sea(script)) or ""
         except Exception as exc:  # a broken bundled script is a lint finding, not a docs crash
             text = f"(broken: {exc})"
         first = re.split(r"(?<=[.!?])\s", text.strip().split("\n")[0], maxsplit=1)[0].replace(

@@ -19,6 +19,7 @@ import json
 import time
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -31,14 +32,36 @@ _NOSTR_DIR = kiss_home() / "third_party_agents" / "nostr"
 _config = ChannelConfig(_NOSTR_DIR, ("private_key",))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/nostr help``."""
-    return (
-        "Publishes notes and replies, sends encrypted DMs, reads and sets profiles and "
-        "manages relays on the Nostr decentralized protocol via pynostr; use it as "
-        '`run_agent(agent="nostr", task="Post a note saying hello")` or through the '
-        "`kiss-nostr` CLI."
-    )
+class NostrSea(BaseSea):
+    """The ``/nostr`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/nostr help``."""
+        return (
+            "Publishes notes and replies, sends encrypted DMs, reads and sets profiles and "
+            "manages relays on the Nostr decentralized protocol via pynostr; use it as "
+            '`run_agent(agent="nostr", task="Post a note saying hello")` or through the '
+            "`kiss-nostr` CLI."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Nostr channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + NostrAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
 
 
 class NostrChannelBackend(ToolMethodBackend):
@@ -374,27 +397,6 @@ class NostrAgent(BaseChannelAgent):
 def main() -> None:
     """Run the NostrAgent from the command line with chat persistence."""
     channel_main(NostrAgent, "kiss-nostr")
-
-
-def add_to_tools() -> list:
-    """Return the Nostr channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return NostrAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

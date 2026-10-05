@@ -514,43 +514,51 @@ def run(
             keeps working.  Empty (default) runs with the default
             system prompt as usual.
         extension_agent_path: Optional path — a string — to a Python
-            *agent script*, also called a Sorcar Extension Agent (SEA),
-            that configures this run **on the daemon**.  When
-            non-empty, the daemon imports the file and applies its
-            ``settings()`` and getters
-            (:mod:`kiss.agents.sorcar.sea_settings`,
+            file defining a Sorcar Extension Agent (SEA) that
+            configures this run **on the daemon**.  When non-empty, the
+            daemon loads the file's one subclass of
+            :class:`kiss.agents.seas.base.base_sea.BaseSea` and applies
+            its methods (:mod:`kiss.agents.sorcar.sea_commands`,
             :func:`kiss.agents.sorcar.agent_file.apply_agent_overrides`) on top
-            of the values passed to this call: a setting the script
+            of the values passed to this call: a setting the SEA
             declares replaces the parameter of the same name; one it
             does not declare keeps the value passed here.
 
-            Script format — a plain Python file defining any subset of
-            these top-level functions::
+            File format — one class deriving from ``BaseSea`` that
+            overrides any of its methods (every one has an identity
+            default)::
 
-                def description() -> str: ...        # /xxx help text
-                def settings() -> dict: ...           # kind + run() keywords
-                def prompt(task: str) -> str: ...     # replaces the task text
-                def system_prompt() -> str: ...       # replaces the base prompt
-                def add_to_system_prompt() -> str: ... # appended to the system prompt
-                def add_to_tools() -> list: ...       # extra tool callables
-                def llm_call_hook() -> Callable | None: ...
-                def tool_call_hook() -> Callable | None: ...
-                def register_as_model() -> bool: ...  # model-picker entry
-                def on_picked_as_model(work_dir: str) -> str: ...
+                from kiss.agents.seas.base.base_sea import BaseSea
 
-            ``settings()`` returns a dict of a ``kind`` and any of the
-            keyword parameters of this function except the transport,
-            identity and prompt ones (``prompt`` and ``system_prompt``
-            are the functions above, not settings): ``work_dir``,
+                class MySea(BaseSea):
+                    def description(self) -> str: ...            # /xxx help text
+                    def settings(self, settings: dict) -> dict:  # settings | {kind, run() keywords}
+                        ...
+                    def prompt(self, task: str) -> str: ...      # the task text -> the prompt
+                    def system_prompt(self, system_prompt: str) -> str:  # assembled -> the run's
+                        ...
+                    def tools(self, tools: list) -> list: ...    # toolset -> the run's toolset
+                    def llm_call_hook(self, new_messages: list) -> list: ...
+                    def tool_call_hook(self, name: str, args: dict) -> str: ...
+                    def register_as_model(self) -> bool: ...     # model-picker entry
+                    def on_picked_as_model(self, work_dir: str) -> str: ...
+
+            A SEA extends another by deriving from its class (the
+            launcher runs every class of the chain, base first; do not
+            call ``super()``).  ``settings`` returns its argument with
+            a ``kind`` and any of the keyword parameters of this
+            function except the transport, identity and prompt ones
+            (``prompt`` and ``system_prompt`` are the methods above,
+            not settings) laid over it: ``work_dir``,
             ``model``, ``chat_id``, ``use_worktree``, ``auto_commit``,
             ``max_budget`` (finite), ``model_config``,
             ``use_web_tools``, ``auto_classify`` (this function's
             ``classify_tasks``), ``use_memory``, ``allow_fan_out``
             (``is_parallel``), ``tool_profile``, ``docker_image``; plus
-            three dispatcher keys: ``extends`` (a base SEA), ``timeout``
-            (seconds a ``run_agent`` call waits for this script's
-            sub-task) and ``locked`` (keys an explicit caller argument
-            may not change).  ``prompt(task)`` receives the task text
+            two dispatcher keys: ``timeout`` (seconds a ``run_agent``
+            call waits for this SEA's sub-task) and ``locked`` (keys an
+            explicit caller argument may not change).  ``prompt(task)``
+            receives the task text
             and returns the prompt body; ``{task_id}`` in its result is
             replaced by *parent_task_id*.  A ``None`` value means "no
             override".  A kind is pure defaults under the explicit
@@ -562,22 +570,23 @@ def run(
             and a workspace held for the run, and a ``run_agent``
             sub-task of it inherits nothing from the caller).
 
-            ``add_to_system_prompt()`` returns text ADDED to the run's
-            system prompt after *append_to_system_prompt*, never
-            replacing it.  ``add_to_tools()`` returns a list of tool
-            callables (never a file path) added to the built-in
-            toolset; with ``"tool_profile": "none"`` they and
-            ``finish`` are the run's whole tool set (the built-in
-            toolset is not built, so the default ``SYSTEM.md`` prompt,
-            whose workflow rules name ``Read``, ``Edit``, ``Bash`` and
-            the browser tools, should usually be replaced by a
-            ``system_prompt()`` written for the tools the run has).
-            Each tool's name, docstring (Google-style ``Args:``
-            section) and annotated keyword-bindable parameters define
-            the tool schema the agent sees, exactly like a native tool.
+            ``system_prompt(system_prompt)`` receives the run's
+            assembled system prompt (the base prompt plus
+            *append_to_system_prompt*) and returns the run's: the same
+            text with additions, or a replacement.  ``tools(tools)``
+            receives the built-in toolset and returns the run's: a list
+            of tool callables (never a file path); with
+            ``"tool_profile": "none"`` it starts empty, so what it
+            returns and ``finish`` are the run's whole tool set (the
+            default ``SYSTEM.md`` prompt, whose workflow rules name
+            ``Read``, ``Edit``, ``Bash`` and the browser tools, should
+            then usually be replaced by a ``system_prompt`` written for
+            the tools the run has).  Each tool's name, docstring
+            (Google-style ``Args:`` section) and annotated
+            keyword-bindable parameters define the tool schema the
+            agent sees, exactly like a native tool.
 
-            The hook getters each return a callable (or ``None`` for
-            "no hook") that the daemon passes to the underlying
+            The two hook methods are passed to the underlying
             :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
             task-executor sub-session of the task's agent (internal
             helper sessions, e.g. the failed-session trajectory
@@ -596,7 +605,7 @@ def run(
             bundled ``autorouter`` and ``bestrouter``); picking it runs
             every task of the tab through the SEA on the model its
             ``settings()["model"]`` names (else the default model),
-            with its ``add_to_system_prompt()`` protocol added to the
+            with the protocol its ``system_prompt`` method adds to the
             system prompt.
 
             Everything the script defines runs **in the daemon
@@ -695,8 +704,8 @@ def run(
             tools (``"shell+edit+memory"``); ``bash`` is the
             single-command runner of the bundled ``/sh`` agent:
             ``Bash`` and ``finish`` only; ``none`` keeps no built-in
-            tool at all (``finish`` plus the agent script's
-            ``add_to_tools()``, the bundled ``/ask`` agent).  Empty
+            tool at all (``finish`` plus what the SEA's ``tools()``
+            returns, the bundled ``/ask`` agent).  Empty
             (the default) keeps the daemon's usual choice (the full
             toolset).
             An unknown name stops the task with a diagnostic error.
@@ -712,13 +721,13 @@ def run(
             tools on the host.
         inherit_tools: Whether the task also gets the extra tools of
             the task *parent_task_id* names — the tool callables that
-            parent's agent script added through ``add_to_tools()``
-            (and those the parent inherited itself), resolved on the
-            daemon from the running parent (a callable cannot travel
-            the wire).  They are added to the task's built-in toolset
-            after the task's own script's ``add_to_tools()`` tools,
-            skipping names the task already has; a script on the
-            ``none`` tool profile keeps exactly its own set.
+            parent's SEA added through ``tools()`` (and those the
+            parent inherited itself), resolved on the daemon from the
+            running parent (a callable cannot travel the wire).  They
+            are added to the task's built-in toolset before the task's
+            own SEA's ``tools()`` sees it, skipping names the task
+            already has; a SEA on the ``none`` tool profile keeps
+            exactly its own set.
             ``run_agent`` sets this for the
             sub-tasks it dispatches in path mode, so a sub-task that
             inherits the caller's system prompt also has the tools
