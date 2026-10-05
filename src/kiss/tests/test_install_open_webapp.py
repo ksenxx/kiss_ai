@@ -11,9 +11,10 @@ daemon (started by the extension inside VS Code), runs
 cloudflared URL when the machine is remote (an SSH session, or Linux
 without a display).
 
-The block is extracted verbatim and run under ``bash -euo pipefail``
-against a temp ``HOME`` / ``KISS_HOME`` with stub ``kiss-web``,
-``xdg-open`` and ``open`` executables that log their arguments.
+The block (together with the ``kiss-browser-helpers`` block it relies
+on) is extracted verbatim and run under ``bash -euo pipefail`` against a
+temp ``HOME`` / ``KISS_HOME`` with stub ``kiss-web``, ``xdg-open`` and
+``open`` executables that log their arguments.
 """
 
 from __future__ import annotations
@@ -34,15 +35,18 @@ _LOOPBACK = "https://127.0.0.1:8787"
 _TUNNEL = "https://example-tunnel.trycloudflare.com"
 
 
-def _block(text: str, name: str) -> str:
-    return text[text.index(f"# BEGIN: {name}"):text.index(f"# END: {name}")]
+def install_sh_block(name: str) -> str:
+    """Return the ``# BEGIN: <name>`` ... ``# END: <name>`` block of install.sh."""
+    text = (_REPO / "install.sh").read_text(encoding="utf-8")
+    start = text.index(f"# BEGIN: {name}")
+    end = text.index(f"# END: {name}")
+    return text[start:end]
 
 
 def _open_webapp_block() -> str:
     # The block uses machine_is_remote / open_in_browser from the shared
     # helpers block that precedes it in install.sh.
-    text = (_REPO / "install.sh").read_text(encoding="utf-8")
-    return _block(text, "kiss-browser-helpers") + "\n" + _block(text, "kiss-open-webapp")
+    return install_sh_block("kiss-browser-helpers") + "\n" + install_sh_block("kiss-open-webapp")
 
 
 def _write_stub(path: Path, log: Path, exit_code: int = 0) -> None:

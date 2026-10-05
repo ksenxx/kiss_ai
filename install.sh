@@ -1427,8 +1427,10 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     # this script) is a VS Code Server: it loads its extensions from
     # ~/.vscode-server/extensions, not from the desktop's directory, so
     # install the VSIX there as well.  This happens before the post-install
-    # hooks below so a brand hook patches this copy too.  Not fatal: the
-    # desktop install above is the one the rest of the setup depends on.
+    # hooks below so a brand hook patches this copy too (and before
+    # guard_vsix_tracking may put the release archive back in place of the
+    # fresh build).  Not fatal: the desktop install above is the one the
+    # rest of the setup depends on.
     if [ -z "${KISS_SKIP_LAUNCH:-}" ]; then
         if "$CODE_CLI" --install-extension "$VSIX" --extensions-dir "$HOME/.vscode-server/extensions" --force 2>&1 9>&-; then
             echo "   Extension installed into VS Code Server ($HOME/.vscode-server/extensions)"
