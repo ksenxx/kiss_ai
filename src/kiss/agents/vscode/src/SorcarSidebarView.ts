@@ -395,6 +395,14 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   browserNavigate: ['tab_id', 'action', 'url'],
   browserInput: ['tab_id', 'event'],
   browserViewport: ['tab_id', 'width', 'height', 'visible'],
+  // A shell on the daemon machine streamed as a tab (terminalTab.js):
+  // the remote webapp opens one from its ... menu; this webview only
+  // mirrors the tab, so it forwards attach/input/resize/close for it.
+  terminalOpen: ['workDir'],
+  terminalAttach: ['tab_id', 'cols', 'rows'],
+  terminalInput: ['tab_id', 'data', 'binary'],
+  terminalResize: ['tab_id', 'cols', 'rows'],
+  terminalClose: ['tab_id'],
 };
 
 /**

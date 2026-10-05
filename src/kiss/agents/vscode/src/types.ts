@@ -387,6 +387,12 @@ export type FromWebviewMessage =
       height: number;
       visible: boolean;
     }
+  // A shell on the daemon machine streamed as a tab (terminalTab.js).
+  | {type: 'terminalOpen'; workDir?: string}
+  | {type: 'terminalAttach'; tab_id: string; cols: number; rows: number}
+  | {type: 'terminalInput'; tab_id: string; data: string; binary?: boolean}
+  | {type: 'terminalResize'; tab_id: string; cols: number; rows: number}
+  | {type: 'terminalClose'; tab_id: string}
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
   // In-page (browser-mic) capture fallback: the webview recorded the

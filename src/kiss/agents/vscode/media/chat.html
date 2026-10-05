@@ -6,6 +6,7 @@
   {{CSP_META}}
   {{HEAD_SCRIPT}}
   <link href="{{STYLE_HREF}}" rel="stylesheet">
+  <link href="{{XTERM_CSS_HREF}}" rel="stylesheet">
   <link id="hljs-theme" href="{{HLJS_CSS_HREF}}" rel="stylesheet">
   <link href="{{BRAND_STYLE_HREF}}" rel="stylesheet">
   <title>{{PAGE_TITLE}}</title>
@@ -105,6 +106,10 @@
                 <button id="browser-btn" class="more-menu-item" role="menuitem" data-tooltip="Open the browser of the machine running KISS Sorcar as a tab" aria-label="Open browser">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
                   <span class="more-item-label">Browser</span>
+                </button>
+                <button id="terminal-btn" class="more-menu-item" role="menuitem" data-tooltip="Open a terminal on the machine running KISS Sorcar as a tab" aria-label="Open terminal">
+                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
+                  <span class="more-item-label">Terminal</span>
                 </button>
                 <button id="theme-btn" class="more-menu-item" role="menuitem">
                   <span class="more-item-icon"></span>
@@ -639,6 +644,9 @@
   <script {{NONCE_ATTR}} src="{{CTX_MENU_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{TREE_MENU_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{BROWSER_TAB_SRC}}"></script>
+  <script {{NONCE_ATTR}} src="{{XTERM_SRC}}"></script>
+  <script {{NONCE_ATTR}} src="{{XTERM_FIT_SRC}}"></script>
+  <script {{NONCE_ATTR}} src="{{TERMINAL_TAB_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{PDF_VIEW_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{MAIN_SRC}}"></script>
   <script {{NONCE_ATTR}}>window.__VOICE__ = {{VOICE_CONFIG}};</script>

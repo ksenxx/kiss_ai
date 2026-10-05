@@ -38,6 +38,8 @@
 //   in : {op:'browser', name, tabId}           -> out {op:'browser', name, info}
 //   in : {op:'browserKeys', name, keys}        -> out {op:'browserKeys', name, found}
 //   in : {op:'browserClick', name, x, y}       -> out {op:'browserClick', name, found}
+//   in : {op:'terminal', name, tabId}          -> out {op:'terminal', name, info}
+//   in : {op:'terminalType', name, tabId, text}-> out {op:'terminalType', name, found}
 //   in : {op:'disconnect', name}               -> out {op:'disconnected', name}
 //   in : {op:'reconnect', name}                -> out {op:'reconnected', name}
 //   in : {op:'quit'}
@@ -96,6 +98,10 @@ const DETAILED_EVENTS = new Set([
   'browserState',
   'closeBrowserTab',
   'browserError',
+  'openTerminalTab',
+  'terminalTabs',
+  'closeTerminalTab',
+  'terminalError',
   'error',
 ]);
 
@@ -116,7 +122,12 @@ function makeWebview(bodyAttrs, initialState, onPost, errors) {
 
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('jsdomError', e => {
-    errors.push(String((e && e.stack) || e));
+    const text = String((e && e.stack) || e);
+    // xterm.js probes a <canvas> once while loading; jsdom has no
+    // canvas (and reports that as an error) but xterm's DOM renderer
+    // does not need one, so this is the environment, not the webview.
+    if (text.includes("HTMLCanvasElement's getContext() method")) return;
+    errors.push(text);
   });
   const dom = new JSDOM(html, {
     runScripts: 'dangerously',
@@ -153,16 +164,74 @@ function makeWebview(bodyAttrs, initialState, onPost, errors) {
       },
     };
   };
+  // xterm.js reads the device pixel ratio through matchMedia, which
+  // jsdom does not implement.
+  win.matchMedia = () => ({
+    matches: false,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+  });
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'browserTab.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'xterm.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'xterm-addon-fit.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'terminalTab.js'), 'utf8'));
+  // Keep every terminal view main.js creates so `terminal` /
+  // `terminalType` can read its xterm buffer and type into it.
+  const terminals = new Map();
+  const createTerminal = win.TerminalTabView.create;
+  win.TerminalTabView.create = (tabId, opts) => {
+    const view = createTerminal(tabId, opts);
+    terminals.set(tabId, view);
+    return view;
+  };
   // The sourceURL names the script in V8 coverage output
   // (NODE_V8_COVERAGE) so a driver can measure main.js branches.
   win.eval(
     fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=multiSurfaceBridge-main.js',
   );
-  return {win, getState: () => state};
+  return {win, terminals, getState: () => state};
+}
+
+// What the user sees of terminal tab *tabId* on *surface*: its tab
+// strip entry and the text in its xterm screen buffer.
+function describeTerminal(surface, tabId) {
+  const {win, terminals} = surface.view;
+  const strip = win.document.querySelector(
+    `#tab-list [data-tab-id="${tabId}"]`,
+  );
+  const holder = win.document.querySelector(
+    `#content-tab-area .terminal-tab-view[data-tab-id="${tabId}"]`,
+  );
+  const view = terminals.get(tabId);
+  const lines = [];
+  if (view) {
+    const buf = view.term.buffer.active;
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (line) lines.push(line.translateToString(true));
+    }
+  }
+  return {
+    inTabBar: !!strip,
+    isTerminalTab: !!(
+      strip &&
+      strip.querySelector('.content-tab-icon') &&
+      strip.querySelector('.content-tab-icon').textContent === '>_'
+    ),
+    title: strip
+      ? (strip.querySelector('.chat-tab-label') || {}).textContent || ''
+      : '',
+    visible: !!(holder && holder.style.display !== 'none'),
+    hasXterm: !!(holder && holder.querySelector('.xterm')),
+    cols: view ? view.term.cols : 0,
+    rows: view ? view.term.rows : 0,
+    text: lines.join('\n').replace(/\n+$/, ''),
+  };
 }
 
 // One daemon connection for `surface`: the webview's posts go out as
@@ -502,6 +571,21 @@ function handle(cmd) {
         );
       }
       out({op: 'browserClick', name: cmd.name, found: !!screen});
+      break;
+    }
+    case 'terminal':
+      out({
+        op: 'terminal',
+        name: cmd.name,
+        info: describeTerminal(surface, cmd.tabId),
+      });
+      break;
+    case 'terminalType': {
+      // Type into the terminal: xterm's input() is the path its own
+      // keyboard handler takes, so the text goes out as terminalInput.
+      const view = surface.view.terminals.get(cmd.tabId);
+      if (view) view.term.input(cmd.text);
+      out({op: 'terminalType', name: cmd.name, found: !!view});
       break;
     }
     default:
