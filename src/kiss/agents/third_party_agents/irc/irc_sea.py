@@ -5,7 +5,7 @@
 """IRC Agent — channel agent with IRC tools.
 
 Connects to IRC servers via the irc library. Stores config in
-``~/.kiss/third_party_agents/irc/config.json``.
+``$KISS_HOME/third_party_agents/irc/config.json``.
 
 Usage::
 
@@ -543,7 +543,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return IRCAgent()._get_tools()

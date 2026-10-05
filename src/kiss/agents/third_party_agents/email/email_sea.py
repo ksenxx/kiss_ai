@@ -9,7 +9,7 @@ IMAP4_SSL and replies are sent over SMTP (implicit SSL or STARTTLS),
 Hermes-style.  Automated mail (no-reply senders, ``Auto-Submitted``,
 ``Precedence: bulk/junk/list``, mailing lists) is dropped from the
 channel loop so the agent only answers real people.  Stores config in
-``~/.kiss/third_party_agents/email/config.json``; the password is
+``$KISS_HOME/third_party_agents/email/config.json``; the password is
 typically an app password.
 
 Usage::
@@ -688,7 +688,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return EmailAgent()._get_tools()

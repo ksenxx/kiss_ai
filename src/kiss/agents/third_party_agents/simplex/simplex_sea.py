@@ -9,7 +9,7 @@ port (e.g. ``simplex-chat -p 5225``, giving ``ws://127.0.0.1:5225``).
 The client sends JSON frames ``{"corrId": "<n>", "cmd": "<command>"}``;
 the CLI replies with frames carrying the matching ``corrId`` and pushes
 unsolicited events (``newChatItems`` for inbound messages).  Stores config
-in ``~/.kiss/third_party_agents/simplex/config.json``.
+in ``$KISS_HOME/third_party_agents/simplex/config.json``.
 
 Usage::
 
@@ -509,7 +509,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return SimpleXAgent()._get_tools()

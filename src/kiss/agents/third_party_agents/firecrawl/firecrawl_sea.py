@@ -7,7 +7,7 @@
 Provides web scraping, site mapping, web search, and crawl management
 through the Firecrawl cloud API (https://api.firecrawl.dev) using an
 API key (sent as ``Authorization: Bearer`` on every call).  Stores
-config in ``~/.kiss/third_party_agents/firecrawl/config.json``; the
+config in ``$KISS_HOME/third_party_agents/firecrawl/config.json``; the
 optional ``base_url`` config key points the agent at a self-hosted
 Firecrawl instance instead of the cloud API.
 
@@ -677,7 +677,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return FirecrawlAgent()._get_tools()

@@ -370,8 +370,9 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
    payments, publishing). Do not restrict yourself to cheap runs: any run whose original
    cost was below $500 is eligible, and a cheaper run is preferred only when it carries the
    same signal. Cap every replay at twice the original run's cost, at most 500, so a
-   regression cannot run away (a SEA that defines its own `max_budget()` getter overrides
-   that cap and limits the replay itself; check with `grep -n "def max_budget" <sea file>`).
+   regression cannot run away (your cap wins over the SEA's own `max_budget` setting; only
+   a SEA that lists `max_budget` in `settings()["locked"]` refuses a different cap, so pass
+   its own value then).
    Two ways to replay:
    - A task that modifies files (a paper, code, a report, a past rsi7d sweep) is replayed
      with `replay_in_clone(task_id, max_budget=<cap>)`. It clones the task's repository at

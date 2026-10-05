@@ -5,7 +5,7 @@
 """Signal Agent — channel agent with Signal CLI tools.
 
 Uses signal-cli subprocess to send/receive Signal messages. Stores
-configuration in ``~/.kiss/third_party_agents/signal/config.json``.
+configuration in ``$KISS_HOME/third_party_agents/signal/config.json``.
 
 Connecting works like linking Signal Desktop: ``authenticate_signal()``
 without a phone number runs ``signal-cli link`` and renders the linking
@@ -848,7 +848,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return SignalAgent()._get_tools()

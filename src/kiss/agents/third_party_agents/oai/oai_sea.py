@@ -7,7 +7,7 @@
 Embeds a small HTTP server that speaks the OpenAI chat API, so any
 OpenAI-style frontend (Open WebUI, LibreChat, an ``openai`` SDK script)
 becomes a chat surface for the kiss-web daemon.  Stores config in
-``~/.kiss/third_party_agents/openai_compat/config.json``.
+``$KISS_HOME/third_party_agents/openai_compat/config.json``.
 
 Endpoints:
 
@@ -712,7 +712,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return OpenAICompatAgent()._get_tools()

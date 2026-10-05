@@ -6,7 +6,7 @@
 
 Provides authenticated access to Zalo OA via access token. Covers both
 extensions/zalo/ (OA API) and extensions/zalouser/ (personal). Stores
-config in ``~/.kiss/third_party_agents/zalo/config.json``.
+config in ``$KISS_HOME/third_party_agents/zalo/config.json``.
 
 Usage::
 
@@ -649,7 +649,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return ZaloAgent()._get_tools()

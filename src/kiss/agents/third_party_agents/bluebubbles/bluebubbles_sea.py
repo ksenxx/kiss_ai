@@ -5,7 +5,7 @@
 """BlueBubbles Agent — channel agent with BlueBubbles REST API tools.
 
 Provides access to iMessage via the BlueBubbles server running on a local Mac.
-macOS only. Stores config in ``~/.kiss/third_party_agents/bluebubbles/config.json``.
+macOS only. Stores config in ``$KISS_HOME/third_party_agents/bluebubbles/config.json``.
 
 Usage::
 
@@ -673,7 +673,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return BlueBubblesAgent()._get_tools()

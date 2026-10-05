@@ -6,7 +6,7 @@
 
 Provides read (and optionally write) access to a PostgreSQL database
 identified by a ``postgresql://`` connection URI.  Stores config in
-``~/.kiss/third_party_agents/postgres/config.json``.
+``$KISS_HOME/third_party_agents/postgres/config.json``.
 
 Read-only enforcement is done at the root cause, entirely server-side —
 no SQL parsing is involved.  When the agent is in read-only mode (the
@@ -521,7 +521,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return PostgresAgent()._get_tools()

@@ -16,7 +16,7 @@ GitHub's device flow (RFC 8628) with the KISS-owned public OAuth app
 ``https://github.com/login/device`` plus a short code; the user signs
 in and clicks Authorize in their own browser and
 ``finish_github_auth()`` collects the token — nothing is pasted back.
-Stores config in ``~/.kiss/third_party_agents/github/config.json``
+Stores config in ``$KISS_HOME/third_party_agents/github/config.json``
 (keys: ``token`` — only when Muse auth is off, otherwise the token
 lives in the Muse vault — and optional ``read_only``: ``"true"``
 blocks every mutating tool).
@@ -1393,7 +1393,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return GitHubAgent()._get_tools()

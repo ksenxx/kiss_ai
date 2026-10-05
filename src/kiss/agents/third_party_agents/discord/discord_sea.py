@@ -29,11 +29,11 @@ Storage.  Exactly one Discord credential is active at a time:
   ``Authorization`` header (``Bot <token>``).  Either way this process
   holds only a surrogate bearer.  ``config.json`` keeps non-secret
   metadata only; ``auth_mode: user`` marks a user sign-in.
-* Legacy mode: ``~/.kiss/third_party_agents/discord/config.json`` holds
+* Legacy mode: ``$KISS_HOME/third_party_agents/discord/config.json`` holds
   ``bot_token``, or ``access_token`` plus ``auth_mode: user``.
 
 The webhook URL embeds its own secret token, so it is kept like a
-credential in ``~/.kiss/third_party_agents/discord/webhook/config.json``
+credential in ``$KISS_HOME/third_party_agents/discord/webhook/config.json``
 (mode 0600) together with its channel and server IDs, and is never
 printed.
 
@@ -1280,7 +1280,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return DiscordAgent()._get_tools()

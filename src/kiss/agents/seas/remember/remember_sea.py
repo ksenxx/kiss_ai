@@ -8,7 +8,7 @@ Typed into a tab as ``/remember <instruction>`` (for example
 ``/remember Always answer in British English``), the slash command
 dispatches this file as a Sorcar Extension Agent through ``run_agent``
 with the instruction as the task.  The agent appends the instruction as
-a bullet line to ``~/.kiss/AGENTS.md`` (``$KISS_HOME/AGENTS.md``), the
+a bullet line to ``$KISS_HOME/AGENTS.md`` (``$KISS_HOME/AGENTS.md``), the
 user-authored file that :meth:`RelentlessAgent.perform_task` appends
 to the system prompt of every task, so every later task follows it.
 ``/forget <instruction>`` (:mod:`kiss.agents.seas.forget.forget_sea`) removes
@@ -51,7 +51,7 @@ def description() -> str:
 
 
 def remember_instruction(instruction: str) -> str:
-    """Add a standing instruction to ~/.kiss/AGENTS.md so every future task follows it.
+    """Add a standing instruction to $KISS_HOME/AGENTS.md so every future task follows it.
 
     The instruction is stored as one bullet line (newlines collapsed to
     spaces).  Adding an instruction that is already stored (compared

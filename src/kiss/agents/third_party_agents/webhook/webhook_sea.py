@@ -8,7 +8,7 @@ Runs an embedded HTTP server that accepts ``POST /hook/<route-name>``
 requests from external systems (GitHub, CI, monitoring, ...), verifies
 an HMAC-SHA256 signature per route, and turns each accepted event into
 a normalized channel message rendered from the route's prompt template.
-Stores config in ``~/.kiss/third_party_agents/webhook/config.json``
+Stores config in ``$KISS_HOME/third_party_agents/webhook/config.json``
 (``port`` plus a JSON-encoded ``routes`` map).
 
 Two signature schemes are supported per route:
@@ -671,7 +671,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return WebhookAgent()._get_tools()

@@ -38,9 +38,13 @@ Rules, each a :class:`Finding` code:
     as the literal ``True``, so the command registry (which reads the
     source, never runs it) still lists the script.
 ``stale-docstring``
-    The module docstring mentions a getter the contract no longer has
-    (``model()``, ``tool_profile()``, ``is_parallel()``,
-    ``dispatch_timeout()``, ``append_to_system_prompt()``, ...).
+    A docstring of the script (module, class, function or constant)
+    mentions a getter the contract no longer has (``model()``,
+    ``tool_profile()``, ``is_parallel()``, ``dispatch_timeout()``,
+    ``append_to_system_prompt()``, ... as ``name()`` or
+    ``:func:`name```), or makes one of the ``stale-prose`` claims
+    below (a ``~/.kiss/`` path, settings that "win over" a call, a
+    timeout that "stops" the sub-task).
 ``home-literal``
     A ``~/.kiss`` path in a code string (not prose): the home directory
     is the brand's (``~/.s10s`` for Seamless Loop) and ``$KISS_HOME``
@@ -396,18 +400,25 @@ def _lint_source(path: Path, source: str, tree: ast.Module) -> list[Finding]:
                     fixable=True,
                 )
             )
-    doc = ast.get_docstring(tree) or ""
-    stale = sorted(
-        {name for name in REMOVED_GETTERS if re.search(rf"``{name}\(\)``|\b{name}\(\)", doc)}
-    )
-    if stale:
-        findings.append(
-            Finding(
-                path,
-                "stale-docstring",
-                "module docstring mentions removed getters: " + ", ".join(f"{n}()" for n in stale),
-            )
+    for lineno, doc in _docstrings(tree, source):
+        stale = sorted(
+            name for name in REMOVED_GETTERS
+            if re.search(rf"\b{name}\(\)|:func:`~?(?:[\w.]+\.)?{name}`", doc)
         )
+        if stale:
+            findings.append(
+                Finding(
+                    path,
+                    "stale-docstring",
+                    f"line {lineno}: docstring mentions removed getters: "
+                    + ", ".join(f"{n}()" for n in stale),
+                )
+            )
+        for pattern, message in STALE_PROSE:
+            match = pattern.search(doc)
+            if match:
+                line = lineno + doc.count("\n", 0, match.start())
+                findings.append(Finding(path, "stale-docstring", f"line {line}: {message}"))
     for node in _code_strings(tree):
         if isinstance(node.value, str) and "~/.kiss" in node.value:
             findings.append(
@@ -420,15 +431,40 @@ def _lint_source(path: Path, source: str, tree: ast.Module) -> list[Finding]:
     return findings
 
 
-def _code_strings(tree: ast.Module) -> list[ast.Constant]:
-    """Return the string constants of *tree* that are not docstrings (expression statements)."""
-    prose = {
-        id(stmt.value)
+def _prose_nodes(tree: ast.Module) -> list[ast.Constant]:
+    """Return the docstrings of *tree*: every string that is a bare expression statement.
+
+    That is the module, class and function docstrings plus the strings
+    documenting a module-level constant (the line after its assignment).
+    """
+    return [
+        stmt.value
         for node in ast.walk(tree)
         if isinstance(node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
         for stmt in node.body
         if isinstance(stmt, ast.Expr)
-    }
+        and isinstance(stmt.value, ast.Constant)
+        and isinstance(stmt.value.value, str)
+    ]
+
+
+def _docstrings(tree: ast.Module, source: str) -> list[tuple[int, str]]:
+    """Return ``(line, text)`` of every docstring of *tree* (see :func:`_prose_nodes`).
+
+    *text* is the docstring as written in *source*, quotes included, so
+    a newline in it is a physical line and ``line + text.count("\\n",
+    0, offset)`` is the source line of a match; an escaped newline in
+    the decoded value would make that count drift.
+    """
+    return [
+        (node.lineno, ast.get_source_segment(source, node) or str(node.value))
+        for node in _prose_nodes(tree)
+    ]
+
+
+def _code_strings(tree: ast.Module) -> list[ast.Constant]:
+    """Return the string constants of *tree* that are not docstrings (expression statements)."""
+    prose = {id(node) for node in _prose_nodes(tree)}
     return [
         node
         for node in ast.walk(tree)

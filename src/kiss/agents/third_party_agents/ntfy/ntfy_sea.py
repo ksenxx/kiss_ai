@@ -10,7 +10,7 @@ by polling ``{server}/{topic}/json?poll=1``.  Loop prevention uses an
 echo tag: every message the agent publishes is tagged (default
 ``kiss-sorcar``) and tagged messages are treated as bot messages.
 
-Stores config in ``~/.kiss/third_party_agents/ntfy/config.json`` with a
+Stores config in ``$KISS_HOME/third_party_agents/ntfy/config.json`` with a
 required ``topic`` and optional ``server`` (default ``https://ntfy.sh``),
 ``token`` (sent as ``Authorization: Bearer``) and ``echo_tag``.
 
@@ -648,7 +648,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return NtfyAgent()._get_tools()

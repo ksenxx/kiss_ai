@@ -12,7 +12,7 @@ and authorizes in their own browser and ``finish_twitch_auth()`` stores
 the token pair (the Muse daemon refreshes it, no client secret needed).
 An access token can still be supplied directly.  Uses requests for Helix
 API and twitchio for chat.  Stores config in
-``~/.kiss/third_party_agents/twitch/config.json``.
+``$KISS_HOME/third_party_agents/twitch/config.json``.
 
 Usage::
 
@@ -822,7 +822,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return TwitchAgent()._get_tools()

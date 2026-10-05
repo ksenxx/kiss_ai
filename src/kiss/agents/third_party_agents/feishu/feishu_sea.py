@@ -5,7 +5,7 @@
 """Feishu/Lark Agent — channel agent with Feishu Open Platform tools.
 
 Provides authenticated access to Feishu/Lark via app_id and app_secret.
-Stores config in ``~/.kiss/third_party_agents/feishu/config.json``.
+Stores config in ``$KISS_HOME/third_party_agents/feishu/config.json``.
 
 Usage::
 
@@ -504,7 +504,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return FeishuAgent()._get_tools()

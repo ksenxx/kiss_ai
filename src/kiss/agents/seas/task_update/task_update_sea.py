@@ -10,7 +10,7 @@ task-info panel's periodic task update is the ``/ask`` agent's answer,
 see :mod:`kiss.server.task_update`; :data:`PROMPT_TEMPLATE` still
 identifies the rows of the releases in which this agent produced it.)
 
-The agent reads the task's persisted transcript (``~/.kiss/history.db``)
+The agent reads the task's persisted transcript (``$KISS_HOME/history.db``)
 through the :func:`task_transcript` tool defined here (a thin wrapper
 over :func:`kiss.agents.sorcar.task_digest.transcript_page`) and
 answers :data:`PROMPT_TEMPLATE` with a short markdown progress report.

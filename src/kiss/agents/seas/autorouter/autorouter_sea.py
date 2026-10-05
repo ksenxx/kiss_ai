@@ -14,7 +14,7 @@ tier from the local catalog, dispatches the unit to that model through the
 built-in ``run_agent`` tool (or switches its own model with ``set_model`` at
 a phase boundary), verifies the result through the
 acceptance check, escalates one tier up on a verified failure, and logs every
-decision to the ledger ``~/.kiss/MODEL_DECISIONS.md`` (``$KISS_HOME`` when
+decision to the ledger ``$KISS_HOME/MODEL_DECISIONS.md`` (``$KISS_HOME`` when
 set), which is shared by every task so it accumulates the routing history of
 the installation; each row carries the task id of the run that wrote it.  The
 objective is cost per accepted task, not cost per token.
@@ -36,7 +36,7 @@ and the decision ledger — are the tools this module exposes through
 coding quality per dollar (researched 2026-09-24); prices and availability
 come from :mod:`kiss.core.models.model_info` at call time, so the menu is
 always the one this installation can run.  The prompt's "Observed model
-evidence" section is read from ``~/.kiss/AUTOROUTER.md`` (:func:`evidence_path`)
+evidence" section is read from ``$KISS_HOME/AUTOROUTER.md`` (:func:`evidence_path`)
 when this file loads: a dated table plus bullets on what this installation's
 own task history shows about each model's cost, speed and reliability, at
 most :data:`EVIDENCE_MAX_CHARS` characters of it (:func:`observed_evidence`
@@ -85,12 +85,12 @@ RSI7D_JOB_MODEL = "claude-fable-5-1"
 """Model of the job and of the rsi7d run when runnable, else :func:`orchestrator_model`."""
 
 RSI7D_JOB_BUDGET_USD = 25.0
-"""Budget (USD) passed to the nested rsi7d run.
+"""Budget (USD) the relay passes explicitly to the nested rsi7d run.
 
-rsi7d's own ``max_budget()`` getter replaces a passed budget
-(``apply_agent_overrides`` applies getters over the wire fields), so the
-binding cap is the dollar sentence of :data:`RSI7D_TASK`; this value sizes
-the job for a reader of the job list.
+An explicit ``run_agent`` argument wins over the SEA's ``settings()``
+(:data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`), so this value,
+not rsi7d's own ``max_budget`` setting, caps the run; the dollar sentence
+of :data:`RSI7D_TASK` tells the run how much of it to spend.
 """
 
 RSI7D_JOB_RELAY_BUDGET_USD = 5.0
@@ -187,7 +187,7 @@ DEFAULT_TOKENS_OUT = 20_000
 """Completion tokens such a sub-agent produces."""
 
 LEDGER_NAME = "MODEL_DECISIONS.md"
-"""File name of the routing ledger inside the KISS home directory (``~/.kiss``)."""
+"""File name of the routing ledger inside the KISS home directory (``$KISS_HOME``)."""
 
 LEDGER_HEADER = (
     "# Model routing decisions\n\n"
@@ -225,9 +225,11 @@ NO_EVIDENCE = (
 def evidence_path() -> Path:
     """Return the path of the observed model evidence: ``<KISS home>/AUTOROUTER.md``.
 
-    The KISS home is ``$KISS_HOME`` when set, else ``~/.kiss`` (the directory
-    of ``history.db`` and the ledger), so the evidence ``/rsi7d`` measures from
-    the task history lives next to that history and travels with it.
+    The KISS home is ``$KISS_HOME`` when set, else the brand's home directory
+    (``~/.kiss`` for KISS Sorcar, ``~/.s10s`` for Seamless Loop): the
+    directory of ``history.db`` and the ledger, so the evidence ``/rsi7d``
+    measures from the task history lives next to that history and travels
+    with it.
     """
     return kiss_home() / EVIDENCE_NAME
 
@@ -551,7 +553,8 @@ def observed_call_costs(days: int = 7, model: str = "") -> str:
 def ledger_path() -> Path:
     """Return the path of the shared routing ledger: ``<KISS home>/MODEL_DECISIONS.md``.
 
-    The KISS home is ``$KISS_HOME`` when set, else ``~/.kiss``, the same
+    The KISS home is ``$KISS_HOME`` when set, else the brand's home directory
+    (``~/.kiss`` for KISS Sorcar, ``~/.s10s`` for Seamless Loop): the same
     directory as ``history.db``, so the ledger outlives the task's work
     directory and worktree and every task appends to the same file.
     """
@@ -570,7 +573,7 @@ def _current_task_id() -> str:
 
 
 def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "pending") -> str:
-    """Append one routing decision to the shared ledger ``~/.kiss/MODEL_DECISIONS.md``.
+    """Append one routing decision to the shared ledger ``$KISS_HOME/MODEL_DECISIONS.md``.
 
     Call it when a unit is dispatched (outcome ``pending``) and again once its
     acceptance check has run, with the outcome.  Every row carries the id of
@@ -644,8 +647,9 @@ def register_as_model() -> bool:
     """List ``autorouter`` in the model picker.
 
     A picked ``autorouter`` makes the daemon run every task of the tab
-    through this SEA on :func:`orchestrator_model` (``model()`` below), with
-    :data:`SYSTEM_PROMPT` added to the system prompt (``add_to_system_prompt()``).
+    through this SEA on :func:`orchestrator_model` (the ``model`` of
+    :func:`settings`), with :data:`SYSTEM_PROMPT` added to the system prompt
+    (:func:`add_to_system_prompt`).
     """
     return True
 

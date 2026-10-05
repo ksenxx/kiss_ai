@@ -15,7 +15,7 @@ in and clicks Accept in their own browser and ``finish_msteams_auth()``
 stores the delegated token pair in the Muse vault, whose daemon
 refreshes it (no client secret exists).  Every Graph call acts as the
 signed-in user.  Stores non-secret metadata (``tenant_id``, optional
-``bot_id``) in ``~/.kiss/third_party_agents/msteams/config.json``.
+``bot_id``) in ``$KISS_HOME/third_party_agents/msteams/config.json``.
 
 Usage::
 
@@ -860,7 +860,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return MSTeamsAgent()._get_tools()

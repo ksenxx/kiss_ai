@@ -5,7 +5,7 @@
 """Tlon/Urbit Agent — channel agent with Tlon/Urbit Eyre HTTP tools.
 
 Provides access to Urbit/Tlon via the Eyre HTTP server. Stores config
-in ``~/.kiss/third_party_agents/tlon/config.json``.
+in ``$KISS_HOME/third_party_agents/tlon/config.json``.
 
 Usage::
 
@@ -349,7 +349,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return TlonAgent()._get_tools()

@@ -6,7 +6,7 @@
 
 Provides access to a WeChat Official Account via the customer-service
 message API and a plaintext callback server for inbound messages.
-Stores config in ``~/.kiss/third_party_agents/weixin/config.json``.
+Stores config in ``$KISS_HOME/third_party_agents/weixin/config.json``.
 
 Outbound messages use the cached ``cgi-bin/token`` access token and the
 ``cgi-bin/message/custom/send`` endpoint.  Inbound messages arrive on an
@@ -514,7 +514,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return WeixinAgent()._get_tools()

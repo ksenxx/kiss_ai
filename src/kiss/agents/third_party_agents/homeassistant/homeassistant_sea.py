@@ -7,7 +7,7 @@
 Provides access to a Home Assistant instance via its REST API using a
 long-lived access token (sent as ``Authorization: Bearer`` on every
 call).  Stores config in
-``~/.kiss/third_party_agents/homeassistant/config.json``.
+``$KISS_HOME/third_party_agents/homeassistant/config.json``.
 
 In Muse-auth mode (the default) the token lives in the Muse
 vault, enrolled together with the instance's host (Home Assistant is
@@ -622,7 +622,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return HomeAssistantAgent()._get_tools()

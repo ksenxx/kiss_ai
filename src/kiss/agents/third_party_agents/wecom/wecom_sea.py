@@ -9,7 +9,7 @@ adapter is **outbound-only**: WeCom inbound callbacks require the
 enterprise AES message envelope (encrypted XML with an app-level
 EncodingAESKey), which is out of scope here, so ``poll_messages``
 always returns no messages and poll mode is disabled.
-Stores config in ``~/.kiss/third_party_agents/wecom/config.json``.
+Stores config in ``$KISS_HOME/third_party_agents/wecom/config.json``.
 
 Usage::
 
@@ -238,7 +238,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return WeComAgent()._get_tools()

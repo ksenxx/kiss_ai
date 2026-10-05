@@ -12,7 +12,7 @@ client secret).  Slack only grants USER scopes to a localhost redirect,
 so the agent acts with a rotating user token (``xoxp-``, about 12
 hours) plus a refresh token.  In Muse-auth mode (the default) the pair
 lives in the Muse vault and the daemon refreshes it; in legacy mode it
-is stored in ``~/.kiss/third_party_agents/slack/<workspace>/token.json``
+is stored in ``$KISS_HOME/third_party_agents/slack/<workspace>/token.json``
 and refreshed in-process.  The agent exposes a focused set of Slack
 Web API tools for messaging, channels, users, reactions, and search.
 
@@ -195,7 +195,7 @@ def _token_path(workspace: str = "default") -> Path:
             Defaults to ``"default"``.
 
     Returns:
-        Path to ``~/.kiss/third_party_agents/slack/{workspace}/token.json``.
+        Path to ``$KISS_HOME/third_party_agents/slack/{workspace}/token.json``.
     """
     return _slack_dir() / workspace / "token.json"
 
@@ -203,8 +203,8 @@ def _token_path(workspace: str = "default") -> Path:
 def _migrate_legacy_token() -> None:
     """Migrate a legacy token file to the workspace-keyed path.
 
-    Moves ``~/.kiss/third_party_agents/slack/token.json`` to
-    ``~/.kiss/third_party_agents/slack/default/token.json`` if the legacy file
+    Moves ``$KISS_HOME/third_party_agents/slack/token.json`` to
+    ``$KISS_HOME/third_party_agents/slack/default/token.json`` if the legacy file
     exists and the new location does not.
     """
     legacy = _slack_dir() / "token.json"
@@ -1398,7 +1398,7 @@ def _workspace_vault_file(workspace: str) -> Path:
 def _delete_workspace(workspace: str) -> None:
     """Delete a workspace's token directory and Muse vault credential.
 
-    Removes the entire ``~/.kiss/third_party_agents/slack/{workspace}/``
+    Removes the entire ``$KISS_HOME/third_party_agents/slack/{workspace}/``
     directory (token file plus any other workspace-specific files) and,
     when the workspace is enrolled in the Muse vault, clears that
     credential too so deletion leaves nothing mintable behind.
@@ -1423,7 +1423,7 @@ def _delete_workspace(workspace: str) -> None:
 def _list_workspaces() -> None:
     """Display all authenticated Slack workspaces and their token status.
 
-    Scans ``~/.kiss/third_party_agents/slack/`` for workspace
+    Scans ``$KISS_HOME/third_party_agents/slack/`` for workspace
     subdirectories containing ``token.json`` files and includes
     workspaces whose credential lives only in the Muse vault.
     Vault-backed workspaces print a ``✓ vault`` status (the plaintext
@@ -1508,7 +1508,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the token
-    persisted under ``~/.kiss`` and returns its authentication and
+    persisted under ``$KISS_HOME`` and returns its authentication and
     backend tools.  The workspace comes from the
     ``KISS_CHANNEL_WORKSPACE`` environment variable (set by the
     launcher while the task runs), defaulting to ``"default"``.

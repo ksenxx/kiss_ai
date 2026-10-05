@@ -8,7 +8,7 @@ Typed into a tab as ``/forget <instruction>`` (for example
 ``/forget Always answer in British English``), the slash command
 dispatches this file as a Sorcar Extension Agent through ``run_agent``
 with the text as the task.  The agent deletes the matching bullet line
-from ``~/.kiss/AGENTS.md`` (``$KISS_HOME/AGENTS.md``), the file that
+from ``$KISS_HOME/AGENTS.md`` (``$KISS_HOME/AGENTS.md``), the file that
 :meth:`RelentlessAgent.perform_task` appends to every task's system
 prompt, so later tasks no longer follow the instruction.  When the text
 does not match a stored line exactly, the agent lists the stored
@@ -56,7 +56,7 @@ def description() -> str:
 
 
 def forget_instruction(instruction: str) -> str:
-    """Remove a standing instruction from ~/.kiss/AGENTS.md.
+    """Remove a standing instruction from $KISS_HOME/AGENTS.md.
 
     The instruction is matched against the stored bullet lines ignoring
     case, the bullet marker and the amount of whitespace; the text must

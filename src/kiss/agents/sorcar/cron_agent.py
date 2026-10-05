@@ -6,7 +6,7 @@
 
 Mirrors the Hermes agent's cron design in the simplest possible form:
 
-- Jobs live in a single JSON file (``~/.kiss/cron/jobs.json``) — no
+- Jobs live in a single JSON file (``$KISS_HOME/cron/jobs.json``) — no
   database.  Atomic writes and an ``flock`` guard make concurrent
   ticks and tool calls safe.
 - The natural-language part is done by the LLM: the :func:`cron_job`
@@ -18,15 +18,14 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   ``extension_agent_path`` contract), and a scheduling request is dispatched to
   it with the ``run_agent`` tool as ``run_agent(task, agent="cron")`` — the
   dispatched session gets the :func:`cron_job` tool from
-  :func:`tools` and runs in ``~/.kiss/cron/work`` without a
-  worktree (:func:`work_dir`, :func:`use_worktree`,
-  :func:`auto_commit`).
+  :func:`tools` and runs in ``$KISS_HOME/cron/work`` without a
+  worktree (the ``channel`` kind and ``work_dir`` of :func:`settings`).
 - The kiss-web daemon runs the scheduler automatically in a
   background thread (:func:`start_scheduler_thread`): every ~60
   seconds a tick finds due jobs, reschedules them *before* running
   (so the same occurrence never double-fires), and launches each one
   CONCURRENTLY in its own thread and its own scratch directory
-  (``~/.kiss/cron/runs/<job_id>-<random>``, removed when the run
+  (``$KISS_HOME/cron/runs/<job_id>-<random>``, removed when the run
   ends) so simultaneous jobs never share a working directory.  The
   scheduler thread does not wait for the jobs: a tick that overlaps
   runs from a previous tick is not skipped — it simply leaves the
@@ -59,7 +58,7 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   ``slack:eng``, ``ntfy``, ...).  This module works without those
   optional channel modules — an unknown channel just yields a
   delivery-error note.  Every run is also appended to a local log
-  under ``~/.kiss/cron/output/``.  A ``[SILENT]`` summary (or empty
+  under ``$KISS_HOME/cron/output/``.  A ``[SILENT]`` summary (or empty
   command output) suppresses delivery, exactly like Hermes.
 - ``command`` jobs (Hermes "no_agent" mode) run a shell command with
   no LLM involved; non-empty stdout is delivered verbatim.
@@ -480,7 +479,7 @@ def _deliver_to_channel(channel: str, chat: str, text: str) -> str:
 
     Imports ``kiss.agents.third_party_agents.<channel>.<channel>_sea``, builds
     its backend with the module's ``_make_backend()`` factory (which
-    loads the credentials persisted under ``~/.kiss``), and calls
+    loads the credentials persisted under ``$KISS_HOME``), and calls
     ``send_message``.
 
     Args:
@@ -527,7 +526,7 @@ def _deliver(job: dict[str, Any], text: str) -> list[str]:
     """Deliver a job result to all of the job's targets.
 
     The result is always appended to the job's local log
-    (``~/.kiss/cron/output/<job_id>.md``); ``local`` and ``none``
+    (``$KISS_HOME/cron/output/<job_id>.md``); ``local`` and ``none``
     targets add nothing further, and every other target is a
     ``<channel>[:<chat>]`` handled by :func:`_deliver_to_channel`.
 
@@ -1397,7 +1396,7 @@ def cron_job(
       time unless it carries an offset).
 
     Delivery (``deliver``): comma-separated targets.  ``local`` (default)
-    only appends to ``~/.kiss/cron/output/<job_id>.md``; any other
+    only appends to ``$KISS_HOME/cron/output/<job_id>.md``; any other
     target is ``<channel>[:<chat>]`` using an authenticated channel
     agent, e.g. ``telegram:123456``, ``slack:general``, ``ntfy``,
     ``discord:987``, ``email:user@example.com``.  A job whose result is
@@ -1816,7 +1815,7 @@ def cron_work_dir() -> str:
     """Return the work directory of cron-management sessions and scheduled runs.
 
     A ``run_agent(agent="cron", ...)`` session manages the job store
-    under ``~/.kiss/cron`` and never touches the calling project, so it
+    under ``$KISS_HOME/cron`` and never touches the calling project, so it
     runs in the cron state directory — the same directory
     :func:`_run_prompt_job` uses for scheduled runs.
 

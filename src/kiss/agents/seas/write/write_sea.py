@@ -138,7 +138,7 @@ sense stays when no plain word means the same thing ("leverage" in a piece on de
 """The writing protocol added to the system prompt of every run."""
 
 DISPATCH_TIMEOUT_SECONDS = 3600.0
-"""Wait of the ``/write`` relay before it stops the agent (see :func:`dispatch_timeout`)."""
+"""Seconds a ``run_agent`` call waits for a ``/write`` run (the ``timeout`` of :func:`settings`)."""
 
 
 def description() -> str:
@@ -161,7 +161,8 @@ def settings() -> dict[str, Any]:
 
     Rewriting a long document means reading every source in full,
     writing, editing, and running the tests that check the file; the
-    ``timeout`` tells the dispatcher how long to wait before stopping it.
+    ``timeout`` tells a ``run_agent`` call how long to block for the run
+    before returning its ``agent_job`` id and letting it finish detached.
     """
     return {"timeout": DISPATCH_TIMEOUT_SECONDS}
 

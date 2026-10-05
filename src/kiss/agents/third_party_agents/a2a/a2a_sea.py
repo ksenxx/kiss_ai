@@ -19,7 +19,7 @@ executed.  An anti-ping-pong turn cap rejects more than 20 inbound
 messages per ``contextId`` per hour, and every inbound request is
 appended to an ``a2a_audit.jsonl`` audit log in the config directory.
 
-Stores config in ``~/.kiss/third_party_agents/a2a/config.json``.
+Stores config in ``$KISS_HOME/third_party_agents/a2a/config.json``.
 
 Usage::
 
@@ -646,7 +646,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return A2AAgent()._get_tools()

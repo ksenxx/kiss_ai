@@ -7,7 +7,7 @@
 Provides access to a Notion workspace via the official REST API using
 an internal-integration token (sent as ``Authorization: Bearer`` with
 ``Notion-Version: 2022-06-28`` on every call).  Stores config in
-``~/.kiss/third_party_agents/notion/config.json``.
+``$KISS_HOME/third_party_agents/notion/config.json``.
 
 Notion's REST API has no inbound message stream, so this adapter is
 outbound-only and the ``--channel`` poll mode is disabled (``main``
@@ -907,7 +907,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return NotionAgent()._get_tools()

@@ -8,7 +8,7 @@ Sends messages through a DingTalk custom-robot incoming webhook
 (optionally signed with the robot's ``secret``) and receives messages
 through an embedded HTTP callback server for DingTalk outgoing robots
 (verified with the robot's ``outgoing_token`` HMAC signature).
-Stores config in ``~/.kiss/third_party_agents/dingtalk/config.json``.
+Stores config in ``$KISS_HOME/third_party_agents/dingtalk/config.json``.
 
 Usage::
 
@@ -452,7 +452,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return DingTalkAgent()._get_tools()

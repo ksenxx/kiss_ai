@@ -5,7 +5,7 @@
 """Telegram Agent — channel agent with Telegram Bot API tools.
 
 Provides authenticated access to Telegram via a bot token from @BotFather.
-Stores the token securely in ``~/.kiss/third_party_agents/telegram/config.json`` and
+Stores the token securely in ``$KISS_HOME/third_party_agents/telegram/config.json`` and
 exposes a focused set of Telegram Bot API tools.
 
 Usage::
@@ -1257,7 +1257,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return TelegramAgent()._get_tools()

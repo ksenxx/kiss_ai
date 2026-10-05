@@ -9,7 +9,7 @@ agent go over every tracked file and every commit of the repository and
 leave behind a memory that answers questions about the domain the
 repository addresses and about the repository itself.  The memory has
 two tiers, both in the repository's *domain memory* directory
-(``~/.kiss/memories/<repo-slug>/``), which every Sorcar run inside that
+(``$KISS_HOME/memories/<repo-slug>/``), which every Sorcar run inside that
 repository attaches through its ``memory_*`` tools (the slug is the
 checkout's directory name, so two unrelated repositories checked out
 under the same name share one memory and rebuild it in turn):

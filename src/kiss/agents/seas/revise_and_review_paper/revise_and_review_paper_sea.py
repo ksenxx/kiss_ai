@@ -85,7 +85,7 @@ REVIEWER_TIMEOUT_SECONDS = 3600
 """``run_agent`` timeout of a review round."""
 
 DISPATCH_TIMEOUT_SECONDS = 24 * 3600
-"""Wait of the slash-command relay for the whole loop (see :func:`dispatch_timeout`)."""
+"""Seconds a ``run_agent`` call waits for the whole loop (the ``timeout`` of :func:`settings`)."""
 
 SYSTEM_PROMPT = f"""\
 # Revise-and-review loop coordinator

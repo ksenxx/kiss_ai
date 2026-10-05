@@ -5,7 +5,7 @@
 """Nostr Agent — channel agent with Nostr protocol tools.
 
 Provides access to the Nostr decentralized protocol via pynostr.
-Stores config in ``~/.kiss/third_party_agents/nostr/config.json``.
+Stores config in ``$KISS_HOME/third_party_agents/nostr/config.json``.
 
 Usage::
 
@@ -381,7 +381,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return NostrAgent()._get_tools()

@@ -215,19 +215,42 @@ def test_stale_docstring_and_home_literal(tmp_path: Path) -> None:
         (
             '"""A script whose docstring describes the old getters ``tool_profile()`` '
             "and model().\n\n"
-            'Prose may mention ~/.kiss freely; only code strings are flagged.\n"""\n'
-            'HISTORY = "~/.kiss/history.db"\n\n'
+            'Prose may mention the bare name ~/.kiss; a ~/.kiss/ path is stale prose.\n"""\n'
+            'HISTORY = "~/.kiss/history.db"\n'
+            '"""A constant docstring (see :func:`dispatch_timeout`) is prose too."""\n\n'
             "def helper() -> str:\n"
-            '    """Docstrings inside functions are prose too: ~/.kiss."""\n'
+            '    """Waits for the run before stopping it; data under ~/.kiss."""\n'
             '    return "~/.kiss/logs"\n'
+            "def escaped() -> str:\n"
+            # An escaped newline is not a physical line: the match is on line 14 (the
+            # decoded value, one newline short, would put it on 13).
+            '    """\\\n'
+            "    Written with an escaped first newline (the `\\\\n` below is two characters).\n"
+            "    Logs under ~/.kiss/logs. Not a line break: \\\\n\n"
+            '    """\n'
+            '    return ""\n'
         )
         + DESCRIPTION,
     )
     findings = lint_all([path])
-    assert codes(findings) == ["stale-docstring", "home-literal", "home-literal"]
-    assert findings[0].message.endswith("removed getters: model(), tool_profile()")
-    assert findings[1].message.startswith("line 5:")
-    assert findings[2].message.startswith("line 9:")
+    assert codes(findings) == [
+        "stale-docstring",
+        "stale-docstring",
+        "stale-docstring",
+        "stale-docstring",
+        "stale-docstring",
+        "home-literal",
+        "home-literal",
+    ]
+    assert findings[0].message == (
+        "line 1: docstring mentions removed getters: model(), tool_profile()"
+    )
+    assert findings[1].message.startswith("line 3: a `~/.kiss/` home path")
+    assert findings[2].message == "line 6: docstring mentions removed getters: dispatch_timeout()"
+    assert findings[3].message.startswith("line 9: claims a run_agent timeout stops the sub-task")
+    assert findings[4].message.startswith("line 14: a `~/.kiss/` home path")
+    assert findings[5].message.startswith("line 5:")
+    assert findings[6].message.startswith("line 10:")
 
 
 def test_broken_scripts(tmp_path: Path) -> None:

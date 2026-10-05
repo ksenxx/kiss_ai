@@ -6,7 +6,7 @@
 
 Provides access to Google Chat as the user, through Composio (see
 :mod:`._composio_google`), or as a Chat bot with a service account
-stored at ``~/.kiss/third_party_agents/googlechat/service_account.json``.
+stored at ``$KISS_HOME/third_party_agents/googlechat/service_account.json``.
 Composio has no managed Google Chat app, so user sign-in needs a custom
 Composio auth config whose ID is set in
 ``KISS_COMPOSIO_AUTH_CONFIG_GOOGLECHAT``.
@@ -61,7 +61,7 @@ def _gchat_dir() -> Path:
 
     Returns:
         Path to ``$KISS_HOME/third_party_agents/googlechat`` (defaults to
-        ``~/.kiss/third_party_agents/googlechat``).
+        ``$KISS_HOME/third_party_agents/googlechat``).
     """
     return kiss_home() / "third_party_agents" / "googlechat"
 
@@ -508,7 +508,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials recorded under ``~/.kiss`` and returns its
+    credentials recorded under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return GoogleChatAgent()._get_tools()

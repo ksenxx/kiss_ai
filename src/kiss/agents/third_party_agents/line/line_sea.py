@@ -6,7 +6,7 @@
 
 Provides authenticated access to LINE via channel access token. Uses webhook
 queue pattern for receiving messages. Stores config in
-``~/.kiss/third_party_agents/line/config.json``.
+``$KISS_HOME/third_party_agents/line/config.json``.
 
 Usage::
 
@@ -679,7 +679,7 @@ def add_to_tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return LineAgent()._get_tools()
