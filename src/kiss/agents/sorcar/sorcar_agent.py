@@ -3252,13 +3252,19 @@ class SorcarAgent(RelentlessAgent):
             # dropped when the run is already unwinding on an exception.
             unwinding = sys.exc_info()[1] is not None
             interrupted: BaseException | None = None
+            # Totals as of the run's last event: a stopped job's spend
+            # (folded by its thread while joined below) and the
+            # classifier's land after it and must be published.
+            totals_at_last_event = self.usage_snapshot()
+            jobs_stopped = False
             try:
-                if kill_jobs_of(self):
+                jobs_stopped = bool(kill_jobs_of(self))
+                if jobs_stopped:
                     logger.info("stopped run_agent jobs still running at the end of the task")
             except BaseException as exc:  # noqa: BLE001 — held, see above
                 logger.warning("interrupted while waiting for cancelled run_agent jobs")
                 interrupted = None if unwinding else exc
-            classifier_spend_folded = self._fold_classifier_usage()
+            self._fold_classifier_usage()
             if self.web_use_tool:
                 self.web_use_tool.close()
             self.web_use_tool = None
@@ -3266,10 +3272,12 @@ class SorcarAgent(RelentlessAgent):
             self._ask_user_question_callback = None
             self.pre_step_hook = None
             self.tool_call_guard = None
-            if classifier_spend_folded:
-                # The run's last event predates the fold, so the UI's
-                # cost would omit the classifier.  Emitted after the
-                # cleanup: printing raises the task's stop when it is set.
+            if jobs_stopped or self.usage_snapshot() != totals_at_last_event:
+                # The run's last event predates the folds above, so the
+                # UI's cost would omit them while the persisted row
+                # (read from the totals after ``run``) includes them.
+                # Emitted after the cleanup: printing raises the task's
+                # stop when it is set.
                 self._emit_usage_totals()
             if interrupted is not None:
                 raise interrupted
