@@ -71,6 +71,7 @@ _EXPECTED_SETTINGS = {
     "use_web_tools": False,
     "use_memory": False,
     "tool_profile": "none",
+    "locked": ["tool_profile"],
 }
 """``resolve_settings`` output: ``settings()`` plus the ``worker`` preset.
 
@@ -152,7 +153,9 @@ def test_settings_follow_the_contract() -> None:
     ``parentTaskId``).  The resolved settings add the preset's defaults
     and nothing else: the getters are applied by the daemon.
     """
-    assert ask_sea.settings() == {"kind": "worker", "tool_profile": "none"}
+    assert ask_sea.settings() == {
+        "kind": "worker", "tool_profile": "none", "locked": ["tool_profile"],
+    }
     assert resolve_settings(vars(ask_sea)) == _EXPECTED_SETTINGS
     assert ask_sea.prompt("why?") == "why?\n\n" + _EXPECTED_ADD_TO_PROMPT
     assert _PLACEHOLDER in ask_sea.prompt("why?")

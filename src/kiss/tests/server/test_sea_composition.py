@@ -154,11 +154,12 @@ def test_settings_vocabulary_has_no_prompt_keys() -> None:
         with pytest.raises(ValueError, match=rf"settings\(\) has an unknown key '{key}'"):
             resolve_settings({"settings": lambda key=key: {key: "x"}})
     # The tool's options vocabulary is the settings vocabulary (minus the
-    # keys that describe a script and the tool's own arguments) plus the
+    # keys that describe a script; the tool's own ``model``,
+    # ``tool_profile``, ``max_budget`` and ``timeout`` arguments are
+    # shortcuts for the options of the same name) plus ``inherit``, the
     # channel workspace and the two appended texts.
     assert set(agent_dispatch.OPTION_TYPES) == (
-        set(SETTING_TYPES)
-        - {"extends", "kind", "locked", "hidden", "timeout", "model", "max_budget"}
+        set(SETTING_TYPES) - {"extends", "kind", "locked", "hidden"}
     ) | {"inherit", "workspace", "add_to_prompt", "add_to_system_prompt"}
     assert set(RunOptions.__dataclass_fields__) == set(agent_dispatch.OPTION_TYPES) | {
         "system_prompt"
@@ -399,7 +400,7 @@ def test_every_agent_spelling_resolves_to_a_script_path() -> None:
         assert isinstance(resolved, tuple), resolved
         path, name = resolved
         assert Path(path).is_file() and path.endswith(".py"), spelling
-        assert name == (spelling.lower() or "dummy")
+        assert name == (spelling.lower() or "sorcar")
     assert resolve_agent("ntfy", "")[0].endswith("ntfy/ntfy_sea.py")
     assert isinstance(resolve_agent("no-such-agent", ""), str)
 

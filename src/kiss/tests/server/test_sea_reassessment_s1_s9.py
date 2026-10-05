@@ -39,7 +39,7 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.run_config import RUN_CONFIG_KEYS, run_config_line
-from kiss.agents.sorcar.sea_docs import precedence_block, render
+from kiss.agents.sorcar.sea_docs import precedence_block, precedence_example, render
 from kiss.agents.sorcar.sea_lint import PROSE_FILES, lint_prose
 from kiss.agents.sorcar.sea_settings import (
     PRECEDENCE_RULE,
@@ -83,10 +83,18 @@ def _bare_agent(work_dir: Path) -> ChatSorcarAgent:
 def test_precedence_rule_is_stated_once_and_quoted_everywhere(home: IsolatedKissHome) -> None:
     assert PRECEDENCE_RULE.startswith("For every setting of a sub-task: what the call passes")
     assert "`locked`" in PRECEDENCE_RULE and "refused" in PRECEDENCE_RULE
-    assert precedence_block() == "> " + PRECEDENCE_RULE
+    # The block quotes the rule, then one example computed from the
+    # bundled ``/sh`` (its literal settings and the exact refusal text).
+    assert precedence_block() == f"> {PRECEDENCE_RULE}\n>\n> {precedence_example()}"
+    assert precedence_example().startswith(
+        'For example, `/sh` declares `{"kind": "worker", "tool_profile": "bash", '
+        '"locked": ["tool_profile"]}`, so `run_agent(agent="sh", task=..., '
+        'tool_profile="review")` is refused with `Error: sh: the script locks '
+        "tool_profile='bash' (asked for 'review')`"
+    )
     page = "x\n<!-- sea-docs: precedence -->\nstale\n<!-- /sea-docs -->\ny\n"
     assert render(page) == (
-        f"x\n<!-- sea-docs: precedence -->\n> {PRECEDENCE_RULE}\n<!-- /sea-docs -->\ny\n"
+        f"x\n<!-- sea-docs: precedence -->\n{precedence_block()}\n<!-- /sea-docs -->\ny\n"
     )
     tools = {t.__name__: t for t in _bare_agent(home.repo)._get_tools()}
     for name in ("run_agent", "run_parallel"):
@@ -160,12 +168,12 @@ def test_channel_kind_locks_every_key_it_sets() -> None:
 
 
 def test_worker_is_a_kind_not_an_alias_and_infrastructure_seas_are_hidden() -> None:
-    assert resolve_agent("", "") == (DEFAULT_AGENT_PATH, "dummy")
-    assert resolve_agent("general", "") == (DEFAULT_AGENT_PATH, "dummy")
+    assert resolve_agent("", "") == (DEFAULT_AGENT_PATH, "sorcar")
+    assert resolve_agent("general", "") == (DEFAULT_AGENT_PATH, "sorcar")
     for name in ("worker", "subagent", "helper"):
         assert str(resolve_agent(name, "")).startswith(f"Error: unknown agent '{name}'")
     commands = sea_commands.list_commands()
-    for hidden in ("dummy", "coding", "oai"):
+    for hidden in ("sorcar", "coding", "oai"):
         assert hidden not in commands, hidden
     assert declares_hidden(Path(DEFAULT_AGENT_PATH))
     assert declared_literal(Path(DEFAULT_AGENT_PATH), "hidden") is True

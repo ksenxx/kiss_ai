@@ -75,7 +75,7 @@ are the daemon defaults unless the caller passes them), and carries that channel
 authenticated tools; the daemon appends the channel preamble to its system prompt,
 which tells it to use those tools directly, without exploring source code. The `agent`
 argument is optional: omitting it (or passing it blank, or a generic label such as
-`"general"` or `"reviewer"`) runs the bundled `src/kiss/agents/seas/dummy/dummy_sea.py`,
+`"general"` or `"reviewer"`) runs the bundled `src/kiss/agents/seas/sorcar/sorcar_sea.py`,
 a plain Sorcar sub-session with the standard toolset, on the task in the caller's work
 directory. The same argument also takes `"cron"`, a path to an agent script, or the name
 of a registered slash command; the call waits for the SEA's `timeout` setting, else

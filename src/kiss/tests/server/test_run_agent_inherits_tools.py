@@ -9,7 +9,7 @@ on a real daemon; its scripted model dispatches three ``run_agent``
 sub-tasks.  Each sub-task's model request is a real chat-completions
 call, so its ``tools`` array is exactly the toolset the sub-agent got:
 
-* the plain sub-agent (``dummy_sea.py``) has the parent's tool, and a
+* the plain sub-agent (``sorcar_sea.py``) has the parent's tool, and a
   parent tool named like one of the sub-agent's built-ins is skipped;
 * a sub-task whose own script also uses ``add_to_tools()`` has both
   sets, and a tool both scripts define by the same name once;
@@ -227,7 +227,7 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
             marker, child_last_messages[marker][-300:],
         )
 
-    # The plain sub-agent (dummy_sea.py) runs the basic toolset plus
+    # The plain sub-agent (sorcar_sea.py) runs the basic toolset plus
     # the parent's tool — and reads the parent's protocol it refers to.
     plain = child_tools["CHILD-A"]
     assert "parent_ledger" in plain

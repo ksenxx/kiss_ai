@@ -365,8 +365,8 @@ def test_cron_is_a_registered_command_and_agent_resolves_by_three_rules(
         "list the jobs", Path(cron_agent.__file__).resolve(),
     )
     resolve = agent_dispatch.resolve_agent
-    assert resolve("", "") == (agent_dispatch.DEFAULT_AGENT_PATH, "dummy")
-    assert resolve("reviewer", "") == (agent_dispatch.DEFAULT_AGENT_PATH, "dummy")
+    assert resolve("", "") == (agent_dispatch.DEFAULT_AGENT_PATH, "sorcar")
+    assert resolve("reviewer", "") == (agent_dispatch.DEFAULT_AGENT_PATH, "sorcar")
     assert resolve("cron", "") == (str(Path(cron_agent.__file__).resolve()), "cron")
     assert resolve("CRON", "") == (str(Path(cron_agent.__file__).resolve()), "cron")
     resolved = resolve("Home-Assistant", "")
@@ -597,13 +597,13 @@ def test_run_agent_wait_false_returns_a_job_the_parent_waits_on_or_kills(
     assert "parent done" in result.text
     assert sorted(children_seen) == ["fast", "slow"]
     # Step 2 saw the first job notice; step 3 the second.
-    assert "Started the dummy agent task as job agent-" in parent_steps[1]
+    assert "Started the sorcar agent task as job agent-" in parent_steps[1]
     assert "agent_job(" in parent_steps[1]
     assert "Wait for or kill it before finishing" in parent_steps[1]
     # Step 4 saw the fast child's YAML result from ``wait``.
     assert "success: true" in parent_steps[3] and "fast child done" in parent_steps[3]
     # Step 5 saw the slow job still running (``tail``).
-    still_running = r"Job agent-[0-9a-f]{8} \(dummy agent task\) is still running\."
+    still_running = r"Job agent-[0-9a-f]{8} \(sorcar agent task\) is still running\."
     assert re.search(still_running, parent_steps[4])
     # Step 6 saw the kill's outcome; step 7 the unknown-job error.
     assert "was stopped by agent_job kill" in parent_steps[5]

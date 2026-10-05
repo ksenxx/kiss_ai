@@ -60,10 +60,16 @@ def system_prompt() -> str:
 
 
 def settings() -> dict[str, Any]:
-    """A worker with Bash only, on the real checkout, running :data:`SYSTEM_PROMPT`."""
+    """A worker with Bash only, on the real checkout, running :data:`SYSTEM_PROMPT`.
+
+    ``tool_profile`` is ``locked``: ``/sh`` is the Bash-only worker, so a
+    ``run_agent(agent="sh", tool_profile="review")`` is refused rather
+    than run as something else.
+    """
     return {
         "kind": "worker",
         "tool_profile": "bash",
+        "locked": ["tool_profile"],
     }
 
 

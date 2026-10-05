@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -129,6 +130,36 @@ def _call_args(function_call: dict[str, Any]) -> dict[str, Any]:
     """Return the arguments dict of a function call, or {} if absent/malformed."""
     raw_args = function_call.get("arguments")
     return raw_args if isinstance(raw_args, dict) else {}
+
+
+def unknown_argument_hint(sig: inspect.Signature | None, args: dict[str, Any]) -> str:
+    """Return a hint for the arguments of a tool call that its signature does not take.
+
+    A tool with an ``options`` parameter (``run_agent``, ``run_parallel``)
+    takes its run settings as one JSON object, so a setting passed as a
+    keyword (``use_worktree=False``) is pointed there.  The agent cannot
+    know the accepted keys, so the hint is conditional: the tool itself
+    rejects a key that is not a setting.
+
+    Args:
+        sig: The tool's signature, ``None`` when unknown.
+        args: The arguments of the call.
+
+    Returns:
+        The hint (starting with a newline), or ``""`` when every
+        argument is a parameter or the tool takes no ``options``.
+    """
+    if sig is None or "options" not in sig.parameters:
+        return ""
+    unknown = [name for name in args if name not in sig.parameters]
+    if not unknown:
+        return ""
+    example = json.dumps({name: args[name] for name in unknown})
+    return (
+        f"\n{', '.join(unknown)} is not an argument; if it is a run setting, pass it in the "
+        f"`options` JSON object, e.g. options='{example}' (the accepted keys are listed "
+        f"under `options`)."
+    )
 
 
 def _is_retryable_error(e: Exception) -> bool:
@@ -1152,7 +1183,8 @@ class KISSAgent(Base):
                 sig = inspect.signature(fn) if fn else None
                 sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
                 function_response = (
-                    f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
+                    f"Failed to call {function_name} with {function_args}: {e}{sig_str}"
+                    f"{unknown_argument_hint(sig, function_args)}\n"
                 )
                 is_error = True
             end_tool_call(token)

@@ -69,7 +69,9 @@ from kiss.agents.sorcar.run_config import (
 )
 from kiss.agents.sorcar.sea_commands import sea_script_in
 from kiss.agents.sorcar.sea_settings import (
+    META_SETTINGS,
     PRECEDENCE_RULE,
+    RENAMED_SETTINGS,
     SETTING_TYPES,
     declared_literal,
     declares_hidden,
@@ -87,12 +89,12 @@ from kiss.core.vscode_config import load_config
 logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT_PATH = str(
-    Path(__file__).resolve().parents[1] / "seas" / "dummy" / "dummy_sea.py"
+    Path(__file__).resolve().parents[1] / "seas" / "sorcar" / "sorcar_sea.py"
 )
 """Agent script run when the ``run_agent`` tool's ``agent`` is empty.
 
-The bundled ``src/kiss/agents/seas/dummy/dummy_sea.py`` — an SEA that defines
-no getters, so the sub-task is a plain Sorcar session on the given task
+The bundled ``src/kiss/agents/seas/sorcar/sorcar_sea.py`` — a hidden SEA that
+pins no setting, so the sub-task is a plain Sorcar session on the given task
 in the calling task's work directory (path mode, with the standard
 worktree/auto-commit lifecycle).  Held as the absolute path of the
 installed file so the default works from any work directory, not only
@@ -159,17 +161,22 @@ class RunOptions:
     The parsed form of the ``run_agent`` / ``run_parallel`` ``options``
     argument: one field per key of :data:`OPTION_TYPES` — the SEA
     settings vocabulary (:data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`)
-    minus what the tool takes as its own arguments — plus
-    ``system_prompt``, the replacement base system prompt a programmatic
-    caller may pass (it is not an ``options`` key: a SEA's
-    ``system_prompt()`` is the user-facing way).  ``None`` / empty means
-    "not passed".  A value here is explicit, so it ranks first in
-    :data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`: it wins
-    over the SEA's ``settings()`` unless the SEA locks the key (then
-    the call is refused), and over what the calling agent passes on
-    (see :func:`inherit_from_parent`).
+    minus the keys that describe a script — plus ``system_prompt``, the
+    replacement base system prompt a programmatic caller may pass (it
+    is not an ``options`` key: a SEA's ``system_prompt()`` is the
+    user-facing way).  The tool's ``model``, ``tool_profile``,
+    ``max_budget`` and ``timeout`` arguments are shortcuts for the
+    options of the same name (:func:`parse_run_options` merges them).
+    ``None`` / empty means "not passed".  A value here is explicit, so
+    it ranks first in :data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`:
+    it wins over the SEA's ``settings()`` unless the SEA locks the key
+    (then the call is refused), and over what the calling agent passes
+    on (see :func:`inherit_from_parent`).
     """
 
+    model: str = ""
+    max_budget: float | None = None
+    timeout: float | None = None
     work_dir: str = ""
     chat_id: str = ""
     use_worktree: bool | None = None
@@ -188,23 +195,8 @@ class RunOptions:
     system_prompt: str = ""
 
 
-_TOOL_ARGUMENT_SETTINGS = frozenset({
-    "extends", "kind", "locked", "hidden", "timeout", "model", "max_budget",
-})
-"""Settings keys the ``options`` JSON object does not accept.
-
-``extends``, ``kind``, ``locked`` and ``hidden`` describe a SEA, not a
-call; ``timeout``, ``model`` and ``max_budget`` are the tool's own
-arguments.  ``tool_profile`` is both an argument and an option (the
-two must agree when both are given).
-"""
-
-OPTION_TYPES: dict[str, type] = {
-    **{
-        key: expected
-        for key, expected in SETTING_TYPES.items()
-        if key not in _TOOL_ARGUMENT_SETTINGS and isinstance(expected, type)
-    },
+OPTION_TYPES: dict[str, type | tuple[type, ...]] = {
+    **{key: expected for key, expected in SETTING_TYPES.items() if key not in META_SETTINGS},
     "inherit": bool,
     "workspace": str,
     "add_to_prompt": str,
@@ -212,15 +204,24 @@ OPTION_TYPES: dict[str, type] = {
 }
 """The keys the ``options`` JSON object accepts, with the type of each value.
 
-Derived from :data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`,
-so the tool and the SEAs share one vocabulary: what a SEA may pin in
-``settings()``, a caller may pass in ``options``; plus four call-only
-keys: ``inherit`` (``false``: the sub-task takes nothing from the
-calling task), ``workspace`` (the account a channel agent's run
-holds), ``add_to_prompt`` (text appended to the task) and
+The SEA settings vocabulary
+(:data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`) minus the
+keys that describe a script rather than a run
+(:data:`~kiss.agents.sorcar.sea_settings.META_SETTINGS`: ``kind``,
+``extends``, ``locked``, ``hidden``), so the tool and the SEAs share
+one vocabulary: what a SEA may pin in ``settings()``, a caller may
+pass in ``options``.  The tool's ``model``, ``tool_profile``,
+``max_budget`` and ``timeout`` arguments are shortcuts for the options
+of the same name (both may be given when they agree).  Plus four
+call-only keys: ``inherit`` (``false``: the sub-task takes nothing
+from the calling task), ``workspace`` (the account a channel agent's
+run holds), ``add_to_prompt`` (text appended to the task) and
 ``add_to_system_prompt``, the option form of a SEA's
 ``add_to_system_prompt()`` getter.
 """
+
+ARGUMENT_OPTIONS = ("model", "tool_profile", "max_budget", "timeout")
+"""The options the ``run_agent`` / ``run_parallel`` tools also take as arguments."""
 
 OPTION_DOCS: dict[str, str] = {
     "inherit": "`false`: the sub-task takes nothing from the calling task (no model, chat, "
@@ -300,73 +301,135 @@ def _parse_bool(name: str, value: Any) -> bool | None:
     raise ValueError(f"{name} must be true or false, got {value!r}.")
 
 
-def parse_run_options(options: str, tool_profile: str = "") -> RunOptions:
-    """Parse the ``options`` argument of ``run_agent`` / ``run_parallel``.
+def _parse_number(name: str, value: Any) -> float | None:
+    """Parse an optional positive finite number (``max_budget``, ``timeout``).
 
     Args:
-        options: A JSON object string whose keys are keyword
-            parameters of :func:`kiss.server.sorcar.run`
+        name: The option's name, for the error message.
+        value: A JSON number, a numeric string (surrounding whitespace
+            ignored) or empty / ``None`` for "not passed".
+
+    Returns:
+        The number, or ``None`` when *value* is empty.
+
+    Raises:
+        ValueError: When *value* is not a positive finite number.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        number = float(value) if not isinstance(value, bool) else "no"
+    except (TypeError, ValueError, OverflowError):
+        number = "no"
+    if isinstance(number, str):
+        raise ValueError(f"{name} must be a number, got {value!r}.")
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{name} must be a positive finite number, got {value!r}.")
+    return number
+
+
+def parse_run_options(
+    options: str,
+    tool_profile: str = "",
+    model: str = "",
+    max_budget: str = "",
+    timeout: str = "",
+) -> RunOptions:
+    """Parse the ``options`` argument of ``run_agent`` / ``run_parallel`` and its shortcuts.
+
+    Args:
+        options: A JSON object string in the settings vocabulary
             (:data:`OPTION_TYPES`), or empty for no overrides.
             Booleans may also be given as the strings ``"true"`` /
             ``"false"``; ``null`` means "not passed".
-        tool_profile: The tool's own ``tool_profile`` argument, carried
-            on the returned options; an ``options`` key of the same
-            name may repeat but not contradict it.  Validated against
+        tool_profile: The tool's ``tool_profile`` argument: a shortcut
+            for the option of the same name, which may repeat but not
+            contradict it.  Validated against
             :func:`kiss.agents.sorcar.sorcar_agent.resolve_tool_profile`.
+        model: The tool's ``model`` argument, the same way.
+        max_budget: The tool's ``max_budget`` argument (a positive
+            finite number as text), the same way.
+        timeout: The tool's ``timeout`` argument (seconds as text), the
+            same way.
 
     Returns:
-        The parsed options.
+        The parsed options, the shortcuts merged in.
 
     Raises:
         ValueError: When *options* is not a JSON object, names an
-            unknown key, has a value of the wrong type, names a
-            ``tool_profile`` that differs from the argument, or the
-            tool profile is unknown.
+            unknown key, has a value of the wrong type, an option
+            contradicts the argument of the same name, a number is not
+            positive and finite, or the tool profile is unknown.
     """
     from kiss.agents.sorcar.sorcar_agent import resolve_tool_profile
 
-    tool_profile = tool_profile.strip()
-    if not options.strip():
-        resolve_tool_profile(tool_profile)
-        return RunOptions(tool_profile=tool_profile)
-    try:
-        raw = json.loads(options)
-    except ValueError as e:
-        raise ValueError(f"options must be a JSON object, got {options!r}: {e}") from None
-    if not isinstance(raw, dict):
-        raise ValueError(f"options must be a JSON object, got {options!r}.")
     parsed: dict[str, Any] = {}
-    for key, value in raw.items():
-        expected = OPTION_TYPES.get(key)
-        if expected is None:
-            raise ValueError(
-                f"options has an unknown key {key!r}; known keys: "
-                f"{', '.join(OPTION_TYPES)}."
-            )
-        if value is None:
+    if options.strip():
+        try:
+            raw = json.loads(options)
+        except ValueError as e:
+            raise ValueError(f"options must be a JSON object, got {options!r}: {e}") from None
+        if not isinstance(raw, dict):
+            raise ValueError(f"options must be a JSON object, got {options!r}.")
+        for key, value in raw.items():
+            parsed_value = _parse_option(key, value)
+            if parsed_value is not None:
+                parsed[key] = parsed_value
+    arguments = {
+        "model": model.strip(),
+        "tool_profile": tool_profile.strip(),
+        "max_budget": _parse_number("max_budget", max_budget),
+        "timeout": _parse_number("timeout", timeout),
+    }
+    for key, argument in arguments.items():
+        if argument in (None, ""):
             continue
-        if expected is bool:
-            parsed[key] = _parse_bool(key, value)
-        elif isinstance(value, str) and expected is str:
-            parsed[key] = (
-                value.strip() if key in ("chat_id", "work_dir", "workspace") else value
-            )
-        elif isinstance(value, expected) and not isinstance(value, bool):
-            parsed[key] = value
-        else:
+        option = parsed.get(key)
+        if option is not None and option != argument:
             raise ValueError(
-                f"options[{key!r}] must be a JSON {expected.__name__}, "
-                f"got {type(value).__name__}."
+                f"options[{key!r}] = {option!r} contradicts the {key} argument "
+                f"{argument!r}; pass one of them."
             )
-    option_profile = str(parsed.pop("tool_profile", "")).strip()
-    if option_profile and tool_profile and option_profile != tool_profile:
+        parsed[key] = argument
+    resolve_tool_profile(parsed.get("tool_profile", ""))
+    return RunOptions(**parsed)
+
+
+def _parse_option(key: str, value: Any) -> Any:
+    """Parse one ``options`` entry; ``None`` (for ``null`` and a blank string too) is "not passed".
+
+    Raises:
+        ValueError: When *key* is unknown (naming the current key for a
+            renamed setting) or *value* has the wrong type.
+    """
+    expected = OPTION_TYPES.get(key)
+    if expected is None:
+        if key in RENAMED_SETTINGS:
+            raise ValueError(
+                f"options key {key!r} was renamed to {RENAMED_SETTINGS[key]!r}; "
+                f"use the new name."
+            )
         raise ValueError(
-            f"options['tool_profile'] = {option_profile!r} contradicts the tool_profile "
-            f"argument {tool_profile!r}; pass one of them."
+            f"options has an unknown key {key!r}; known keys: {', '.join(OPTION_TYPES)}."
         )
-    tool_profile = tool_profile or option_profile
-    resolve_tool_profile(tool_profile)
-    return RunOptions(tool_profile=tool_profile, **parsed)
+    if value is None:
+        return None
+    if expected is bool:
+        return _parse_bool(key, value)
+    if key in ("max_budget", "timeout"):
+        return _parse_number(f"options[{key!r}]", value)
+    if isinstance(value, str) and expected is str:
+        if not value.strip():
+            return None
+        if key in ("chat_id", "work_dir", "workspace", "model", "tool_profile"):
+            return value.strip()
+        return value
+    if isinstance(value, expected) and not isinstance(value, bool):
+        return value
+    raise ValueError(
+        f"options[{key!r}] must be a JSON {getattr(expected, '__name__', 'number')}, "
+        f"got {type(value).__name__}."
+    )
 
 
 def _package_dir() -> Path | None:
@@ -549,17 +612,14 @@ def explicit_values(
     Returns:
         ``{setting key: value}`` for every value passed.
     """
-    values: dict[str, Any] = {}
+    values: dict[str, Any] = {
+        key: getattr(options, key) for key in OPTION_TYPES
+        if getattr(options, key, None) not in (None, "")
+    }
     if model_name:
         values["model"] = model_name
     if budget is not None:
         values["max_budget"] = budget
-    if options.tool_profile:
-        values["tool_profile"] = options.tool_profile
-    values.update(
-        (key, getattr(options, key)) for key in OPTION_TYPES
-        if getattr(options, key, None) not in (None, "")
-    )
     return values
 
 
@@ -813,12 +873,15 @@ def _dispatch(
     cancel: threading.Event | None = None,
     running: threading.Event | None = None,
     timeout_explicit: bool = False,
+    alias: str = "",
 ) -> str:
     """Submit a SEA task to the kiss-web daemon and wait for its YAML result.
 
     :func:`dispatch_result` with the same arguments, formatted for the
     calling model: the sub-task's YAML result (``ran``, ``success`` and
-    ``summary`` keys), or the error message.
+    ``summary`` keys), or the error message.  *alias* is the registered
+    command name of a SEA reached by path, shown on the ``ran`` line
+    (:func:`~kiss.agents.sorcar.run_config.run_config_line`).
     """
     result = dispatch_result(
         name, prompt, agent_path, work_dir, model_name, budget, timeout,
@@ -831,7 +894,7 @@ def _dispatch(
     summary = result.text or ("" if result.success else "Task failed")
     return str(yaml.safe_dump(
         {
-            "ran": run_config_line({**result.settings, "timeout": timeout}),
+            "ran": run_config_line({**result.settings, "timeout": timeout}, alias),
             "success": result.success,
             "summary": summary,
         },
@@ -1097,21 +1160,6 @@ def dispatch_result(
     return result
 
 
-def parse_budget(max_budget: str) -> float | None | str:
-    """Parse a tool's ``max_budget`` argument: ``None`` when empty, else a positive finite float.
-
-    Returns:
-        The budget, ``None`` for an empty argument, or an error string.
-    """
-    try:
-        budget = float(max_budget) if max_budget.strip() else None
-    except ValueError:
-        return f"Error: max_budget must be a number, got {max_budget!r}."
-    if budget is not None and (not math.isfinite(budget) or budget <= 0):
-        return f"Error: max_budget must be a positive finite number, got {max_budget!r}."
-    return budget
-
-
 def _run_agent(
     parent_work_dir: str,
     task: str,
@@ -1170,14 +1218,8 @@ def _run_agent(
     """
     if not task.strip():
         return "Error: task must be a non-empty string."
-    budget = parse_budget(max_budget)
-    if isinstance(budget, str):
-        return budget
     try:
-        run_options = parse_run_options(options, tool_profile)
-    except ValueError as e:
-        return f"Error: {e}"
-    try:
+        run_options = parse_run_options(options, tool_profile, model, max_budget, timeout)
         blocking = _parse_bool("wait", wait) is not False
     except ValueError as e:
         return f"Error: {e}"
@@ -1191,9 +1233,7 @@ def _run_agent(
         settings = sea_settings(Path(agent_path))
     except SeaScriptError as e:
         return f"Error: {e}"
-    seconds = resolve_timeout(timeout, settings)
-    if isinstance(seconds, str):
-        return seconds
+    seconds = resolve_timeout(run_options.timeout, settings)
     # sea_settings.PRECEDENCE_RULE: an explicit argument or option wins
     # over the SEA's ``settings()``, which win over what the calling
     # task passes on; a key the SEA locks may not be replaced.  A
@@ -1206,9 +1246,7 @@ def _run_agent(
     # empty are inherited from the calling agent (see
     # ``inherit_from_parent``), and the task's references to the main
     # checkout are rewritten to the caller's worktree.
-    asked = explicit_values(model, budget, run_options)
-    if timeout.strip():
-        asked["timeout"] = seconds
+    asked = explicit_values(run_options.model, run_options.max_budget, run_options)
     conflict = locked_conflicts(settings, asked, parent_work_dir)
     if conflict:
         return f"Error: {name}: {conflict}"
@@ -1231,10 +1269,11 @@ def _run_agent(
         task = rewrite_parent_repo_paths(task, parent_work_dir)
     kwargs: dict[str, Any] = {
         "name": name, "prompt": task, "agent_path": agent_path, "work_dir": work_dir,
-        "model_name": model, "budget": budget, "timeout": seconds,
+        "model_name": run_options.model, "budget": run_options.max_budget, "timeout": seconds,
         "parent_agent": parent_agent, "scope_work_dir": parent_work_dir,
         "options": run_options, "inherit": inherit, "settings": settings,
-        "workspace": run_options.workspace, "timeout_explicit": bool(timeout.strip()),
+        "workspace": run_options.workspace, "timeout_explicit": run_options.timeout is not None,
+        "alias": command_alias(agent_path) if is_agent_path(agent.strip()) else "",
     }
     if blocking:
         return _dispatch(**kwargs)
@@ -1465,7 +1504,7 @@ def resolve_agent(agent: str, parent_work_dir: str) -> tuple[str, str] | str:
     squashed = _squash(requested)
     if not requested or squashed in _GENERIC_AGENT_NAMES:
         requested = DEFAULT_AGENT_PATH
-    if requested.endswith(".py") or "/" in requested or "\\" in requested:
+    if is_agent_path(requested):
         candidate = Path(requested).expanduser()
         if not candidate.is_absolute() and parent_work_dir:
             candidate = Path(parent_work_dir) / candidate
@@ -1483,34 +1522,45 @@ def resolve_agent(agent: str, parent_work_dir: str) -> tuple[str, str] | str:
     return _unknown_agent_error(agent, squashed, commands)
 
 
-def resolve_timeout(timeout: str, settings: dict[str, Any]) -> float | str:
-    """Resolve the ``run_agent`` tool's ``timeout`` argument to seconds.
+def is_agent_path(agent: str) -> bool:
+    """Return whether a ``run_agent`` ``agent`` argument is a path (rule 2 of ``resolve_agent``)."""
+    return agent.endswith(".py") or "/" in agent or "\\" in agent
 
-    An explicit positive number wins; an empty argument takes the agent
-    script's own ``timeout`` setting (``settings()["timeout"]``, see
+
+def command_alias(agent_path: str) -> str:
+    """Return the registered command name whose script is *agent_path*, or ``""``.
+
+    Lets a call that reached a bundled or ``SEAS.md`` SEA by its path
+    learn the name it could have used instead
+    (``run_agent(agent="review_paper", ...)``).
+    """
+    from kiss.agents.sorcar import sea_commands
+
+    for name in sea_commands.list_commands():
+        if str(sea_commands.get_command(name)) == agent_path:
+            return name
+    return ""
+
+
+def resolve_timeout(timeout: float | None, settings: dict[str, Any]) -> float:
+    """Resolve how long a ``run_agent`` call waits for its sub-task, in seconds.
+
+    The call's ``timeout`` wins; ``None`` takes the agent script's own
+    ``timeout`` setting (``settings()["timeout"]``, see
     :mod:`kiss.agents.sorcar.sea_settings`), else
     :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
 
     Args:
-        timeout: The argument as the model passed it.
+        timeout: The call's parsed ``timeout`` argument or option
+            (:attr:`RunOptions.timeout`), ``None`` when not passed.
         settings: The resolved settings of the script the sub-task
             runs.
 
     Returns:
-        The seconds to wait, or an error string for a malformed
-        argument.
+        The seconds to wait.
     """
-    if timeout.strip():
-        try:
-            wait = float(timeout)
-        except ValueError:
-            return f"Error: timeout must be a number of seconds, got {timeout!r}."
-        if not math.isfinite(wait) or wait <= 0:
-            return (
-                f"Error: timeout must be a positive finite number of seconds, "
-                f"got {timeout!r}."
-            )
-        return wait
+    if timeout is not None:
+        return timeout
     declared = settings.get("timeout")
     if isinstance(declared, int | float) and declared > 0:
         return float(declared)
@@ -1618,15 +1668,18 @@ def make_run_agent_tool(
                 SEA's ``timeout`` setting, else 3600.  Check what a
                 timed-out task already did before retrying with more.
             options: JSON object of run settings to override, e.g.
-                ``'{"use_web_tools": false}'``; usually empty.  Keys:
+                ``'{"use_web_tools": false}'``; usually empty.  Its
+                keys are the SEA settings vocabulary: ``model``,
+                ``tool_profile``, ``max_budget``, ``timeout`` (the
+                four arguments above are shortcuts for these),
                 ``work_dir`` (relative to this task's), ``chat_id``,
                 ``workspace`` (the account of a multi-account channel),
-                ``tool_profile``, ``add_to_system_prompt`` /
-                ``add_to_prompt`` (appended text), ``model_config``
-                (JSON object), ``docker_image``, and the booleans
-                ``inherit`` (``false`` = take nothing from this task),
-                ``use_worktree``, ``auto_commit``, ``auto_classify``,
-                ``use_web_tools``, ``use_memory``, ``allow_fan_out``.
+                ``add_to_system_prompt`` / ``add_to_prompt`` (appended
+                text), ``model_config`` (JSON object), ``docker_image``,
+                and the booleans ``inherit`` (``false`` = take nothing
+                from this task), ``use_worktree``, ``auto_commit``,
+                ``auto_classify``, ``use_web_tools``, ``use_memory``,
+                ``allow_fan_out``.
             wait: ``"false"`` = return a job id at once; then
                 ``agent_job(job_id, "wait")`` returns the result,
                 ``"tail"`` its status, ``"kill"`` stops it.  Use it to
@@ -1639,8 +1692,10 @@ def make_run_agent_tool(
             and kind it ran as, its model, tool profile, budget and
             timeout, which values it inherited from this task and which
             inherited or default values the SEA pinned to its own, e.g.
-            ``pinned=use_worktree(True->False)``), then ``success`` and
-            ``summary``; the job notice (``wait="false"``); or an error
+            ``pinned=use_worktree(True->False)``; a SEA reached by path
+            that is also a command ends with ``(also agent="name")``),
+            then ``success`` and ``summary``; the job notice
+            (``wait="false"``); or an error
             message (unknown agent — naming the closest command — a
             locked key the call contradicts, or a timeout).
         """

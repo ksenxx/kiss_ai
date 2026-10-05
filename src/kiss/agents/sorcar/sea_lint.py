@@ -49,10 +49,12 @@ Rules, each a :class:`Finding` code:
     A sentence about SEA semantics that the code no longer backs, in
     the documentation pages ``sea docs`` generates into and in the
     dispatcher modules (:data:`PROSE_FILES`): a ``~/.kiss/`` home path
-    (write ``$KISS_HOME/``), or the pre-2026-10-04 claim that a SEA's
+    (write ``$KISS_HOME/``), the pre-2026-10-04 claim that a SEA's
     settings "still win" / "win over" a call (the one rule is
-    :data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`).  Text
-    inside a generated ``<!-- sea-docs: ... -->`` block is skipped.
+    :data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`), or a
+    "``/name`` declares ``{...}``" claim whose dict is not what the
+    command's ``settings()`` returns.  Text inside a generated
+    ``<!-- sea-docs: ... -->`` block is skipped.
 
 Cost and duration rules (a ``max_budget`` below the script's observed
 cost, a ``timeout`` below its observed duration) need the task history
@@ -64,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import sys
 from collections.abc import Iterable
@@ -76,6 +79,7 @@ from kiss.agents.sorcar.sea_commands import (
     get_command,
     list_commands,
     model_sea,
+    sea_getter_value,
 )
 from kiss.agents.sorcar.sea_settings import (
     META_SETTINGS,
@@ -198,7 +202,42 @@ STALE_PROSE = (
 )
 """``(pattern, message)`` pairs of the ``stale-prose`` rule."""
 
+_DECLARES_CLAIM = re.compile(
+    r"`/([A-Za-z0-9_-]+)` declares `(\{[^`]*\})`"
+    r"|`(\{[^`]*\})` \(what `/([A-Za-z0-9_-]+)` declares\)"
+)
+"""A prose claim about a command's ``settings()`` literal, in either word order."""
+
 _GENERATED_BLOCK = re.compile(r"<!-- sea-docs: \w+ -->.*?<!-- /sea-docs -->", re.DOTALL)
+
+
+def _stale_declares_claim(match: re.Match[str]) -> str:
+    """Return why a "`/name` declares `{...}`" claim is stale, or ``""`` when the SEA agrees.
+
+    The claim is compared with what the command's script's
+    ``settings()`` returns as written (before its kind's defaults are
+    laid under it), so a settings change of a bundled SEA is caught in
+    every page that quotes it.
+    """
+    name = match.group(1) or match.group(4)
+    claim = match.group(2) or match.group(3)
+    path = get_command(name)
+    if path is None:
+        return f"`/{name}` is not a registered command"
+    try:
+        claimed = json.loads(claim)
+    except ValueError:
+        try:
+            claimed = ast.literal_eval(claim)
+        except (ValueError, SyntaxError):
+            return f"the quoted settings of `/{name}` are not a dict literal"
+    try:
+        declared = sea_getter_value(path, "settings") or {}
+    except SeaError as exc:
+        return f"`/{name}` does not load: {exc}"
+    if claimed != declared:
+        return f"`/{name}` declares `{json.dumps(declared)}`"
+    return ""
 
 
 def _blank_lines(match: re.Match[str]) -> str:
@@ -223,6 +262,10 @@ def lint_prose(root: Path | None = None) -> list[Finding]:
             for pattern, message in STALE_PROSE:
                 if pattern.search(line):
                     findings.append(Finding(path, "stale-prose", f"line {number}: {message}"))
+            for match in _DECLARES_CLAIM.finditer(line):
+                why = _stale_declares_claim(match)
+                if why:
+                    findings.append(Finding(path, "stale-prose", f"line {number}: {why}"))
     return findings
 
 

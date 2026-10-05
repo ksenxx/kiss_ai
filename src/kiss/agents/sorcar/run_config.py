@@ -127,7 +127,7 @@ def inherited_keys(provenance: Any) -> list[str]:
     return [str(key) for key, mark in provenance.items() if mark == PROVENANCE_INHERITED]
 
 
-def run_config_line(settings: Mapping[str, Any]) -> str:
+def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
     """Render a task's effective configuration as one line.
 
     Example (``/sh`` run from a task that uses a worktree)::
@@ -138,6 +138,9 @@ def run_config_line(settings: Mapping[str, Any]) -> str:
     Args:
         settings: A ``task_settings`` payload (see :data:`RUN_CONFIG_KEYS`);
             missing keys render as unknown / none.
+        alias: The registered command name of a SEA the call reached
+            by path, appended as ``(also agent="name")`` so the caller
+            learns the shorter spelling; empty for none.
 
     Returns:
         The line, without a trailing newline.
@@ -159,10 +162,11 @@ def run_config_line(settings: Mapping[str, Any]) -> str:
         )
     else:
         pinned_text = "none"
-    return (
+    line = (
         f"{sea} ({kind}) model={model} tools={tools} budget={budget_text} "
         f"timeout={timeout_text} inherited={inherited_text} pinned={pinned_text}"
     )
+    return f'{line} (also agent="{alias}")' if alias else line
 
 
 def _short(value: Any) -> str:

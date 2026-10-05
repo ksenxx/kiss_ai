@@ -110,11 +110,11 @@ class TestUnknownAgentHints:
         """A generic label means what an empty ``agent`` means: the plain sub-agent.
 
         ``code-review``, ``general``, ``Agent``, ... resolve to the
-        bundled ``dummy_sea.py`` instead of erroring, so the dispatch
+        bundled ``sorcar_sea.py`` instead of erroring, so the dispatch
         reaches the daemon.  Both endpoint sources are pointed at a
         daemon that does not exist (an absent ``KISS_SORCAR_LOCAL``
         file, no endpoint recorded by an in-process cron scheduler), so
-        the reply is the dummy agent's could-not-run error — the same
+        the reply is the sorcar agent's could-not-run error — the same
         text an empty ``agent`` produces — not an unknown-agent hint.
         """
         from kiss.agents.sorcar import cron_agent
@@ -122,9 +122,9 @@ class TestUnknownAgentHints:
         monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
         monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
         expected = _run_agent("", "review it", "")
-        assert expected.startswith("Error: the dummy agent task could not run:")
+        assert expected.startswith("Error: the sorcar agent task could not run:")
         for name in ("code-review", "general", "Agent", "sorcar", "analysis", " Reviewer "):
-            assert resolve_agent(name, "") == (DEFAULT_AGENT_PATH, "dummy")
+            assert resolve_agent(name, "") == (DEFAULT_AGENT_PATH, "sorcar")
             out = _run_agent("", "review it", name)
             assert out == expected
             assert "unknown agent" not in out and "Commands:" not in out

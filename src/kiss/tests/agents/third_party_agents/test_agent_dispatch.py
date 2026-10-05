@@ -377,7 +377,7 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     assert out.startswith("Error: options must be a JSON object, got '{not json': ")
     out = run_agent("say hi", "ntfy", options='{"tools": "x.py"}')
     assert out.startswith(
-        "Error: options has an unknown key 'tools'; known keys: work_dir, chat_id, "
+        "Error: options has an unknown key 'tools'; known keys: work_dir, model, chat_id, "
     )
     out = run_agent("say hi", "ntfy", tool_profile="bogus")
     assert out.startswith("Error: tool_profile must be one of ")
@@ -664,10 +664,10 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
     assert not (tmp_path / "channel_work").exists()
 
 
-def test_default_agent_is_the_bundled_dummy_sea(
+def test_default_agent_is_the_bundled_sorcar_sea(
     tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
-    """``run_agent(task)`` with no ``agent`` runs ``seas/dummy/dummy_sea.py`` in path mode.
+    """``run_agent(task)`` with no ``agent`` runs ``seas/sorcar/sorcar_sea.py`` in path mode.
 
     The default is the installed file's absolute path (not a path
     relative to the calling work directory), so it resolves from any
@@ -678,11 +678,11 @@ def test_default_agent_is_the_bundled_dummy_sea(
 
     default = Path(DEFAULT_AGENT_PATH)
     assert default.is_absolute() and default.is_file()
-    assert default.parts[-4:] == ("agents", "seas", "dummy", "dummy_sea.py")
+    assert default.parts[-4:] == ("agents", "seas", "sorcar", "sorcar_sea.py")
     # The dummy SEA defines no getters: a plain Sorcar session.
     cmd = {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
     assert apply_agent_overrides(cmd) == set()
-    assert cmd.pop("_runConfig") == {"sea": "dummy", "kind": "session", "pinned": {}}
+    assert cmd.pop("_runConfig") == {"sea": "sorcar", "kind": "session", "pinned": {}}
     assert cmd == {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
 
     caller = tmp_path / "caller_project"
@@ -707,7 +707,7 @@ def test_default_agent_unreachable_daemon_is_a_clean_error() -> None:
     # dummy SEA's file stem (without ``_sea``), failing only at the
     # unreachable daemon.
     out = run_agent("say hi")
-    assert out.startswith("Error: the dummy agent task could not run:")
+    assert out.startswith("Error: the sorcar agent task could not run:")
     assert "no-daemon.json" in out
 
 

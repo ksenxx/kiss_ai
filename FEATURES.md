@@ -242,7 +242,7 @@ The 17 bundled SEAs (`src/kiss/agents/seas/`):
 | `/autorouter` | Tiered cheapest-model routing with escalation and a decision ledger; picker entry | orchestrator model = first runnable frontier model | **NEW** |
 | `/bestrouter` | claude-fable-5-1 writes, gpt-6-astra reviews read-only (≤75% budget); picker entry | default | **NEW** |
 | `/coding` | Unattended Sorcar inside a Docker container for benchmark trials (`ContainerHarness`, JSONL trajectories); generates per-trial SEAs | default | relocated |
-| `/dummy` | Plain Sorcar sub-agent; what `run_agent(agent="")` runs | default | |
+| `sorcar` (hidden, no slash command) | Plain Sorcar sub-agent; what `run_agent(agent="")` or `agent="sorcar"` runs | default | renamed from `dummy` |
 | `/forget` | Remove a standing instruction from `~/.kiss/AGENTS.md` | `bash`, $1 | **NEW** |
 | `/git_extract_knowledge` | Index every tracked file and commit of a repository into its domain memory and an FTS5 block store; `update`, `ask` modes; daily 04:00 PT refresh job | `full`, parallel, no memory tools | **NEW** |
 | `/merge` | Resolve git merge conflicts and stage the result; also run automatically by auto-commit merges | $5, no worktree | |

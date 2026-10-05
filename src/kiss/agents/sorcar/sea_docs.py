@@ -25,11 +25,17 @@ reports the blocks that are out of date and exits ``1``.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 
 from kiss.agents.sorcar.agent_dispatch import OPTION_DOCS, OPTION_TYPES
-from kiss.agents.sorcar.sea_commands import bundled_commands, sea_description
+from kiss.agents.sorcar.sea_commands import (
+    bundled_commands,
+    sea_description,
+    sea_getter_value,
+    sea_settings,
+)
 from kiss.agents.sorcar.sea_settings import (
     DISPATCHER_SETTINGS,
     KIND_DOCS,
@@ -37,6 +43,7 @@ from kiss.agents.sorcar.sea_settings import (
     SETTING_DOCS,
     SETTING_TYPES,
     kind_defaults,
+    locked_conflicts,
     wire_field,
 )
 from kiss.core.config import kiss_home
@@ -65,8 +72,35 @@ def type_name(expected: type | tuple[type, ...]) -> str:
 
 
 def precedence_block() -> str:
-    """The one precedence rule, as a quoted paragraph."""
-    return "> " + PRECEDENCE_RULE
+    """The one precedence rule and one worked example, as a quoted paragraph."""
+    return f"> {PRECEDENCE_RULE}\n>\n> {precedence_example()}"
+
+
+def precedence_example() -> str:
+    """One example of the rule, computed from the bundled ``/sh`` SEA so it cannot drift.
+
+    States what ``/sh`` declares (its ``settings()`` as written), the
+    call its lock refuses with the exact error
+    :func:`~kiss.agents.sorcar.sea_settings.locked_conflicts` produces,
+    and a call an unlocked key lets through.
+
+    Raises:
+        ValueError: When ``/sh`` no longer locks ``tool_profile``; pick
+            another example SEA then.
+    """
+    name = "sh"
+    path = bundled_commands()[name]
+    declared = sea_getter_value(path, "settings")
+    refused = locked_conflicts(sea_settings(path), {"tool_profile": "review"})
+    if not refused:
+        raise ValueError(f"/{name} no longer locks tool_profile; the precedence example needs one")
+    return (
+        f"For example, `/{name}` declares `{json.dumps(declared)}`, so "
+        f'`run_agent(agent="{name}", task=..., tool_profile="review")` is refused with '
+        f"`Error: {name}: {refused}`, while "
+        f'`run_agent(agent="{name}", task=..., model="gpt-5")` runs it with that model: '
+        f"`model` is not locked, so the explicit argument wins."
+    )
 
 
 def settings_table() -> str:

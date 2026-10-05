@@ -112,7 +112,7 @@ def test_slash_command_resolves_to_the_bundled_sea() -> None:
     assert task_text == "Writing: a paper. Review: for ICLR."
     settings = sea_commands.sea_settings(path)
     assert settings == {"kind": "session", **sea.settings()}
-    assert resolve_timeout("", settings) == 86400.0
+    assert resolve_timeout(None, settings) == 86400.0
     assert sea_commands.sea_description(_SEA_PATH) == sea.description()
 
 
@@ -120,7 +120,7 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
     """``resolve_timeout`` takes ``settings()["timeout"]`` when positive, else the default.
 
     The paper SEAs declare their own waits; a SEA without ``timeout``
-    (the bundled ``/dummy``) gets :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
+    (the bundled ``sorcar`` SEA) gets :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
     Real SEA files whose ``settings()`` returns a non-numeric, boolean,
     infinite or non-positive ``timeout``, or raises, fail loudly at ``sea_settings`` (a
     broken script must not run with guessed parameters); a non-positive
@@ -129,12 +129,12 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
     for command, seconds in [("write_paper", 21600.0), ("review_paper", 7200.0)]:
         path = sea_commands.get_command(command)
         assert path is not None
-        assert resolve_timeout("", sea_commands.sea_settings(path)) == seconds, command
-    # ``dummy`` is hidden (no ``/dummy`` command): it is reached by path.
-    assert sea_commands.get_command("dummy") is None
+        assert resolve_timeout(None, sea_commands.sea_settings(path)) == seconds, command
+    # ``sorcar`` is hidden (no ``/sorcar`` command): it is reached by path.
+    assert sea_commands.get_command("sorcar") is None
     dummy_settings = sea_commands.sea_settings(Path(DEFAULT_AGENT_PATH))
     assert "timeout" not in dummy_settings
-    assert resolve_timeout("", dummy_settings) == DEFAULT_DISPATCH_TIMEOUT_SECONDS == 3600.0
+    assert resolve_timeout(None, dummy_settings) == DEFAULT_DISPATCH_TIMEOUT_SECONDS == 3600.0
 
     def _script(n: int, body: str) -> Path:
         folder = tmp_path / f"t{n}"
@@ -152,9 +152,9 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
     }
     for n, (body, expected) in enumerate(resolved.items()):
         settings = sea_commands.sea_settings(_script(n, body))
-        assert resolve_timeout("", settings) == expected, body
+        assert resolve_timeout(None, settings) == expected, body
         # An explicit positive argument always wins over the script.
-        assert resolve_timeout("42", settings) == 42.0, body
+        assert resolve_timeout(42.0, settings) == 42.0, body
     broken = [
         "def settings():\n    return {'timeout': 'soon'}\n",
         "def settings():\n    return {'timeout': True}\n",

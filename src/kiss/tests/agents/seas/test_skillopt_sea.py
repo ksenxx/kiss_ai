@@ -544,7 +544,9 @@ def test_one_round_accepts_a_candidate_that_passes_more_selection_tasks(tmp_path
         == sh_sea.system_prompt().rstrip("\n") + "\nReturn the exact output.\n"
     )
     # Every other line of the SEA is kept: its ``settings()`` still pin the Bash profile.
-    assert ns["settings"]() == sh_sea.settings() == {"kind": "worker", "tool_profile": "bash"}
+    assert ns["settings"]() == sh_sea.settings() == {
+        "kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"],
+    }
     assert sea.read_text(encoding="utf-8") == _SH_SEA.read_text(encoding="utf-8")
 
     out = tmp_path / "out"

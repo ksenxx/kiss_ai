@@ -111,7 +111,7 @@ class TestSeaNameOfAgent:
         assert sea_name_of_agent("/x/seas/write_paper/write_paper_sea.py", channels) == (
             "write_paper_sea"
         )
-        assert sea_name_of_agent("", channels) == "dummy_sea"
+        assert sea_name_of_agent("", channels) == "sorcar_sea"
         assert sea_name_of_agent("Cron", channels) == "cron_agent"
         assert sea_name_of_agent("Home Assistant", channels) == "homeassistant_sea"
         assert sea_name_of_agent("slack", channels) == "slack_sea"

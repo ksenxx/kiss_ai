@@ -29,10 +29,8 @@ from kiss.agents.sorcar.agent_dispatch import (
     RunOptions,
     fanout_conflict,
     inherit_from_parent,
-    parse_budget,
     parse_run_options,
     resolve_agent,
-    resolve_timeout,
 )
 from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
 from kiss.agents.sorcar.fanout_guard import (
@@ -2306,9 +2304,11 @@ class SorcarAgent(RelentlessAgent):
                     string (default) lets Python choose automatically.
                     Set to a lower number to limit concurrency.
                 options: Optional JSON object of run settings, as for
-                    ``run_agent``: ``work_dir`` (relative to this
-                    task's), ``tool_profile``, ``add_to_system_prompt``
-                    / ``add_to_prompt`` (appended text),
+                    ``run_agent``: ``model``, ``tool_profile``,
+                    ``max_budget``, ``timeout`` (the arguments above
+                    are shortcuts for these), ``work_dir`` (relative to
+                    this task's), ``add_to_system_prompt`` /
+                    ``add_to_prompt`` (appended text),
                     ``model_config``, ``docker_image``, and the booleans
                     ``inherit`` (``false``: the children take nothing
                     from this task but their budget share),
@@ -2349,25 +2349,19 @@ class SorcarAgent(RelentlessAgent):
                 )
             if workers is not None and workers < 1:
                 return f"Error: max_workers must be at least 1, got {workers}."
-            budget = parse_budget(max_budget)
-            if isinstance(budget, str):
-                return budget
             try:
-                run_options = parse_run_options(options, tool_profile)
+                run_options = parse_run_options(options, tool_profile, model, max_budget, timeout)
             except ValueError as exc:
                 return f"Error: {exc}"
-            seconds = resolve_timeout(timeout, {}) if timeout.strip() else None
-            if isinstance(seconds, str):
-                return seconds
             try:
                 results = self._run_tasks_parallel(
                     task_list, max_workers=workers,
-                    model_name=model or None,
+                    model_name=run_options.model or None,
                     tool_profile=run_options.tool_profile,
                     agent=agent,
-                    max_budget=budget,
+                    max_budget=run_options.max_budget,
                     options=run_options,
-                    timeout=seconds,
+                    timeout=run_options.timeout,
                 )
             except SeaError as exc:
                 return f"Error: {exc}"

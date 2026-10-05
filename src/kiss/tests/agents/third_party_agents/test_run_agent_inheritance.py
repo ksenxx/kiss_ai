@@ -50,7 +50,7 @@ from kiss.tests.server.parallel_agent_harness import (
 )
 
 DUMMY_SEA = str(
-    Path(agent_dispatch.__file__).resolve().parents[1] / "seas" / "dummy" / "dummy_sea.py"
+    Path(agent_dispatch.__file__).resolve().parents[1] / "seas" / "sorcar" / "sorcar_sea.py"
 )
 PARENT_MODEL = "gpt-4o-mini"
 PARENT_CONFIG = {"base_url": "http://127.0.0.1:1/v1", "api_key": "kiss-test-key"}
@@ -118,9 +118,9 @@ def _dispatch(
     budget: float | None = None,
     options: RunOptions = RunOptions(),
 ) -> daemon_client.TaskResult:
-    """Run ``dispatch_result`` for ``dummy_sea.py`` on *parent*'s repo."""
+    """Run ``dispatch_result`` for ``sorcar_sea.py`` on *parent*'s repo."""
     result = dispatch_result(
-        "dummy_sea", "say hi", DUMMY_SEA, parent.work_dir, model_name, budget, 30.0,
+        "sorcar_sea", "say hi", DUMMY_SEA, parent.work_dir, model_name, budget, 30.0,
         parent_agent=parent, inherit=inherit, options=options,
     )
     assert isinstance(result, daemon_client.TaskResult), result
@@ -341,7 +341,7 @@ class TestDispatchResultInheritance:
         assert captured[0]["model_config"] == PARENT_CONFIG
         captured.clear()
         result = dispatch_result(
-            "dummy_sea", "say hi", DUMMY_SEA, str(env.repo), "", None, 30.0,
+            "sorcar_sea", "say hi", DUMMY_SEA, str(env.repo), "", None, 30.0,
             parent_agent=parent, inherit=True, settings={"kind": "session", "model": "x"},
         )
         assert isinstance(result, daemon_client.TaskResult), result
@@ -506,7 +506,7 @@ def _run_parent(
     """Run a ``WorktreeSorcarAgent`` whose scripted model calls ``run_agent`` once."""
     parent = WorktreeSorcarAgent("inherit-e2e-parent")
     result = parent.run(
-        prompt_template="delegate to the dummy agent",
+        prompt_template="delegate to the sorcar agent",
         model_name=STANDIN_MODEL,
         model_config=server.model_config,
         work_dir=str(env.repo),
@@ -524,7 +524,7 @@ def _run_parent(
 
 
 class _DelegatingModel:
-    """Scripted model: first ``run_agent(dummy_sea.py)``, then ``finish``.
+    """Scripted model: first ``run_agent(sorcar_sea.py)``, then ``finish``.
 
     Keeps the text of every request so a test can check what system
     prompt the parent itself ran with.

@@ -57,7 +57,9 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert "call the Bash tool with the user's command exactly as written" in prompt
     assert "call the `finish` tool" in prompt
     assert "must never be empty" in prompt
-    assert sh_sea.settings() == {"kind": "worker", "tool_profile": "bash"}
+    assert sh_sea.settings() == {
+        "kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"],
+    }
     assert TOOL_PROFILES["bash"] == frozenset({"Bash"})
     # The ``worker`` preset turns worktree, auto-commit, classifier,
     # fan-out, browser and memory off; ``system_prompt()`` stays a getter
@@ -65,6 +67,7 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert resolve_settings(vars(sh_sea)) == {
         "kind": "worker",
         "tool_profile": "bash",
+        "locked": ["tool_profile"],
         "use_worktree": False,
         "auto_commit": False,
         "auto_classify": False,

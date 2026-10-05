@@ -119,11 +119,13 @@ def settings() -> dict[str, Any]:
     memory — the answer comes from ``task_context`` alone, quickly.
     ``tool_profile: "none"`` keeps even the built-in toolset out, so the
     answerer (which shares the running task's tree) cannot run commands
-    or touch files.  ``system_prompt`` is the SYSTEM_LITE ablation prompt
-    (``_ask_system_lite.md`` next to this module, brand placeholders
-    filled).
+    or touch files; it is ``locked``, so a ``run_agent(agent="ask",
+    tool_profile=...)`` that asks for tools is refused instead of
+    running an answerer with them.  ``system_prompt`` is the
+    SYSTEM_LITE ablation prompt (``_ask_system_lite.md`` next to this
+    module, brand placeholders filled).
     """
-    return {"kind": "worker", "tool_profile": "none"}
+    return {"kind": "worker", "tool_profile": "none", "locked": ["tool_profile"]}
 
 
 def prompt(task: str) -> str:

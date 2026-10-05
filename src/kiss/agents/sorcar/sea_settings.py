@@ -17,8 +17,9 @@ path of a base script whose configuration this one refines, see
 :func:`kiss.agents.sorcar.sea_commands.sea_layers`), any of the
 per-run parameters of :func:`kiss.server.sorcar.run` listed in
 :data:`SETTING_TYPES`, and two keys read by the dispatcher:
-``timeout`` (seconds a ``run_agent`` call waits for this script's
-sub-task, and the limit of each ``run_parallel`` child) and ``locked``
+``timeout`` (seconds the sub-task may take: the call's value, else
+this setting, else 3600 for ``run_agent`` and no own limit for a
+``run_parallel`` child) and ``locked``
 (the keys an explicit caller argument may not replace).  Against the
 caller there is one precedence rule, :data:`PRECEDENCE_RULE`, enforced
 by :func:`locked_conflicts` and rendered by ``sea docs`` into every
@@ -148,12 +149,17 @@ SETTING_DOCS: dict[str, str] = {
     "tool_profile": "The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full "
                     "toolset).",
     "docker_image": "Run inside this Docker image (default: the host).",
-    "timeout": "Seconds a `run_agent` call waits for the run (default 3600) and the limit of each "
-               "`run_parallel` child (default none); ignored by `/<name>`.",
+    "timeout": "Seconds the run may take: the call's `timeout` argument or option wins, then "
+               "this setting, then the default, which is 3600 for a `run_agent` call (the "
+               "sub-task is stopped when it expires) and no limit of its own for a "
+               "`run_parallel` child (a thread of the calling task, bounded by it); ignored by "
+               "`/<name>`.",
     "locked": "Keys an explicit `run_agent` / `run_parallel` argument or option may not change: "
               "a differing value is an error.",
     "hidden": "`True`: the script is no `/command` and no `run_agent` agent name (loadable by "
-              "path and as an `extends` base only); must be the literal `True` in `settings()`.",
+              "path and as an `extends` base only). It must be the literal `True` in "
+              "`settings()` because the command registry reads it from the source without "
+              "running the script (a computed value is ignored).",
 }
 """One line of documentation per :data:`SETTING_TYPES` key (rendered by ``sea docs``)."""
 
