@@ -8,7 +8,7 @@ Channel agent modules read their multi-account workspace identifier
 from the process-global ``KISS_CHANNEL_WORKSPACE`` environment
 variable when their ``add_to_tools()`` runs on the daemon.  The
 daemon's task runner publishes the workspace through the helpers here
-for every ``channel``-preset run (``/slack ...``, ``run_agent("slack")``,
+for every ``channel``-kind run (``/slack ...``, ``run_agent("slack")``,
 ``run_agent(".../slack_sea.py")``, a channel CLI's launch; see
 ``kiss.server.task_runner``), from before the tools are built until
 the run ends.
@@ -49,7 +49,7 @@ WORKSPACE_ENV_VAR = "KISS_CHANNEL_WORKSPACE"
 WORKSPACE_WAIT_TIMEOUT_SECONDS = 900.0
 """Bound on a run's wait for a conflicting channel workspace to free up.
 
-A ``channel``-preset run whose workspace differs from a running channel
+A ``channel``-kind run whose workspace differs from a running channel
 task's waits at most this long in :func:`enter_workspace` before it
 fails with a diagnostic, so a conflicting task cannot hang it forever.
 """

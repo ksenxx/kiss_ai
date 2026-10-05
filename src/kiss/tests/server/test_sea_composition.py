@@ -4,7 +4,8 @@
 # add your name here
 """End-to-end tests of the composed SEA contract.
 
-What these tests pin down (``reports/sea-run-agent-semantics-and-defects-2026-10-04.md``,
+What these tests pin down (``reports/archive/sea-run-agent-2026-10-04/
+sea-run-agent-semantics-and-defects-2026-10-04.md``,
 proposals F1–F5):
 
 * ``prompt(task)`` is the one prompt surface: it receives the task and
@@ -22,7 +23,7 @@ proposals F1–F5):
   included) and rejects the old ``append_to_*`` names by name; the
   ``workspace`` argument is forwarded as a wire field and HELD by the
   daemon for a ``channel``-preset run's lifetime.
-* ``is_parallel`` is inherited from the calling agent; ``run_parallel``
+* ``allow_fan_out`` is inherited from the calling agent; ``run_parallel``
   can name an agent script for its children.
 """
 
@@ -74,7 +75,7 @@ BASE_SEA = textwrap.dedent('''
 
 
     def settings() -> dict:
-        return {"preset": "worker", "use_web_tools": True}
+        return {"kind": "worker", "use_web_tools": True}
 
 
     def prompt(task: str) -> str:
@@ -157,25 +158,25 @@ def test_settings_vocabulary_has_no_prompt_keys() -> None:
     # channel workspace and the two appended texts.
     assert set(agent_dispatch.OPTION_TYPES) == (
         set(SETTING_TYPES)
-        - {"preset", "extends", "kind", "timeout", "model", "max_budget", "tool_profile"}
-    ) | {"workspace", "add_to_prompt", "add_to_system_prompt"}
+        - {"extends", "kind", "locked", "hidden", "timeout", "model", "max_budget", "tool_profile"}
+    ) | {"inherit", "workspace", "add_to_prompt", "add_to_system_prompt"}
     assert set(RunOptions.__dataclass_fields__) == set(agent_dispatch.OPTION_TYPES) | {
         "system_prompt", "tool_profile"
     }
 
 
 def test_merge_settings_later_wins_and_session_never_masks_a_preset() -> None:
-    base = resolve_settings({"settings": lambda: {"preset": "worker", "use_web_tools": True}})
+    base = resolve_settings({"settings": lambda: {"kind": "worker", "use_web_tools": True}})
     derived = resolve_settings({"settings": lambda: {"max_budget": 1, "extends": "x"}})
     merged = merge_settings([base, derived])
-    assert merged["preset"] == "worker"
+    assert merged["kind"] == "worker"
     assert merged["use_web_tools"] is True and merged["max_budget"] == 1.0
-    assert merged["is_parallel"] is False  # the worker preset's default survives
+    assert merged["allow_fan_out"] is False  # the worker preset's default survives
     assert "extends" not in merged
-    assert merge_settings([]) == {"preset": "session"}
+    assert merge_settings([]) == {"kind": "session"}
     # A derived preset replaces the base's preset and its defaults.
-    channel = resolve_settings({"settings": lambda: {"preset": "channel"}})
-    assert merge_settings([base, channel])["preset"] == "channel"
+    channel = resolve_settings({"settings": lambda: {"kind": "channel"}})
+    assert merge_settings([base, channel])["kind"] == "channel"
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +197,7 @@ def test_extends_by_command_name_and_by_path_evaluates_both_layers(tmp_path: Pat
         layers = sea_layers(derived)
         assert [layer.path for layer in layers] == [base.resolve(), derived]
         settings = sea_settings(derived)
-        assert settings["preset"] == "worker"
+        assert settings["kind"] == "worker"
         assert settings["use_web_tools"] is True and settings["max_budget"] == 2.0
         run = evaluate_sea(layers, "do it", task_id="T-1")
         assert run.prompt == "[derived] [base] do it BASE-ADD T-1 DERIVED-ADD"
@@ -247,7 +248,7 @@ def test_extends_errors_name_the_script(tmp_path: Path) -> None:
     # A channel agent is never a base.
     _write(
         folder / "chan" / "chan_sea.py",
-        "def description():\n    return 'c'\ndef settings():\n    return {'preset': 'channel'}\n",
+        "def description():\n    return 'c'\ndef settings():\n    return {'kind': 'channel'}\n",
     )
     onchan = _write(
         folder / "onchan" / "onchan_sea.py",
@@ -261,7 +262,7 @@ def test_extends_errors_name_the_script(tmp_path: Path) -> None:
     base = _write(folder / "wbase" / "wbase_sea.py", BASE_SEA)
     chan2 = _write(folder / "chan2" / "chan2_sea.py",
                    "def description():\n    return 'c'\n"
-                   "def settings():\n    return {'preset': 'channel', 'extends': 'wbase'}\n")
+                   "def settings():\n    return {'kind': 'channel', 'extends': 'wbase'}\n")
     sea_commands.refresh_registry()
     assert [layer.path for layer in sea_layers(chan2)] == [base, chan2]
     cmd: dict[str, Any] = {"agentPath": str(chan2), "prompt": "p", "workspace": " acct "}
@@ -368,13 +369,15 @@ def test_prompt_getter_is_checked(tmp_path: Path) -> None:
     run = evaluate_sea(sea_layers(sea), "kept")
     assert run.prompt == "kept" and run.tools == []
     cmd: dict[str, Any] = {"agentPath": str(sea), "prompt": "kept"}
-    assert apply_agent_overrides(cmd) == set() and cmd == {"agentPath": str(sea), "prompt": "kept"}
+    assert apply_agent_overrides(cmd) == set()
+    assert cmd.pop("_runConfig") == {"sea": "noprompt", "kind": "session", "overridden": {}}
+    assert cmd == {"agentPath": str(sea), "prompt": "kept"}
     with pytest.raises(AgentFileError, match="must be a path string"):
         apply_agent_overrides({"agentPath": 7, "prompt": "p"})
 
 
 # ---------------------------------------------------------------------------
-# Dispatcher: one path, work_dir option, renamed options, is_parallel
+# Dispatcher: one path, work_dir option, renamed options, allow_fan_out
 # ---------------------------------------------------------------------------
 
 
@@ -419,9 +422,19 @@ def test_work_dir_option_and_script_work_dir(
     assert captured[-1]["work_dir"] == str(caller / "sub")
     assert run_agent("t", str(plain), options=json.dumps({"work_dir": str(tmp_path)})) != ""
     assert captured[-1]["work_dir"] == str(tmp_path)
-    # The script's own work_dir wins over the option.
+    # The explicit option wins over the script's work_dir; the script's
+    # applies when the option is absent, and a locked work_dir refuses the option.
     run_agent("t", str(pinning), options='{"work_dir": "sub"}')
+    assert captured[-1]["work_dir"] == str(caller / "sub")
+    run_agent("t", str(pinning))
     assert captured[-1]["work_dir"] == str(pinned)
+    locking = _write(
+        caller / "locking.py",
+        f"def settings():\n    return {{'work_dir': {str(pinned)!r}, 'locked': ['work_dir']}}\n",
+    )
+    out = run_agent("t", str(locking), options='{"work_dir": "sub"}')
+    assert out.startswith("Error: locking: the script locks work_dir="), out
+    assert "(asked for 'sub')" in out
     # The wire spellings are not option keys; the ``add_to_*`` ones are forwarded.
     out = run_agent("t", str(plain), options='{"append_to_system_prompt": "x"}')
     assert out.startswith("Error: options has an unknown key 'append_to_system_prompt'")
@@ -443,15 +456,15 @@ def test_is_parallel_is_inherited_from_the_calling_agent(
     parent.model_name = "gpt-6-astra"
     parent._is_parallel = False
     inherited = inherit_from_parent(parent, "", None, RunOptions())
-    assert inherited.options.is_parallel is False
-    explicit = inherit_from_parent(parent, "", None, RunOptions(is_parallel=True))
-    assert explicit.options.is_parallel is True
-    assert inherit_from_parent(None, "", None, RunOptions()).options.is_parallel is None
+    assert inherited.options.allow_fan_out is False
+    explicit = inherit_from_parent(parent, "", None, RunOptions(allow_fan_out=True))
+    assert explicit.options.allow_fan_out is True
+    assert inherit_from_parent(None, "", None, RunOptions()).options.allow_fan_out is None
     plain = _write(tmp_path / "plain.py", "def settings():\n    return {}\n")
     run_agent = agent_dispatch.make_run_agent_tool(str(tmp_path), parent)
     run_agent("t", str(plain))
     assert captured[-1]["is_parallel"] is False
-    run_agent("t", str(plain), options='{"is_parallel": true}')
+    run_agent("t", str(plain), options='{"allow_fan_out": true}')
     assert captured[-1]["is_parallel"] is True
     # Without a parent (standalone use) the daemon default — fan-out on — stands.
     agent_dispatch.make_run_agent_tool(str(tmp_path))("t", str(plain))
@@ -543,7 +556,7 @@ class SeaCompositionDaemonTest(DaemonRunApiHarness):
             self.folder / "chan" / "chan_sea.py",
             "import os\n"
             "def description():\n    return 'c'\n"
-            f"def settings():\n    return {{'preset': 'channel', 'work_dir': {self.repo!r}}}\n"
+            f"def settings():\n    return {{'kind': 'channel', 'work_dir': {self.repo!r}}}\n"
             "def add_to_tools():\n"
             "    def probe() -> str:\n"
             '        """Probe."""\n'
@@ -571,7 +584,7 @@ class SeaCompositionDaemonTest(DaemonRunApiHarness):
         chan = _write(
             self.folder / "chan" / "chan_sea.py",
             "def description():\n    return 'c'\n"
-            f"def settings():\n    return {{'preset': 'channel', 'work_dir': {self.repo!r}}}\n",
+            f"def settings():\n    return {{'kind': 'channel', 'work_dir': {self.repo!r}}}\n",
         )
         from kiss.server import task_runner
 

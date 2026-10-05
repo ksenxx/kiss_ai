@@ -83,6 +83,7 @@ from typing import Any
 from kiss.agents.sorcar.sea_settings import (
     SeaError,
     SettingsError,
+    declares_hidden,
     execute_python_file,
     merge_settings,
     resolve_settings,
@@ -218,7 +219,10 @@ def _scan_folder(folder: Path) -> dict[str, Path]:
         Mapping from command name (sub-folder name) to the absolute,
         resolved SEA-script path.  An underscore-prefixed folder is a
         valid command (``_helper/_helper_sea.py`` becomes ``/_helper``);
-        only names outside ``[A-Za-z0-9_-]`` are skipped.
+        only names outside ``[A-Za-z0-9_-]`` and scripts whose
+        ``settings()`` declare ``"hidden": True``
+        (:func:`~kiss.agents.sorcar.sea_settings.declares_hidden`) are
+        skipped.
     """
     out: dict[str, Path] = {}
     try:
@@ -235,7 +239,7 @@ def _scan_folder(folder: Path) -> dict[str, Path]:
             continue
         path = sea_script_in(sea_dir)
         try:
-            if not path.is_file():
+            if not path.is_file() or declares_hidden(path):
                 continue
         except OSError:
             continue
@@ -267,6 +271,22 @@ def _builtin_commands() -> dict[str, Path]:
         if spec is not None and spec.origin:
             out[command] = Path(spec.origin).resolve()
     return out
+
+
+def bundled_commands() -> dict[str, Path]:
+    """Return ``{command_name: script_path}`` for every command the package ships.
+
+    The built-in scripts (:data:`BUILTIN_COMMANDS`), the bundled
+    ``seas/`` folder and the bundled ``third_party_agents/`` folder, in
+    the registry's precedence (a later source overwrites an earlier
+    one), without the user's ``SEAS.md`` folders: the deterministic
+    list ``sea docs`` renders.
+    """
+    merged = _builtin_commands()
+    for folder in (_seas_dir(), _third_party_dir()):
+        if folder is not None:
+            merged.update(_scan_folder(folder))
+    return merged
 
 
 def _read_seas_md_folders() -> list[Path]:
@@ -677,14 +697,14 @@ def sea_settings(sea_path: Path) -> dict[str, Any]:
 
     :func:`sea_layers` merged with
     :func:`kiss.agents.sorcar.sea_settings.merge_settings`.  The
-    dispatcher reads the ``preset``, ``timeout``, ``work_dir`` and
+    dispatcher reads the ``kind``, ``timeout``, ``work_dir`` and
     ``model`` from it; the task runner the ``model`` and ``work_dir``.
 
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.
 
     Returns:
-        The settings dict, at least ``{"preset": "session"}``.
+        The settings dict, at least ``{"kind": "session"}``.
 
     Raises:
         SeaScriptError: When a script of the chain fails to import or
@@ -1053,6 +1073,55 @@ RESERVED_SUBCOMMANDS = ("help", "check")
 """The ``/xxx <word>`` prompts the daemon answers itself instead of running the SEA."""
 
 
+def check_sea(
+    sea_path: Path, require_description: bool = True,
+) -> tuple[list[SeaLayer], dict[str, Any], str]:
+    """Load the SEA at *sea_path* the way a run would and evaluate every getter.
+
+    The daemon's own path (``load_layers`` + ``apply_agent_overrides``
+    on a ``run`` command for :data:`CHECK_SAMPLE_TASK`), so a script
+    that reads the run command from those frames works, plus the
+    ``description()`` and model-picker checks a run does not make.
+
+    Args:
+        sea_path: The SEA's script.
+        require_description: Whether a missing ``description()`` is an
+            error (it is for a ``/command``; a script only loaded by
+            path or as an ``extends`` base needs none).
+
+    Returns:
+        ``(layers, cmd, description)``: the loaded layers, the ``run``
+        command with the script's overrides applied, and the
+        description text (``""`` when not required and absent).
+
+    Raises:
+        SeaError: The script or one of its getters breaks the contract,
+            in the words the daemon would use.
+    """
+    # Imported here: ``agent_file`` imports this module.
+    from kiss.server.agent_file import apply_agent_overrides, load_layers
+
+    cmd: dict[str, Any] = {
+        "agentPath": str(sea_path), "prompt": CHECK_SAMPLE_TASK, "parentTaskId": "<task id>",
+    }
+    layers = load_layers(cmd)
+    apply_agent_overrides(cmd, layers)
+    innermost = layers[-1].namespace
+    description = (
+        sea_description(sea_path) if require_description or "description" in innermost else ""
+    )
+    label = str(layers[-1].path)
+    registers = call_getter(innermost, label, "register_as_model")
+    if "register_as_model" in innermost and not isinstance(registers, bool):
+        raise SeaScriptError(
+            f"register_as_model() of agent script {label!r} must return a bool, "
+            f"got {type(registers).__name__}"
+        )
+    if "on_picked_as_model" in innermost:
+        _check_picked_hook(innermost["on_picked_as_model"], label)
+    return layers, cmd, description
+
+
 def sea_check(name: str, sea_path: Path) -> str:
     """Execute the SEA *name* at *sea_path* and report what a run of it would use.
 
@@ -1072,33 +1141,12 @@ def sea_check(name: str, sea_path: Path) -> str:
     Returns:
         The report, one item per line.
     """
-    # The daemon's own path (``load_layers`` + ``apply_agent_overrides``
-    # on a ``run`` command), so the report is what a run would get and
-    # a script that reads the run command from those frames works.
-    # Imported here: ``agent_file`` imports this module.
-    from kiss.server.agent_file import apply_agent_overrides, load_layers
-
-    cmd: dict[str, Any] = {
-        "agentPath": str(sea_path), "prompt": CHECK_SAMPLE_TASK, "parentTaskId": "<task id>",
-    }
     try:
-        layers = load_layers(cmd)
-        apply_agent_overrides(cmd, layers)
-        description = sea_description(sea_path)
-        innermost = layers[-1].namespace
-        label = str(layers[-1].path)
-        registers = call_getter(innermost, label, "register_as_model")
-        if "register_as_model" in innermost and not isinstance(registers, bool):
-            raise SeaScriptError(
-                f"register_as_model() of agent script {label!r} must return a bool, "
-                f"got {type(registers).__name__}"
-            )
-        if "on_picked_as_model" in innermost:
-            _check_picked_hook(innermost["on_picked_as_model"], label)
+        layers, cmd, description = check_sea(sea_path)
     except SeaError as exc:
         return f"/{name} is broken: {exc}"
     merged = merge_settings([layer.settings for layer in layers])
-    settings = {key: value for key, value in merged.items() if key != "preset"}
+    settings = {key: value for key, value in merged.items() if key != "kind"}
     model = settings.get("model") or "the calling task's model (else the default model)"
     tools = cmd.get("tools") or []
     defined = [
@@ -1110,14 +1158,14 @@ def sea_check(name: str, sea_path: Path) -> str:
     lines = [
         f"/{name}: {description}",
         "layers: " + " > ".join(script_name(str(layer.path)) for layer in layers),
-        f"preset: {merged['preset']}",
+        f"kind: {merged['kind']}",
         "settings: " + (json.dumps(settings, sort_keys=True, default=str) or "{}"),
         f"model: {model}",
         "tools added: " + (", ".join(_tool_name(tool) for tool in tools) or "none"),
         "getters and hooks defined: " + (", ".join(defined) or "none"),
         f"prompt for {CHECK_SAMPLE_TASK}: {cmd['prompt']}",
     ]
-    if "description" not in innermost:
+    if "description" not in layers[-1].namespace:
         lines.append("note: description() comes from an extended script")
     return "\n".join(lines)
 

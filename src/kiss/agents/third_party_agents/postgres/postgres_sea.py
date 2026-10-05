@@ -534,7 +534,7 @@ def settings() -> dict:
     channel preamble in the system prompt (see
     :mod:`kiss.agents.sorcar.sea_settings`).
     """
-    return {"preset": "channel"}
+    return {"kind": "channel"}
 
 
 def add_to_system_prompt() -> str:

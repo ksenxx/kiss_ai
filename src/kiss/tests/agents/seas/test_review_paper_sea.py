@@ -172,12 +172,12 @@ def test_sea_getters_follow_the_user_contract() -> None:
     # Browse, fan out, skip the classifier; a ``run_agent`` dispatch waits two hours.
     assert review_paper_sea.settings() == {
         "use_web_tools": True,
-        "is_parallel": True,
-        "classify_tasks": False,
+        "allow_fan_out": True,
+        "auto_classify": False,
         "timeout": 2 * 3600,
     }
     assert resolve_settings(vars(review_paper_sea)) == {
-        "preset": "session", **review_paper_sea.settings()
+        "kind": "session", **review_paper_sea.settings()
     }
     # The default system prompt is kept: the SEA only appends to it (no
     # ``system_prompt()`` getter), and defines none of the removed
@@ -387,7 +387,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
             system_prompt=review_paper_sea.add_to_system_prompt(),
             tools=review_paper_sea.add_to_tools(),
             web_tools=settings["use_web_tools"],
-            is_parallel=settings["is_parallel"],
+            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

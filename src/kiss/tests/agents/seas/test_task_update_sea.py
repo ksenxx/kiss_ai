@@ -74,20 +74,20 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert sea.system_prompt() == sea.SYSTEM_PROMPT
     assert "task_transcript" in sea.SYSTEM_PROMPT
     assert sea.add_to_tools() == [sea.task_transcript]
-    assert sea.settings() == {"preset": "worker", "tool_profile": "bash", "max_budget": 1.0}
+    assert sea.settings() == {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
     # ``worker`` turns fan-out, browser, memory, worktree, auto-commit and
     # the classifier off; ``system_prompt()`` stays a getter the daemon
     # applies, so ``resolve_settings`` does not carry its text.
     assert resolve_settings(vars(sea)) == {
-        "preset": "worker",
+        "kind": "worker",
         "tool_profile": "bash",
         "max_budget": 1.0,
-        "is_parallel": False,
+        "allow_fan_out": False,
         "use_web_tools": False,
         "use_memory": False,
         "use_worktree": False,
         "auto_commit": False,
-        "classify_tasks": False,
+        "auto_classify": False,
     }
     assert_no_removed_getters(sea)
 
@@ -278,7 +278,7 @@ def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path)
             base_system_prompt=sea.system_prompt(),
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["is_parallel"],
+            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

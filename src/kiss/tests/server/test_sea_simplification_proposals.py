@@ -4,15 +4,17 @@
 # add your name here
 """The SEA / ``run_agent`` semantics after the 2026-10-04 simplification.
 
-``reports/sea-run-agent-semantics-assessment-2026-10-04.md`` §3 proposed
+``reports/archive/sea-run-agent-2026-10-04/sea-run-agent-semantics-assessment-2026-10-04.md``
+§3 proposed
 nine changes; each has a test here that drives the real code paths
 (the settings loader, the daemon-side ``apply_agent_overrides``, the
 dispatcher with a captured ``daemon_client.run``, a real
 ``VSCodeServer`` run for the classifier, and the fan-out engine):
 
-* P1 — ``channel`` is a pure preset: ``kind: "channel"``, ``inherit:
-  False`` and a ``work_dir`` under the explicit keys; the daemon and
-  the dispatcher key on those settings, not on the preset's name.
+* P1 — one ``kind`` axis (``session`` / ``worker`` / ``channel``): a
+  kind is a dict of defaults under the explicit keys; the daemon and
+  the dispatcher key on ``kind: "channel"`` (scratch ``work_dir``,
+  workspace, preamble, no inheritance).
 * P2 — ``run_parallel`` refuses, with a message, a script or an
   ``options`` object pinning what a fan-out child cannot honour.
 * P3 — ``add_to_prompt`` is not a setting; ``{task_id}`` is
@@ -49,11 +51,10 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_commands import SeaScriptError, sea_layers, sea_settings
 from kiss.agents.sorcar.sea_settings import (
     KINDS,
-    PRESET_NAMES,
     SETTING_TYPES,
-    WORKER_PRESET,
+    WORKER_DEFAULTS,
     SettingsError,
-    presets,
+    kind_defaults,
     resolve_settings,
 )
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
@@ -129,112 +130,96 @@ def _bare_agent(work_dir: Path) -> ChatSorcarAgent:
 
 
 # ---------------------------------------------------------------------------
-# P1 — channel is a pure preset: kind, inherit, work_dir
+# P1 / P2 (2026-10-04 round two) — one ``kind`` axis: session | worker | channel
 # ---------------------------------------------------------------------------
 
 
-def test_presets_are_pure_dicts_and_channel_is_worker_plus_three_keys(
+def test_kinds_are_pure_dicts_and_channel_is_worker_plus_work_dir(
     home: IsolatedKissHome,
 ) -> None:
-    table = presets()
-    assert tuple(table) == PRESET_NAMES == ("session", "worker", "channel")
+    table = kind_defaults()
+    assert tuple(table) == KINDS == ("session", "worker", "channel")
     assert table["session"] == {}
-    assert table["worker"] == WORKER_PRESET
-    assert table["channel"] == {
-        **WORKER_PRESET,
-        "kind": "channel",
-        "inherit": False,
-        "work_dir": str(home.kiss_home / "channel_work"),
-    }
-    # The preset is defaults only: an explicit key wins.
-    resolved = resolve_settings(
-        {"settings": lambda: {"preset": "channel", "inherit": True, "work_dir": "/w"}},
-    )
-    assert resolved["inherit"] is True and resolved["work_dir"] == "/w"
-    assert resolved["kind"] == "channel"
-    # ``kind`` and ``inherit`` are settings of their own, for any preset.
-    plain = resolve_settings({"settings": lambda: {"kind": "channel", "inherit": False}})
-    assert plain["preset"] == "session" and plain["kind"] == "channel"
-    assert "kind" in SETTING_TYPES and "inherit" in SETTING_TYPES
+    assert table["worker"] == WORKER_DEFAULTS
+    assert table["channel"] == {**WORKER_DEFAULTS, "work_dir": str(home.kiss_home / "channel_work")}
+    # A kind is defaults only: an explicit key wins; the kind itself is kept.
+    resolved = resolve_settings({"settings": lambda: {"kind": "channel", "work_dir": "/w"}})
+    assert resolved["kind"] == "channel" and resolved["work_dir"] == "/w"
+    assert resolve_settings({"settings": lambda: {}})["kind"] == "session"
     with pytest.raises(
-        SettingsError, match="settings\\(\\)\\['kind'\\] must be one of agent, channel; got 'bot'",
+        SettingsError,
+        match="settings\\(\\)\\['kind'\\] must be one of session, worker, channel; got 'agent'",
     ):
-        resolve_settings({"settings": lambda: {"kind": "bot"}})
-    assert KINDS == ("agent", "channel")
-    # Neither travels the wire; both are read by the dispatcher / daemon.
-    assert set(DISPATCHER_SETTINGS) == {"preset", "extends", "timeout", "inherit", "kind"}
-    assert "kind" not in SETTING_FIELDS and "inherit" not in SETTING_FIELDS
+        resolve_settings({"settings": lambda: {"kind": "agent"}})
+    # The former second axis is gone: ``preset`` is a renamed key, ``inherit`` a removed one.
+    with pytest.raises(
+        SettingsError, match="key 'preset' was renamed to 'kind'; run `uv run sea lint --fix`",
+    ):
+        resolve_settings({"settings": lambda: {"preset": "worker"}})
+    with pytest.raises(
+        SettingsError, match="key 'inherit' was removed: a `channel` run never inherits",
+    ):
+        resolve_settings({"settings": lambda: {"inherit": False}})
+    assert "preset" not in SETTING_TYPES and "inherit" not in SETTING_TYPES
+    # None of the script-only keys travels the wire.
+    assert set(DISPATCHER_SETTINGS) == {"kind", "extends", "timeout", "locked", "hidden"}
+    assert not set(DISPATCHER_SETTINGS) & set(SETTING_FIELDS)
 
 
-def test_daemon_keys_on_kind_not_on_the_preset_name(home: IsolatedKissHome, tmp_path: Path) -> None:
-    """Workspace, preamble and the extends refusal follow ``kind: "channel"``."""
-    by_kind = _write(
-        tmp_path / "bykind" / "bykind_sea.py",
-        "def description():\n    return 'k'\n"
-        "def settings():\n    return {'preset': 'worker', 'kind': 'channel'}\n",
-    )
-    by_preset = _write(
-        tmp_path / "bypreset" / "bypreset_sea.py",
-        "def description():\n    return 'p'\ndef settings():\n    return {'preset': 'channel'}\n",
+def test_daemon_keys_on_the_channel_kind(home: IsolatedKissHome, tmp_path: Path) -> None:
+    """Workspace, preamble, scratch work_dir and the extends refusal follow ``kind: "channel"``."""
+    channel = _write(
+        tmp_path / "chan" / "chan_sea.py",
+        "def description():\n    return 'p'\ndef settings():\n    return {'kind': 'channel'}\n",
     )
     worker = _write(
         tmp_path / "worker" / "worker_sea.py",
-        "def description():\n    return 'w'\ndef settings():\n    return {'preset': 'worker'}\n",
+        "def description():\n    return 'w'\ndef settings():\n    return {'kind': 'worker'}\n",
     )
-    for script in (by_kind, by_preset):
-        cmd: dict[str, Any] = {"agentPath": str(script), "prompt": "p", "workspace": "acct"}
-        layers = load_layers(cmd)
-        assert is_channel(layers)
-        assert channel_workspace(cmd, layers) == "acct"
-        apply_agent_overrides(cmd, layers)
-        preamble = CHANNEL_PREAMBLE.format(name=script.parent.name)
-        assert cmd["appendToSystemPrompt"].startswith(preamble)
-    # The channel preset's work_dir reaches the wire; a bare kind does not add one.
-    cmd = {"agentPath": str(by_preset), "prompt": "p"}
-    assert "workDir" in apply_agent_overrides(cmd)
+    cmd: dict[str, Any] = {"agentPath": str(channel), "prompt": "p", "workspace": "acct"}
+    layers = load_layers(cmd)
+    assert is_channel(layers)
+    assert channel_workspace(cmd, layers) == "acct"
+    assert "workDir" in apply_agent_overrides(cmd, layers)
     assert cmd["workDir"] == str(home.kiss_home / "channel_work")
-    cmd = {"agentPath": str(by_kind), "prompt": "p"}
-    assert "workDir" not in apply_agent_overrides(cmd)
+    preamble = CHANNEL_PREAMBLE.format(name="chan")
+    assert cmd["appendToSystemPrompt"].startswith(preamble)
     layers = load_layers({"agentPath": str(worker)})
     assert not is_channel(layers) and channel_workspace({"agentPath": str(worker)}, layers) == ""
     derived = _write(
         tmp_path / "derived" / "derived_sea.py",
         f"def description():\n    return 'd'\n"
-        f"def settings():\n    return {{'extends': {str(by_kind)!r}}}\n",
+        f"def settings():\n    return {{'extends': {str(channel)!r}}}\n",
     )
     with pytest.raises(SeaScriptError, match="cannot extend the channel agent script"):
         sea_layers(derived)
 
 
-def test_dispatcher_inherits_unless_inherit_is_false(
+def test_dispatcher_inherits_unless_channel_or_inherit_false(
     captured: list[dict[str, Any]], tmp_path: Path, home: IsolatedKissHome,
 ) -> None:
-    """``inherit`` (script > option > True) decides the dispatch, not the preset."""
+    """The kind and the call's ``inherit`` option decide the dispatch; a channel never inherits."""
     plain = _write(tmp_path / "plain_sea.py", "def settings():\n    return {}\n")
-    no_inherit = _write(
-        tmp_path / "noinherit_sea.py", "def settings():\n    return {'inherit': False}\n",
-    )
     channel = _write(
-        tmp_path / "chan_sea.py", "def settings():\n    return {'preset': 'channel'}\n",
+        tmp_path / "chan_sea.py", "def settings():\n    return {'kind': 'channel'}\n",
     )
     run_agent = make_run_agent_tool(str(home.repo))
     run_agent("t", str(plain))
     assert captured[-1]["inherit_tools"] is True
     assert captured[-1]["work_dir"] == str(home.repo)
-    run_agent("t", str(no_inherit))
-    assert captured[-1]["inherit_tools"] is False
-    assert captured[-1]["work_dir"] == str(home.repo)
     run_agent("t", str(plain), options='{"inherit": false}')
     assert captured[-1]["inherit_tools"] is False
-    # The script's ``inherit`` wins over the option.
-    run_agent("t", str(no_inherit), options='{"inherit": true}')
-    assert captured[-1]["inherit_tools"] is False
+    assert captured[-1]["work_dir"] == str(home.repo)
+    n = len(captured)
     run_agent("t", str(channel))
     assert captured[-1]["inherit_tools"] is False
     assert captured[-1]["work_dir"] == str(home.kiss_home / "channel_work")
     assert captured[-1]["workspace"] == ""
     run_agent("t", str(channel), options='{"workspace": " acct "}')
     assert captured[-1]["workspace"] == "acct"
+    out = run_agent("t", str(channel), options='{"inherit": true}')
+    assert out == "Error: chan: a channel agent never inherits from the calling task"
+    assert len(captured) == n + 2  # the refused call never dispatched
 
 
 # ---------------------------------------------------------------------------
@@ -244,11 +229,11 @@ def test_dispatcher_inherits_unless_inherit_is_false(
 
 def test_fanout_conflict_is_one_rule_for_settings_and_options() -> None:
     assert fanout_conflict({}) == ""
-    unpinned = {"use_worktree": False, "auto_commit": False, "classify_tasks": False}
+    unpinned = {"use_worktree": False, "auto_commit": False, "auto_classify": False}
     assert fanout_conflict(unpinned) == ""
-    channel = fanout_conflict({"preset": "channel", "kind": "channel"})
+    channel = fanout_conflict({"kind": "channel"})
     assert channel.startswith("is a channel agent")
-    for key in ("use_worktree", "auto_commit", "classify_tasks"):
+    for key in ("use_worktree", "auto_commit", "auto_classify"):
         assert f"pins {key}: true" in fanout_conflict({key: True})
     assert "pins chat_id" in fanout_conflict({"chat_id": ""})
     assert "names a workspace" in fanout_conflict({"workspace": "acct"})
@@ -290,11 +275,16 @@ def test_run_parallel_refuses_pinned_settings_and_options_loudly(
     out = run_parallel('["a"]', options='{"workspace": "acct"}')
     assert out.startswith("Error: run_parallel options names a workspace")
     assert fanned == []
-    # A script pinning only what a child does anyway (or a timeout) runs,
-    # and its settings win over an option that alone would be refused.
+    # A script pinning only what a child does anyway (or a timeout) runs;
+    # an explicit option wins over its settings, so one a child cannot
+    # honour is refused even when the script pins the opposite.
     out = run_parallel(
         '["a", "b"]', agent="fine_sea.py", max_budget="0.5",
         options='{"work_dir": "sub", "use_worktree": true}',
+    )
+    assert out.startswith("Error: run_parallel options pins use_worktree: true")
+    out = run_parallel(
+        '["a", "b"]', agent="fine_sea.py", max_budget="0.5", options='{"work_dir": "sub"}',
     )
     assert "success: true" in out
     (call,) = fanned
@@ -352,9 +342,10 @@ def test_run_agent_and_run_parallel_share_one_argument_order(home: IsolatedKissH
         "task", "agent", "model", "tool_profile", "max_budget", "timeout", "options", "wait",
     ]
     assert run_parallel == [
-        "tasks", "agent", "model", "tool_profile", "max_budget", "max_workers", "options",
+        "tasks", "agent", "model", "tool_profile", "max_budget", "timeout", "max_workers",
+        "options",
     ]
-    assert run_agent[1:4] == run_parallel[1:4] and run_agent[4] == run_parallel[4]
+    assert run_agent[1:6] == run_parallel[1:6]
     agent_job = list(inspect.signature(tools["agent_job"]).parameters)
     assert agent_job == ["job_id", "action", "timeout_seconds"]
     assert TOOL_PROFILES["agents"] == {"run_agent", "agent_job", "run_parallel", "number_of_cores"}
@@ -399,7 +390,7 @@ def test_an_empty_model_setting_means_no_override(
     blank = _write(tmp_path / "blank_sea.py", "def settings():\n    return {'model': ''}\n")
     assert "model" not in sea_settings(blank)
     none = _write(tmp_path / "none_sea.py", "def settings():\n    return {'model': None}\n")
-    assert sea_settings(none) == sea_settings(blank) == {"preset": "session"}
+    assert sea_settings(none) == sea_settings(blank) == {"kind": "session"}
     named = _write(tmp_path / "named_sea.py", "def settings():\n    return {'model': 'm-1'}\n")
     assert sea_settings(named)["model"] == "m-1"
     # Other empty strings keep their meaning (``chat_id: ""`` is a fresh chat).
@@ -419,7 +410,7 @@ def test_slash_check_reports_the_effective_run_or_the_first_error(
     _write(
         folder / "good" / "good_sea.py",
         "def description():\n    return 'Good things.'\n"
-        "def settings():\n    return {'preset': 'worker', 'model': 'm-1', 'timeout': 60}\n"
+        "def settings():\n    return {'kind': 'worker', 'model': 'm-1', 'timeout': 60}\n"
         "def prompt(task):\n    return '[good] ' + task + ' #{task_id}'\n"
         "def add_to_system_prompt():\n    return 'protocol'\n"
         "def probe(x: str) -> str:\n    \"\"\"Probe x.\"\"\"\n    return x\n"
@@ -428,7 +419,7 @@ def test_slash_check_reports_the_effective_run_or_the_first_error(
     _write(
         folder / "broken" / "broken_sea.py",
         "def description():\n    return 'Broken.'\n"
-        "def settings():\n    return {'preset': 'nope'}\n",
+        "def settings():\n    return {'kind': 'nope'}\n",
     )
     (home.kiss_home / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
     sea_commands.refresh_registry()
@@ -437,7 +428,7 @@ def test_slash_check_reports_the_effective_run_or_the_first_error(
     lines = report.splitlines()
     assert lines[0] == "/good: Good things."
     assert lines[1] == "layers: good"
-    assert lines[2] == "preset: worker"
+    assert lines[2] == "kind: worker"
     settings = json.loads(lines[3].removeprefix("settings: "))
     assert settings["model"] == "m-1" and settings["timeout"] == 60
     assert settings["use_worktree"] is False
@@ -447,7 +438,7 @@ def test_slash_check_reports_the_effective_run_or_the_first_error(
     assert lines[7] == "prompt for <the task text>: [good] <the task text> #<task id>"
     broken = sea_commands.help_text_if_command("/broken CHECK")
     assert broken is not None and broken.startswith("/broken is broken: agent script ")
-    assert "unknown preset 'nope'" in broken
+    assert "settings()['kind'] must be one of session, worker, channel; got 'nope'" in broken
     # The picker getters are validated too, and a tool without a
     # ``__name__`` (a partial) is reported by its type, not a crash.
     picker = _write(

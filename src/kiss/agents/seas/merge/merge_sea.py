@@ -104,7 +104,7 @@ def settings() -> dict[str, Any]:
     The budget is capped at :data:`MAX_BUDGET_USD`.
     """
     return {
-        "preset": "worker",
+        "kind": "worker",
         "max_budget": MAX_BUDGET_USD,
     }
 

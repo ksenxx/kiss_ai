@@ -382,18 +382,18 @@ class TestMergeSea:
         # budget cap; ``system_prompt()`` supplies the base prompt.
         assert merge_sea.system_prompt() == merge_sea.SYSTEM_PROMPT
         assert merge_sea.settings() == {
-            "preset": "worker", "max_budget": merge_sea.MAX_BUDGET_USD,
+            "kind": "worker", "max_budget": merge_sea.MAX_BUDGET_USD,
         }
         resolved = resolve_settings(vars(merge_sea))
-        assert resolved["preset"] == "worker"
-        assert resolved["is_parallel"] is False
+        assert resolved["kind"] == "worker"
+        assert resolved["allow_fan_out"] is False
         assert resolved["use_web_tools"] is False
         assert resolved["use_memory"] is False
         assert resolved["use_worktree"] is False
         assert resolved["auto_commit"] is False
-        assert resolved["classify_tasks"] is False
+        assert resolved["auto_classify"] is False
         assert resolved["max_budget"] == merge_sea.MAX_BUDGET_USD
-        for legacy in ("is_parallel", "use_web_tools", "use_memory", "use_worktree",
+        for legacy in ("allow_fan_out", "use_web_tools", "use_memory", "use_worktree",
                        "auto_commit", "max_budget"):
             assert not hasattr(merge_sea, legacy), legacy
 

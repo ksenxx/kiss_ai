@@ -262,7 +262,7 @@ class TestDispatchResultInheritance:
             "settings": "def settings():\n    return {'model': 'claude-sonnet-4-5'}\n",
             "worker": (
                 "def settings():\n"
-                "    return {'preset': 'worker', 'model': 'claude-sonnet-4-5'}\n"
+                "    return {'kind': 'worker', 'model': 'claude-sonnet-4-5'}\n"
             ),
             # ``settings`` defined under a condition the script evaluates
             # at import time (true on every platform the suite runs on).
@@ -295,6 +295,18 @@ class TestDispatchResultInheritance:
             assert yaml.safe_load(text)["success"] is True, (label, text)
             assert captured[0]["model_config"] == PARENT_CONFIG, label
             assert captured[0]["model"] == PARENT_MODEL, label
+        # An explicit model wins over the script's; when it is the
+        # parent's launch model the parent's endpoint still applies.
+        captured.clear()
+        text = run_agent(
+            task="say hi", agent=str(scripts / "settings_sea.py"), model=PARENT_MODEL,
+            timeout="30",
+        )
+        assert yaml.safe_load(text)["success"] is True, text
+        assert captured[0]["model"] == PARENT_MODEL
+        assert captured[0]["model_config"] == PARENT_CONFIG
+        assert captured[0]["provenance"]["model"] == "explicit"
+        assert captured[0]["provenance"]["timeout"] == "explicit"
         # A script whose settings cannot be evaluated — a syntax error,
         # a ``settings`` that is not a zero-argument callable returning
         # a dict — is a clean error and dispatches nothing.
@@ -330,7 +342,7 @@ class TestDispatchResultInheritance:
         captured.clear()
         result = dispatch_result(
             "dummy_sea", "say hi", DUMMY_SEA, str(env.repo), "", None, 30.0,
-            parent_agent=parent, inherit=True, settings={"preset": "session", "model": "x"},
+            parent_agent=parent, inherit=True, settings={"kind": "session", "model": "x"},
         )
         assert isinstance(result, daemon_client.TaskResult), result
         assert captured[0]["model_config"] is None

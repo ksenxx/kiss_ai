@@ -24,4 +24,4 @@ def description() -> str:
 
 def settings() -> dict:
     """Return the run settings of a scheduled prompt job."""
-    return {"classify_tasks": False}
+    return {"auto_classify": False}

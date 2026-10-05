@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import cron_agent
-from kiss.agents.sorcar.sea_settings import WORKER_PRESET, presets
+from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, kind_defaults
 from kiss.core.config import kiss_home
 from kiss.server.agent_file import (
     CHANNEL_PREAMBLE,
@@ -41,7 +41,7 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
     # built-in toolset (no tool profile is staged, so the daemon keeps
     # the basics), and whose ``add_to_system_prompt()`` follows the
     # channel preamble in the system prompt suffix.
-    assert cron_agent.settings() == {"preset": "channel", "work_dir": cron_agent.cron_work_dir()}
+    assert cron_agent.settings() == {"kind": "channel", "work_dir": cron_agent.cron_work_dir()}
     assert cron_agent.add_to_system_prompt() == cron_agent.CRON_DISPATCH_PREAMBLE
     cmd: dict[str, Any] = {"agentPath": cron_agent.__file__, "appendToSystemPrompt": "CALLER"}
     overridden = apply_agent_overrides(cmd)
@@ -57,11 +57,10 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
     assert "appendBasicTools" not in cmd
     assert "toolsFile" not in cmd
     assert cmd["workDir"] == cron_agent.cron_work_dir()
-    for key, value in WORKER_PRESET.items():
+    for key, value in WORKER_DEFAULTS.items():
         assert value is False, key
-    assert presets()["channel"] == {
-        **WORKER_PRESET, "kind": "channel", "inherit": False,
-        "work_dir": str(kiss_home() / "channel_work"),
+    assert kind_defaults()["channel"] == {
+        **WORKER_DEFAULTS, "work_dir": str(kiss_home() / "channel_work"),
     }
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
@@ -238,6 +237,10 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
         "appendToSystemPrompt": "CALLER",
     }
     assert apply_agent_overrides(cmd) == set()
+    # The only write is the provenance record of a script that replaced nothing.
+    assert cmd.pop("_runConfig") == {
+        "sea": "old_contract_agent", "kind": "session", "overridden": {},
+    }
     assert cmd == {
         "agentPath": str(script),
         "model": "kept-model",
@@ -250,7 +253,7 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
 
 
 def test_settings_keys_override_their_wire_fields(tmp_path: Path) -> None:
-    # ``use_web_tools``, ``classify_tasks`` and ``is_parallel`` are
+    # ``use_web_tools``, ``auto_classify`` and ``allow_fan_out`` are
     # ``settings()`` keys: each is written over its wire field on the
     # run command, whatever the caller sent there.
     script = tmp_path / "settings_agent.py"
@@ -258,8 +261,8 @@ def test_settings_keys_override_their_wire_fields(tmp_path: Path) -> None:
         def settings() -> dict:
             return {
                 "use_web_tools": False,
-                "classify_tasks": True,
-                "is_parallel": False,
+                "auto_classify": True,
+                "allow_fan_out": False,
             }
     """))
     cmd = {
@@ -282,7 +285,7 @@ def test_web_and_classify_settings_accept_none(tmp_path: Path) -> None:
     script = tmp_path / "none_settings_agent.py"
     script.write_text(
         "def settings():\n"
-        "    return {'use_web_tools': None, 'classify_tasks': None}\n"
+        "    return {'use_web_tools': None, 'auto_classify': None}\n"
     )
     cmd = {"agentPath": str(script), "useWebTools": True, "classifyTasks": False}
     assert apply_agent_overrides(cmd) == set()
@@ -296,7 +299,7 @@ def test_is_parallel_setting_accepts_none(tmp_path: Path) -> None:
     # reported as overridden.  (A non-bool, non-None value is still
     # rejected: see the type-check tests below.)
     script = tmp_path / "none_parallel_agent.py"
-    script.write_text("def settings():\n    return {'is_parallel': None}\n")
+    script.write_text("def settings():\n    return {'allow_fan_out': None}\n")
     cmd = {"agentPath": str(script), "isParallel": True}
     assert apply_agent_overrides(cmd) == set()
     assert cmd["isParallel"] is True
@@ -304,13 +307,13 @@ def test_is_parallel_setting_accepts_none(tmp_path: Path) -> None:
 
 def test_is_parallel_setting_rejects_non_bool(tmp_path: Path) -> None:
     script = tmp_path / "bad_parallel_agent.py"
-    script.write_text("def settings():\n    return {'is_parallel': 'no'}\n")
+    script.write_text("def settings():\n    return {'allow_fan_out': 'no'}\n")
     cmd = {"agentPath": str(script), "isParallel": True}
     with pytest.raises(
         AgentFileError,
         match=(
             r"agent script '.*bad_parallel_agent\.py': "
-            r"settings\(\)\['is_parallel'\] must be bool, got str"
+            r"settings\(\)\['allow_fan_out'\] must be bool, got str"
         ),
     ):
         apply_agent_overrides(cmd)
@@ -330,10 +333,10 @@ def test_use_web_tools_setting_rejects_non_bool(tmp_path: Path) -> None:
 
 def test_classify_tasks_setting_rejects_non_bool(tmp_path: Path) -> None:
     script = tmp_path / "bad_classify_agent.py"
-    script.write_text("def settings():\n    return {'classify_tasks': 1}\n")
+    script.write_text("def settings():\n    return {'auto_classify': 1}\n")
     cmd = {"agentPath": str(script), "classifyTasks": None}
     with pytest.raises(
-        AgentFileError, match=r"settings\(\)\['classify_tasks'\] must be bool, got int",
+        AgentFileError, match=r"settings\(\)\['auto_classify'\] must be bool, got int",
     ):
         apply_agent_overrides(cmd)
     assert cmd["classifyTasks"] is None

@@ -51,7 +51,7 @@ def test_channel_preamble_precedes_the_addition(tmp_path: Path) -> None:
     """
     script = _script(
         tmp_path,
-        "def settings():\n    return {'preset': 'channel'}\n"
+        "def settings():\n    return {'kind': 'channel'}\n"
         "def add_to_system_prompt():\n    return 'PROTOCOL'\n",
     )
     cmd: dict[str, Any] = {"agentPath": script, "appendToSystemPrompt": "CALLER"}

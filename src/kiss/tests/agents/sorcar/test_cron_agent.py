@@ -763,20 +763,24 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     (the daemon appends it to the system prompt suffix), not the task.
     """
     from kiss.agents.sorcar.sea_commands import sea_settings
-    from kiss.agents.sorcar.sea_settings import presets
+    from kiss.agents.sorcar.sea_settings import kind_defaults
     from kiss.server.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
 
     work_dir = cron_agent.cron_work_dir()
     assert work_dir == str(tmp_path / "cron" / "work")
     assert Path(work_dir).is_dir()
-    assert cron_agent.settings() == {"preset": "channel", "work_dir": work_dir}
+    assert cron_agent.settings() == {"kind": "channel", "work_dir": work_dir}
     resolved = sea_settings(Path(cron_agent.__file__))
-    assert resolved == {"preset": "channel", **presets()["channel"], "work_dir": work_dir}
+    # A channel's work_dir is implicitly locked (sea_settings.merge_settings).
+    assert resolved == {
+        "kind": "channel", **kind_defaults()["channel"],
+        "work_dir": work_dir, "locked": ["work_dir"],
+    }
     assert resolved["kind"] == "channel"
-    assert resolved["inherit"] is False
+    assert resolved["kind"] == "channel"
     assert resolved["use_worktree"] is False
     assert resolved["auto_commit"] is False
-    assert resolved["classify_tasks"] is False
+    assert resolved["auto_classify"] is False
     assert cron_agent.add_to_system_prompt() == cron_agent.CRON_DISPATCH_PREAMBLE
     assert "cron_job" in cron_agent.CRON_DISPATCH_PREAMBLE
     assert [tool.__name__ for tool in cron_agent.add_to_tools()] == [

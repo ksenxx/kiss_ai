@@ -27,7 +27,7 @@ import json
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -172,6 +172,11 @@ class TaskResult:
         task_id: The daemon's persisted ``task_history`` row id of the
             run; ``""`` when the run ended before a row was allocated
             (e.g. the daemon had no model configured).
+        settings: The run's ``task_settings`` event payload (its
+            effective model, work directory, budget, agent script, kind,
+            tool profile, timeout, inherited and overridden values; see
+            :mod:`kiss.agents.sorcar.run_config`); empty when the run
+            ended before the daemon emitted it.
     """
 
     text: str
@@ -181,6 +186,7 @@ class TaskResult:
     steps: int
     chat_id: str = ""
     task_id: str = ""
+    settings: dict[str, Any] = field(default_factory=dict)
 
 
 def _resolve_endpoint_file(endpoint_file: str | Path | None) -> Path:
@@ -259,6 +265,7 @@ def _to_task_result(
     chat_id: str = "",
     task_id: str = "",
     totals: dict[str, Any] | None = None,
+    settings: dict[str, Any] | None = None,
 ) -> TaskResult:
     """Convert the final daemon ``result`` event into a :class:`TaskResult`.
 
@@ -276,6 +283,8 @@ def _to_task_result(
             classifier's spend is folded in only after the agent
             emitted its result, and announced by a later
             ``usage_info``.
+        settings: The ``settings`` payload of the run's
+            ``task_settings`` event, or ``None`` when none was seen.
 
     Returns:
         The parsed :class:`TaskResult`.  The daemon enriches ``result``
@@ -293,6 +302,7 @@ def _to_task_result(
         steps=int(steps or 0),
         chat_id=chat_id,
         task_id=task_id,
+        settings=dict(settings or {}),
     )
 
 
@@ -426,6 +436,7 @@ def run(
     docker_image: str = "",
     inherit_tools: bool = False,
     workspace: str = "",
+    provenance: dict[str, str] | None = None,
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
     endpoint_file: str | Path | None = None,
@@ -515,7 +526,7 @@ def run(
             these top-level functions::
 
                 def description() -> str: ...        # /xxx help text
-                def settings() -> dict: ...           # preset + run() keywords
+                def settings() -> dict: ...           # kind + run() keywords
                 def prompt(task: str) -> str: ...     # replaces the task text
                 def system_prompt() -> str: ...       # replaces the base prompt
                 def add_to_system_prompt() -> str: ... # appended to the system prompt
@@ -525,30 +536,29 @@ def run(
                 def register_as_model() -> bool: ...  # model-picker entry
                 def on_picked_as_model(work_dir: str) -> str: ...
 
-            ``settings()`` returns a dict of a ``preset`` and any of
-            the keyword parameters of this function except the
-            transport, identity and prompt ones (``prompt`` and
-            ``system_prompt`` are the functions above, not settings):
-            ``work_dir``, ``model``, ``chat_id``,
-            ``use_worktree``, ``auto_commit``, ``max_budget`` (finite),
-            ``model_config``, ``use_web_tools``, ``classify_tasks``,
-            ``use_memory``, ``is_parallel``, ``tool_profile``,
-            ``docker_image``; plus four dispatcher keys: ``extends`` (a
-            base SEA), ``timeout`` (seconds a ``run_agent`` call waits
-            for this script's sub-task), ``inherit`` (whether a
-            ``run_agent`` sub-task inherits the caller's model, chat,
-            tools and prompt suffixes) and ``kind`` (``"agent"`` or
-            ``"channel"``: a channel gets the channel preamble and a
-            workspace held for the run).  ``prompt(task)`` receives the
-            task text and returns the prompt body; ``{task_id}`` in its
-            result is replaced by *parent_task_id*.  A ``None`` value
-            means "no override".  Presets are pure defaults: ``session``
-            (changes nothing), ``worker`` (``use_worktree``,
-            ``auto_commit``, ``classify_tasks``, ``is_parallel``,
-            ``use_web_tools``, ``use_memory`` all off) and ``channel``
-            (``worker`` plus ``kind: "channel"``, ``inherit: False``
-            and ``work_dir: ~/.kiss/channel_work``).  Explicit keys
-            override the preset.
+            ``settings()`` returns a dict of a ``kind`` and any of the
+            keyword parameters of this function except the transport,
+            identity and prompt ones (``prompt`` and ``system_prompt``
+            are the functions above, not settings): ``work_dir``,
+            ``model``, ``chat_id``, ``use_worktree``, ``auto_commit``,
+            ``max_budget`` (finite), ``model_config``,
+            ``use_web_tools``, ``auto_classify`` (this function's
+            ``classify_tasks``), ``use_memory``, ``allow_fan_out``
+            (``is_parallel``), ``tool_profile``, ``docker_image``; plus
+            three dispatcher keys: ``extends`` (a base SEA), ``timeout``
+            (seconds a ``run_agent`` call waits for this script's
+            sub-task) and ``locked`` (keys an explicit caller argument
+            may not change).  ``prompt(task)`` receives the task text
+            and returns the prompt body; ``{task_id}`` in its result is
+            replaced by *parent_task_id*.  A ``None`` value means "no
+            override".  A kind is pure defaults under the explicit
+            keys: ``session`` (the default, changes nothing), ``worker``
+            (``use_worktree``, ``auto_commit``, ``auto_classify``,
+            ``allow_fan_out``, ``use_web_tools``, ``use_memory`` all
+            off) and ``channel`` (``worker`` plus ``work_dir:
+            ~/.kiss/channel_work``; the run gets the channel preamble
+            and a workspace held for the run, and a ``run_agent``
+            sub-task of it inherits nothing from the caller).
 
             ``add_to_system_prompt()`` returns text ADDED to the run's
             system prompt after *append_to_system_prompt*, never
@@ -603,7 +613,7 @@ def run(
             broken agent script (deleted before the daemon reads it,
             raising at import time, a non-callable getter, a raising
             ``settings()`` or getter, an unknown settings key or
-            preset, or a wrong-typed value) stops the task: the daemon
+            kind, or a wrong-typed value) stops the task: the daemon
             fails the run and the returned :class:`TaskResult` carries
             the diagnostic error in its ``text`` with ``success=False``.
         use_worktree: Run the task in an isolated git worktree.
@@ -713,12 +723,23 @@ def run(
             that prompt refers to.  ``False`` (default) adds nothing;
             ignored without *parent_task_id*.
         workspace: Workspace/account identifier for multi-account
-            channels.  A ``channel``-preset agent script's run holds
+            channels.  A ``channel``-kind agent script's run holds
             it (``KISS_CHANNEL_WORKSPACE``) for its whole lifetime, so
             its channel tools load that account's credentials; empty
             means ``"default"``.  Ignored by every other run.
+        provenance: Where the command's values come from, ``{setting
+            key: "explicit" | "inherited"}`` (see
+            :mod:`kiss.agents.sorcar.run_config`): a field the caller
+            was given explicitly, or one it filled from the agent
+            calling it.  Recorded in the task's ``task_settings`` event
+            (``inherited``), so the result's ``ran:`` line and the
+            persisted history show which values the sub-task took over.
+            ``None`` (default): every value is a persisted setting or
+            the daemon's default.
         timeout: Maximum seconds to wait for the task to finish;
-            ``None`` waits indefinitely.
+            ``None`` waits indefinitely.  With *stop_on_timeout* it is
+            also sent to the daemon (wire field ``timeout``), which
+            records it in the task's ``task_settings`` event.
         stop_on_timeout: Whether a *timeout* expiry also STOPS the
             task.  ``False`` (the default) keeps the documented
             timeout contract — the caller stops waiting, the task
@@ -828,6 +849,7 @@ def run(
     ws: ClientConnection | None = None
     aborted: BaseException | None = None
     result_event: dict[str, Any] | None = None
+    settings_event: dict[str, Any] | None = None  # the run's task_settings payload
     totals_event: dict[str, Any] | None = None  # latest spend totals
     charged = {"cost": 0.0, "tokens": 0, "steps": 0}  # see _net_totals
     task_id = ""
@@ -866,6 +888,8 @@ def run(
             "dockerImage": docker_image,
             "inheritTools": inherit_tools,
             "workspace": workspace,
+            "provenance": provenance or {},
+            "timeout": timeout if stop_on_timeout else None,
         }
         try:
             local_endpoint.send(ws, json.dumps(cmd))
@@ -957,7 +981,9 @@ def run(
                         if cancelled:
                             raise CancelledError(
                                 "the stop was sent but not confirmed",
-                                _to_task_result(result_event, chat_id, task_id, totals_event),
+                                _to_task_result(
+                            result_event, chat_id, task_id, totals_event, settings_event,
+                        ),
                                 confirmed=False,
                             )
                         raise StopUnconfirmedTimeoutError(timeout_msg)
@@ -992,6 +1018,8 @@ def run(
                 totals_event = _net_totals(event, charged)
             if etype == "result":
                 result_event = event
+            elif etype == "task_settings" and isinstance(event.get("settings"), dict):
+                settings_event = event["settings"]
             elif etype == "status":
                 if event.get("running"):
                     started = True
@@ -1012,7 +1040,9 @@ def run(
                         # completion — return it instead of discarding
                         # the completed work behind a ``TimeoutError``
                         # that falsely claims the task "was stopped".
-                        return _to_task_result(result_event, chat_id, task_id, totals_event)
+                        return _to_task_result(
+                            result_event, chat_id, task_id, totals_event, settings_event,
+                        )
                     # The terminal status confirms the
                     # stopped-on-timeout task is dead; the run still
                     # timed out.  ``started`` is deliberately not
@@ -1027,12 +1057,16 @@ def run(
                     if cancelled:
                         raise CancelledError(
                             "the task was stopped by the caller",
-                            _to_task_result(result_event, chat_id, task_id, totals_event),
+                            _to_task_result(
+                            result_event, chat_id, task_id, totals_event, settings_event,
+                        ),
                             confirmed=True,
                         )
                     raise StoppedOnTimeoutError(
                         timeout_msg,
-                        _to_task_result(result_event, chat_id, task_id, totals_event),
+                        _to_task_result(
+                            result_event, chat_id, task_id, totals_event, settings_event,
+                        ),
                     )
                 elif started or result_event is not None:
                     # A result before any ``running=true`` means the
@@ -1044,7 +1078,9 @@ def run(
                     # in this condition that terminal status would be
                     # ignored and the loop would wait out the whole
                     # timeout (forever with ``timeout=None``).
-                    return _to_task_result(result_event, chat_id, task_id, totals_event)
+                    return _to_task_result(
+                            result_event, chat_id, task_id, totals_event, settings_event,
+                        )
     except BaseException as exc:
         aborted = exc
         if ws is not None and not isinstance(exc, (TimeoutError, CancelledError)):
@@ -1053,7 +1089,7 @@ def run(
             # totals so it can still charge them (``run_agent`` folds
             # them into the stopped calling task).
             exc.task_result = _to_task_result(  # type: ignore[attr-defined]
-                result_event, chat_id, task_id, totals_event,
+                result_event, chat_id, task_id, totals_event, settings_event,
             )
         raise
     finally:

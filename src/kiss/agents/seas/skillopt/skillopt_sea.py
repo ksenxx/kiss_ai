@@ -367,7 +367,7 @@ class SeaTarget(Target):
             kwargs["prompt"] = functools.partial(sea_prompt, layers)
         for setting, key in (
             ("tool_profile", "tool_profile"),
-            ("is_parallel", "is_parallel"),
+            ("allow_fan_out", "is_parallel"),
             ("use_web_tools", "web_tools"),
             ("use_memory", "use_memory"),
             ("docker_image", "docker_image"),
@@ -1518,7 +1518,7 @@ def system_prompt() -> str:
 def settings() -> dict[str, Any]:
     """A worker with the shell tools, on the real checkout, running :data:`SYSTEM_PROMPT`."""
     return {
-        "preset": "worker",
+        "kind": "worker",
         "tool_profile": "shell",
     }
 

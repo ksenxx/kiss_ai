@@ -659,9 +659,9 @@ def settings() -> dict[str, Any]:
     for the per-repository indexing sub-agents.
     """
     return {
-        "preset": "worker",
+        "kind": "worker",
         "tool_profile": "full",
-        "is_parallel": True,
+        "allow_fan_out": True,
     }
 
 

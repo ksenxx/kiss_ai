@@ -43,7 +43,7 @@ CHILD_SEA = textwrap.dedent('''
 
 
     def settings():
-        return {"tool_profile": "bash", "is_parallel": False}
+        return {"tool_profile": "bash", "allow_fan_out": False}
 
 
     def prompt(task: str) -> str:

@@ -405,7 +405,7 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     assert settings["model_config"] is None
     assert resolve_settings(vars(sea))["use_web_tools"] is False
     assert resolve_settings(vars(sea))["use_memory"] is False
-    assert resolve_settings(vars(sea))["is_parallel"] is True
+    assert resolve_settings(vars(sea))["allow_fan_out"] is True
     assert sea.tool_call_hook()("Bash", {"command": "ls"}) == "OK"
     harness = coding_sea.ContainerHarness.shared(str(tmp_path / "sea-trial" / "config.json"))
     assert sea._harness is harness

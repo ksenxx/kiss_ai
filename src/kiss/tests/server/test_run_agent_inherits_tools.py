@@ -68,7 +68,7 @@ PARENT_SCRIPT = textwrap.dedent('''
         # number_of_cores, so its own tool of that name registers; a
         # sub-task WITH run_parallel has the built-in and must skip the
         # inherited one instead of failing on the duplicate name.
-        return {"is_parallel": False}
+        return {"allow_fan_out": False}
 
 
     def add_to_system_prompt():
@@ -198,9 +198,9 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
                 child_prompts[marker] = request_text(request)
                 child_last_messages[marker] = last
                 return finish_response(f"done-{marker}")
-        # The sequential parent's children inherit ``is_parallel``;
+        # The sequential parent's children inherit ``allow_fan_out``;
         # CHILD-A asks for fan-out explicitly.
-        return dispatch("", "CHILD-A", '{"is_parallel": true}')
+        return dispatch("", "CHILD-A", '{"allow_fan_out": true}')
 
     model = StandInModelServer(responder)
     try:

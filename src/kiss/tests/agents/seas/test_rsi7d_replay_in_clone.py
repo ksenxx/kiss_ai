@@ -69,7 +69,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
                 "custom_endpoint": self.standin.url,
                 "custom_api_key": "kiss-test-key",
                 "use_web_browser": False,
-                "classify_tasks": False,
+                "auto_classify": False,
                 "auto_commit_mode": False,
                 "is_worktree": False,
             }),

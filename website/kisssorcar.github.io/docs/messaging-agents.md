@@ -52,7 +52,7 @@ Ten service agents give Sorcar authenticated API tools for productivity and data
 - Overleaf (`kiss-overleaf`)
 - PostgreSQL (`kiss-postgres`)
 
-In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp", "list my open GitHub PRs") — Sorcar dispatches the matching agent through its `run_agent` tool (`run_agent(agent="whatsapp", task="...")`). Every channel agent is a SEA with the `channel` preset: the sub-task runs in `~/.kiss/channel_work` with the channel's authenticated API tools, inherits nothing from the calling task, and waits up to 3600 seconds unless the call passes a `timeout`. Typing `/whatsapp send 'running late' to Alice` in the chat runs the same agent directly in the tab. Each agent also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...) for running tasks directly from the shell.
+In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp", "list my open GitHub PRs") — Sorcar dispatches the matching agent through its `run_agent` tool (`run_agent(agent="whatsapp", task="...")`). Every channel agent is a SEA of the `channel` kind: the sub-task runs in `~/.kiss/channel_work` with the channel's authenticated API tools, inherits nothing from the calling task, and waits up to 3600 seconds unless the call passes a `timeout`. Typing `/whatsapp send 'running late' to Alice` in the chat runs the same agent directly in the tab. Each agent also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...) for running tasks directly from the shell.
 
 ## Inbound Channel Gateways
 

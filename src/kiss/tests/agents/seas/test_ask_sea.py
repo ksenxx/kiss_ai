@@ -63,11 +63,11 @@ _EXPECTED_SUFFIX_START = (
     "at any point. You must answer quickly because the user is waiting.**"
 )
 _EXPECTED_SETTINGS = {
-    "preset": "worker",
+    "kind": "worker",
     "use_worktree": False,
     "auto_commit": False,
-    "classify_tasks": False,
-    "is_parallel": False,
+    "auto_classify": False,
+    "allow_fan_out": False,
     "use_web_tools": False,
     "use_memory": False,
     "tool_profile": "none",
@@ -152,7 +152,7 @@ def test_settings_follow_the_contract() -> None:
     ``parentTaskId``).  The resolved settings add the preset's defaults
     and nothing else: the getters are applied by the daemon.
     """
-    assert ask_sea.settings() == {"preset": "worker", "tool_profile": "none"}
+    assert ask_sea.settings() == {"kind": "worker", "tool_profile": "none"}
     assert resolve_settings(vars(ask_sea)) == _EXPECTED_SETTINGS
     assert ask_sea.prompt("why?") == "why?\n\n" + _EXPECTED_ADD_TO_PROMPT
     assert _PLACEHOLDER in ask_sea.prompt("why?")
@@ -257,7 +257,7 @@ def test_slash_resolver_treats_unrelated_commands_the_same_way(tmp_path: Path) -
     task_text, sea_path = hit
     assert task_text == "hello"
     assert sea_path == folder / "notify" / "notify_sea.py"
-    assert sea_commands.sea_settings(sea_path) == {"preset": "session"}
+    assert sea_commands.sea_settings(sea_path) == {"kind": "session"}
 
 
 def test_slash_resolver_honours_a_user_sea_shadowing_ask(tmp_path: Path) -> None:
@@ -279,7 +279,7 @@ def test_slash_resolver_honours_a_user_sea_shadowing_ask(tmp_path: Path) -> None
     task_text, sea_path = hit
     assert sea_path == shadow / "ask_sea.py"
     assert task_text == "what happened?"
-    assert sea_commands.sea_settings(sea_path) == {"preset": "session"}
+    assert sea_commands.sea_settings(sea_path) == {"kind": "session"}
 
 
 def test_slash_resolver_rejects_bare_ask_and_answers_help_from_description() -> None:

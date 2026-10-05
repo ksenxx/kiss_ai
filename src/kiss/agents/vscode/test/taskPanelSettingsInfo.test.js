@@ -226,6 +226,40 @@ test('live task_settings paints the info block; new submit clears it', () => {
   assert.strictEqual(infoRows(win).model, DASH, 'an unknown row shows a dash');
 });
 
+test('a run with an agent script shows the Agent row; a plain run hides it', () => {
+  const wv = makeWebview();
+  const win = wv.win;
+  const TAB = tabIdOf(wv);
+  const doc = win.document;
+  send(win, {type: 'setTaskText', text: 'plain', tabId: TAB});
+  send(win, {type: 'task_settings', settings: SETTINGS, tabId: TAB, taskId: 'task-1'});
+  assert.ok(doc.getElementById('meta-agent-item').hidden, 'no script: row hidden');
+  assert.strictEqual(doc.getElementById('meta-agent').textContent, DASH);
+  send(win, {
+    type: 'task_settings',
+    settings: {
+      ...SETTINGS,
+      task_id: 'task-3',
+      sea: 'sh',
+      kind: 'worker',
+      tool_profile: 'bash',
+      timeout: 3600,
+      inherited: ['model', 'chat_id'],
+      overridden: {tool_profile: ['review', 'bash'], work_dir: ['', '/tmp/x']},
+    },
+    tabId: TAB,
+    taskId: 'task-3',
+  });
+  assert.ok(!doc.getElementById('meta-agent-item').hidden, 'script: row shown');
+  assert.strictEqual(
+    doc.getElementById('meta-agent').textContent,
+    'sh (worker) \u2022 tools bash \u2022 timeout 3600s \u2022 ' +
+      'overridden tool_profile(review->bash), work_dir(empty->/tmp/x)',
+  );
+  send(win, {type: 'clear', chat_id: 'chat-abc', tabId: TAB});
+  assert.ok(doc.getElementById('meta-agent-item').hidden, 'a new run clears the row');
+});
+
 test('subagent settings show no-wt, sequential and parentage', () => {
   const wv = makeWebview();
   const win = wv.win;

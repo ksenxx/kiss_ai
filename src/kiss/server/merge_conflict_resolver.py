@@ -94,7 +94,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
             model_name=model_name,
             work_dir=str(repo),
             printer=printer,
-            is_parallel=merge_settings["is_parallel"],
+            is_parallel=merge_settings["allow_fan_out"],
             max_budget=merge_settings["max_budget"],
             model_config=(
                 getattr(parent_agent, "model_config", None)

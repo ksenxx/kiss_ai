@@ -588,7 +588,7 @@ def test_dataclass_sea_with_future_annotations_loads(tmp_path: Path) -> None:
 
     assert sea_commands.slash_command_task("/verdict go") == ("go", sea.resolve())
     settings = sea_commands.sea_settings(sea)
-    assert settings == {"preset": "session", "use_worktree": False, "auto_commit": True}
+    assert settings == {"kind": "session", "use_worktree": False, "auto_commit": True}
     loaded = sea_commands.load_sea(sea)
     name = loaded["__name__"]
     assert name.startswith("_kiss_sea_verdict_sea_")

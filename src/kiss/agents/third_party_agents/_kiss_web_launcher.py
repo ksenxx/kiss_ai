@@ -287,7 +287,7 @@ def run_agent_via_kiss_web(
     — the agent's own module, whose top-level ``add_to_tools()`` the
     daemon calls to build a fresh agent from the credentials persisted
     under ``~/.kiss`` and whose ``settings()`` / ``add_to_system_prompt()``
-    make the run a ``channel``-preset session with the channel's
+    make the run a ``channel``-kind session with the channel's
     guidance in its system prompt), and submits the task to the in-process kiss-web daemon over its
     Unix-domain socket.  Blocks until the daemon reports the task
     finished (or *timeout* elapses) and returns the task's YAML result.
@@ -362,6 +362,15 @@ def run_agent_via_kiss_web(
     # The workspace travels on the wire; the daemon holds it (and
     # publishes it to ``KISS_CHANNEL_WORKSPACE``) for the run's lifetime,
     # exactly as it does for ``/slack ...`` and ``run_agent("slack")``.
+    # The values a caller of this launcher can be seen to have passed
+    # (the others have defaults indistinguishable from "not given"):
+    # they win over the channel script's settings, or clash with a
+    # locked one (kiss.agents.sorcar.sea_settings.locked_conflicts).
+    given = {
+        "model": model_name, "max_budget": max_budget,
+        "model_config": model_config, "use_web_tools": web_tools,
+    }
+    provenance = {key: "explicit" for key, value in given.items() if value not in (None, "")}
     try:
         result = sorcar.run(
             prompt,
@@ -377,6 +386,7 @@ def run_agent_via_kiss_web(
             append_to_system_prompt=append_to_system_prompt,
             append_to_prompt=append_to_prompt,
             workspace=agent.workspace,
+            provenance=provenance,
             timeout=timeout if timeout is not None else _NO_TIMEOUT_SECONDS,
             endpoint_file=endpoint,
         )

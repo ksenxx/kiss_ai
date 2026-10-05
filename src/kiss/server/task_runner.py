@@ -45,6 +45,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
+from kiss.agents.sorcar.run_config import inherited_keys
 from kiss.agents.sorcar.sea_commands import (
     SeaLayer,
     SeaScriptError,
@@ -72,6 +73,7 @@ from kiss.server import agent_state
 from kiss.server.agent_file import (
     DAEMON_SIDE_FIELDS,
     NO_TOOLS_PROFILE,
+    RUN_CONFIG_FIELD,
     AgentFileError,
     apply_agent_overrides,
     channel_workspace,
@@ -2031,6 +2033,19 @@ class _TaskRunnerMixin:
             _raw_profile = cmd.get("toolProfile")
             _tool_profile = _raw_profile.strip() if isinstance(_raw_profile, str) else ""
             resolve_tool_profile(_tool_profile)
+            # The run's effective configuration, folded into its
+            # ``task_settings`` event (see kiss.agents.sorcar.run_config):
+            # the script's provenance record (``apply_agent_overrides``),
+            # the caller's ``provenance`` / ``timeout`` wire fields and
+            # the resolved tool profile.
+            _raw_run_config = cmd.get(RUN_CONFIG_FIELD)
+            _raw_timeout = cmd.get("timeout")
+            agent.run_config = {
+                **(_raw_run_config if isinstance(_raw_run_config, dict) else {}),
+                "tool_profile": _tool_profile,
+                "timeout": _raw_timeout if isinstance(_raw_timeout, int | float) else None,
+                "inherited": inherited_keys(cmd.get("provenance")),
+            }
             # Docker image (or ``container:<id>``) the run's shell and
             # file tools execute in; absent or malformed means the host.
             _raw_docker = cmd.get("dockerImage")

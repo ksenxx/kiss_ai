@@ -68,7 +68,7 @@ exactly what interactive authentication and write-approval flows need.
 Name the service in your prompt and Sorcar routes it. Internally the session calls its
 `run_agent` tool with the channel name and your request (`run_agent(agent="slack",
 task=...)`); your request goes through verbatim as the sub-session's task. The channel's
-SEA declares `settings()` returning `{"preset": "channel"}`, so the sub-session runs in
+SEA declares `settings()` returning `{"kind": "channel"}`, so the sub-session runs in
 the shared `~/.kiss/channel_work` directory with no worktree, auto-commit, classifier,
 fan-out, web tools or memory, inherits nothing from the calling task (model and budget
 are the daemon defaults unless the caller passes them), and carries that channel's
@@ -122,7 +122,7 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
 - Every module defines `description()`, the one-sentence summary `/xxx help` prints;
-  `settings()`, which returns `{"preset": "channel"}` (the worker preset — worktree,
+  `settings()`, which returns `{"kind": "channel"}` (the worker defaults — worktree,
   auto-commit, classifier, fan-out, web tools and memory off — plus a run in
   `~/.kiss/channel_work` that inherits nothing from the calling task); an
   `add_to_tools()` function; and, when its agent class sets `channel_system_prompt`,
@@ -423,7 +423,7 @@ identity as a `{{IDENTITY}}` placeholder), its `add_to_system_prompt()` adds a
 no-internet, answer-quickly directive and a playbook asking for two or three plain
 sentences drawn only from the context, and `add_to_tools()` supplies the single
 `task_context` tool under `"tool_profile": "none"`, so no built-in tool (no shell, no
-file access) is offered; the `worker` preset turns off web tools, memory and parallel
+file access) is offered; the `worker` kind turns off web tools, memory and parallel
 sub-agents, so there are no browser tools, no memory tools, and no fan-out either; it
 cannot touch the running task's working tree. Typed into a tab whose task is still running, the question
 is instead dispatched directly to the daemon through a background side channel that does

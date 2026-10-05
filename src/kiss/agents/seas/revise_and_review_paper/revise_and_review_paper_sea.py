@@ -522,8 +522,8 @@ def settings() -> dict[str, Any]:
     """
     return {
         "use_web_tools": False,
-        "is_parallel": False,
-        "classify_tasks": False,
+        "allow_fan_out": False,
+        "auto_classify": False,
         "tool_profile": "full",
         "timeout": DISPATCH_TIMEOUT_SECONDS,
     }

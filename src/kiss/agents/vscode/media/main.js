@@ -5929,6 +5929,7 @@
         chatId: metaValueText('meta-chat-id'),
         taskId: metaValueText('meta-task-id'),
         parentTask: metaValueText('meta-parent-id'),
+        agent: metaValueText('meta-agent'),
       },
       taskUpdate: metaInfoState,
     });
@@ -5993,6 +5994,7 @@
     setMetaValue('meta-chat-id', v('chatId'));
     setMetaValue('meta-task-id', v('taskId'));
     setMetaParentTask(v('parentTask') || '\u2014');
+    setMetaAgent(v('agent') || '\u2014');
     const update = ev && ev.taskUpdate && typeof ev.taskUpdate === 'object';
     renderTaskUpdate(update ? ev.taskUpdate : null);
   }
@@ -10869,6 +10871,54 @@
   }
 
   /**
+   * The Agent row's text: the agent script (SEA) the task ran as, its
+   * kind, tool profile, the caller's timeout and every asked-for value
+   * the script replaced (chat_sorcar_agent.py task_settings keys sea,
+   * kind, tool_profile, timeout, overridden; kiss.agents.sorcar.run_config).
+   *
+   * @param {object|null} s A task_settings event's settings payload.
+   * @returns {string} The text, '—' when the task ran no script and
+   *   nothing was replaced.
+   */
+  function metaAgentText(s) {
+    if (!s || typeof s !== 'object') return '\u2014';
+    const parts = [];
+    if (s.sea)
+      parts.push(String(s.sea) + (s.kind ? ' (' + String(s.kind) + ')' : ''));
+    if (s.tool_profile) parts.push('tools ' + String(s.tool_profile));
+    if (typeof s.timeout === 'number')
+      parts.push('timeout ' + String(s.timeout) + 's');
+    const over =
+      s.overridden && typeof s.overridden === 'object' ? s.overridden : null;
+    const keys = over ? Object.keys(over) : [];
+    if (keys.length) {
+      parts.push(
+        'overridden ' +
+          keys
+            .map(k => {
+              const pair = Array.isArray(over[k]) ? over[k] : [];
+              const show = v => (v === '' ? 'empty' : String(v));
+              return k + '(' + show(pair[0]) + '->' + show(pair[1]) + ')';
+            })
+            .join(', '),
+      );
+    }
+    return parts.length ? parts.join(' \u2022 ') : '\u2014';
+  }
+
+  /**
+   * Show or hide the Agent row: shown whenever the task ran an agent
+   * script or something replaced the caller's settings.
+   *
+   * @param {string} text The row's value text ('—' when none).
+   */
+  function setMetaAgent(text) {
+    const item = document.getElementById('meta-agent-item');
+    if (item) item.hidden = text === '\u2014';
+    setMetaValue('meta-agent', text);
+  }
+
+  /**
    * Paint the task-settings items of the task-info panel (#meta-panel:
    * the remote desktop dock, the sidebar-chat drawer, the mobile
    * drawer): Workdir, Max budget, Date, Base model, Worktree mode,
@@ -10935,6 +10985,7 @@
         : taskId,
     );
     setMetaParentTask(metaText(s ? s.parent_task_id : ''));
+    setMetaAgent(metaAgentText(s));
     setMetaInfoTarget();
   }
   updateMetaTaskDetails(null);

@@ -32,6 +32,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     parse_budget,
     parse_run_options,
     resolve_agent,
+    resolve_timeout,
 )
 from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
 from kiss.agents.sorcar.fanout_guard import (
@@ -41,8 +42,14 @@ from kiss.agents.sorcar.fanout_guard import (
 )
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent, resolve_work_dir
+from kiss.agents.sorcar.run_config import note_override, with_run_config
 from kiss.agents.sorcar.sea_commands import SeaLayer, evaluate_sea, model_sea
-from kiss.agents.sorcar.sea_settings import SeaError, merge_settings
+from kiss.agents.sorcar.sea_settings import (
+    SeaError,
+    locked_conflicts,
+    merge_settings,
+    script_name,
+)
 from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.task_classifier import (
     TaskClassification,
@@ -72,6 +79,7 @@ from kiss.core.models.model_info import (
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
+from kiss.core.stop_signal import get_thread_stop_event, set_thread_stop_event
 from kiss.core.tool_interrupt import ToolCallInterrupted
 from kiss.core.utils import substitute_prompt_args
 
@@ -1785,6 +1793,7 @@ class SorcarAgent(RelentlessAgent):
         agent: str = "",
         max_budget: float | None = None,
         options: RunOptions | None = None,
+        timeout: float | None = None,
     ) -> list[str]:
         """Execute multiple independent tasks concurrently using parallel agents.
 
@@ -1827,6 +1836,8 @@ class SorcarAgent(RelentlessAgent):
             options: Parsed ``options`` of the ``run_parallel`` call
                 (:func:`kiss.agents.sorcar.agent_dispatch.parse_run_options`);
                 ``None`` for no overrides.
+            timeout: Maximum seconds each child may run; ``None`` takes
+                the script's ``timeout`` setting, else no limit.
 
         Returns:
             List of YAML result strings in the same order as *tasks*.
@@ -1851,13 +1862,25 @@ class SorcarAgent(RelentlessAgent):
             conflict = fanout_conflict(settings)
             if conflict:
                 raise SeaScriptError(f"{resolved[1]} {conflict}")
-        # The SEA's settings win over *options* (the one precedence rule),
-        # so an option is refused only when the effective value conflicts.
+        # Precedence (sea_settings.locked_conflicts): an explicit
+        # argument or option wins over the script's settings unless
+        # the script locks the key — then the clash is an error — and
+        # the script's settings win over what the children inherit.
         pinned = {
             key: value for key, value in dataclasses.asdict(run_options).items()
             if value not in (None, "")
         }
-        conflict = fanout_conflict({**pinned, **settings})
+        if model_name:
+            pinned["model"] = model_name
+        if max_budget is not None:
+            pinned["max_budget"] = max_budget
+        if timeout is not None:
+            pinned["timeout"] = timeout
+        conflict = locked_conflicts(settings, pinned, self.work_dir)
+        if conflict:
+            raise SeaScriptError(f"run_parallel: {conflict}")
+        explicit = set(pinned)
+        conflict = fanout_conflict({**settings, **pinned})
         if conflict:
             raise SeaScriptError(f"run_parallel options {conflict}")
         work_dir = self.work_dir
@@ -1866,6 +1889,8 @@ class SorcarAgent(RelentlessAgent):
             if not requested.is_absolute():
                 requested = Path(self.work_dir) / requested
             work_dir = str(requested)
+        elif settings.get("work_dir"):
+            work_dir = str(settings["work_dir"])
         # Bank whatever an earlier fan-out's abandoned children spent
         # after this agent stopped waiting for them, before the budget
         # share below is computed from those totals.
@@ -1874,7 +1899,8 @@ class SorcarAgent(RelentlessAgent):
         share = self._subagent_budget_share(len(tasks)) if max_budget is None else max_budget
         inherited = inherit_from_parent(
             self, model_name or "", None, run_options,
-            script_picks_model=any("model" in layer.settings for layer in layers),
+            # The script's model applies only when the call names none.
+            script_picks_model="model" in settings and not model_name,
         )
         totals: dict[str, float | list[float]] = {}
         try:
@@ -1903,8 +1929,19 @@ class SorcarAgent(RelentlessAgent):
                 use_memory=inherited.options.use_memory,
                 live_browser=self._live_browser,
                 sea_layers=layers,
+                explicit=explicit,
+                # > 0 by contract
+                timeout=timeout if timeout is not None else settings.get("timeout"),
+                # Children share the parent's worktree and commit policy
+                # rather than inheriting the flags, and an explicit
+                # ``max_budget`` is not inherited.
+                run_config={"inherited": [
+                    key for key in inherited.fields
+                    if key not in ("use_worktree", "auto_commit")
+                    and (key != "max_budget" or max_budget is None)
+                ]},
                 prompt_suffix=inherited.options.add_to_prompt,
-                is_parallel=inherited.options.is_parallel is not False,
+                is_parallel=inherited.options.allow_fan_out is not False,
                 inherited_tools=list(self._extra_tools),
             )
         finally:
@@ -2180,7 +2217,8 @@ class SorcarAgent(RelentlessAgent):
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(
             tasks: str, agent: str = "", model: str = "", tool_profile: str = "",
-            max_budget: str = "", max_workers: str = "", options: str = "",
+            max_budget: str = "", timeout: str = "", max_workers: str = "",
+            options: str = "",
         ) -> str:
             """Run multiple independent tasks concurrently using parallel agents.
 
@@ -2227,9 +2265,11 @@ class SorcarAgent(RelentlessAgent):
                 agent: The agent script every child runs as: a ``.py``
                     path (relative to this task's work directory) or a
                     slash-command name (``"write_paper"``), exactly as
-                    ``run_agent``'s ``agent`` argument.  Its
-                    ``settings()`` win over the arguments here; its
-                    ``prompt(task)`` shapes each child's prompt.  Empty
+                    ``run_agent``'s ``agent`` argument.  The arguments
+                    here win over its ``settings()`` unless the script
+                    locks a key (``settings()["locked"]``: then a
+                    differing argument is refused); its ``prompt(task)``
+                    shapes each child's prompt.  Empty
                     (default) runs plain sub-agents.  Channel agents
                     (``"slack"``, ``"cron"``) and scripts pinning a
                     worktree, auto-commit, the classifier or a chat are
@@ -2256,6 +2296,10 @@ class SorcarAgent(RelentlessAgent):
                 max_budget: Per-child USD budget as a number string;
                     empty shares this task's remaining budget among
                     the children.
+                timeout: Maximum seconds each child may run, as a
+                    number string; empty takes the script's ``timeout``
+                    setting, else no limit.  A child still running when
+                    it expires is stopped and reports ``success: false``.
                 max_workers: Maximum number of concurrent threads, as a
                     string containing an integer (e.g. ``"4"``).  An empty
                     string (default) lets Python choose automatically.
@@ -2265,16 +2309,21 @@ class SorcarAgent(RelentlessAgent):
                     task's), ``add_to_system_prompt`` / ``add_to_prompt``
                     (appended text), ``model_config``, ``docker_image``,
                     and the booleans ``use_web_tools``, ``use_memory``,
-                    ``is_parallel``.  A child is a thread of this task
+                    ``allow_fan_out``.  A child is a thread of this task
                     on its own tree and chat, so ``use_worktree``,
-                    ``auto_commit``, ``classify_tasks``, ``chat_id``
+                    ``auto_commit``, ``auto_classify``, ``chat_id``
                     and ``workspace`` are refused.  Usually leave it
                     empty.
 
             Returns:
                 A YAML-formatted string containing a list of result
                 objects, one per task, in the same order as the input.
-                Each result object has ``success`` and ``summary`` keys.
+                Each result object starts with a ``ran`` line (the agent
+                and kind the child ran as, its model, tool profile and
+                budget, which values it inherited from this task and
+                which asked-for values the agent script replaced, e.g.
+                ``overridden=tool_profile(review->bash)``) followed by
+                its ``success`` and ``summary`` keys.
                 A string starting with ``Error:`` when the call was
                 refused by one of the hard limits above, ``agent``
                 names no usable agent script, or the script or
@@ -2304,6 +2353,9 @@ class SorcarAgent(RelentlessAgent):
                 run_options = parse_run_options(options, tool_profile)
             except ValueError as exc:
                 return f"Error: {exc}"
+            seconds = resolve_timeout(timeout, {}) if timeout.strip() else None
+            if isinstance(seconds, str):
+                return seconds
             try:
                 results = self._run_tasks_parallel(
                     task_list, max_workers=workers,
@@ -2312,6 +2364,7 @@ class SorcarAgent(RelentlessAgent):
                     agent=agent,
                     max_budget=budget,
                     options=run_options,
+                    timeout=seconds,
                 )
             except SeaError as exc:
                 return f"Error: {exc}"
@@ -3281,8 +3334,12 @@ def _coerce_tasks(tasks: Any) -> list[str]:
 
 
 def _sea_run_kwargs(
-    layers: list[SeaLayer], task: str, defaults: dict[str, Any], parent_agent: Any,
-) -> dict[str, Any]:
+    layers: list[SeaLayer],
+    task: str,
+    defaults: dict[str, Any],
+    parent_agent: Any,
+    explicit: set[str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return the ``run()`` keyword overrides an agent script makes for one child.
 
     The in-process counterpart of the daemon's
@@ -3304,9 +3361,14 @@ def _sea_run_kwargs(
             otherwise (read, not modified).
         parent_agent: The fanning-out agent, whose persisted task id
             replaces ``{task_id}`` in the prompt.
+        explicit: The setting keys the ``run_parallel`` call passed
+            explicitly; the script's values for them are not applied
+            (the call's win; a locked clash was refused before).
 
     Returns:
-        The keyword arguments to update the child's with.
+        The keyword arguments to update the child's with, and the
+        child's run-configuration record (``sea``, ``kind``,
+        ``overridden``; see :mod:`kiss.agents.sorcar.run_config`).
 
     Raises:
         SeaScriptError: When a getter is broken (see
@@ -3314,6 +3376,11 @@ def _sea_run_kwargs(
     """
     run = evaluate_sea(layers, task, _persisted_task_id(parent_agent))
     settings = run.settings
+    run_config: dict[str, Any] = {
+        "sea": script_name(str(layers[-1].path)),
+        "kind": settings.get("kind") or "session",
+        "overridden": {},
+    }
     # ``run()`` only records ``prompt_suffix``: the prompt carries it.
     overrides: dict[str, Any] = {
         "prompt_template": run.prompt + str(defaults.get("prompt_suffix") or ""),
@@ -3335,21 +3402,26 @@ def _sea_run_kwargs(
         ("model", "model_name"), ("max_budget", "max_budget"),
         ("tool_profile", "tool_profile"), ("docker_image", "docker_image"),
         ("work_dir", "work_dir"), ("use_web_tools", "web_tools"),
-        ("use_memory", "use_memory"), ("is_parallel", "is_parallel"),
+        ("use_memory", "use_memory"), ("allow_fan_out", "is_parallel"),
     ):
-        if key in settings and settings[key] != "":
+        if key in settings and settings[key] != "" and key not in (explicit or ()):
             overrides[kwarg] = settings[key]
-    if "model" in settings and settings["model"] != defaults.get("model_name"):
+            note_override(run_config["overridden"], key, defaults.get(kwarg), settings[key])
+    if "model_name" in overrides and settings["model"] != defaults.get("model_name"):
         # The parent's model_config belongs to the parent's model.
         overrides["model_config"] = None
-    if settings.get("model_config"):
+    if settings.get("model_config") and "model_config" not in (explicit or ()):
         overrides["model_config"] = settings["model_config"]
+        note_override(
+            run_config["overridden"], "model_config",
+            defaults.get("model_config"), settings["model_config"],
+        )
     if overrides.get("tool_profile", defaults.get("tool_profile")) == "none":
         # The script fixed the whole toolset: no built-ins, no tools
         # taken over from the parent.
         overrides["append_basic_tools"] = False
         overrides["inherited_tools"] = []
-    return overrides
+    return overrides, run_config
 
 
 def run_tasks_parallel(
@@ -3373,6 +3445,9 @@ def run_tasks_parallel(
     live_browser: Any = None,
     docker_image: str | None = None,
     sea_layers: list[SeaLayer] | None = None,
+    run_config: dict[str, Any] | None = None,
+    explicit: set[str] | None = None,
+    timeout: float | None = None,
     prompt_suffix: str = "",
     is_parallel: bool = True,
     inherited_tools: list[Callable[..., Any]] | None = None,
@@ -3490,11 +3565,23 @@ def run_tasks_parallel(
             runs as (:func:`kiss.agents.sorcar.sea_commands.sea_layers`),
             evaluated per child on its task
             (:func:`~kiss.agents.sorcar.sea_commands.evaluate_sea`): the
-            script's settings win over the arguments above, its
+            script's settings apply where *explicit* names no key, its
             ``prompt(task)`` shapes the child's prompt, its system-prompt
             texts, tools and hooks apply.  ``None``/empty runs plain
             sub-agents.  A getter broken for one task fails that child
             alone (a YAML failure entry), like any other child error.
+        run_config: The run-configuration record every child starts
+            from (its ``inherited`` keys and ``timeout``; see
+            :mod:`kiss.agents.sorcar.run_config`), extended per child
+            with the tool profile and the script's ``sea`` / ``kind`` /
+            ``overridden`` and folded into its ``task_settings`` event;
+            every child's result starts with the matching ``ran:`` line.
+        explicit: The setting keys the ``run_parallel`` call passed
+            explicitly (``model``, ``tool_profile``, ``max_budget``, the
+            options); the agent script's settings do not replace them.
+        timeout: Maximum seconds each child may run; ``None`` for no
+            limit.  A child still running when it expires is stopped
+            and reports ``success: false`` with the elapsed limit.
         prompt_suffix: Text appended to every child's task prompt (the
             parent's own ``appendToPrompt``), recorded on the child as
             its ``prompt_suffix`` so its sub-tasks inherit it in turn.
@@ -3531,7 +3618,12 @@ def run_tasks_parallel(
 
     parent_tl = getattr(printer, "_thread_local", None) if printer else None
     parent_key = str(getattr(parent_tl, "task_id", "") or "") if parent_tl else ""
-    parent_stop_event = getattr(parent_tl, "stop_event", None) if parent_tl else None
+    # The thread's own binding first (a headless child of an enclosing
+    # fan-out has one and no printer); the printer's thread-local is a
+    # view over the same storage for the JSON printer.
+    parent_stop_event = get_thread_stop_event() or (
+        getattr(parent_tl, "stop_event", None) if parent_tl else None
+    )
     persisted_parent_id = _persisted_task_id(parent_agent)
     parent_is_reviewer = bool(
         (getattr(parent_agent, "_subagent_info", None) or {}).get("reviewer")
@@ -3576,6 +3668,12 @@ def run_tasks_parallel(
         # or its siblings, while a parent stop (or an abandoned
         # fan-out) still reaches every child (_SubagentStopEvent).
         sub_stop_event = _SubagentStopEvent(fanout_stop_event)
+        # Bound to the thread itself (so a headless fan-out's per-child
+        # ``timeout`` can stop the child) and to the printer's
+        # thread-local, which for the JSON printer is a view over the
+        # same storage and for a plainer printer is where the child's
+        # ``run`` reads its stop event from.
+        set_thread_stop_event(sub_stop_event)
         tl = getattr(printer, "_thread_local", None) if printer else None
         if tl is not None:
             tl.stop_event = sub_stop_event
@@ -3626,13 +3724,33 @@ def run_tasks_parallel(
             "live_browser": live_browser,
             "inherited_tools": [] if child_profile == "none" else list(inherited_tools or []),
         }
+        agent.run_config = {**(run_config or {}), "timeout": timeout}
+        timer: threading.Timer | None = None
+        timed_out = threading.Event()
+
+        def _expire() -> None:
+            # Flag first, then stop only this child (its own event, not the fan-out's).
+            timed_out.set()
+            sub_stop_event.set()
+
+        if timeout is not None:
+            timer = threading.Timer(timeout, _expire)
+            timer.daemon = True
+            timer.start()
         try:
             if sea_layers:
                 # Inside the try: a getter broken for THIS task (its
                 # ``prompt(task)`` raised) fails this child alone, with
                 # the usual cleanup, instead of the whole fan-out.
-                run_kwargs.update(_sea_run_kwargs(sea_layers, task, run_kwargs, parent_agent))
-            result: str = agent.run(**run_kwargs)
+                overrides, sea_config = _sea_run_kwargs(
+                    sea_layers, task, run_kwargs, parent_agent, explicit,
+                )
+                run_kwargs.update(overrides)
+                agent.run_config.update(sea_config)
+            agent.run_config["tool_profile"] = run_kwargs["tool_profile"]
+            result: str = with_run_config(
+                agent.run(**run_kwargs), agent.task_settings or agent.run_config,
+            )
             return result
         except KeyboardInterrupt:
             # Only THIS child was stopped: report it as a stopped task
@@ -3642,13 +3760,21 @@ def run_tasks_parallel(
             if parent_stop_event is not None and parent_stop_event.is_set():
                 raise
             stopped: str = yaml.dump(
-                {"success": False, "summary": "Sub-agent task stopped by user."},
+                {
+                    "success": False,
+                    "summary": (
+                        f"Sub-agent task did not finish within {timeout:g} s and was stopped."
+                        if timed_out.is_set() else "Sub-agent task stopped by user."
+                    ),
+                },
                 sort_keys=False,
             )
-            return stopped
+            return with_run_config(stopped, agent.task_settings or agent.run_config)
         except Exception as exc:
-            return _yaml_failure(exc)
+            return with_run_config(_yaml_failure(exc), agent.task_settings or agent.run_config)
         finally:
+            if timer is not None:
+                timer.cancel()
             # _live_agent_usage (not _agent_usage): an interrupted child
             # never folds its in-flight executor session's spend into the
             # agent totals, so the folded-only read would undercount it.
@@ -3671,6 +3797,7 @@ def run_tasks_parallel(
             # Pool workers are reused and the binding is per THREAD, so
             # leaving it behind would let an unrelated sibling inherit a
             # stop meant for this task.
+            set_thread_stop_event(None)
             if tl is not None:
                 tl.stop_event = None
 

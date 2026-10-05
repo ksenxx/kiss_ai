@@ -125,7 +125,7 @@ def system_prompt() -> str:
 def settings() -> dict[str, Any]:
     """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
     return {
-        "preset": "worker",
+        "kind": "worker",
         "tool_profile": "bash",
         "max_budget": 1.0,
     }

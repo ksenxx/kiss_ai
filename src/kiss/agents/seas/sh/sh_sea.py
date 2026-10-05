@@ -13,8 +13,9 @@ and no other built-in tool — directly on the checkout (no worktree, no
 auto-commit, no classification, no browser, no memory, no fan-out), so
 the command's output is the result of the run.
 
-Module-level getters (``system_prompt()``, ``tool_profile()``, ...)
-follow the SEA contract in :mod:`kiss.server.agent_file`.
+``settings()`` (the ``worker`` kind with the ``bash`` tool profile) and
+the getters ``system_prompt()`` / ``prompt(task)`` follow the SEA contract
+in :mod:`kiss.agents.sorcar.sea_settings`.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def system_prompt() -> str:
 def settings() -> dict[str, Any]:
     """A worker with Bash only, on the real checkout, running :data:`SYSTEM_PROMPT`."""
     return {
-        "preset": "worker",
+        "kind": "worker",
         "tool_profile": "bash",
     }
 

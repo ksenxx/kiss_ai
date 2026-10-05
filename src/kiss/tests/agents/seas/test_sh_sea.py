@@ -57,18 +57,18 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert "call the Bash tool with the user's command exactly as written" in prompt
     assert "call the `finish` tool" in prompt
     assert "must never be empty" in prompt
-    assert sh_sea.settings() == {"preset": "worker", "tool_profile": "bash"}
+    assert sh_sea.settings() == {"kind": "worker", "tool_profile": "bash"}
     assert TOOL_PROFILES["bash"] == frozenset({"Bash"})
     # The ``worker`` preset turns worktree, auto-commit, classifier,
     # fan-out, browser and memory off; ``system_prompt()`` stays a getter
     # the daemon applies, so ``resolve_settings`` does not carry its text.
     assert resolve_settings(vars(sh_sea)) == {
-        "preset": "worker",
+        "kind": "worker",
         "tool_profile": "bash",
         "use_worktree": False,
         "auto_commit": False,
-        "classify_tasks": False,
-        "is_parallel": False,
+        "auto_classify": False,
+        "allow_fan_out": False,
         "use_web_tools": False,
         "use_memory": False,
     }
@@ -116,7 +116,7 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
             tool_profile=settings["tool_profile"],
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["is_parallel"],
+            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

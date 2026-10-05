@@ -14,7 +14,7 @@ daemon executes the script and the scripts it extends
 (:func:`kiss.agents.sorcar.sea_commands.evaluate_sea`) and applies the
 result in place on the command dict (:func:`apply_agent_overrides`):
 
-* the merged ``settings()``: a ``preset`` plus per-run parameters, each
+* the merged ``settings()``: a ``kind`` plus per-run parameters, each
   written over the command's corresponding wire field
   (:data:`SETTING_FIELDS`), so a script's choice wins over whatever
   the caller sent;
@@ -22,12 +22,12 @@ result in place on the command dict (:func:`apply_agent_overrides`):
   returns (``{task_id}`` in it -> the calling task's id);
 * ``system_prompt()``, written over ``systemPrompt`` (the run's base
   system prompt);
-* the ``channel`` preset's preamble and ``add_to_system_prompt()``,
+* the ``channel`` kind's preamble and ``add_to_system_prompt()``,
   appended to ``appendToSystemPrompt``;
 * ``add_to_tools()`` callables and ``llm_call_hook()`` /
   ``tool_call_hook()`` hooks — values no wire field can carry — staged
   on the daemon-side fields ``tools`` / ``llmCallHook`` / ``toolCallHook``;
-* for a ``channel`` preset, the workspace the run holds for its
+* for a ``channel`` kind, the workspace the run holds for its
   lifetime (:func:`channel_workspace`), which the task runner enters
   BEFORE the tools are built — a channel's ``add_to_tools()`` binds the
   credentials of the workspace active at that moment — and releases
@@ -46,6 +46,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT, sea_overrides
 from kiss.agents.sorcar.sea_commands import (
     SeaLayer,
     SeaScriptError,
@@ -54,10 +55,13 @@ from kiss.agents.sorcar.sea_commands import (
     sea_layers,
 )
 from kiss.agents.sorcar.sea_settings import (
+    DISPATCHER_SETTINGS,
     SETTING_TYPES,
     SeaError,
+    locked_conflicts,
     merge_settings,
     script_name,
+    wire_field,
 )
 
 logger = logging.getLogger("kiss-vscode")
@@ -77,38 +81,13 @@ class AgentFileError(SeaError):
     """
 
 
-def wire_field(key: str) -> str:
-    """Return the ``run`` command wire field of the ``run()`` keyword *key*.
-
-    The wire vocabulary is the keyword vocabulary in camelCase
-    (``use_web_tools`` -> ``useWebTools``), with two aliases kept from
-    the wire protocol's earlier vocabulary: ``add_to_prompt`` ->
-    ``appendToPrompt`` and ``add_to_system_prompt`` ->
-    ``appendToSystemPrompt``.
-    """
-    aliases = {"add_to_prompt": "appendToPrompt", "add_to_system_prompt": "appendToSystemPrompt"}
-    if key in aliases:
-        return aliases[key]
-    first, *rest = key.split("_")
-    return first + "".join(part.capitalize() for part in rest)
-
-
-DISPATCHER_SETTINGS = ("preset", "extends", "timeout", "inherit", "kind")
-"""``settings()`` keys with no ``run`` command wire field.
-
-``preset`` and ``extends`` are resolved by
-:func:`~kiss.agents.sorcar.sea_commands.sea_layers`; ``timeout`` and
-``inherit`` are read by the dispatcher
-(:mod:`kiss.agents.sorcar.agent_dispatch`); ``kind`` is read from the
-layers by :func:`channel_workspace` and :func:`apply_agent_overrides`.
-"""
-
 SETTING_FIELDS: dict[str, str] = {
     key: wire_field(key) for key in SETTING_TYPES if key not in DISPATCHER_SETTINGS
 }
 """``settings()`` key -> the ``run`` command wire field it overrides.
 
-Every key is a parameter of :func:`kiss.server.sorcar.run`.
+Every key is a parameter of :func:`kiss.server.sorcar.run`; the
+:data:`~kiss.agents.sorcar.sea_settings.DISPATCHER_SETTINGS` have none.
 """
 
 CHANNEL_PREAMBLE = (
@@ -128,6 +107,7 @@ def is_channel(layers: list[SeaLayer]) -> bool:
     if not layers:
         return False
     return merge_settings([layer.settings for layer in layers]).get("kind") == "channel"
+
 
 NO_TOOLS_PROFILE = "none"
 """The tool profile of a run whose only built-in tool is ``finish``."""
@@ -189,7 +169,8 @@ def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[SeaLayer]
 
 
 def apply_agent_overrides(
-    cmd: dict[str, Any], layers: list[SeaLayer] | None = None,
+    cmd: dict[str, Any],
+    layers: list[SeaLayer] | None = None,
 ) -> set[str]:
     """Apply a ``run`` command's agent-script configuration, in place.
 
@@ -248,6 +229,37 @@ def apply_agent_overrides(
     for key, field in SETTING_FIELDS.items():
         if key in run.settings:
             staged[field] = run.settings[key]
+    # Precedence (kiss.agents.sorcar.sea_settings.locked_conflicts): a
+    # value the caller passed explicitly (``provenance`` wire field)
+    # wins over the script's, unless the script locks the key — then
+    # the clash is an error.  Inherited and persisted values lose to
+    # the script's.
+    provenance = cmd.get("provenance")
+    marks = provenance if isinstance(provenance, dict) else {}
+    explicit = {
+        key: cmd.get(field)
+        for key, field in SETTING_FIELDS.items()
+        if marks.get(key) == PROVENANCE_EXPLICIT
+    }
+    # ``timeout``, the one dispatcher setting a caller can pass
+    # explicitly, has no staged write but can clash with a lock.
+    if marks.get("timeout") == PROVENANCE_EXPLICIT:
+        explicit["timeout"] = cmd.get("timeout")
+    scope = cmd.get("scopeWorkDir")
+    conflict = locked_conflicts(
+        run.settings,
+        explicit,
+        scope if isinstance(scope, str) else "",
+    )
+    if conflict:
+        raise AgentFileError(f"{script_name(str(layers[-1].path))}: {conflict}")
+    for key, asked in explicit.items():
+        field = SETTING_FIELDS.get(key, "")
+        # An explicit value that differs from the script's wins; one that
+        # agrees keeps the script's write, so the field still counts as
+        # script-pinned (``_seaPinnedWorktree``).
+        if field in staged and asked is not None and asked != "" and asked != staged[field]:
+            del staged[field]
     if any("prompt" in layer.namespace for layer in layers):
         staged["prompt"] = run.prompt
     if run.system_prompt is not None:
@@ -255,7 +267,8 @@ def apply_agent_overrides(
     system_suffix = cmd.get("appendToSystemPrompt")
     if run.settings.get("kind") == "channel":
         system_suffix = _add_text(
-            system_suffix, CHANNEL_PREAMBLE.format(name=script_name(str(layers[-1].path))),
+            system_suffix,
+            CHANNEL_PREAMBLE.format(name=script_name(str(layers[-1].path))),
         )
         staged["appendToSystemPrompt"] = system_suffix
     if run.add_to_system_prompt:
@@ -266,8 +279,26 @@ def apply_agent_overrides(
         staged["llmCallHook"] = run.llm_call_hook
     if any("tool_call_hook" in layer.namespace for layer in layers):
         staged["toolCallHook"] = run.tool_call_hook
+    # The provenance record the task runner folds into the run's
+    # ``task_settings`` event (see :mod:`kiss.agents.sorcar.run_config`):
+    # computed from the command BEFORE the writes, so it names what the
+    # caller sent and what the script replaced it with.
+    cmd[RUN_CONFIG_FIELD] = {
+        "sea": script_name(str(layers[-1].path)),
+        "kind": run.settings.get("kind") or "session",
+        "overridden": sea_overrides(cmd, staged, SETTING_FIELDS),
+    }
     cmd.update(staged)
     return set(staged)
+
+
+RUN_CONFIG_FIELD = "_runConfig"
+"""The daemon-side ``run`` command field :func:`apply_agent_overrides` leaves its provenance
+record in.
+
+``{"sea": <script name>, "kind": <kind>, "overridden": {key: [asked, forced]}}``;
+absent when the command carries no agent script.
+"""
 
 
 def _add_text(base: Any, addition: str) -> str:

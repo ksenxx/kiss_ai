@@ -28,7 +28,7 @@ steps on the missing ``sqlite3`` CLI, a schema dump and raw event JSON
 (median 9 steps, $0.91 and 99 s per answer); with no other tool to
 reach for, the answer comes straight from the context.
 
-Configuration: :func:`settings` picks the ``worker`` preset with the
+Configuration: :func:`settings` picks the ``worker`` kind with the
 ``none`` tool profile (no built-in tool besides ``finish`` — the parent
 task is still running in the same working tree, so the answerer must
 never edit files or run commands), the SYSTEM_LITE ablation prompt as
@@ -123,7 +123,7 @@ def settings() -> dict[str, Any]:
     (``_ask_system_lite.md`` next to this module, brand placeholders
     filled).
     """
-    return {"preset": "worker", "tool_profile": "none"}
+    return {"kind": "worker", "tool_profile": "none"}
 
 
 def prompt(task: str) -> str:

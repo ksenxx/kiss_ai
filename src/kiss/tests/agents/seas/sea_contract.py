@@ -17,8 +17,8 @@ from typing import Any
 
 REMOVED_GETTERS: tuple[str, ...] = (
     "model", "work_dir", "chat_id", "docker_image", "model_config",
-    "max_budget", "tool_profile", "use_worktree", "auto_commit", "classify_tasks",
-    "is_parallel", "use_web_tools", "use_memory", "dispatch_timeout",
+    "max_budget", "tool_profile", "use_worktree", "auto_commit", "auto_classify",
+    "allow_fan_out", "use_web_tools", "use_memory", "dispatch_timeout",
     "append_to_prompt", "append_to_system_prompt", "tools", "if_append_basic_tools",
 )
 """Module-level names the old per-field getter contract used; none is read any more.

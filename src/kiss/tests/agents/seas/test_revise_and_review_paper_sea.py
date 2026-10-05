@@ -74,17 +74,17 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert names == ["writer_task", "reviewer_task", "loop_status"]
     assert sea.settings() == {
         "use_web_tools": False,
-        "is_parallel": False,
-        "classify_tasks": False,
+        "allow_fan_out": False,
+        "auto_classify": False,
         "tool_profile": "full",
         "timeout": sea.DISPATCH_TIMEOUT_SECONDS,
     }
     assert sea.DISPATCH_TIMEOUT_SECONDS == 86400
     # No preset named, so the resolved settings are these five keys under
     # the default ``session`` preset; the deprecated getters are gone.
-    assert resolve_settings(vars(sea)) == {"preset": "session", **sea.settings()}
+    assert resolve_settings(vars(sea)) == {"kind": "session", **sea.settings()}
     for legacy in (
-        "system_prompt", "use_web_tools", "is_parallel", "classify_tasks", "tool_profile",
+        "system_prompt", "use_web_tools", "allow_fan_out", "auto_classify", "tool_profile",
         "dispatch_timeout", "append_to_system_prompt",
     ):
         assert not hasattr(sea, legacy), legacy
@@ -107,7 +107,7 @@ def test_slash_command_resolves_to_the_bundled_sea() -> None:
     assert path == _SEA_PATH
     assert task_text == "Writing: a paper. Review: for ICLR."
     settings = sea_commands.sea_settings(path)
-    assert settings == {"preset": "session", **sea.settings()}
+    assert settings == {"kind": "session", **sea.settings()}
     assert resolve_timeout("", settings) == 86400.0
     assert sea_commands.sea_description(_SEA_PATH) == sea.description()
 
@@ -117,8 +117,8 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
 
     The paper SEAs declare their own waits; a SEA without ``timeout``
     (the bundled ``/dummy``) gets :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
-    Real SEA files whose ``settings()`` returns a non-numeric, boolean or
-    infinite ``timeout``, or raises, fail loudly at ``sea_settings`` (a
+    Real SEA files whose ``settings()`` returns a non-numeric, boolean,
+    infinite or non-positive ``timeout``, or raises, fail loudly at ``sea_settings`` (a
     broken script must not run with guessed parameters); a non-positive
     value falls back to the default and a positive float is kept as is.
     """
@@ -141,7 +141,6 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
 
     resolved = {
         "": 3600.0,
-        "def settings():\n    return {'timeout': 0}\n": 3600.0,
         "def settings():\n    return {'timeout': 1800.0}\n": 1800.0,
         "def settings():\n    return {'timeout': 1800}\n": 1800.0,
         # A removed legacy getter is an ordinary module function: ignored.
@@ -156,6 +155,9 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
         "def settings():\n    return {'timeout': 'soon'}\n",
         "def settings():\n    return {'timeout': True}\n",
         "def settings():\n    return {'timeout': float('inf')}\n",
+        # A non-positive wait means nothing: refused like an infinite one.
+        "def settings():\n    return {'timeout': 0}\n",
+        "def settings():\n    return {'timeout': -5}\n",
         "def settings():\n    raise RuntimeError('broken')\n",
     ]
     for n, body in enumerate(broken, start=len(resolved)):
@@ -378,7 +380,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
             tools=sea.add_to_tools(),
             tool_profile=settings["tool_profile"],
             web_tools=settings["use_web_tools"],
-            is_parallel=settings["is_parallel"],
+            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

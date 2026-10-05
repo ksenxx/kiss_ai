@@ -101,15 +101,15 @@ def test_finite_numbers_are_returned_as_floats() -> None:
 
 
 def test_unknown_key_with_none_value_is_rejected() -> None:
-    namespace = {"settings": lambda: {"preset": "worker", "tiemout": None}}
+    namespace = {"settings": lambda: {"kind": "worker", "tiemout": None}}
     with pytest.raises(SettingsError, match="unknown key 'tiemout'"):
         resolve_settings(namespace)
 
 
 def test_known_key_with_none_value_is_dropped() -> None:
-    resolved = resolve_settings({"settings": lambda: {"preset": "worker", "timeout": None}})
+    resolved = resolve_settings({"settings": lambda: {"kind": "worker", "timeout": None}})
     assert "timeout" not in resolved
-    assert resolved["preset"] == "worker"
+    assert resolved["kind"] == "worker"
 
 
 def _history_tasks() -> list[str]:
@@ -245,7 +245,7 @@ class SeaSettingsDaemonRegressionTest(DaemonRunApiHarness):
         _seed_seas_md(
             Path(self.tmpdir) / "user-seas", "chan",
             "def description():\n    return 'a channel'\n"
-            "def settings():\n    return {'preset': 'channel'}\n",
+            "def settings():\n    return {'kind': 'channel'}\n",
         )
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)

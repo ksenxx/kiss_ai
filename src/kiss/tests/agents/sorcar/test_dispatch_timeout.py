@@ -329,6 +329,7 @@ def test_run_agent_tool_waits_past_delayed_result(
             "say hi slowly", str(script), timeout=timeout_arg,
         )
         parsed = yaml.safe_load(out)
+        assert parsed.pop("ran").startswith("sub-agent (session) model=default ")
         assert parsed == {"success": True, "summary": "slow but done"}
         assert "did not finish within" not in out
         assert daemon.run_cmd is not None

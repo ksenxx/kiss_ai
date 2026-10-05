@@ -544,7 +544,7 @@ def test_one_round_accepts_a_candidate_that_passes_more_selection_tasks(tmp_path
         == sh_sea.system_prompt().rstrip("\n") + "\nReturn the exact output.\n"
     )
     # Every other line of the SEA is kept: its ``settings()`` still pin the Bash profile.
-    assert ns["settings"]() == sh_sea.settings() == {"preset": "worker", "tool_profile": "bash"}
+    assert ns["settings"]() == sh_sea.settings() == {"kind": "worker", "tool_profile": "bash"}
     assert sea.read_text(encoding="utf-8") == _SH_SEA.read_text(encoding="utf-8")
 
     out = tmp_path / "out"
@@ -955,22 +955,22 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     """The SkillOpt SEA is registered as ``/skillopt`` and exposes optimize/status."""
     assert skillopt_sea.system_prompt().startswith("You are SkillOpt")
     assert [t.__name__ for t in skillopt_sea.add_to_tools()] == ["optimize", "status"]
-    assert skillopt_sea.settings() == {"preset": "worker", "tool_profile": "shell"}
+    assert skillopt_sea.settings() == {"kind": "worker", "tool_profile": "shell"}
     # ``worker`` turns worktree, auto-commit, classifier, fan-out, browser
     # and memory off; ``system_prompt()`` is a getter, not a settings key.
     assert resolve_settings(vars(skillopt_sea)) == {
-        "preset": "worker",
+        "kind": "worker",
         "tool_profile": "shell",
         "use_worktree": False,
         "auto_commit": False,
-        "classify_tasks": False,
-        "is_parallel": False,
+        "auto_classify": False,
+        "allow_fan_out": False,
         "use_web_tools": False,
         "use_memory": False,
     }
     assert skillopt_sea.system_prompt() == skillopt_sea.SYSTEM_PROMPT
     for legacy in (
-        "tool_profile", "use_worktree", "auto_commit", "classify_tasks", "is_parallel",
+        "tool_profile", "use_worktree", "auto_commit", "auto_classify", "allow_fan_out",
         "use_web_tools", "use_memory", "tools", "append_to_system_prompt", "model", "prompt",
     ):
         assert not hasattr(skillopt_sea, legacy), legacy

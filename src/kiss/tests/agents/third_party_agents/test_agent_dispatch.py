@@ -344,9 +344,9 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
         "use_worktree",
         "auto_commit",
         "use_web_tools",
-        "classify_tasks",
+        "auto_classify",
         "use_memory",
-        "is_parallel",
+        "allow_fan_out",
     ):
         out = run_agent("say hi", "ntfy", options=f'{{"{name}": "maybe"}}')
         assert out == f"Error: {name} must be true or false, got 'maybe'."
@@ -487,9 +487,9 @@ def test_run_options_are_forwarded_to_daemon(
             "use_worktree": "false",
             "auto_commit": "False",
             "use_web_tools": true,
-            "classify_tasks": false,
+            "auto_classify": false,
             "use_memory": "true",
-            "is_parallel": false,
+            "allow_fan_out": false,
             "add_to_system_prompt": "Answer in French.",
             "add_to_prompt": "Cite sources."
         }""",
@@ -518,23 +518,23 @@ def test_run_options_are_forwarded_to_daemon(
     # ``""`` mean "not passed", so the defaults stand.
     captured_dispatch.clear()
     tool("say hi", str(script), options='{"use_worktree": true, "use_memory": null, '
-                                        '"is_parallel": "", "chat_id": null}')
+                                        '"allow_fan_out": "", "chat_id": null}')
     assert captured_dispatch[0]["use_worktree"] is True
     assert captured_dispatch[0]["use_memory"] is None
     assert captured_dispatch[0]["is_parallel"] is True
     assert captured_dispatch[0]["chat_id"] == ""
 
-    # The dispatcher forwards an explicit classify_tasks for every
+    # The dispatcher forwards an explicit auto_classify for every
     # agent alike; for cron and the channel agents the module's
     # ``channel`` preset then pins classification off on the daemon.
     captured_dispatch.clear()
-    tool("run 'echo hi' every 5 minutes", "cron", options='{"classify_tasks": true}')
+    tool("run 'echo hi' every 5 minutes", "cron", options='{"auto_classify": true}')
     assert captured_dispatch[0]["classify_tasks"] is True
     cmd = _daemon_run_command(captured_dispatch[0])
     apply_agent_overrides(cmd)
     assert cmd["classifyTasks"] is False
     captured_dispatch.clear()
-    tool("say hi", "ntfy", options='{"classify_tasks": "False", "use_memory": false}')
+    tool("say hi", "ntfy", options='{"auto_classify": "False", "use_memory": false}')
     assert captured_dispatch[0]["classify_tasks"] is False
     assert captured_dispatch[0]["use_memory"] is False
 
@@ -676,6 +676,7 @@ def test_default_agent_is_the_bundled_dummy_sea(
     # The dummy SEA defines no getters: a plain Sorcar session.
     cmd = {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
     assert apply_agent_overrides(cmd) == set()
+    assert cmd.pop("_runConfig") == {"sea": "dummy", "kind": "session", "overridden": {}}
     assert cmd == {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
 
     caller = tmp_path / "caller_project"
@@ -857,7 +858,7 @@ def test_every_channel_module_is_dispatchable() -> None:
         # Every channel module is a ``channel``-preset agent script
         # whose ``add_to_system_prompt()`` carries the channel's
         # guidance (the agent class's ``channel_system_prompt``).
-        assert module.settings()["preset"] == "channel", channel
+        assert module.settings()["kind"] == "channel", channel
         guidance = getattr(cls, "channel_system_prompt", "")
         addition = getattr(module, "add_to_system_prompt", None)
         if guidance:

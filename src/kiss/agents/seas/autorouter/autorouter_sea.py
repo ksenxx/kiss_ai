@@ -42,13 +42,14 @@ own task history shows about each model's cost, speed and reliability, at
 most :data:`EVIDENCE_MAX_CHARS` characters of it (:func:`observed_evidence`
 cuts a longer file at a line boundary).
 :mod:`kiss.agents.seas.rsi7d.rsi7d_sea` rewrites that file from
-``~/.kiss/history.db`` (so refreshing the evidence never edits this SEA),
+``$KISS_HOME/history.db`` (so refreshing the evidence never edits this SEA),
 refusing text over the same cap, and the protocol treats it as the
 posterior over the tier-order prior.
 
-Module-level getters (``add_to_system_prompt()``, ``register_as_model()``,
-``model()``, ``is_parallel()``, ...) follow the SEA contract in
-:mod:`kiss.server.agent_file`.  Picking ``autorouter`` in the model picker
+``settings()`` (a sequential ``worker`` that picks its model per run) and
+the getters ``add_to_system_prompt()`` / ``register_as_model()`` /
+``on_picked_as_model()`` follow the SEA contract in
+:mod:`kiss.agents.sorcar.sea_settings`.  Picking ``autorouter`` in the model picker
 also keeps the evidence fresh: the ``on_picked_as_model(work_dir)`` hook
 (:func:`schedule_weekly_rsi7d`) makes sure an enabled weekly cron job that
 runs ``/rsi7d autorouter`` exists, creating or resuming it when it does not.
@@ -781,7 +782,7 @@ def add_to_system_prompt() -> str:
 def settings() -> dict[str, Any]:
     """Configure a routed session: the orchestrator model, no fan-out, no browser, no memory.
 
-    ``is_parallel`` is off because ``run_parallel`` forwards the parent's
+    ``allow_fan_out`` is off because ``run_parallel`` forwards the parent's
     system-prompt additions to every worker, which would turn each routed
     unit into another router without the routing tools; ``run_agent`` is
     the dispatch primitive (one unit per call).  Classification is off so
@@ -789,8 +790,8 @@ def settings() -> dict[str, Any]:
     """
     return {
         "model": orchestrator_model(),
-        "is_parallel": False,
-        "classify_tasks": False,
+        "allow_fan_out": False,
+        "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,
     }

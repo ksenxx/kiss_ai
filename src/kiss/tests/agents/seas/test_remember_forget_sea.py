@@ -72,7 +72,7 @@ def _run(sea: Any, prompt: str, script: list[bytes], work_dir: Path) -> tuple[An
             base_system_prompt=sea.system_prompt(),
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["is_parallel"],
+            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     return yaml.safe_load(result), [r for r in requests if r.get("tools")]
@@ -95,17 +95,17 @@ def test_sea_getters_follow_the_contract() -> None:
     assert "`list_instructions`" in forget_sea.SYSTEM_PROMPT
     assert forget_sea.add_to_tools() == [forget_sea.forget_instruction, agents_md.list_instructions]
     for sea in (remember_sea, forget_sea):
-        assert sea.settings() == {"preset": "worker", "tool_profile": "bash", "max_budget": 1.0}
+        assert sea.settings() == {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
         # ``resolve_settings`` evaluates ``settings()`` plus the ``worker``
         # preset only; ``system_prompt()`` is a getter the daemon applies.
         assert resolve_settings(vars(sea)) == {
-            "preset": "worker",
+            "kind": "worker",
             "tool_profile": "bash",
             "max_budget": 1.0,
             "use_worktree": False,
             "auto_commit": False,
-            "classify_tasks": False,
-            "is_parallel": False,
+            "auto_classify": False,
+            "allow_fan_out": False,
             "use_web_tools": False,
             "use_memory": False,
         }, sea.__name__

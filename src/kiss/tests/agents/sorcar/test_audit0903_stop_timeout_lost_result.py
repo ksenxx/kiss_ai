@@ -325,9 +325,9 @@ def test_run_agent_tool_returns_result_when_finish_races_timeout(
             "finishes while stop is in flight", str(script), timeout="0.3",
         )
         assert "did not finish within" not in out
-        assert yaml.safe_load(out) == {
-            "success": True, "summary": "finished on my own",
-        }
+        parsed = yaml.safe_load(out)
+        assert "timeout=0.3s" in parsed.pop("ran")
+        assert parsed == {"success": True, "summary": "finished on my own"}
     finally:
         daemon.close()
 

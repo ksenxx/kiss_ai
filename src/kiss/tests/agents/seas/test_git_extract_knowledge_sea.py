@@ -135,18 +135,18 @@ def _keys(hits: list[Any]) -> list[str]:
 
 def test_sea_getters_follow_the_contract(tmp_path: Path) -> None:
     """The settings pin the run: full tools + knowledge tools, no worktree, no web, no memory."""
-    assert sea.settings() == {"preset": "worker", "tool_profile": "full", "is_parallel": True}
+    assert sea.settings() == {"kind": "worker", "tool_profile": "full", "allow_fan_out": True}
     # ``worker`` turns worktree, auto-commit, classifier, browser and memory
     # off; the explicit ``is_parallel`` wins over the preset's ``False``.
     # ``system_prompt()`` is a getter the daemon applies (checked below
     # through ``apply_agent_overrides``), not a settings key.
     assert resolve_settings(vars(sea)) == {
-        "preset": "worker",
+        "kind": "worker",
         "tool_profile": "full",
-        "is_parallel": True,
+        "allow_fan_out": True,
         "use_worktree": False,
         "auto_commit": False,
-        "classify_tasks": False,
+        "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,
     }
@@ -1066,7 +1066,7 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
             base_system_prompt=sea.system_prompt(),
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["is_parallel"],
+            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

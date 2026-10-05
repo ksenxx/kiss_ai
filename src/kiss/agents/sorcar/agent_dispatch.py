@@ -15,9 +15,10 @@ one dispatch path (:func:`_run_agent`):
 
 1. the script's effective ``settings()`` are read in the calling
    process (:func:`kiss.agents.sorcar.sea_commands.sea_settings`) for
-   the ``timeout``, ``inherit`` and ``work_dir`` the dispatcher needs;
-2. unless ``inherit`` is ``False``, the arguments the call left empty
-   are inherited from the calling agent (:func:`inherit_from_parent`:
+   the ``timeout``, ``kind`` and ``work_dir`` the dispatcher needs;
+2. unless the kind is ``channel`` or the ``inherit`` option is
+   ``false``, the arguments the call left empty are inherited from the
+   calling agent (:func:`inherit_from_parent`:
    model, budget share, chat, prompt suffixes, web/memory flags,
    container, worktree/auto-commit choices, fan-out flag, extra tools);
 3. the sub-task is submitted to the kiss-web daemon
@@ -33,11 +34,12 @@ getters (:mod:`kiss.agents.sorcar.sea_settings`,
 channel workspace (the ``workspace`` option, forwarded as a wire
 field) for the run's lifetime.
 
-One precedence rule holds for every setting of the sub-task: the agent
-script's ``settings()`` win, then the tool's arguments, then what the
-calling task passes on, then the user's persisted settings.  The one
-exception is ``timeout``: an explicit argument beats the script's
-setting, because it bounds the CALLER's wait.  Inside the kiss-web
+One precedence rule holds for every setting of the sub-task
+(:func:`kiss.agents.sorcar.sea_settings.locked_conflicts`): the tool's
+explicit arguments and options win, then the agent script's
+``settings()``, then what the calling task passes on, then the user's
+persisted settings — except that an argument differing from a setting
+the script lists in ``locked`` is an error.  Inside the kiss-web
 daemon the sub-task is submitted back through the daemon's own local
 endpoint (recorded at boot by the cron scheduler); standalone runs use
 the standard endpoint resolution and need a reachable daemon.
@@ -52,7 +54,7 @@ import math
 import re
 import threading
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -60,8 +62,18 @@ from typing import Any
 import yaml
 
 from kiss.agents.sorcar.daemon_client import TaskResult
+from kiss.agents.sorcar.run_config import (
+    PROVENANCE_EXPLICIT,
+    PROVENANCE_INHERITED,
+    run_config_line,
+)
 from kiss.agents.sorcar.sea_commands import sea_script_in
-from kiss.agents.sorcar.sea_settings import SETTING_TYPES, safe_message, script_name
+from kiss.agents.sorcar.sea_settings import (
+    SETTING_TYPES,
+    locked_conflicts,
+    safe_message,
+    script_name,
+)
 from kiss.agents.sorcar.useful_tools import (
     remap_vanished_worktree,
     rewrite_parent_repo_paths,
@@ -169,9 +181,9 @@ class RunOptions:
     auto_commit: bool | None = None
     model_config: dict[str, Any] | None = None
     use_web_tools: bool | None = None
-    classify_tasks: bool | None = None
+    auto_classify: bool | None = None
     use_memory: bool | None = None
-    is_parallel: bool | None = None
+    allow_fan_out: bool | None = None
     tool_profile: str = ""
     docker_image: str = ""
     inherit: bool | None = None
@@ -182,11 +194,11 @@ class RunOptions:
 
 
 _TOOL_ARGUMENT_SETTINGS = frozenset({
-    "preset", "extends", "kind", "timeout", "model", "max_budget", "tool_profile",
+    "extends", "kind", "locked", "hidden", "timeout", "model", "max_budget", "tool_profile",
 })
 """Settings keys the ``options`` JSON object does not accept.
 
-``preset``, ``extends`` and ``kind`` describe a script, not a call;
+``extends``, ``kind``, ``locked`` and ``hidden`` describe a script, not a call;
 ``timeout``, ``model``, ``max_budget`` and ``tool_profile`` are the
 tool's own arguments.
 """
@@ -197,6 +209,7 @@ OPTION_TYPES: dict[str, type] = {
         for key, expected in SETTING_TYPES.items()
         if key not in _TOOL_ARGUMENT_SETTINGS and isinstance(expected, type)
     },
+    "inherit": bool,
     "workspace": str,
     "add_to_prompt": str,
     "add_to_system_prompt": str,
@@ -205,14 +218,31 @@ OPTION_TYPES: dict[str, type] = {
 
 Derived from :data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`,
 so the tool and the scripts share one vocabulary: what a script may
-pin in ``settings()``, a caller may pass in ``options``; plus
-``workspace`` (the account a channel agent's run holds),
-``add_to_prompt`` (text appended to the task) and
+pin in ``settings()``, a caller may pass in ``options``; plus four
+call-only keys: ``inherit`` (``false``: the sub-task takes nothing
+from the calling task), ``workspace`` (the account a channel agent's
+run holds), ``add_to_prompt`` (text appended to the task) and
 ``add_to_system_prompt``, the option form of a script's
 ``add_to_system_prompt()`` getter.
 """
 
-FANOUT_REFUSED: dict[str, Any] = {"use_worktree": True, "auto_commit": True, "classify_tasks": True}
+OPTION_DOCS: dict[str, str] = {
+    "inherit": "`false`: the sub-task takes nothing from the calling task (no model, budget "
+               "share, chat, prompt suffixes, tools or container); default `true`. A `channel` "
+               "run never inherits, so `true` is refused there. `run_agent` only.",
+    "workspace": "The account a `kind: channel` agent's run holds (its channel workspace); "
+                 "`run_agent` only.",
+    "add_to_prompt": "Text appended to the task after the script's `prompt(task)`.",
+    "add_to_system_prompt": "Text appended to the system prompt after the script's "
+                            "`add_to_system_prompt()`.",
+}
+"""Documentation of the option keys that are not ``settings()`` keys (``sea docs``).
+
+Every other option is documented by
+:data:`~kiss.agents.sorcar.sea_settings.SETTING_DOCS`.
+"""
+
+FANOUT_REFUSED: dict[str, Any] = {"use_worktree": True, "auto_commit": True, "auto_classify": True}
 """Setting values a ``run_parallel`` child cannot honour (see :func:`fanout_conflict`)."""
 
 
@@ -478,6 +508,75 @@ class Inherited:
     docker_image: str
     use_worktree: bool | None
     auto_commit: bool | None
+    fields: tuple[str, ...] = ()
+    """The setting keys that were filled from the caller (``model``, ``chat_id``, ...)."""
+
+    def provenance(self, explicit: Iterable[str]) -> dict[str, str]:
+        """Return the ``provenance`` wire field of a run: ``{setting key: explicit | inherited}``.
+
+        Args:
+            explicit: The setting keys the call passed itself
+                (:func:`explicit_keys`).
+        """
+        marks = dict.fromkeys(self.fields, PROVENANCE_INHERITED)
+        marks.update(dict.fromkeys(explicit, PROVENANCE_EXPLICIT))
+        return marks
+
+
+def explicit_values(
+    model_name: str, budget: float | None, options: RunOptions,
+) -> dict[str, Any]:
+    """Return the settings a ``run_agent`` / ``run_parallel`` call passed explicitly.
+
+    Args:
+        model_name: The call's ``model`` argument (empty: not passed).
+        budget: The call's parsed ``max_budget`` (``None``: not passed).
+        options: The call's parsed options; a field that is ``None`` or
+            empty was not passed.
+
+    Returns:
+        ``{setting key: value}`` for every value passed.
+    """
+    values: dict[str, Any] = {}
+    if model_name:
+        values["model"] = model_name
+    if budget is not None:
+        values["max_budget"] = budget
+    if options.tool_profile:
+        values["tool_profile"] = options.tool_profile
+    values.update(
+        (key, getattr(options, key)) for key in OPTION_TYPES
+        if getattr(options, key, None) not in (None, "")
+    )
+    return values
+
+
+def explicit_keys(model_name: str, budget: float | None, options: RunOptions) -> list[str]:
+    """Return the setting keys a ``run_agent`` / ``run_parallel`` call passed explicitly.
+
+    See :func:`explicit_values`.
+    """
+    return list(explicit_values(model_name, budget, options))
+
+
+def _filled_keys(asked: Inherited, got: Inherited) -> tuple[str, ...]:
+    """Return the setting keys whose value *got* has and *asked* left empty."""
+    pairs = [
+        ("model", asked.model_name, got.model_name),
+        ("max_budget", asked.budget, got.budget),
+        ("docker_image", asked.docker_image, got.docker_image),
+        ("use_worktree", asked.use_worktree, got.use_worktree),
+        ("auto_commit", asked.auto_commit, got.auto_commit),
+    ]
+    pairs.extend(
+        (key, getattr(asked.options, key), getattr(got.options, key))
+        for key in OPTION_TYPES if key != "docker_image"
+    )
+    pairs.append(("system_prompt", asked.options.system_prompt, got.options.system_prompt))
+    return tuple(
+        key for key, before, after in pairs
+        if before in (None, "") and after not in (None, "")
+    )
 
 
 def _parent_model_config(
@@ -564,8 +663,8 @@ def inherit_from_parent(
       run), so the sub-task's prompt ends with the same text.  An
       agent script's ``prompt(task)`` getter then rewrites the whole
       task text on the daemon.
-    - ``is_parallel``: whether the caller may fan out itself
-      (``_is_parallel``), so a sequential caller (a ``worker`` preset,
+    - ``allow_fan_out``: whether the caller may fan out itself
+      (``_is_parallel``), so a sequential caller (a ``worker`` kind,
       a user who turned fan-out off) does not hand ``run_parallel``
       back to its children.
     - the caller's extra tools (its agent script's ``add_to_tools()``
@@ -614,8 +713,21 @@ def inherit_from_parent(
             caller has nothing left to spend (the same signal a
             ``run_parallel`` fan-out raises).
     """
+    asked = Inherited(model_name, budget, options, options.docker_image, None, None)
     if parent_agent is None:
-        return Inherited(model_name, budget, options, options.docker_image, None, None)
+        return asked
+    got = _inherit_from_parent(parent_agent, model_name, budget, options, script_picks_model)
+    return dataclasses.replace(got, fields=_filled_keys(asked, got))
+
+
+def _inherit_from_parent(
+    parent_agent: Any,
+    model_name: str,
+    budget: float | None,
+    options: RunOptions,
+    script_picks_model: bool,
+) -> Inherited:
+    """:func:`inherit_from_parent` for a caller that exists, without the ``fields`` record."""
     model_name = model_name or str(getattr(parent_agent, "model_name", "") or "")
     model_config = options.model_config
     if model_config is None:
@@ -642,9 +754,9 @@ def inherit_from_parent(
             or str(getattr(parent_agent, "_prompt_suffix", "") or "")
         ),
         model_config=model_config,
-        is_parallel=(
+        allow_fan_out=(
             getattr(parent_agent, "_is_parallel", None)
-            if options.is_parallel is None else options.is_parallel
+            if options.allow_fan_out is None else options.allow_fan_out
         ),
         use_web_tools=(
             getattr(parent_agent, "_use_web_tools", None)
@@ -688,24 +800,30 @@ def _dispatch(
     workspace: str = "",
     cancel: threading.Event | None = None,
     running: threading.Event | None = None,
+    timeout_explicit: bool = False,
 ) -> str:
     """Submit an agent-script task to the kiss-web daemon and wait for its YAML result.
 
     :func:`dispatch_result` with the same arguments, formatted for the
-    calling model: the sub-task's YAML result ("success" and "summary"
-    keys), or the error message.
+    calling model: the sub-task's YAML result (``ran``, ``success`` and
+    ``summary`` keys), or the error message.
     """
     result = dispatch_result(
         name, prompt, agent_path, work_dir, model_name, budget, timeout,
         parent_agent=parent_agent, scope_work_dir=scope_work_dir,
         options=options, inherit=inherit, settings=settings, workspace=workspace,
-        cancel=cancel, running=running,
+        cancel=cancel, running=running, timeout_explicit=timeout_explicit,
     )
     if isinstance(result, str):
         return result
     summary = result.text or ("" if result.success else "Task failed")
     return str(yaml.safe_dump(
-        {"success": result.success, "summary": summary}, sort_keys=False,
+        {
+            "ran": run_config_line({**result.settings, "timeout": timeout}),
+            "success": result.success,
+            "summary": summary,
+        },
+        sort_keys=False,
     ))
 
 
@@ -725,6 +843,7 @@ def dispatch_result(
     workspace: str = "",
     cancel: threading.Event | None = None,
     running: threading.Event | None = None,
+    timeout_explicit: bool = False,
 ) -> TaskResult | str:
     """Submit an agent-script task to the kiss-web daemon and wait.
 
@@ -775,9 +894,9 @@ def dispatch_result(
             its web-tools and memory settings, its live Docker
             container, and its effective worktree / auto-commit
             choices.  ``True`` for every ``run_agent`` dispatch except
-            a script whose ``inherit`` setting is ``False`` (the
-            ``channel`` preset) — a sub-task on the same project is a
-            sub-agent of the caller, whereas a channel or cron session
+            a ``kind: "channel"`` script or an ``inherit: false``
+            option — a sub-task on the same project is a sub-agent of
+            the caller, whereas a channel or cron session
             acts on an external service from a scratch directory on
             the host and must not inherit the caller's chat context or
             container.  ``False`` (the default) also for programmatic
@@ -795,6 +914,9 @@ def dispatch_result(
         cancel: An event a background job's ``agent_job(..., "kill")``
             sets; the wait then stops the sub-task and returns an
             error string saying so.  ``None`` for a blocking call.
+        timeout_explicit: Whether *timeout* was passed by the call
+            (marked explicit in the run's ``provenance``) rather than
+            taken from the script or the default.
 
     Returns:
         The sub-task's :class:`TaskResult`, or an error message.
@@ -837,11 +959,15 @@ def dispatch_result(
     # The arguments the caller left empty come from the calling agent
     # (its model, budget share, chat, web/memory settings, container,
     # effective worktree/auto-commit), the way a ``run_parallel`` child
-    # inherits them.  Channel-preset dispatches and explicit
-    # programmatic callers skip this.
+    # inherits them.  Channel dispatches and explicit programmatic
+    # callers skip this.
+    explicit = explicit_keys(model_name, budget, options)
+    if timeout_explicit:
+        explicit.append("timeout")
     inherited = inherit_from_parent(
         parent_agent if inherit else None, model_name, budget, options,
-        script_picks_model="model" in (settings or {}),
+        # The script's model applies only when the call names none.
+        script_picks_model="model" in (settings or {}) and not model_name,
     )
     model_name, budget, options = inherited.model_name, inherited.budget, inherited.options
     # A sub-task of an unattended (cron) run inherits the no-questions
@@ -866,7 +992,7 @@ def dispatch_result(
     # commit" settings — the same values a task submitted from the
     # chat panel runs with — not a hard-coded ``True`` that would
     # ignore a user who turned them off.  The agent script's
-    # ``settings()`` (a ``channel`` preset pins both off) still win on
+    # ``settings()`` (the ``channel`` kind pins both off) still win on
     # the daemon.
     cfg = load_config()  # fills every key from DEFAULTS
     default_worktree = (
@@ -897,12 +1023,12 @@ def dispatch_result(
             system_prompt=options.system_prompt,
             use_worktree=use_worktree,
             auto_commit=auto_commit,
-            classify_tasks=options.classify_tasks,
+            classify_tasks=options.auto_classify,
             max_budget=budget,
             model_config=options.model_config,
             use_web_tools=options.use_web_tools,
             use_memory=options.use_memory,
-            is_parallel=True if options.is_parallel is None else options.is_parallel,
+            is_parallel=True if options.allow_fan_out is None else options.allow_fan_out,
             append_to_system_prompt=options.add_to_system_prompt,
             append_to_prompt=options.add_to_prompt,
             tool_profile=options.tool_profile,
@@ -912,6 +1038,7 @@ def dispatch_result(
             # cannot travel the wire: the daemon takes them off the
             # running caller, which ``parent_task_id`` names.
             inherit_tools=inherit,
+            provenance=inherited.provenance(explicit),
             timeout=timeout,
             stop_on_timeout=True,
             endpoint_file=_daemon_endpoint_file(),
@@ -991,7 +1118,8 @@ def _run_agent(
     remaining arguments are the tool's (see its docstring).  One body
     for every agent: resolve the script (:func:`resolve_agent`), read
     its settings, pick the work directory, inherit from the caller
-    unless the script's ``inherit`` is ``False``, dispatch.
+    unless the script is a channel or the call says ``inherit: false``,
+    dispatch.
 
     Args:
         parent_work_dir: Work directory of the calling task.  A
@@ -1053,24 +1181,34 @@ def _run_agent(
     seconds = resolve_timeout(timeout, settings)
     if isinstance(seconds, str):
         return seconds
-    # One rule for every script: its ``settings()`` decide.  A script
-    # with ``inherit: False`` (the ``channel`` preset: a channel agent,
-    # cron) takes nothing from the calling task — not its chat, model,
-    # budget share, container or prompt suffixes — and runs in its own
-    # ``work_dir`` (the preset's scratch directory).  Every other
-    # script is a sub-agent on the caller's project (or on the
-    # ``work_dir`` option, resolved against it): the arguments left
-    # empty are inherited from the calling agent (see
-    # ``inherit_from_parent``), and the task's references to the main
-    # checkout are rewritten to the caller's worktree.
-    inherit = bool(settings.get(
-        "inherit", True if run_options.inherit is None else run_options.inherit,
-    ))
+    # One precedence rule (sea_settings.locked_conflicts): an explicit
+    # argument or option wins over the script's ``settings()``, which
+    # win over what the calling task passes on; a key the script locks
+    # may not be replaced.  A ``kind: "channel"`` script (a channel
+    # agent, cron) takes nothing from the calling task — not its chat,
+    # model, budget share, container or prompt suffixes — and runs in
+    # its own ``work_dir`` (the kind's scratch directory); so does a
+    # call with ``inherit: false``.  Every other script is a sub-agent on the
+    # caller's project (or on the ``work_dir`` option, resolved against
+    # it): the arguments left empty are inherited from the calling
+    # agent (see ``inherit_from_parent``), and the task's references
+    # to the main checkout are rewritten to the caller's worktree.
+    asked = explicit_values(model, budget, run_options)
+    if timeout.strip():
+        asked["timeout"] = seconds
+    conflict = locked_conflicts(settings, asked, parent_work_dir)
+    if conflict:
+        return f"Error: {name}: {conflict}"
+    channel = settings.get("kind") == "channel"
+    if channel and run_options.inherit:
+        return f"Error: {name}: a channel agent never inherits from the calling task"
+    inherit = not channel and run_options.inherit is not False
     work_dir = parent_work_dir or str(kiss_home() / "agent_work")
     if run_options.work_dir:
         requested = Path(run_options.work_dir).expanduser()
         work_dir = str(requested if requested.is_absolute() else Path(work_dir) / requested)
-    work_dir = str(settings.get("work_dir") or "") or work_dir
+    else:
+        work_dir = str(settings.get("work_dir") or "") or work_dir
     if inherit and DEFAULT_CONFIG.dispatch_path_rewrite:
         task = rewrite_parent_repo_paths(task, parent_work_dir)
     kwargs: dict[str, Any] = {
@@ -1078,7 +1216,7 @@ def _run_agent(
         "model_name": model, "budget": budget, "timeout": seconds,
         "parent_agent": parent_agent, "scope_work_dir": parent_work_dir,
         "options": run_options, "inherit": inherit, "settings": settings,
-        "workspace": run_options.workspace,
+        "workspace": run_options.workspace, "timeout_explicit": bool(timeout.strip()),
     }
     if blocking:
         return _dispatch(**kwargs)
@@ -1425,9 +1563,10 @@ def make_run_agent_tool(
         agent file or a slash command to run a task with.
 
         Available channels: {channels}.  The built-in ``"cron"`` agent
-        is always available.  The agent file's ``settings()`` win over
-        the arguments here, which win over what this task passes on
-        (its model, half of its remaining budget, chat, prompt
+        is always available.  The arguments here win over the agent
+        file's ``settings()`` (unless the file locks a key: then a
+        differing argument is an error), which win over what this task
+        passes on (its model, half of its remaining budget, chat, prompt
         suffixes, extra tools, container, worktree/auto-commit and
         fan-out choices; a channel or cron sub-task inherits none of
         these and runs in ``~/.kiss/channel_work``).  The call blocks
@@ -1470,8 +1609,8 @@ def make_run_agent_tool(
                 ``add_to_prompt`` (appended text), ``model_config``
                 (JSON object), ``docker_image``, and the booleans
                 ``inherit`` (``false``: take nothing from this task),
-                ``use_worktree``, ``auto_commit``, ``classify_tasks``,
-                ``use_web_tools``, ``use_memory``, ``is_parallel``.
+                ``use_worktree``, ``auto_commit``, ``auto_classify``,
+                ``use_web_tools``, ``use_memory``, ``allow_fan_out``.
                 Example: ``'{"use_web_tools": false}'``.  Usually leave
                 it empty.
             wait: ``"false"`` returns at once with a job id instead of
@@ -1482,10 +1621,14 @@ def make_run_agent_tool(
                 every job before finishing.  Empty (default) blocks.
 
         Returns:
-            The sub-task's YAML result ("success" and "summary" keys),
-            the job notice (``wait="false"``), or an error message
-            (unknown agent — naming the closest command — or a
-            timeout).
+            The sub-task's YAML result: a ``ran`` line first (the agent
+            and kind it ran as, its model, tool profile, budget and
+            timeout, which values it inherited from this task and which
+            of the asked-for values the agent script replaced, e.g.
+            ``overridden=tool_profile(review->bash)``), then ``success``
+            and ``summary``; the job notice (``wait="false"``); or an
+            error message (unknown agent — naming the closest command —
+            or a timeout).
         """
         return _run_agent(
             work_dir, task, agent, model, tool_profile, max_budget,

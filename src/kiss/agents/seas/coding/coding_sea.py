@@ -18,8 +18,8 @@ The harness is KISS Sorcar's full built-in toolset except the browser and
 persistent-memory tools, driven by a short system prompt written for
 unattended engineering work in a container (:data:`SYSTEM_PROMPT`).  The shell and
 file tools execute inside the trial container through the daemon's Docker mode
-(``docker_image() -> "container:<id>"``), so nothing the agent does touches
-the host.  There is no cap on the number of steps; the only limit is the
+(``settings()["docker_image"] == "container:<id>"``), so nothing the agent does
+touches the host.  There is no cap on the number of steps; the only limit is the
 per-trial USD budget.  Every LLM call and every tool call is appended to a
 JSONL trajectory file for later analysis.
 """
@@ -365,13 +365,13 @@ class ContainerHarness:
         pre-run classification, no browser, no persistent memory.
         """
         return {
-            "preset": "worker",
+            "kind": "worker",
             "model": self.model_name,
             "max_budget": self.budget,
             "model_config": self.model_overrides or None,
             "work_dir": self.host_work_dir,
             "docker_image": f"container:{self.container}",
-            "is_parallel": True,
+            "allow_fan_out": True,
         }
 
     def llm_call_hook(self) -> Callable[[list], list]:

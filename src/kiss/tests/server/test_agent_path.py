@@ -265,7 +265,7 @@ class AgentPathApiTest(unittest.TestCase):
                     # client-passed True values.
                     "use_web_tools": False,
                     "use_memory": False,
-                    "is_parallel": False,
+                    "allow_fan_out": False,
                     # ``none`` switches the basic toolset off, so
                     # ``add_to_tools()`` becomes the whole tool set.
                     "tool_profile": "none",
@@ -312,7 +312,7 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_auto_commit_attr"] is False
         assert seen["max_budget"] == 1.25
         assert seen["model_config"] == {"base_url": "http://localhost:1234/v1"}
-        # The script's ``use_web_tools`` / ``is_parallel`` / ``use_memory``
+        # The script's ``use_web_tools`` / ``allow_fan_out`` / ``use_memory``
         # False values override the client-passed True values, so the
         # run built no web or memory tools and no fan-out.
         assert seen["_web_tools_attr"] is False
@@ -496,9 +496,9 @@ class AgentPathApiTest(unittest.TestCase):
                 ["settings()", "unknown key 'prompt_x'"],
             ),
             (
-                "unknown_preset_agent.py",
-                "def settings():\n    return {'preset': 'rocket'}\n",
-                ["unknown preset 'rocket'"],
+                "unknown_kind_agent.py",
+                "def settings():\n    return {'kind': 'rocket'}\n",
+                ["settings()['kind'] must be one of session, worker, channel; got 'rocket'"],
             ),
             (
                 "noncallable_settings_agent.py",

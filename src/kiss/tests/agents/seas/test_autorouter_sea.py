@@ -80,8 +80,8 @@ def test_sea_getters_follow_the_contract() -> None:
     # would make every routed unit a router; dispatch goes through run_agent.
     assert autorouter_sea.settings() == {
         "model": autorouter_sea.orchestrator_model(),
-        "is_parallel": False,
-        "classify_tasks": False,
+        "allow_fan_out": False,
+        "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,
     }
@@ -90,11 +90,11 @@ def test_sea_getters_follow_the_contract() -> None:
     # caller's budget, worktree, auto-commit and tool profile win.  The
     # protocol is ADDED to the default prompt, never a replacement.
     assert resolve_settings(vars(autorouter_sea)) == {
-        "preset": "session", **autorouter_sea.settings()
+        "kind": "session", **autorouter_sea.settings()
     }
     for name in (
         "system_prompt", "max_budget", "use_worktree", "auto_commit", "tool_profile",
-        "model", "is_parallel", "classify_tasks", "use_web_tools", "use_memory",
+        "model", "allow_fan_out", "auto_classify", "use_web_tools", "use_memory",
     ):
         assert not hasattr(autorouter_sea, name), name
 
@@ -113,7 +113,7 @@ def test_slash_autorouter_resolves_to_the_bundled_sea() -> None:
     task_text, path = hit
     assert path == _SEA_PATH
     assert task_text == "add a --json flag"
-    assert sea_commands.sea_settings(path) == {"preset": "session", **autorouter_sea.settings()}
+    assert sea_commands.sea_settings(path) == {"kind": "session", **autorouter_sea.settings()}
 
 
 def test_agent_file_loader_stages_the_sea_tools() -> None:
@@ -368,7 +368,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
                 tools=autorouter_sea.add_to_tools(),
                 web_tools=settings["use_web_tools"],
                 use_memory=settings["use_memory"],
-                is_parallel=settings["is_parallel"],
+                is_parallel=settings["allow_fan_out"],
                 verbose=False,
             )
     finally:

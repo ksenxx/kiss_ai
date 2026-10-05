@@ -189,6 +189,15 @@ class ChatSorcarAgent(SorcarAgent):
         # ``cron_agent``; set by the task runner and persisted in the
         # ``task_history.sea`` column.  Empty for a plain run.
         self.sea_name: str = ""
+        # The run's effective configuration beyond model / work dir /
+        # budget (see kiss.agents.sorcar.run_config.RUN_CONFIG_KEYS):
+        # set per run by the task runner or the fan-out engine and
+        # folded into the ``task_settings`` event.  Empty for a run
+        # that is neither a daemon task nor a sub-agent.
+        self.run_config: dict[str, Any] = {}
+        # The ``task_settings`` payload of the latest run (model, work
+        # dir, budget and ``run_config``); empty before the first run.
+        self.task_settings: dict[str, object] = {}
         # Frontend tab this agent's events belong to.  The fan-out
         # engine assigns each sub-agent its own synthetic tab id, so
         # the attribute lives here rather than on the worktree
@@ -390,6 +399,7 @@ class ChatSorcarAgent(SorcarAgent):
         max_budget: float | None,
         start_ts: int,
         task_id: str,
+        tool_profile: str = "",
     ) -> dict[str, object]:
         """Build the ``task_settings`` display-event payload.
 
@@ -409,9 +419,16 @@ class ChatSorcarAgent(SorcarAgent):
             start_ts: The run's start timestamp (ms since epoch) — the
                 same value persisted as the row's ``startTs``.
             task_id: The freshly allocated ``task_history`` row id.
+            tool_profile: The effective tool profile (``"full"``, a
+                profile name or ``""`` when unknown); recorded whenever
+                it is known or the run carries a ``run_config``.
 
         Returns:
-            The settings dict carried by the event.
+            The settings dict carried by the event: the keys above,
+            ``chat_id``, ``is_subagent``, ``parent_task_id`` when there
+            is one, ``sea`` when the run executes an agent script and
+            the :attr:`run_config` keys (see
+            :data:`kiss.agents.sorcar.run_config.RUN_CONFIG_KEYS`).
         """
         payload: dict[str, object] = {
             "model": model,
@@ -428,6 +445,11 @@ class ChatSorcarAgent(SorcarAgent):
         parent_id = str((self._subagent_info or {}).get("parent_task_id") or "")
         if parent_id:
             payload["parent_task_id"] = parent_id
+        if self.sea_name:
+            payload["sea"] = self.sea_name
+        payload.update(self.run_config)
+        if tool_profile != "" or "tool_profile" in payload:
+            payload["tool_profile"] = tool_profile
         return payload
 
     def _persist_replay_events_if_missing(
@@ -708,6 +730,31 @@ class ChatSorcarAgent(SorcarAgent):
                         task_id,
                         exc_info=True,
                     )
+            # Kept on the agent too: a fan-out parent reads the child's
+            # settings back for the ``ran:`` line of its result.  The
+            # tool profile is the EFFECTIVE one (``SorcarAgent.run``
+            # resolves the same rule from the same name a moment later):
+            # a reviewer-marked sub-agent asked for no profile runs
+            # ``review``, not the full toolset.
+            self._tool_profile_name = str(kwargs.get("tool_profile") or "")
+            self.task_settings = self._task_settings_payload(
+                model=resolved_model,
+                work_dir=resolved_work_dir,
+                is_parallel=run_is_parallel,
+                is_worktree=is_worktree,
+                max_budget=resolved_budget,
+                start_ts=start_ts_ms,
+                task_id=task_id,
+                tool_profile=self._tool_profile(prompt_template),
+            )
+            if printer is None and task_id:
+                # Headless (a fan-out child without a printer): persist
+                # the event ourselves, as :meth:`_persist_replay_events_if_missing`
+                # does for the prompt and result.
+                _append_chat_event(
+                    {"type": "task_settings", "settings": self.task_settings},
+                    task_id=task_id,
+                )
             if printer is not None:
                 # Emitted AFTER on_task_id_allocated: the server's
                 # WebPrinter only sends a task event's stamped copies
@@ -719,18 +766,7 @@ class ChatSorcarAgent(SorcarAgent):
                 broadcast = getattr(printer, "broadcast", None)
                 if broadcast is not None:
                     try:
-                        broadcast({
-                            "type": "task_settings",
-                            "settings": self._task_settings_payload(
-                                model=resolved_model,
-                                work_dir=resolved_work_dir,
-                                is_parallel=run_is_parallel,
-                                is_worktree=is_worktree,
-                                max_budget=resolved_budget,
-                                start_ts=start_ts_ms,
-                                task_id=task_id,
-                            ),
-                        })
+                        broadcast({"type": "task_settings", "settings": self.task_settings})
                     except Exception:
                         logging.getLogger(__name__).warning(
                             "task_settings broadcast raised", exc_info=True,

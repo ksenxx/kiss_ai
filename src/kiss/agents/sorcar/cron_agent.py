@@ -1777,7 +1777,7 @@ CRON_DISPATCH_PREAMBLE = (
 
 Returned by :func:`add_to_system_prompt`, which the daemon applies when
 ``run_agent`` is called with ``"cron"`` as the agent (after the
-``channel`` preset's generic preamble).
+``channel`` kind's generic preamble).
 """
 
 
@@ -1826,7 +1826,7 @@ def settings() -> dict[str, Any]:
     preamble in the system prompt.  Classification is off: unattended
     scheduled automations should not spend a classifier round trip.
     """
-    return {"preset": "channel", "work_dir": cron_work_dir()}
+    return {"kind": "channel", "work_dir": cron_work_dir()}
 
 
 def add_to_system_prompt() -> str:

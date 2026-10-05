@@ -501,7 +501,7 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
             system_prompt=ask_sea.add_to_system_prompt(),
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["is_parallel"],
+            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

@@ -176,7 +176,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     # No preset named: the resolved settings are exactly those three keys under
     # the default ``session`` preset; ``system_prompt()`` is a getter the daemon
     # applies separately, not a settings key.
-    assert resolve_settings(vars(sea)) == {"preset": "session", **sea.settings()}
+    assert resolve_settings(vars(sea)) == {"kind": "session", **sea.settings()}
     assert "system_prompt" not in resolve_settings(vars(sea))
     for legacy in (
         "max_budget",
@@ -202,6 +202,12 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
         "model_scorecard",
         "sea_prompt",
         "patch_sea_prompt",
+        "sea_source",
+        "patch_sea_code",
+        "tune_sea_settings",
+        "patch_sea_settings",
+        "export_sea_evals",
+        "frequent_tasks",
         "write_autorouter_evidence",
         "replay_in_clone",
         "replay_in_place",

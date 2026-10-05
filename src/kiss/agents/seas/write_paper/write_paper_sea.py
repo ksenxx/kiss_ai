@@ -796,8 +796,8 @@ def settings() -> dict[str, Any]:
     """
     return {
         "use_web_tools": True,
-        "is_parallel": True,
-        "classify_tasks": False,
+        "allow_fan_out": True,
+        "auto_classify": False,
         "timeout": DISPATCH_TIMEOUT_SECONDS,
     }
 
