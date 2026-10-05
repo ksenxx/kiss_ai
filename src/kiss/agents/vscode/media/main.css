@@ -1725,10 +1725,8 @@ body.content-tab-open #send-btn { display: none !important; }
 #theme-btn { display: none; }
 body.remote-chat #theme-btn { display: flex; }
 
-/* Terminal is for the remote webapp, whose browser may be far from the
-   machine running the daemon; VS Code already has an integrated
-   terminal on that machine.  Terminal tabs opened there still show on
-   every surface. */
+/* The terminal tab only exists on the remote webapp; a VS Code window
+   has its own integrated terminal. */
 #terminal-btn { display: none; }
 body.remote-chat #terminal-btn { display: flex; }
 
@@ -5050,27 +5048,46 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   flex-direction: column;
 }
 
-/* A shell on the daemon machine streamed as a tab (terminalTab.js):
-   xterm.js fills the tab; the fit addon sizes the pty to it, so the
-   holder must have a definite height (flex child, min-height: 0). */
+/* A shell on the daemon machine as a tab (terminalTab.js): xterm.js
+   fills the tab; the fit addon sizes the shell's pty to the surface. */
 #content-tab-area .terminal-view {
-  display: flex;
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
-  background: var(--vscode-terminal-background, var(--vscode-editor-background));
-}
-
-#content-tab-area .terminal-xterm {
-  flex: 1 1 auto;
-  min-height: 0;
-  min-width: 0;
-  padding: var(--space-1) 0 0 var(--space-2);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  padding: var(--space-1) 0 0 var(--space-1);
   box-sizing: border-box;
 }
 
-#content-tab-area .terminal-xterm .xterm {
+#content-tab-area .terminal-surface {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+#content-tab-area .terminal-surface .xterm {
   height: 100%;
+}
+
+#content-tab-area .terminal-load-error {
+  padding: var(--space-3);
+  color: var(--error);
+  font-size: var(--fs-sm);
+}
+
+/* xterm.css paints the scroll viewport black (xterm 6 themes its
+   scrollable node, not this one); the rows never fill the last few
+   pixels, which showed as a black strip under a light theme. */
+#content-tab-area .terminal-surface .xterm .xterm-viewport {
+  background-color: transparent;
+}
+
+.content-tab-icon.terminal-tab-icon {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-weight: 700;
+  font-size: var(--fs-xs);
 }
 
 /* The daemon machine's browser streamed as a tab (browserTab.js): an

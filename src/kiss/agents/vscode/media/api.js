@@ -84,7 +84,6 @@
     'browserInput',
     'browserViewport',
     'terminalOpen',
-    'terminalAttach',
     'terminalInput',
     'terminalResize',
     'terminalClose',

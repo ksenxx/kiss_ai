@@ -1727,6 +1727,9 @@
     if (window.monaco && window.monaco.editor) {
       applyContentMonacoTheme(window.monaco);
     }
+    tabs.forEach(t => {
+      if (t.terminalView) t.terminalView.retheme();
+    });
   }
 
   // The page palette variables (VS Code Dark/Light Modern, injected by
@@ -1925,6 +1928,7 @@
           : tab.isTerminalTab
             ? '>_'
             : '\uD83D\uDCC4';
+        if (tab.isTerminalTab) fileIcon.classList.add('terminal-tab-icon');
         fileIcon.title = tab.contentPath || '';
         el.appendChild(fileIcon);
       } else if (tab.isSubagentTab) {
@@ -2341,16 +2345,51 @@
   }
   // browser-tab-coverage:end
 
-  // terminal-tab-coverage:start
-  // ---- A shell on the daemon machine, streamed as a tab -------------
+  // ---- A shell on the daemon machine, as a tab (remote webapp) -------
   //
-  // kiss/server/terminal_tab.py runs the user's shell in a
-  // pseudo-terminal (Terminal in the composer's ... menu), announces it
-  // as openTerminalTab on EVERY surface, streams its output as
-  // terminalData to the surfaces that attached and closes it everywhere
-  // with closeTerminalTab.  The view (xterm.js) lives in terminalTab.js;
-  // this block is the tab plumbing.  A surface attaches the first time
-  // it shows the tab (showContentTab -> setVisible(true)).
+  // The "Terminal" item of the "..." menu opens a tab holding an
+  // xterm.js terminal (terminalTab.js) whose shell runs on the machine
+  // hosting the daemon (kiss/server/terminal_tab.py).  Unlike the
+  // browser tab a terminal belongs to THIS surface alone, as VS Code's
+  // integrated terminal belongs to its window: the daemon streams its
+  // output to the connection that opened it and nowhere else.  The tab
+  // id is minted here and names the shell in every command and event.
+
+  function terminalTabCount() {
+    return tabs.filter(t => t.isTerminalTab).length;
+  }
+
+  function openTerminalTab() {
+    if (!window.TerminalTabView) return;
+    const n = terminalTabCount() + 1;
+    const tab = makeTab(n > 1 ? 'Terminal ' + n : 'Terminal');
+    tab.isContentTab = true;
+    tab.isTerminalTab = true;
+    tab.contentNotAFile = true;
+    tab.contentPath = '';
+    // The shell starts in the workspace the surface is browsing (the
+    // chat's folder), which the side views keep showing for this tab
+    // as they do for a file opened from that chat.
+    const owner = getTab(chatTargetTabId());
+    tab.ownerTabId = owner ? owner.id : '';
+    tab.ownerBrowseWorkDir = owner ? workDirForTab(owner.id) : '';
+    const workDir = sidebarWorkDir();
+    tabs.push(tab);
+    const area = ensureContentArea();
+    const holder = document.createElement('div');
+    holder.className = 'content-tab-view terminal-tab-view';
+    holder.dataset.tabId = tab.id;
+    holder.style.display = 'none';
+    area.appendChild(holder);
+    tab.contentViewEl = holder;
+    tab.terminalView = window.TerminalTabView.create(tab.id, {
+      send: msg => api.send(msg),
+      workDir: workDir,
+    });
+    holder.appendChild(tab.terminalView.el);
+    switchToTab(tab.id);
+    renderTabBar();
+  }
 
   function syncTerminalTabVisibility(shownTab) {
     tabs.forEach(t => {
@@ -2358,52 +2397,35 @@
     });
   }
 
-  function openTerminalTab(ev) {
-    if (!ev.tab_id || !window.TerminalTabView) return;
-    let tab = getTab(ev.tab_id);
-    if (tab && tab.terminalView) {
-      // Re-announced (a `ready` after a reconnect): the daemon forgot
-      // which connections were watching, so an attached view attaches
-      // again and repaints from the daemon's backlog.
-      tab.terminalView.resubscribe();
-    }
-    if (!tab) {
-      tab = makeTab((ev.title || 'Terminal').substring(0, 40));
-      tab.id = ev.tab_id;
-      tab.isContentTab = true;
-      tab.isTerminalTab = true;
-      tab.contentNotAFile = true;
-      tab.contentPath = '';
-      tab.terminalCwd = ev.cwd || '';
-      tabs.push(tab);
-      const area = ensureContentArea();
-      const holder = document.createElement('div');
-      holder.className = 'content-tab-view terminal-tab-view';
-      holder.dataset.tabId = tab.id;
-      holder.style.display = 'none';
-      area.appendChild(holder);
-      tab.contentViewEl = holder;
-      tab.terminalView = window.TerminalTabView.create(tab.id, {
-        send: msg => api.send(msg),
-      });
-      holder.appendChild(tab.terminalView.el);
-    }
-    // The surface that asked for the terminal switches to it.
-    if (ev.focus) switchToTab(tab.id);
-    renderTabBar();
+  // The WebSocket came back (a `ready` after a reconnect): every
+  // terminal tab asks for its shell again; the daemon re-attaches one
+  // that survived the outage and starts a fresh one otherwise.
+  function reattachTerminalTabs() {
+    tabs.forEach(t => {
+      if (t.terminalView) t.terminalView.reconnect();
+    });
   }
 
-  // The daemon's snapshot of live terminals, sent on every `ready`:
-  // shells that exited while this surface was away (or did not survive
-  // a daemon restart) close here too.
-  function reconcileTerminalTabs(ev) {
-    const live = new Set((ev.tabs || []).map(t => t.tab_id));
-    tabs
-      .filter(t => t.isTerminalTab && !live.has(t.id))
-      .forEach(t => closeTab(t.id, false, true));
-    (ev.tabs || []).forEach(openTerminalTab);
+  function terminalEvent(ev) {
+    const tab = getTab(ev.tab_id);
+    if (!tab || !tab.terminalView) return;
+    switch (ev.type) {
+      case 'terminalData':
+        tab.terminalView.data(ev.data || '');
+        break;
+      case 'terminalOpened':
+        tab.terminalView.opened(ev);
+        break;
+      case 'terminalExit':
+        tab.terminalView.exit(ev.code);
+        break;
+      case 'terminalError':
+        tab.terminalView.error(ev.text || 'The terminal could not be opened.');
+        break;
+      default:
+        break;
+    }
   }
-  // terminal-tab-coverage:end
 
   function activateAdjacentTab(newTab) {
     if (newTab.isContentTab) {
@@ -2567,9 +2589,9 @@
     // A browser tab closed by hand closes the page on the daemon's
     // machine, which then drops the tab from every other surface too.
     if (tab.isBrowserTab && !fromServer) api.browserClose({tab_id: tabId});
-    // Likewise a terminal tab closed by hand ends its shell on the
-    // daemon's machine, which drops the tab from every surface.
-    if (tab.isTerminalTab && !fromServer) api.terminalClose({tab_id: tabId});
+    // Closing a terminal tab hangs its shell up, as closing a terminal
+    // window does.
+    if (tab.isTerminalTab) api.terminalClose({tab_id: tabId});
     tabs.splice(idx, 1);
     disposeTabContentView(tab);
     if (activeTabId === tabId) {
@@ -15697,29 +15719,12 @@
       case 'closeBrowserTab':
         if (getTab(ev.tab_id)) closeTab(ev.tab_id, false, true);
         break;
-      // terminal-tab-coverage:start
-      case 'openTerminalTab':
-        openTerminalTab(ev);
-        break;
-      case 'terminalTabs':
-        reconcileTerminalTabs(ev);
-        break;
-      case 'terminalData': {
-        const tt = getTab(ev.tab_id);
-        if (tt && tt.terminalView) tt.terminalView.data(ev.data);
-        break;
-      }
-      case 'closeTerminalTab':
-        if (getTab(ev.tab_id)) closeTab(ev.tab_id, false, true);
-        break;
+      case 'terminalData':
+      case 'terminalOpened':
+      case 'terminalExit':
       case 'terminalError':
-        showNotification({
-          id: 'terminal-open-error',
-          severity: 'error',
-          message: ev.text || 'The terminal could not be opened.',
-        });
+        terminalEvent(ev);
         break;
-      // terminal-tab-coverage:end
       case 'browserError': {
         const bt = getTab(ev.tab_id);
         if (bt && bt.browserView) bt.browserView.error(ev.text || '');
@@ -19188,6 +19193,9 @@
     readySentAt = Date.now();
     reportedChatTabId = chatTabId;
     // readychat-coverage:end
+    // Terminal tabs are this surface's alone: nothing in the daemon's
+    // replay re-creates them, so they re-claim their shells here.
+    reattachTerminalTabs();
   }
 
   // The settings panel's "Chat in the editor" toggle. VS Code
@@ -19273,7 +19281,9 @@
         (e.metaKey || e.ctrlKey) &&
         e.key === 'd' &&
         !e.shiftKey &&
-        !e.altKey
+        !e.altKey &&
+        // Ctrl+D inside a terminal tab is the shell's end-of-input.
+        !(e.target && e.target.closest && e.target.closest('.terminal-view'))
       ) {
         e.preventDefault();
         api.focusEditor();
@@ -19677,12 +19687,10 @@
         api.browserOpen({url: ''});
       });
     }
-    // Terminal (remote webapp only): a shell on the machine running
-    // the daemon, in the working directory of the active chat.
     const terminalBtn = document.getElementById('terminal-btn');
     if (terminalBtn) {
       terminalBtn.addEventListener('click', () => {
-        api.terminalOpen({workDir: sidebarWorkDir() || ''});
+        openTerminalTab();
       });
     }
     if (moreBtn && moreMenu) {

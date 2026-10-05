@@ -353,6 +353,22 @@
   - `cmd`: The ``listDir`` command (optional ``path``, ``workDir``, ``tabId``, ``token``).
   - `ctx`: The transport context of the current call.
 
+- **terminal_open** — Start (or re-attach) the shell of a terminal tab.<br/>`async terminal_open(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``terminalOpen`` command (``tab_id``; optional ``cols``, ``rows``, ``workDir``).
+  - `ctx`: The transport context of the current call.
+
+- **terminal_input** — Write the keystrokes of a terminal tab to its shell.<br/>`async terminal_input(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``terminalInput`` command (``tab_id``, ``data``).
+  - `ctx`: The transport context of the current call.
+
+- **terminal_resize** — Resize the pty of a terminal tab.<br/>`async terminal_resize(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``terminalResize`` command (``tab_id``, ``cols``, ``rows``).
+  - `ctx`: The transport context of the current call.
+
+- **terminal_close** — Hang up the shell of a closed terminal tab.<br/>`async terminal_close(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``terminalClose`` command (``tab_id``).
+  - `ctx`: The transport context of the current call.
+
 - **git_status** — Report working-tree changes for the remote Source Control view. The activity bar's Source Control view lists the repository's staged, unstaged and untracked changes (VS Code's "Changes" section) from this command's ``gitStatus`` reply, sent to the requester only.  A locally delivered ``gitStatus`` is dropped as a defensive no-op, exactly like ``saveFile``.<br/>`async git_status(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``gitStatus`` command (optional ``workDir``, ``tabId``, ``token``).
   - `ctx`: The transport context of the current call.

@@ -2,358 +2,486 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""A shell on the daemon machine, streamed into a tab on every surface.
+"""A shell on the daemon's machine, streamed into a remote-webapp tab.
 
-The remote webapp runs in a browser that may be far from the machine
-hosting the daemon; "Terminal" in the composer's ... menu opens the
-user's login shell on that machine inside a pseudo-terminal and shows
-it in a content tab (xterm.js, ``media/terminalTab.js``), the way the
-VS Code integrated terminal does.
+The remote webapp's "..." menu has a "Terminal" item that opens a tab
+holding an xterm.js terminal (``media/terminalTab.js``).  This module
+is the daemon half: one pseudo-terminal running the user's shell per
+terminal tab.
 
-Like the streamed browser (:mod:`kiss.server.browser_tab`) a terminal is
-owned by the daemon, not by the surface that opened it:
+Protocol (every command is a remote-only entry of the API catalog in
+:mod:`kiss.server.sorcar`; every event is stamped with the owning
+connection's ``connId`` so no other surface sees it):
 
-* ``terminalOpen`` spawns the shell and announces ``openTerminalTab``
-  on EVERY connected surface (``focus`` only for the one that asked);
-* a surface that shows the tab sends ``terminalAttach`` and receives
-  the scrollback kept so far, then every later chunk of output as
-  ``terminalData`` (base64 of the raw bytes: xterm.js decodes UTF-8
-  itself, so a multi-byte character split across two reads survives);
-* ``terminalInput`` / ``terminalResize`` drive the pty; the most recent
-  resize from any surface wins;
-* when the shell exits, or a surface closes the tab by hand
-  (``terminalClose``), ``closeTerminalTab`` closes it everywhere;
-* the ``terminalTabs`` snapshot sent with ``ready`` lets a surface that
-  (re)connects add the live terminals and drop the ones that died while
-  it was away.
+* ``terminalOpen {tab_id, cols, rows}`` starts a shell for the tab in
+  the command's work dir, or re-attaches a shell that outlived a
+  dropped connection.  Answered by ``terminalOpened {tab_id, shell,
+  cwd, attached}``, or ``terminalError {tab_id, text}``.
+* ``terminalInput {tab_id, data}`` writes keystrokes/pastes to the pty.
+* ``terminalResize {tab_id, cols, rows}`` sets the pty window size.
+* ``terminalClose {tab_id}`` hangs the shell up.
+* ``terminalData {tab_id, data}`` streams the shell's output;
+  ``terminalExit {tab_id, code}`` reports the shell's end.
 
-Every public method is thread-safe; output is pumped by one daemon
-thread per terminal so the server loop never blocks on the pty.
+A tab is identified by a client-generated ``tab_id``.  Sessions are
+bound to the WebSocket connection that opened them: when that
+connection drops, the shell keeps running for ``GRACE_SECONDS`` so a
+page that reconnects (a phone waking up, a network blip) gets its
+shell back by sending ``terminalOpen`` with the same ``tab_id``.
+Windows has no pty: there ``terminalOpen`` answers with an error.
 """
 
 from __future__ import annotations
 
-import base64
-import contextlib
+import codecs
 import logging
 import os
-import pwd
+import queue
+import selectors
 import signal
-import subprocess
+import struct
 import sys
 import threading
-import uuid
+import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from kiss.core.printers.json_printer import JsonPrinter
-
-try:  # Windows has no pseudo-terminals.
+if sys.platform != "win32":
     import fcntl
-    import struct
+    import pty
     import termios
-except ImportError:  # pragma: no cover - exercised only on Windows
-    fcntl = None  # type: ignore[assignment]
-    struct = None  # type: ignore[assignment]
-    termios = None  # type: ignore[assignment]
+
+from kiss.core.processes import find_bash
 
 logger = logging.getLogger(__name__)
 
-# Output kept per terminal for surfaces that attach later (a browser
-# that reconnects, a second surface that switches to the tab).
-BACKLOG_LIMIT = 256 * 1024
-# A closed terminal's shell gets this long to honour SIGHUP before SIGKILL.
-KILL_GRACE_SECONDS = 2.0
-DEFAULT_COLS = 80
-DEFAULT_ROWS = 24
-
-
-@dataclass
-class _Terminal:
-    """One shell and the connections watching it."""
-
-    tab_id: str
-    title: str
-    cwd: str
-    proc: subprocess.Popen[bytes]
-    master_fd: int
-    backlog: bytearray = field(default_factory=bytearray)
-    viewers: set[str] = field(default_factory=set)
-    cols: int = DEFAULT_COLS
-    rows: int = DEFAULT_ROWS
-    # Set once ``closeTerminalTab`` went out (by exit or by request).
-    finished: bool = False
+# A shell whose connection dropped is kept this long for a re-attach.
+GRACE_SECONDS = 60.0
+# After a hang-up the shell gets this long to exit before SIGKILL.
+_HANGUP_TIMEOUT = 2.0
+_READ_CHUNK = 65536
+_MAX_DIM = 1000
 
 
 def default_shell() -> list[str]:
-    """The user's login shell as an argv (a login shell on macOS, as VS Code does)."""
-    shell = os.environ.get("SHELL") or ""
-    if not shell:
-        with contextlib.suppress(KeyError, OSError):
-            shell = pwd.getpwuid(os.getuid()).pw_shell
-    if not shell or not os.path.exists(shell):
-        shell = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
+    """Return the argv of the shell a terminal tab runs.
+
+    ``$SHELL`` when it names an executable, else ``bash`` from ``PATH``,
+    else ``/bin/sh``.  On macOS the shell is a login shell (``-l``), as
+    in Terminal.app and VS Code, so the user's PATH set-up applies.
+    """
+    shell = os.environ.get("SHELL", "")
+    if not (shell and os.access(shell, os.X_OK)):
+        shell = find_bash() or "/bin/sh"
     return [shell, "-l"] if sys.platform == "darwin" else [shell]
 
 
-def _become_controlling_tty() -> None:
-    """In the child: make the pty (already stdin) its controlling terminal.
+def _clamp_dim(value: Any, fallback: int) -> int:
+    """Return *value* as a terminal dimension in ``1..1000``, else *fallback*."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return fallback
+    return max(1, min(_MAX_DIM, int(value)))
 
-    ``start_new_session`` made the child a session leader; a tty merely
-    inherited as fd 0 does not become its controlling terminal by
-    itself, and a shell without one runs without job control.
+
+def _winsize(rows: int, cols: int) -> bytes:
+    """Pack *rows* x *cols* as the ``struct winsize`` ``TIOCSWINSZ`` takes."""
+    return struct.pack("HHHH", rows, cols, 0, 0)
+
+
+@dataclass
+class _Session:
+    """One shell: its pty master, its process and the connection watching it."""
+
+    tab_id: str
+    conn_id: str
+    pid: int
+    fd: int
+    shell: str
+    cwd: str
+    decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="replace")
+    )
+    writes: queue.Queue[bytes | None] = field(default_factory=queue.Queue)
+    # ``time.monotonic()`` when the owning connection dropped; ``None``
+    # while a connection is attached.
+    detached_at: float | None = None
+    # Counts the disconnects, so the grace timer of an earlier one
+    # cannot expire a later one (the page re-attached in between).
+    detach_seq: int = 0
+    hung_up: bool = False
+    # Set under the service lock in the same step as the ``waitpid``
+    # that collected the shell, so no signal is ever sent to a pid the
+    # kernel may already have handed to another process.
+    reaped: bool = False
+
+
+class TerminalService:
+    """The daemon's terminal sessions: one pty shell per terminal tab.
+
+    Thread-safe; the public methods may be called from the server loop
+    or any executor thread.  Output is delivered through
+    ``printer.broadcast`` events stamped with the owning ``connId``.
     """
-    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
-
-def _set_winsize(fd: int, cols: int, rows: int) -> None:
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-
-
-def _clamp(value: Any, default: int) -> int:
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(2, min(n, 1000))
-
-
-class TerminalTabService:
-    """Spawn shells in pseudo-terminals and stream them to the surfaces."""
-
-    def __init__(self, printer: JsonPrinter) -> None:
+    def __init__(self, printer: Any) -> None:
+        """Create an idle service that emits events through *printer*."""
         self._printer = printer
+        self._sessions: dict[str, _Session] = {}
         self._lock = threading.Lock()
-        self._terms: dict[str, _Terminal] = {}
-        self._count = 0
-        self._closed = False
 
     # ------------------------------------------------------------------
-    # Public API (any thread)
+    # Commands
     # ------------------------------------------------------------------
 
-    def open(self, work_dir: str, conn_id: str) -> None:
-        """Start a shell in *work_dir* and announce its tab everywhere.
+    def open(
+        self, tab_id: str, conn_id: str, work_dir: str, cols: Any, rows: Any,
+    ) -> None:
+        """Start the shell of *tab_id* for *conn_id*, or re-attach a live one.
 
-        The requesting connection (*conn_id*) gets ``focus: true`` so it
-        switches to the tab; every other surface adds it unfocused.  A
-        failure (no pty support, no shell) is reported as
-        ``terminalError`` to the requester alone.
+        Args:
+            tab_id: The terminal tab's id (chosen by the client).
+            conn_id: The WebSocket connection that owns the tab.
+            work_dir: The directory the shell starts in.
+            cols: Initial width in cells (``1..1000``; default 80).
+            rows: Initial height in cells (``1..1000``; default 24).
         """
-        if termios is None:
-            self._emit(
-                {"type": "terminalError", "tab_id": "",
-                 "text": "A terminal needs a Unix daemon: this daemon runs on Windows."},
-                conn_id,
-            )
-            return
-        cwd = work_dir if work_dir and os.path.isdir(work_dir) else os.path.expanduser("~")
-        try:
-            term = self._spawn(cwd)
-        except OSError as exc:
-            logger.warning("terminal: cannot start a shell: %s", exc)
-            self._emit(
-                {"type": "terminalError", "tab_id": "", "text": f"The shell could not start: {exc}"},
-                conn_id,
-            )
-            return
+        cols = _clamp_dim(cols, 80)
+        rows = _clamp_dim(rows, 24)
         with self._lock:
-            if self._closed:
-                self._terminate(term)
+            session = self._sessions.get(tab_id)
+            if session is not None:
+                # A page that reconnected within the grace period (or
+                # re-sent its open): the shell carries on where it was.
+                session.conn_id = conn_id
+                session.detached_at = None
+                self._set_winsize(session, cols, rows)
+                self._emit_opened(session, attached=True)
                 return
-            self._terms[term.tab_id] = term
+            if sys.platform == "win32":  # pragma: no cover — no pty there
+                self._emit(
+                    {
+                        "type": "terminalError",
+                        "tab_id": tab_id,
+                        "text": "The terminal needs a pseudo-terminal, which Windows has none of.",
+                    },
+                    conn_id,
+                )
+                return
+            try:
+                session = self._spawn(tab_id, conn_id, work_dir, cols, rows)
+            except Exception as exc:  # noqa: BLE001 — reported to the tab
+                logger.warning("terminal spawn failed: %s", exc, exc_info=True)
+                self._emit(
+                    {
+                        "type": "terminalError",
+                        "tab_id": tab_id,
+                        "text": f"The shell could not be started: {exc}",
+                    },
+                    conn_id,
+                )
+                return
+            self._sessions[tab_id] = session
+            # Announced before the reader runs, so a shell that exits
+            # at once still reports ``terminalOpened`` before its
+            # ``terminalExit``.
+            self._emit_opened(session, attached=False)
         threading.Thread(
-            target=self._pump, args=(term,), name=f"terminal-{term.tab_id[:8]}", daemon=True
+            target=self._write_loop, args=(session,), daemon=True,
+            name=f"terminal-write-{tab_id[:8]}",
         ).start()
-        # Everyone gets the tab; only the surface that asked switches to it.
-        self._emit(self._open_event(term, focus=False))
-        if conn_id:
-            self._emit(self._open_event(term, focus=True), conn_id)
+        threading.Thread(
+            target=self._pump, args=(session,), daemon=True,
+            name=f"terminal-read-{tab_id[:8]}",
+        ).start()
 
-    def attach(self, tab_id: str, conn_id: str, cols: Any, rows: Any) -> None:
-        """Start streaming *tab_id* to *conn_id*, replaying the backlog first.
+    def input(self, tab_id: str, conn_id: str, data: Any) -> None:
+        """Queue *data* (the keystrokes xterm.js produced) for the shell.
 
-        The replay and the registration happen under one lock with the
-        output pump, so the connection sees every byte exactly once and
-        in order.  The surface's size becomes the pty's size.
+        Args:
+            tab_id: The terminal tab.
+            conn_id: The sending connection; must own the tab.
+            data: The text to write (a non-string is ignored).
+        """
+        if not isinstance(data, str) or not data:
+            return
+        session = self._owned(tab_id, conn_id)
+        if session is not None:
+            session.writes.put(data.encode("utf-8", errors="surrogateescape"))
+
+    def resize(self, tab_id: str, conn_id: str, cols: Any, rows: Any) -> None:
+        """Set the pty window size (the shell gets ``SIGWINCH``).
+
+        Args:
+            tab_id: The terminal tab.
+            conn_id: The sending connection; must own the tab.
+            cols: New width in cells.
+            rows: New height in cells.
+        """
+        session = self._owned(tab_id, conn_id)
+        if session is not None:
+            self._set_winsize(session, _clamp_dim(cols, 80), _clamp_dim(rows, 24))
+
+    def close(self, tab_id: str, conn_id: str = "") -> None:
+        """Hang the shell of *tab_id* up (the tab was closed).
+
+        The shell's process group gets ``SIGHUP`` as on a closed
+        terminal window; one that is still alive ``_HANGUP_TIMEOUT``
+        later is killed.  The reader thread reports the exit.
+
+        Args:
+            tab_id: The terminal tab.
+            conn_id: The sending connection; when non-empty it must own
+                the tab.
         """
         with self._lock:
-            term = self._terms.get(tab_id)
-            if term is None or term.finished:
+            session = self._sessions.get(tab_id)
+            if session is None or (conn_id and session.conn_id != conn_id):
                 return
-            term.viewers.add(conn_id)
-            self._emit(
-                {"type": "terminalData", "tab_id": tab_id,
-                 "data": base64.b64encode(bytes(term.backlog)).decode("ascii")},
-                conn_id,
-            )
-            self._resize_locked(term, cols, rows)
+            self._hang_up(session)
 
-    def input(self, tab_id: str, data: str, binary: bool = False) -> None:
-        """Write what the user typed (or pasted) to the shell."""
-        with self._lock:
-            term = self._terms.get(tab_id)
-            if term is None or term.finished:
-                return
-            fd = term.master_fd
-        raw = data.encode("latin-1", "ignore") if binary else data.encode("utf-8")
-        try:
-            while raw:
-                raw = raw[os.write(fd, raw):]
-        except OSError as exc:
-            logger.debug("terminal %s: write failed: %s", tab_id, exc)
-
-    def resize(self, tab_id: str, cols: Any, rows: Any) -> None:
-        """Resize the pty to the viewing surface's columns and rows."""
-        with self._lock:
-            term = self._terms.get(tab_id)
-            if term is not None and not term.finished:
-                self._resize_locked(term, cols, rows)
-
-    def close(self, tab_id: str) -> None:
-        """Close the tab everywhere and end its shell (SIGHUP, then SIGKILL)."""
-        with self._lock:
-            term = self._terms.get(tab_id)
-            if term is None or term.finished:
-                return
-            self._finish_locked(term)
-        threading.Thread(
-            target=self._terminate, args=(term,), name="terminal-kill", daemon=True
-        ).start()
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     def viewer_gone(self, conn_id: str) -> None:
-        """Stop streaming to *conn_id* (the client disconnected)."""
-        with self._lock:
-            for term in self._terms.values():
-                term.viewers.discard(conn_id)
+        """The connection *conn_id* dropped: keep its shells for a re-attach.
 
-    def open_events(self) -> list[dict[str, Any]]:
-        """One unfocused ``openTerminalTab`` event per live terminal."""
+        Each shell owned by the connection is detached and hung up
+        ``GRACE_SECONDS`` later unless a reconnecting page claims it
+        with ``terminalOpen`` first.
+        """
+        now = time.monotonic()
         with self._lock:
-            return [self._open_event(t, focus=False) for t in self._terms.values() if not t.finished]
-
-    def snapshot_event(self) -> dict[str, Any]:
-        """The ``terminalTabs`` event a connecting client reconciles its tabs against."""
-        return {"type": "terminalTabs", "tabs": self.open_events()}
+            orphans = [s for s in self._sessions.values() if s.conn_id == conn_id]
+            for session in orphans:
+                session.detached_at = now
+                session.detach_seq += 1
+        for session in orphans:
+            timer = threading.Timer(
+                GRACE_SECONDS, self._expire_detached, [session, session.detach_seq],
+            )
+            timer.daemon = True
+            timer.start()
 
     def shutdown(self) -> None:
-        """End every shell; the daemon is stopping."""
+        """Hang up every shell (the daemon is stopping)."""
         with self._lock:
-            self._closed = True
-            terms = [t for t in self._terms.values() if not t.finished]
-            for term in terms:
-                term.finished = True
-        for term in terms:
-            self._terminate(term)
+            sessions = list(self._sessions.values())
+            for session in sessions:
+                self._hang_up(session)
+        deadline = time.monotonic() + _HANGUP_TIMEOUT + 1.0
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not any(s.tab_id in self._sessions for s in sessions):
+                    return
+            time.sleep(0.05)
+
+    def session_count(self) -> int:
+        """Return how many shells are running (tests and diagnostics)."""
+        with self._lock:
+            return len(self._sessions)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _spawn(self, cwd: str) -> _Terminal:
-        master_fd, slave_fd = os.openpty()
+    def _owned(self, tab_id: str, conn_id: str) -> _Session | None:
+        with self._lock:
+            session = self._sessions.get(tab_id)
+            if session is None or session.conn_id != conn_id:
+                return None
+            return session
+
+    def _spawn(
+        self, tab_id: str, conn_id: str, work_dir: str, cols: int, rows: int,
+    ) -> _Session:
+        """Fork the shell on a new pty; return its session (caller holds the lock)."""
+        argv = default_shell()
+        cwd = work_dir if work_dir and os.path.isdir(work_dir) else os.path.expanduser("~")
         env = dict(os.environ)
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
-        env.pop("COLUMNS", None)
-        env.pop("LINES", None)
-        argv = default_shell()
-        try:
-            _set_winsize(master_fd, DEFAULT_COLS, DEFAULT_ROWS)
-            proc = subprocess.Popen(  # noqa: S603 — the user's own shell
-                argv,
-                cwd=cwd,
-                env=env,
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                start_new_session=True,
-                preexec_fn=_become_controlling_tty,  # noqa: PLW1509 — two syscalls, no locks
-                close_fds=True,
-            )
-        except OSError:
-            os.close(master_fd)
-            os.close(slave_fd)
-            raise
-        # The child holds its own copy; ours would keep the pty from
-        # reporting EOF when the shell exits.
-        os.close(slave_fd)
-        with self._lock:
-            self._count += 1
-            n = self._count
-        name = os.path.basename(cwd.rstrip(os.sep)) or cwd
-        title = f"Terminal: {name}" if n == 1 else f"Terminal {n}: {name}"
-        return _Terminal(
-            tab_id=uuid.uuid4().hex, title=title, cwd=cwd, proc=proc, master_fd=master_fd
+        pid, fd = pty.fork()
+        if pid == 0:  # pragma: no cover — the child execs or dies
+            # Only exec-safe work here: the parent is multi-threaded.
+            try:
+                fcntl.ioctl(0, termios.TIOCSWINSZ, _winsize(rows, cols))
+                os.chdir(cwd)
+                os.execvpe(argv[0], argv, env)
+            except BaseException:  # noqa: BLE001
+                pass
+            os._exit(127)
+        # ``forkpty`` hands back an inheritable master: without this a
+        # later shell would hold every earlier terminal's master open.
+        os.set_inheritable(fd, False)
+        return _Session(
+            tab_id=tab_id, conn_id=conn_id, pid=pid, fd=fd,
+            shell=argv[0], cwd=cwd,
         )
 
-    def _pump(self, term: _Terminal) -> None:
-        """Copy the shell's output to the attached surfaces until it exits."""
+    def _set_winsize(self, session: _Session, cols: int, rows: int) -> None:
+        try:
+            fcntl.ioctl(session.fd, termios.TIOCSWINSZ, _winsize(rows, cols))
+        except OSError:  # the shell just exited; the reader reports it
+            pass
+
+    def _hang_up(self, session: _Session) -> None:
+        """Signal the shell to exit (caller holds the lock)."""
+        if session.hung_up or session.reaped:
+            return
+        session.hung_up = True
+        session.detached_at = None
+        try:
+            os.killpg(os.getpgid(session.pid), signal.SIGHUP)
+        except OSError:
+            pass
+        timer = threading.Timer(_HANGUP_TIMEOUT, self._kill_if_alive, [session])
+        timer.daemon = True
+        timer.start()
+
+    def _kill_if_alive(self, session: _Session) -> None:
+        with self._lock:
+            self._kill_locked(session)
+
+    def _kill_locked(self, session: _Session) -> None:
+        """SIGKILL the shell unless it was reaped (caller holds the lock)."""
+        if session.reaped:
+            return
+        try:
+            os.kill(session.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    def _expire_detached(self, session: _Session, detach_seq: int) -> None:
+        with self._lock:
+            if (
+                session.detached_at is not None
+                and session.detach_seq == detach_seq
+                and session.tab_id in self._sessions
+            ):
+                self._hang_up(session)
+
+    def _write_loop(self, session: _Session) -> None:
+        """Write queued input to the pty in order, then close the master.
+
+        A blocked write never stalls the server loop, and the master is
+        closed HERE, after the reader's end-of-session sentinel, so no
+        write can ever land on a descriptor number the kernel has since
+        reused for something else.
+        """
+        broken = False
         while True:
+            data = session.writes.get()
+            if data is None:
+                break
+            if broken:
+                continue
             try:
-                data = os.read(term.master_fd, 65536)
-            except OSError:  # EIO on Linux once the last slave fd closed
-                data = b""
+                while data:
+                    n = os.write(session.fd, data)
+                    data = data[n:]
+            except OSError:
+                broken = True
+        try:
+            os.close(session.fd)
+        except OSError:
+            pass
+
+    def _pump(self, session: _Session) -> None:
+        """Stream the shell's output to its connection until it exits.
+
+        The shell's exit is polled with ``waitpid`` on every turn, not
+        only at EOF: a background child that inherited the pty keeps
+        the slave side open (no EOF) and may keep printing.
+        """
+        selector = selectors.DefaultSelector()
+        selector.register(session.fd, selectors.EVENT_READ)
+        code: int | None = None
+        while code is None:
+            if selector.select(0.5):
+                data = self._read(session)
+                if not data:
+                    # EOF: every handle on the slave side is closed, so
+                    # the shell is gone or on its way out.
+                    code = self._reap(session, _HANGUP_TIMEOUT)
+                    break
+                self._emit_data(session, data)
+            code = self._reap(session, 0.0)
+        # Output written just before the exit may still sit in the pty
+        # buffer; a child that keeps printing after the shell is gone
+        # does not keep the tab alive.
+        drain_until = time.monotonic() + 0.2
+        while time.monotonic() < drain_until and selector.select(0):
+            data = self._read(session)
             if not data:
                 break
-            with self._lock:
-                term.backlog += data
-                if len(term.backlog) > BACKLOG_LIMIT:
-                    cut = len(term.backlog) - BACKLOG_LIMIT
-                    nl = term.backlog.find(b"\n", cut)
-                    del term.backlog[: nl + 1 if 0 <= nl < cut + 4096 else cut]
-                viewers = list(term.viewers)
-            payload = base64.b64encode(data).decode("ascii")
-            for conn_id in viewers:
-                self._emit({"type": "terminalData", "tab_id": term.tab_id, "data": payload}, conn_id)
+            self._emit_data(session, data)
+        selector.close()
         with self._lock:
-            self._finish_locked(term)
-        with contextlib.suppress(OSError):
-            os.close(term.master_fd)
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            term.proc.wait(timeout=KILL_GRACE_SECONDS)
+            self._sessions.pop(session.tab_id, None)
+        session.writes.put(None)
+        self._emit(
+            {"type": "terminalExit", "tab_id": session.tab_id, "code": code},
+            session.conn_id,
+        )
 
-    def _finish_locked(self, term: _Terminal) -> None:
-        """Drop *term* and close its tab on every surface (idempotent)."""
-        if term.finished:
-            return
-        term.finished = True
-        self._terms.pop(term.tab_id, None)
-        self._emit({"type": "closeTerminalTab", "tab_id": term.tab_id})
+    def _read(self, session: _Session) -> bytes:
+        try:
+            return os.read(session.fd, _READ_CHUNK)
+        except OSError:  # EIO: the slave side is closed (Linux reports EOF so)
+            return b""
 
-    def _terminate(self, term: _Terminal) -> None:
-        """Hang up the shell's process group; kill it if it lingers."""
-        if term.proc.poll() is not None:
-            return
-        for sig in (signal.SIGHUP, signal.SIGKILL):
-            with contextlib.suppress(OSError):
-                os.killpg(term.proc.pid, sig)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                term.proc.wait(timeout=KILL_GRACE_SECONDS)
-                return
+    def _reap(self, session: _Session, timeout: float) -> int | None:
+        """Collect the shell's exit code, waiting at most *timeout* seconds.
 
-    def _resize_locked(self, term: _Terminal, cols: Any, rows: Any) -> None:
-        cols, rows = _clamp(cols, term.cols), _clamp(rows, term.rows)
-        if (cols, rows) == (term.cols, term.rows):
-            return
-        term.cols, term.rows = cols, rows
-        with contextlib.suppress(OSError):
-            _set_winsize(term.master_fd, cols, rows)
+        A shell that has not exited by the deadline (it closed its tty
+        but lingers) is killed; ``None`` means still running when
+        *timeout* is zero.  Each ``waitpid`` runs under the lock
+        together with the ``reaped`` flag it sets, so the hang-up and
+        kill paths (which check that flag under the same lock) never
+        signal a pid the kernel has recycled.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                try:
+                    wpid, status = os.waitpid(session.pid, os.WNOHANG)
+                except ChildProcessError:
+                    wpid, status = session.pid, 0
+                if wpid:
+                    session.reaped = True
+                    return os.waitstatus_to_exitcode(status)
+                if timeout and time.monotonic() >= deadline:
+                    self._kill_locked(session)
+                    deadline = time.monotonic() + _HANGUP_TIMEOUT
+            if not timeout:
+                return None
+            time.sleep(0.02)
 
-    def _open_event(self, term: _Terminal, *, focus: bool) -> dict[str, Any]:
-        return {
-            "type": "openTerminalTab",
-            "tab_id": term.tab_id,
-            "title": term.title,
-            "cwd": term.cwd,
-            "focus": focus,
-        }
+    def _emit_data(self, session: _Session, data: bytes) -> None:
+        text = session.decoder.decode(data)
+        if text:
+            self._emit(
+                {"type": "terminalData", "tab_id": session.tab_id, "data": text},
+                session.conn_id,
+            )
 
-    def _emit(self, event: dict[str, Any], conn_id: str = "") -> None:
-        """Send *event* to one connection (*conn_id*) or to every client."""
-        if conn_id:
-            event["connId"] = conn_id
-        else:
-            event["tabId"] = ""
+    def _emit_opened(self, session: _Session, attached: bool) -> None:
+        self._emit(
+            {
+                "type": "terminalOpened",
+                "tab_id": session.tab_id,
+                "shell": os.path.basename(session.shell),
+                "cwd": session.cwd,
+                "attached": attached,
+            },
+            session.conn_id,
+        )
+
+    def _emit(self, event: dict[str, Any], conn_id: str) -> None:
+        """Deliver *event* to the connection *conn_id* only."""
+        event["connId"] = conn_id
         self._printer.broadcast(event)
+
+
+__all__ = ["GRACE_SECONDS", "TerminalService", "default_shell"]

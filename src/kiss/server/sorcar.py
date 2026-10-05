@@ -299,11 +299,16 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("browserNavigate", required=("tab_id", "action")),
     ApiCommand("browserInput", required=("tab_id", "event")),
     ApiCommand("browserViewport", required=("tab_id",)),
-    ApiCommand("terminalOpen"),
-    ApiCommand("terminalAttach", required=("tab_id",)),
-    ApiCommand("terminalInput", required=("tab_id", "data")),
-    ApiCommand("terminalResize", required=("tab_id", "cols", "rows")),
-    ApiCommand("terminalClose", required=("tab_id",)),
+    ApiCommand("terminalOpen", required=("tab_id",), handler="terminal_open"),
+    ApiCommand(
+        "terminalInput", required=("tab_id", "data"), handler="terminal_input"
+    ),
+    ApiCommand(
+        "terminalResize",
+        required=("tab_id", "cols", "rows"),
+        handler="terminal_resize",
+    ),
+    ApiCommand("terminalClose", required=("tab_id",), handler="terminal_close"),
     ApiCommand("setWorkDir", required=("workDir",)),
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
@@ -528,6 +533,8 @@ class ServerBackend(Protocol):
     async def _handle_list_dir(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
+
+    def _cmd_work_dir(self, cmd: dict[str, Any]) -> str: ...
 
     async def _handle_git_status(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -1307,6 +1314,70 @@ class ServerApi:
         if ctx.is_local:
             return
         await self._backend._handle_list_dir(cmd, ctx.endpoint)
+
+    # The remote webapp's terminal tabs (``kiss.server.terminal_tab``):
+    # a shell on the daemon's machine, owned by the connection that
+    # opened it.  VS Code windows have their own integrated terminal,
+    # so a locally delivered terminal command is dropped like
+    # ``listDir``.  The ``tab_id`` is the terminal tab, never a chat.
+
+    async def terminal_open(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Start (or re-attach) the shell of a terminal tab.
+
+        Args:
+            cmd: The ``terminalOpen`` command (``tab_id``; optional
+                ``cols``, ``rows``, ``workDir``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_local:
+            return
+        self._backend._vscode_server.terminals.open(
+            str(cmd["tab_id"]),
+            ctx.conn_state["conn_id"],
+            self._backend._cmd_work_dir(cmd),
+            cmd.get("cols"),
+            cmd.get("rows"),
+        )
+
+    async def terminal_input(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Write the keystrokes of a terminal tab to its shell.
+
+        Args:
+            cmd: The ``terminalInput`` command (``tab_id``, ``data``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_local:
+            return
+        self._backend._vscode_server.terminals.input(
+            str(cmd["tab_id"]), ctx.conn_state["conn_id"], cmd["data"],
+        )
+
+    async def terminal_resize(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Resize the pty of a terminal tab.
+
+        Args:
+            cmd: The ``terminalResize`` command (``tab_id``, ``cols``,
+                ``rows``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_local:
+            return
+        self._backend._vscode_server.terminals.resize(
+            str(cmd["tab_id"]), ctx.conn_state["conn_id"], cmd["cols"], cmd["rows"],
+        )
+
+    async def terminal_close(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Hang up the shell of a closed terminal tab.
+
+        Args:
+            cmd: The ``terminalClose`` command (``tab_id``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_local:
+            return
+        self._backend._vscode_server.terminals.close(
+            str(cmd["tab_id"]), ctx.conn_state["conn_id"],
+        )
 
     async def git_status(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Report working-tree changes for the remote Source Control view.

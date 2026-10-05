@@ -4070,9 +4070,6 @@ def _build_html() -> str:
         "CTX_MENU_SRC": _media_url("contentContextMenu.js"),
         "TREE_MENU_SRC": _media_url("treeContextMenu.js"),
         "BROWSER_TAB_SRC": _media_url("browserTab.js"),
-        "XTERM_SRC": _media_url("xterm.js"),
-        "XTERM_FIT_SRC": _media_url("xterm-addon-fit.js"),
-        "XTERM_CSS_HREF": _media_url("xterm.css"),
         "TERMINAL_TAB_SRC": _media_url("terminalTab.js"),
         "PDF_VIEW_SRC": _media_url("pdfView.js"),
         "MAIN_SRC": _media_url("main.js"),
@@ -6121,7 +6118,7 @@ class RemoteAccessServer:
                 )
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
-            self._vscode_server.terminal_tabs.viewer_gone(conn_state["conn_id"])
+            self._vscode_server.terminals.viewer_gone(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
 
@@ -8812,8 +8809,6 @@ class RemoteAccessServer:
         # (re)connecting client add the live ones and drop any it kept
         # from before a disconnect or a daemon restart.
         self._broadcast_to_conn(self._vscode_server.browser_tabs.snapshot_event(), conn_id)
-        # Same contract for the shells streamed as terminal tabs.
-        self._broadcast_to_conn(self._vscode_server.terminal_tabs.snapshot_event(), conn_id)
         await self._send_welcome_info()
         # The Inject promptlets and the tips: the daemon owns both files
         # (and the opt-out marker), so every surface paints them from
@@ -11007,6 +11002,9 @@ class RemoteAccessServer:
             # The Browser tab dies with this server: a later hand-off in
             # this process must fall back to the default browser.
             set_browser_tab_opener(None)
+            # Terminal-tab shells are hung up (and killed when they
+            # ignore it) rather than left to outlive the daemon.
+            self._vscode_server.terminals.shutdown()
             # Also stop the SEA registry watcher on the blocking
             # start() cleanup path (KeyboardInterrupt / pre-loop
             # SIGTERM).  The async ``stop_async`` path unhooks it via
@@ -11168,8 +11166,8 @@ class RemoteAccessServer:
             # daemon: close it so no orphan browser survives shutdown.
             set_browser_tab_opener(None)
             await asyncio.to_thread(self._vscode_server.browser_tabs.shutdown)
-            # The shells behind terminal tabs are children of this daemon too.
-            await asyncio.to_thread(self._vscode_server.terminal_tabs.shutdown)
+            # Terminal-tab shells are children of this daemon too.
+            await asyncio.to_thread(self._vscode_server.terminals.shutdown)
             # An interactive merge/discard runs in the default executor,
             # not on a task thread: WAIT for it before anything else is
             # torn down, or the repository keeps being rewritten after
