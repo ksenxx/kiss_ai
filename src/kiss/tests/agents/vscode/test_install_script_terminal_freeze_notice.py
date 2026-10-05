@@ -105,7 +105,10 @@ def _extract_guard_function() -> str:
 
 
 def _build_sandbox(
-    tmp_path: Path, kiss_home: Path | None = None
+    tmp_path: Path,
+    kiss_home: Path | None = None,
+    skip_launch: bool = False,
+    server_install_fails: bool = False,
 ) -> tuple[Path, Path]:
     """Create the sandbox (stubs, fake HOME, project dir, dummy daemon).
 
@@ -113,10 +116,14 @@ def _build_sandbox(
         tmp_path: Per-test scratch directory.
         kiss_home: When given, exported as ``KISS_HOME`` to the harness —
             the block must then write its markers there, not ``~/.kiss``.
+        skip_launch: Export ``KISS_SKIP_LAUNCH=1`` (the Docker entrypoint).
+        server_install_fails: Make the ``code`` stub fail the install into
+            the VS Code Server extensions directory (``--extensions-dir``).
 
     Returns:
         ``(harness_path, log_path)`` — the harness script to run under
-        bash and the install log it tees into.
+        bash and the install log it tees into.  The stub ``code`` records
+        every call's arguments in ``tmp_path / "code-calls.log"``.
     """
     home = tmp_path / "home"
     (home / ".kiss").mkdir(parents=True)
@@ -132,10 +139,16 @@ def _build_sandbox(
     supervisor_log = tmp_path / "supervisor-calls.log"
 
     code_cli = stubs / "code-stub"
+    code_calls = tmp_path / "code-calls.log"
+    server_install_exit = 1 if server_install_fails else 0
     code_cli.write_text(
         textwrap.dedent(
             f"""\
             #!/bin/bash
+            printf '%s\\n' "$*" >> {code_calls.as_posix()!r}
+            case " $* " in
+                *" --extensions-dir "*) [ {server_install_exit} = 0 ] || exit {server_install_exit} ;;
+            esac
             echo "Installing extensions..."
             echo "{_CODE_STUB_DONE}"
             """
@@ -205,6 +218,8 @@ def _build_sandbox(
         if kiss_home
         else "unset KISS_HOME\n"
     )
+    if skip_launch:
+        kiss_home_export += "export KISS_SKIP_LAUNCH=1\n"
     harness = tmp_path / "harness.sh"
     harness.write_text(
         textwrap.dedent(
@@ -534,3 +549,69 @@ def test_step_5_5_runs_post_install_hooks_before_the_reload_marker(
     )
     assert f"post-install hook {hooks.as_posix()}/20-broken exited with status 3" in text
     assert "README" not in text, "a file without the executable bit is not a hook"
+
+
+def _run_step_5_5(tmp_path: Path, **sandbox_kwargs: bool) -> tuple[str, Path]:
+    """Run the step [5/5] harness to completion; return (pty text, log)."""
+    harness, log = _build_sandbox(tmp_path, **sandbox_kwargs)
+    proc, master = _spawn_on_pty(harness)
+    try:
+        out = _read_until(master, _LAST_BLOCK_LINE.encode())
+        rc = proc.wait(timeout=30)
+    finally:
+        os.close(master)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        _kill_dummy_daemon(tmp_path)
+    text = out.decode("utf-8", errors="replace")
+    assert rc == 0, f"step [5/5] harness failed rc={rc}:\n{text}"
+    _wait_for_line(log, _COMPLETE_LINE)
+    return text, log
+
+
+def _code_calls(tmp_path: Path) -> list[str]:
+    return (tmp_path / "code-calls.log").read_text(encoding="utf-8").splitlines()
+
+
+def test_step_5_5_installs_the_extension_into_the_vscode_server_too(
+    tmp_path: Path,
+) -> None:
+    """VS Code in the browser (``code serve-web``) loads extensions from
+    ``~/.vscode-server/extensions``: the VSIX is installed there as well,
+    after the desktop install and before the post-install hooks.
+    """
+    text, _log = _run_step_5_5(tmp_path)
+    vsix = (tmp_path / "project" / "kiss-sorcar.vsix").as_posix()
+    server_dir = (tmp_path / "home" / ".vscode-server" / "extensions").as_posix()
+    assert _code_calls(tmp_path) == [
+        f"--install-extension {vsix} --force",
+        f"--install-extension {vsix} --extensions-dir {server_dir} --force",
+    ]
+    assert f"Extension installed into VS Code Server ({server_dir})" in text
+    assert text.index("Extension installed into VS Code\r\n") < text.index(
+        "Extension installed into VS Code Server"
+    )
+
+
+def test_step_5_5_server_install_failure_is_a_warning_only(tmp_path: Path) -> None:
+    """The desktop install is what the setup depends on; a failed install
+    into ``~/.vscode-server/extensions`` is reported and the step completes.
+    """
+    text, _log = _run_step_5_5(tmp_path, server_install_fails=True)
+    assert len(_code_calls(tmp_path)) == 2
+    assert "WARNING: could not install the extension into" in text
+    assert "VS Code in the browser will run without KISS Sorcar." in text
+    assert (tmp_path / "home" / ".kiss" / ".extension-updated").exists()
+
+
+def test_step_5_5_skips_the_server_install_under_kiss_skip_launch(
+    tmp_path: Path,
+) -> None:
+    """Docker (``KISS_SKIP_LAUNCH``) never serves VS Code in the browser from
+    this script, so only the editor's own extensions directory is written.
+    """
+    text, _log = _run_step_5_5(tmp_path, skip_launch=True)
+    vsix = (tmp_path / "project" / "kiss-sorcar.vsix").as_posix()
+    assert _code_calls(tmp_path) == [f"--install-extension {vsix} --force"]
+    assert "VS Code Server" not in text

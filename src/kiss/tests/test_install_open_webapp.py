@@ -34,11 +34,15 @@ _LOOPBACK = "https://127.0.0.1:8787"
 _TUNNEL = "https://example-tunnel.trycloudflare.com"
 
 
+def _block(text: str, name: str) -> str:
+    return text[text.index(f"# BEGIN: {name}"):text.index(f"# END: {name}")]
+
+
 def _open_webapp_block() -> str:
+    # The block uses machine_is_remote / open_in_browser from the shared
+    # helpers block that precedes it in install.sh.
     text = (_REPO / "install.sh").read_text(encoding="utf-8")
-    start = text.index("# BEGIN: kiss-open-webapp")
-    end = text.index("# END: kiss-open-webapp")
-    return text[start:end]
+    return _block(text, "kiss-browser-helpers") + "\n" + _block(text, "kiss-open-webapp")
 
 
 def _write_stub(path: Path, log: Path, exit_code: int = 0) -> None:

@@ -7,7 +7,8 @@
 #
 # This script's job is intentionally small: bootstrap only the tools needed to
 # build and install the VS Code extension from a cloned checkout, then launch
-# VS Code.  Runtime setup is owned by the extension's DependencyInstaller so
+# VS Code (the desktop app, and VS Code in the browser via ``code serve-web``)
+# and open the webapp.  Runtime setup is owned by the extension's DependencyInstaller so
 # users get the same installation path whether they run this script or install
 # the VSIX directly.
 #
@@ -1422,6 +1423,20 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
         exit 1
     fi
     echo "   Extension installed into VS Code"
+    # VS Code in the browser (``code serve-web``, started at the end of
+    # this script) is a VS Code Server: it loads its extensions from
+    # ~/.vscode-server/extensions, not from the desktop's directory, so
+    # install the VSIX there as well.  This happens before the post-install
+    # hooks below so a brand hook patches this copy too.  Not fatal: the
+    # desktop install above is the one the rest of the setup depends on.
+    if [ -z "${KISS_SKIP_LAUNCH:-}" ]; then
+        if "$CODE_CLI" --install-extension "$VSIX" --extensions-dir "$HOME/.vscode-server/extensions" --force 2>&1 9>&-; then
+            echo "   Extension installed into VS Code Server ($HOME/.vscode-server/extensions)"
+        else
+            echo "   WARNING: could not install the extension into $HOME/.vscode-server/extensions;"
+            echo "            VS Code in the browser will run without KISS Sorcar."
+        fi
+    fi
     # Keep the freshly built VSIX from dirtying git (see guard_vsix_tracking
     # for the full rationale).  Public kiss_ai clones ship the VSIX as a
     # tracked file in every release commit, so "tracked" is a healthy state
@@ -1555,6 +1570,132 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Browser helpers shared by the two blocks below
+# ---------------------------------------------------------------------------
+# BEGIN: kiss-browser-helpers  (tests extract this block verbatim)
+machine_is_remote() {
+    # An SSH session, or Linux without a display, has no browser to open.
+    [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}${SSH_CLIENT:-}" ] && return 0
+    [ "$OS" = "Linux" ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && return 0
+    return 1
+}
+
+open_in_browser() {
+    case "$OS" in
+        Darwin)
+            open "$1" >/dev/null 2>&1 9>&-
+            ;;
+        Linux)
+            command -v xdg-open >/dev/null 2>&1 || return 1
+            (nohup xdg-open "$1" >/dev/null 2>&1 9>&- &)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+# END: kiss-browser-helpers
+
+# ---------------------------------------------------------------------------
+# Open VS Code in the browser
+# ---------------------------------------------------------------------------
+# ``code serve-web`` (the VS Code CLI) serves VS Code itself over HTTP on
+# 127.0.0.1, guarded by a connection token in the URL.  The CLI announces
+# the URL at once ("Web UI available at http://127.0.0.1:PORT?tkn=...")
+# and downloads the VS Code Server on the first visit (the page shows a
+# "downloading, please wait" notice and reloads itself).  The server loads
+# extensions from ~/.vscode-server/extensions, where step [5/5] installed
+# the VSIX, and the window opens on the same workspace as the desktop
+# launch above.  The server is left running detached, like the editor; a
+# re-run of this script reuses it when it is still alive.  On a remote
+# machine the URL is printed with an ssh port-forward hint instead of
+# opening a browser.  ``KISS_SKIP_LAUNCH`` (Docker) skips this too.
+#
+# The progress notification is updated here, outside the block, because
+# tests extract the block verbatim and run it without report_step.
+[ -n "${KISS_SKIP_LAUNCH:-}" ] || report_step "Starting VS Code in the browser..."
+# BEGIN: kiss-open-vscode-web
+# 0 lets the CLI pick a free port; the announced URL carries the real one.
+KISS_VSCODE_WEB_PORT="${KISS_VSCODE_WEB_PORT:-0}"
+KISS_VSCODE_WEB_WAIT_SECS="${KISS_VSCODE_WEB_WAIT_SECS:-60}"
+
+vscode_web_url() {
+    # Print the URL ``code serve-web`` announced in its log ($1), if any.
+    sed -n 's/^Web UI available at \(http[^[:space:]]*\).*/\1/p' "$1" | head -n 1
+}
+
+url_port() {
+    # Print the port of an http://host:PORT... URL ($1).
+    local rest="${1#http://}"
+    rest="${rest%%[/?]*}"
+    printf '%s\n' "${rest##*:}"
+}
+
+port_is_open() {
+    # True when something accepts TCP connections on 127.0.0.1:$1.
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+open_vscode_web() {
+    local home_dir="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}"
+    local log="$home_dir/vscode-web.log" pid_file="$home_dir/vscode-web.pid"
+    local pid url port waited=0
+    if [ -z "${CODE_CLI:-}" ] && ! find_code_cli; then
+        echo "No VS Code CLI found; not starting VS Code in the browser."
+        return 1
+    fi
+    echo ""
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    url="$(vscode_web_url "$log" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -n "$url" ] && port_is_open "$(url_port "$url")"; then
+        echo "VS Code is already served in the browser by 'code serve-web' (pid $pid)."
+    else
+        echo "Starting VS Code in the browser ('code serve-web')..."
+        echo "   This accepts the VS Code Server license terms (https://aka.ms/vscode-server-license)."
+        mkdir -p "$home_dir"
+        : > "$log"
+        (nohup "$CODE_CLI" serve-web --port "$KISS_VSCODE_WEB_PORT" --accept-server-license-terms \
+            --default-folder "$USER_PWD" < /dev/null > "$log" 2>&1 9>&- &
+         echo $! > "$pid_file")
+        pid="$(cat "$pid_file")"
+        while :; do
+            url="$(vscode_web_url "$log")"
+            [ -n "$url" ] && break
+            if ! kill -0 "$pid" 2>/dev/null || [ "$waited" -ge "$KISS_VSCODE_WEB_WAIT_SECS" ]; then
+                echo "   'code serve-web' did not announce a URL (log: $log)."
+                sed 's/^/       /' "$log" | tail -n 5
+                echo "   To serve VS Code in the browser yourself, run:"
+                echo "       '$CODE_CLI' serve-web --accept-server-license-terms"
+                return 1
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+    fi
+
+    if machine_is_remote; then
+        port="$(url_port "$url")"
+        echo ""
+        echo "This machine is remote; forward the port from your own device with"
+        echo "    ssh -L $port:127.0.0.1:$port ${USER:-$(id -un)}@$(hostname)"
+        echo "and then open VS Code in your browser at:"
+        echo "    $url"
+        return 0
+    fi
+    echo ""
+    echo "Opening VS Code in the browser at $url"
+    echo "   (the first visit downloads the VS Code Server and reloads itself)"
+    if ! open_in_browser "$url"; then
+        echo "   Could not open a browser; open the URL above yourself."
+    fi
+}
+
+if [ -z "${KISS_SKIP_LAUNCH:-}" ]; then
+    open_vscode_web || true
+fi
+# END: kiss-open-vscode-web
+
+# ---------------------------------------------------------------------------
 # Open the webapp
 # ---------------------------------------------------------------------------
 # The kiss-web daemon is started by the extension once VS Code has finished
@@ -1596,28 +1737,6 @@ url_file_field() {
     # Print the string value of key $2 in the daemon's remote-url.json ($1),
     # a flat object written with one ``"key": "value"`` pair per line.
     sed -n "s/^[[:space:]]*\"$2\":[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -n 1
-}
-
-machine_is_remote() {
-    # An SSH session, or Linux without a display, has no browser to open.
-    [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}${SSH_CLIENT:-}" ] && return 0
-    [ "$OS" = "Linux" ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && return 0
-    return 1
-}
-
-open_in_browser() {
-    case "$OS" in
-        Darwin)
-            open "$1" >/dev/null 2>&1 9>&-
-            ;;
-        Linux)
-            command -v xdg-open >/dev/null 2>&1 || return 1
-            (nohup xdg-open "$1" >/dev/null 2>&1 9>&- &)
-            ;;
-        *)
-            return 1
-            ;;
-    esac
 }
 
 open_webapp() {
