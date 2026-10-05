@@ -7,7 +7,7 @@
 Embeds a small HTTP server that speaks the OpenAI chat API, so any
 OpenAI-style frontend (Open WebUI, LibreChat, an ``openai`` SDK script)
 becomes a chat surface for the kiss-web daemon.  Stores config in
-``~/.kiss/third_party_agents/openai_compat/config.json``.
+``$KISS_HOME/third_party_agents/openai_compat/config.json``.
 
 Endpoints:
 
@@ -87,10 +87,14 @@ def description() -> str:
         "Exposes the kiss-web daemon as an OpenAI-compatible chat API (`GET /v1/models`, "
         "`POST /v1/chat/completions` with a bearer api_key) so Open WebUI, LibreChat or any "
         "`openai` SDK client can chat with Sorcar; configure it with "
-        "`kiss-oai -t 'configure the OpenAI-compatible API server'`, start it with "
-        "`kiss-oai --serve`, and check it with "
-        '`run_agent(agent="oai", task="Report the API server status")`.'
+        "`kiss-oai -t 'configure the OpenAI-compatible API server'` and start it with "
+        "`kiss-oai --serve` (a terminal setup, not a chat command)."
     )
+
+
+def settings() -> dict:
+    """Return the SEA's settings: hidden, since the server is set up from a terminal."""
+    return {"hidden": True}
 
 
 def _chat_map_path() -> Path:
@@ -703,12 +707,12 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the OpenAI-compatible API tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the OpenAI-compatible API tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return OpenAICompatAgent()._get_tools()

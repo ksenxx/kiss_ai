@@ -27,7 +27,9 @@
 //  - a tab bound to a chat some open panel already shows is skipped
 //    while that panel's tab is still registered (resume race) — but
 //    ADOPTED when the registry displaced the panel's tab (one tab per
-//    chat: the newest bind wins and the old panel closes itself);
+//    chat: the newest bind wins), and the displaced panel is closed
+//    on the host at once — without retiring its chat — so the chat
+//    never has two panels in the window;
 //  - the displacement decision holds even when the panel's OWN daemon
 //    socket never delivered its snapshots (the manager syncs
 //    registryBound from the controller's snapshot stream itself);
@@ -494,8 +496,13 @@ async function runTest() {
   // adopted. panel1's root tab T1 is registry-confirmed (listed by
   // the snapshots above); another client re-binding chat-1 to a NEW
   // tab makes the daemon drop T1 (one tab per chat, newest bind wins)
-  // — panel1 will close itself, so the replacement must get a panel
-  // or the chat would vanish from this window.
+  // — the replacement must get a panel or the chat would vanish from
+  // this window, and panel1 must close right away (not retiring the
+  // chat: the registry already dropped its tab) so chat-1 never has
+  // two panels here.
+  const closeTabCommandsBefore = receivedCommands.filter(
+    c => c.type === 'closeTab',
+  ).length;
   await daemonBroadcast({
     type: 'tabs_state',
     tabs: [
@@ -513,6 +520,17 @@ async function runTest() {
     'the displaced chat-1 replacement tab must be adopted',
   );
   assert.strictEqual(tabIdOf(createdPanels[7]), 'T1b');
+  assert.ok(panel1.disposed, 'the displaced panel must close at once');
+  assert.ok(
+    !recordedIds.includes('T1'),
+    'the displaced panel leaves the persisted record',
+  );
+  await new Promise(r => setTimeout(r, 150));
+  assert.strictEqual(
+    receivedCommands.filter(c => c.type === 'closeTab').length,
+    closeTabCommandsBefore,
+    'closing a displaced panel must not retire its chat',
+  );
 
   // --- displacement with a LAGGING panel socket: the manager must
   // confirm a panel's registration from the CONTROLLER's snapshot
@@ -563,6 +581,10 @@ async function runTest() {
       "the old panel's own socket saw no snapshot",
   );
   assert.strictEqual(tabIdOf(createdPanels[9]), 'T-s2');
+  assert.ok(
+    createdPanels[8].disposed,
+    'the displaced chat-S panel must close when its replacement opens',
+  );
 
   // --- persisted tab ids: user closes update the record ---------------
   assert.deepStrictEqual(
@@ -575,12 +597,11 @@ async function runTest() {
       'T-pinned',
       'T-s2',
       'T-unpinned',
-      'T1',
       'T1b',
       tabIdOf(createdPanels[5]), // the chat-R resume panel's random id
-      slowPanelTabId,
     ].sort(),
-    'the record lists every open panel tab id',
+    'the record lists every open panel tab id (the displaced T1 and ' +
+      'chat-S panels are closed)',
   );
   createdPanels[9].dispose(); // user closes the T-s2 panel
   assert.ok(

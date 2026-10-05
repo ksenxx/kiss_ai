@@ -17,7 +17,7 @@ Spec
    worktree/parallel/auto-commit toggles in the toolbar — to a new
    configuration (``is_worktree=False``, etc.).  The toggle state
    in the webview is the source of truth for the next task's
-   ``useWorktree`` / ``useParallel`` / ``autoCommit`` flags.
+   ``useWorktree`` / ``isParallel`` / ``autoCommit`` flags.
 
 3. The user clicks the history row for T1.  The frontend issues
    ``newChat`` then ``resumeSession`` for chat X into a fresh tab Y.
@@ -30,7 +30,7 @@ Spec
    frontend's ``task_events`` handler used those values to overwrite
    the live toggle UI and ``selectedModel``.  The next ``submit`` in
    tab Y then sent those STALE values as ``useWorktree`` /
-   ``useParallel`` / ``autoCommit`` / ``model`` — silently making
+   ``isParallel`` / ``autoCommit`` / ``model`` — silently making
    the follow-up task run with T1's old settings instead of the
    user's CURRENT global settings.
 
@@ -164,7 +164,7 @@ def _run_and_wait(
         "workDir": work_dir,
         "tabId": tab_id,
         "useWorktree": use_worktree,
-        "useParallel": use_parallel,
+        "isParallel": use_parallel,
         "autoCommit": auto_commit,
     })
     state = agent_state.find_by_tab(tab_id)

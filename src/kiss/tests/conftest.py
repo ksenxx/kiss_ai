@@ -220,6 +220,15 @@ def hold_loopback_port(port: int) -> Iterator[None]:
     frees the port); concurrent tests take turns instead of failing
     with ``[Errno 98] Address already in use``.
 
+    The lock cannot keep OTHER connections off the port: a loaded run
+    opens thousands of loopback connections (Playwright, WSS clients),
+    and one whose ephemeral local port happened to be *port* leaves a
+    TIME_WAIT without ``SO_REUSEADDR`` for 60 s once it closes, which
+    Linux counts as a conflict even for a ``SO_REUSEADDR`` bind.  So
+    after taking the lock the helper also waits until a probe bind
+    succeeds (up to a little over one TIME_WAIT lifetime); a port that
+    stays taken is left for the test to report.
+
     Args:
         port: The fixed loopback port the test binds.
 
@@ -227,7 +236,35 @@ def hold_loopback_port(port: int) -> Iterator[None]:
         None while the port is reserved.
     """
     with exclusive_file_lock(Path(tempfile.gettempdir()) / f"kiss-test-loopback-{port}.lock"):
+        wait_until_loopback_port_bindable(port)
         yield
+
+
+def wait_until_loopback_port_bindable(port: int, timeout: float = 75.0) -> bool:
+    """Wait until ``127.0.0.1:port`` accepts a ``SO_REUSEADDR`` bind.
+
+    Probes with a bind-and-close (no listen, no connection, so the probe
+    itself leaves no TIME_WAIT) once a second until the bind succeeds or
+    *timeout* seconds have passed.
+
+    Args:
+        port: The loopback port to probe.
+        timeout: Seconds to keep probing; a TIME_WAIT lasts 60 s.
+
+    Returns:
+        True when the port became bindable, False when it stayed taken.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        with socket.socket() as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(("127.0.0.1", port))
+                return True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    return False
+        time.sleep(1.0)
 
 
 @contextlib.contextmanager

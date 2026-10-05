@@ -340,16 +340,21 @@ class TestCachePricing:
         assert MODEL_INFO["openrouter/openai/gpt-4o"].cache_read_price_per_1M == pytest.approx(
             MODEL_INFO["openrouter/openai/gpt-4o"].input_price_per_1M * 0.5
         )
-        # DeepSeek's OpenRouter prices are floating provider averages that
-        # every ``update_models.py`` refresh moves, so only the cache-read /
-        # input ratios (fixed by the vendor) are pinned, not the absolute values.
-        d = MODEL_INFO["openrouter/deepseek/deepseek-v4-flash"]
-        assert 0 < d.input_price_per_1M < 1
-        assert d.cache_read_price_per_1M == pytest.approx(d.input_price_per_1M * 0.2, rel=0.05)
-        assert d.cache_write_price_per_1M is None
-        p = MODEL_INFO["openrouter/deepseek/deepseek-v4-pro"]
-        assert 0 < p.input_price_per_1M < 5
-        assert p.cache_read_price_per_1M == pytest.approx(p.input_price_per_1M / 12, rel=0.05)
+        # DeepSeek's OpenRouter prices are floating averages over several
+        # providers whose cache-read discounts differ, so every
+        # ``update_models.py`` refresh moves both the absolute prices and
+        # the cache-read / input ratio (2026-10: flash 0.0224 / 0.022).
+        # Only the shape is pinned: a positive cache-read price is stored
+        # and no cache-write price is invented.
+        for name, cap in (
+            ("openrouter/deepseek/deepseek-v4-flash", 1),
+            ("openrouter/deepseek/deepseek-v4-pro", 5),
+        ):
+            d = MODEL_INFO[name]
+            assert 0 < d.input_price_per_1M < cap
+            assert d.cache_read_price_per_1M is not None
+            assert 0 < d.cache_read_price_per_1M < cap
+            assert d.cache_write_price_per_1M is None
         q = MODEL_INFO["openrouter/qwen/qwen3.8-max-0902"]
         assert q.cache_read_price_per_1M == pytest.approx(0.25)
         assert q.cache_write_price_per_1M == pytest.approx(2.5)

@@ -41,6 +41,7 @@ import threading
 from pathlib import Path
 from typing import TypedDict
 
+from kiss.core.brand import HOME_DIR
 from kiss.core.utils import atomic_write_text
 from kiss.server.user_assets import ensure_user_asset_from_default
 
@@ -219,11 +220,11 @@ def delete_my_injection_trick(text: str) -> str | None:
             "MY_INJECTION.md", DEFAULT_MY_INJECTION,
         )
         if user_path is None:
-            return "Could not read ~/.kiss/MY_INJECTION.md"
+            return f"Could not read ~/{HOME_DIR}/MY_INJECTION.md"
         try:
             existing = user_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            return "~/.kiss/MY_INJECTION.md is not UTF-8 text"
+            return f"~/{HOME_DIR}/MY_INJECTION.md is not UTF-8 text"
         preamble, sections = _split_sections(existing)
         kept = [preamble]
         removed = 0
@@ -233,7 +234,7 @@ def delete_my_injection_trick(text: str) -> str | None:
             else:
                 kept.append(section)
         if removed == 0:
-            return "That promptlet is not in ~/.kiss/MY_INJECTION.md"
+            return f"That promptlet is not in ~/{HOME_DIR}/MY_INJECTION.md"
         # Trailing blank lines belonged to the dropped section's spacing;
         # one newline keeps add/delete cycles from growing the file.
         rest = "".join(kept)
@@ -308,19 +309,19 @@ def edit_my_injection_trick(text: str, new_text: str) -> str | None:
             "MY_INJECTION.md", DEFAULT_MY_INJECTION,
         )
         if user_path is None:
-            return "Could not read ~/.kiss/MY_INJECTION.md"
+            return f"Could not read ~/{HOME_DIR}/MY_INJECTION.md"
         try:
             existing = user_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            return "~/.kiss/MY_INJECTION.md is not UTF-8 text"
+            return f"~/{HOME_DIR}/MY_INJECTION.md is not UTF-8 text"
         preamble, sections = _split_sections(existing)
         bodies = [_parse_trick_sections(s) for s in sections]
         if [body] not in bodies:
-            return "That promptlet is not in ~/.kiss/MY_INJECTION.md"
+            return f"That promptlet is not in ~/{HOME_DIR}/MY_INJECTION.md"
         if new_body == body:
             return None
         if [new_body] in bodies:
-            return "That promptlet is already in ~/.kiss/MY_INJECTION.md"
+            return f"That promptlet is already in ~/{HOME_DIR}/MY_INJECTION.md"
         index = bodies.index([body])
         old = sections[index]
         # Keep the section's own spacing (usually one blank line) so the
@@ -365,13 +366,13 @@ def append_my_injection_trick(text: str) -> str | None:
             "MY_INJECTION.md", DEFAULT_MY_INJECTION,
         )
         if user_path is None:
-            return "Could not write ~/.kiss/MY_INJECTION.md"
+            return f"Could not write ~/{HOME_DIR}/MY_INJECTION.md"
         try:
             existing = user_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            return "~/.kiss/MY_INJECTION.md is not UTF-8 text"
+            return f"~/{HOME_DIR}/MY_INJECTION.md is not UTF-8 text"
         if body in _parse_trick_sections(existing):
-            return "That promptlet is already in ~/.kiss/MY_INJECTION.md"
+            return f"That promptlet is already in ~/{HOME_DIR}/MY_INJECTION.md"
         escaped = _MARKDOWN_ESCAPABLE_BACKSLASH.sub(r"\\\\", body)
         separator = "" if existing == "" or existing.endswith("\n") else "\n"
         with user_path.open("a", encoding="utf-8") as fh:

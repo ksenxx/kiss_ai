@@ -7,7 +7,8 @@
 * parent-repo paths in sub-agent task text are rewritten to the active
   worktree at dispatch (fan-out engine and ``run_agent`` path mode);
 * the Bash guard's refusal suggests the rewritten command;
-* ``run_agent`` with a generic or misspelled name gets a useful hint.
+* ``run_agent`` with a generic name runs the plain sub-agent; a
+  misspelled name gets a useful hint.
 """
 
 from __future__ import annotations
@@ -17,7 +18,12 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import sorcar_agent as sa
-from kiss.agents.sorcar.agent_dispatch import _run_agent, available_channels
+from kiss.agents.sorcar.agent_dispatch import (
+    DEFAULT_AGENT_PATH,
+    _run_agent,
+    available_channels,
+    resolve_agent,
+)
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
     _bash_parent_repo_guard,
@@ -98,12 +104,39 @@ def test_fanout_rewrites_child_task_text(worktree, monkeypatch: pytest.MonkeyPat
 
 
 class TestUnknownAgentHints:
-    def test_generic_name_points_to_run_parallel(self) -> None:
-        out = _run_agent("", "code-review", "review it", "", "", "", "")
-        assert out.startswith("Error: 'code-review' is not an agent.")
-        assert "run_parallel" in out and "Available channels" not in out
-        for name in ("general", "Agent", "sorcar", "analysis"):
-            assert "run_parallel" in _run_agent("", name, "x", "", "", "", "")
+    def test_generic_name_runs_the_plain_sub_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A generic label means what an empty ``agent`` means: the plain sub-agent.
+
+        ``general``, ``Agent``, ``analysis``, ... resolve to the
+        bundled ``sorcar_sea.py`` instead of erroring, so the dispatch
+        reaches the daemon.  Both endpoint sources are pointed at a
+        daemon that does not exist (an absent ``KISS_SORCAR_LOCAL``
+        file, no endpoint recorded by an in-process cron scheduler), so
+        the reply is the sorcar agent's could-not-run error — the same
+        text an empty ``agent`` produces — not an unknown-agent hint.
+        A reviewer name asks for a toolset, not an agent, and is refused
+        with the spelling of that intent (U4).
+        """
+        from kiss.agents.sorcar import cron_agent
+
+        monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
+        monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
+        expected = _run_agent("", "review it", "")
+        assert expected.startswith("Error: the sorcar agent task could not run:")
+        for name in ("general", "Agent", "sorcar", "analysis", "LLM"):
+            assert resolve_agent(name, "") == (DEFAULT_AGENT_PATH, "sorcar")
+            out = _run_agent("", "review it", name)
+            assert out == expected
+            assert "unknown agent" not in out and "Commands:" not in out
+        for name in ("code-review", " Reviewer "):
+            out = _run_agent("", "review it", name)
+            assert out.startswith(f"Error: {name!r} is not an agent.")
+            assert 'pass tool_profile="review"' in out
+        # ``worker`` is a kind, not a generic label: naming it is the usual error.
+        for name in ("worker", "subagent", "helper"):
+            assert str(resolve_agent(name, "")).startswith(f"Error: unknown agent '{name}'")
 
     def test_misspelled_channel_gets_a_suggestion(self) -> None:
         channels = available_channels()
@@ -111,11 +144,11 @@ class TestUnknownAgentHints:
             pytest.skip("no channel agents installed")
         target = channels[0]
         typo = target[:-1] + "x" if len(target) > 3 else target + "x"
-        out = _run_agent("", typo, "x", "", "", "", "")
+        out = _run_agent("", "x", typo)
         assert out.startswith(f"Error: unknown agent {typo!r}")
         assert f"Did you mean {target!r}?" in out
-        assert "Available channels" in out
+        assert "Commands:" in out and target in out
 
     def test_nonsense_name_has_no_suggestion(self) -> None:
-        out = _run_agent("", "zzqqxxjjvv", "x", "", "", "", "")
-        assert "Did you mean" not in out and "Available channels" in out
+        out = _run_agent("", "x", "zzqqxxjjvv")
+        assert "Did you mean" not in out and "Commands:" in out

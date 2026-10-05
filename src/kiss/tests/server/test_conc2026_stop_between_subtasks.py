@@ -143,7 +143,7 @@ class TestStopBetweenSubtasks(TestCase):
                 "prompt": "<task>first part</task><task>second part</task>",
                 "tabId": tab_id,
                 "workDir": self.work_dir,
-                "useParallel": False,
+                "isParallel": False,
                 "useWorktree": False,
                 "autoCommit": False,
                 "_state_key": state.task_id,

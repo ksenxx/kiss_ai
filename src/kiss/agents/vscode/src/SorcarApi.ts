@@ -13,9 +13,9 @@ export interface SubmitFields {
   activeFile?: string;
   attachments?: Attachment[];
   useWorktree?: boolean;
-  useParallel?: boolean;
+  isParallel?: boolean;
   autoCommit?: boolean;
-  webTools?: boolean;
+  useWebTools?: boolean;
   classifyTasks?: boolean;
   tabId?: string;
 }

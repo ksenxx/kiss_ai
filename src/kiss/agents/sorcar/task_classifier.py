@@ -52,7 +52,7 @@ per call:
   :func:`~kiss.agents.sorcar.decide_tool.decisions_tool_available` says
   so — the one gate for every use of Jev, the ``decide`` tool included:
   the ``classify_with_decisions`` config key (the settings panel's "Use
-  Jev" checkbox, default off) and an ``OPENROUTER_API_KEY`` with the
+  Jev" checkbox, default on) and an ``OPENROUTER_API_KEY`` with the
   model in the catalog.  When it is off,
   unavailable, or its call fails, the LLM classifier below runs
   instead, so a missing key or an OpenRouter outage never changes the

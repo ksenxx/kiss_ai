@@ -65,7 +65,7 @@ def decisions_tool_available() -> bool:
     ``decide`` tool offered to the agent and the pre-run task classifier's
     decisions route (:func:`kiss.agents.sorcar.task_classifier.classify_task`).
     The user's switch is the ``classify_with_decisions`` key of
-    ``~/.kiss/config.json`` — the settings panel's "Use Jev" checkbox, off by
+    ``~/.kiss/config.json`` — the settings panel's "Use Jev" checkbox, on by
     default — read on every call so a settings change applies to the next
     run without a daemon restart.  Even when the switch is on, the model
     needs an OpenRouter key and a ``"dec": true`` catalog entry; without
@@ -79,7 +79,7 @@ def decisions_tool_available() -> bool:
     """
     from kiss.core.vscode_config import load_config
 
-    if not load_config().get("classify_with_decisions", False):
+    if not load_config().get("classify_with_decisions", True):
         return False
     info = MODEL_INFO.get(DEFAULT_DECISIONS_MODEL)
     return bool(config_module.DEFAULT_CONFIG.OPENROUTER_API_KEY) and (

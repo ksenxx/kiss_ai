@@ -167,8 +167,8 @@ def env(monkeypatch: pytest.MonkeyPatch) -> Iterator[IsolatedKissHome]:
     Yields the isolated home; ``KISS_DECISIONS_BASE_URL`` points at the
     replay server and ``OPENROUTER_API_KEY`` is a placeholder the replay
     ignores, so the decisions route is enabled whatever the developer's
-    real keys are.  ``classify_with_decisions`` is off by default, so the
-    isolated config turns it on.
+    real keys are.  ``classify_with_decisions`` is written explicitly so
+    the route stays on whatever the default is.
     """
     saved = os.environ.get(_DISABLE_ENV)
     os.environ[_DISABLE_ENV] = "0"

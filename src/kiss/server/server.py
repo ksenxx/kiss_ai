@@ -2296,17 +2296,14 @@ class VSCodeServer(
             )
 
         if rebound_state is not None:
-            start_ts_for_resume = 0
-            if isinstance(extra_raw, dict):
-                try:
-                    start_ts_for_resume = int(extra_raw.get("startTs", 0) or 0)
-                except (TypeError, ValueError):
-                    start_ts_for_resume = 0
-            if start_ts_for_resume <= 0:
-                start_ts_for_resume = self._live_task_start_ms(
-                    rebound_task_id,
-                    chat_id,
-                )
+            # The live agent's stamp (``_cmd_run``'s start) is what
+            # the originating client's ``status running:true`` carried,
+            # so a viewer attaching mid-run counts from the same
+            # instant; the row's ``startTs`` covers a live state
+            # without a stamp (a sub-agent).
+            start_ts_for_resume = self._live_task_start_ms(
+                rebound_task_id, chat_id,
+            ) or _start_ts_from_extra(extra_raw)
             self._broadcast_viewer_running(
                 tab_id, rebound_state, start_ts_for_resume,
             )

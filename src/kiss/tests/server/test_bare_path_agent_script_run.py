@@ -87,13 +87,13 @@ class BarePathAgentScriptRunTest(DaemonRunApiHarness):
     def test_agent_script_with_system_prompt_suffix_gets_no_directive(self) -> None:
         """An SEA that only APPENDS to the system prompt keeps its bare-path task.
 
-        Covers the paper SEAs, which define ``append_to_system_prompt()``
+        Covers the paper SEAs, which define ``add_to_system_prompt()``
         rather than ``system_prompt()``: the exemption rests on the run
         being an agent-script run, not on which getter it defines.
         """
         sea = self._sea(
             "reviewer",
-            'def append_to_system_prompt() -> str:\n'
+            'def add_to_system_prompt() -> str:\n'
             '    return "Review the paper whose path is the task."\n',
         )
         sent = self._run(self.repo, extension_agent_path=sea)

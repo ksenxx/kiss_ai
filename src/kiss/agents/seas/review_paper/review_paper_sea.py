@@ -18,7 +18,7 @@ through ``run_agent`` with the instructions as the task.  The task text
 supplies the paper (a PDF, .tex, .md or .txt file), the
 venue, the output path, the word limit, the cutoff date for the
 related-work search and, optionally, a second model that checks the
-review.  :func:`append_to_system_prompt` adds the reviewing rules (read
+review.  :func:`add_to_system_prompt` adds the reviewing rules (read
 everything, search the related work, judge the novelty, pinpoint
 problems by page and section, suggest how to fix them, write like
 Strunk and White, no AI slop) to the default system prompt, so the
@@ -48,8 +48,8 @@ Two tools implement the mechanical steps:
   scores, named related work, the slop and reviewer-boilerplate lists)
   and lists every hit with its line number.
 
-Module-level getters (``append_to_system_prompt()``, ``tools()``,
-...) follow the SEA contract in :mod:`kiss.server.agent_file`.
+Module-level getters (``add_to_system_prompt()``, ``add_to_tools()``,
+...) follow the SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
 """
 
 from __future__ import annotations
@@ -191,7 +191,7 @@ process, whose working directory is not the task's. Use model names literally; n
 
 6. Run the `check_review` tool with the word limit and fix everything it flags.
 7. When the task names a second model (default `{SECOND_OPINION_MODEL}`), have it check
-   the review read-only through `run_parallel(tasks, model_name=<second model>,
+   the review read-only through `run_parallel(tasks, model=<second model>,
    tool_profile="review")`. It does not have `read_paper`: give it the paper path and
    the review path, and tell it that `pdftotext <paper> -` in Bash (or Read for a text
    file) gives the paper text. Ask: does every finding hold against the paper, are the
@@ -298,7 +298,16 @@ and what you did with it, and anything the paper claims that you could not verif
   the retry repeats the whole review text.
 - `run_commands_parallel` takes a JSON array of strings: double every backslash, prefer
   `grep -E 'a|b'` over `\\|`, and run multi-line Python through Bash with a heredoc; a
-  rejected array costs a step and resends every command."""
+  rejected array costs a step and resends every command.
+- When the task names no word limit, L is 700, the `check_review` default; write
+  "L = 700" into `tmp/PAPER-NOTES.md` before drafting and allot the sections from it.
+  Three runs of one task assumed L = 850 to 1000, drafted 1,044 to 1,217 words, learned
+  the limit from the first gate failure and needed four or five rewrites to fit.
+- On the first HTTP 429 from Semantic Scholar, run every remaining query through the
+  arXiv API in one Bash call (a loop over the query list, one request per three seconds);
+  do not retry the Semantic Scholar queries one by one.
+- Check all cited arXiv ids in one Bash call: one script over the whole id list, not
+  three ids per call followed by a repeat over all of them."""
 """The reviewing rules, appended to the default system prompt."""
 
 _HEADINGS = ("Summary", "Strengths", "Weaknesses", "Detailed review", "Scores")
@@ -585,35 +594,31 @@ def check_review(review_path: str, word_limit: int = DEFAULT_WORD_LIMIT) -> str:
     return "\n".join(lines)
 
 
-def append_to_system_prompt() -> str:
+def add_to_system_prompt() -> str:
     """Append the reviewing rules to the default system prompt."""
     return SYSTEM_PROMPT
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Expose the paper reader and the review checker to the model."""
     return [read_paper, check_review]
 
 
-def use_web_tools() -> bool:
-    """Browse: related work and the venue's reviewer guidelines are on the web."""
-    return True
+DISPATCH_TIMEOUT_SECONDS = 7200
+"""Seconds a ``run_agent`` call waits for a ``/review_paper`` run: two hours."""
 
+def settings() -> dict[str, Any]:
+    """Browse (related work), fan out (second opinion), skip the classifier, wait two hours.
 
-def is_parallel() -> bool:
-    """Fan out: the read-only second opinion runs as a ``run_parallel`` sub-agent."""
-    return True
-
-
-def classify_tasks() -> bool:
-    """Skip the task classifier: reviewing a paper always needs the full system prompt."""
-    return False
-
-
-def dispatch_timeout() -> float:
-    """Seconds the ``/review_paper`` relay waits for the agent before stopping it.
-
-    Reading the paper, searching the related work and the second-opinion round take
-    well over the default 300 s ``run_agent`` wait.
+    Reading the paper, searching the related work and the second-opinion
+    round take far longer than the default ``run_agent`` wait; the
+    ``timeout`` tells the dispatcher how long a ``/review_paper`` run may run.
     """
-    return 2 * 3600
+    return {
+        "use_web_tools": True,
+        "allow_fan_out": True,
+        "auto_classify": False,
+        "timeout": DISPATCH_TIMEOUT_SECONDS,
+    }
+
+

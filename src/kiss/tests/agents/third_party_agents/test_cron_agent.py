@@ -14,7 +14,7 @@ daemon and require a live LLM endpoint, which is unavailable (and
 non-deterministic) in unit tests; the failure path is covered via
 ``_execute_job``'s exception handling.
 
-The daemon/tools-file scenarios (pure kiss.agents.sorcar +
+The daemon/agent-script scenarios (pure kiss.agents.sorcar +
 kiss.server closure) moved to ``kiss.tests.server.test_cron_agent``;
 this file keeps the delivery test that imports real
 ``kiss.agents.third_party_agents`` channel modules and the
@@ -62,7 +62,7 @@ def test_delivery_error_notes() -> None:
 
 
 def test_get_tools_and_sorcar_wiring() -> None:
-    assert cron_agent.tools() == [cron_job, cron_agent.gateway_command]
+    assert cron_agent.add_to_tools() == [cron_job, cron_agent.gateway_command]
     # The module lives in the sorcar package and never imports from
     # kiss.agents.third_party_agents at module scope.
     source_text = Path(cron_agent.__file__).read_text(encoding="utf-8")
@@ -76,11 +76,10 @@ def test_get_tools_and_sorcar_wiring() -> None:
     agent_text = agent_source.read_text(encoding="utf-8")
     assert "tools.append(cron_job)" not in agent_text
     assert "from kiss.agents.sorcar.cron_agent import cron_job" not in agent_text
-    dispatch_source = Path(cron_agent.__file__).parent / "agent_dispatch.py"
-    assert (
-        "cron_agent.CRON_DISPATCH_PREAMBLE + task"
-        in dispatch_source.read_text(encoding="utf-8")
-    )
+    # The dispatch preamble reaches the session through the agent-script
+    # contract (``add_to_system_prompt()``), not through a prompt prefix.
+    assert cron_agent.add_to_system_prompt() == cron_agent.CRON_DISPATCH_PREAMBLE
+    assert cron_agent.settings()["kind"] == "channel"
     # The system prompt directs scheduling requests to run_agent(agent="cron").
     system_md = Path(cron_agent.__file__).parents[2] / "SYSTEM.md"
     assert 'run_agent tool with "cron"' in system_md.read_text(encoding="utf-8")

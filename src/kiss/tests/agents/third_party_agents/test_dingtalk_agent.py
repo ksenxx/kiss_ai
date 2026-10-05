@@ -34,7 +34,7 @@ from kiss.agents.third_party_agents.dingtalk.dingtalk_sea import (
     DingTalkChannelBackend,
 )
 from kiss.agents.third_party_agents.dingtalk.dingtalk_sea import (
-    tools as module_tools,
+    add_to_tools as module_tools,
 )
 
 _AUTH_TRIO = {"check_dingtalk_auth", "authenticate_dingtalk", "clear_dingtalk_auth"}
@@ -207,7 +207,7 @@ def test_fresh_agent_loads_persisted_config() -> None:
 
 
 def test_tools_module_function() -> None:
-    """The module-level tools() returns a non-empty tool list."""
+    """The module-level add_to_tools() returns a non-empty tool list."""
     assert len(module_tools()) >= 3
 
 

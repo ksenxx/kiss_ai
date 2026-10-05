@@ -184,8 +184,8 @@ class TestIRCBugs:
 class TestIRCFreshDaemonTools:
     """A fresh daemon-side agent's IRC tools must really reach the server.
 
-    The ``kiss.server.sorcar.run`` tools-file contract builds a FRESH
-    ``IRCAgent`` inside the daemon via this module's ``tools()``.
+    The ``kiss.server.sorcar.run`` agent-script contract builds a FRESH
+    ``IRCAgent`` inside the daemon via this module's ``add_to_tools()``.
     That backend starts disconnected, so its messaging tools must
     connect on demand from the persisted config instead of silently
     reporting success while sending nothing.
@@ -202,7 +202,7 @@ class TestIRCFreshDaemonTools:
                 self.server.close()
 
     def test_tools_post_message_connects_on_demand(self) -> None:
-        """tools()' fresh backend lazily connects and really sends."""
+        """add_to_tools()' fresh backend lazily connects and really sends."""
         from kiss.agents.third_party_agents.irc import irc_sea
 
         _irc_config.save(
@@ -214,7 +214,7 @@ class TestIRCFreshDaemonTools:
                 "use_tls": "false",
             }
         )
-        tools = {t.__name__: t for t in irc_sea.tools()}
+        tools = {t.__name__: t for t in irc_sea.add_to_tools()}
         assert "post_message" in tools, "authenticated backend tools expected"
         try:
             result = json.loads(tools["post_message"]("#chan", "from daemon"))

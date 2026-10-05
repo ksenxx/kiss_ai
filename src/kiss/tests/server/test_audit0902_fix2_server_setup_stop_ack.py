@@ -223,7 +223,7 @@ class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
             "tabId": tab_id,
             "workDir": str(self.work_dir),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         })
         self.assertTrue(
@@ -306,7 +306,7 @@ class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
             "workDir": str(self.work_dir),
             "agentPath": str(self.tmp / "missing_agent.py"),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         })
         result = self.client.wait_for("result", tab_id)

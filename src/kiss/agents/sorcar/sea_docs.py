@@ -1,0 +1,242 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""``sea docs``: render the SEA vocabulary tables from the code that defines them.
+
+The precedence rule, the settings keys, the kinds, the ``run_agent``
+options and the bundled commands each have one source of truth in the
+code (:data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`,
+:data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`,
+:func:`~kiss.agents.sorcar.sea_settings.kind_defaults`,
+:data:`~kiss.agents.sorcar.agent_dispatch.OPTION_TYPES`,
+:func:`~kiss.agents.sorcar.sea_commands.bundled_commands`).  The
+Markdown pages that describe them carry marked blocks::
+
+    <!-- sea-docs: settings -->
+    ...generated table...
+    <!-- /sea-docs -->
+
+``sea docs`` rewrites every block in :data:`GENERATED_FILES` (``uv run
+check`` runs it, like ``generate-api-docs``); ``sea docs --check`` only
+reports the blocks that are out of date and exits ``1``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path, PurePath
+
+from kiss.agents.sorcar.agent_dispatch import OPTION_DOCS, OPTION_TYPES
+from kiss.agents.sorcar.sea_commands import (
+    bundled_commands,
+    sea_description,
+    sea_getter_value,
+    sea_settings,
+)
+from kiss.agents.sorcar.sea_settings import (
+    DISPATCHER_SETTINGS,
+    KIND_DOCS,
+    PRECEDENCE_RULE,
+    SETTING_DOCS,
+    SETTING_TYPES,
+    kind_defaults,
+    locked_conflicts,
+    wire_field,
+)
+from kiss.core.config import kiss_home
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+"""The checkout that holds the generated pages (``src/kiss/agents/sorcar`` is four levels down)."""
+
+GENERATED_FILES = (
+    "website/kisssorcar.github.io/docs/sea-commands.md",
+    "website/kisssorcar.github.io/docs/cli.md",
+    "src/kiss/server/README.md",
+)
+"""Pages (relative to :data:`REPO_ROOT`) whose ``sea-docs`` blocks are regenerated."""
+
+_BLOCK = re.compile(r"(<!-- sea-docs: ([\w-]+) -->\n)(.*?)(<!-- /sea-docs -->)", re.S)
+
+
+def type_name(expected: type | tuple[type, ...]) -> str:
+    """Render a :data:`SETTING_TYPES` value (``int`` or ``(int, float)``) as ``int \\| float``.
+
+    The pipe is escaped because the name sits in a Markdown table cell.
+    """
+    return " \\| ".join(
+        t.__name__ for t in (expected if isinstance(expected, tuple) else (expected,))
+    )
+
+
+def precedence_block() -> str:
+    """The one precedence rule and one worked example, as a quoted paragraph."""
+    return f"> {PRECEDENCE_RULE}\n>\n> {precedence_example()}"
+
+
+def precedence_example() -> str:
+    """One example of the rule, computed from the bundled ``/sh`` SEA so it cannot drift.
+
+    States what ``/sh`` declares (its ``settings()`` as written), the
+    call its lock refuses with the exact error
+    :func:`~kiss.agents.sorcar.sea_settings.locked_conflicts` produces,
+    and a call an unlocked key lets through.
+
+    Raises:
+        ValueError: When ``/sh`` no longer locks ``tool_profile``; pick
+            another example SEA then.
+    """
+    name = "sh"
+    path = bundled_commands()[name]
+    declared = sea_getter_value(path, "settings")
+    refused = locked_conflicts(sea_settings(path), {"tool_profile": "review"})
+    if not refused:
+        raise ValueError(f"/{name} no longer locks tool_profile; the precedence example needs one")
+    return (
+        f"For example, `/{name}` declares `{json.dumps(declared)}`, so "
+        f'`run_agent(agent="{name}", task=..., tool_profile="review")` is refused with '
+        f"`Error: {name}: {refused}`, while "
+        f'`run_agent(agent="{name}", task=..., model="gpt-5")` runs it with that model: '
+        f"`model` is not locked, so the explicit argument wins."
+    )
+
+
+def settings_table() -> str:
+    """The ``settings()`` keys: key, type, wire field, meaning."""
+    rows = ["| Key | Type | `run` wire field | Meaning |", "|---|---|---|---|"]
+    for key, expected in SETTING_TYPES.items():
+        field = "—" if key in DISPATCHER_SETTINGS else f"`{wire_field(key)}`"
+        rows.append(f"| `{key}` | `{type_name(expected)}` | {field} | {SETTING_DOCS[key]} |")
+    return "\n".join(rows)
+
+
+def kinds_table() -> str:
+    """The kinds: name, the defaults each lays under the explicit keys, when to use it.
+
+    A path under the Sorcar home is rendered as ``<home>/...`` with forward
+    slashes so the generated page does not depend on the machine (or OS) it
+    was built on.
+    """
+    rows = ["| Kind | Defaults | Use |", "|---|---|---|"]
+    for name, values in kind_defaults().items():
+        sets = (
+            ", ".join(f"`{key}={portable_default(value)!r}`" for key, value in values.items())
+            or "nothing"
+        )
+        rows.append(f"| `{name}` | {sets} | {KIND_DOCS[name]} |")
+    return "\n".join(rows)
+
+
+def portable_default(value: object) -> object:
+    """A kind default as the docs show it: a path under the Sorcar home becomes ``<home>/...``.
+
+    Args:
+        value: One default from ``kind_defaults()``.
+
+    Returns:
+        The value unchanged, or the ``<home>``-relative POSIX form of a path under ``kiss_home()``.
+    """
+    home = PurePath(str(kiss_home()))
+    if isinstance(value, str) and PurePath(value).is_relative_to(home):
+        return "<home>/" + PurePath(value).relative_to(home).as_posix()
+    return value
+
+
+def options_table() -> str:
+    """The ``run_agent`` / ``run_parallel`` ``options`` keys: key, type, meaning."""
+    rows = ["| Option | Type | Meaning |", "|---|---|---|"]
+    for key, expected in OPTION_TYPES.items():
+        doc = OPTION_DOCS.get(key) or SETTING_DOCS[key]
+        rows.append(f"| `{key}` | `{type_name(expected)}` | {doc} |")
+    return "\n".join(rows)
+
+
+def commands_table() -> str:
+    """The bundled commands: name, script (relative to ``src/kiss``) and the first sentence of
+    ``description()``."""
+    package = (REPO_ROOT / "src" / "kiss").resolve()
+    rows = ["| Command | Script | Description |", "|---|---|---|"]
+    for name, script in sorted(bundled_commands().items()):
+        try:
+            text = sea_description(script) or ""
+        except Exception as exc:  # a broken bundled script is a lint finding, not a docs crash
+            text = f"(broken: {exc})"
+        first = re.split(r"(?<=[.!?])\s", text.strip().split("\n")[0], maxsplit=1)[0].replace(
+            "|", "\\|"
+        )
+        rel = script.resolve()
+        if rel.is_relative_to(package):
+            rel = rel.relative_to(package)
+        rows.append(f"| `/{name}` | `{rel.as_posix()}` | {first} |")
+    return "\n".join(rows)
+
+
+TABLES = {
+    "precedence": precedence_block,
+    "settings": settings_table,
+    "kinds": kinds_table,
+    "options": options_table,
+    "commands": commands_table,
+}
+"""Block name -> renderer."""
+
+
+def render(text: str) -> str:
+    """Return *text* with every ``sea-docs`` block regenerated.
+
+    Raises:
+        KeyError: a block names an unknown table.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{TABLES[match.group(2)]()}\n{match.group(4)}"
+
+    return _BLOCK.sub(replace, text)
+
+
+def update_file(path: Path, check: bool) -> bool:
+    """Regenerate the blocks of *path*; return whether it was (or would be) changed.
+
+    Args:
+        path: A Markdown page with ``sea-docs`` blocks.
+        check: ``True`` only compares, ``False`` writes the page.
+    """
+    old = path.read_text(encoding="utf-8")
+    new = render(old)
+    if new != old and not check:
+        path.write_text(new, encoding="utf-8")
+    return new != old
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``sea docs [--check] [FILE ...]``: regenerate (or verify) the vocabulary tables.
+
+    Args:
+        argv: Command-line arguments; ``None`` reads ``sys.argv``.
+
+    Returns:
+        ``0`` when every page is up to date (after writing), ``1`` when
+        ``--check`` found stale blocks.
+    """
+    parser = argparse.ArgumentParser(prog="sea docs", description=(__doc__ or "").split("\n\n")[0])
+    add_arguments(parser)
+    return run(parser.parse_args(argv))
+
+
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Attach the ``sea docs`` arguments to *parser*."""
+    parser.add_argument("files", nargs="*", help="pages to regenerate; default: the bundled docs")
+    parser.add_argument(
+        "--check", action="store_true", help="report stale blocks instead of rewriting them"
+    )
+
+
+def run(args: argparse.Namespace) -> int:
+    """Execute ``sea docs`` with parsed *args* (see :func:`main`)."""
+    files = [Path(f) for f in args.files] or [REPO_ROOT / rel for rel in GENERATED_FILES]
+    stale = [path for path in files if path.exists() and update_file(path, args.check)]
+    for path in stale:
+        print(("stale: " if args.check else "updated: ") + str(path))
+    return 1 if stale and args.check else 0

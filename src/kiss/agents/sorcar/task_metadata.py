@@ -208,7 +208,7 @@ def sea_name_of_agent(agent: str, channels: list[str]) -> str:
     Mirrors ``agent_dispatch._run_agent``: a path names the SEA file
     (its stem), ``cron`` the bundled ``cron_agent``, a channel name its
     ``<channel>_sea`` script, and an empty value the default
-    ``dummy_sea``.  The same stem is what a live run records from its
+    ``sorcar_sea``.  The same stem is what a live run records from its
     ``agentPath``, so backfilled and live rows agree.
 
     Args:
@@ -220,7 +220,7 @@ def sea_name_of_agent(agent: str, channels: list[str]) -> str:
     """
     requested = agent.strip()
     if not requested:
-        return "dummy_sea"
+        return "sorcar_sea"
     if requested.endswith(".py") or "/" in requested or "\\" in requested:
         return Path(requested).stem
     squashed = re.sub(r"[\s\-_]+", "", requested.lower())

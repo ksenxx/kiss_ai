@@ -71,10 +71,16 @@ class _Loads:
         self.documents = 0
         self.asset_requests = 0
         self.aborted = 0
+        self.network_changed: list[str] = []
 
     def on_request(self, request) -> None:
         if request.is_navigation_request() and request.resource_type == "document":
             self.documents += 1
+
+    def on_request_failed(self, request) -> None:
+        """Record requests the host's network churn aborted (not the injected failure)."""
+        if "ERR_NETWORK_CHANGED" in (request.failure or ""):
+            self.network_changed.append(request.url)
 
     def route(self, route) -> None:
         self.asset_requests += 1
@@ -96,6 +102,7 @@ def _open(browser: Browser, harness: ExplorerHarness, loads: _Loads) -> tuple:
     )
     page = context.new_page()
     page.on("request", loads.on_request)
+    page.on("requestfailed", loads.on_request_failed)
     page.route(f"**/media/{loads.asset}*", loads.route)
     # The self-reload interrupts the first navigation's ``load`` event,
     # so wait for the commit only and let the assertions drive the rest.
@@ -133,54 +140,83 @@ _CHAT_CLEAR_OF_SIDEBAR_JS = """
     "asset", ["api.js", "highlight.min.js", "remote-codex.css", "main.css"],
 )
 def test_page_reloads_itself_once_when_an_asset_fails_to_load(browser, harness, asset):
-    loads = _Loads(asset, abort_first_n=1)
-    context, page = _open(browser, harness, loads)
-    try:
-        page.wait_for_selector("#task-input", state="visible", timeout=30000)
-        page.wait_for_selector("body.remote-desktop", state="attached")
-        assert loads.aborted == 1
-        assert loads.asset_requests == 2, loads.asset_requests
-        assert loads.documents == 2, loads.documents
-        assert _reloaded_at(page) > 0
-        # The recovered page is fully live: the config reply landed.
-        page.wait_for_function(
-            "document.getElementById('meta-workdir').textContent.length > 1",
-            timeout=30000,
-        )
-        # ... and styled: the docked history panel sits beside the chat
-        # (without remote-codex.css it is a 90vw drawer over the chat,
-        # and every click on the chat lands on the history list).
-        page.wait_for_function(_CHAT_CLEAR_OF_SIDEBAR_JS, timeout=10000)
-    finally:
-        context.close()
+    _run_unless_network_churn(
+        browser, harness, _Loads(asset, abort_first_n=1), _check_recovered_after_one_reload,
+    )
+
+
+def _run_unless_network_churn(
+    browser: Browser, harness: ExplorerHarness, loads: _Loads, check,
+) -> None:
+    """Run ``check(page, loads)`` on a fresh page; retry when the host's network churn interfered.
+
+    The guard reloads once per 30 s, so when the host's network churn
+    (Docker containers of concurrent tests on a CI box) aborts one of
+    the *reloaded* page's own assets, or the reload's document request
+    itself, with the real ``ERR_NETWORK_CHANGED``, the page stays
+    half-booted or unstyled by design (or is Chromium's error page).
+    That second, uninjected failure is not what is under test: when one
+    was seen the scenario is retried, up to three times, in a fresh
+    context (fresh ``sessionStorage``).  Any other failure propagates.
+    """
+    for attempt in range(3):
+        loads.reset()
+        context, page = _open(browser, harness, loads)
+        try:
+            check(page, loads)
+            return
+        except (AssertionError, PlaywrightError):
+            if not loads.network_changed or attempt == 2:
+                raise
+        finally:
+            context.close()
+
+
+def _check_recovered_after_one_reload(page: Page, loads: _Loads) -> None:
+    page.wait_for_selector("#task-input", state="visible", timeout=30000)
+    page.wait_for_selector("body.remote-desktop", state="attached")
+    assert loads.aborted == 1
+    assert loads.asset_requests == 2, loads.asset_requests
+    assert loads.documents == 2, loads.documents
+    assert _reloaded_at(page) > 0
+    # The recovered page is fully live: the config reply landed.
+    page.wait_for_function(
+        "document.getElementById('meta-workdir').textContent.length > 1",
+        timeout=30000,
+    )
+    # ... and styled: the docked history panel sits beside the chat
+    # (without remote-codex.css it is a 90vw drawer over the chat,
+    # and every click on the chat lands on the history list).
+    page.wait_for_function(_CHAT_CLEAR_OF_SIDEBAR_JS, timeout=10000)
 
 
 def test_a_script_that_keeps_failing_reloads_once_then_stays(browser, harness):
     # A really broken asset (every fetch fails) must not put the page in
     # a reload loop: the timestamp guard allows one reload per 30 s.
-    loads = _Loads("api.js", abort_first_n=10**6)
-    context, page = _open(browser, harness, loads)
-    try:
-        # ``wait_for_timeout`` (not ``time.sleep``): the sync API runs
-        # route handlers only while a Playwright call is in progress.
-        deadline = time.monotonic() + 15
-        while loads.documents < 2 and time.monotonic() < deadline:
-            page.wait_for_timeout(50)
-        assert loads.documents == 2, loads.documents
-        page.wait_for_load_state("load")
-        stamp = _reloaded_at(page)
-        assert stamp > 0
-        page.wait_for_timeout(3000)
-        assert loads.documents == 2, loads.documents
-        assert loads.aborted == 2, loads.aborted
-        assert _reloaded_at(page) == stamp
-        # The failure stays visible instead of a blank flicker loop.
-        assert page.evaluate(
-            "getComputedStyle(document.getElementById('app')).display"
-        ) == "none"
-        assert page.evaluate(
-            "getComputedStyle(document.getElementById('kiss-server-loading')).display"
-        ) != "none"
-    finally:
-        context.close()
+    _run_unless_network_churn(
+        browser, harness, _Loads("api.js", abort_first_n=10**6), _check_reloaded_once_then_stayed,
+    )
+
+
+def _check_reloaded_once_then_stayed(page: Page, loads: _Loads) -> None:
+    # ``wait_for_timeout`` (not ``time.sleep``): the sync API runs
+    # route handlers only while a Playwright call is in progress.
+    deadline = time.monotonic() + 15
+    while loads.documents < 2 and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
+    assert loads.documents == 2, loads.documents
+    page.wait_for_load_state("load")
+    stamp = _reloaded_at(page)
+    assert stamp > 0
+    page.wait_for_timeout(3000)
+    assert loads.documents == 2, loads.documents
+    assert loads.aborted == 2, loads.aborted
+    assert _reloaded_at(page) == stamp
+    # The failure stays visible instead of a blank flicker loop.
+    assert page.evaluate(
+        "getComputedStyle(document.getElementById('app')).display"
+    ) == "none"
+    assert page.evaluate(
+        "getComputedStyle(document.getElementById('kiss-server-loading')).display"
+    ) != "none"
 

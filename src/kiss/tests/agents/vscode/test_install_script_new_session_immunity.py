@@ -96,6 +96,10 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import posix_only
+
+pytestmark = posix_only("bash install.sh")
+
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 

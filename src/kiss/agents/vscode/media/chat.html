@@ -308,11 +308,14 @@
           <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Task Info</span></button>
         </div>
         <ul id="meta-list" class="meta-section-body">
+          <!-- The machine the agent runs on comes first, in bold: it is
+               the one value a user with several daemons reads before
+               anything else. -->
+          <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Tokens:</span><span id="meta-tokens" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Cost:</span><span id="meta-cost" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Steps:</span><span id="meta-steps" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Time:</span><span id="meta-time" class="meta-value">Ready</span></li>
-          <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
           <!-- The task's own settings (a task_settings event), which
@@ -324,6 +327,10 @@
           <li class="meta-item"><span class="meta-label">Chat id:</span><span id="meta-chat-id" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Task id:</span><span id="meta-task-id" class="meta-value">&mdash;</span></li>
           <li class="meta-item" id="meta-parent-item" hidden><span class="meta-label">Parent task:</span><span id="meta-parent-id" class="meta-value">&mdash;</span></li>
+          <!-- The agent script the task ran as and what it did to the
+               caller's settings (task_settings keys sea, kind,
+               tool_profile, timeout, overridden); hidden for a plain run. -->
+          <li class="meta-item" id="meta-agent-item" hidden><span class="meta-label">Agent:</span><span id="meta-agent" class="meta-value">&mdash;</span></li>
         </ul>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Task Info section" aria-controls="meta-list" tabindex="0"></div>
@@ -482,13 +489,13 @@
             Classify tasks before running
           </label>
           <!-- classify_with_decisions: the one switch for OpenRouter's
-               ~typesafe/jev-latest decisions model.  Checked: the
-               pre-run classifier asks Jev first (falling back to the
-               run's own LLM) and the agent gets the ``decide`` tool.
-               Unchecked (the default): the LLM classifier runs and no
-               task ever calls Jev. -->
+               ~typesafe/jev-latest decisions model.  Checked (the
+               default): the pre-run classifier asks Jev first (falling
+               back to the run's own LLM) and the agent gets the
+               ``decide`` tool.  Unchecked: the LLM classifier runs and
+               no task ever calls Jev. -->
           <label class="config-label config-checkbox" title="Let tasks use the ~typesafe/jev-latest decisions model (needs an OpenRouter API key): the pre-run classifier asks Jev first and the agent gets the decide tool. Unchecked: the classifier runs on the run's own model (skipped for cc/* and codex/* models) and no task calls Jev">
-            <input type="checkbox" id="cfg-classify-with-decisions">
+            <input type="checkbox" id="cfg-classify-with-decisions" checked>
             Use Jev (decisions model)
           </label>
           <label class="config-label config-checkbox">
@@ -528,7 +535,7 @@
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
               <span>Reset Server</span>
             </button>
-            <button type="button" id="cfg-update-models-btn" class="config-update-btn" data-tooltip="Refresh the model catalog in ~/.kiss/MODEL_INFO.json">
+            <button type="button" id="cfg-update-models-btn" class="config-update-btn" data-tooltip="Refresh the model catalog in ~/{{HOME_DIR}}/MODEL_INFO.json">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
               <span>Update Models</span>
             </button>

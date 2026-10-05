@@ -6,7 +6,7 @@
 
 The agent is the plain Sorcar agent with one change: :data:`SYSTEM_PROMPT`,
 a writing protocol, is added to the system prompt through the
-``add_to_system_prompt()`` getter (:mod:`kiss.server.agent_file`, ``ADD_FIELDS``).
+``add_to_system_prompt()`` getter (:mod:`kiss.agents.sorcar.agent_file`, ``ADD_FIELDS``).
 The protocol fixes the register (concise, professional American English for
 a general audience), lists the vocabulary and sentence patterns that mark
 machine-written text and bans them, and ends with an edit pass that checks the
@@ -26,6 +26,8 @@ final answer.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 SYSTEM_PROMPT = """\
 ## Writing protocol (write)
@@ -124,11 +126,19 @@ sense stays when no plain word means the same thing ("leverage" in a piece on de
    task names only as a source stays untouched. Otherwise the prose itself, as HTML
    paragraphs, is the final answer. The final answer carries the text, not a
    description of it.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- Run Python through `uv run python` (or `uv run python - <<'PY'`): `python` is not on
+  PATH and `python3` cannot import the project's packages, so a check script run with
+  either fails and costs two extra steps.
 """
 """The writing protocol added to the system prompt of every run."""
 
 DISPATCH_TIMEOUT_SECONDS = 3600.0
-"""Wait of the ``/write`` relay before it stops the agent (see :func:`dispatch_timeout`)."""
+"""Seconds a ``run_agent`` call waits for a ``/write`` run (the ``timeout`` of :func:`settings`)."""
 
 
 def description() -> str:
@@ -146,12 +156,14 @@ def add_to_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-def dispatch_timeout() -> float:
-    """Seconds the ``/write`` relay waits for the agent before stopping it.
+def settings() -> dict[str, Any]:
+    """Let a ``/write`` run take up to :data:`DISPATCH_TIMEOUT_SECONDS`.
 
-    Rewriting a long document means reading every source in full, writing,
-    editing, and running the tests that check the file; a 100 KB README took
-    over the default 300 s ``run_agent`` wait, which stopped the agent after
-    the edits were made but before it could return them.
+    Rewriting a long document means reading every source in full,
+    writing, editing, and running the tests that check the file; the
+    ``timeout`` tells a ``run_agent`` call how long to block for the run
+    before returning its ``agent_job`` id and letting it finish detached.
     """
-    return DISPATCH_TIMEOUT_SECONDS
+    return {"timeout": DISPATCH_TIMEOUT_SECONDS}
+
+

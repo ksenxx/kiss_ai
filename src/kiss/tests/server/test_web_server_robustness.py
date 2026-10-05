@@ -60,6 +60,7 @@ from kiss.server.web_server import (
     _create_ssl_context,
     _generate_self_signed_cert,
 )
+from kiss.tests.conftest import posix_only
 
 
 def _find_free_port() -> int:
@@ -387,6 +388,7 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         self._snap.__exit__()
 
     @pytest.mark.slow
+    @posix_only("fake cloudflared is a bash script")
     async def test_spawn_retries_on_immediate_exit(self) -> None:
         """First spawn exits with rc=7, second succeeds; final proc is alive."""
         loop = asyncio.get_running_loop()

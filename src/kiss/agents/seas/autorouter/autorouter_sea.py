@@ -14,7 +14,7 @@ tier from the local catalog, dispatches the unit to that model through the
 built-in ``run_agent`` tool (or switches its own model with ``set_model`` at
 a phase boundary), verifies the result through the
 acceptance check, escalates one tier up on a verified failure, and logs every
-decision to the ledger ``~/.kiss/MODEL_DECISIONS.md`` (``$KISS_HOME`` when
+decision to the ledger ``$KISS_HOME/MODEL_DECISIONS.md`` (``$KISS_HOME`` when
 set), which is shared by every task so it accumulates the routing history of
 the installation; each row carries the task id of the run that wrote it.  The
 objective is cost per accepted task, not cost per token.
@@ -32,23 +32,24 @@ The routing protocol (:data:`SYSTEM_PROMPT`) is added to the default Sorcar
 system prompt through the ``add_to_system_prompt()`` getter; the
 deterministic parts — the priced candidate menu, the pick, the cost estimate
 and the decision ledger — are the tools this module exposes through
-``tools()``.  Candidate order per tier is :data:`TIERS`, ranked by measured
+``add_to_tools()``.  Candidate order per tier is :data:`TIERS`, ranked by measured
 coding quality per dollar (researched 2026-09-24); prices and availability
 come from :mod:`kiss.core.models.model_info` at call time, so the menu is
 always the one this installation can run.  The prompt's "Observed model
-evidence" section is read from ``~/.kiss/AUTOROUTER.md`` (:func:`evidence_path`)
+evidence" section is read from ``$KISS_HOME/AUTOROUTER.md`` (:func:`evidence_path`)
 when this file loads: a dated table plus bullets on what this installation's
 own task history shows about each model's cost, speed and reliability, at
 most :data:`EVIDENCE_MAX_CHARS` characters of it (:func:`observed_evidence`
 cuts a longer file at a line boundary).
 :mod:`kiss.agents.seas.rsi7d.rsi7d_sea` rewrites that file from
-``~/.kiss/history.db`` (so refreshing the evidence never edits this SEA),
+``$KISS_HOME/history.db`` (so refreshing the evidence never edits this SEA),
 refusing text over the same cap, and the protocol treats it as the
 posterior over the tier-order prior.
 
-Module-level getters (``add_to_system_prompt()``, ``register_as_model()``,
-``model()``, ``is_parallel()``, ...) follow the SEA contract in
-:mod:`kiss.server.agent_file`.  Picking ``autorouter`` in the model picker
+``settings()`` (a sequential ``worker`` that picks its model per run) and
+the getters ``add_to_system_prompt()`` / ``register_as_model()`` /
+``on_picked_as_model()`` follow the SEA contract in
+:mod:`kiss.agents.sorcar.sea_settings`.  Picking ``autorouter`` in the model picker
 also keeps the evidence fresh: the ``on_picked_as_model(work_dir)`` hook
 (:func:`schedule_weekly_rsi7d`) makes sure an enabled weekly cron job that
 runs ``/rsi7d autorouter`` exists, creating or resuming it when it does not.
@@ -84,12 +85,12 @@ RSI7D_JOB_MODEL = "claude-fable-5-1"
 """Model of the job and of the rsi7d run when runnable, else :func:`orchestrator_model`."""
 
 RSI7D_JOB_BUDGET_USD = 25.0
-"""Budget (USD) passed to the nested rsi7d run.
+"""Budget (USD) the relay passes explicitly to the nested rsi7d run.
 
-rsi7d's own ``max_budget()`` getter replaces a passed budget
-(``apply_agent_overrides`` applies getters over the wire fields), so the
-binding cap is the dollar sentence of :data:`RSI7D_TASK`; this value sizes
-the job for a reader of the job list.
+An explicit ``run_agent`` argument wins over the SEA's ``settings()``
+(:data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`), so this value,
+not rsi7d's own ``max_budget`` setting, caps the run; the dollar sentence
+of :data:`RSI7D_TASK` tells the run how much of it to spend.
 """
 
 RSI7D_JOB_RELAY_BUDGET_USD = 5.0
@@ -103,7 +104,8 @@ RSI7D_TASK = (
     "tools. Mine the last 7 days of autorouter runs and of the models it dispatched to, rewrite "
     "the observed model evidence with write_autorouter_evidence, and patch the autorouter "
     "prompt only where its own runs show a repeatable failure. Spend at most $20 in total and "
-    "at most $8 on replays; replay only tasks that changed nothing on disk, with run_agent. "
+    "at most $8 on replays; replay only tasks that changed nothing on disk, with "
+    "replay_in_place. "
     "Delete tmp/rsi7d/replays before finishing. Write the report to "
     "./reports/rsi7d-autorouter-<date>.md and, when the work dir is a git checkout, git add it."
 )
@@ -117,9 +119,8 @@ RSI7D_JOB_PROMPT = (
     "  task         = {task!r}\n"
     "  timeout      = {timeout!r}\n"
     "  max_budget   = {max_budget!r}\n"
-    "  model_name   = {model!r}\n"
-    "  use_worktree = 'false'\n"
-    "  auto_commit  = 'false'\n"
+    "  model        = {model!r}\n"
+    "  options      = '{{\"use_worktree\": false, \"auto_commit\": false}}'\n"
     "Do not explore any source code, do not paraphrase the task, and do not call any other "
     "tool first. When run_agent returns, relay its result (the report path, whether the "
     "autorouter evidence was rewritten and whether its prompt was patched) as your final "
@@ -186,7 +187,7 @@ DEFAULT_TOKENS_OUT = 20_000
 """Completion tokens such a sub-agent produces."""
 
 LEDGER_NAME = "MODEL_DECISIONS.md"
-"""File name of the routing ledger inside the KISS home directory (``~/.kiss``)."""
+"""File name of the routing ledger inside the KISS home directory (``$KISS_HOME``)."""
 
 LEDGER_HEADER = (
     "# Model routing decisions\n\n"
@@ -224,9 +225,11 @@ NO_EVIDENCE = (
 def evidence_path() -> Path:
     """Return the path of the observed model evidence: ``<KISS home>/AUTOROUTER.md``.
 
-    The KISS home is ``$KISS_HOME`` when set, else ``~/.kiss`` (the directory
-    of ``history.db`` and the ledger), so the evidence ``/rsi7d`` measures from
-    the task history lives next to that history and travels with it.
+    The KISS home is ``$KISS_HOME`` when set, else the brand's home directory
+    (``~/.kiss`` for KISS Sorcar, ``~/.s10s`` for Seamless Loop): the
+    directory of ``history.db`` and the ledger, so the evidence ``/rsi7d``
+    measures from the task history lives next to that history and travels
+    with it.
     """
     return kiss_home() / EVIDENCE_NAME
 
@@ -283,7 +286,7 @@ availability come from `model_menu`, `pick_model` and `estimate_cost`; never inv
    medium codebase and runs tests: about 200k prompt and 20k completion tokens. Then
    `observed_call_costs(days, model)` once; pass over a candidate whose observed mean cost
    per call is over twice the estimate or far slower than its tier peers.
-   Dispatch with `run_agent(task=..., model_name=<picked>)`, one call per unit,
+   Dispatch with `run_agent(task=..., model=<picked>)`, one call per unit,
    never mid-context; the task text names the files the sub-agent may touch and the check
    that ends it. Units run in sequence; a sub-agent may fan out with its own `run_parallel`.
 
@@ -308,11 +311,11 @@ availability come from `model_menu`, `pick_model` and `estimate_cost`; never inv
 
 7. Log each dispatch with `log_decision(unit, tier, model, reason, outcome)` and log again
    once the check has run. One short clause per cell (cut at {CELL_MAX_CHARS} characters);
-   ledger: `~/.kiss/MODEL_DECISIONS.md`.
+   ledger: `~/{HOME_DIR}/MODEL_DECISIONS.md`.
 
 ## Observed model evidence
 
-From `~/.kiss/AUTOROUTER.md` (rewritten by `/rsi7d`): the posterior over the tier-order
+From `~/{HOME_DIR}/AUTOROUTER.md` (rewritten by `/rsi7d`): the posterior over the tier-order
 prior. A model with a high observed failure share for the role goes into `exclude` even
 when `pick_model` ranks it first; prefer lower observed $ and s/step backed by at least 10
 tasks.
@@ -332,7 +335,7 @@ tasks.
 
 - Nothing dispatched: no `decide`, `observed_call_costs` or `estimate_cost`; they follow
   `pick_model`. Actual cost = the last `Budget:` figure plus each child's `run_agent`
-  result; never query `~/.kiss/sorcar.db`.
+  result; never query `~/{HOME_DIR}/history.db`.
 - `estimated_usd` prices one call; a sub-agent re-reads its context every step: budget
   about 50x. An audit you would re-check yourself is frontier work; delegate only raw
   fact gathering (file lists, grep hits, test output).
@@ -550,7 +553,8 @@ def observed_call_costs(days: int = 7, model: str = "") -> str:
 def ledger_path() -> Path:
     """Return the path of the shared routing ledger: ``<KISS home>/MODEL_DECISIONS.md``.
 
-    The KISS home is ``$KISS_HOME`` when set, else ``~/.kiss``, the same
+    The KISS home is ``$KISS_HOME`` when set, else the brand's home directory
+    (``~/.kiss`` for KISS Sorcar, ``~/.s10s`` for Seamless Loop): the same
     directory as ``history.db``, so the ledger outlives the task's work
     directory and worktree and every task appends to the same file.
     """
@@ -569,7 +573,7 @@ def _current_task_id() -> str:
 
 
 def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "pending") -> str:
-    """Append one routing decision to the shared ledger ``~/.kiss/MODEL_DECISIONS.md``.
+    """Append one routing decision to the shared ledger ``$KISS_HOME/MODEL_DECISIONS.md``.
 
     Call it when a unit is dispatched (outcome ``pending``) and again once its
     acceptance check has run, with the outcome.  Every row carries the id of
@@ -643,8 +647,9 @@ def register_as_model() -> bool:
     """List ``autorouter`` in the model picker.
 
     A picked ``autorouter`` makes the daemon run every task of the tab
-    through this SEA on :func:`orchestrator_model` (``model()`` below), with
-    :data:`SYSTEM_PROMPT` added to the system prompt (``add_to_system_prompt()``).
+    through this SEA on :func:`orchestrator_model` (the ``model`` of
+    :func:`settings`), with :data:`SYSTEM_PROMPT` added to the system prompt
+    (:func:`add_to_system_prompt`).
     """
     return True
 
@@ -778,37 +783,26 @@ def add_to_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-def model() -> str:
-    """Run the router itself on the frontier orchestrator model."""
-    return orchestrator_model()
+def settings() -> dict[str, Any]:
+    """Configure a routed session: the orchestrator model, no fan-out, no browser, no memory.
+
+    ``allow_fan_out`` is off because ``run_parallel`` forwards the parent's
+    system-prompt additions to every worker, which would turn each routed
+    unit into another router without the routing tools; ``run_agent`` is
+    the dispatch primitive (one unit per call).  Classification is off so
+    the router always sees the full protocol.
+    """
+    return {
+        "model": orchestrator_model(),
+        "allow_fan_out": False,
+        "auto_classify": False,
+        "use_web_tools": False,
+        "use_memory": False,
+    }
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Expose the priced menu, the pick, the cost estimate, the observed costs and the ledger."""
     return [model_menu, pick_model, estimate_cost, observed_call_costs, log_decision]
 
 
-def is_parallel() -> bool:
-    """Withhold ``run_parallel``: its workers would inherit this protocol in their prompt.
-
-    ``run_parallel`` forwards the parent's system-prompt additions to every
-    worker, which would turn each routed unit into another router without
-    the routing tools.  ``run_agent`` starts a fresh default session, so it
-    is the dispatch primitive (one unit per call).
-    """
-    return False
-
-
-def classify_tasks() -> bool:
-    """Skip the lite/full prompt classifier: the router always gets the full prompt."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """No browser for the router itself; a routed sub-agent may still get one."""
-    return False
-
-
-def use_memory() -> bool:
-    """No persistent memory: the shared ledger in the KISS home is the record."""
-    return False

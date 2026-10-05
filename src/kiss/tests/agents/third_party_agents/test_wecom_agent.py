@@ -26,7 +26,7 @@ from kiss.agents.third_party_agents.wecom.wecom_sea import (
     WeComChannelBackend,
 )
 from kiss.agents.third_party_agents.wecom.wecom_sea import (
-    tools as module_tools,
+    add_to_tools as module_tools,
 )
 
 _AUTH_TRIO = {"check_wecom_auth", "authenticate_wecom", "clear_wecom_auth"}
@@ -142,7 +142,7 @@ def test_fresh_agent_loads_persisted_config() -> None:
 
 
 def test_tools_module_function() -> None:
-    """The module-level tools() returns a non-empty tool list."""
+    """The module-level add_to_tools() returns a non-empty tool list."""
     assert len(module_tools()) >= 3
 
 

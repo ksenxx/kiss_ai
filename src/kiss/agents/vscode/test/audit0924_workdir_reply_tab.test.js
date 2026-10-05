@@ -3,29 +3,35 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (JSDOM + compiled host) regression tests for a late
-// "Working directory" reply landing in another tab's panel.
+// End-to-end (JSDOM) regression tests for a late "Working directory"
+// reply from the VS Code host landing in a panel that was not waiting
+// for it.
 //
-// Bug: tab A asks the VS Code host for a folder (openWorkDir /
-// pickWorkDir).  Before the answer arrives the user closes the panel,
-// switches to tab B and opens B's panel, typing a path there.  A's
-// `workDirPicked` pinned A correctly but also closed B's panel (losing
-// the typed path), and A's `workDirError` was shown in B's panel.
+// History: this file used to check that a reply was routed to the TAB
+// that asked (openWorkDir / pickWorkDir carried a tabId, the host echoed
+// it, and only that tab's panel reacted).  The working directory is one
+// global value now: requests and replies name no tab, every tab shows
+// the same directory, and `submit` carries none.  The tab-correlation
+// tests (and the host test that `workDirError` echoes a tabId) are gone
+// with the behaviour; `workDirPanelHost.test.js` asserts the replies
+// carry no tabId.
 //
-// Fixed behaviour: a reply touches the panel only when it answers the
-// request the open panel is waiting on; a `workDirError` without a
-// `tabId` (an older host build) keeps the previous behaviour.  The host
-// stamps `workDirError` with the requesting tab, like `workDirPicked`.
+// What remains, and is tested here: the webview reacts to a reply only
+// while the open panel is waiting on a request it sent
+// (workDirRequestPending).  Closing the panel abandons the request, so
+// a late `workDirPicked` for it adopts the directory (it IS the global
+// value now) but leaves a since-reopened panel, and whatever was typed
+// into it, alone; a late `workDirError` is not shown in that panel.  A
+// reply that arrives while the panel is waiting (also after a tab
+// switch with the panel kept open) closes it or shows the error.
 
-/* global require, __dirname, console, process, global */
+/* global require, __dirname, console, process */
 
 'use strict';
 
 const assert = require('assert');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const Module = require('module');
 const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
@@ -101,6 +107,12 @@ function errorText(win) {
   return el.hidden ? '' : el.textContent;
 }
 
+/** The panel's "Current:" line ('' while it is hidden). */
+function currentLine(win) {
+  const el = byId(win, 'workdir-current');
+  return el.hidden ? '' : el.textContent;
+}
+
 function openPanelViaMenu(win) {
   click(win, byId(win, 'more-btn'));
   click(win, byId(win, 'workdir-btn'));
@@ -122,299 +134,198 @@ function submitPrompt(win, posted, text) {
 }
 
 /**
- * Tab A asks for a folder (through *ask*), the user closes the panel,
- * creates tab B and opens B's panel with a path typed into it.
- * Returns the two tab ids.
+ * The panel asks for a folder (through *ask*), the user closes it,
+ * creates a second tab and reopens the panel there with a path typed
+ * into it.  Returns the two tab ids.
  */
-function askForAThenOpenBsPanel(win, posted, ask) {
+function askThenCloseAndReopen(win, posted, ask) {
   const tabA = win._testApi.getActiveTabId();
   openPanelViaMenu(win);
-  ask(win, posted, tabA);
+  ask(win, posted);
   click(win, byId(win, 'workdir-panel-close'));
-  assert.ok(!panelOpen(win), 'the user closed A\'s panel');
+  assert.ok(!panelOpen(win), 'the user closed the panel');
 
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();
   assert.notStrictEqual(tabB, tabA);
   openPanelViaMenu(win);
-  typeInto(win, 'workdir-input', '/typed/for-b');
-  assert.strictEqual(byId(win, 'workdir-input').value, '/typed/for-b');
+  typeInto(win, 'workdir-input', '/typed/later');
+  assert.strictEqual(byId(win, 'workdir-input').value, '/typed/later');
   return {tabA, tabB};
 }
 
-function askViaPickButton(win, posted, tabA) {
+function askViaPickButton(win, posted) {
   click(win, byId(win, 'workdir-pick-btn'));
   const picks = msgs(posted, 'pickWorkDir');
   assert.strictEqual(picks.length, 1);
-  assert.strictEqual(picks[0].tabId, tabA);
+  assert.strictEqual(picks[0].tabId, undefined, 'the request names no tab');
 }
 
-function askViaTypedPath(win, posted, tabA) {
-  typeInto(win, 'workdir-input', '/asked/by-a');
+function askViaTypedPath(win, posted) {
+  typeInto(win, 'workdir-input', '/asked/first');
   pressEnter(win, 'workdir-input');
   const opens = msgs(posted, 'openWorkDir');
   assert.strictEqual(opens.length, 1);
-  assert.strictEqual(opens[0].tabId, tabA);
+  assert.strictEqual(opens[0].path, '/asked/first');
+  assert.strictEqual(opens[0].tabId, undefined, 'the request names no tab');
 }
 
 // ---------------------------------------------------------------------------
 
-function testLatePickForAKeepsBsPanelOpen() {
+function testLatePickLeavesTheReopenedPanelOpen() {
   const {win, posted} = makeWebview();
-  const {tabA, tabB} = askForAThenOpenBsPanel(win, posted, askViaPickButton);
+  const {tabA, tabB} = askThenCloseAndReopen(win, posted, askViaPickButton);
 
-  send(win, {type: 'workDirPicked', path: '/picked/for-a', tabId: tabA});
-  assert.ok(panelOpen(win), 'A\'s reply must not close B\'s panel');
+  send(win, {type: 'workDirPicked', path: '/picked/late'});
+  assert.ok(panelOpen(win), 'a reply to an abandoned request keeps the panel');
   assert.strictEqual(
     byId(win, 'workdir-input').value,
-    '/typed/for-b',
-    'B\'s typed path is intact',
+    '/typed/later',
+    'the typed path is intact',
   );
   assert.strictEqual(errorText(win), '');
+  // The folder is the global directory all the same: the panel's
+  // "Current:" line follows it, in this tab and in the one that asked.
+  assert.strictEqual(currentLine(win), 'Current: /picked/late');
 
-  // A was still pinned by its reply; B was not.
   click(win, byId(win, 'workdir-panel-close'));
   let sub = submitPrompt(win, posted, 'from b');
   assert.strictEqual(sub.tabId, tabB);
-  assert.strictEqual(sub.workDir, undefined, 'tab B was not pinned');
+  assert.strictEqual(sub.workDir, undefined, 'no tab carries a directory');
   switchToTab(win, tabA);
+  openPanelViaMenu(win);
+  assert.strictEqual(currentLine(win), 'Current: /picked/late');
+  click(win, byId(win, 'workdir-panel-close'));
   sub = submitPrompt(win, posted, 'from a');
-  assert.strictEqual(sub.workDir, '/picked/for-a', 'tab A runs where it asked');
+  assert.strictEqual(sub.tabId, tabA);
+  assert.strictEqual(sub.workDir, undefined);
+  assert.strictEqual(msgs(posted, 'setWorkDir').length, 0, 'the host did it');
 }
 
-function testLateErrorForAStaysOutOfBsPanel() {
+function testLateErrorStaysOutOfTheReopenedPanel() {
   const {win, posted} = makeWebview();
-  const {tabA} = askForAThenOpenBsPanel(win, posted, askViaTypedPath);
+  askThenCloseAndReopen(win, posted, askViaTypedPath);
 
-  send(win, {
-    type: 'workDirError',
-    text: 'Not a directory: /asked/by-a',
-    tabId: tabA,
-  });
+  send(win, {type: 'workDirError', text: 'Not a directory: /asked/first'});
   assert.ok(panelOpen(win));
-  assert.strictEqual(errorText(win), '', 'A\'s error is not shown to B');
-  assert.strictEqual(byId(win, 'workdir-input').value, '/typed/for-b');
+  assert.strictEqual(errorText(win), '', 'the stale error is not shown');
+  assert.strictEqual(byId(win, 'workdir-input').value, '/typed/later');
+  assert.strictEqual(currentLine(win), 'Current: /work/ws');
 }
 
-function testLatePickForATurnedContentTabShowsNoErrorInBsPanel() {
+function testReplyForTheWaitingPanelCloses() {
   const {win, posted} = makeWebview();
-  const {tabA} = askForAThenOpenBsPanel(win, posted, askViaPickButton);
-  // Tab A is busy by the time its folder arrives: the pin is refused,
-  // and the refusal is A's business, not B's panel's.
-  send(win, {type: 'status', running: true, tabId: tabA});
-  send(win, {type: 'workDirPicked', path: '/picked/for-a', tabId: tabA});
-  assert.ok(panelOpen(win));
-  assert.strictEqual(errorText(win), '');
-  assert.strictEqual(byId(win, 'workdir-input').value, '/typed/for-b');
-}
-
-function testReplyForTheAskingPanelStillCloses() {
-  const {win, posted} = makeWebview();
-  const tabA = win._testApi.getActiveTabId();
   openPanelViaMenu(win);
-  askViaTypedPath(win, posted, tabA);
-  send(win, {type: 'workDirPicked', path: '/asked/by-a', tabId: tabA});
-  assert.ok(!panelOpen(win), 'the tab that asked closes its own panel');
+  askViaTypedPath(win, posted);
+  send(win, {type: 'workDirPicked', path: '/asked/first'});
+  assert.ok(!panelOpen(win), 'the waiting panel closes on its answer');
   const sub = submitPrompt(win, posted, 'go');
-  assert.strictEqual(sub.workDir, '/asked/by-a');
+  assert.strictEqual(sub.workDir, undefined);
+  openPanelViaMenu(win);
+  assert.strictEqual(currentLine(win), 'Current: /asked/first');
 }
 
-function testErrorForTheAskingPanelIsShown() {
+function testErrorForTheWaitingPanelIsShown() {
   const {win, posted} = makeWebview();
-  const tabA = win._testApi.getActiveTabId();
   openPanelViaMenu(win);
-  askViaTypedPath(win, posted, tabA);
-  send(win, {type: 'workDirError', text: 'Not a directory: x', tabId: tabA});
+  askViaTypedPath(win, posted);
+  send(win, {type: 'workDirError', text: 'Not a directory: x'});
   assert.ok(panelOpen(win), 'an error leaves the panel on screen');
   assert.strictEqual(errorText(win), 'Not a directory: x');
+  assert.strictEqual(currentLine(win), 'Current: /work/ws');
 
-  // The refusal of a pick for a tab that started running meanwhile is
-  // shown in that tab's own panel.
-  send(win, {type: 'status', running: true, tabId: tabA});
-  send(win, {type: 'workDirPicked', path: '/late', tabId: tabA});
-  assert.ok(panelOpen(win));
-  assert.match(errorText(win), /running task keeps its working directory/);
+  // The panel is still waiting: a second try that works closes it.
+  typeInto(win, 'workdir-input', '/asked/again');
+  pressEnter(win, 'workdir-input');
+  assert.strictEqual(errorText(win), '', 'a new request clears the error');
+  send(win, {type: 'workDirPicked', path: '/asked/again'});
+  assert.ok(!panelOpen(win));
 }
 
-function testPanelOpenedForAThenBAsksClosesOnBsReplyOnly() {
-  // The panel stays open across a tab switch; the request it then
-  // sends names the now-active tab, and only that tab's reply closes it.
+function testPanelKeptOpenAcrossATabSwitchClosesOnTheReply() {
+  // The panel stays open across a tab switch and keeps waiting: the
+  // host's answer closes it whichever tab is active by then.
   const {win, posted} = makeWebview();
   const tabA = win._testApi.getActiveTabId();
   openPanelViaMenu(win);
-  askViaPickButton(win, posted, tabA);
+  askViaPickButton(win, posted);
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();
+  assert.notStrictEqual(tabB, tabA);
   assert.ok(panelOpen(win));
   typeInto(win, 'workdir-input', '/for/b');
   pressEnter(win, 'workdir-input');
   const opens = msgs(posted, 'openWorkDir');
-  assert.strictEqual(opens[opens.length - 1].tabId, tabB);
+  assert.strictEqual(opens.length, 1);
+  assert.strictEqual(opens[0].tabId, undefined);
 
-  send(win, {type: 'workDirPicked', path: '/picked/for-a', tabId: tabA});
-  assert.ok(panelOpen(win), 'A\'s stale reply leaves B\'s pending panel');
-  send(win, {type: 'workDirPicked', path: '/for/b', tabId: tabB});
-  assert.ok(!panelOpen(win), 'B\'s reply closes the panel B is waiting on');
+  send(win, {type: 'workDirPicked', path: '/picked/by-dialog'});
+  assert.ok(!panelOpen(win), 'the first answer closes the waiting panel');
+  // The second answer finds no waiting panel: it only moves the
+  // directory on.
+  send(win, {type: 'workDirPicked', path: '/for/b'});
+  assert.ok(!panelOpen(win));
+  openPanelViaMenu(win);
+  assert.strictEqual(currentLine(win), 'Current: /for/b');
 }
 
-function testErrorWithoutTabIdKeepsOldBehaviour() {
+function testReopenedPanelWithItsOwnRequestClosesOnAnyReply() {
+  // The reopened panel asked again, so it is waiting: the webview
+  // cannot tell the earlier request's late answer from its own (replies
+  // name no request), and either answer is the global directory now.
   const {win, posted} = makeWebview();
-  askForAThenOpenBsPanel(win, posted, askViaTypedPath);
-  send(win, {type: 'workDirError', text: 'Not a directory: legacy'});
-  assert.ok(panelOpen(win));
-  assert.strictEqual(
-    errorText(win),
-    'Not a directory: legacy',
-    'an older host without tabId still reports into the open panel',
-  );
-}
-
-// ---- host: workDirError names the requesting tab ------------------------
-
-class EventEmitterLite {
-  constructor() {
-    this._subs = [];
-  }
-  event = cb => {
-    this._subs.push(cb);
-    return {dispose() {}};
-  };
-  fire(v) {
-    for (const cb of this._subs) cb(v);
-  }
-  dispose() {}
-}
-
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-workdir-reply-tab-'));
-fs.writeFileSync(path.join(tmp, 'a-file.txt'), 'not a folder\n');
-
-global.__kissVscodeStub = {
-  Uri: {
-    file: p => ({fsPath: p, scheme: 'file'}),
-    joinPath: (base, ...parts) => ({
-      fsPath: path.join(base.fsPath, ...parts),
-      scheme: 'file',
-    }),
-    parse: s => ({fsPath: s.replace(/^file:\/\//, ''), scheme: 'file'}),
-  },
-  Position: class {},
-  Range: class {},
-  Selection: class {},
-  TextEditorRevealType: {InCenter: 2},
-  ViewColumn: {One: 1},
-  ProgressLocation: {Notification: 15},
-  ConfigurationTarget: {Global: 1, Workspace: 2, WorkspaceFolder: 3},
-  EventEmitter: EventEmitterLite,
-  TabInputText: class {},
-  window: {
-    visibleTextEditors: [],
-    activeTextEditor: undefined,
-    tabGroups: {all: [], close: () => Promise.resolve(true)},
-    createTextEditorDecorationType: () => ({dispose() {}}),
-    onDidChangeVisibleTextEditors: () => ({dispose() {}}),
-    showTextDocument: () => Promise.resolve({}),
-    showInformationMessage: () => undefined,
-    showWarningMessage: () => undefined,
-    showErrorMessage: () => undefined,
-    showOpenDialog: () => Promise.resolve(undefined),
-    withProgress: (_opts, task) =>
-      task({report() {}}, {onCancellationRequested: () => ({dispose() {}})}),
-    createTerminal: () => ({show() {}, sendText() {}}),
-  },
-  workspace: {
-    isTrusted: true,
-    workspaceFolders: [{uri: {fsPath: tmp, scheme: 'file'}}],
-    getConfiguration: () => ({get: () => undefined}),
-    onWillSaveTextDocument: () => ({dispose() {}}),
-    onDidSaveTextDocument: () => ({dispose() {}}),
-    onDidChangeWorkspaceFolders: () => ({dispose() {}}),
-    textDocuments: [],
-    openTextDocument: () => Promise.resolve({}),
-    saveAll: () => Promise.resolve(true),
-    applyEdit: () => Promise.resolve(true),
-  },
-  commands: {executeCommand: () => Promise.resolve()},
-};
-const origResolve = Module._resolveFilename;
-Module._resolveFilename = function (request, parent, ...rest) {
-  if (request === 'vscode') return require.resolve('./_vscode-stub.js');
-  return origResolve.call(this, request, parent, ...rest);
-};
-
-async function testHostStampsWorkDirErrorWithTheTab() {
-  const outDir = path.join(__dirname, '..', 'out');
-  assert.ok(
-    fs.existsSync(path.join(outDir, 'SorcarSidebarView.js')),
-    'compiled extension missing — run `npm run compile` first',
-  );
-  const {SorcarSidebarView} = require(path.join(outDir, 'SorcarSidebarView.js'));
-  const view = new SorcarSidebarView({fsPath: path.join(tmp, 'ext')});
-  const forwarded = [];
-  view._api = {
-    forward: cmd => forwarded.push(cmd),
-    run: () => {},
-    getConfig: () => {},
-    setWorkDir: () => {},
-  };
-  const posted = [];
-  view._view = {
-    visible: true,
-    webview: {postMessage: m => posted.push(m)},
-    show() {},
-  };
-  view._disposed = false;
-
-  await view._handleMessage({
-    type: 'openWorkDir',
-    path: path.join(tmp, 'a-file.txt'),
-    tabId: 'tab-a',
-  });
-  await view._handleMessage({type: 'openWorkDir', path: '/', tabId: 'tab-b'});
-  const errors = posted.filter(m => m.type === 'workDirError');
-  assert.strictEqual(errors.length, 2);
-  assert.match(errors[0].text, /^Not a directory: /);
-  assert.strictEqual(errors[0].tabId, 'tab-a');
-  assert.match(errors[1].text, /file-system root/);
-  assert.strictEqual(errors[1].tabId, 'tab-b');
-  assert.strictEqual(forwarded.length, 0, 'nothing recorded for a refusal');
+  askThenCloseAndReopen(win, posted, askViaPickButton);
+  typeInto(win, 'workdir-input', '/second/ask');
+  pressEnter(win, 'workdir-input');
+  assert.strictEqual(msgs(posted, 'openWorkDir').length, 1);
+  send(win, {type: 'workDirPicked', path: '/picked/late'});
+  assert.ok(!panelOpen(win), 'the waiting panel closes');
+  openPanelViaMenu(win);
+  assert.strictEqual(currentLine(win), 'Current: /picked/late');
 }
 
 // ---------------------------------------------------------------------------
 
 const tests = [
-  ['late workDirPicked for A keeps B\'s panel and typed path', testLatePickForAKeepsBsPanelOpen],
-  ['late workDirError for A is not shown in B\'s panel', testLateErrorForAStaysOutOfBsPanel],
   [
-    'late pick for a now-running A shows no error in B\'s panel',
-    testLatePickForATurnedContentTabShowsNoErrorInBsPanel,
+    'a late workDirPicked leaves the reopened panel and its typed path',
+    testLatePickLeavesTheReopenedPanelOpen,
   ],
-  ['a reply for the asking tab still closes the panel', testReplyForTheAskingPanelStillCloses],
-  ['an error for the asking tab is shown in its panel', testErrorForTheAskingPanelIsShown],
   [
-    'panel kept open across a tab switch closes on the new request\'s reply only',
-    testPanelOpenedForAThenBAsksClosesOnBsReplyOnly,
+    'a late workDirError is not shown in the reopened panel',
+    testLateErrorStaysOutOfTheReopenedPanel,
   ],
-  ['workDirError without tabId keeps the old behaviour', testErrorWithoutTabIdKeepsOldBehaviour],
-  ['host: workDirError carries the requesting tabId', testHostStampsWorkDirErrorWithTheTab],
+  [
+    'a reply for the waiting panel closes it',
+    testReplyForTheWaitingPanelCloses,
+  ],
+  [
+    'an error for the waiting panel is shown',
+    testErrorForTheWaitingPanelIsShown,
+  ],
+  [
+    'a panel kept open across a tab switch closes on the reply',
+    testPanelKeptOpenAcrossATabSwitchClosesOnTheReply,
+  ],
+  [
+    'a reopened panel that asked again closes on any reply',
+    testReopenedPanelWithItsOwnRequestClosesOnAnyReply,
+  ],
 ];
 
-(async () => {
-  let failed = 0;
-  for (const [name, fn] of tests) {
-    try {
-      await fn();
-      console.log('ok - ' + name);
-    } catch (e) {
-      failed += 1;
-      console.log('not ok - ' + name);
-      console.log(e && e.stack ? e.stack : String(e));
-    }
+let failed = 0;
+for (const [name, fn] of tests) {
+  try {
+    fn();
+    console.log('ok - ' + name);
+  } catch (e) {
+    failed += 1;
+    console.log('not ok - ' + name);
+    console.log(e && e.stack ? e.stack : String(e));
   }
-  fs.rmSync(tmp, {recursive: true, force: true});
-  if (failed) {
-    console.log(`${failed} of ${tests.length} tests failed`);
-    process.exit(1);
-  }
-  console.log(`all ${tests.length} audit0924_workdir_reply_tab tests passed`);
-  process.exit(0);
-})();
+}
+if (failed) {
+  console.log(`${failed} of ${tests.length} tests failed`);
+  process.exit(1);
+}
+console.log(`all ${tests.length} audit0924_workdir_reply_tab tests passed`);

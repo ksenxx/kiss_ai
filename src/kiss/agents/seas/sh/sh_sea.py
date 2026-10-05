@@ -13,11 +13,14 @@ and no other built-in tool — directly on the checkout (no worktree, no
 auto-commit, no classification, no browser, no memory, no fan-out), so
 the command's output is the result of the run.
 
-Module-level getters (``system_prompt()``, ``tool_profile()``, ...)
-follow the SEA contract in :mod:`kiss.server.agent_file`.
+``settings()`` (the ``worker`` kind with the ``bash`` tool profile) and
+the getters ``system_prompt()`` / ``prompt(task)`` follow the SEA contract
+in :mod:`kiss.agents.sorcar.sea_settings`.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 SYSTEM_PROMPT = (
     "You are a shell-command execution assistant. The user's message contains a shell "
@@ -52,40 +55,21 @@ def description() -> str:
 
 
 def system_prompt() -> str:
-    """Return the shell agent's base system prompt."""
+    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
     return SYSTEM_PROMPT
 
 
-def tool_profile() -> str:
-    """Give the agent the ``Bash`` tool and no other built-in tool."""
-    return "bash"
+def settings() -> dict[str, Any]:
+    """A worker with Bash only, on the real checkout, running :data:`SYSTEM_PROMPT`.
+
+    ``tool_profile`` is ``locked``: ``/sh`` is the Bash-only worker, so a
+    ``run_agent(agent="sh", tool_profile="review")`` is refused rather
+    than run as something else.
+    """
+    return {
+        "kind": "worker",
+        "tool_profile": "bash",
+        "locked": ["tool_profile"],
+    }
 
 
-def use_worktree() -> bool:
-    """Run the command directly in the tab's working directory."""
-    return False
-
-
-def auto_commit() -> bool:
-    """Never auto-commit: the run only reports a command's output."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """Skip the task classifier: the run needs no lite/full prompt choice."""
-    return False
-
-
-def is_parallel() -> bool:
-    """Never fan out: one command, one Bash call."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """Never enable browser tools: the command runs in the shell."""
-    return False
-
-
-def use_memory() -> bool:
-    """Never load persistent memory tools: a command's output is not knowledge."""
-    return False

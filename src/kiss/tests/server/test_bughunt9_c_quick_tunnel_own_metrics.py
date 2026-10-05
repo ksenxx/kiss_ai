@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from kiss.server import web_server as ws
+from kiss.tests.conftest import posix_only
 
 _FAKE_CLOUDFLARED = """#!/bin/sh
 port=""
@@ -111,6 +112,7 @@ class TestQuickTunnelPrefersOwnMetricsPort(unittest.TestCase):
         self._tmp.cleanup()
 
     @pytest.mark.slow
+    @posix_only("fake cloudflared is a bash script")
     def test_fallback_returns_own_url_not_foreign(self) -> None:
         """_start_quick_tunnel adopts OUR /quicktunnel hostname."""
         with tempfile.TemporaryDirectory() as tmp:

@@ -131,24 +131,20 @@ async function runTests() {
     `expected setWorkDir, got ${JSON.stringify(firstMsg)}`);
   assert.strictEqual(firstMsg.workDir, wsA,
     `expected workDir=${wsA}, got ${firstMsg.workDir}`);
-  console.log('  ok - syncWorkDir() sends setWorkDir with current workspace folder');
+  assert.strictEqual(firstMsg.ifUnset, true,
+    'the connect-time setWorkDir only seeds a daemon with no persisted work_dir');
+  console.log('  ok - syncWorkDir() seeds the global work dir with the workspace folder (ifUnset)');
 
-  const secondPromise = new Promise((resolve) => {
-    serverResolveLine = resolve;
-  });
-
+  // The working directory is global and chosen by the user: opening
+  // another folder in the window must NOT push a new setWorkDir.
   const wsB = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-ws-b-'));
   workspaceFolders = [{uri: {fsPath: wsB, scheme: 'file'}}];
+  const beforeFolderChange = received.length;
   for (const cb of folderChangeListeners.slice()) cb({added: [], removed: []});
-
-  const secondMsg = await Promise.race([
-    secondPromise,
-    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout waiting for follow-up setWorkDir')), 5000)),
-  ]);
-  assert.strictEqual(secondMsg.type, 'setWorkDir');
-  assert.strictEqual(secondMsg.workDir, wsB,
-    `expected workDir=${wsB} after folder change, got ${secondMsg.workDir}`);
-  console.log('  ok - workspace-folder change pushes follow-up setWorkDir');
+  await new Promise((res) => setTimeout(res, 300));
+  assert.strictEqual(received.length, beforeFolderChange,
+    `a workspace-folder change must not re-send setWorkDir; got ${JSON.stringify(received.slice(beforeFolderChange))}`);
+  console.log('  ok - workspace-folder change sends no setWorkDir (the global value is the user\'s)');
 
   const beforeCount = received.length;
   view.syncWorkDir();
@@ -169,9 +165,10 @@ async function runTests() {
   ]);
   assert.strictEqual(reconnectMsg.type, 'setWorkDir',
     `expected setWorkDir after reconnect, got ${JSON.stringify(reconnectMsg)}`);
-  assert.strictEqual(reconnectMsg.workDir, wsB,
-    `expected workDir=${wsB} after reconnect, got ${reconnectMsg.workDir}`);
-  console.log('  ok - reconnect re-sends setWorkDir (per-connection daemon state)');
+  assert.strictEqual(reconnectMsg.workDir, wsA,
+    `expected the seed workDir=${wsA} after reconnect, got ${reconnectMsg.workDir}`);
+  assert.strictEqual(reconnectMsg.ifUnset, true);
+  console.log('  ok - reconnect re-sends the ifUnset seed (a no-op once a work dir is persisted)');
 
   if (typeof view.dispose === 'function') view.dispose();
   fs.rmSync(wsA, {recursive: true, force: true});

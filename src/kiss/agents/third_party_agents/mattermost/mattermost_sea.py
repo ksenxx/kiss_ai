@@ -5,7 +5,7 @@
 """Mattermost Agent — channel agent with Mattermost REST API tools.
 
 Provides authenticated access to Mattermost via a personal access token.
-Stores config in ``~/.kiss/third_party_agents/mattermost/config.json``.
+Stores config in ``$KISS_HOME/third_party_agents/mattermost/config.json``.
 
 Usage::
 
@@ -30,6 +30,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
     save_json_config,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
@@ -49,8 +50,8 @@ def description() -> str:
     return (
         "Channel agent for Mattermost that lists teams, channels and users and reads, posts "
         "and manages messages through the REST API with a personal access token stored under "
-        "~/.kiss/third_party_agents/mattermost; use `run_agent(agent=\"mattermost\", task=...)` "
-        "or the `kiss-mattermost` CLI."
+        f"~/{HOME_DIR}/third_party_agents/mattermost; use "
+        "`run_agent(agent=\"mattermost\", task=...)` or the `kiss-mattermost` CLI."
     )
 
 
@@ -920,15 +921,25 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the Mattermost channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the Mattermost channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return MattermostAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

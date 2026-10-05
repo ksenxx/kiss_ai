@@ -30,7 +30,11 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
     _record_steer_input,
 )
-from kiss.agents.sorcar.sea_commands import SeaScriptError, run_picked_hook
+from kiss.agents.sorcar.sea_commands import (
+    RESERVED_SUBCOMMANDS,
+    SeaScriptError,
+    run_picked_hook,
+)
 from kiss.agents.sorcar.sea_commands import (
     help_text_if_command as sea_help_text,
 )
@@ -240,8 +244,9 @@ def _restart_kiss_web_daemon() -> bool:
     if not _kiss_home_is_default():
         logger.warning(
             "Skipping kiss-web daemon restart: KISS_HOME=%r is not the "
-            "default ~/.kiss — the system daemon serves a different home",
+            "default ~/%s — the system daemon serves a different home",
             os.environ.get("KISS_HOME", ""),
+            HOME_DIR,
         )
         return False
     if sys.platform not in ("darwin", "linux"):
@@ -319,6 +324,13 @@ class _CommandsMixin:
     """Methods that implement frontend command handlers."""
 
     _save_config_lock = threading.Lock()
+    # Serializes a whole working-directory adoption (live value,
+    # persistence, broadcast — see ``_apply_new_work_dir``): commands run
+    # on a thread pool, so two concurrent adoptions would otherwise
+    # interleave and leave the disk or the clients on the loser.
+    # Ordering: taken BEFORE ``_state_lock`` and ``_save_config_lock``,
+    # never while holding either.
+    _work_dir_lock = threading.Lock()
 
     # Admission barrier for the self-update: ``True`` from the moment
     # the web server decides to spawn ``install.sh`` (the idle poller's
@@ -452,47 +464,71 @@ class _CommandsMixin:
         ) -> None: ...
 
 
-    def _apply_new_work_dir(self, new_dir: str) -> None:
-        """Adopt *new_dir* as the daemon-wide fallback working directory.
+    def _apply_new_work_dir(self, new_dir: str, if_unset: bool = False) -> None:
+        """Adopt *new_dir* as the one global working directory.
 
-        Single shared implementation of the work-dir update used by
-        both :meth:`_cmd_set_work_dir` and :meth:`_cmd_save_config`
-        (D-R1: the latter used to copy-paste the former's block).
-        Starts indexing the new directory for the ``@``-mention picker
-        when the directory actually changes, and mirrors the value onto
-        the printer either way.  Takes ``_state_lock`` itself; the lock is
-        re-entrant, so callers already holding it may call this
-        directly.
+        The working directory is a single daemon-wide value that every
+        task from every surface (VS Code windows, the remote webapp,
+        the Python API's ``sorcar.run`` without ``work_dir=``) runs in.
+        Shared by :meth:`_cmd_set_work_dir` and :meth:`_cmd_save_config`;
+        when the directory actually changes it starts indexing the new
+        directory for the ``@``-mention picker, persists it as
+        ``config.json`` ``work_dir`` so a daemon restart keeps it, and
+        broadcasts ``workDirChanged`` so every connected client
+        re-scopes its Explorer, history and "Working directory" panel.
+        Mirrors the value onto the printer either way.  Takes
+        ``_state_lock`` itself; the lock is re-entrant, so callers
+        already holding it may call this directly.
 
         Refuses a filesystem root (``/``, ``C:\\`` — see
-        :func:`kiss.core.utils.is_root_dir`): the fallback is what an
-        unstamped command resolves to, so adopting a root here (from a
+        :func:`kiss.core.utils.is_root_dir`): adopting one (from a
         persisted ``config.work_dir`` via ``saveConfig``, the one root
         source ``ServerApi.dispatch``'s top-level ``workDir``
-        normalization cannot see) would root those commands — and the
+        normalization cannot see) would root every task — and the
         ``@``-mention file scan — at the whole disk.
 
         Args:
             new_dir: The non-empty directory to adopt.
+            if_unset: Adopt only while ``config.json`` holds no
+                ``work_dir`` (a VS Code window's connect-time seed).
         """
-        if is_root_dir(new_dir):
+        if not isinstance(new_dir, str) or not new_dir or is_root_dir(new_dir):
             logger.warning(
-                "Refusing filesystem root %r as the daemon work dir; "
-                "keeping %r", new_dir, self.work_dir,
+                "Refusing %r as the daemon work dir; keeping %r",
+                new_dir, self.work_dir,
             )
             return
-        with self._state_lock:
-            if self.work_dir != new_dir:
-                self.work_dir = new_dir
-                self._file_index.ensure(new_dir)
-            if hasattr(self.printer, "work_dir"):
-                setattr(self.printer, "work_dir", new_dir)
-        # Every surface's "Working directory" panel lists the directories
-        # opened so far (most recent first); this is the one place every
-        # adopted directory passes through.
-        from kiss.core.vscode_config import record_recent_work_dir
+        from kiss.core.vscode_config import (
+            load_config,
+            record_recent_work_dir,
+            save_config,
+        )
 
-        record_recent_work_dir(new_dir)
+        # One adoption at a time, check included: two interleaved
+        # adoptions (a seed racing a pick, a pick racing a settings save)
+        # must end with the live value, the disk and every client on the
+        # same directory — the last one in.
+        with _CommandsMixin._work_dir_lock:
+            if if_unset and load_config().get("work_dir"):
+                return
+            with self._state_lock:
+                changed = self.work_dir != new_dir
+                if changed:
+                    self.work_dir = new_dir
+                    self._file_index.ensure(new_dir)
+                if hasattr(self.printer, "work_dir"):
+                    setattr(self.printer, "work_dir", new_dir)
+            # Every surface's "Working directory" panel lists the
+            # directories opened so far (most recent first); this is the
+            # one place every adopted directory passes through.
+            record_recent_work_dir(new_dir)
+            with _CommandsMixin._save_config_lock:
+                if load_config().get("work_dir") != new_dir:
+                    save_config({"work_dir": new_dir})
+            if changed:
+                self.printer.broadcast(
+                    {"type": "workDirChanged", "workDir": new_dir},
+                )
 
     def _refuse_run(self, tab_id: str, text: str) -> None:
         """Turn down a ``run`` on *tab_id* with an ``error`` broadcast.
@@ -1368,10 +1404,10 @@ class _CommandsMixin:
         session's) is charged to the owner task with
         :func:`~kiss.server.task_update.charge_side_channel_usage`.
 
-        The ``<task_id>`` placeholder is substituted HERE so the
-        answering session receives the OWNER's task id even when it
-        would end up as the answering task's own parent id (which is
-        the same value; kept explicit for clarity).
+        The answering session is dispatched with the owner as its
+        ``parent_task_id``: the daemon applies the ask script's
+        ``prompt(task)`` (which names that id as the task the question
+        is about) and ``add_to_system_prompt()``.
 
         Args:
             tab_id: The frontend tab whose ``/ask`` produced this
@@ -1400,12 +1436,8 @@ class _CommandsMixin:
 
         # Always the bundled script: ``seas/`` has the lowest registry
         # precedence, so a ``SEAS.md`` folder may shadow the ``/ask``
-        # chat command, but the side channel reads ``APPEND_TO_PROMPT``
-        # and ``append_to_system_prompt()`` from this module and must
-        # dispatch the file those texts belong to.
+        # chat command, but the side channel is this answerer's.
         sea_path = Path(ask_sea.__file__)
-        append_to_prompt = ask_sea.APPEND_TO_PROMPT.replace("<task_id>", owner_task_id)
-        append_to_system_prompt = ask_sea.append_to_system_prompt()
         endpoint_file = _daemon_endpoint_file()
         epoch_getter = getattr(owner_agent, "_usage_epoch", None)
         epoch = epoch_getter() if callable(epoch_getter) else None
@@ -1416,8 +1448,6 @@ class _CommandsMixin:
                 result = daemon_client.run(
                     question,
                     extension_agent_path=str(sea_path),
-                    append_to_prompt=append_to_prompt,
-                    append_to_system_prompt=append_to_system_prompt,
                     parent_task_id=owner_task_id,
                     parent_tab_id=tab_id,
                     side_channel=True,
@@ -1619,9 +1649,11 @@ class _CommandsMixin:
             # in the running task's history stream, right where the
             # answer will land.
             self._echo_injected_prompt(tab_id, prompt, owner_task)
-            if ask_question.lower() == "help":
-                # ``/ask help`` is the SEA's ``description()``, like
-                # every ``/xxx help`` — answered here, no dispatch.
+            if ask_question.lower() in RESERVED_SUBCOMMANDS:
+                # ``/ask help`` is the SEA's ``description()`` and
+                # ``/ask check`` its dry-run report, like every
+                # ``/xxx help`` / ``/xxx check`` — answered here, no
+                # dispatch.
                 try:
                     help_text, help_ok = sea_help_text(prompt), True
                 except SeaScriptError as exc:
@@ -2150,16 +2182,12 @@ class _CommandsMixin:
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
         """Send the current configuration to the frontend.
 
-        The reported ``work_dir`` is taken from the command's
-        ``workDir`` — stamped per connection by
-        :class:`RemoteAccessServer` — whenever the connection has one,
-        falling back to the globally saved value only for connections
-        that never announced a folder.  Each connection (one per
-        VS Code window, one per webapp instance) runs its commands in
-        its own stamped work_dir (``task_runner`` resolves
-        ``cmd["workDir"]`` first), so the client must be told the
-        directory that will actually be used by *this* instance, not
-        whichever folder another instance persisted last.
+        The reported ``work_dir`` is the daemon's live global working
+        directory — the one every task from every surface runs in
+        (``task_runner`` falls back to it whenever a ``run`` carries no
+        explicit ``workDir``).  It equals the persisted ``config.json``
+        value once anything has been adopted, and the daemon's startup
+        fallback (``--workdir``, ``$KISS_WORKDIR``, cwd) before that.
         """
         from kiss.core.vscode_config import (
             get_current_api_keys,
@@ -2168,8 +2196,8 @@ class _CommandsMixin:
         )
 
         cfg = load_config()
-        if cmd.get("workDir"):
-            cfg["work_dir"] = cmd["workDir"]
+        if self.work_dir:
+            cfg["work_dir"] = self.work_dir
         # Only directories that still exist, most recently opened first
         # (the raw stored list may hold deleted or malformed entries).
         cfg["recent_work_dirs"] = recent_work_dirs()
@@ -2233,10 +2261,6 @@ class _CommandsMixin:
                 new_password and new_password != prev_password,
             )
 
-            new_work_dir = cfg.get("work_dir", "")
-            if new_work_dir:
-                self._apply_new_work_dir(new_work_dir)
-
             # Persist API keys INSIDE ``_save_config_lock``: each
             # ``save_api_key`` edits the canonical key store and the
             # shell RC, and serializing the writes under the same lock
@@ -2255,10 +2279,20 @@ class _CommandsMixin:
                 ):
                     save_api_key(key_name, key_value)
 
+        # Outside ``_save_config_lock``: ``_apply_new_work_dir`` takes
+        # that (non-reentrant) lock itself to persist the directory.
+        new_work_dir = cfg.get("work_dir", "")
+        if new_work_dir:
+            self._apply_new_work_dir(new_work_dir)
+
         conn_id = cmd.get("connId", "")
         self._get_models(conn_id)
 
         new_cfg = load_config()
+        # Same effective directory as ``getConfig``: a save that carries
+        # no ``work_dir`` must not report the startup fallback as "".
+        if self.work_dir:
+            new_cfg["work_dir"] = self.work_dir
         event: dict[str, Any] = {"type": "configData", "config": new_cfg}
         if conn_id:
             event["connId"] = conn_id
@@ -2327,7 +2361,7 @@ class _CommandsMixin:
             # A failed write (permissions, disk full) must answer the
             # client instead of killing its connection's dispatch.
             logger.warning("saveMyModel failed", exc_info=True)
-            error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
+            error = f"Could not write ~/{HOME_DIR}/MY_MODELS.json: {e}"
         if error:
             self._send_error_to_sender(error, cmd)
             return
@@ -2360,7 +2394,7 @@ class _CommandsMixin:
                 error = delete_custom_model(name)
             except OSError as e:
                 logger.warning("deleteMyModel failed", exc_info=True)
-                error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
+                error = f"Could not write ~/{HOME_DIR}/MY_MODELS.json: {e}"
         if error:
             self._send_error_to_sender(error, cmd)
             return
@@ -2443,7 +2477,7 @@ class _CommandsMixin:
             error = edit(text if isinstance(text, str) else "")
         except OSError as e:
             logger.warning("%s failed", name, exc_info=True)
-            error = f"Could not write ~/.kiss/MY_INJECTION.md: {e}"
+            error = f"Could not write ~/{HOME_DIR}/MY_INJECTION.md: {e}"
         event: dict[str, Any] = {"type": "tricksData", **read_tricks_data()}
         if error:
             self._send_error_to_sender(error, cmd)
@@ -2452,31 +2486,26 @@ class _CommandsMixin:
         self.printer.broadcast(event)
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
-        """Update the server's *fallback* working directory.
+        """Make ``workDir`` the global working directory of every task.
 
-        Sent by the VS Code extension on every (re)connect of its daemon
-        client and whenever ``vscode.workspace.workspaceFolders``
-        changes (i.e. the user opens a different folder), so a
-        freshly-attached extension synchronises the daemon even when
-        the daemon was started with a different ``KISS_WORKDIR``.
-
-        Note that ``self.work_dir`` is only the last-resort fallback:
-        each connection (one per VS Code window) keeps its own
-        work_dir in the server API dispatcher
-        (:meth:`kiss.server.sorcar.ServerApi.dispatch`), which stamps
-        it onto every command from that connection that lacks an
-        explicit ``workDir``.  Two windows sharing this
-        daemon therefore never resolve to each other's folder even
-        though both of their ``setWorkDir`` commands also land here.
+        Sent when the user picks a folder in any surface's "..." >
+        "Working directory" panel or ticks a top-level folder in the
+        remote webapp's Explorer.  The VS Code extension also sends it
+        with ``ifUnset: true`` on connect, carrying its workspace
+        folder: that seeds the value on a fresh install (the daemon is
+        a service whose cwd is not the project) and is ignored once
+        ``config.json`` holds a ``work_dir``, so opening a VS Code
+        window never overrides a directory the user chose.
 
         Clears the calling connection's ``_last_active_file`` snapshot
-        (it refers to a file from that window's previous workspace),
-        invalidates the connection's in-flight autocomplete generation,
-        and, when the daemon-wide fallback actually changes, invalidates
-        the autocomplete file cache.
+        (it refers to a file from the previous workspace), invalidates
+        the connection's in-flight autocomplete generation, and, when
+        the directory actually changes, invalidates the autocomplete
+        file cache and broadcasts ``workDirChanged`` (see
+        :meth:`_apply_new_work_dir`).
         """
         new_dir = cmd.get("workDir", "")
-        if not new_dir:
+        if not isinstance(new_dir, str) or not new_dir:
             return
         conn_id = cmd.get("connId", "")
         with self._state_lock:
@@ -2491,24 +2520,9 @@ class _CommandsMixin:
             # fail (``seq != -1``); the next ``complete`` command
             # re-creates the entry with a fresh sequence number.
             self._complete_seq_latest.pop(conn_id, None)
-            self._apply_new_work_dir(new_dir)
-
-    def _cmd_record_work_dir(self, cmd: dict[str, Any]) -> None:
-        """Add ``path`` to the "Working directory" panel's opened-so-far list.
-
-        Sent by the VS Code extension when a folder picked in that panel
-        becomes one chat tab's working directory.  Unlike ``setWorkDir``
-        this changes neither the connection's pin nor the daemon-wide
-        fallback: the window keeps its workspace folder and only the
-        tab's next task runs in ``path``.  A non-directory or a
-        filesystem root is ignored.
-        """
-        path = cmd.get("path", "")
-        if not isinstance(path, str) or not path or is_root_dir(path):
-            return
-        from kiss.core.vscode_config import record_recent_work_dir
-
-        record_recent_work_dir(path)
+        # Outside ``_state_lock``: the adoption takes ``_work_dir_lock``
+        # first (see its ordering note).
+        self._apply_new_work_dir(new_dir, if_unset=bool(cmd.get("ifUnset")))
 
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,
@@ -2538,7 +2552,6 @@ class _CommandsMixin:
         "worktreeAction": _cmd_worktree_action,
         "mainTreeAction": _cmd_main_tree_action,
         "setWorkDir": _cmd_set_work_dir,
-        "recordWorkDir": _cmd_record_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
         "getMyModels": _cmd_get_my_models,

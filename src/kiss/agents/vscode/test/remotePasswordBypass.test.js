@@ -472,9 +472,13 @@ async function run() {
       fail('vscode-api state persistence broken', err);
     }
 
+    // The working directory is the daemon's one global value: the shim
+    // queues a pre-auth setWorkDir like any other frame and remembers
+    // nothing about it in sessionStorage.
     api.postMessage({type: 'setWorkDir', workDir: '/w'});
     assert.strictEqual(
-      window.sessionStorage.getItem('sorcar-work-dir'), '/w');
+      window.sessionStorage.getItem('sorcar-work-dir'), null,
+      'the shim keeps no per-browser-tab work dir');
 
     const s0 = sockets[0];
     window.dispatchEvent(new window.Event('focus'));
@@ -495,23 +499,29 @@ async function run() {
     s0.fireMessage({type: 'auth_ok'});
     try {
       assert.deepStrictEqual(
-        s0.sent.map((d) => JSON.parse(d).type), ['setWorkDir', 'setWorkDir', 'ping'],
-        'work-dir pin, the queued frame, then the probe',
+        s0.sent.map((d) => JSON.parse(d).type), ['setWorkDir', 'ping'],
+        'the queued frame once, then the probe: no work-dir replay',
       );
       assert.ok(
-        /\/w/.test(s0.sent[0]),
-        'pinned work dir must be re-announced FIRST after auth_ok',
+        /"workDir":"\/w"/.test(s0.sent[0]),
+        'the queued setWorkDir goes out as posted',
       );
-      ok('auth_ok replays the pinned work dir before flushing the queue');
+      ok('auth_ok flushes the queue once, with no work-dir replay of its own');
     } catch (err) {
-      fail('work-dir replay on auth_ok broken', err);
+      fail('auth_ok flush broken', err);
     }
     // The server took the boot batch: nothing is owed to a later socket.
     s0.fireMessage({type: 'pong'});
 
     api.postMessage({type: 'setWorkDir'});
     assert.strictEqual(
-      window.sessionStorage.getItem('sorcar-work-dir'), '');
+      window.sessionStorage.getItem('sorcar-work-dir'), null,
+      'a bare setWorkDir leaves sessionStorage alone too');
+    assert.deepStrictEqual(
+      s0.sent.map((d) => JSON.parse(d).type),
+      ['setWorkDir', 'ping', 'setWorkDir'],
+      'an authenticated frame goes straight to the socket',
+    );
 
     window.dispatchEvent(new window.Event('pageshow'));
     window.dispatchEvent(new window.Event('online'));
@@ -1596,6 +1606,11 @@ async function run() {
       assert.strictEqual(msg.textContent,
         'Too many wrong passwords from this network. You can try again in 2 s.');
       sockets[0].fireClose();
+      // The 1 s tick is due exactly where ceil() flips from 2 to 1, so
+      // a 1 ms disagreement between the timer clock (libuv's truncated
+      // monotonic ms) and Date.now() shows "2 s" (seen on Windows).
+      // Half a second of clock skew puts the tick mid-band.
+      window.Date.now = function () { return realNow() + 500; };
       await sleep(1100);
       assert.strictEqual(msg.textContent,
         'Too many wrong passwords from this network. You can try again in 1 s.',

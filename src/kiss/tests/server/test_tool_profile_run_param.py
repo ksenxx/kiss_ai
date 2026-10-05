@@ -12,20 +12,21 @@ LLM itself: the per-session executor's
 :meth:`kiss.core.kiss_agent.KISSAgent.run` is swapped for a stub that
 records the tools it was handed, so the daemon's full run pipeline —
 wire ``toolProfile`` field → ``apply_agent_overrides`` (the SEA's
-``tool_profile()`` getter) → ``task_runner`` validation →
+``settings()["tool_profile"]``) → ``task_runner`` validation →
 ``SorcarAgent.run(tool_profile=...)`` → ``_get_tools`` filtering —
 executes for real without any model API calls.
 
 Contract under test: ``tool_profile`` (the parameter, the wire field
-and the agent-script getter) cuts the built-in toolset down to the
+and the agent-script setting) cuts the built-in toolset down to the
 named ``TOOL_PROFILES`` entry; the bundled ``sh_sea.py`` therefore
 runs with ``Bash`` + ``finish`` only, in the caller's work directory
 (no worktree), with its own system prompt; an unknown name fails the
 task before any executor session starts; a malformed wire value means
 "no profile"; the ``run_agent`` tool validates and forwards its
-``tool_profile`` argument; and the OUTER relay run of a ``/xxx``
-command honours the SEA's ``use_worktree()`` / ``auto_commit()``
-verdicts (a broken SEA fails that relay with a diagnostic).
+``tool_profile`` argument; and a ``/xxx`` command
+runs the SEA directly in the tab's own run, which honours the SEA's
+``use_worktree`` / ``auto_commit`` settings (a broken SEA fails that
+run with the loader's diagnostic).
 """
 
 from __future__ import annotations
@@ -142,13 +143,14 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         assert self._git("status", "--porcelain") == "?? sentinel.txt"
         assert self._git("rev-list", "--count", "HEAD") == commits_before
 
-    def test_broken_user_sea_fails_the_relay_instead_of_stopping_it(self) -> None:
+    def test_broken_user_sea_fails_the_tabs_run_instead_of_stopping_it(self) -> None:
         """An SEA raising ``KeyboardInterrupt`` at import is a task ERROR, not a stop.
 
-        The relay demotion imports the SEA on the task thread; whatever
-        the script raises is normalised into ``SeaScriptError`` (with
-        the original raise as the cause), so the runner reports a
-        failed task with the diagnostic rather than "stopped by user".
+        ``/boom anything`` runs the SEA directly in the tab's own run,
+        so the loader imports it on the task thread; whatever the script
+        raises is normalised into ``AgentFileError`` (with the original
+        raise as the cause), so the runner reports a failed task with
+        the diagnostic naming the file rather than "stopped by user".
         """
         folder = Path(self.tmpdir) / "user-seas"
         (folder / "boom").mkdir(parents=True)
@@ -175,8 +177,8 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             seas_md.unlink()
             sea_commands._reset_for_tests()
         assert result.success is False, result
-        assert "Task failed: SeaScriptError" in result.text, result
-        assert "boom_sea.py" in result.text and "use_worktree()" in result.text, result
+        assert "Task failed: AgentFileError" in result.text, result
+        assert "boom_sea.py' failed to import" in result.text, result
         assert "KeyboardInterrupt: boom at import" in result.text, result
         assert "stopped" not in result.text.lower(), result
         assert calls == []
@@ -205,7 +207,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         The run is dispatched exactly as the ``/sh`` slash command
         dispatches it — the SEA path as ``extension_agent_path`` with
         the daemon defaults (``use_worktree=True``) that the script's
-        getters must override.
+        ``settings()`` must override.
         """
         calls: list[dict[str, Any]] = []
         self._install_recording_stub(calls)
@@ -243,6 +245,27 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         }, call
         assert "# Restricted tool profile: shell" in call["system_prompt"]
 
+    def test_composite_profile_unions_the_groups(self) -> None:
+        """``tool_profile="shell+edit+control"`` offers the union of the groups."""
+        calls: list[dict[str, Any]] = []
+        self._install_recording_stub(calls)
+        result = sorcar.run(
+            "task with a composite profile",
+            work_dir=self.repo,
+            tool_profile="shell+edit+control",
+            use_worktree=False,
+            endpoint_file=self.endpoint_file,
+            timeout=60,
+        )
+        assert result.success is True, result
+        call = self._single_call(calls)
+        assert set(call["tool_names"]) == {
+            "finish", "Bash", "bash_job", "Read", "run_commands_parallel",
+            "Edit", "Write", "summary", "set_model",
+        }, call
+        assert "# Restricted tool profile: shell+edit+control" in call["system_prompt"]
+        assert "Edit, Read, Write" in call["system_prompt"]
+
     def test_no_profile_keeps_the_full_toolset(self) -> None:
         """Without ``tool_profile`` the executor gets the full built-in set."""
         calls: list[dict[str, Any]] = []
@@ -275,17 +298,17 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         assert "'bogus'" in result.text, result
         assert calls == [], "no executor session may start for an unknown profile"
 
-    def test_agent_script_profile_getter_wins_over_the_wire_value(self) -> None:
-        """A script's ``tool_profile()`` overrides the client's ``tool_profile``."""
+    def test_agent_script_profile_setting_wins_over_the_wire_value(self) -> None:
+        """A script's ``settings()["tool_profile"]`` overrides the client's ``tool_profile``."""
         agent_path = self._write_py(
             "shell_profile_agent.py",
             '''
             """Agent script choosing the shell profile."""
 
 
-            def tool_profile() -> str:
-                """Return the profile name."""
-                return "shell"
+            def settings() -> dict:
+                """Pick the shell profile."""
+                return {"tool_profile": "shell"}
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -302,23 +325,23 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         assert result.success is True, result
         assert "bash_job" in self._single_call(calls)["tool_names"]
 
-    def test_wrong_typed_profile_getter_fails_task(self) -> None:
-        """A non-string ``tool_profile()`` result stops the task."""
+    def test_wrong_typed_profile_setting_fails_task(self) -> None:
+        """A non-string ``settings()["tool_profile"]`` stops the task."""
         agent_path = self._write_py(
             "bad_profile_agent.py",
             '''
-            """Agent script with a wrong-typed profile getter."""
+            """Agent script with a wrong-typed profile setting."""
 
 
-            def tool_profile() -> int:
-                """Return the wrong type."""
-                return 7
+            def settings() -> dict:
+                """Return the wrong type for tool_profile."""
+                return {"tool_profile": 7}
             ''',
         )
         calls: list[dict[str, Any]] = []
         self._install_recording_stub(calls)
         result = sorcar.run(
-            "task with a broken profile getter",
+            "task with a broken profile setting",
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
@@ -326,8 +349,11 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        assert "tool_profile" in result.text
-        assert "a string" in result.text
+        # The diagnostic is the SettingsError text naming the key; the
+        # path is quoted with repr (Windows backslashes come doubled).
+        assert (
+            f"agent script {agent_path!r}: settings()['tool_profile'] must be str, got int"
+        ) in result.text, result.text
         assert calls == []
 
     def test_malformed_wire_profile_means_no_profile(self) -> None:
@@ -346,7 +372,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         script = self._write_py(
             "plain_agent.py",
             '''
-            """Agent script with no getters: the tool's arguments decide."""
+            """Agent script with no settings: the tool's arguments decide."""
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -356,8 +382,8 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         try:
             tool = make_run_agent_tool(self.repo, None)
             text = tool(
-                "run with the bash profile", script,
-                use_worktree="false", tool_profile="bash",
+                "run with the bash profile", script, tool_profile="bash",
+                options='{"use_worktree": false}',
             )
         finally:
             cron_agent._daemon_endpoint_file = saved_endpoint
@@ -365,13 +391,10 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         assert self._single_call(calls)["tool_names"] == ["finish", "Bash"]
 
     def test_run_agent_tool_rejects_unknown_profile_locally(self) -> None:
-        """``run_agent(tool_profile="bogus")`` is refused without a daemon round trip."""
+        """``tool_profile="bogus"`` is refused with no daemon round trip."""
         calls: list[dict[str, Any]] = []
         self._install_recording_stub(calls)
-        text = _run_agent(
-            self.repo, _SH_SEA_PATH, "printf hi", "", "", "", "",
-            tool_profile="bogus",
-        )
+        text = _run_agent(self.repo, "printf hi", _SH_SEA_PATH, tool_profile="bogus")
         assert text.startswith("Error: tool_profile must be one of"), text
         assert "'bogus'" in text
         assert calls == []

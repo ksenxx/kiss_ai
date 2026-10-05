@@ -62,7 +62,7 @@ def function_call_part(
 
 def chunk(
     parts: list[dict[str, Any]],
-    usage: dict[str, int] | None = None,
+    usage: dict[str, Any] | None = None,
     finish_reason: str | None = None,
 ) -> dict[str, Any]:
     """Build one ``GenerateContentResponse`` chunk.

@@ -131,9 +131,7 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
 
     async def test_unticking_the_box_pins_the_llm_classifier(self) -> None:
         """The panel's partial saveConfig turns the decisions route off."""
-        # Off by default; tick it first so the untick has an effect.
-        self.assertFalse(decisions_tool_available())
-        await self._request(dict(_TICKED_SAVE))
+        # On by default, so the untick has an effect on a fresh config.
         self.assertTrue(decisions_tool_available())
 
         reply = await self._request(dict(_UNTICKED_SAVE))
@@ -180,12 +178,12 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         """``getConfig`` reports the key at its default and after a save."""
         first = await self._request({"type": "getConfig"})
         # Nothing stored yet: load_config seeds the DEFAULTS value, so
-        # the box initialises unchecked without a hardcoded fallback.
-        self.assertIs(first["config"]["classify_with_decisions"], False)
+        # the box initialises checked without a hardcoded fallback.
+        self.assertIs(first["config"]["classify_with_decisions"], True)
 
-        await self._request(dict(_TICKED_SAVE))
+        await self._request(dict(_UNTICKED_SAVE))
         second = await self._request({"type": "getConfig"})
-        self.assertIs(second["config"]["classify_with_decisions"], True)
+        self.assertIs(second["config"]["classify_with_decisions"], False)
 
     async def test_partial_save_leaves_the_other_settings_alone(self) -> None:
         """Only the edited key changes; the merge keeps the rest."""

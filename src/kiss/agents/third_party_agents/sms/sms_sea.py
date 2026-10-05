@@ -5,7 +5,7 @@
 """SMS Agent — channel agent with Twilio SMS tools.
 
 Provides SMS sending/receiving via Twilio. Stores config in
-``~/.kiss/third_party_agents/sms/config.json``.
+``$KISS_HOME/third_party_agents/sms/config.json``.
 
 Usage::
 
@@ -25,6 +25,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.browser_handoff import portal_handoff
 from kiss.core.config import kiss_home
 
@@ -44,7 +45,7 @@ def description() -> str:
     return (
         "Sends and lists SMS, MMS and WhatsApp messages and places or lists voice calls through "
         "a Twilio account (account SID, auth token and from-number stored in "
-        "~/.kiss/third_party_agents/sms/config.json); use it with "
+        f"~/{HOME_DIR}/third_party_agents/sms/config.json); use it with "
         "`run_agent(agent=\"sms\", task=\"Send 'Hello!' to +14155238886\")` or the "
         "`kiss-sms -t '<task>'` CLI (`kiss-sms --channel <number>` runs one inbound poll tick)."
     )
@@ -522,15 +523,25 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the SMS channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the SMS channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return SMSAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ task-info panel's periodic task update is the ``/ask`` agent's answer,
 see :mod:`kiss.server.task_update`; :data:`PROMPT_TEMPLATE` still
 identifies the rows of the releases in which this agent produced it.)
 
-The agent reads the task's persisted transcript (``~/.kiss/history.db``)
+The agent reads the task's persisted transcript (``$KISS_HOME/history.db``)
 through the :func:`task_transcript` tool defined here (a thin wrapper
 over :func:`kiss.agents.sorcar.task_digest.transcript_page`) and
 answers :data:`PROMPT_TEMPLATE` with a short markdown progress report.
@@ -122,46 +122,17 @@ def system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-def tools() -> list[Any]:
+def settings() -> dict[str, Any]:
+    """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
+    return {
+        "kind": "worker",
+        "tool_profile": "bash",
+        "max_budget": 1.0,
+    }
+
+
+def add_to_tools() -> list[Any]:
     """Return the agent's tools: :func:`task_transcript`."""
     return [task_transcript]
 
 
-def tool_profile() -> str:
-    """Return the built-in tool profile: ``"bash"`` (Bash and finish only)."""
-    return "bash"
-
-
-def max_budget() -> float:
-    """Return the per-run budget cap in USD."""
-    return 1.0
-
-
-def is_parallel() -> bool:
-    """Return whether the agent may fan out sub-agents: never."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """Return whether the agent gets the browser tools: never."""
-    return False
-
-
-def use_memory() -> bool:
-    """Return whether the agent gets the memory tools: never."""
-    return False
-
-
-def use_worktree() -> bool:
-    """Return whether the agent runs in a git worktree: never."""
-    return False
-
-
-def auto_commit() -> bool:
-    """Return whether the agent's changes are auto-committed: never."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """Return whether the framework classifies the prompt first: never."""
-    return False
