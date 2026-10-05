@@ -401,7 +401,7 @@ def test_every_agent_spelling_resolves_to_a_script_path() -> None:
         path, name = resolved
         assert Path(path).is_file() and path.endswith(".py"), spelling
         assert name == (spelling.lower() or "sorcar")
-    assert resolve_agent("ntfy", "")[0].endswith("ntfy/ntfy_sea.py")
+    assert Path(resolve_agent("ntfy", "")[0]).parts[-2:] == ("ntfy", "ntfy_sea.py")
     assert isinstance(resolve_agent("no-such-agent", ""), str)
 
 
@@ -449,7 +449,7 @@ def test_work_dir_option_and_script_work_dir(
     # ``workspace`` travels as its own wire field; nothing is held here.
     run_agent("t", "ntfy", options='{"workspace": "acct-2"}')
     assert captured[-1]["workspace"] == "acct-2"
-    assert captured[-1]["extension_agent_path"].endswith("ntfy/ntfy_sea.py")
+    assert Path(captured[-1]["extension_agent_path"]).parts[-2:] == ("ntfy", "ntfy_sea.py")
     assert captured[-1]["work_dir"] == str(kiss_home() / "channel_work")
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
 

@@ -328,11 +328,12 @@ class TestDispatchResultInheritance:
             # one that runs but misdeclares its settings names the
             # settings() problem.  The diagnostic names the script by
             # its canonical path (``resolve_agent_path``), which on
-            # macOS differs from the ``/var`` spelling of ``tmp_path``.
-            canonical = script.resolve()
+            # macOS differs from the ``/var`` spelling of ``tmp_path``, and
+            # quotes it with ``!r`` (doubled backslashes on Windows).
+            canonical = str(script.resolve())
             expected = (
-                f"Error: agent script '{canonical}' failed to import" if label == "unparsable"
-                else f"Error: agent script '{canonical}': settings()"
+                f"Error: agent script {canonical!r} failed to import" if label == "unparsable"
+                else f"Error: agent script {canonical!r}: settings()"
             )
             assert text.startswith(expected), (label, text)
             assert captured == [], label

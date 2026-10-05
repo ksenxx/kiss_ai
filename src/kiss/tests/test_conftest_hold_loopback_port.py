@@ -13,7 +13,8 @@ six Slack PKCE tests down at once in a loaded run.  These tests build
 that TIME_WAIT with real sockets and check the helper against the live
 kernel: nothing is mocked.  Every port under test is read from a socket
 that still holds it (no close-then-rebind gap another process could
-slip into).
+slip into), except where macOS forces the gap (see
+``test_a_bindable_port_returns_at_once``).
 """
 
 import socket
@@ -83,12 +84,23 @@ def test_a_client_time_wait_refuses_the_reuseaddr_bind() -> None:
 
 
 def test_a_bindable_port_returns_at_once() -> None:
-    """A port held only by a non-listening SO_REUSEADDR socket binds right away."""
+    """A port nobody listens on binds right away.
+
+    Linux and Windows let the probe bind beside a non-listening
+    ``SO_REUSEADDR`` holder, so the port stays held throughout the check.
+    macOS refuses every second bind unless both sockets set
+    ``SO_REUSEPORT`` (verified: ``EADDRINUSE`` for a ``SO_REUSEADDR``
+    probe over any bound holder), so there the holder is closed first; a
+    bound-only socket never leaves a TIME_WAIT behind.
+    """
     with socket.socket() as holder:
         holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         holder.bind(("127.0.0.1", 0))
+        port = _port(holder)
+        if sys.platform == "darwin":
+            holder.close()
         started = time.monotonic()
-        assert wait_until_loopback_port_bindable(_port(holder)) is True
+        assert wait_until_loopback_port_bindable(port) is True
         assert time.monotonic() - started < 1.0
 
 

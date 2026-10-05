@@ -1606,6 +1606,11 @@ async function run() {
       assert.strictEqual(msg.textContent,
         'Too many wrong passwords from this network. You can try again in 2 s.');
       sockets[0].fireClose();
+      // The 1 s tick is due exactly where ceil() flips from 2 to 1, so
+      // a 1 ms disagreement between the timer clock (libuv's truncated
+      // monotonic ms) and Date.now() shows "2 s" (seen on Windows).
+      // Half a second of clock skew puts the tick mid-band.
+      window.Date.now = function () { return realNow() + 500; };
       await sleep(1100);
       assert.strictEqual(msg.textContent,
         'Too many wrong passwords from this network. You can try again in 1 s.',

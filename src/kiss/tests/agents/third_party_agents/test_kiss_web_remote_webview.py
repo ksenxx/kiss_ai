@@ -42,7 +42,7 @@ from typing import Any, cast
 
 import yaml
 
-from kiss.agents.sorcar import local_endpoint
+from kiss.agents.sorcar import channel_workspace, local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._kiss_web_launcher import (
@@ -271,17 +271,25 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
             started.set()
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            assert printer is not None, "the launched agent has no printer"
+            # Drain through the printer bridge a real agent's pre-step
+            # hook uses.  It CLEARS the queue: a message merely peeked
+            # at would still be pending when this run ends, and the
+            # task runner re-submits undrained prompts as the tab's
+            # next run -- a real-model run on the slack SEA that
+            # outlives the test (seen blocked in ask_user_question on
+            # Windows) and keeps the ``default`` channel workspace held
+            # for every later test in the process.
             deadline = time.time() + 30
             while time.time() < deadline and not release.is_set():
-                tab_id = getattr(self_agent, "_tab_id", "")
-                with agent_state.STATE_LOCK:
-                    state = agent_state.find_by_tab(tab_id)
-                    if state is not None and state.pending_user_messages:
-                        drained_messages.extend(
-                            state.pending_user_messages,
-                        )
-                        release.set()
-                        break
+                queued = printer.drain_pending_user_messages()
+                if queued:
+                    drained_messages.extend(queued)
+                    release.set()
+                    break
                 time.sleep(0.05)
             release.wait(timeout=30)
             raw: str = yaml.safe_dump(
@@ -292,17 +300,13 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                 },
                 sort_keys=False,
             )
-            printer = kwargs.get("printer") or getattr(
-                self_agent, "printer", None,
+            printer.print(
+                raw,
+                type="result",
+                step_count=1,
+                total_tokens=10,
+                cost="$0.0010",
             )
-            if printer is not None:  # pragma: no branch
-                printer.print(
-                    raw,
-                    type="result",
-                    step_count=1,
-                    total_tokens=10,
-                    cost="$0.0010",
-                )
             return raw
 
         self._parent_class.run = stub_run
@@ -328,13 +332,15 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
 
             tab_id = ""
             deadline = time.time() + 10
+            worker: threading.Thread | None = None
             while time.time() < deadline and not tab_id:
                 for st in agent_state.snapshot():
                     if st.tab_id.startswith("api-") and st.is_task_active:
-                        tab_id = st.tab_id
+                        tab_id, worker = st.tab_id, st.task_thread
                         break
                 time.sleep(0.02)
             assert tab_id, "API launch never appeared in the registry"
+            assert worker is not None, "the API launch has no task thread"
 
             deadline = time.time() + 10
             while time.time() < deadline:
@@ -408,6 +414,22 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                 break
             time.sleep(0.05)
         assert ended, "remote webview never saw status running=False"
+        # The drained follow-up must not come back as a second run on
+        # the tab.  The task runner re-submits leftovers as the LAST
+        # step of the worker thread's cleanup (after ``running=False``),
+        # so wait for that thread itself; a re-submitted run would then
+        # show as a second ``clear`` event, a fresh task thread and the
+        # slack SEA's ``default`` channel workspace held again.
+        worker.join(timeout=30)
+        assert not worker.is_alive(), "the launched run's task thread did not finish"
+        time.sleep(1.0)  # a re-dispatched run would have started by now
+        assert len(self._events_for_tab(received, tab_id, "clear")) == 1, (
+            "an undrained follow-up was re-submitted as a new run"
+        )
+        assert dict(channel_workspace._ACTIVE_WORKSPACES) == {}
+        assert not any(
+            st.task_thread is not None for st in agent_state.snapshot()
+        ), "a task thread outlived the launched run"
 
 
 if __name__ == "__main__":

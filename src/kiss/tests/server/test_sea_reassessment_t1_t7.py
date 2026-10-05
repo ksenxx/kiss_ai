@@ -177,7 +177,9 @@ def test_ask_and_sh_lock_their_tool_profile() -> None:
 def test_the_plain_sub_agent_sea_is_named_sorcar() -> None:
     default = Path(DEFAULT_AGENT_PATH)
     assert default.parts[-4:] == ("agents", "seas", "sorcar", "sorcar_sea.py")
-    assert default.is_file() and not (default.parents[1] / "dummy").exists()
+    # No source may remain under the old ``dummy`` name; an ignored ``dummy/__pycache__``
+    # left behind by a checkout that predates the rename is not a SEA.
+    assert default.is_file() and not list((default.parents[1] / "dummy").glob("*.py"))
     assert sea_commands.sea_getter_value(default, "settings") == {"hidden": True}
     assert "`agent=\"sorcar\"`" in sea_commands.sea_getter_value(default, "description")
     for spelling in ("", "sorcar", "general", "assistant"):

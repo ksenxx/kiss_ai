@@ -27,7 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from kiss.agents.sorcar.agent_dispatch import OPTION_DOCS, OPTION_TYPES
 from kiss.agents.sorcar.sea_commands import (
@@ -115,21 +115,33 @@ def settings_table() -> str:
 def kinds_table() -> str:
     """The kinds: name, the defaults each lays under the explicit keys, when to use it.
 
-    A path under the Sorcar home is rendered as ``<home>/...`` so the
-    generated page does not depend on the machine it was built on.
+    A path under the Sorcar home is rendered as ``<home>/...`` with forward
+    slashes so the generated page does not depend on the machine (or OS) it
+    was built on.
     """
-    home = str(kiss_home())
     rows = ["| Kind | Defaults | Use |", "|---|---|---|"]
     for name, values in kind_defaults().items():
         sets = (
-            ", ".join(
-                f"`{key}={value.replace(home, '<home>') if isinstance(value, str) else value!r}`"
-                for key, value in values.items()
-            )
+            ", ".join(f"`{key}={portable_default(value)!r}`" for key, value in values.items())
             or "nothing"
         )
         rows.append(f"| `{name}` | {sets} | {KIND_DOCS[name]} |")
     return "\n".join(rows)
+
+
+def portable_default(value: object) -> object:
+    """A kind default as the docs show it: a path under the Sorcar home becomes ``<home>/...``.
+
+    Args:
+        value: One default from ``kind_defaults()``.
+
+    Returns:
+        The value unchanged, or the ``<home>``-relative POSIX form of a path under ``kiss_home()``.
+    """
+    home = PurePath(str(kiss_home()))
+    if isinstance(value, str) and PurePath(value).is_relative_to(home):
+        return "<home>/" + PurePath(value).relative_to(home).as_posix()
+    return value
 
 
 def options_table() -> str:
@@ -157,7 +169,7 @@ def commands_table() -> str:
         rel = script.resolve()
         if rel.is_relative_to(package):
             rel = rel.relative_to(package)
-        rows.append(f"| `/{name}` | `{rel}` | {first} |")
+        rows.append(f"| `/{name}` | `{rel.as_posix()}` | {first} |")
     return "\n".join(rows)
 
 

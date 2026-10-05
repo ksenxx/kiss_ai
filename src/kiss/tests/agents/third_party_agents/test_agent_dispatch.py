@@ -812,7 +812,7 @@ def test_dispatch_forwards_the_workspace_to_the_daemon(
 
     run_agent("say hi", "ntfy", options='{"workspace": " my-ws "}')
     assert captured_dispatch[0]["workspace"] == "my-ws"
-    assert captured_dispatch[0]["extension_agent_path"].endswith("ntfy/ntfy_sea.py")
+    assert Path(captured_dispatch[0]["extension_agent_path"]).parts[-2:] == ("ntfy", "ntfy_sea.py")
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
     captured_dispatch.clear()
     run_agent("say hi", "ntfy")

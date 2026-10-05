@@ -372,10 +372,10 @@ def test_cron_is_a_registered_command_and_agent_resolves_by_three_rules(
     assert resolve("CRON", "") == (str(Path(cron_agent.__file__).resolve()), "cron")
     resolved = resolve("Home-Assistant", "")
     assert isinstance(resolved, tuple) and resolved[1] == "homeassistant"
-    assert resolved[0].endswith("homeassistant/homeassistant_sea.py")
+    assert Path(resolved[0]).parts[-2:] == ("homeassistant", "homeassistant_sea.py")
     resolved = resolve("write_paper", "")
     assert isinstance(resolved, tuple) and resolved[1] == "write_paper"
-    assert resolved[0].endswith("write_paper/write_paper_sea.py")
+    assert Path(resolved[0]).parts[-2:] == ("write_paper", "write_paper_sea.py")
     error = resolve("cronn", "")
     assert isinstance(error, str)
     assert error.startswith(
