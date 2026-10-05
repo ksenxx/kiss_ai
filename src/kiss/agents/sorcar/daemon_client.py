@@ -311,7 +311,7 @@ def resolve_agent_path(agent_path: str | None) -> str:
     """Validate a client-supplied agent-script path and resolve it.
 
     Client-side counterpart of the daemon's
-    ``kiss.server.agent_file.apply_agent_overrides``: the path is
+    ``kiss.agents.sorcar.agent_file.apply_agent_overrides``: the path is
     resolved against the CLIENT's working directory (the daemon may run
     with a different one) and validated eagerly so a bad value fails
     fast, before any daemon connection is made.
@@ -519,7 +519,7 @@ def run(
             non-empty, the daemon imports the file and applies its
             ``settings()`` and getters
             (:mod:`kiss.agents.sorcar.sea_settings`,
-            :func:`kiss.server.agent_file.apply_agent_overrides`) on top
+            :func:`kiss.agents.sorcar.agent_file.apply_agent_overrides`) on top
             of the values passed to this call: a setting the script
             declares replaces the parameter of the same name; one it
             does not declare keeps the value passed here.

@@ -21,9 +21,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import cron_agent
-from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, kind_defaults
-from kiss.core.config import kiss_home
-from kiss.server.agent_file import (
+from kiss.agents.sorcar.agent_file import (
     CHANNEL_PREAMBLE,
     NO_TOOLS_PROFILE,
     AgentFileError,
@@ -31,6 +29,8 @@ from kiss.server.agent_file import (
     channel_workspace,
     load_layers,
 )
+from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, kind_defaults
+from kiss.core.config import kiss_home
 
 
 def test_cron_agent_module_is_a_valid_agent_script() -> None:

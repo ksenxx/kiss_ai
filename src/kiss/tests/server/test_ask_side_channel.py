@@ -50,8 +50,8 @@ import pytest
 
 from kiss.agents.seas.ask import ask_sea
 from kiss.agents.sorcar import daemon_client, sea_commands
+from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.server import agent_state
-from kiss.server.agent_file import apply_agent_overrides
 from kiss.server.agent_state import AgentState
 from kiss.server.commands import _split_ask_command
 from kiss.server.server import VSCodeServer

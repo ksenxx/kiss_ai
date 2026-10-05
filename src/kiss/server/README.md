@@ -150,7 +150,7 @@ runs the task text as its prompt.
    (`kiss.agents.sorcar.sea_settings.resolve_settings`: the named
    kind's defaults with the explicit keys of `settings()` on top,
    every value type-checked) and merges them (a later layer's key
-   wins).  `apply_agent_overrides()` (in `kiss.server.agent_file`)
+   wins).  `apply_agent_overrides()` (in `kiss.agents.sorcar.agent_file`)
    then evaluates the layers on the task (`evaluate_sea`) and writes
    each merged setting into the command dict's wire field, the result
    of the `prompt(task)` chain into `prompt`, `system_prompt()` into

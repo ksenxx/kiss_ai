@@ -109,7 +109,9 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             tools["Write"](note, "written by the stub\n")
             record["read"] = tools["Read"](note)
             if run_parallel_task and run_parallel_task not in record["task"]:
-                record["run_parallel"] = tools["run_parallel"](f'["{run_parallel_task}"]', "1")
+                record["run_parallel"] = tools["run_parallel"](
+                    f'["{run_parallel_task}"]', max_workers="1",
+                )
             calls.append(record)
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.0001

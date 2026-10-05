@@ -44,9 +44,9 @@ from kiss.agents.sorcar.agent_dispatch import (
     available_channels,
     make_run_agent_tool,
 )
+from kiss.agents.sorcar.agent_file import apply_agent_overrides, channel_workspace, load_layers
 from kiss.agents.third_party_agents.auth_status import _agent_class
 from kiss.core.config import kiss_home
-from kiss.server.agent_file import apply_agent_overrides, channel_workspace, load_layers
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 # The standalone tool (no calling-task work directory): relative agent
@@ -239,7 +239,7 @@ def _daemon_run_command(call: dict[str, Any]) -> dict[str, Any]:
     """Return the daemon-side ``run`` command the captured dispatch *call* becomes.
 
     Only the wire fields the agent script's ``settings()`` can override
-    are mapped (:data:`kiss.server.agent_file.SETTING_FIELDS`), so a test
+    are mapped (:data:`kiss.agents.sorcar.agent_file.SETTING_FIELDS`), so a test
     can apply ``apply_agent_overrides`` to exactly what the dispatcher sent.
     """
     return {
@@ -888,7 +888,7 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     channel guidance travels in the prompt any more.
     """
     import kiss.agents.third_party_agents.ntfy.ntfy_sea as ntfy_sea
-    from kiss.server.agent_file import CHANNEL_PREAMBLE
+    from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE
 
     cmd = {"agentPath": ntfy_sea.__file__, "appendToSystemPrompt": "Caller suffix."}
     overridden = apply_agent_overrides(cmd)

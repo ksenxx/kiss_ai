@@ -236,9 +236,9 @@ def test_meta_values_render_as_a_bulleted_list(
     """The panel lists the machine name first, in bold, then the live
     status values (Tokens / Cost / Steps / Time / Workdir / Max budget)
     followed by the task's own settings (Date / Base model / Worktree
-    mode / Parallel mode / Chat id / Task id / Parent task) as real
-    ``<ul>`` bullet items.  The Parent-task row starts hidden until a
-    parent id arrives."""
+    mode / Parallel mode / Chat id / Task id / Parent task / Agent) as
+    real ``<ul>`` bullet items.  The Parent-task row starts hidden until
+    a parent id arrives; the Agent row stays hidden for a plain run."""
     page = _open_desktop_page(browser, remote_url, 1280)
     try:
         listing = page.evaluate(_META_LIST_JS)
@@ -247,9 +247,9 @@ def test_meta_values_render_as_a_bulleted_list(
             "the meta items must render as a bulleted list, got "
             f"list-style-type: {listing['listStyle']}"
         )
-        # Every row bar the initially-hidden Parent-task row renders as
-        # a bullet; the hidden row collapses to display:none.
-        assert listing["displays"] == ["list-item"] * 13 + ["none"], listing
+        # Every row bar the initially-hidden Parent-task and Agent rows
+        # renders as a bullet; the hidden rows collapse to display:none.
+        assert listing["displays"] == ["list-item"] * 13 + ["none"] * 2, listing
         assert listing["labels"] == [
             "Machine:",
             "Tokens:",
@@ -265,6 +265,7 @@ def test_meta_values_render_as_a_bulleted_list(
             "Chat id:",
             "Task id:",
             "Parent task:",
+            "Agent:",
         ], listing
         # Before any task ran the machine and numeric values show the
         # em-dash placeholder and the time mirrors the "Ready" status.

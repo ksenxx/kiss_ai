@@ -3452,7 +3452,7 @@ def _sea_run_kwargs(
     """Return the ``run()`` keyword overrides a SEA makes for one child.
 
     The in-process counterpart of the daemon's
-    :func:`kiss.server.agent_file.apply_agent_overrides`: the SEA's
+    :func:`kiss.agents.sorcar.agent_file.apply_agent_overrides`: the SEA's
     merged settings replace the inherited *defaults* (an explicit
     fan-out argument was checked against ``locked`` by the caller), its
     ``prompt(task)`` shapes the prompt, its ``system_prompt()`` replaces

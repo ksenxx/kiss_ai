@@ -39,12 +39,12 @@ from kiss.agents.seas.git_extract_knowledge.git_knowledge_store import (
     query_tokens,
 )
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cron_agent import cron_job, load_jobs
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.config import kiss_home
 from kiss.core.memoryfield.pages import MemoryDir
-from kiss.server.agent_file import apply_agent_overrides
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,

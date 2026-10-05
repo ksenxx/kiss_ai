@@ -20,7 +20,7 @@ Three ways to run it::
     run_agent(agent="src/kiss/agents/seas/bestrouter/bestrouter_sea.py", task="...")
 
 ``settings()`` and the module-level getters (``add_to_system_prompt()``,
-``register_as_model()``, ...) follow the SEA contract in :mod:`kiss.server.agent_file`.
+``register_as_model()``, ...) follow the SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
 """
 
 from __future__ import annotations

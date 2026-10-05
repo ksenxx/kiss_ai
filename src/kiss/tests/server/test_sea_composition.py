@@ -39,6 +39,13 @@ import pytest
 
 from kiss.agents.sorcar import agent_dispatch, channel_workspace, daemon_client, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions, inherit_from_parent, resolve_agent
+from kiss.agents.sorcar.agent_file import (
+    CHANNEL_PREAMBLE,
+    AgentFileError,
+    apply_agent_overrides,
+    load_layers,
+)
+from kiss.agents.sorcar.agent_file import channel_workspace as held_workspace
 from kiss.agents.sorcar.sea_commands import (
     SeaScriptError,
     evaluate_sea,
@@ -50,13 +57,6 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
-from kiss.server.agent_file import (
-    CHANNEL_PREAMBLE,
-    AgentFileError,
-    apply_agent_overrides,
-    load_layers,
-)
-from kiss.server.agent_file import channel_workspace as held_workspace
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 BASE_SEA = textwrap.dedent('''

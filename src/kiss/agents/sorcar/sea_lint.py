@@ -192,7 +192,7 @@ PROSE_FILES = (
     "src/kiss/agents/sorcar/agent_dispatch.py",
     "src/kiss/agents/sorcar/sorcar_agent.py",
     "src/kiss/agents/sorcar/run_config.py",
-    "src/kiss/server/agent_file.py",
+    "src/kiss/agents/sorcar/agent_file.py",
 )
 """Files (relative to the checkout) whose prose the ``stale-prose`` rule reads."""
 

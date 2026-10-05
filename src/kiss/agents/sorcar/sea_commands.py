@@ -56,7 +56,7 @@ task of the tab as the outermost layer (on the model its ``model``
 setting names, else the default model), so a ``/xxx`` command or a
 ``run_agent`` child run on that tab keeps its routing protocol
 (``add_to_system_prompt()``) and runs its own SEA on top (see
-:func:`sea_layers` and :mod:`kiss.server.agent_file`).
+:func:`sea_layers` and :mod:`kiss.agents.sorcar.agent_file`).
 
 Locking: two module locks, always acquired in the order
 ``_notify_lock`` -> ``_lock``.  ``_lock`` guards the registry and the
@@ -1116,7 +1116,7 @@ def check_sea(
             in the words the daemon would use.
     """
     # Imported here: ``agent_file`` imports this module.
-    from kiss.server.agent_file import apply_agent_overrides, load_layers
+    from kiss.agents.sorcar.agent_file import apply_agent_overrides, load_layers
 
     cmd: dict[str, Any] = {
         "agentPath": str(sea_path), "prompt": CHECK_SAMPLE_TASK, "parentTaskId": "<task id>",

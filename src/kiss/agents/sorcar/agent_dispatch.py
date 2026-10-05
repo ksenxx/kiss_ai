@@ -30,7 +30,7 @@ one dispatch path (:func:`_run_agent`):
 
 The daemon executes the script once more, applies its settings and
 getters (:mod:`kiss.agents.sorcar.sea_settings`,
-:mod:`kiss.server.agent_file`) and, for ``kind: "channel"``, holds the
+:mod:`kiss.agents.sorcar.agent_file`) and, for ``kind: "channel"``, holds the
 channel workspace (the ``workspace`` option, forwarded as a wire
 field) for the run's lifetime.
 

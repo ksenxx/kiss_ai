@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from kiss.server.agent_file import CHANNEL_PREAMBLE, AgentFileError, apply_agent_overrides
+from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE, AgentFileError, apply_agent_overrides
 
 
 def _script(tmp_path: Path, body: str) -> str:

@@ -37,7 +37,7 @@ not re-derive them with ad-hoc greps:
   overfull boxes over 10 pt, and the page count.
 
 Module-level getters (``add_to_system_prompt()``, ``add_to_tools()``,
-...) follow the SEA contract in :mod:`kiss.server.agent_file`.
+...) follow the SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
 """
 
 from __future__ import annotations

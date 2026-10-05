@@ -43,10 +43,10 @@ import pytest
 from kiss.agents.seas.ask import ask_sea
 from kiss.agents.sorcar import agent_dispatch, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
+from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.brand import BRAND, render_brand
 from kiss.core.config import kiss_home
-from kiss.server.agent_file import apply_agent_overrides
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 
 # The placeholder the daemon substitutes with the calling task's id.

@@ -37,7 +37,7 @@ the pages the changes affect.  ``ask <question>`` answers from the
 memory.
 
 Module-level getters (``system_prompt()``, ``add_to_tools()``, ...) follow the
-SEA contract in :mod:`kiss.server.agent_file`.
+SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
 """
 
 from __future__ import annotations

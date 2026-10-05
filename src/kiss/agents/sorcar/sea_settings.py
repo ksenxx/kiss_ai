@@ -173,7 +173,7 @@ DISPATCHER_SETTINGS = ("kind", "extends", "timeout", "locked", "hidden")
 
 ``kind`` and ``extends`` are resolved by :func:`resolve_settings` and
 :func:`~kiss.agents.sorcar.sea_commands.sea_layers` (the daemon reads
-``kind`` from the layers, :mod:`kiss.server.agent_file`); ``timeout``
+``kind`` from the layers, :mod:`kiss.agents.sorcar.agent_file`); ``timeout``
 is read by the dispatcher (:mod:`kiss.agents.sorcar.agent_dispatch`);
 ``locked`` names the keys an explicit caller argument may not replace
 (:func:`locked_conflicts`); ``hidden`` keeps the script out of the
@@ -292,7 +292,7 @@ class SeaError(Exception):
 
     :exc:`kiss.agents.sorcar.sea_commands.SeaScriptError` (raised by the
     registry and the dispatcher) and
-    :exc:`kiss.server.agent_file.AgentFileError` (raised by the daemon's
+    :exc:`kiss.agents.sorcar.agent_file.AgentFileError` (raised by the daemon's
     task runner) both derive from it, so a caller that only wants to
     know "the script failed" catches one class.
     """

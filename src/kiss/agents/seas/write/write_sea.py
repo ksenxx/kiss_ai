@@ -6,7 +6,7 @@
 
 The agent is the plain Sorcar agent with one change: :data:`SYSTEM_PROMPT`,
 a writing protocol, is added to the system prompt through the
-``add_to_system_prompt()`` getter (:mod:`kiss.server.agent_file`, ``ADD_FIELDS``).
+``add_to_system_prompt()`` getter (:mod:`kiss.agents.sorcar.agent_file`, ``ADD_FIELDS``).
 The protocol fixes the register (concise, professional American English for
 a general audience), lists the vocabulary and sentence patterns that mark
 machine-written text and bans them, and ends with an edit pass that checks the

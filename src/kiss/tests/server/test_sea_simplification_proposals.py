@@ -47,6 +47,15 @@ import pytest
 
 from kiss.agents.sorcar import agent_dispatch, cron_agent, daemon_client, sea_commands
 from kiss.agents.sorcar.agent_dispatch import fanout_conflict, make_run_agent_tool
+from kiss.agents.sorcar.agent_file import (
+    CHANNEL_PREAMBLE,
+    DISPATCHER_SETTINGS,
+    SETTING_FIELDS,
+    apply_agent_overrides,
+    channel_workspace,
+    is_channel,
+    load_layers,
+)
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_commands import SeaScriptError, sea_layers, sea_settings
 from kiss.agents.sorcar.sea_settings import (
@@ -61,15 +70,6 @@ from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
 from kiss.agents.sorcar.task_classifier import clear_classification_cache
 from kiss.core import config as config_module
 from kiss.server import agent_state
-from kiss.server.agent_file import (
-    CHANNEL_PREAMBLE,
-    DISPATCHER_SETTINGS,
-    SETTING_FIELDS,
-    apply_agent_overrides,
-    channel_workspace,
-    is_channel,
-    load_layers,
-)
 from kiss.server.server import VSCodeServer
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,

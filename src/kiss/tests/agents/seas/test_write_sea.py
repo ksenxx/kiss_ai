@@ -24,8 +24,8 @@ import yaml
 from kiss.agents.seas.write import write_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.agent_dispatch import resolve_timeout
+from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.server.agent_file import apply_agent_overrides
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
 

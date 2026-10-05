@@ -9,7 +9,7 @@ loader of caller-supplied tool code) as untrusted; a broken script
 must stop the task with a DIAGNOSTIC error.  Every import-time
 failure — including ``KeyboardInterrupt`` and ``SystemExit``, which
 are not ``Exception`` subclasses — must surface as
-:exc:`~kiss.server.agent_file.AgentFileError`: the loader's production
+:exc:`~kiss.agents.sorcar.agent_file.AgentFileError`: the loader's production
 caller sits inside an ``except KeyboardInterrupt`` branch that cancels
 the whole agent task, so letting either escape unwrapped would report
 a broken script as a task cancellation (or kill the thread) instead of
@@ -28,7 +28,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from kiss.server.agent_file import AgentFileError, apply_agent_overrides
+from kiss.agents.sorcar.agent_file import AgentFileError, apply_agent_overrides
 from kiss.server.user_assets import ensure_user_asset_from_default
 
 

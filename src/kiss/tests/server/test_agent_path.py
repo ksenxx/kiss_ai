@@ -599,7 +599,7 @@ class AgentPathApiTest(unittest.TestCase):
         the failure would leak the broken script's chat id into a
         later run.
         """
-        from kiss.server.agent_file import (
+        from kiss.agents.sorcar.agent_file import (
             AgentFileError,
             apply_agent_overrides,
         )

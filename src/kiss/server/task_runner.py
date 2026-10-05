@@ -27,6 +27,15 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from kiss.agents.sorcar.agent_file import (
+    DAEMON_SIDE_FIELDS,
+    NO_TOOLS_PROFILE,
+    RUN_CONFIG_FIELD,
+    AgentFileError,
+    apply_agent_overrides,
+    channel_workspace,
+    load_layers,
+)
 from kiss.agents.sorcar.channel_workspace import (
     WORKSPACE_WAIT_TIMEOUT_SECONDS,
     enter_workspace,
@@ -70,15 +79,6 @@ from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_available_models, get_default_model
 from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
-from kiss.server.agent_file import (
-    DAEMON_SIDE_FIELDS,
-    NO_TOOLS_PROFILE,
-    RUN_CONFIG_FIELD,
-    AgentFileError,
-    apply_agent_overrides,
-    channel_workspace,
-    load_layers,
-)
 from kiss.server.agent_state import AgentState
 from kiss.server.browser_tab import BrowserTabService
 from kiss.server.json_printer import JsonPrinter, stamp_event_ts

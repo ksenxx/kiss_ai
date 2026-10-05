@@ -44,8 +44,8 @@ from kiss.agents.seas.skillopt.skillopt_sea import (
     verify,
 )
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.sea_settings import resolve_settings
-from kiss.server.agent_file import apply_agent_overrides
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,

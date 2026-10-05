@@ -593,7 +593,7 @@ def test_prompt_job_runs_the_cron_prompt_sea(
     own loader to read the effective run settings.
     """
     from kiss.agents.sorcar import daemon_client
-    from kiss.server.agent_file import apply_agent_overrides
+    from kiss.agents.sorcar.agent_file import apply_agent_overrides
 
     captured: list[dict[str, object]] = []
 
@@ -762,9 +762,9 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     cron guidance reaches the session through ``add_to_system_prompt()``
     (the daemon appends it to the system prompt suffix), not the task.
     """
+    from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
     from kiss.agents.sorcar.sea_commands import sea_settings
     from kiss.agents.sorcar.sea_settings import kind_defaults
-    from kiss.server.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
 
     work_dir = cron_agent.cron_work_dir()
     assert work_dir == str(tmp_path / "cron" / "work")

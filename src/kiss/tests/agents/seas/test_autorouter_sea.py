@@ -25,11 +25,11 @@ import yaml
 
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
 from kiss.server import agent_state
-from kiss.server.agent_file import apply_agent_overrides
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
