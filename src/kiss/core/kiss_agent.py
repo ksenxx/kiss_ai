@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -129,6 +130,48 @@ def _call_args(function_call: dict[str, Any]) -> dict[str, Any]:
     """Return the arguments dict of a function call, or {} if absent/malformed."""
     raw_args = function_call.get("arguments")
     return raw_args if isinstance(raw_args, dict) else {}
+
+
+def unknown_argument_hint(
+    sig: inspect.Signature | None, args: dict[str, Any], tool: Any = None,
+) -> str:
+    """Return a hint for the arguments of a tool call that its signature does not take.
+
+    A tool that knows its own vocabulary says so through an
+    ``unknown_arguments_hint`` attribute, a function from the unknown
+    ``{name: value}`` pairs to the hint text (``run_agent`` and
+    ``run_parallel`` tell an options key from a renamed, removed or
+    misspelled one).  Otherwise a tool with an ``options`` parameter
+    takes its run settings as one JSON object, so a setting passed as
+    a keyword (``use_worktree=False``) is pointed there; the agent
+    cannot know the accepted keys, so that hint is conditional: the
+    tool itself rejects a key that is not a setting.
+
+    Args:
+        sig: The tool's signature, ``None`` when unknown.
+        args: The arguments of the call.
+        tool: The tool callable, for its ``unknown_arguments_hint``.
+
+    Returns:
+        The hint (starting with a newline), or ``""`` when every
+        argument is a parameter or the tool takes no ``options``.
+    """
+    if sig is None:
+        return ""
+    unknown = {name: args[name] for name in args if name not in sig.parameters}
+    if not unknown:
+        return ""
+    own_hint = getattr(tool, "unknown_arguments_hint", None)
+    if callable(own_hint):
+        return "\n" + str(own_hint(unknown))
+    if "options" not in sig.parameters:
+        return ""
+    example = json.dumps(unknown)
+    return (
+        f"\n{', '.join(unknown)} is not an argument; if it is a run setting, pass it in the "
+        f"`options` JSON object, e.g. options='{example}' (the accepted keys are listed "
+        f"under `options`)."
+    )
 
 
 def _is_retryable_error(e: Exception) -> bool:
@@ -517,11 +560,7 @@ class KISSAgent(Base):
                 ) from e
             raise
         except BaseException:
-            # A Stop (KeyboardInterrupt) mid-stream: bill the usage seen
-            # so far to this run, not to the adapter's next call.  An
-            # unpriced model's KISSError must not replace the Stop.
-            with contextlib.suppress(KISSError):
-                self._bill_partial_usage()
+            self._bill_stopped_call(call_started)
             raise
         self._update_tokens_and_budget_from_response(response)
         self._print_llm_call(call_started)
@@ -798,6 +837,7 @@ class KISSAgent(Base):
         self._llm_hook_conversation_index = len(self.model.conversation)
         self._prompt_cache_touched_at = time.time()
         call_started = time.time()
+        self.last_call_usage = None
         try:
             function_calls, response_text, response = (
                 self.model.generate_and_process_with_tools(
@@ -807,23 +847,17 @@ class KISSAgent(Base):
         except Exception:
             # A truncated, incomplete or refused response raises but was
             # still billed; the retry/fallback loop must not drop it.
-            self.last_call_usage = None
             self._bill_partial_usage()
             self._print_llm_call(call_started)
             raise
         except BaseException:
-            # A Stop (KeyboardInterrupt) mid-stream: bill the usage seen
-            # so far to this run, not to the adapter's next call.  An
-            # unpriced model's KISSError must not replace the Stop.
-            with contextlib.suppress(KISSError):
-                self._bill_partial_usage()
+            self._bill_stopped_call(call_started)
             raise
         # ... and again AFTER it returns, so the assistant turn the call
         # appended is not treated as a "new" message on the next call.
         self._llm_hook_conversation_index = len(self.model.conversation)
         if response_text and response_text.strip():
             self._last_response_text = response_text
-        self.last_call_usage = None
         self._update_tokens_and_budget_from_response(response)
         self._print_llm_call(call_started)
         usage_info = self._get_usage_info_string()
@@ -1161,7 +1195,8 @@ class KISSAgent(Base):
                 sig = inspect.signature(fn) if fn else None
                 sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
                 function_response = (
-                    f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
+                    f"Failed to call {function_name} with {function_args}: {e}{sig_str}"
+                    f"{unknown_argument_hint(sig, function_args, fn)}\n"
                 )
                 is_error = True
             end_tool_call(token)
@@ -1252,6 +1287,22 @@ class KISSAgent(Base):
         if partial is not None:
             self._update_tokens_and_budget_from_response(partial)
 
+    def _bill_stopped_call(self, started: float) -> None:
+        """Account a call interrupted by a Stop (``KeyboardInterrupt``).
+
+        Bills the usage seen so far to this run (not to the adapter's
+        next call) and emits its ``llm_call`` event, so the per-call
+        records add up to the task's cost.  Nothing raised here may
+        replace the Stop: an unpriced model's ``KISSError`` and printer
+        failures are swallowed.
+
+        Args:
+            started: ``time.time()`` taken right before the call.
+        """
+        with contextlib.suppress(Exception):
+            self._bill_partial_usage()
+            self._print_llm_call(started)
+
     def _update_tokens_and_budget_from_response(self, response: Any) -> None:
         """Updates token counter and budget from API response.
 
@@ -1266,7 +1317,7 @@ class KISSAgent(Base):
         """
         try:
             usage = self.model.extract_input_output_token_counts_from_response(response)
-            # Adapters return 4 to 8 counts; the missing trailing ones are 0.
+            # Adapters return 4 to 9 counts; the missing trailing ones are 0.
             (
                 input_tokens,
                 output_tokens,
@@ -1276,7 +1327,8 @@ class KISSAgent(Base):
                 audio_input,
                 audio_output,
                 audio_cache_read,
-            ) = (*usage, 0, 0, 0, 0)[:8]
+                image_output,
+            ) = (*usage, 0, 0, 0, 0, 0)[:9]
             cache_read = text_cache_read + audio_cache_read
             call_tokens = (
                 input_tokens
@@ -1286,6 +1338,7 @@ class KISSAgent(Base):
                 + cache_write_1h
                 + audio_input
                 + audio_output
+                + image_output
             )
             if call_tokens > 0:
                 self.context_tokens_used = call_tokens
@@ -1308,10 +1361,11 @@ class KISSAgent(Base):
                     num_audio_input_tokens=audio_input,
                     num_audio_output_tokens=audio_output,
                     num_audio_cache_read_tokens=audio_cache_read,
+                    num_image_output_tokens=image_output,
                 )
             self.last_call_usage = {
                 "input_tokens": input_tokens + audio_input,
-                "output_tokens": output_tokens + audio_output,
+                "output_tokens": output_tokens + audio_output + image_output,
                 "cache_read": cache_read,
                 "cache_write": cache_write + cache_write_1h,
                 "cost": cost,

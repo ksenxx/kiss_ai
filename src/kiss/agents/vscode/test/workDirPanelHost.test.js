@@ -5,16 +5,20 @@
 
 // The extension-host half of the "Working directory" panel: the webview
 // posts `openWorkDir {path}` (typed path or a row of the opened-so-far
-// list) or `pickWorkDir` (the folder button), and the compiled
-// SorcarSidebarView answers `workDirPicked {path}` with the folder's
-// real path (and records it in the daemon's opened-so-far list through
-// `recordWorkDir`) -- or `workDirError` for a path that is not a
-// directory or a file-system root (also one reached through `..` or a
-// symlink).  The host never opens the folder as the window's workspace:
-// `vscode.openFolder` must not run, and the window's own folder is as
-// valid a pick as any other.  A `submit` carrying a tab work dir is
-// forwarded with it and runs there; without one it is forwarded bare and
-// the daemon stamps the window's pinned workspace folder.
+// list) or `pickWorkDir` (the folder button) -- neither names a tab, the
+// working directory is ONE global value -- and the compiled
+// SorcarSidebarView makes the folder's real path the daemon's global
+// working directory (`SorcarApi.setWorkDir`, nothing is sent as
+// `recordWorkDir`) and answers `workDirPicked {path}` without a tabId;
+// a path that is not a directory or is a file-system root (also one
+// reached through `..` or a symlink) gets `workDirError {text}` instead
+// and nothing goes to the daemon.  The host never opens the folder as
+// the window's workspace: `vscode.openFolder` must not run, and the
+// window's own folder is as valid a pick as any other.  The host caches
+// the daemon's value (its own pick, `configData.config.work_dir`,
+// `workDirChanged`) as the fallback directory of path-taking messages
+// and the folder dialog's starting folder.  A `submit` is forwarded
+// bare: the host adds no workDir, the daemon runs it in the global value.
 //
 // Runs the compiled extension (out/SorcarSidebarView.js) against a
 // minimal `vscode` stub; run `npm run compile` first.
@@ -136,11 +140,13 @@ function makeView() {
   const view = new SorcarSidebarView({fsPath: path.join(tmp, 'ext')});
   const forwarded = [];
   const runs = [];
+  // Every directory the host sent to the daemon as the global value.
+  const sets = [];
   view._api = {
     forward: cmd => forwarded.push(cmd),
     submit: fields => runs.push(fields),
     getConfig: () => {},
-    setWorkDir: () => {},
+    setWorkDir: wd => sets.push(wd),
   };
   const posted = [];
   view._view = {
@@ -149,7 +155,7 @@ function makeView() {
     show() {},
   };
   view._disposed = false;
-  return {view, posted, forwarded, runs};
+  return {view, posted, forwarded, runs, sets};
 }
 
 function opens() {
@@ -164,32 +170,35 @@ function picks(posted) {
   return posted.filter(m => m.type === 'workDirPicked').map(m => m.path);
 }
 
-/** The tab named by every workDirPicked reply (must echo the request). */
-function pickTabs(posted) {
-  return posted.filter(m => m.type === 'workDirPicked').map(m => m.tabId);
+/** No workDirPicked / workDirError reply names a tab: the pick is global. */
+function assertNoTabIds(posted) {
+  const replies = posted.filter(
+    m => m.type === 'workDirPicked' || m.type === 'workDirError',
+  );
+  assert.ok(
+    replies.every(m => !('tabId' in m)),
+    'replies carry no tabId: ' + JSON.stringify(replies),
+  );
 }
 
-function recorded(forwarded) {
-  return forwarded.filter(c => c.type === 'recordWorkDir').map(c => c.path);
-}
-
-async function testOpenWorkDirPicksAFolderForTheTab() {
-  const {view, posted, forwarded} = makeView();
+async function testOpenWorkDirMakesTheFolderGlobal() {
+  const {view, posted, forwarded, sets} = makeView();
   executed.length = 0;
-  await view._handleMessage({type: 'openWorkDir', path: other, tabId: 'tab-a'});
-  // The window's own folder is a legitimate pick too (the tab may be
-  // brought back from another folder), in any spelling.
+  assert.strictEqual(view._getWorkDir(), wsRoot, 'the window folder at first');
+  await view._handleMessage({type: 'openWorkDir', path: other});
+  assert.strictEqual(
+    view._getWorkDir(),
+    realOther,
+    'the pick is the fallback directory from now on',
+  );
+  // The window's own folder is a legitimate pick too (the user may come
+  // back to it from another folder), in any spelling.
   await view._handleMessage({
     type: 'openWorkDir',
     path: wsRoot + path.sep + '.',
-    tabId: 'tab-a',
   });
   if (process.platform !== 'win32') {
-    await view._handleMessage({
-      type: 'openWorkDir',
-      path: otherLink,
-      tabId: 'tab-a',
-    });
+    await view._handleMessage({type: 'openWorkDir', path: otherLink});
   }
   assert.deepStrictEqual(
     opens(),
@@ -204,55 +213,41 @@ async function testOpenWorkDirPicksAFolderForTheTab() {
     expected,
     'each pick is answered with the real path',
   );
+  assertNoTabIds(posted);
   assert.deepStrictEqual(
-    pickTabs(posted),
-    expected.map(() => 'tab-a'),
-    'each reply names the tab that asked',
-  );
-  assert.deepStrictEqual(
-    recorded(forwarded),
+    sets,
     expected,
-    'each pick lands in the daemon opened-so-far list',
+    'each pick is sent to the daemon as the global working directory',
   );
-  assert.ok(
-    !forwarded.some(c => c.type === 'setWorkDir'),
-    'the connection pin is left alone',
-  );
+  assert.deepStrictEqual(forwarded, [], 'nothing is forwarded raw');
   view.dispose();
 }
 
 async function testOpenWorkDirRefusals() {
-  const {view, posted, forwarded} = makeView();
+  const {view, posted, forwarded, sets} = makeView();
   executed.length = 0;
   const missing = path.join(tmp, 'missing');
-  await view._handleMessage({
-    type: 'openWorkDir',
-    path: missing,
-    tabId: 'tab-a',
-  });
+  await view._handleMessage({type: 'openWorkDir', path: missing});
   await view._handleMessage({
     type: 'openWorkDir',
     path: path.join(tmp, 'a-file.txt'),
-    tabId: 'tab-a',
   });
-  await view._handleMessage({type: 'openWorkDir', path: '   ', tabId: 'tab-a'});
-  await view._handleMessage({type: 'openWorkDir', path: '/', tabId: 'tab-a'});
+  await view._handleMessage({type: 'openWorkDir', path: '   '});
+  await view._handleMessage({type: 'openWorkDir', path: '/'});
   // A root reached through ".." segments.
   await view._handleMessage({
     type: 'openWorkDir',
     path: tmp + '/..'.repeat(12),
-    tabId: 'tab-a',
   });
   if (process.platform !== 'win32') {
-    await view._handleMessage({
-      type: 'openWorkDir',
-      path: rootLink,
-      tabId: 'tab-a',
-    });
+    await view._handleMessage({type: 'openWorkDir', path: rootLink});
   }
   assert.deepStrictEqual(opens(), [], 'nothing is opened');
   assert.deepStrictEqual(picks(posted), [], 'none of these is picked');
-  assert.deepStrictEqual(recorded(forwarded), [], 'nor recorded');
+  assert.deepStrictEqual(sets, [], 'nor sent to the daemon');
+  assert.deepStrictEqual(forwarded, []);
+  assert.strictEqual(view._getWorkDir(), wsRoot, 'the fallback is unchanged');
+  assertNoTabIds(posted);
   const texts = errors(posted);
   assert.strictEqual(texts.length, process.platform !== 'win32' ? 6 : 5);
   assert.strictEqual(texts[0], 'Not a directory: ' + missing);
@@ -270,11 +265,11 @@ async function testOpenWorkDirRefusals() {
 }
 
 async function testPickWorkDirUsesTheEditorDialog() {
-  const {view, posted, forwarded} = makeView();
+  const {view, posted, sets} = makeView();
   executed.length = 0;
   // Cancelled dialog: nothing happens.
   dialogAnswer = undefined;
-  await view._handleMessage({type: 'pickWorkDir', tabId: 'tab-b'});
+  await view._handleMessage({type: 'pickWorkDir'});
   const dialog = executed.find(e => e.dialog).dialog;
   assert.strictEqual(dialog.canSelectFolders, true);
   assert.strictEqual(dialog.canSelectFiles, false);
@@ -287,42 +282,87 @@ async function testPickWorkDirUsesTheEditorDialog() {
   assert.deepStrictEqual(picks(posted), []);
   assert.deepStrictEqual(errors(posted), []);
 
+  assert.deepStrictEqual(sets, []);
+
   // A picked folder goes through the same checks as a typed one.
   dialogAnswer = [{fsPath: other}];
-  await view._handleMessage({type: 'pickWorkDir', tabId: 'tab-b'});
+  await view._handleMessage({type: 'pickWorkDir'});
   assert.deepStrictEqual(picks(posted), [realOther]);
-  assert.deepStrictEqual(pickTabs(posted), ['tab-b']);
-  assert.deepStrictEqual(recorded(forwarded), [realOther]);
+  assert.deepStrictEqual(sets, [realOther]);
+  assertNoTabIds(posted);
   dialogAnswer = [{fsPath: '/'}];
-  await view._handleMessage({type: 'pickWorkDir', tabId: 'tab-b'});
+  await view._handleMessage({type: 'pickWorkDir'});
   assert.deepStrictEqual(picks(posted), [realOther], 'a root is not picked');
+  assert.deepStrictEqual(sets, [realOther]);
   assert.ok(/root/.test(errors(posted)[0]));
+  // The next dialog starts in the global directory, not the window's.
+  const last = executed.filter(e => e.dialog).pop().dialog;
+  assert.strictEqual(last.defaultUri.fsPath, realOther);
   assert.deepStrictEqual(opens(), [], 'no vscode.openFolder either way');
   view.dispose();
 }
 
-async function testSubmitRunsInTheTabWorkDir() {
+async function testDaemonValueIsTheHostFallback() {
+  // The daemon's global value reaches the host through the client
+  // messages configData (config.work_dir, passed on untouched) and
+  // workDirChanged; both set the fallback directory and the folder
+  // dialog's starting folder.
+  const {view, posted} = makeView();
+  const listeners = {};
+  view._installClientListener({
+    on: (event, cb) => {
+      listeners[event] = cb;
+    },
+  });
+  assert.strictEqual(view._getWorkDir(), wsRoot);
+  listeners.message({type: 'configData', config: {work_dir: '/from/config'}});
+  assert.strictEqual(view._getWorkDir(), '/from/config');
+  listeners.message({type: 'configData', config: {work_dir: ''}});
+  assert.strictEqual(
+    view._getWorkDir(),
+    '/from/config',
+    'an empty work_dir does not erase the cached value',
+  );
+  listeners.message({type: 'workDirChanged', workDir: '/from/broadcast'});
+  assert.strictEqual(view._getWorkDir(), '/from/broadcast');
+  // Both messages reach the webview as the daemon sent them: the host
+  // no longer rewrites work_dir to the window's workspace folder.
+  const configs = posted.filter(m => m.type === 'configData');
+  assert.deepStrictEqual(
+    configs.map(m => m.config.work_dir),
+    ['/from/config', ''],
+    'configData.config.work_dir is passed on untouched',
+  );
+  const changes = posted.filter(m => m.type === 'workDirChanged');
+  assert.deepStrictEqual(
+    changes.map(m => m.workDir),
+    ['/from/broadcast'],
+  );
+  executed.length = 0;
+  dialogAnswer = undefined;
+  await view._handleMessage({type: 'pickWorkDir'});
+  const dialog = executed.find(e => e.dialog).dialog;
+  assert.strictEqual(dialog.defaultUri.fsPath, '/from/broadcast');
+  assert.deepStrictEqual(picks(posted), []);
+  view.dispose();
+}
+
+async function testSubmitIsForwardedWithoutAWorkDir() {
   const {view, runs} = makeView();
+  await view._handleMessage({type: 'openWorkDir', path: other});
   await view._handleMessage({
     type: 'submit',
     prompt: 'list files',
     model: 'm',
     attachments: [],
     tabId: 'tab-1',
-    workDir: other,
   });
-  await view._handleMessage({
-    type: 'submit',
-    prompt: 'list files',
-    model: 'm',
-    attachments: [],
-    tabId: 'tab-2',
-  });
-  assert.strictEqual(runs.length, 2);
-  assert.strictEqual(runs[0].workDir, other, 'the tab dir is the run dir');
-  // No tab dir: the submit is forwarded without one; the daemon stamps
-  // this connection's pinned workspace folder (setWorkDir on connect).
-  assert.strictEqual(runs[1].workDir, undefined, 'no tab dir: left to the pin');
+  assert.strictEqual(runs.length, 1);
+  assert.strictEqual(runs[0].prompt, 'list files');
+  assert.strictEqual(runs[0].tabId, 'tab-1');
+  // The host stamps no directory of its own, not even the one it just
+  // picked: the daemon runs every task in the global value.
+  assert.ok(!('workDir' in runs[0]), 'the submit is forwarded bare');
   view.dispose();
 }
 
@@ -352,7 +392,11 @@ async function testWebviewEditorContextFallsBackToTheFileTab() {
   assert.strictEqual(completes[0].activeFile, '/ws/notes.md');
   assert.strictEqual(completes[0].activeFileContent, 'buffer text');
   await view._handleMessage({type: 'complete', query: 'exp', tabId: 'tab-1'});
-  assert.strictEqual(completes[1].activeFile, undefined, 'no file tab: no context');
+  assert.strictEqual(
+    completes[1].activeFile,
+    undefined,
+    'no file tab: no context',
+  );
   assert.strictEqual(completes[1].activeFileContent, undefined);
 
   const native = path.join(wsRoot, 'native.ts');
@@ -389,12 +433,19 @@ async function testWebviewEditorContextFallsBackToTheFileTab() {
 async function main() {
   const tests = [
     [
-      'openWorkDir answers workDirPicked without opening a workspace',
-      testOpenWorkDirPicksAFolderForTheTab,
+      'openWorkDir sends setWorkDir and answers workDirPicked without opening a workspace',
+      testOpenWorkDirMakesTheFolderGlobal,
     ],
     ['openWorkDir refusals are reported to the panel', testOpenWorkDirRefusals],
     ['pickWorkDir uses the editor dialog', testPickWorkDirUsesTheEditorDialog],
-    ['submit runs in the tab work dir', testSubmitRunsInTheTabWorkDir],
+    [
+      'configData / workDirChanged set the host fallback directory',
+      testDaemonValueIsTheHostFallback,
+    ],
+    [
+      'submit is forwarded without a workDir',
+      testSubmitIsForwardedWithoutAWorkDir,
+    ],
     [
       'the webview file tab is the editor context unless an editor is visible',
       testWebviewEditorContextFallsBackToTheFileTab,

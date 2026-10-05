@@ -3576,6 +3576,45 @@ class TestServeAsyncPrinting(IsolatedAsyncioTestCase):
         output = buf.getvalue()
         self.assertIn(f"{PRODUCT_NAME} remote access:", output)
 
+    async def test_serve_async_forgets_the_daemon_endpoint_on_shutdown(self) -> None:
+        """The endpoint recorded for in-daemon dispatch is cleared when the daemon stops.
+
+        ``_serve_async`` records its endpoint file as the cron module's
+        daemon endpoint so ``run_agent`` sub-tasks and ``run_now`` go
+        back through this daemon.  Left behind after shutdown, a later
+        daemon in the same process (an in-process restart, the next
+        test) would send its sub-tasks to the dead endpoint and hang.
+        """
+        from kiss.agents.sorcar import agent_dispatch
+
+        work_dir = tempfile.mkdtemp()
+        endpoint_file = os.path.join(work_dir, "sorcar-local.json")
+        server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=self.port,
+            use_tunnel=False,
+            work_dir=work_dir,
+            local_endpoint_file=endpoint_file,
+        )
+        serve_task = asyncio.create_task(server._serve_async())
+        try:
+            try:
+                while server._shutdown_future is None:
+                    await asyncio.sleep(0.02)
+                self.assertEqual(agent_dispatch._daemon_endpoint_file(), endpoint_file)
+            finally:
+                server._request_loop_shutdown()
+                await asyncio.wait_for(serve_task, 10)
+            self.assertIsNone(agent_dispatch._daemon_endpoint_file())
+            for thread in threading.enumerate():
+                if thread.name == "kiss-cron-scheduler":
+                    thread.join(timeout=10)
+                    self.assertFalse(thread.is_alive())
+        finally:
+            # ``_serve_async`` only unwinds the listeners; the registry
+            # watcher and its subscription belong to ``stop_async``.
+            await server.stop_async()
+
 
 class TestAutoGenCertInCreateSslContext(unittest.TestCase):
     """Test _create_ssl_context auto-generates certs when missing."""
@@ -4715,6 +4754,7 @@ class TestNamedTunnelProcessDies(IsolatedAsyncioTestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     @pytest.mark.slow
+    @posix_only("fake cloudflared is a bash script")
     async def test_named_tunnel_process_dies_returns_none(self) -> None:
         """Named tunnel process exits without registering → None (1580-1581)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5160,6 +5200,7 @@ class TestQuickTunnelProcessPoll(IsolatedAsyncioTestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     @pytest.mark.slow
+    @posix_only("fake cloudflared is a bash script")
     async def test_process_exits_during_stderr_read(self) -> None:
         """Process exits after non-URL output → poll() check (line 1522)."""
         cf = os.path.join(self._tmpdir, "cloudflared")

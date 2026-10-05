@@ -18,7 +18,7 @@ call its localhost REST API — no Meta Business account, access token,
 or webhook is involved.
 
 Pairing renders the bridge's QR code into a local HTML page
-(``~/.kiss/third_party_agents/whatsapp/qr.html``) so the agent can show
+(``$KISS_HOME/third_party_agents/whatsapp/qr.html``) so the agent can show
 it in the browser for the user to scan with their phone (WhatsApp →
 Settings → Linked devices → Link a device).
 
@@ -93,7 +93,7 @@ def _channel_dir() -> Path:
 def _default_repo_dir() -> Path:
     """Return the default whatsapp-mcp clone location.
 
-    Reuses an existing ``~/.kiss/connectors/whatsapp-mcp`` clone (made by
+    Reuses an existing ``$KISS_HOME/connectors/whatsapp-mcp`` clone (made by
     ``connectors/enable.py enable whatsapp``) so the device is paired only
     once; otherwise a clone inside the channel directory is used.
     """
@@ -1230,7 +1230,7 @@ class WhatsAppAgent(BaseChannelAgent):
             """Set up the WhatsApp bridge: clone whatsapp-mcp and build it.
 
             Clones https://github.com/lharries/whatsapp-mcp (reusing an
-            existing ~/.kiss/connectors/whatsapp-mcp clone when present),
+            existing $KISS_HOME/connectors/whatsapp-mcp clone when present),
             upgrades its whatsmeow dependency to the latest release
             (WhatsApp rejects the upstream pin as "Client outdated"),
             builds the Go bridge (CGO enabled), and saves the config.
@@ -1594,15 +1594,30 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     )
 
 
-def tools() -> list:
-    """Return the WhatsApp channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the WhatsApp channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    bridge state persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    bridge state persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return WhatsAppAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
+
+
+def add_to_system_prompt() -> str:
+    """Return the channel guidance appended to the run's system prompt."""
+    return WhatsAppAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

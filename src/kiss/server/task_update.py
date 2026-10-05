@@ -32,6 +32,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kiss.agents.seas.ask import ask_sea
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.server.json_printer import stamp_event_ts
 
 log = logging.getLogger(__name__)
@@ -54,9 +55,9 @@ TaskUpdateSeaRunner = Callable[[Any, str], tuple[str, float]]
 def build_prompt(task_id: str) -> str:
     """Return the ``/ask`` prompt the update run answers for *task_id*.
 
-    What a ``/ask`` typed into the task's chat produces: the question
-    followed by :data:`ask_sea.APPEND_TO_PROMPT` with the task id
-    filled in.
+    What a ``/ask`` typed into the task's chat produces:
+    :func:`ask_sea.prompt` applied to the question, with ``{task_id}``
+    filled in as the daemon would.
 
     Args:
         task_id: The ``task_history`` row id of the task to report on.
@@ -64,10 +65,7 @@ def build_prompt(task_id: str) -> str:
     Returns:
         The prompt text.
     """
-    return (
-        UPDATE_QUESTION + "\n\n"
-        + ask_sea.APPEND_TO_PROMPT.replace("<task_id>", task_id)
-    )
+    return ask_sea.prompt(UPDATE_QUESTION).replace("{task_id}", task_id)
 
 
 @dataclasses.dataclass
@@ -328,10 +326,8 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
     parent_tab_id = subagent_parent_tab_id_of(parent_agent)
     sub_tab_id = f"task-{task_id}__update-{int(time.time() * 1000)}"
-    model_getter = getattr(ask_sea, "model", None)
-    model_name = str(
-        model_getter() if callable(model_getter) else parent_agent.model_name
-    )
+    ask_settings = resolve_settings(vars(ask_sea))
+    model_name = str(ask_settings.get("model") or parent_agent.model_name)
     agent = ChatSorcarAgent("Task update")
     agent._tab_id = sub_tab_id
     # A side channel like the ``/ask`` answerer: its answer lands in the
@@ -356,18 +352,21 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
             model_name=model_name,
             work_dir=str(getattr(parent_agent, "work_dir", "") or "."),
             printer=printer,
-            tools=ask_sea.tools(),
-            append_basic_tools=ask_sea.if_append_basic_tools(),
-            is_parallel=ask_sea.is_parallel(),
+            # The ask SEA's ``none`` tool profile: its ``add_to_tools()``
+            # and ``finish`` are the whole tool set, no built-in tools.
+            tools=ask_sea.add_to_tools(),
+            append_basic_tools=False,
+            tool_profile=ask_settings["tool_profile"],
+            is_parallel=ask_settings["allow_fan_out"],
             max_budget=UPDATE_BUDGET_USD,
             model_config=(
                 getattr(parent_agent, "model_config", None)
                 if model_name == parent_agent.model_name else None
             ),
             base_system_prompt=ask_sea.system_prompt(),
-            system_prompt=ask_sea.append_to_system_prompt(),
-            web_tools=ask_sea.use_web_tools(),
-            use_memory=ask_sea.use_memory(),
+            system_prompt=ask_sea.add_to_system_prompt(),
+            web_tools=ask_settings["use_web_tools"],
+            use_memory=ask_settings["use_memory"],
         )
     finally:
         budget, tokens, steps = _live_agent_usage(agent)

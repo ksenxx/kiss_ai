@@ -380,13 +380,14 @@ async function main() {
       entries: [{name: 'sub', path: WD + '/sub', isDir: true}],
     });
     const input = picker.querySelector('.folder-picker-input');
-    // (configData already pinned WD with one setWorkDir.)
-    const pins = ofType(posted, 'setWorkDir').length;
+    // configData is adopted directly: no setWorkDir echo, and the
+    // working directory is never a settings save.
+    assert.strictEqual(ofType(posted, 'setWorkDir').length, 0);
+    assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
     // Typed, never listed: Select lists it first...
     input.value = '/definitely/missing';
     click(win, picker.querySelector('.folder-picker-select'));
-    assert.strictEqual(ofType(posted, 'saveConfig').length, 0, 'not saved yet');
-    assert.strictEqual(ofType(posted, 'setWorkDir').length, pins);
+    assert.strictEqual(ofType(posted, 'setWorkDir').length, 0, 'not adopted yet');
     list = ofType(posted, 'listDir');
     req = list[list.length - 1];
     assert.strictEqual(req.path, '/definitely/missing');
@@ -403,11 +404,10 @@ async function main() {
       'BUG: the picker closed on a folder that does not exist',
     );
     assert.strictEqual(
-      ofType(posted, 'saveConfig').length,
+      ofType(posted, 'setWorkDir').length,
       0,
-      'BUG: a missing path was saved',
+      'BUG: a missing path was adopted',
     );
-    assert.strictEqual(ofType(posted, 'setWorkDir').length, pins);
     assert.ok(
       picker
         .querySelector('.folder-picker-note')
@@ -427,13 +427,12 @@ async function main() {
       entries: [],
     });
     assert.ok(picker.hidden, 'the picker closes once the folder is listed');
-    const saved = ofType(posted, 'saveConfig');
-    assert.strictEqual(saved.length, 1);
-    assert.strictEqual(saved[0].config.work_dir, '/data/proj');
-    assert.strictEqual(
-      ofType(posted, 'setWorkDir')[pins].workDir,
-      '/data/proj',
-    );
+    // The daemon is handed the global working directory (it persists
+    // and broadcasts it); nothing goes through saveConfig.
+    const adopted = ofType(posted, 'setWorkDir');
+    assert.strictEqual(adopted.length, 1);
+    assert.strictEqual(adopted[0].workDir, '/data/proj');
+    assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
     // The Explorer re-roots at the picked folder.
     list = ofType(posted, 'listDir').filter(
       m => !String(m.token).startsWith('picker:'),
@@ -454,17 +453,16 @@ async function main() {
     assert.strictEqual(input.value, '/data/proj/child');
     click(win, picker.querySelector('.folder-picker-select'));
     assert.ok(picker.hidden);
-    assert.strictEqual(
-      ofType(posted, 'saveConfig')[1].config.work_dir,
-      '/data/proj/child',
-    );
+    assert.strictEqual(ofType(posted, 'setWorkDir')[1].workDir, '/data/proj/child');
+    assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
   });
 
-  await test('Folder picker: the picked folder is browsed even when the chat pinned another', async () => {
+  await test('Folder picker: the global working directory is browsed, not the chat\'s task folder, and a pick re-roots', async () => {
     const {win, posted} = makeWebview();
     pinWorkspace(win);
-    // The active chat replays a task that ran in a sub-folder: its tab
-    // pins that folder for browsing.
+    // The active chat replays a task that ran in a sub-folder.  There
+    // is one global working directory now: the tab's task folder does
+    // not change what the Explorer browses.
     send(win, {
       type: 'task_events',
       task: 'earlier task',
@@ -476,54 +474,64 @@ async function main() {
     let list = ofType(posted, 'listDir');
     assert.strictEqual(
       list[list.length - 1].path,
-      WD + '/sub',
-      'the tab folder is browsed',
+      WD,
+      'the global working directory is browsed, not the tab folder',
     );
     send(win, {
       type: 'dirListing',
       token: list[list.length - 1].token,
-      path: WD + '/sub',
-      root: WD + '/sub',
-      entries: [],
+      path: WD,
+      root: WD,
+      entries: [{name: 'sub', path: WD + '/sub', isDir: true}],
     });
     click(win, byId(win, 'explorer-pick-folder'));
     const picker = byId(win, 'folder-picker');
     list = ofType(posted, 'listDir');
     let req = list[list.length - 1];
-    send(win, {
-      type: 'dirListing',
-      token: req.token,
-      path: WD + '/sub',
-      root: WD + '/sub',
-      entries: [],
-    });
-    // Up to the parent, then Select it.
-    click(win, picker.querySelector('.folder-picker-up'));
-    list = ofType(posted, 'listDir');
-    req = list[list.length - 1];
-    assert.strictEqual(req.path, WD);
+    assert.strictEqual(req.path, WD, 'the picker opens at the global folder');
     send(win, {
       type: 'dirListing',
       token: req.token,
       path: WD,
       root: WD,
-      entries: [],
+      entries: [{name: 'sub', path: WD + '/sub', isDir: true}],
     });
+    // Pick the listed sub-folder: it becomes the global working directory.
+    click(win, picker.querySelector('.folder-picker-item'));
     click(win, picker.querySelector('.folder-picker-select'));
     assert.ok(picker.hidden);
+    const adopted = ofType(posted, 'setWorkDir');
+    assert.strictEqual(adopted.length, 1);
+    assert.strictEqual(adopted[0].workDir, WD + '/sub');
+    assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
     list = ofType(posted, 'listDir').filter(
       m => !String(m.token).startsWith('picker:'),
     );
     assert.strictEqual(
       list[list.length - 1].path,
-      WD,
-      'BUG: the Explorer kept browsing the tab folder after picking its parent',
+      WD + '/sub',
+      'BUG: the Explorer kept browsing the old folder after the pick',
     );
-    assert.strictEqual(list[list.length - 1].workDir, WD);
+    assert.strictEqual(list[list.length - 1].workDir, WD + '/sub');
     // The Source Control view follows too.
     click(win, byId(win, 'activity-scm'));
     const st = ofType(posted, 'gitStatus');
-    assert.strictEqual(st[st.length - 1].workDir, WD);
+    assert.strictEqual(st[st.length - 1].workDir, WD + '/sub');
+    // Another surface's pick arrives as the daemon's broadcast: this
+    // client re-scopes to it the same way.
+    send(win, {type: 'workDirChanged', workDir: '/elsewhere'});
+    const st2 = ofType(posted, 'gitStatus');
+    assert.strictEqual(st2[st2.length - 1].workDir, '/elsewhere');
+    click(win, byId(win, 'activity-explorer'));
+    list = ofType(posted, 'listDir').filter(
+      m => !String(m.token).startsWith('picker:'),
+    );
+    assert.strictEqual(list[list.length - 1].path, '/elsewhere');
+    assert.strictEqual(
+      ofType(posted, 'setWorkDir').length,
+      1,
+      'a broadcast is adopted, never echoed back as setWorkDir',
+    );
   });
 
   await test('Folder picker: Up stays at a root ("/" and "C:\\")', async () => {
@@ -758,9 +766,12 @@ async function main() {
     });
     click(win, byId(win, 'activity-explorer'));
     let list = ofType(posted, 'listDir');
-    assert.strictEqual(list[list.length - 1].path, WD + '/sub');
+    // The global working directory is browsed past the content tab and
+    // its owner chat alike (the owner's task folder is not a scope).
+    assert.strictEqual(list[list.length - 1].path, WD);
     // The "Working directory" panel: type a new work dir and open it;
-    // the daemon's listing confirms the folder and the client saves it.
+    // the daemon's listing confirms the folder and the client hands it
+    // to the daemon as the global working directory.
     click(win, byId(win, 'more-btn'));
     click(win, byId(win, 'workdir-btn'));
     const wd = byId(win, 'workdir-input');
@@ -777,10 +788,13 @@ async function main() {
       root: '/parent',
       entries: [],
     });
-    const saved = ofType(posted, 'saveConfig');
+    const adopted = ofType(posted, 'setWorkDir');
+    assert.strictEqual(adopted.length, 1);
+    assert.strictEqual(adopted[0].workDir, '/parent');
+    assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
     assert.ok(
-      saved.length >= 1 &&
-        saved[saved.length - 1].config.work_dir === '/parent',
+      !byId(win, 'workdir-panel').classList.contains('open'),
+      'the panel closes once the folder is adopted',
     );
     list = ofType(posted, 'listDir').filter(
       m => !String(m.token).startsWith('picker:'),

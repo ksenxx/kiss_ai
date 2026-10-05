@@ -224,7 +224,7 @@ class TestLocalListener(IsolatedAsyncioTestCase):
                     },
                 ],
                 "useWorktree": False,
-                "useParallel": False,
+                "isParallel": False,
             }
             line = json.dumps(submit).encode("utf-8") + b"\n"
             self.assertGreater(len(line), 64 * 1024)

@@ -31,7 +31,7 @@ from kiss.agents.third_party_agents.simplex.simplex_sea import (
     _config,
 )
 from kiss.agents.third_party_agents.simplex.simplex_sea import (
-    tools as module_tools,
+    add_to_tools as module_tools,
 )
 
 _NEW_CHAT_ITEMS_EVENT: dict[str, Any] = {
@@ -216,10 +216,10 @@ def test_authenticate_rejects_empty_url() -> None:
 
 
 def test_tools_module_function() -> None:
-    """tools() returns a non-empty list (at least the auth trio)."""
+    """add_to_tools() returns a non-empty list (at least the auth trio)."""
     tools = module_tools()
     assert len(tools) >= 3
-    assert simplex_mod.tools.__doc__
+    assert simplex_mod.add_to_tools.__doc__
 
 
 def test_end_to_end_over_real_websocket(simplex_server: str) -> None:

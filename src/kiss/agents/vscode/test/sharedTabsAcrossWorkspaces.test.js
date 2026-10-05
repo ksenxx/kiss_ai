@@ -125,10 +125,10 @@ function testEveryRegistryTabIsShownWhateverTheWorkspace() {
 }
 
 function testWorkspaceChangeLeavesTheTabBarAlone() {
-  // Switching the client's workspace (configData from the daemon, or
-  // the VS Code host's workspaceWorkDir) re-scopes the history filter
-  // only: the strips, the active tab and every draft stay put, and no
-  // placeholder tab is spawned.
+  // Switching the global working directory (configData from the
+  // daemon, or its workDirChanged broadcast) re-scopes the history
+  // filter only: the strips, the active tab and every draft stay put,
+  // and no placeholder tab is spawned.
   const {win} = makeWebview();
   setWorkspace(win, '/ws/a');
   send(win, MIXED_SNAPSHOT);
@@ -143,7 +143,7 @@ function testWorkspaceChangeLeavesTheTabBarAlone() {
   assert.strictEqual(activeTabId(win), 'b1', 'the active tab survives');
   assert.strictEqual(input.value, 'draft on b1', 'the draft survives');
 
-  send(win, {type: 'workspaceWorkDir', workDir: '/ws/b'});
+  send(win, {type: 'workDirChanged', workDir: '/ws/b'});
   assert.deepStrictEqual(tabBarIds(win), ['a1', 'wt', 'b1', 'un', 'api']);
   assert.strictEqual(activeTabId(win), 'b1');
 }

@@ -5,7 +5,7 @@
 """BlueBubbles Agent — channel agent with BlueBubbles REST API tools.
 
 Provides access to iMessage via the BlueBubbles server running on a local Mac.
-macOS only. Stores config in ``~/.kiss/third_party_agents/bluebubbles/config.json``.
+macOS only. Stores config in ``$KISS_HOME/third_party_agents/bluebubbles/config.json``.
 
 Usage::
 
@@ -28,6 +28,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 
 _BB_DIR = kiss_home() / "third_party_agents" / "bluebubbles"
@@ -52,7 +53,7 @@ def description() -> str:
     return (
         "Reads and sends iMessages through a BlueBubbles server running on a local Mac "
         "(macOS only; server URL and password in "
-        "~/.kiss/third_party_agents/bluebubbles/config.json); use it with "
+        f"~/{HOME_DIR}/third_party_agents/bluebubbles/config.json); use it with "
         "`run_agent(agent=\"bluebubbles\", task=...)` or the `kiss-bluebubbles -t \"<task>\"` CLI "
         "(`kiss-bluebubbles --channel <chat guid>` polls a chat and answers new messages)."
     )
@@ -667,15 +668,25 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the BlueBubbles channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the BlueBubbles channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return BlueBubblesAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

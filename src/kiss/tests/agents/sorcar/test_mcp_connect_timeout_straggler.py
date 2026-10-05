@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -35,16 +36,18 @@ import pytest
 
 from kiss.agents.sorcar import mcp_servers
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
+from kiss.core.processes import pid_alive as _pid_alive
 
 
-def _pid_alive(pid: int) -> bool:
+def _force_kill(pid: int) -> None:
+    """Kill a leaked child outright (``SIGKILL``; ``taskkill`` on Windows)."""
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:  # pragma: no cover — foreign-owned pid
-        return True
-    return True
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, check=False)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 def _wait_pid_dead(pid: int, deadline_s: float) -> bool:
@@ -106,10 +109,7 @@ def test_connect_timeout_straggler_killed_on_shutdown(
     finally:
         manager.shutdown()
         if child_pid and _pid_alive(child_pid):
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except OSError:
-                pass
+            _force_kill(child_pid)
 
 
 @pytest.mark.slow
@@ -133,7 +133,4 @@ def test_connect_timeout_straggler_killed_after_grace(
     finally:
         manager.shutdown()
         if child_pid and _pid_alive(child_pid):
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except OSError:
-                pass
+            _force_kill(child_pid)

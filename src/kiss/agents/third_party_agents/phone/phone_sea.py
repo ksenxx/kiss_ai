@@ -5,7 +5,7 @@
 """Phone Control Agent — channel agent with Android phone control tools.
 
 Provides access to Android SMS, calls, and notifications via a companion
-REST app. Stores config in ``~/.kiss/third_party_agents/phone/config.json``.
+REST app. Stores config in ``$KISS_HOME/third_party_agents/phone/config.json``.
 
 Usage::
 
@@ -27,6 +27,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 
 _PHONE_DIR = kiss_home() / "third_party_agents" / "phone"
@@ -37,7 +38,7 @@ def description() -> str:
     """Return the one-sentence help text shown by ``/phone help``."""
     return (
         "Channel agent that controls an Android phone through its companion REST app "
-        "(configured by device IP under ~/.kiss/third_party_agents/phone) to send and read "
+        f"(configured by device IP under ~/{HOME_DIR}/third_party_agents/phone) to send and read "
         "SMS, make and end calls, read the call log and list, dismiss or reply to "
         "notifications; use `run_agent(agent=\"phone\", task=...)` or the `kiss-phone` CLI."
     )
@@ -419,15 +420,25 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the phone-control channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the phone-control channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return PhoneControlAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

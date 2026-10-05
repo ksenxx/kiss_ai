@@ -346,7 +346,7 @@ def test_new_agent_loads_persisted_base_url() -> None:
 
 def test_tools_module_function() -> None:
     """Module-level tools() returns a non-empty tool list."""
-    tools = fc_mod.tools()
+    tools = fc_mod.add_to_tools()
     assert len(tools) >= 3
     assert all(callable(t) for t in tools)
 

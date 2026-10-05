@@ -2,21 +2,16 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests: each VS Code window keeps its own work_dir.
+"""Integration tests: the working directory is ONE global value.
 
-Every VS Code window owns exactly one local connection to the shared
-``kiss-web`` daemon and announces its open workspace folder via
-``setWorkDir``.  The daemon records that folder per connection
-(``kiss.server.sorcar.ServerApi.dispatch``) and stamps it onto
-every command from the same connection that lacks an explicit
-``workDir``.
-
-The invariant under test: two windows sharing one daemon can NEVER
-observe each other's folder.  Before the per-connection state existed,
-``setWorkDir`` only mutated the daemon-global fallback
-``VSCodeServer.work_dir``, so the window that synced last silently
-redirected autocomplete, commit-message generation and task launches
-of every other window to its own folder.
+Every surface (VS Code windows, the remote webapp) shares the daemon's
+single working directory: ``setWorkDir`` from any connection -- the
+"Working directory" panel, the remote Explorer's check mark -- adopts
+it for every task of every connection, persists it as ``config.json``
+``work_dir`` and broadcasts ``workDirChanged`` to every client.  A
+command carrying its own ``workDir`` (the Python API's ``work_dir=``)
+still wins, and a VS Code window's connect-time ``setWorkDir`` with
+``ifUnset`` only seeds the value while none is persisted.
 
 These tests bind a loopback WSS listener on an ephemeral port with an
 endpoint file under a temp dir (not the production
@@ -31,12 +26,14 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
+import kiss.core.vscode_config as vc
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
@@ -66,8 +63,8 @@ def _file_names(event: dict[str, Any]) -> list[str]:
     return names
 
 
-class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
-    """Two local connections (= two VS Code windows) with distinct folders."""
+class TestGlobalWorkDir(IsolatedAsyncioTestCase):
+    """Two local connections (= two VS Code windows) sharing one work dir."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -160,15 +157,15 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
             )
         return _pred
 
-    async def test_two_windows_keep_independent_work_dirs(self) -> None:
-        """The core invariant: window B's ``setWorkDir`` must never
-        redirect window A's work_dir-dependent commands to folder B.
+    async def test_set_work_dir_from_one_window_applies_to_every_window(
+        self,
+    ) -> None:
+        """The core contract: the LAST ``setWorkDir`` from any connection
+        is where every connection's work_dir-dependent commands run.
 
-        Window A syncs folder A, window B syncs folder B afterwards
-        (so the daemon-global fallback now points at B).  A ``getFiles``
-        WITHOUT an explicit ``workDir`` from window A must still scan
-        folder A — before the per-connection work_dir existed it
-        scanned folder B.
+        Window A picks folder A, window B then picks folder B: a
+        ``getFiles`` WITHOUT an explicit ``workDir`` from window A scans
+        folder B.  Window A picking folder A again moves window B too.
         """
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
@@ -182,32 +179,88 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
 
         await self._send(writer_a, {"type": "getFiles", "prefix": ""})
         ev_a = await self._drain_until(
-            reader_a, self._files_event_with("./alpha.txt"),
+            reader_a, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("./beta.txt", _file_names(ev_a))
+        self.assertNotIn("./alpha.txt", _file_names(ev_a))
 
+        await self._send(
+            writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
+        )
         await self._send(writer_b, {"type": "getFiles", "prefix": ""})
         ev_b = await self._drain_until(
-            reader_b, self._files_event_with("./beta.txt"),
+            reader_b, self._files_event_with("./alpha.txt"),
         )
-        self.assertNotIn("./alpha.txt", _file_names(ev_b))
+        self.assertNotIn("./beta.txt", _file_names(ev_b))
 
-        await self._send(writer_a, {"type": "getFiles", "prefix": ""})
-        ev_a2 = await self._drain_until(
-            reader_a, self._files_event_with("./alpha.txt"),
+    async def test_set_work_dir_persists_and_broadcasts(self) -> None:
+        """``setWorkDir`` persists ``config.json`` ``work_dir`` (a daemon
+        restart keeps it) and every connection -- the picking one and
+        the other window -- receives ``workDirChanged``; ``getConfig``
+        then reports the same directory to both."""
+        reader_a, writer_a = await self._connect()
+        reader_b, writer_b = await self._connect()
+        await self._send(
+            writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
         )
-        self.assertNotIn("./beta.txt", _file_names(ev_a2))
+        await self._send(
+            writer_b, {"type": "setWorkDir", "workDir": str(self.dir_b)},
+        )
+        for rd in (reader_a, reader_b):
+            await self._drain_until(
+                rd,
+                lambda m: (
+                    m.get("type") == "workDirChanged"
+                    and m.get("workDir") == str(self.dir_b)
+                ),
+            )
+        self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_b))
+        for rd, wr in ((reader_a, writer_a), (reader_b, writer_b)):
+            await self._send(wr, {"type": "getConfig"})
+            cfg = await self._drain_until(
+                rd, lambda m: m.get("type") == "configData",
+            )
+            self.assertEqual(cfg["config"]["work_dir"], str(self.dir_b))
 
-    async def test_explicit_work_dir_wins_over_connection_work_dir(
+    async def test_if_unset_seeds_only_while_nothing_is_persisted(
         self,
     ) -> None:
-        """A command carrying its own ``workDir`` must keep it.
+        """A VS Code window's connect-time ``setWorkDir`` carries
+        ``ifUnset``: with no persisted ``work_dir`` it seeds the global
+        value; once one is persisted it is ignored, so opening a window
+        on another project never overrides the user's pick."""
+        vc.save_config({"work_dir": ""})
+        reader_a, writer_a = await self._connect()
+        reader_b, writer_b = await self._connect()
+        await self._send(
+            writer_a,
+            {"type": "setWorkDir", "workDir": str(self.dir_a), "ifUnset": True},
+        )
+        await self._drain_until(
+            reader_a,
+            lambda m: (
+                m.get("type") == "workDirChanged"
+                and m.get("workDir") == str(self.dir_a)
+            ),
+        )
+        self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_a))
 
-        Per-tab routing (the webview stamps the active tab's folder on
-        ``getFiles``) takes precedence over the connection-level
-        default, so the stamping must never overwrite a non-empty
-        ``workDir``.
-        """
+        await self._send(
+            writer_b,
+            {"type": "setWorkDir", "workDir": str(self.dir_b), "ifUnset": True},
+        )
+        await self._send(writer_b, {"type": "getFiles", "prefix": ""})
+        ev_b = await self._drain_until(
+            reader_b, self._files_event_with("./alpha.txt"),
+        )
+        self.assertNotIn("./beta.txt", _file_names(ev_b))
+        self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_a))
+
+    async def test_explicit_work_dir_wins_over_global_work_dir(
+        self,
+    ) -> None:
+        """A command carrying its own ``workDir`` must keep it: the
+        Python API's ``sorcar.run(work_dir=...)`` and the webview's
+        per-tab file requests take precedence over the global value."""
         reader_a, writer_a = await self._connect()
         await self._send(
             writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
@@ -221,8 +274,8 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
         )
         self.assertNotIn("./alpha.txt", _file_names(ev))
 
-    async def test_empty_set_work_dir_keeps_connection_work_dir(self) -> None:
-        """An empty ``setWorkDir`` must not clear the window's folder."""
+    async def test_empty_set_work_dir_keeps_global_work_dir(self) -> None:
+        """An empty ``setWorkDir`` must not clear the global value."""
         reader_a, writer_a = await self._connect()
         await self._send(
             writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
@@ -234,16 +287,54 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
         )
         self.assertNotIn("./beta.txt", _file_names(ev))
 
-    async def test_commit_message_uses_connection_work_dir(self) -> None:
-        """``generateCommitMessage`` without ``workDir`` must run in the
-        requesting window's folder, not the daemon-global fallback.
+    async def test_concurrent_adoptions_end_in_one_consistent_state(
+        self,
+    ) -> None:
+        """Commands run on a thread pool, so a pick, a settings save and a
+        window's connect-time seed can race.  Whichever adoption wins,
+        the live value, the persisted ``config.json`` value and the last
+        ``workDirChanged`` every client saw must all name the same
+        directory, and a seed (``if_unset``) must never displace a pick
+        that landed first."""
+        reader, _writer = await self._connect()
+        backend = self.server._vscode_server
+        dirs = [str(self.dir_a), str(self.dir_b)]
+        barrier = threading.Barrier(16)
 
-        Folder A is NOT a git repository while folder B is — and B
-        synced last, so the global fallback points at the git repo.
-        Window A's request must still fail with "Not a git
-        repository." (folder A), proving the connection's work_dir was
-        used; window B's request reaches its own repo and fails with
-        the no-staged-changes message instead.
+        def adopt(i: int) -> None:
+            barrier.wait()
+            # Every third thread is a connect-time seed.
+            backend._apply_new_work_dir(dirs[i % 2], if_unset=i % 3 == 0)
+
+        threads = [threading.Thread(target=adopt, args=(i,)) for i in range(16)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        live = backend.work_dir
+        self.assertIn(live, dirs)
+        self.assertEqual(vc.load_config().get("work_dir"), live)
+        # The last broadcast the client saw names the live directory.
+        last = ""
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                line = await asyncio.wait_for(reader.readline(), timeout=0.3)
+            except TimeoutError:
+                break
+            msg = json.loads(line.decode("utf-8"))
+            if msg.get("type") == "workDirChanged":
+                last = msg["workDir"]
+        self.assertEqual(last, live)
+
+    async def test_commit_message_uses_global_work_dir(self) -> None:
+        """``generateCommitMessage`` without ``workDir`` runs in the
+        global working directory whichever window asks.
+
+        Folder A is NOT a git repository while folder B is.  With B
+        picked last, window A's request reaches B's repo (fails with the
+        no-staged-changes message); after A is picked again, window B's
+        request fails with "Not a git repository." (folder A).
         """
         subprocess.run(
             ["git", "init", "-q"], cwd=self.dir_b, check=True, timeout=30,
@@ -267,8 +358,11 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
                 m.get("type") == "commitMessage" and m.get("tabId") == "win-a"
             ),
         )
-        self.assertEqual(msg_a.get("error"), "Not a git repository.")
+        self.assertIn("No staged changes", str(msg_a.get("error", "")))
 
+        await self._send(
+            writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
+        )
         await self._send(
             writer_b, {"type": "generateCommitMessage", "tabId": "win-b"},
         )
@@ -278,4 +372,4 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
                 m.get("type") == "commitMessage" and m.get("tabId") == "win-b"
             ),
         )
-        self.assertIn("No staged changes", str(msg_b.get("error", "")))
+        self.assertEqual(msg_b.get("error"), "Not a git repository.")

@@ -31,6 +31,8 @@ import yaml
 from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -138,31 +140,41 @@ def _line(tex: str, needle: str) -> int:
 
 def test_sea_getters_follow_the_user_contract() -> None:
     """The SEA appends the template's rules, offers the two tools, browses and fans out."""
-    prompt = write_paper_sea.append_to_system_prompt()
+    prompt = write_paper_sea.add_to_system_prompt()
     assert prompt == write_paper_sea.SYSTEM_PROMPT
     assert "William Strunk Jr. and E. B. White" in prompt
     assert "Independent review: run the reviewer model read-only" in prompt
     assert "`check_paper`" in prompt and "`build_paper`" in prompt
     assert "Em dashes: zero in prose" in prompt
     assert "Never add .aux" in prompt
-    tools = write_paper_sea.tools()
+    tools = write_paper_sea.add_to_tools()
     assert [t.__name__ for t in tools] == ["check_paper", "build_paper"]
-    assert write_paper_sea.use_web_tools() is True
-    assert write_paper_sea.is_parallel() is True
-    assert write_paper_sea.classify_tasks() is False
-    # The default system prompt is kept: the SEA only appends to it.
+    # Browse, fan out, skip the classifier; a ``run_agent`` dispatch waits six hours.
+    assert write_paper_sea.settings() == {
+        "use_web_tools": True,
+        "allow_fan_out": True,
+        "auto_classify": False,
+        "timeout": 6 * 3600,
+    }
+    assert resolve_settings(vars(write_paper_sea)) == {
+        "kind": "session", **write_paper_sea.settings()
+    }
+    # The default system prompt is kept: the SEA only appends to it (no
+    # ``system_prompt()`` getter), and defines none of the removed
+    # per-field getters, which nothing would read.
     assert not hasattr(write_paper_sea, "system_prompt")
+    assert_no_removed_getters(write_paper_sea)
 
 
 def test_slash_write_paper_resolves_to_the_bundled_sea() -> None:
-    """``/write_paper <instructions>`` is rewritten into a ``run_agent`` directive on this file."""
+    """``/write_paper <instructions>`` resolves to the instructions and this file."""
     assert sea_commands.get_command("write_paper") == _SEA_PATH
-    rewritten = sea_commands.rewrite_prompt_if_command("/write_paper Write a paper on X")
-    assert rewritten is not None
-    prompt, path = rewritten
+    hit = sea_commands.slash_command_task("/write_paper Write a paper on X")
+    assert hit is not None
+    task_text, path = hit
     assert path == _SEA_PATH
-    assert f'agent = "{_SEA_PATH}"' in prompt
-    assert prompt.endswith("TASK TEXT FOR run_agent:\nWrite a paper on X")
+    assert task_text == "Write a paper on X"
+    assert sea_commands.sea_settings(path) == resolve_settings(vars(write_paper_sea))
 
 
 def test_check_paper_flags_the_sloppy_prose_and_skips_non_prose(tmp_path: Path) -> None:
@@ -481,6 +493,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: P
     the real gate report flowed through the tool-result message.
     """
     path = _write(tmp_path, _SLOPPY_TEX, _SLOPPY_BIB)
+    settings = write_paper_sea.settings()
     script = [
         tool_call_body("check_paper", {"tex_path": str(path)}, prompt_tokens=500),
         finish_body("<pre>summary: 7 gate(s) failed</pre>", prompt_tokens=600),
@@ -494,10 +507,10 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: P
             max_steps=4,
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
-            system_prompt=write_paper_sea.append_to_system_prompt(),
-            tools=write_paper_sea.tools(),
-            web_tools=write_paper_sea.use_web_tools(),
-            is_parallel=write_paper_sea.is_parallel(),
+            system_prompt=write_paper_sea.add_to_system_prompt(),
+            tools=write_paper_sea.add_to_tools(),
+            web_tools=settings["use_web_tools"],
+            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

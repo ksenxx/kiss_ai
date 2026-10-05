@@ -9,7 +9,9 @@ task's project, so the arguments the call leaves empty are filled from the
 calling agent the way a ``run_parallel`` child's are
 (:func:`kiss.agents.sorcar.agent_dispatch.inherit_from_parent`): model,
 same-model model configuration, half of the remaining budget, chat id,
-web-tools and memory settings, the live Docker container, and the
+the run's replacement system prompt, appended system-prompt text and
+appended prompt text, web-tools and memory settings, the live Docker
+container, and the
 effective worktree / auto-commit choices.  Channel and cron sub-tasks and
 explicit programmatic callers (``inherit=False``) inherit nothing.
 
@@ -33,7 +35,9 @@ import yaml
 
 from kiss.agents.sorcar import agent_dispatch, daemon_client
 from kiss.agents.sorcar.agent_dispatch import RunOptions, dispatch_result, make_run_agent_tool
+from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.cron_agent import UNATTENDED_CHILD_PREAMBLE, unattended_child_suffix
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.tests.server.parallel_agent_harness import (
@@ -41,14 +45,18 @@ from kiss.tests.server.parallel_agent_harness import (
     IsolatedKissHome,
     StandInModelServer,
     finish_response,
+    request_text,
     tool_call_response,
 )
 
 DUMMY_SEA = str(
-    Path(agent_dispatch.__file__).resolve().parents[1] / "seas" / "dummy" / "dummy_sea.py"
+    Path(agent_dispatch.__file__).resolve().parents[1] / "seas" / "sorcar" / "sorcar_sea.py"
 )
 PARENT_MODEL = "gpt-4o-mini"
 PARENT_CONFIG = {"base_url": "http://127.0.0.1:1/v1", "api_key": "kiss-test-key"}
+PARENT_BASE_PROMPT = "You are the parent run's replacement system prompt."
+PARENT_SUFFIX = "Parent rule: answer in French."
+PARENT_PROMPT_SUFFIX = "\n\nWhen done, append the word PARENT-SUFFIX to your summary."
 
 
 @pytest.fixture()
@@ -92,6 +100,9 @@ def _parent_after_a_run(repo: Path, auto_commit: bool, use_worktree: bool) -> Wo
     parent.max_budget = 4.0
     parent.budget_used = 1.0
     parent._chat_id = "chat-parent"
+    parent._base_system_prompt = PARENT_BASE_PROMPT
+    parent._system_prompt_suffix = PARENT_SUFFIX
+    parent._prompt_suffix = PARENT_PROMPT_SUFFIX
     parent._use_web_tools = False
     parent._use_memory_override = True
     parent.auto_commit_enabled = auto_commit
@@ -107,9 +118,9 @@ def _dispatch(
     budget: float | None = None,
     options: RunOptions = RunOptions(),
 ) -> daemon_client.TaskResult:
-    """Run ``dispatch_result`` for ``dummy_sea.py`` on *parent*'s repo."""
+    """Run ``dispatch_result`` for ``sorcar_sea.py`` on *parent*'s repo."""
     result = dispatch_result(
-        "dummy_sea", "say hi", DUMMY_SEA, parent.work_dir, model_name, budget, 30.0,
+        "sorcar_sea", "say hi", DUMMY_SEA, parent.work_dir, model_name, budget, 30.0,
         parent_agent=parent, inherit=inherit, options=options,
     )
     assert isinstance(result, daemon_client.TaskResult), result
@@ -132,12 +143,57 @@ class TestDispatchResultInheritance:
         # (4.0 - 1.0 used) / 2: half of the remaining budget.
         assert call["max_budget"] == pytest.approx(1.5)
         assert call["chat_id"] == "chat-parent"
+        assert call["system_prompt"] == PARENT_BASE_PROMPT
+        assert call["append_to_system_prompt"] == PARENT_SUFFIX
+        assert call["append_to_prompt"] == PARENT_PROMPT_SUFFIX
         assert call["use_web_tools"] is False
         assert call["use_memory"] is True
         assert call["docker_image"] == ""
+        # The caller's ``add_to_tools()`` tools are resolved on the
+        # daemon (callables cannot travel the wire): the flag asks for them.
+        assert call["inherit_tools"] is True
         # The parent's EFFECTIVE choices beat the persisted settings.
         assert call["use_worktree"] is False
         assert call["auto_commit"] is False
+
+    def test_script_prompt_getters_win_over_the_inherited_prompts(
+        self, env: IsolatedKissHome, captured: list[dict[str, Any]],
+    ) -> None:
+        """The daemon applies the script's getters to the wire fields the parent filled.
+
+        ``system_prompt()`` replaces the inherited base prompt;
+        ``add_to_system_prompt()`` is added after the inherited suffix;
+        ``prompt(task)`` shapes the prompt body and leaves the inherited
+        prompt suffix as sent.
+        """
+        script = env.repo / "prompts_sea.py"
+        script.write_text(
+            "def system_prompt() -> str:\n    return 'script base'\n\n"
+            "def add_to_system_prompt() -> str:\n    return 'script addition'\n\n"
+            "def prompt(task: str) -> str:\n    return task + ' script prompt suffix'\n"
+        )
+        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        result = dispatch_result(
+            "prompts", "say hi", str(script), str(env.repo), "", None, 30.0,
+            parent_agent=parent, inherit=True,
+        )
+        assert isinstance(result, daemon_client.TaskResult), result
+        (call,) = captured
+        assert call["system_prompt"] == PARENT_BASE_PROMPT
+        assert call["append_to_system_prompt"] == PARENT_SUFFIX
+        assert call["append_to_prompt"] == PARENT_PROMPT_SUFFIX
+        cmd = {
+            "agentPath": call["extension_agent_path"],
+            "prompt": "say hi",
+            "systemPrompt": call["system_prompt"],
+            "appendToSystemPrompt": call["append_to_system_prompt"],
+            "appendToPrompt": call["append_to_prompt"],
+        }
+        assert apply_agent_overrides(cmd) == {"systemPrompt", "appendToSystemPrompt", "prompt"}
+        assert cmd["systemPrompt"] == "script base"
+        assert cmd["appendToSystemPrompt"] == f"{PARENT_SUFFIX}\n\nscript addition"
+        assert cmd["prompt"] == "say hi script prompt suffix"
+        assert cmd["appendToPrompt"] == PARENT_PROMPT_SUFFIX
 
     def test_parent_worktree_and_auto_commit_on_are_inherited_over_config_off(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],
@@ -156,6 +212,8 @@ class TestDispatchResultInheritance:
         parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
         options = RunOptions(
             chat_id="chat-explicit", model_config={"base_url": "http://x/v1"},
+            system_prompt="explicit base", add_to_system_prompt="explicit suffix",
+            add_to_prompt="explicit prompt suffix",
             use_worktree=False, auto_commit=False, use_web_tools=True, use_memory=False,
         )
         _dispatch(parent, model_name=PARENT_MODEL, budget=0.5, options=options)
@@ -164,6 +222,9 @@ class TestDispatchResultInheritance:
         assert call["model_config"] == {"base_url": "http://x/v1"}
         assert call["max_budget"] == 0.5
         assert call["chat_id"] == "chat-explicit"
+        assert call["system_prompt"] == "explicit base"
+        assert call["append_to_system_prompt"] == "explicit suffix"
+        assert call["append_to_prompt"] == "explicit prompt suffix"
         assert call["use_web_tools"] is True
         assert call["use_memory"] is False
         assert call["use_worktree"] is False
@@ -181,56 +242,112 @@ class TestDispatchResultInheritance:
     def test_a_script_that_picks_its_model_gets_no_parent_model_config(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],
     ) -> None:
-        """The daemon applies the script's ``model()`` without touching ``modelConfig``.
+        """The daemon applies the script's ``model`` setting without touching ``modelConfig``.
 
         The parent's endpoint must therefore not be inherited when the
-        script chooses the model — whichever way it binds ``model`` at
-        module level.  Any other top-level name leaves the inheritance.
+        script chooses the model: ``run_agent`` resolves the script's
+        ``settings()`` (its ``model`` key) and hands them to
+        ``dispatch_result``, where a ``model`` in them blocks the
+        ``model_config`` inheritance.  A script that names no model, or
+        sets it to ``None``, leaves the inheritance (so does a script
+        defining the removed ``model()`` getter, which is an ordinary
+        function now); a script whose settings cannot be evaluated is
+        an error before any dispatch.
         """
         parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        run_agent = make_run_agent_tool(str(env.repo), parent)
         scripts = env.repo / "scripts"
         scripts.mkdir()
-        bodies = {
-            "def": "def model() -> str:\n    return 'claude-sonnet-4-5'\n",
-            "async": "async def model():\n    return 'x'\n",
-            "class": "class model:\n    pass\n",
-            "assign": "model = lambda: 'x'\n",
-            "annotated": "model: object = None\n",
-            "import": "from os.path import basename as model\n",
-            "import_as": "import os as model\n",
-            "conditional": (
-                "import os\nif os.name == 'posix':\n"
-                "    def model():\n        return 'claude-sonnet-4-5'\n"
+        picks_model = {
+            "settings": "def settings():\n    return {'model': 'claude-sonnet-4-5'}\n",
+            "worker": (
+                "def settings():\n"
+                "    return {'kind': 'worker', 'model': 'claude-sonnet-4-5'}\n"
             ),
-            "tuple": "def pick():\n    return 'x'\n\nmodel, other = pick, None\n",
-            "try": "try:\n    from missing import model\nexcept ImportError:\n    model = None\n",
+            # ``settings`` defined under a condition the script evaluates
+            # at import time (true on every platform the suite runs on).
+            "conditional": (
+                "import os\nif os.name in ('posix', 'nt'):\n"
+                "    def settings():\n        return {'model': 'claude-sonnet-4-5'}\n"
+            ),
         }
-        for label, body in bodies.items():
+        for label, body in picks_model.items():
             script = scripts / f"{label}_sea.py"
             script.write_text(body)
             captured.clear()
-            result = dispatch_result(
-                label, "say hi", str(script), str(env.repo), "", None, 30.0,
-                parent_agent=parent, inherit=True,
-            )
-            assert isinstance(result, daemon_client.TaskResult), result
+            text = run_agent(task="say hi", agent=str(script), timeout="30")
+            assert yaml.safe_load(text)["success"] is True, (label, text)
             assert captured[0]["model_config"] is None, label
             # The wire ``model`` is still the parent's; the daemon's
             # override replaces it with the script's choice.
             assert captured[0]["model"] == PARENT_MODEL, label
-        for label, body in {
+        leaves_inheritance = {
+            "none": "def settings():\n    return {'model': None}\n",
             "other": "def model_name() -> str:\n    return 'x'\n\nmodels = []\n",
-            "unparsable": "def model(:\n",
-        }.items():
+            "legacy_getter": "def model() -> str:\n    return 'claude-sonnet-4-5'\n",
+            "empty": "def settings():\n    return {}\n",
+        }
+        for label, body in leaves_inheritance.items():
             script = scripts / f"{label}_sea.py"
             script.write_text(body)
             captured.clear()
-            dispatch_result(
-                label, "say hi", str(script), str(env.repo), "", None, 30.0,
-                parent_agent=parent, inherit=True,
-            )
+            text = run_agent(task="say hi", agent=str(script), timeout="30")
+            assert yaml.safe_load(text)["success"] is True, (label, text)
             assert captured[0]["model_config"] == PARENT_CONFIG, label
-        assert agent_dispatch.script_defines(str(scripts / "missing.py"), "model") is False
+            assert captured[0]["model"] == PARENT_MODEL, label
+        # An explicit model wins over the script's; when it is the
+        # parent's launch model the parent's endpoint still applies.
+        captured.clear()
+        text = run_agent(
+            task="say hi", agent=str(scripts / "settings_sea.py"), model=PARENT_MODEL,
+            timeout="30",
+        )
+        assert yaml.safe_load(text)["success"] is True, text
+        assert captured[0]["model"] == PARENT_MODEL
+        assert captured[0]["model_config"] == PARENT_CONFIG
+        assert captured[0]["provenance"]["model"] == "explicit"
+        assert captured[0]["provenance"]["timeout"] == "explicit"
+        # A script whose settings cannot be evaluated — a syntax error,
+        # a ``settings`` that is not a zero-argument callable returning
+        # a dict — is a clean error and dispatches nothing.
+        broken = {
+            "unparsable": "def settings(:\n",
+            "async": "async def settings():\n    return {}\n",  # a coroutine, not a dict
+            "class": "class settings:\n    pass\n",  # an instance, not a dict
+            "import": "from os.path import basename as settings\n",  # needs an argument
+            "raising": "def settings():\n    raise RuntimeError('boom')\n",
+            "unknown_key": "def settings():\n    return {'models': 'x'}\n",
+            "wrong_type": "def settings():\n    return {'model': 5}\n",
+        }
+        for label, body in broken.items():
+            script = scripts / f"{label}_sea.py"
+            script.write_text(body)
+            captured.clear()
+            text = run_agent(task="say hi", agent=str(script), timeout="30")
+            # A file that does not even compile "failed to import";
+            # one that runs but misdeclares its settings names the
+            # settings() problem.  The diagnostic names the script by
+            # its canonical path (``resolve_agent_path``), which on
+            # macOS differs from the ``/var`` spelling of ``tmp_path``, and
+            # quotes it with ``!r`` (doubled backslashes on Windows).
+            canonical = str(script.resolve())
+            expected = (
+                f"Error: agent script {canonical!r} failed to import" if label == "unparsable"
+                else f"Error: agent script {canonical!r}: settings()"
+            )
+            assert text.startswith(expected), (label, text)
+            assert captured == [], label
+        # ``dispatch_result`` itself: the ``settings`` argument decides.
+        _dispatch(parent)
+        assert captured[0]["model_config"] == PARENT_CONFIG
+        captured.clear()
+        result = dispatch_result(
+            "sorcar_sea", "say hi", DUMMY_SEA, str(env.repo), "", None, 30.0,
+            parent_agent=parent, inherit=True, settings={"kind": "session", "model": "x"},
+        )
+        assert isinstance(result, daemon_client.TaskResult), result
+        assert captured[0]["model_config"] is None
+        assert captured[0]["model"] == PARENT_MODEL
 
     def test_an_empty_parent_model_config_is_not_forwarded(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],
@@ -274,6 +391,8 @@ class TestDispatchResultInheritance:
         assert call["model_config"] is None
         assert call["max_budget"] is None  # daemon default
         assert call["chat_id"] == ""
+        assert call["system_prompt"] == ""
+        assert call["append_to_system_prompt"] == ""
         assert call["use_web_tools"] is True  # the agent's initial per-run value
         assert call["use_memory"] is None
         # No ``use_worktree_enabled`` / ``auto_commit_enabled`` on a
@@ -293,10 +412,33 @@ class TestDispatchResultInheritance:
         assert call["model_config"] is None
         assert call["max_budget"] is None
         assert call["chat_id"] == ""
+        assert call["system_prompt"] == ""
+        assert call["append_to_system_prompt"] == ""
+        assert call["append_to_prompt"] == ""
         assert call["use_web_tools"] is None
         assert call["use_memory"] is None
+        assert call["inherit_tools"] is False
         assert call["use_worktree"] is True
         assert call["auto_commit"] is True
+
+    def test_unattended_preamble_follows_the_inherited_prompt_suffix(
+        self, env: IsolatedKissHome, captured: list[dict[str, Any]],
+    ) -> None:
+        """A cron sub-task's no-questions rule is added after the inherited suffix.
+
+        A caller that is itself an unattended sub-task already carries
+        the preamble in its suffix; the child's suffix is then the
+        caller's, not the preamble twice.
+        """
+        parent = _parent_after_a_run(env.repo, auto_commit=False, use_worktree=False)
+        parent.task_description = "nightly chores" + unattended_child_suffix("")
+        _dispatch(parent)
+        assert captured[0]["append_to_prompt"] == (
+            PARENT_PROMPT_SUFFIX + "\n\n" + UNATTENDED_CHILD_PREAMBLE
+        )
+        parent._prompt_suffix = unattended_child_suffix("")
+        _dispatch(parent)
+        assert captured[1]["append_to_prompt"] == unattended_child_suffix("")
 
     def test_exhausted_parent_budget_raises_like_run_parallel(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],
@@ -311,21 +453,52 @@ class TestDispatchResultInheritance:
     def test_channel_mode_inherits_nothing(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],
     ) -> None:
-        """A channel sub-task acts on an external service: no chat, model, or budget."""
-        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        """A channel sub-task acts on an external service: no chat, model, or budget.
+
+        The channel module's path is dispatched with ``inherit=False``
+        and the task text verbatim (no prompt preamble: the daemon adds
+        the channel preamble and the module's ``add_to_system_prompt()``
+        to the system prompt), in the shared ``channel_work`` scratch
+        directory.  Worktree and auto-commit follow the persisted
+        settings on the wire, not the parent's run, and the module's
+        ``channel`` preset pins both off on the daemon.
+        """
+        from kiss.agents.third_party_agents.slack import slack_sea
+
+        env.write_config(is_worktree=True, auto_commit_mode=True)
+        parent = _parent_after_a_run(env.repo, auto_commit=False, use_worktree=False)
         run_agent = make_run_agent_tool(str(env.repo), parent)
         text = run_agent(task="list channels", agent="slack", timeout="30")
         assert yaml.safe_load(text)["success"] is True, text
         (call,) = captured
+        assert call["prompt"] == "list channels"
+        assert call["extension_agent_path"] == slack_sea.__file__
+        assert call["work_dir"] == str(env.kiss_home / "channel_work")
+        assert call["scope_work_dir"] == str(env.repo)
         assert call["model"] == ""
         assert call["model_config"] is None
         assert call["max_budget"] is None
         assert call["chat_id"] == ""
+        assert call["system_prompt"] == ""
+        assert call["append_to_system_prompt"] == ""
+        assert call["append_to_prompt"] == ""
         assert call["use_web_tools"] is None
         assert call["use_memory"] is None
         assert call["docker_image"] == ""
-        assert call["use_worktree"] is False
-        assert call["auto_commit"] is False
+        assert call["inherit_tools"] is False
+        # The persisted settings, not the parent's (opposite) choices.
+        assert call["use_worktree"] is True
+        assert call["auto_commit"] is True
+        cmd = {
+            "agentPath": call["extension_agent_path"],
+            "useWorktree": call["use_worktree"],
+            "autoCommit": call["auto_commit"],
+            "appendToSystemPrompt": call["append_to_system_prompt"],
+        }
+        apply_agent_overrides(cmd)
+        assert cmd["useWorktree"] is False
+        assert cmd["autoCommit"] is False
+        assert cmd["appendToSystemPrompt"].endswith(slack_sea.SlackAgent.channel_system_prompt)
 
 
 def _run_parent(
@@ -334,7 +507,7 @@ def _run_parent(
     """Run a ``WorktreeSorcarAgent`` whose scripted model calls ``run_agent`` once."""
     parent = WorktreeSorcarAgent("inherit-e2e-parent")
     result = parent.run(
-        prompt_template="delegate to the dummy agent",
+        prompt_template="delegate to the sorcar agent",
         model_name=STANDIN_MODEL,
         model_config=server.model_config,
         work_dir=str(env.repo),
@@ -352,13 +525,19 @@ def _run_parent(
 
 
 class _DelegatingModel:
-    """Scripted model: first ``run_agent(dummy_sea.py)``, then ``finish``."""
+    """Scripted model: first ``run_agent(sorcar_sea.py)``, then ``finish``.
+
+    Keeps the text of every request so a test can check what system
+    prompt the parent itself ran with.
+    """
 
     def __init__(self) -> None:
         self.turns = 0
+        self.requests: list[str] = []
 
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         self.turns += 1
+        self.requests.append(request_text(request))
         if self.turns == 1:
             return tool_call_response(
                 "run_agent", {"task": "say hi", "agent": DUMMY_SEA, "timeout": "30"},
@@ -385,6 +564,10 @@ class TestFullRunInheritance:
         assert call["model_config"]["api_key"] == server.model_config["api_key"]
         assert 0.0 < call["max_budget"] <= 2.0  # half of what was left of 4.0
         assert call["chat_id"] == parent._chat_id != ""
+        # A run given no system prompt of its own forwards none: the
+        # default SYSTEM.md the parent ran with is not an override.
+        assert call["system_prompt"] == ""
+        assert call["append_to_system_prompt"] == ""
         assert call["use_web_tools"] is False
         assert call["use_memory"] is True
         assert call["docker_image"] == ""
@@ -397,6 +580,53 @@ class TestFullRunInheritance:
         assert call["auto_commit"] is False
         # The sub-task's spend folded into the parent's accounting.
         assert parent.budget_used >= 0.25
+
+    def test_run_system_prompts_reach_the_sub_task(
+        self, env: IsolatedKissHome, captured: list[dict[str, Any]],
+    ) -> None:
+        """A run's ``base_system_prompt`` and ``system_prompt`` suffix go to the sub-task.
+
+        The same two values ``run_parallel`` forwards: the parent's own
+        request carried both, and the ``run_agent`` dispatch sends them
+        as the sub-task's ``system_prompt`` / ``append_to_system_prompt``.
+        """
+        env.write_config(classify_tasks=False, is_worktree=False, auto_commit_mode=False)
+        model = _DelegatingModel()
+        server = StandInModelServer(model)
+        try:
+            parent = _run_parent(
+                env, server, use_worktree=False,
+                base_system_prompt=PARENT_BASE_PROMPT, system_prompt=PARENT_SUFFIX,
+            )
+        finally:
+            server.stop()
+        assert PARENT_BASE_PROMPT in model.requests[0]
+        assert PARENT_SUFFIX in model.requests[0]
+        assert parent._base_system_prompt == PARENT_BASE_PROMPT
+        assert parent._system_prompt_suffix == PARENT_SUFFIX
+        (call,) = captured
+        assert call["system_prompt"] == PARENT_BASE_PROMPT
+        assert call["append_to_system_prompt"] == PARENT_SUFFIX
+
+    def test_run_prompt_suffix_reaches_the_sub_task(
+        self, env: IsolatedKissHome, captured: list[dict[str, Any]],
+    ) -> None:
+        """The ``appendToPrompt`` text a run was given becomes the sub-task's.
+
+        The daemon appends the suffix to the prompt itself and hands
+        it to ``run(prompt_suffix=...)`` for the record; the dispatch
+        sends it as the sub-task's ``append_to_prompt``.
+        """
+        env.write_config(classify_tasks=False, is_worktree=False, auto_commit_mode=False)
+        server = StandInModelServer(_DelegatingModel())
+        try:
+            parent = _run_parent(
+                env, server, use_worktree=False, prompt_suffix=PARENT_PROMPT_SUFFIX,
+            )
+        finally:
+            server.stop()
+        assert parent._prompt_suffix == PARENT_PROMPT_SUFFIX
+        assert captured[0]["append_to_prompt"] == PARENT_PROMPT_SUFFIX
 
     def test_worktree_run_passes_its_worktree_and_its_directory(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],

@@ -134,7 +134,7 @@ def _drive_run_task_with_base_exception(
             "prompt": "reproduce-no-result-on-outer-baseexception",
             "tabId": tab_id,
             "workDir": work_dir,
-            "useParallel": False,
+            "isParallel": False,
             "useWorktree": False,
             "autoCommit": False,
             "_state_key": state.task_id,

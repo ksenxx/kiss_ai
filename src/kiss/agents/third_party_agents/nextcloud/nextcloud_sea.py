@@ -10,7 +10,7 @@ takes only the server URL and hands back a sign-in link the user opens
 in their own browser; once they grant access, ``finish_nextcloud_auth``
 collects the app password the server issued for this client.  A
 username plus password/app password can still be supplied directly.
-Stores config in ``~/.kiss/third_party_agents/nextcloud/config.json``.
+Stores config in ``$KISS_HOME/third_party_agents/nextcloud/config.json``.
 
 Usage::
 
@@ -872,15 +872,30 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the Nextcloud Talk channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the Nextcloud Talk channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return NextcloudTalkAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
+
+
+def add_to_system_prompt() -> str:
+    """Return the channel guidance appended to the run's system prompt."""
+    return NextcloudTalkAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

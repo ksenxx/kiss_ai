@@ -65,7 +65,7 @@ test('SorcarApi (extension host) emits correct wire commands', () => {
   const api = new SorcarApi({sendCommand: cmd => sent.push(cmd)});
 
   api.submit({prompt: 'p', model: 'm', workDir: '/w', attachments: [],
-              useWorktree: false, useParallel: true, autoCommit: false,
+              useWorktree: false, isParallel: true, autoCommit: false,
               tabId: 't'});
   api.stop('t');
   api.appendUserMessage('more', 't');
@@ -95,7 +95,7 @@ test('SorcarApi (extension host) emits correct wire commands', () => {
   ]);
   assert.deepStrictEqual(sent[0], {
     type: 'submit', prompt: 'p', model: 'm', workDir: '/w', attachments: [],
-    useWorktree: false, useParallel: true, autoCommit: false, tabId: 't',
+    useWorktree: false, isParallel: true, autoCommit: false, tabId: 't',
   });
   assert.deepStrictEqual(sent[1], {type: 'stop', tabId: 't'});
   assert.deepStrictEqual(sent[4], {

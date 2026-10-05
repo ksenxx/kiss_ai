@@ -237,7 +237,10 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "max_budget": max_budget,
         "model_config": model_config,
         "work_dir": work_dir,
-        "web_tools": not args.no_web,
+        # ``None`` = not given: only ``--no-web`` is an explicit choice, so
+        # the default cannot clash with the channel kind's locked
+        # ``use_web_tools: False`` (sea_settings.PRECEDENCE_RULE).
+        "web_tools": False if args.no_web else None,
         "is_parallel": args.parallel,
     }
     return run_kwargs

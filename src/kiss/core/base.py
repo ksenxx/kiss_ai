@@ -7,6 +7,7 @@
 
 import json
 import logging
+import re
 import shutil
 import sys
 import threading
@@ -191,7 +192,11 @@ class Base:
             Path: The file path for the trajectory YAML file.
         """
         folder_path = Path(config_module.artifact_dir) / "trajectories"
-        name_safe = self.name.replace(" ", "_").replace("/", "_")
+        # Agent names can carry arbitrary text (``run_parallel`` names
+        # its workers after the task); every character that is not a
+        # word character, dot or dash becomes ``_`` so the file name is
+        # valid on every platform (Windows rejects ``: \ * ? " < > |``).
+        name_safe = re.sub(r"[^\w.-]", "_", self.name)
         return folder_path / f"trajectory_{name_safe}_{self.id}_{self._trajectory_stamp}.yaml"
 
     def _add_message(self, role: str, content: Any, timestamp: int | None = None) -> None:

@@ -31,7 +31,7 @@ from kiss.agents.third_party_agents.qq.qq_sea import (
     _derive_signing_key,
 )
 from kiss.agents.third_party_agents.qq.qq_sea import (
-    tools as module_tools,
+    add_to_tools as module_tools,
 )
 
 _SECRET = "kiss-qq-test-secret"

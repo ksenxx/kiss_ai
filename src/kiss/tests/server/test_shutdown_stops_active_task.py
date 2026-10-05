@@ -135,7 +135,7 @@ class TestShutdownStopsActiveTask(TestCase):
                 "prompt": "shutdown-while-running",
                 "tabId": tab_id,
                 "workDir": "/tmp",
-                "useParallel": False,
+                "isParallel": False,
                 "useWorktree": False,
                 "autoCommit": False,
             },),

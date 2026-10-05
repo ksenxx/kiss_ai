@@ -62,7 +62,7 @@ _FAILING_SCRIPT = textwrap.dedent(
     _DIR = pathlib.Path(__file__).resolve().parent
 
 
-    def prompt():
+    def settings():
         \"\"\"Block until released, then raise (the task ends in setup).\"\"\"
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -322,7 +322,7 @@ class TestReplayBoundary(TabMirroringBase):
                 "chatId": chat_id,
                 "workDir": str(work_dir),
                 "useWorktree": False,
-                "useParallel": False,
+                "isParallel": False,
                 "autoCommit": False,
                 "agentPath": str(script),
             })
@@ -934,7 +934,7 @@ def test_intermediate_subtask_cleaned_up_when_its_persistence_fails() -> None:
             "prompt": "<task>first part</task><task>second part</task>",
             "tabId": tab_id,
             "workDir": tempfile.mkdtemp(prefix="kiss-rb5-wd-"),
-            "useParallel": False,
+            "isParallel": False,
             "useWorktree": False,
             "autoCommit": False,
             "_state_key": state.task_id,

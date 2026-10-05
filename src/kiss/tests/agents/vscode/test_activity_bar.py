@@ -433,12 +433,21 @@ def test_commit_click_lists_modified_files_and_opens_them(browser, harness):
         assert shows[-1]["mode"] == "diff"
         assert shows[-1]["sha"] == harness.shas["second"]
         assert shows[-1]["path"] == "dir/nested.py"
+        # The diff's modified side carries the file's content.  Monaco
+        # comes from a CDN with a 10 s load timeout in main.js; when a
+        # loaded machine misses it, renderDiffContent shows the same
+        # diff as a unified-diff <pre class="content-code-fallback">,
+        # so the sentinel is accepted from either view (the pattern of
+        # test_content_tab_file_links.py).
         page.wait_for_function(
-            "window.monaco && monaco.editor.getDiffEditors().some(d => {"
+            "(window.monaco && monaco.editor.getDiffEditors().some(d => {"
             "  const m = d.getModel();"
             "  return !!m && d.getContainerDomNode().isConnected"
-            "    && m.modified.getValue().includes('nested-sentinel-4f2a'); })",
-            timeout=15000,
+            "    && m.modified.getValue().includes('nested-sentinel-4f2a'); }))"
+            " || Array.from(document.querySelectorAll("
+            "  '#content-tab-area .content-code-fallback')).some("
+            "  p => p.textContent.includes('nested-sentinel-4f2a'))",
+            timeout=30000,
         )
         # A deleted file in the Changes list is not openable.
         n_open = len(opened)

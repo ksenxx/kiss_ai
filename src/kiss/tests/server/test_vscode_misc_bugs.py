@@ -196,7 +196,7 @@ class TestSubtaskFailureStepCount(_TempDbTestCase):
             "prompt": "c4 failing task",
             "tabId": tab_id,
             "workDir": self._tmp,
-            "useParallel": False,
+            "isParallel": False,
             "useWorktree": False,
             "autoCommit": False,
         })

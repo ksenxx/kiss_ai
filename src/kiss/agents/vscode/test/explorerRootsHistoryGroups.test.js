@@ -442,13 +442,17 @@ async function main() {
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, WD);
     answerWorkDirCheck(win, posted, OTHER);
     const after = posted.slice(before);
-    const saved = after.find(m => m.type === 'saveConfig');
-    assert.ok(
-      saved && saved.config.work_dir === OTHER,
-      'saveConfig {work_dir: OTHER}',
+    // The daemon owns the one global working directory: the folder is
+    // handed to it as setWorkDir (it persists and broadcasts it), never
+    // as a settings save.
+    assert.strictEqual(
+      after.filter(m => m.type === 'saveConfig').length,
+      0,
+      'no saveConfig: the working directory is not a settings field',
     );
-    const pinned = after.find(m => m.type === 'setWorkDir');
-    assert.ok(pinned && pinned.workDir === OTHER, 'setWorkDir OTHER');
+    const adopted = after.filter(m => m.type === 'setWorkDir');
+    assert.strictEqual(adopted.length, 1, 'exactly one setWorkDir');
+    assert.strictEqual(adopted[0].workDir, OTHER, 'setWorkDir OTHER');
     // The tree: OTHER first (working directory), the old work dir kept.
     const roots = rootRows(win);
     assert.deepStrictEqual(

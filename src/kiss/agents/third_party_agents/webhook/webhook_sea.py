@@ -8,7 +8,7 @@ Runs an embedded HTTP server that accepts ``POST /hook/<route-name>``
 requests from external systems (GitHub, CI, monitoring, ...), verifies
 an HMAC-SHA256 signature per route, and turns each accepted event into
 a normalized channel message rendered from the route's prompt template.
-Stores config in ``~/.kiss/third_party_agents/webhook/config.json``
+Stores config in ``$KISS_HOME/third_party_agents/webhook/config.json``
 (``port`` plus a JSON-encoded ``routes`` map).
 
 Two signature schemes are supported per route:
@@ -666,15 +666,30 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the webhook channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the webhook channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return WebhookAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
+
+
+def add_to_system_prompt() -> str:
+    """Return the channel guidance appended to the run's system prompt."""
+    return WebhookAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

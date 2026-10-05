@@ -40,6 +40,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _save_task_result,
 )
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.utils import rmtree_force
@@ -83,7 +84,7 @@ short and cite every file you changed by path.
 """
 
 
-def append_to_system_prompt() -> str:
+def add_to_system_prompt() -> str:
     """Append to the default prompt."""
     return SYSTEM_PROMPT
 '''
@@ -101,8 +102,8 @@ def system_prompt() -> str:
 _NOPROMPT_SEA = '''"""Demo SEA without a prompt getter."""
 
 
-def tools() -> list:
-    """No tools."""
+def add_to_tools() -> list:
+    """No extra tools."""
     return []
 '''
 
@@ -171,10 +172,25 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert "{{HOME_DIR}}" in sea.SYSTEM_PROMPT and "{{" not in sea.system_prompt()
     assert f"~/{HOME_DIR}/MODEL_INFO.json" in sea.system_prompt()
     assert "--seas-dir" in sea.description() and "--seas-dir" in sea.SYSTEM_PROMPT
-    assert sea.max_budget() == 2000.0
-    assert sea.use_memory() is True
-    assert sea.use_web_tools() is False
-    names = [t.__name__ for t in sea.tools()]
+    assert sea.settings() == {"max_budget": 2000.0, "use_memory": True, "use_web_tools": False}
+    # No preset named: the resolved settings are exactly those three keys under
+    # the default ``session`` preset; ``system_prompt()`` is a getter the daemon
+    # applies separately, not a settings key.
+    assert resolve_settings(vars(sea)) == {"kind": "session", **sea.settings()}
+    assert "system_prompt" not in resolve_settings(vars(sea))
+    for legacy in (
+        "max_budget",
+        "use_memory",
+        "use_web_tools",
+        "append_to_system_prompt",
+        "add_to_system_prompt",
+        "tools",
+        "tool_profile",
+        "model",
+        "prompt",
+    ):
+        assert not hasattr(sea, legacy), legacy
+    names = [t.__name__ for t in sea.add_to_tools()]
     assert names == [
         "indexed_seas",
         "sea_runs",
@@ -186,8 +202,18 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
         "model_scorecard",
         "sea_prompt",
         "patch_sea_prompt",
+        "sea_source",
+        "patch_sea_code",
+        "improve_sea_code",
+        "revert_sea_code",
+        "tune_sea_settings",
+        "patch_sea_settings",
+        "settle_sea_settings",
+        "export_sea_evals",
+        "frequent_tasks",
         "write_autorouter_evidence",
         "replay_in_clone",
+        "replay_in_place",
         "sorcar_text",
         "request_sorcar_permission",
         "patch_sorcar",
@@ -195,11 +221,10 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     for name in names:
         assert f"`{name}" in sea.SYSTEM_PROMPT or name in sea.SYSTEM_PROMPT, name
     assert sea_commands.get_command("rsi7d") == _SEA_PATH
-    assert (
-        sea_commands.rewrite_prompt_if_command("/rsi7d") is None
-    )  # a slash command needs task text
-    rewritten = sea_commands.rewrite_prompt_if_command("/rsi7d all")
-    assert rewritten is not None and rewritten[1] == _SEA_PATH
+    assert sea_commands.slash_command_task("/rsi7d") is None  # a slash command needs task text
+    hit = sea_commands.slash_command_task("/rsi7d all")
+    assert hit == ("all", _SEA_PATH)
+    assert sea_commands.sea_settings(_SEA_PATH) == resolve_settings(vars(sea))
 
 
 def test_sea_name_of_handles_paths_channels_and_plain_subagents() -> None:
@@ -243,7 +268,7 @@ def test_indexed_seas_reports_editable_paths_and_prompt_shapes(checkout: Path) -
         "SYSTEM_PROMPT",
     )
     assert rows["demo"]["prompt_chars"] > 100
-    assert rows["fdemo"]["prompt_getter"] == "append_to_system_prompt"
+    assert rows["fdemo"]["prompt_getter"] == "add_to_system_prompt"
     assert rows["fdemo"]["prompt_constant"] == "SYSTEM_PROMPT"
     assert rows["fdemo"]["prompt_chars"] == len(
         _FSTRING_SEA.split("SYSTEM_PROMPT = ", 1)[1].split("\n\n\ndef")[0]
@@ -291,7 +316,7 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
     )
     _persist("plain", [_result_event(True)], result="<p>plain</p>", parent_task_id=parent, cost=0.5)
     fdemo = checkout / "fdemo" / "fdemo_sea.py"
-    fdemo_prompt = sea._execute_sea(fdemo)["append_to_system_prompt"]()
+    fdemo_prompt = sea._execute_sea(fdemo)["add_to_system_prompt"]()
     side = _persist(
         "What have the task done so far?",
         [
@@ -586,7 +611,7 @@ def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Pa
         )
         in source
     )
-    prompt = sea._execute_sea(path)["append_to_system_prompt"]()
+    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     assert "Run the gate `uv run pytest -q` before you finish" in prompt
     assert prompt.endswith("- Quote {GATE} literally.\n")
     # A replacement inside the f-string source doubles braces in the new text.
@@ -594,9 +619,7 @@ def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Pa
         "fdemo", "Keep the summary\nshort", "Keep the summary {short}"
     ).startswith("Patched")
     assert "Keep the summary {{short}}" in path.read_text(encoding="utf-8")
-    assert (
-        "Keep the summary {short} and cite" in sea._execute_sea(path)["append_to_system_prompt"]()
-    )
+    assert "Keep the summary {short} and cite" in sea._execute_sea(path)["add_to_system_prompt"]()
     ok_source = path.read_text(encoding="utf-8")
     # Closing the literal early would change code: rejected, file untouched.
     bad = sea.patch_sea_prompt("fdemo", "Never edit files", 'x"""\nimport os\ny = f"""z')
@@ -898,6 +921,7 @@ def _run_registered(
     agent: WorktreeSorcarAgent, task: str, script: list[bytes], work_dir: Path
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run *agent* on *task* against the scripted model; return the raw result and requests."""
+    settings = resolve_settings(vars(sea))
     with serve(script) as (url, requests):
         result = agent.run(
             prompt_template=task,
@@ -905,11 +929,11 @@ def _run_registered(
             model_name=MODEL,
             work_dir=str(work_dir),
             max_steps=8,
-            max_budget=sea.max_budget(),
+            max_budget=settings["max_budget"],
             model_config={"base_url": url, "api_key": "local"},
-            tools=sea.tools(),
+            tools=sea.add_to_tools(),
             base_system_prompt=sea.system_prompt(),
-            web_tools=sea.use_web_tools(),
+            web_tools=settings["use_web_tools"],
             use_memory=False,
             is_parallel=False,
             verbose=False,
@@ -953,9 +977,9 @@ def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
     assert parsed["success"] is True and parsed["summary"] == "<p>Patched demo.</p>", parsed
     assert len(agentic) == 4
     names = {t["function"]["name"] for t in agentic[0]["tools"]}
-    assert {t.__name__ for t in sea.tools()} <= names
-    # ``decide`` is not expected: the Jev tool follows the "Use Jev"
-    # setting (off in the test KISS_HOME), not the SEA's tool list.
+    assert {t.__name__ for t in sea.add_to_tools()} <= names
+    # ``decide`` is not asserted: the Jev tool follows the "Use Jev"
+    # setting and the OpenRouter key, not the SEA's tool list.
     assert {"Bash", "run_agent", "finish"} <= names
     system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
     assert str(system["content"]).startswith(sea.system_prompt())

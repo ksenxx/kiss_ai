@@ -19,7 +19,7 @@ arriving on another connection) found the thread with
   exactly this window (S3-05 / C-R4) — so no force-stop watchdog was
   ever started;
 * only the cooperative stop event was set, which nothing in the run's
-  untrusted setup code (agent-script getters, tools files) ever
+  untrusted setup code (agent-script getters) ever
   checks, so the run kept executing that code indefinitely and the
   client's stop confirmation wait starved.
 
@@ -77,7 +77,7 @@ _BLOCKING_SCRIPT = textwrap.dedent(
     _DIR = pathlib.Path(__file__).resolve().parent
 
 
-    def prompt():
+    def settings():
         \"\"\"Block until interrupted; raise if released or timed out.\"\"\"
         (_DIR / "entered").write_text("1", encoding="utf-8")
         deadline = time.time() + 60
@@ -147,7 +147,7 @@ class TestStopBeforeThreadStart(TestCase):
             "tabId": tab_id,
             "workDir": str(self.work_dir),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
             "agentPath": str(self.script),
         }

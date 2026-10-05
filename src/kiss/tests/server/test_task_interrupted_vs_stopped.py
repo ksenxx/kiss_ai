@@ -127,7 +127,7 @@ def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, str]:
             "prompt": f"cancel-while-running-{tab_id}",
             "tabId": tab_id,
             "workDir": "/tmp",
-            "useParallel": False,
+            "isParallel": False,
             "useWorktree": False,
             "autoCommit": False,
             "_state_key": state.task_id,

@@ -66,11 +66,23 @@ exactly what interactive authentication and write-approval flows need.
 ## How a prompt reaches a channel
 
 Name the service in your prompt and Sorcar routes it. Internally the session calls its
-`run_agent` tool with the channel name and your request; the dispatched sub-session
-already carries that channel's authenticated tools and is instructed to use them
-directly, without exploring source code. The `agent` argument is optional: omitting it
-(or passing it blank) runs the bundled `src/kiss/agents/seas/dummy/dummy_sea.py`, a plain
-Sorcar sub-session with the standard toolset, on the task in the caller's work directory.
+`run_agent` tool with the channel name and your request (`run_agent(agent="slack",
+task=...)`); your request goes through verbatim as the sub-session's task. The channel's
+SEA declares `settings()` returning `{"kind": "channel"}`, so the sub-session runs in
+the shared `~/.kiss/channel_work` directory with no worktree, auto-commit, classifier,
+fan-out, web tools or memory, inherits nothing from the calling task (model and budget
+are the daemon defaults unless the caller passes them), and carries that channel's
+authenticated tools; the daemon appends the channel preamble to its system prompt,
+which tells it to use those tools directly, without exploring source code. The `agent`
+argument is optional: omitting it (or passing it blank, or a generic label such as
+`"general"` or `"assistant"`) runs the bundled `src/kiss/agents/seas/sorcar/sorcar_sea.py`,
+a plain Sorcar sub-session with the standard toolset, on the task in the caller's work
+directory (`"reviewer"` is refused with a pointer to `tool_profile="review"`: a reviewer
+is a plain sub-agent with the read-only toolset, not an agent of its own). The same
+argument also takes `"cron"`, a path to an agent script, or the name of a registered
+slash command; the call waits for the SEA's `timeout` setting, else 3600 s, unless
+`timeout` is passed, and when the wait expires the sub-task keeps running as an
+`agent_job` whose id the call returns.
 
 > Send "dinner at 7" to Telegram chat 123456789.
 
@@ -88,16 +100,18 @@ modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on.
 
 Prompts that span several services also work in a single message: the top-level
 session orchestrates, dispatching one channel at a time and passing results between
-them. Each dispatched channel session is instructed to handle only its own service and
-never call `run_agent` (it keeps the standard toolset, so this is a prompt rule, not a
-tool restriction), so let the session you are chatting with do the coordination — which
+them. Each dispatched channel session's system prompt tells it to handle only its own service
+and never call `run_agent` (it keeps the standard toolset, so this is a prompt rule, not
+a tool restriction), so let the session you are chatting with do the coordination — which
 it does by default.
 
 When you want a specific channel with no routing guesswork, start the prompt with its
 slash command: `/slack post "deploy done" to #eng`. Every SEA folder `xxx/xxx_sea.py`
 in this package is registered as `/xxx` (the command is the folder name), the chat box
-autocompletes the names, and the daemon turns the prompt into a direct `run_agent` call
-on that file. `/xxx help` runs nothing and prints the module's `description()`, one
+autocompletes the names, and the daemon runs that file directly in the tab with the rest
+of the prompt as the task: no relay turn by the chat agent and no nested sub-agent tab,
+the channel's settings, system prompt and tools apply to that very run, and the tab
+keeps showing `/xxx ...` as you typed it. `/xxx help` runs nothing and prints the module's `description()`, one
 sentence saying what the agent does and how to use it. Folders of your own SEAs
 listed in `~/.kiss/SEAS.md` are registered the same way; the file syntax and the
 dispatch flow are in
@@ -110,14 +124,23 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 (bash, file editing, browser automation). The channel agent instance is the *carrier*
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
-- Every module defines `description()`, the one-sentence summary `/xxx help` prints,
-  and a `tools()` function. The daemon calls
-  `tools()` to build the channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
+- Every module defines `description()`, the one-sentence summary `/xxx help` prints;
+  `settings()`, which returns `{"kind": "channel"}` (the worker defaults — worktree,
+  auto-commit, classifier, fan-out, web tools and memory off — plus a run in
+  `~/.kiss/channel_work` that inherits nothing from the calling task); an
+  `add_to_tools()` function; and, when its agent class sets `channel_system_prompt`,
+  `add_to_system_prompt()` returning that text. The daemon calls
+  `add_to_tools()` to build the channel's tool list, added to the standard toolset: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
+  It appends the channel preamble (`agent_file.CHANNEL_PREAMBLE`: use the channel tools
+  directly, never call `run_agent`, never edit source or run tests) and then the
+  `add_to_system_prompt()` guidance to the run's **system** prompt; the task text itself
+  is not modified (the `kiss-<channel>` CLI launcher no longer appends
+  `channel_system_prompt` to the prompt either).
 - Config lives under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME` overrides
   `~/.kiss`). On Linux, outbound API secrets for the 18 Muse-covered services (see
-  below) migrate out of those files into the `$KISS_HOME/muse_auth/vault` credential
+  below) migrate out of those files into the `~/.kiss/muse_auth/vault` credential
   vault on first use; non-secret settings and inbound-verification secrets (LINE's
   `channel_secret`) stay in the service directory. The Google Workspace agents keep no
   Google token at all: Composio holds it (see *Composio sign-in* below). Because auth tools are always available,
@@ -267,20 +290,21 @@ renews itself when the grant includes a refresh token (Teams rejects a grant wit
 one; GitHub OAuth apps issue one only with expiring tokens enabled), otherwise as a
 plain bearer token (a Discord bot token is stored as the `Authorization: Bot …`
 header). The daemon starts on demand: agents that find none
-serialize the start behind `$KISS_HOME/muse_auth/spawn.lock`, so concurrent agents
+serialize the start behind `~/.kiss/muse_auth/spawn.lock`, so concurrent agents
 never race to launch two, and a running daemon exits on its own as soon as its
-`$KISS_HOME/muse_auth` state directory is deleted (a temporary home torn down), so it
+`~/.kiss/muse_auth` state directory is deleted (a temporary home torn down), so it
 never re-creates a removed directory from its periodic sweep of stale pending files.
 `grant SERVICE write` defaults to a single-use grant (`--scope once`); use `--scope ttl --ttl 3600`,
 `--scope session`, or `--scope perpetual` for a standing one. Opt out with
-`KISS_MUSE_AUTH=0` in `$KISS_HOME/api_keys.env` (default `~/.kiss/api_keys.env`).
+`KISS_MUSE_AUTH=0` in `~/.kiss/api_keys.env`.
 
 ## Agent catalog
 
 The **Name in prompts** column is the canonical channel name; say it (or any spacing /
 casing variant) in your prompt to target the channel. Config paths are relative to
-`~/.kiss/third_party_agents/` (override the root with `$KISS_HOME`; exception: Slack's
-workspace token store is hard-coded under `~/.kiss`). Token locations name the legacy
+`~/.kiss/third_party_agents/` (override the root with `$KISS_HOME`; Slack's
+per-workspace token store, `slack/<workspace>/token.json`, follows the same root,
+resolved on every call). Token locations name the legacy
 (non-Muse) files: on Linux with Muse enabled, the secret moves into the vault on first
 use and the legacy file is removed. "Gateway" marks the modules with `_make_backend()`
 — they can carry inbound prompts and receive scheduled deliveries. Tool names are the
@@ -329,7 +353,8 @@ helpers noted below, such as `finish_<service>_auth` and the browser-setup tools
 Platform notes: BlueBubbles and iMessage are macOS-only (BlueBubbles needs a Mac running
 the BlueBubbles server; iMessage drives the local Messages app via `osascript`). The
 email agent drops automated mail (no-reply senders, `Auto-Submitted`, `Precedence:
-bulk/junk/list`) from the gateway loop so it only answers real people. The webhook
+bulk/junk/list`, `List-Id` mailing-list mail) from the gateway loop so it only answers
+real people. The webhook
 agent verifies GitHub (`X-Hub-Signature-256`) or generic timestamped HMAC signatures,
 caps bodies at 1 MB, suppresses duplicate deliveries, rate-limits to 60 events per
 route per minute, and can either queue events as agent tasks or push them straight
@@ -386,21 +411,23 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
 `/ask` wraps no external service, so its SEA is not in this package: it is
 `src/kiss/agents/seas/ask/ask_sea.py`, next to the other Sorcar-extending SEAs, and is
 described here because it is used from the same chat surfaces. On an idle tab,
-`/ask <question>` is rewritten into a `run_agent` sub-task whose prompt is your question
-plus an instruction naming the task you are asking about and telling the agent to call
-`task_context` on it. The answering session has exactly two tools: `task_context(task_id)`
+`/ask <question>` runs the SEA directly in the tab, like every slash command, with your
+question as the task; the SEA's `prompt(task)` getter appends an instruction naming
+the task you are asking about (`{task_id}`, filled in by the daemon from the run's
+parent task id) and telling the agent to call `task_context` on it. The answering session has exactly two tools: `task_context(task_id)`
 and `finish`. `task_context` (over `kiss.agents.sorcar.task_digest.context`) returns the
 whole context in one call: the task's status, model, spend and the sub-agents it
 dispatched, the newest 8k characters of the progress log the task keeps in its work dir
 (`PROGRESS_LOG.md`, `PROGRESS.md` or `tmp/PROGRESS.md`, freshest wins), and its digested
 transcript entries oldest first, the whole text capped at 60k characters by dropping the
-oldest entries. The script swaps the system prompt for the compact SYSTEM_LITE prompt (the
+oldest entries. The script's `system_prompt()` swaps the system prompt for the compact SYSTEM_LITE prompt (the
 bundled `seas/ask/_ask_system_lite.md`, a copy of the ablation prompt with the brand
-identity as a `{{IDENTITY}}` placeholder) with a no-internet, answer-quickly suffix and a
-playbook asking for two or three plain sentences drawn only from the context, returns
-`False` from `if_append_basic_tools()` so no built-in tool (no shell, no file access) is
-offered, and returns `False` from `is_parallel()`, `use_web_tools()`, and `use_memory()`,
-so there are no browser tools, no memory tools, and no parallel sub-agents either; it
+identity as a `{{IDENTITY}}` placeholder), its `add_to_system_prompt()` adds a
+no-internet, answer-quickly directive and a playbook asking for two or three plain
+sentences drawn only from the context, and `add_to_tools()` supplies the single
+`task_context` tool under `"tool_profile": "none"`, so no built-in tool (no shell, no
+file access) is offered; the `worker` kind turns off web tools, memory and parallel
+sub-agents, so there are no browser tools, no memory tools, and no fan-out either; it
 cannot touch the running task's working tree. Typed into a tab whose task is still running, the question
 is instead dispatched directly to the daemon through a background side channel that does
 not interrupt the running agent:
@@ -607,7 +634,12 @@ gateway-capable channel (25 of the 32 messaging channels; a `[SILENT]` or `NO_RE
 result suppresses delivery). Jobs due at the same time run concurrently, each in its
 own scratch directory (`~/.kiss/cron/runs/<job_id>-<random>`, removed when the run
 ends); the daemon's scheduler tick never waits for a long job, and a job whose previous
-run is still in progress in that scheduler is not started again until it finishes. A
+run is still in progress in that scheduler is not started again until it finishes.
+Like cron, the scheduler never catches up on occurrences that passed while no daemon
+was running (stopped, restarted by an install, or the machine asleep): a repeating job
+found more than ten minutes overdue (`cron_agent.MISSED_RUN_GRACE_SECONDS`) is
+rescheduled from now without running, so a daemon back after a day does not fire every
+daily job at once; a one-shot job is exempt and runs late rather than never. A
 job that must work inside a specific project ("run the tests in ~/proj every night and
 fix them") names that directory instead; a prompt job in a Git repository can
 additionally ask for a worktree and auto-commit like a chat task. A run is stopped
@@ -685,7 +717,7 @@ resume the same daemon chat. Gateway state — per-thread chat continuity, an
 at-least-once delivery ledger with `(recovered reply)` redelivery, and a circuit
 breaker that pauses the channel after repeated tick crashes (only errors that escape a
 tick count) — persists next to the adapter's config (or under
-`$KISS_HOME/third_party_agents/channel_state/`), and overlapping ticks exit
+`~/.kiss/third_party_agents/channel_state/`), and overlapping ticks exit
 immediately thanks to a non-blocking per-channel lock.
 
 Two caveats. Adapters that receive messages through an **embedded callback server**

@@ -143,9 +143,9 @@ class _ReaderHarness(unittest.TestCase):
             "model": STANDIN_MODEL,
             "workDir": str(self.repo),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": auto_commit,
-            "webTools": False,
+            "useWebTools": False,
             "maxBudget": 5.0,
             "modelConfig": self.standin.model_config,
         }

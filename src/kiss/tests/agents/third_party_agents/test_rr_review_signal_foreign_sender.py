@@ -125,7 +125,7 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
             backend=self._backend,
             channel_name="+1AAA",
             agent_name="Signal Background Agent",
-            tools_file="",
+            sea_path="",
             model_name="test-model",
             max_budget=1.0,
             work_dir=self._tmpdir,

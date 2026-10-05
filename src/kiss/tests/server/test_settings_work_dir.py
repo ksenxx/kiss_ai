@@ -6,18 +6,18 @@
 
 Tested against a real ``RemoteAccessServer`` over its local endpoint:
 
-* ``getConfig`` reports each connection's (= each VS Code window's)
-  own work_dir when nothing is persisted, and keeps preferring it over a
-  work_dir another client persisted globally;
-* a remote ``saveConfig`` carrying ``config.work_dir`` persists it to
-  ``config.json`` and moves the daemon-wide fallback;
+* ``getConfig`` reports the daemon's ONE global work_dir to every
+  connection (= every VS Code window and webapp instance): the last
+  ``setWorkDir`` from any of them, which also replaces the persisted
+  value;
+* a ``saveConfig`` carrying ``config.work_dir`` persists it to
+  ``config.json`` and moves the global work_dir;
 * a ``saveConfig`` that omits ``work_dir`` -- which is what the
   Settings panel sends on every surface, since it has no working
   directory field -- leaves the persisted value alone.
 
-The webview half (the Settings form never carries ``work_dir``; the
-standalone web client saves and re-pins through the "Working
-directory" panel) is covered by the real DOM tests in
+The webview half (the Settings form never carries ``work_dir``; every
+surface picks through the "Working directory" panel) is covered by the real DOM tests in
 ``agents/vscode/test/settingsWorkDirField.test.js`` and
 ``agents/vscode/test/workDirPanel.test.js``.
 """
@@ -145,12 +145,13 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
             )
         return _pred
 
-    async def test_get_config_reports_each_windows_own_work_dir(
+    async def test_get_config_reports_the_one_global_work_dir(
         self,
     ) -> None:
-        """With no persisted work_dir, ``getConfig`` fills it from the
-        requesting connection's own work_dir — so each VS Code window
-        scopes its history and tabs by its own workspace folder."""
+        """``getConfig`` reports the daemon's single global work_dir to
+        every connection: the last ``setWorkDir`` from ANY window is
+        what both windows see (and scope their history and Explorer
+        by), because it is where both windows' tasks run."""
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
         await self._send(
@@ -162,7 +163,7 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
 
         await self._send(writer_a, {"type": "getConfig"})
         await self._drain_until(
-            reader_a, self._config_data_with_work_dir(str(self.dir_a)),
+            reader_a, self._config_data_with_work_dir(str(self.dir_b)),
         )
 
         await self._send(writer_b, {"type": "getConfig"})
@@ -183,32 +184,31 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         )
         self.assertEqual(msg.get("machine"), platform.node())
 
-    async def test_get_config_prefers_connection_work_dir_over_persisted(
+    async def test_set_work_dir_replaces_persisted_value_for_everyone(
         self,
     ) -> None:
-        """A connection that announced its own folder via ``setWorkDir``
-        must see THAT folder in ``getConfig`` even when a different
-        work_dir is persisted globally (e.g. saved by another webapp
-        instance) — the stamped work_dir is what its commands actually
-        run in.  A connection that never announced a folder still sees
-        the persisted global value."""
+        """A ``setWorkDir`` (a "Working directory" panel pick) replaces
+        the persisted work_dir: ``getConfig`` reports the new directory
+        both to the picking connection and to a connection opened
+        afterwards that announced nothing, and ``config.json`` holds it."""
         vc.save_config({"work_dir": str(self.dir_a)})
 
-        reader_pinned, writer_pinned = await self._connect()
+        reader_picker, writer_picker = await self._connect()
         await self._send(
-            writer_pinned,
+            writer_picker,
             {"type": "setWorkDir", "workDir": str(self.dir_b)},
         )
-        await self._send(writer_pinned, {"type": "getConfig"})
+        await self._send(writer_picker, {"type": "getConfig"})
         await self._drain_until(
-            reader_pinned, self._config_data_with_work_dir(str(self.dir_b)),
+            reader_picker, self._config_data_with_work_dir(str(self.dir_b)),
         )
 
         reader_fresh, writer_fresh = await self._connect()
         await self._send(writer_fresh, {"type": "getConfig"})
         await self._drain_until(
-            reader_fresh, self._config_data_with_work_dir(str(self.dir_a)),
+            reader_fresh, self._config_data_with_work_dir(str(self.dir_b)),
         )
+        self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_b))
 
     async def test_save_config_work_dir_persists_and_updates_fallback(
         self,
@@ -230,6 +230,26 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         self.assertEqual(
             self.server._vscode_server.work_dir, str(self.dir_b),
         )
+
+    async def test_save_config_reply_reports_live_work_dir(self) -> None:
+        """The ``configData`` answering a ``saveConfig`` reports the
+        daemon's live global work_dir, like ``getConfig`` does -- not
+        the raw persisted value, which is empty before anything was
+        adopted (the daemon runs in its startup fallback then)."""
+        vc.save_config({"work_dir": ""})
+        self.server._vscode_server.work_dir = str(self.dir_b)
+        reader, writer = await self._connect()
+        await self._send(
+            writer, {"type": "saveConfig", "config": {"max_budget": 42}},
+        )
+        msg = await self._drain_until(
+            reader,
+            lambda m: (
+                m.get("type") == "configData"
+                and m.get("config", {}).get("max_budget") == 42
+            ),
+        )
+        self.assertEqual(msg["config"]["work_dir"], str(self.dir_b))
 
     async def test_save_config_without_work_dir_keeps_persisted_value(
         self,

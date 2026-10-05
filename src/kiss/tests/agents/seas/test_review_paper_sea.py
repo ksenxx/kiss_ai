@@ -33,6 +33,8 @@ from kiss.agents.seas.review_paper import review_paper_sea
 from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -150,7 +152,7 @@ def _gate(report: str, name: str) -> str:
 
 def test_sea_getters_follow_the_user_contract() -> None:
     """The SEA appends the reviewing rules, offers the two tools, browses and fans out."""
-    prompt = review_paper_sea.append_to_system_prompt()
+    prompt = review_paper_sea.add_to_system_prompt()
     assert prompt == review_paper_sea.SYSTEM_PROMPT
     assert "William Strunk Jr. and E. B. White" in prompt
     assert review_paper_sea.SECOND_OPINION_MODEL in prompt
@@ -166,11 +168,22 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert "\n       Scores\n       Originality: N/10." in prompt
     assert all(f"       {d}: N/10." in prompt for d in review_paper_sea._DIMENSIONS)
     assert review_paper_sea._HEADINGS[-1] == "Scores"
-    assert [t.__name__ for t in review_paper_sea.tools()] == ["read_paper", "check_review"]
-    assert review_paper_sea.use_web_tools() is True
-    assert review_paper_sea.is_parallel() is True
-    assert review_paper_sea.classify_tasks() is False
+    assert [t.__name__ for t in review_paper_sea.add_to_tools()] == ["read_paper", "check_review"]
+    # Browse, fan out, skip the classifier; a ``run_agent`` dispatch waits two hours.
+    assert review_paper_sea.settings() == {
+        "use_web_tools": True,
+        "allow_fan_out": True,
+        "auto_classify": False,
+        "timeout": 2 * 3600,
+    }
+    assert resolve_settings(vars(review_paper_sea)) == {
+        "kind": "session", **review_paper_sea.settings()
+    }
+    # The default system prompt is kept: the SEA only appends to it (no
+    # ``system_prompt()`` getter), and defines none of the removed
+    # per-field getters, which nothing would read.
     assert not hasattr(review_paper_sea, "system_prompt")
+    assert_no_removed_getters(review_paper_sea)
     # The paper's word gates are reused minus the one about draft talk (a review
     # is allowed to say "reviewer" and "submission").
     names = [gate[0] for gate in review_paper_sea._REVIEW_GATES]
@@ -181,14 +194,14 @@ def test_sea_getters_follow_the_user_contract() -> None:
 
 
 def test_slash_review_paper_resolves_to_the_bundled_sea() -> None:
-    """``/review_paper <instructions>`` is rewritten into a ``run_agent`` directive on this file."""
+    """``/review_paper <instructions>`` resolves to the instructions and this file."""
     assert sea_commands.get_command("review_paper") == _SEA_PATH
-    rewritten = sea_commands.rewrite_prompt_if_command("/review_paper Review x.pdf for ICLR")
-    assert rewritten is not None
-    prompt, path = rewritten
+    hit = sea_commands.slash_command_task("/review_paper Review x.pdf for ICLR")
+    assert hit is not None
+    task_text, path = hit
     assert path == _SEA_PATH
-    assert f'agent = "{_SEA_PATH}"' in prompt
-    assert prompt.endswith("TASK TEXT FOR run_agent:\nReview x.pdf for ICLR")
+    assert task_text == "Review x.pdf for ICLR"
+    assert sea_commands.sea_settings(path) == resolve_settings(vars(review_paper_sea))
 
 
 @pytest.mark.skipif(shutil.which("pdftotext") is None, reason="poppler not installed")
@@ -354,6 +367,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
     """
     paper = tmp_path / "paper.tex"
     paper.write_text("\\section{Intro}\nWe measure 329 tasks.", encoding="utf-8")
+    settings = review_paper_sea.settings()
     review = tmp_path / "review.txt"
     review.write_text(_SLOPPY_REVIEW, encoding="utf-8")
     script = [
@@ -370,10 +384,10 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
             max_steps=5,
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
-            system_prompt=review_paper_sea.append_to_system_prompt(),
-            tools=review_paper_sea.tools(),
-            web_tools=review_paper_sea.use_web_tools(),
-            is_parallel=review_paper_sea.is_parallel(),
+            system_prompt=review_paper_sea.add_to_system_prompt(),
+            tools=review_paper_sea.add_to_tools(),
+            web_tools=settings["use_web_tools"],
+            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

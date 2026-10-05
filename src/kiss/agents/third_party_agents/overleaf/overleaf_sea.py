@@ -14,7 +14,7 @@ the cookie back.  Mutating requests carry the session's CSRF token in
 ``x-csrf-token``.  File-tree entity ids come from the editor's socket.io
 connection (:mod:`._overleaf_realtime`).  Optionally a Git
 authentication token enables the official Git bridge (a premium
-feature).  Config lives in ``~/.kiss/third_party_agents/overleaf/config.json``.
+feature).  Config lives in ``$KISS_HOME/third_party_agents/overleaf/config.json``.
 
 Overleaf has no inbound message stream, so ``--channel`` poll mode is
 disabled (``main`` passes ``make_backend=None`` to ``channel_main``).
@@ -1609,15 +1609,30 @@ def main() -> None:
     channel_main(OverleafAgent, "kiss-overleaf", channel_name="Overleaf", make_backend=None)
 
 
-def tools() -> list:
-    """Return the Overleaf channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the Overleaf channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return OverleafAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
+
+
+def add_to_system_prompt() -> str:
+    """Return the channel guidance appended to the run's system prompt."""
+    return OverleafAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

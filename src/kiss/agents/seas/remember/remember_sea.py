@@ -8,7 +8,7 @@ Typed into a tab as ``/remember <instruction>`` (for example
 ``/remember Always answer in British English``), the slash command
 dispatches this file as a Sorcar Extension Agent through ``run_agent``
 with the instruction as the task.  The agent appends the instruction as
-a bullet line to ``~/.kiss/AGENTS.md`` (``$KISS_HOME/AGENTS.md``), the
+a bullet line to ``$KISS_HOME/AGENTS.md`` (``$KISS_HOME/AGENTS.md``), the
 user-authored file that :meth:`RelentlessAgent.perform_task` appends
 to the system prompt of every task, so every later task follows it.
 ``/forget <instruction>`` (:mod:`kiss.agents.seas.forget.forget_sea`) removes
@@ -51,7 +51,7 @@ def description() -> str:
 
 
 def remember_instruction(instruction: str) -> str:
-    """Add a standing instruction to ~/.kiss/AGENTS.md so every future task follows it.
+    """Add a standing instruction to $KISS_HOME/AGENTS.md so every future task follows it.
 
     The instruction is stored as one bullet line (newlines collapsed to
     spaces).  Adding an instruction that is already stored (compared
@@ -68,50 +68,21 @@ def remember_instruction(instruction: str) -> str:
 
 
 def system_prompt() -> str:
-    """Return the remember agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
+    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
     return SYSTEM_PROMPT
 
 
-def tools() -> list[Any]:
+def settings() -> dict[str, Any]:
+    """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
+    return {
+        "kind": "worker",
+        "tool_profile": "bash",
+        "max_budget": 1.0,
+    }
+
+
+def add_to_tools() -> list[Any]:
     """Return the agent's tools: :func:`remember_instruction` and ``list_instructions``."""
     return [remember_instruction, list_instructions]
 
 
-def tool_profile() -> str:
-    """Give the agent the ``Bash`` tool and no other built-in tool."""
-    return "bash"
-
-
-def max_budget() -> float:
-    """Return the per-run budget cap in USD: one tool call and a finish."""
-    return 1.0
-
-
-def use_worktree() -> bool:
-    """Never use a worktree: the agent edits ``~/.kiss/AGENTS.md``, not the checkout."""
-    return False
-
-
-def auto_commit() -> bool:
-    """Never auto-commit: nothing in the checkout changes."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """Skip the task classifier: the run needs no lite/full prompt choice."""
-    return False
-
-
-def is_parallel() -> bool:
-    """Never fan out: one instruction, one tool call."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """Never enable browser tools."""
-    return False
-
-
-def use_memory() -> bool:
-    """Never load persistent memory tools: AGENTS.md is the memory here."""
-    return False

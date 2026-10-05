@@ -2474,6 +2474,10 @@ body.meta-panel-mode #meta-list {
 .meta-item[hidden] { display: none !important; }
 .meta-item .meta-label { white-space: nowrap; }
 
+/* The Machine row heads the list on every surface and its value is
+   bold: which daemon's machine a task runs on is read first. */
+#meta-machine { font-weight: 700; }
+
 body.meta-panel-mode .meta-item {
   display: list-item;
   font-size: var(--fs-sm);

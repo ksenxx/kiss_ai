@@ -24,6 +24,8 @@ def test_screenshot_tilde_path_targets_home_not_literal_dir(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # ``Path.expanduser`` reads USERPROFILE, not HOME, on Windows.
+    monkeypatch.setenv("USERPROFILE", str(home))
     work_dir = tmp_path / "wd"
     work_dir.mkdir()
 

@@ -43,7 +43,7 @@ DISPATCH_ARGS = {
     "task": CHILD_TASK,
     "use_worktree": "false",
     "auto_commit": "false",
-    "classify_tasks": "false",
+    "auto_classify": "false",
     "use_memory": "false",
     "use_web_tools": "false",
     "timeout": "180",

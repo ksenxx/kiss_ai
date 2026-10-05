@@ -7,7 +7,7 @@
 Provides web scraping, site mapping, web search, and crawl management
 through the Firecrawl cloud API (https://api.firecrawl.dev) using an
 API key (sent as ``Authorization: Bearer`` on every call).  Stores
-config in ``~/.kiss/third_party_agents/firecrawl/config.json``; the
+config in ``$KISS_HOME/third_party_agents/firecrawl/config.json``; the
 optional ``base_url`` config key points the agent at a self-hosted
 Firecrawl instance instead of the cloud API.
 
@@ -672,15 +672,30 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the Firecrawl channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the Firecrawl channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return FirecrawlAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
+
+
+def add_to_system_prompt() -> str:
+    """Return the channel guidance appended to the run's system prompt."""
+    return FirecrawlAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

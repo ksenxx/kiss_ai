@@ -354,7 +354,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     "workDir": str(work_dir),
                     "attachments": [],
                     "useWorktree": False,
-                    "useParallel": False,
+                    "isParallel": False,
                     "autoCommit": True,
                 })
                 _, seen = await self._drain_until(reader, "setTaskText")
@@ -389,10 +389,10 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             agent_state.agent_states.clear()
 
     async def test_submit_forwards_web_tools_to_run(self) -> None:
-        """A webapp ``submit`` with ``webTools: false`` reaches the agent.
+        """A webapp ``submit`` with ``useWebTools: false`` reaches the agent.
 
         The settings panel's "Use web tools" checkbox rides the
-        ``submit`` command as the per-run ``webTools`` field; the web
+        ``submit`` command as the per-run ``useWebTools`` field; the web
         server's submit → run translation must forward it so
         ``task_runner`` passes ``web_tools=False`` to the agent instead
         of silently falling back to the persisted config default.
@@ -441,9 +441,9 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     "workDir": str(work_dir),
                     "attachments": [],
                     "useWorktree": False,
-                    "useParallel": False,
+                    "isParallel": False,
                     "autoCommit": True,
-                    "webTools": False,
+                    "useWebTools": False,
                 })
                 _, seen = await self._drain_until(reader, "setTaskText")
                 self._assert_no_unknown_command(seen)
@@ -456,7 +456,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                 self.assertIs(
                     seen_kwargs.get("web_tools"),
                     False,
-                    "webTools was dropped on the submit → run path",
+                    "useWebTools was dropped on the submit → run path",
                 )
             finally:
                 writer.close()
@@ -524,7 +524,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     "activeFile": str(viewed),
                     "attachments": [],
                     "useWorktree": False,
-                    "useParallel": False,
+                    "isParallel": False,
                     "autoCommit": True,
                 })
                 _, seen = await self._drain_until(reader, "setTaskText")
@@ -604,7 +604,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     "workDir": str(work_dir),
                     "attachments": [],
                     "useWorktree": False,
-                    "useParallel": False,
+                    "isParallel": False,
                     "autoCommit": True,
                     "useMemory": False,
                 })
@@ -695,7 +695,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     "workDir": str(work_dir),
                     "attachments": [],
                     "useWorktree": False,
-                    "useParallel": False,
+                    "isParallel": False,
                     "autoCommit": True,
                     "classifyTasks": False,
                 })

@@ -50,7 +50,7 @@ _BLOCKING_SCRIPT = textwrap.dedent(
     _DIR = pathlib.Path(__file__).resolve().parent
 
 
-    def prompt():
+    def settings():
         \"\"\"Block until released, then raise (the task ends in setup).\"\"\"
         (_DIR / "entered-{marker}").write_text("1", encoding="utf-8")
         deadline = time.time() + 60
@@ -114,7 +114,7 @@ class TestViewerStatusNewerRun(TestCase):
             "chatId": chat_id,
             "workDir": str(self.work_dir),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
             "agentPath": str(script),
         })

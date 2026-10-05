@@ -9,9 +9,13 @@ Two integration surfaces are pinned:
 * the ``getSeaCommands`` API handler on :class:`VSCodeServer`,
   including the ``connId``-scoped delivery contract shared by every
   other read command;
-* the ``_run_task_inner`` prompt rewriter, which turns a submitted
-  prompt starting with ``/xxx text`` into an explicit ``run_agent``
-  directive by the time the LLM sees it.
+* the slash-command run: ``/xxx text`` runs the SEA ``xxx`` DIRECTLY
+  in the tab's own run (``slash_command_task`` splits the prompt, and
+  :meth:`TaskRunner._run_task` makes the SEA the run's ``agentPath``
+  and ``text`` its prompt), so the LLM sees ``text`` as its task while
+  the tab, ``state.last_user_prompt`` and the history row keep the raw
+  ``/xxx text``.  There is no ``run_agent`` relay turn and no nested
+  sub-agent any more.
 
 A real :class:`JsonPrinter` subclass captures broadcasts (no mocks).
 """
@@ -25,10 +29,14 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.sea_commands import rewrite_prompt_if_command
+from kiss.agents.sorcar.persistence import _get_db, _rw_lock
+from kiss.agents.sorcar.sea_commands import slash_command_task
 from kiss.core.config import kiss_home
+from kiss.core.kiss_agent import KISSAgent
+from kiss.server import agent_state, sorcar
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 
 class _CapturePrinter(JsonPrinter):
@@ -61,11 +69,11 @@ def _reset_registry() -> Iterator[None]:
     (kiss_home() / "SEAS.md").unlink(missing_ok=True)
 
 
-def _seed_seas_md(folder: Path, name: str) -> Path:
-    """Create ``<folder>/<name>/<name>_sea.py`` and point ``SEAS.md`` at it."""
+def _seed_seas_md(folder: Path, name: str, body: str = "# stub\n") -> Path:
+    """Create ``<folder>/<name>/<name>_sea.py`` holding *body* and point ``SEAS.md`` at it."""
     sea = folder / name / f"{name}_sea.py"
     sea.parent.mkdir(parents=True, exist_ok=True)
-    sea.write_text("# stub\n", encoding="utf-8")
+    sea.write_text(body, encoding="utf-8")
     home = kiss_home()
     home.mkdir(parents=True, exist_ok=True)
     (home / "SEAS.md").write_text(str(folder) + "\n", encoding="utf-8")
@@ -118,77 +126,148 @@ def test_get_sea_commands_reflects_seas_md(tmp_path: Path) -> None:
     assert "customcmd" in commands
 
 
-def test_task_runner_prompt_rewriter_replaces_slash_command(
-    tmp_path: Path,
-) -> None:
-    """``_run_task_inner``'s slash-command branch rewrites the prompt.
+def test_slash_command_task_splits_a_registered_command(tmp_path: Path) -> None:
+    """``slash_command_task`` yields the SEA to run and the trailing text as its task.
 
-    Rather than launching the whole worker (which needs a live agent
-    and a real model), this asserts the rewriter helper the runner
-    imports produces the expected shape for a registered command —
-    the same helper the runner calls at the top of _run_task_inner.
+    This is the helper :meth:`TaskRunner._run_task` calls first: the
+    SEA becomes the run's ``agentPath`` and the text its ``prompt``.
+    No ``run_agent`` directive is built any more.
     """
     sea = _seed_seas_md(tmp_path / "user-seas", "notify")
-    result = rewrite_prompt_if_command('/notify send "hi" now')
+    result = slash_command_task('/notify send "hi" now')
     assert result is not None
-    rewritten, resolved = result
+    task_text, resolved = result
     assert resolved == sea
-    # The rewritten prompt MUST reference the SEA path and the user
-    # text, and MUST direct the agent to invoke ``run_agent`` first.
-    assert 'run_agent' in rewritten
-    assert str(sea) in rewritten
-    assert 'send "hi" now' in rewritten
+    assert task_text == 'send "hi" now'
 
 
-def test_task_runner_prompt_rewriter_leaves_plain_prompt_untouched(
-    tmp_path: Path,
-) -> None:
-    """A non-command prompt must not be rewritten."""
+def test_slash_command_task_leaves_plain_prompt_untouched(tmp_path: Path) -> None:
+    """A non-command prompt, an unknown command, a bare command and ``help`` run as usual."""
     _seed_seas_md(tmp_path / "user-seas", "notify")
-    assert rewrite_prompt_if_command("please summarize this file") is None
+    assert slash_command_task("please summarize this file") is None
     # A slash prefix that does not match a known command also passes
     # through unchanged.
-    assert rewrite_prompt_if_command("/unknowncmd anything") is None
+    assert slash_command_task("/unknowncmd anything") is None
+    # A bare command has no task text to run the SEA on.
+    assert slash_command_task("/notify") is None
+    assert slash_command_task("/notify   ") is None
+    # ``/xxx help`` is answered by ``description()`` without running the SEA.
+    assert slash_command_task("/notify help") is None
+    assert slash_command_task("/notify HELP") is None
 
 
 def test_slash_command_with_embedded_task_tags_runs_atomically(
     tmp_path: Path,
 ) -> None:
-    """A ``/xxx <task>...</task>`` prompt dispatches as a SINGLE subtask.
+    """A ``/xxx <task>...</task>`` prompt runs the SEA on the WHOLE trailing text.
 
     Regression for a bug where the task-tag splitter (``parse_task_tags``)
-    consumed the embedded ``<task>`` blocks and discarded the
-    ``run_agent`` directive.  The runner MUST detect the slash prefix
-    on the raw prompt and, after ``parse_task_tags`` has run, substitute
-    the parsed subtasks with a single-element list containing the
-    ``run_agent`` directive.
-
-    Exercises the ``_sea_dispatch`` branch in
-    :meth:`TaskRunner._run_task_inner` by reproducing its slash-detection
-    and subtask-replacement contract explicitly.
+    consumed the embedded ``<task>`` blocks before the slash command
+    was recognised.  The runner detects the slash prefix on the raw
+    prompt FIRST (:meth:`TaskRunner._run_task`), so the embedded
+    ``<task>`` markers reach the SEA verbatim and the SEA (not the
+    runner) decides what they mean.
     """
     from kiss.server.task_runner import parse_task_tags
 
     sea = _seed_seas_md(tmp_path / "user-seas", "atomic")
     raw_prompt = "/atomic <task>send first</task><task>send second</task>"
 
-    # ``parse_task_tags`` sees the ORIGINAL prompt (this mirrors the
-    # runner's ordering — the classifier and the tag splitter run
-    # before the rewrite is applied).
+    # Sanity: the tag splitter alone would read two subtasks out of it.
     parsed = parse_task_tags(raw_prompt)
     assert len(parsed) == 2, "sanity: task-tag splitter reads two subtasks"
 
-    # The runner detects the slash command up front and substitutes
-    # the parsed list with a single rewritten subtask.
-    hit = rewrite_prompt_if_command(raw_prompt)
+    hit = slash_command_task(raw_prompt)
     assert hit is not None
-    rewritten, resolved = hit
-    subtasks = [rewritten]
-
-    assert len(subtasks) == 1
+    task_text, resolved = hit
     assert resolved == sea
-    assert 'run_agent' in subtasks[0]
-    # The embedded ``<task>`` markers MUST reach run_agent verbatim so
-    # the SEA (not the runner) decides what they mean.
-    assert '<task>send first</task>' in subtasks[0]
-    assert '<task>send second</task>' in subtasks[0]
+    assert task_text == "<task>send first</task><task>send second</task>"
+
+
+def _history_rows() -> list[dict[str, Any]]:
+    """Return ``(id, task, parent_task_id)`` of every persisted task row."""
+    with _rw_lock.read_lock():
+        rows = _get_db().execute(
+            "SELECT id, task, parent_task_id FROM task_history "
+            "ORDER BY timestamp ASC, rowid ASC",
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _marker_tool(note: str) -> str:
+    """Record *note*; the SEA under test adds this tool to the run."""
+    return note
+
+
+class SlashCommandRunTest(DaemonRunApiHarness):
+    """``/xxx text`` runs the SEA directly in the tab's own run, against a real daemon."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        sea_commands._reset_for_tests()
+        self.addCleanup(sea_commands._reset_for_tests)
+        self.addCleanup((kiss_home() / "SEAS.md").unlink, missing_ok=True)
+
+    def _record_runs(self, runs: list[dict[str, Any]]) -> None:
+        """Replace the executor LLM loop with a stub recording what the LLM is given."""
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            if kwargs.get("is_agentic") is False:
+                return ""  # follow-up proposer etc.: silent, unrecorded
+            arguments = dict(kwargs.get("arguments") or {})
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.0001
+            self_agent.step_count = 1
+            if "task_description" not in arguments:
+                return "result: prior progress\n"
+            runs.append({
+                "system_prompt": str(kwargs.get("system_prompt") or ""),
+                "prompt": str(arguments["task_description"]),
+                "tool_names": [t.__name__ for t in (kwargs.get("tools") or [])],
+                # What the live tab shows while the LLM works.
+                "live_user_prompts": [
+                    s.last_user_prompt for s in agent_state.snapshot() if s.last_user_prompt
+                ],
+            })
+            raw = "success: true\nis_continue: false\nsummary: agent ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:  # pragma: no branch
+                printer.print(
+                    raw, type="result", step_count=1, total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        KISSAgent.run = stub_run  # type: ignore[assignment,method-assign]
+
+    def test_slash_command_runs_the_sea_directly_in_the_tabs_run(self) -> None:
+        """The LLM's task is the trailing text; tab, state and history keep ``/xxx text``."""
+        _seed_seas_md(
+            Path(self.tmpdir) / "user-seas", "notify",
+            "def description():\n    return 'notify'\n"
+            "def add_to_system_prompt():\n    return 'NOTIFY-PROTOCOL'\n"
+            "def add_to_tools():\n"
+            "    from kiss.tests.server.test_sea_command_dispatch import _marker_tool\n"
+            "    return [_marker_tool]\n",
+        )
+        runs: list[dict[str, Any]] = []
+        self._record_runs(runs)
+        raw_prompt = '/notify send "hi" now'
+        result = sorcar.run(
+            raw_prompt, work_dir=self.repo, use_worktree=False, auto_commit=False,
+            endpoint_file=self.endpoint_file, timeout=60,
+        )
+        assert result.success is True, result
+        # ONE LLM run — no relay turn that would then spawn a sub-agent.
+        assert len(runs) == 1, runs
+        run = runs[0]
+        assert run["prompt"] == '# Task\nsend "hi" now', run["prompt"]
+        # The SEA's settings apply to this very run: its protocol is in
+        # the system prompt and its tool sits beside the built-in ones.
+        assert "NOTIFY-PROTOCOL" in run["system_prompt"]
+        assert "_marker_tool" in run["tool_names"]
+        assert "finish" in run["tool_names"]
+        # The tab's state and the single history row show what the user typed.
+        assert run["live_user_prompts"] == [raw_prompt], run
+        rows = _history_rows()
+        assert [r["task"] for r in rows] == [raw_prompt], rows
+        assert rows[0]["parent_task_id"] in ("", None), rows

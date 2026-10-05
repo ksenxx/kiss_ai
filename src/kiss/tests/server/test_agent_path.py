@@ -202,6 +202,9 @@ class AgentPathApiTest(unittest.TestCase):
             seen["_auto_commit_attr"] = getattr(
                 self_agent, "auto_commit_enabled", None,
             )
+            seen["_append_basic_tools_attr"] = getattr(
+                self_agent, "_append_basic_tools", None,
+            )
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.001
             self_agent.total_steps = 1
@@ -214,15 +217,16 @@ class AgentPathApiTest(unittest.TestCase):
 
         self._parent_class.run = stub_run
 
-    def test_getters_override_every_supported_parameter(self) -> None:
-        """Each defined ``X()`` getter replaces the value passed for X.
+    def test_settings_override_every_supported_parameter(self) -> None:
+        """Each ``settings()`` key replaces the value passed for that parameter.
 
         The client passes explicit values for every overridable
-        parameter and the script defines a getter for each — the
+        parameter and the script's ``settings()`` sets each — the
         daemon-built agent must see the SCRIPT's values, proving the
-        getters ran on the daemon and won over the passed arguments.
-        The script's ``use_web_tools()`` and ``is_parallel()`` getters
-        must also win over the client-passed values.
+        settings were applied on the daemon and won over the passed
+        arguments.  ``system_prompt()`` wins over the client's system
+        prompt, and ``add_to_tools()`` with ``tool_profile: "none"``
+        makes the script's tools the whole tool set.
         """
         available = get_available_models()
         assert available, "test needs at least one available model"
@@ -230,10 +234,10 @@ class AgentPathApiTest(unittest.TestCase):
         repo2 = str(Path(self.tmpdir) / "repo2")
         Path(repo2).mkdir(parents=True, exist_ok=True)
         _init_repo(repo2)
-        tools_path = self._write_py(
-            "script_tools.py",
-            '''
-            """Tools the agent script picks."""
+        agent_path = self._write_py(
+            "my_agent.py",
+            f'''
+            """Agent script overriding every supported parameter."""
 
 
             def scripted_tool(x: int) -> int:
@@ -245,87 +249,35 @@ class AgentPathApiTest(unittest.TestCase):
                 return 2 * x
 
 
-            def get_tools():
-                """Return the tools the agent may call."""
-                return [scripted_tool]
-            ''',
-        )
-        agent_path = self._write_py(
-            "my_agent.py",
-            f'''
-            """Agent script overriding every supported parameter."""
-
-            import pathlib
-
-
-            def prompt():
+            def prompt(task):
                 return "scripted prompt marker"
 
 
-            def work_dir():
-                return {repo2!r}
-
-
-            def model():
-                return {script_model!r}
+            def settings():
+                return {{
+                    "work_dir": {repo2!r},
+                    "model": {script_model!r},
+                    "use_worktree": False,
+                    "auto_commit": False,
+                    "max_budget": 1.25,
+                    "model_config": {{"base_url": "http://localhost:1234/v1"}},
+                    # The script's False values must win over the
+                    # client-passed True values.
+                    "use_web_tools": False,
+                    "use_memory": False,
+                    "allow_fan_out": False,
+                    # ``none`` switches the basic toolset off, so
+                    # ``add_to_tools()`` becomes the whole tool set.
+                    "tool_profile": "none",
+                }}
 
 
             def system_prompt():
                 return "scripted system prompt"
 
 
-            def tools():
-                # A pathlib.Path is accepted like run(tools=...) does.
-                return pathlib.Path({tools_path!r})
-
-
-            def use_worktree():
-                return False
-
-
-            def auto_commit():
-                return False
-
-
-            def max_budget():
-                return 1.25
-
-
-            def model_config():
-                return {{"base_url": "http://localhost:1234/v1"}}
-
-
-            def use_web_tools():
-                # Supported getter: the script's False must win over
-                # the client-passed True.
-                return False
-
-
-            def use_memory():
-                # Supported getter: the script's False must win over
-                # the client-passed True.
-                return False
-
-
-            def is_parallel():
-                # Supported getter too; the script's False wins.
-                return False
-            ''',
-        )
-        client_tools = self._write_py(
-            "client_tools.py",
-            '''
-            """Tools the client passes (the script's must win)."""
-
-
-            def client_tool() -> str:
-                """Return a marker."""
-                return "client"
-
-
-            def get_tools():
-                """Return the tools the agent may call."""
-                return [client_tool]
+            def add_to_tools():
+                return [scripted_tool]
             ''',
         )
         seen: dict[str, Any] = {}
@@ -335,7 +287,6 @@ class AgentPathApiTest(unittest.TestCase):
             work_dir=self.repo,
             model=available[0],
             system_prompt="client system prompt",
-            tools=client_tools,
             extension_agent_path=agent_path,
             use_worktree=True,
             auto_commit=True,
@@ -351,9 +302,9 @@ class AgentPathApiTest(unittest.TestCase):
         assert result.text == "agent ok"
         assert "scripted prompt marker" in str(seen["prompt_template"])
         assert "client prompt" not in str(seen["prompt_template"])
-        # ``use_worktree() -> False`` took effect: the agent runs in
-        # the scripted work dir ITSELF, not in a worktree carved under
-        # the client-passed repo.
+        # ``use_worktree: False`` took effect: the agent runs in the
+        # scripted work dir ITSELF, not in a worktree carved under the
+        # client-passed repo.
         assert seen["work_dir"] == repo2
         assert seen["model_name"] == script_model
         assert seen["_base_system_prompt_attr"] == "scripted system prompt"
@@ -361,26 +312,26 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_auto_commit_attr"] is False
         assert seen["max_budget"] == 1.25
         assert seen["model_config"] == {"base_url": "http://localhost:1234/v1"}
-        # ``use_web_tools()`` / ``is_parallel()`` are agent-script
-        # getters: the script's False returns override the
-        # client-passed True values.
+        # The script's ``use_web_tools`` / ``allow_fan_out`` / ``use_memory``
+        # False values override the client-passed True values, so the
+        # run built no web or memory tools and no fan-out.
         assert seen["_web_tools_attr"] is False
         assert seen["_is_parallel_attr"] is False
-        # ``use_memory()`` is an agent-script getter too: the script's
-        # False overrides the client-passed True, so the run built no
-        # memory tools.
         assert seen["_use_memory_attr"] is False
         assert [t.__name__ for t in seen["tools"]] == ["scripted_tool"]
         assert seen["tools"][0](x=21) == 42
+        # ``tool_profile: "none"`` means ONLY these tools (+ finish):
+        # the basic toolset is switched off.
+        assert seen["_append_basic_tools_attr"] is False
 
-    def test_missing_getters_keep_passed_and_default_values(self) -> None:
-        """Parameters without an ``X()`` getter keep the caller's values.
+    def test_missing_settings_keep_passed_and_default_values(self) -> None:
+        """Parameters absent from ``settings()`` keep the caller's values.
 
-        The script defines only ``prompt()``; every other parameter
-        must arrive exactly as passed to :func:`sorcar.run` — and
-        parameters the caller did not pass must keep their defaults
-        (``use_worktree=True``, ``is_parallel=True``, daemon-config
-        budget).
+        The script's ``settings()`` sets only ``prompt``; every other
+        parameter must arrive exactly as passed to :func:`sorcar.run`
+        — and parameters the caller did not pass must keep their
+        defaults (``use_worktree=True``, ``is_parallel=True``,
+        daemon-config budget).
         """
         agent_path = self._write_py(
             "prompt_only_agent.py",
@@ -388,8 +339,8 @@ class AgentPathApiTest(unittest.TestCase):
             """Agent script overriding only the prompt."""
 
 
-            def prompt():
-                return "prompt from script"
+            def prompt(task):
+                return "prompt from script (" + task + ")"
             ''',
         )
         seen: dict[str, Any] = {}
@@ -415,52 +366,45 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_is_parallel_attr"] is True
         assert seen["tools"] == []
 
-    def test_tools_none_drops_client_tools(self) -> None:
-        """A ``tools()`` returning ``None`` overrides to no tools."""
-        client_tools = self._write_py(
-            "dropped_tools.py",
-            '''
-            """Tools the client passes (dropped by the script)."""
+    def test_add_to_tools_keeps_basic_tools(self) -> None:
+        """An ``add_to_tools()`` script adds its tools and keeps the basic toolset.
 
-
-            def client_tool() -> str:
-                """Return a marker."""
-                return "client"
-
-
-            def get_tools():
-                """Return the tools the agent may call."""
-                return [client_tool]
-            ''',
-        )
+        The agent sees the script's tools, with the basic toolset kept
+        on.
+        """
         agent_path = self._write_py(
-            "no_tools_agent.py",
+            "add_tools_agent.py",
             '''
-            """Agent script clearing the tools."""
+            """Agent script adding a tool to the basic toolset."""
 
 
-            def tools():
-                return None
+            def script_tool() -> str:
+                """Return a marker."""
+                return "script"
+
+
+            def add_to_tools():
+                return [script_tool]
             ''',
         )
         seen: dict[str, Any] = {}
         self._install_recording_stub(seen)
         result = sorcar.run(
-            "run without tools",
+            "run with added tools",
             work_dir=self.repo,
-            tools=client_tools,
             extension_agent_path=agent_path,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
-        assert seen["tools"] == []
+        assert [t.__name__ for t in seen["tools"]] == ["script_tool"]
+        assert seen["_append_basic_tools_attr"] is True
 
     def test_chat_id_continues_existing_chat(self) -> None:
-        """A ``chat_id()`` override continues that chat's context.
+        """A ``settings()['chat_id']`` override continues that chat's context.
 
-        The client passes NO ``chat_id``; the script's ``chat_id()``
-        returns the first run's chat id.  The second run must persist
+        The client passes NO ``chat_id``; the script's ``settings()``
+        names the first run's chat id.  The second run must persist
         under that chat and see the first task in its prompt context —
         proving the override reached ``state.chat_id`` on the daemon.
         """
@@ -497,8 +441,8 @@ class AgentPathApiTest(unittest.TestCase):
             """Agent script pinning the chat id."""
 
 
-            def chat_id():
-                return {first.chat_id!r}
+            def settings():
+                return {{"chat_id": {first.chat_id!r}}}
             ''',
         )
         second = sorcar.run(
@@ -517,7 +461,7 @@ class AgentPathApiTest(unittest.TestCase):
         assert "chat marker answer" in prompts_seen[1]
 
     def test_broken_agent_scripts_fail_the_task_with_diagnostics(self) -> None:
-        """Import errors, raising getters, and bad returns stop the task."""
+        """Import errors, broken ``settings()``, raising getters and bad returns stop the task."""
         seen: dict[str, Any] = {}
         self._install_recording_stub(seen)
         cases = [
@@ -527,62 +471,102 @@ class AgentPathApiTest(unittest.TestCase):
                 ["agent script", "failed to import", "boom at import"],
             ),
             (
+                "raising_settings_agent.py",
+                "def settings():\n    raise ValueError('no settings today')\n",
+                ["settings()", "raised", "ValueError", "no settings today"],
+            ),
+            (
                 "raising_getter_agent.py",
-                "def model():\n    raise ValueError('no model today')\n",
-                ["model()", "raised", "no model today"],
+                "def system_prompt():\n    raise ValueError('no prompt today')\n",
+                ["system_prompt()", "raised", "no prompt today"],
             ),
             (
                 "badtype_agent.py",
-                "def max_budget():\n    return 'lots'\n",
-                ["max_budget()", "must return a finite number or None", "str"],
+                "def settings():\n    return {'max_budget': 'lots'}\n",
+                ["settings()['max_budget']", "must be int or float", "str"],
             ),
             (
-                "noncallable_agent.py",
-                "prompt = 'not a function'\n",
-                ["prompt", "must be a callable", "str"],
+                "nondict_settings_agent.py",
+                "def settings():\n    return 3\n",
+                ["settings()", "must return a dict", "int"],
+            ),
+            (
+                "unknown_key_agent.py",
+                "def settings():\n    return {'prompt_x': 'hi'}\n",
+                ["settings()", "unknown key 'prompt_x'"],
+            ),
+            (
+                "unknown_kind_agent.py",
+                "def settings():\n    return {'kind': 'rocket'}\n",
+                ["settings()['kind'] must be one of session, worker, channel; got 'rocket'"],
+            ),
+            (
+                "noncallable_settings_agent.py",
+                "settings = 'not a function'\n",
+                ["settings", "must be a function returning a dict"],
+            ),
+            (
+                "noncallable_getter_agent.py",
+                "add_to_tools = 'not a function'\n",
+                ["add_to_tools", "must be a callable", "str"],
             ),
             (
                 "empty_prompt_agent.py",
-                "def prompt():\n    return '  '\n",
+                "def prompt(task):\n    return '  '\n",
                 ["prompt()", "must return a non-empty string"],
             ),
             (
+                "prompt_setting_agent.py",
+                "def settings():\n    return {'prompt': 'x'}\n",
+                ["settings() has an unknown key 'prompt'"],
+            ),
+            (
                 "none_getter_agent.py",
-                "model = None\n",
-                ["model", "must be a callable", "NoneType"],
+                "system_prompt = None\n",
+                ["system_prompt", "must be a callable", "NoneType"],
+            ),
+            (
+                "badtype_system_prompt_agent.py",
+                "def system_prompt():\n    return 5\n",
+                ["system_prompt()", "must return a string", "int"],
+            ),
+            (
+                "badtype_add_to_tools_agent.py",
+                "def add_to_tools():\n    return 5\n",
+                ["add_to_tools()", "must return a list of tool callables", "int"],
             ),
             (
                 "nan_budget_agent.py",
-                "def max_budget():\n    return float('nan')\n",
+                "def settings():\n    return {'max_budget': float('nan')}\n",
                 [
-                    "max_budget()",
+                    "settings()['max_budget']",
                     "must return a finite number or None",
                 ],
             ),
             (
                 "inf_budget_agent.py",
-                "def max_budget():\n    return float('inf')\n",
+                "def settings():\n    return {'max_budget': float('inf')}\n",
                 [
-                    "max_budget()",
+                    "settings()['max_budget']",
                     "must return a finite number or None",
                 ],
             ),
             (
                 "huge_budget_agent.py",
-                "def max_budget():\n    return 10 ** 400\n",
+                "def settings():\n    return {'max_budget': 10 ** 400}\n",
                 [
-                    "max_budget()",
+                    "settings()['max_budget']",
                     "must return a finite number or None",
                 ],
             ),
             (
                 "evil_value_agent.py",
                 "class _Evil(str):\n"
-                "    def strip(self, *args):\n"
-                "        raise RuntimeError('evil strip')\n"
-                "def prompt():\n"
+                "    def __str__(self):\n"
+                "        raise RuntimeError('evil str')\n"
+                "def prompt(task):\n"
                 "    return _Evil('x')\n",
-                ["prompt()", "returned a broken value", "evil strip"],
+                ["prompt()", "returned a broken value", "evil str"],
             ),
         ]
         for name, source, expected_parts in cases:
@@ -607,14 +591,15 @@ class AgentPathApiTest(unittest.TestCase):
         """A later failing getter must not apply earlier overrides.
 
         ``apply_agent_overrides`` is the daemon-side loader; drive it
-        directly with a real script whose ``chat_id()`` succeeds
-        and whose LATER ``use_worktree()`` raises: the command must
-        come out exactly as it went in — a direct ``_run_task`` caller
-        seeds its run state from the command, so a partial override
-        surviving the failure would leak the broken script's chat id
-        into a later run.
+        directly with a real script whose ``settings()`` succeeds (a
+        ``chat_id`` and ``use_worktree`` override) and whose LATER
+        ``add_to_system_prompt()`` raises: the command must come out
+        exactly as it went in — a direct ``_run_task`` caller seeds its
+        run state from the command, so a partial override surviving
+        the failure would leak the broken script's chat id into a
+        later run.
         """
-        from kiss.server.agent_file import (
+        from kiss.agents.sorcar.agent_file import (
             AgentFileError,
             apply_agent_overrides,
         )
@@ -625,11 +610,11 @@ class AgentPathApiTest(unittest.TestCase):
             """Agent script whose later getter fails."""
 
 
-            def chat_id():
-                return "hijacked-chat"
+            def settings():
+                return {"chat_id": "hijacked-chat", "use_worktree": False}
 
 
-            def use_worktree():
+            def add_to_system_prompt():
                 raise RuntimeError("late failure")
             ''',
         )
@@ -643,7 +628,7 @@ class AgentPathApiTest(unittest.TestCase):
         original = dict(cmd)
         with self.assertRaises(AgentFileError) as ctx:
             apply_agent_overrides(cmd)
-        assert "use_worktree()" in str(ctx.exception)
+        assert "add_to_system_prompt()" in str(ctx.exception)
         assert "late failure" in str(ctx.exception)
         assert cmd == original
 
@@ -655,7 +640,7 @@ class AgentPathApiTest(unittest.TestCase):
                 endpoint_file=self.endpoint_file,
             )
         not_py = Path(self.tmpdir) / "agent.txt"
-        not_py.write_text("def model():\n    return 'x'\n")
+        not_py.write_text("def settings():\n    return {'model': 'x'}\n")
         with self.assertRaises(ValueError):
             sorcar.run("hi", extension_agent_path=str(not_py), endpoint_file=self.endpoint_file)
         with self.assertRaises(ValueError):
