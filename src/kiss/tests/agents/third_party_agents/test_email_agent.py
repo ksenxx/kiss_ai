@@ -29,7 +29,7 @@ from kiss.agents.third_party_agents.email.email_sea import (
     _normalize_mail,
 )
 from kiss.agents.third_party_agents.email.email_sea import (
-    tools as module_tools,
+    add_to_tools as module_tools,
 )
 
 _AUTH_TRIO = {"check_email_auth", "authenticate_email", "clear_email_auth"}
@@ -181,7 +181,7 @@ class TestAuthFlow:
         )
 
     def test_module_tools(self) -> None:
-        """The module-level tools() returns a non-empty tool list."""
+        """The module-level add_to_tools() returns a non-empty tool list."""
         tools = module_tools()
         assert tools
         assert _AUTH_TRIO <= {t.__name__ for t in tools}

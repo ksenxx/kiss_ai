@@ -87,6 +87,7 @@ from __future__ import annotations
 import argparse
 import ast
 import difflib
+import functools
 import html
 import importlib
 import json
@@ -109,6 +110,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.sea_settings import SeaError
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import flatten_content_to_text
@@ -287,13 +289,6 @@ def _format_fields(text: str) -> set[str]:
     return {name for _, name, _, _ in string.Formatter().parse(text) if name is not None}
 
 
-def _execute_sea(path: Path) -> dict[str, Any]:
-    """Execute the SEA file at *path* and return its namespace."""
-    from kiss.server.tools_file import execute_python_file
-
-    return execute_python_file(str(path), ValueError, "SEA")
-
-
 class SeaTarget(Target):
     """A SEA whose trainable text is the constant returned by ``system_prompt()``."""
 
@@ -331,7 +326,10 @@ class SeaTarget(Target):
             with tempfile.TemporaryDirectory(prefix="skillopt-") as tmp:
                 path = Path(tmp) / self.candidate_name()
                 path.write_text(candidate, encoding="utf-8")
-                returned = _execute_sea(path)["system_prompt"]()
+                # Loaded as a rollout would load it, bases included: a
+                # candidate copy whose ``extends`` cannot be resolved from
+                # a scratch directory is rejected here, not at rollout.
+                returned = _sea_layers(path)[-1].namespace["system_prompt"]()
         except Exception as exc:  # noqa: BLE001 - any failure is a gate reason
             return f"candidate cannot be loaded as a SEA: {exc}"
         if returned != text:
@@ -339,45 +337,68 @@ class SeaTarget(Target):
         return ""
 
     def rollout_kwargs(self) -> dict[str, Any]:
-        """Map the file's getters onto ``SorcarAgent.run`` arguments."""
-        ns = _execute_sea(self.path)
-        kwargs: dict[str, Any] = {
-            "base_system_prompt": str(_call_getter(ns, "system_prompt") or "")
-        }
-        if not kwargs["base_system_prompt"]:
+        """Map the file's layers (``extends`` included) onto ``SorcarAgent.run`` arguments.
+
+        The composition the daemon applies to a run of the file
+        (:func:`~kiss.agents.sorcar.sea_commands.sea_layers` and
+        :func:`~kiss.agents.sorcar.sea_commands.sea_configuration`; the
+        ``prompt(task)`` chain runs once per rollout, on the real task),
+        so a rollout evaluates the agent the file actually configures.  A
+        relative ``extends`` path resolves against the file's own
+        directory, so a target rolled out from candidate copies must
+        name its base by command name or absolute path.
+
+        Raises:
+            ValueError: When a script of the chain is broken or the
+                effective ``system_prompt()`` is empty.
+        """
+        from kiss.agents.sorcar.sea_commands import sea_configuration, sea_prompt
+
+        layers = _sea_layers(self.path)
+        try:
+            run = sea_configuration(layers)
+        except SeaError as exc:
+            raise ValueError(str(exc)) from exc
+        if not run.system_prompt:
             raise ValueError(f"{self.path.name}: system_prompt() returned nothing")
-        for getter, key in (
-            ("prompt", "prompt"),
-            ("append_to_prompt", "append_to_prompt"),
+        kwargs: dict[str, Any] = {"base_system_prompt": run.system_prompt}
+        if any("prompt" in layer.namespace for layer in layers):
+            # ``prompt(task)`` needs the task: handed to the rollout as a callable.
+            kwargs["prompt"] = functools.partial(sea_prompt, layers)
+        for setting, key in (
             ("tool_profile", "tool_profile"),
-            ("is_parallel", "is_parallel"),
+            ("allow_fan_out", "is_parallel"),
             ("use_web_tools", "web_tools"),
             ("use_memory", "use_memory"),
-            ("append_to_system_prompt", "system_prompt"),
-            ("if_append_basic_tools", "append_basic_tools"),
             ("docker_image", "docker_image"),
             ("model", "model_name"),
             ("model_config", "model_config"),
-            ("llm_call_hook", "llm_call_hook"),
-            ("tool_call_hook", "tool_call_hook"),
         ):
-            value = _call_getter(ns, getter)
-            if value is not None:
-                kwargs[key] = value
-        tools = _call_getter(ns, "tools")
-        if isinstance(tools, list):
-            kwargs["tools"] = tools
-        elif isinstance(tools, (str, os.PathLike)) and os.fspath(tools):
-            from kiss.server.tools_file import load_tools_file
-
-            kwargs["tools"] = load_tools_file(os.fspath(tools))
+            if setting in run.settings:
+                kwargs[key] = run.settings[setting]
+        if run.add_to_system_prompt:
+            kwargs["system_prompt"] = run.add_to_system_prompt
+        if run.llm_call_hook is not None:
+            kwargs["llm_call_hook"] = run.llm_call_hook
+        if run.tool_call_hook is not None:
+            kwargs["tool_call_hook"] = run.tool_call_hook
+        # ``add_to_tools()`` extends the built-in toolset (a list of
+        # callables, never a file path), as in the daemon's agent-file loader.
+        if any("add_to_tools" in layer.namespace for layer in layers):
+            kwargs["tools"] = run.tools
+        if kwargs.get("tool_profile") == "none":
+            kwargs["append_basic_tools"] = False
         return kwargs
 
 
-def _call_getter(ns: dict[str, Any], name: str) -> Any:
-    """Call the SEA getter *name* in namespace *ns*; ``None`` when it is not defined."""
-    getter = ns.get(name)
-    return getter() if callable(getter) else None
+def _sea_layers(path: Path) -> list[Any]:
+    """Execute the SEA at *path* and its ``extends`` chain; ``ValueError`` when broken."""
+    from kiss.agents.sorcar.sea_commands import sea_layers
+
+    try:
+        return sea_layers(path)
+    except SeaError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 class ConstantTarget(Target):
@@ -696,10 +717,10 @@ def run_rollout(
     """Run *task* against *target* in-process inside *work_dir* and grade it.
 
     *defaults* is the eval set's ``rollout`` object (``SorcarAgent.run``
-    keyword arguments plus ``max_steps``); the target's own getters override
-    it.  A target defining ``prompt()`` replaces the task's prompt with its
-    fixed one (such a SEA varies only through ``setup``); ``append_to_prompt()``
-    is appended to the task's prompt.
+    keyword arguments plus ``max_steps``); the target's own settings override
+    it.  A target that defines ``prompt(task)`` shapes the task's prompt with
+    it; a ``prompt_suffix`` the defaults name is appended after that and
+    recorded on the run so the target's ``run_agent`` sub-tasks inherit it.
     """
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _live_agent_usage
 
@@ -715,7 +736,9 @@ def run_rollout(
     kwargs: dict[str, Any] = {"web_tools": False, "is_parallel": False, "use_memory": False}
     kwargs.update(defaults or {})
     kwargs.update(target.rollout_kwargs())
-    prompt = str(kwargs.pop("prompt", "") or task.prompt) + str(kwargs.pop("append_to_prompt", ""))
+    prompt_suffix = str(kwargs.pop("prompt_suffix", ""))
+    prompt_fn = kwargs.pop("prompt", None)
+    prompt = (str(prompt_fn(task.prompt)) if callable(prompt_fn) else task.prompt) + prompt_suffix
     record = _TrajectoryRecorder(
         cfg.trajectory_chars, kwargs.pop("llm_call_hook", None), kwargs.pop("tool_call_hook", None)
     )
@@ -734,6 +757,7 @@ def run_rollout(
             verbose=False,
             llm_call_hook=record,
             tool_call_hook=record.tool_call,
+            prompt_suffix=prompt_suffix,
             **kwargs,
         )
         success, summary = _parse_result(raw)
@@ -1487,48 +1511,21 @@ def status(out_dir: str) -> str:
 
 
 def system_prompt() -> str:
-    """Replace the default system prompt with the SkillOpt manual."""
+    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
     return SYSTEM_PROMPT
 
 
-def tools() -> list[Any]:
+def settings() -> dict[str, Any]:
+    """A worker with the shell tools, on the real checkout, running :data:`SYSTEM_PROMPT`."""
+    return {
+        "kind": "worker",
+        "tool_profile": "shell",
+    }
+
+
+def add_to_tools() -> list[Any]:
     """Expose the optimizer to the orchestrating model."""
     return [optimize, status]
-
-
-def tool_profile() -> str:
-    """Bash and Read for inspecting the target, eval set and proposal; no editing tools."""
-    return "shell"
-
-
-def use_worktree() -> bool:
-    """Nothing is committed; run directly in the work dir."""
-    return False
-
-
-def auto_commit() -> bool:
-    """Never commit: the proposal is for the user to adopt."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """The task is always the same kind; skip classification."""
-    return False
-
-
-def is_parallel() -> bool:
-    """Rollouts run in the tool's own thread pool."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """No browsing."""
-    return False
-
-
-def use_memory() -> bool:
-    """No persistent memory."""
-    return False
 
 
 # --------------------------------------------------------------------------

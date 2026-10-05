@@ -37,6 +37,7 @@ from kiss.core.models.model import Model
 from kiss.core.models.model_info import calculate_cost
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.server.json_printer import JsonPrinter
 from kiss.tests.core.models.anthropic_sse_harness import sse, text_message_stream
 from kiss.tests.core.models.gemini_sse_harness import (
     GeminiScript,
@@ -314,3 +315,134 @@ def test_agent_stop_on_unpriced_model_still_raises_the_stop(is_agentic: bool) ->
     agent, model = _run_agent_until_stop(_OPENAI_MODEL, is_agentic)
     assert agent.budget_used == 0.0
     assert model.take_partial_usage_response() is None
+
+
+# ------------------------------------------- Stop emits the call's llm_call event
+
+
+def _recording_printer() -> JsonPrinter:
+    """A real JsonPrinter recording the events of one task."""
+    printer = JsonPrinter()
+    printer._thread_local.task_id = "t-stop-llm-call"
+    printer.start_recording()
+    return printer
+
+
+def _tool_call_chunks(usage: dict[str, int]) -> list[bytes]:
+    """One streamed ``echo`` tool call followed by its usage chunk."""
+    call = {
+        "index": 0,
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "echo", "arguments": '{"text": "x"}'},
+    }
+    return [
+        _chat([{"index": 0, "delta": {"role": "assistant", "tool_calls": [call]},
+                "finish_reason": None}]),
+        _chat([{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]),
+        _chat([], usage=usage),
+    ]
+
+
+def echo(text: str) -> str:
+    """Return *text* unchanged.
+
+    Args:
+        text: Any text.
+
+    Returns:
+        The same text.
+    """
+    return text
+
+
+class _StepsPolicy:
+    """Serves scripted replies in order; the last one is held open."""
+
+    def __init__(self, replies: list[list[bytes]]) -> None:
+        self.replies = replies
+        self.count = 0
+        self.release = threading.Event()
+
+    def __call__(self, request: Request) -> Reply:
+        """Return the next scripted reply."""
+        chunks = self.replies[min(self.count, len(self.replies) - 1)]
+        self.count += 1
+        held = self.count >= len(self.replies)
+        return Reply(sse_chunks=chunks, hold=self.release if held else None)
+
+
+def _stop_after_requests(policy: _StepsPolicy, n: int, stop: threading.Event) -> None:
+    """Press Stop shortly after the *n*-th request reached the server."""
+    deadline = time.monotonic() + 10.0
+    while policy.count < n and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.3)
+    stop.set()
+
+
+def _run_stopped(replies: list[list[bytes]], is_agentic: bool) -> tuple[KISSAgent, list[dict]]:
+    """Run a real agent whose last streamed call is stopped mid-stream.
+
+    Returns:
+        The agent and the events its printer recorded.
+    """
+    config = {"stream_stall_timeout": 10.0}
+    policy = _StepsPolicy(replies)
+    printer = _recording_printer()
+    with ScriptedOpenAIServer(policy) as server:
+        model = OpenAICompatibleModel(
+            _PRICED_MODEL,
+            base_url=server.base_url,
+            api_key="test-key",
+            model_config=dict(config),
+        )
+        agent = KISSAgent("stop-emits-llm-call")
+        agent.model = model
+        stop = threading.Event()
+        watcher = threading.Thread(
+            target=_stop_after_requests, args=(policy, len(replies), stop)
+        )
+        stop_signal.set_thread_stop_event(stop)
+        watcher.start()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                agent.run(
+                    _PRICED_MODEL,
+                    "Say hi.",
+                    is_agentic=is_agentic,
+                    tools=[echo] if is_agentic else None,
+                    model_config=dict(config),
+                    printer=printer,
+                )
+        finally:
+            stop_signal.set_thread_stop_event(None)
+            policy.release.set()
+            watcher.join()
+    return agent, printer.stop_recording()
+
+
+def _llm_calls(events: list[dict]) -> list[dict]:
+    return [e for e in events if e["type"] == "llm_call"]
+
+
+@pytest.mark.parametrize("is_agentic", [False, True])
+def test_stopped_call_with_usage_emits_its_llm_call(is_agentic: bool) -> None:
+    """The spend billed for a stopped call has its own ``llm_call`` record."""
+    agent, events = _run_stopped([_CHAT_CHUNKS], is_agentic)
+    (call,) = _llm_calls(events)
+    assert (call["input_tokens"], call["output_tokens"]) == (11, 7)
+    assert call["cost"] == pytest.approx(calculate_cost(_PRICED_MODEL, 11, 7))
+    assert call["cost"] == pytest.approx(agent.budget_used)
+
+
+def test_stop_before_usage_emits_no_stale_llm_call() -> None:
+    """A call stopped before any usage repeats no earlier call's record."""
+    usage = {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}
+    agent, events = _run_stopped(
+        [_tool_call_chunks(usage), _CHAT_CHUNKS[:1]], is_agentic=True
+    )
+    (call,) = _llm_calls(events)
+    assert (call["input_tokens"], call["output_tokens"]) == (20, 5)
+    assert agent.budget_used == pytest.approx(calculate_cost(_PRICED_MODEL, 20, 5))
+    assert agent.last_call_usage is None

@@ -245,9 +245,11 @@ export function buildChatHtml(
     // webview's own title is never shown, VS Code labels the tab.
     PAGE_TITLE: escapeHtml(BRAND.productName),
     TAGLINE: escapeHtml(BRAND.tagline),
+    HOME_DIR: escapeHtml(BRAND.homeDir),
     BRAND_JSON: JSON.stringify({
       productName: BRAND.productName,
       shortName: BRAND.shortName,
+      homeDir: BRAND.homeDir,
     }).replace(/<\//g, '<\\/'),
     INPUT_PLACEHOLDER: placeholder,
     ENTERKEYHINT: '',

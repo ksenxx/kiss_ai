@@ -698,7 +698,7 @@ class TabRegistry:
             title: New title (``None``/empty keeps the current one).
             work_dir: New working directory (``None``/empty keeps it).
             scope_work_dir: The workspace a standalone API dispatch
-                (``sorcar.run`` / a SEA file's ``scope_work_dir()``)
+                (``sorcar.run``'s ``scope_work_dir``)
                 was issued from, distinct from *work_dir* (the
                 channel/cron scratch directory it executes in).
                 Informational: every client shows every registry tab

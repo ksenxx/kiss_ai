@@ -4,23 +4,23 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for the Settings panel having NO "Working
-// directory" (and no "Memory directory") field, and for what the config
-// reply still does without it.
+// directory" (and no "Memory directory") field, and for how the config
+// reply carries the ONE global working directory instead.
 //
-// The same media/ files are served to two very different clients:
+// The working directory is a single daemon-wide value (config.json
+// work_dir) that every task on every surface runs in.  The same media/
+// files are served to the VS Code webview and to the standalone web
+// client, and both treat `configData.config.work_dir` the same way:
 //
-//   * In a VS Code webview the working directory IS the workspace folder
-//     open in that window, so a settings box for it had nothing to edit;
-//     the form leaves `work_dir` out of the `saveConfig` payload so three
-//     windows open on three projects never overwrite one another's stored
-//     value.
-//   * In the standalone web client the folder is chosen in the "Working
-//     directory" panel of the "..." menu, which saves it AND re-pins THIS
-//     browser tab (sessionStorage `sorcar-work-dir`, written by the WS
-//     shim when the page posts `setWorkDir`).  The config reply still
-//     honours that pin -- a second browser tab pointed elsewhere does not
-//     drag this one along -- and a fresh tab with no pin yet adopts the
-//     stored value as its own.
+//   * it is adopted as-is -- no per-browser-tab sessionStorage pin, no
+//     `setWorkDir` echo back to the daemon (that used to re-pin the
+//     connection; there is no connection pin any more);
+//   * the Settings form never carries `work_dir` in `saveConfig`, because
+//     the folder is changed only through the "Working directory" panel of
+//     the "..." menu (remote: a `listDir` check, then `setWorkDir`; the
+//     daemon persists it and broadcasts `workDirChanged`);
+//   * a `workDirChanged` broadcast from the daemon (a pick made on another
+//     surface) re-scopes this client without any echo.
 
 'use strict';
 
@@ -33,9 +33,10 @@ const MEDIA = path.join(__dirname, '..', 'media');
 
 // `remote` picks which of the two clients is being tested: the served web
 // page carries body.remote-chat (web_server.py injects the class), the
-// VS Code webview does not.
+// VS Code webview does not.  `stalePin` seeds the sessionStorage key an
+// older WS shim used to write, to prove main.js no longer reads it.
 function makeWebview(opts) {
-  const {remote = false, pinnedWorkDir = ''} = opts || {};
+  const {remote = false, stalePin = ''} = opts || {};
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
@@ -53,11 +54,8 @@ function makeWebview(opts) {
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
 
-  // The pin a previous page instance left behind. In production the WS
-  // shim writes this key; here the same real sessionStorage is seeded
-  // before main.js ever reads it.
-  if (pinnedWorkDir) {
-    win.sessionStorage.setItem('sorcar-work-dir', pinnedWorkDir);
+  if (stalePin) {
+    win.sessionStorage.setItem('sorcar-work-dir', stalePin);
   }
 
   const posted = [];
@@ -147,6 +145,28 @@ function setWorkDirs(posted) {
   return posted.filter(m => m && m.type === 'setWorkDir').map(m => m.workDir);
 }
 
+// The directory the active tab's daemon-bound commands actually carry:
+// typing an @-mention posts getFiles stamped with workDirForTab().
+function mentionWorkDir(win, posted) {
+  const before = posted.length;
+  typeInto(win, 'task-input', '@readm');
+  const msg = lastMsg(posted.slice(before), 'getFiles');
+  assert.ok(msg, 'typing an @-mention must post a getFiles command');
+  typeInto(win, 'task-input', '');
+  return msg.workDir;
+}
+
+// The "Current:" line of the "..." menu's "Working directory" panel.
+function openPanelCurrentLine(win) {
+  const panel = win.document.getElementById('workdir-panel');
+  if (!panel.classList.contains('open')) {
+    click(win, win.document.getElementById('more-btn'));
+    click(win, win.document.getElementById('workdir-btn'));
+  }
+  const el = win.document.getElementById('workdir-current');
+  return el && !el.hidden ? el.textContent : '';
+}
+
 // --- the standalone web client -------------------------------------------
 
 function testRemoteSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir() {
@@ -179,54 +199,37 @@ function testRemoteBlankWhenNothingIsStored() {
   const saved = lastMsg(posted, 'saveConfig');
   assert.ok(saved, 'closing the settings panel must save the form');
   assert.ok(!('work_dir' in saved.config), 'nothing to save as work_dir');
-  assert.deepStrictEqual(
-    setWorkDirs(posted),
-    [],
-    'there is nothing to adopt and nothing to pin',
+  assert.deepStrictEqual(setWorkDirs(posted), [], 'nothing to announce');
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '',
+    'with no global directory yet, commands carry none and the daemon ' +
+      'resolves its own fallback',
   );
   win.close();
-  console.log('  ok - a blank stored working directory pins nothing');
+  console.log('  ok - a blank stored working directory announces nothing');
 }
 
-function testRemoteInstancePrefersItsOwnPin() {
-  const {win, posted} = makeWebview({
-    remote: true,
-    pinnedWorkDir: '/srv/mine',
-  });
-  // Another browser tab has since saved its own folder globally.
-  send(win, {type: 'configData', config: {work_dir: '/srv/other-instance'}});
-  assert.ok(
-    !setWorkDirs(posted).includes('/srv/other-instance'),
-    'a page that already pinned a folder must not re-adopt the one ' +
-      'another instance happened to store last',
-  );
-  // The pin never filters the shared tab bar: every registry tab is
-  // shown on every surface, whatever folder it runs in.
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      tabEntry('mine-1', '/srv/mine'),
-      tabEntry('other-1', '/srv/other-instance'),
-    ],
-  });
-  assert.deepStrictEqual(
-    tabBarIds(win),
-    ['mine-1', 'other-1'],
-    'the tab bar shows every registry tab regardless of the pin',
-  );
-  win.close();
-  console.log('  ok - a pinned web client keeps its own working directory');
-}
-
-function testRemoteInstanceAdoptsStoredWorkDirWhenUnpinned() {
+function testRemoteAdoptsGlobalWorkDirWithoutEcho() {
   const {win, posted} = makeWebview({remote: true});
   send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
   assert.deepStrictEqual(
     setWorkDirs(posted),
-    ['/srv/project'],
-    'a fresh page claims the stored working directory as its own pin, so ' +
-      'its tasks run where the daemon says they do',
+    [],
+    'the config reply reports the global value; echoing it back as ' +
+      'setWorkDir would persist and re-broadcast what the daemon just said',
   );
+  assert.strictEqual(
+    win.sessionStorage.getItem('sorcar-work-dir'),
+    null,
+    'no per-browser-tab pin is written: every page uses the one global value',
+  );
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/srv/project',
+    'commands from this page run in the global working directory',
+  );
+  assert.strictEqual(openPanelCurrentLine(win), 'Current: /srv/project');
   send(win, {
     type: 'tabs_state',
     tabs: [tabEntry('p-1', '/srv/project'), tabEntry('q-1', '/srv/other')],
@@ -234,17 +237,40 @@ function testRemoteInstanceAdoptsStoredWorkDirWhenUnpinned() {
   assert.deepStrictEqual(
     tabBarIds(win),
     ['p-1', 'q-1'],
-    'and still shows every registry tab: the pin is where tasks run, not a filter',
+    'the tab bar still shows every registry tab: the directory is where ' +
+      'tasks run, not a filter',
   );
   win.close();
-  console.log('  ok - an unpinned web client adopts the stored directory');
+  console.log('  ok - the web client adopts the global directory without echo');
+}
+
+function testRemoteIgnoresStaleSessionPin() {
+  const {win, posted} = makeWebview({remote: true, stalePin: '/srv/mine'});
+  send(win, {type: 'configData', config: {work_dir: '/srv/global'}});
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/srv/global',
+    'a sessionStorage pin left by an older page must not override the ' +
+      'global working directory',
+  );
+  assert.deepStrictEqual(setWorkDirs(posted), [], 'and nothing is echoed');
+  send(win, {
+    type: 'tabs_state',
+    tabs: [tabEntry('mine-1', '/srv/mine'), tabEntry('g-1', '/srv/global')],
+  });
+  assert.deepStrictEqual(
+    tabBarIds(win),
+    ['mine-1', 'g-1'],
+    'the tab bar shows every registry tab whatever folder it ran in',
+  );
+  win.close();
+  console.log(
+    '  ok - a stale per-tab pin is ignored in favour of the global value',
+  );
 }
 
 function testRemoteWorkDirChangesThroughThePanel() {
-  const {win, posted} = makeWebview({
-    remote: true,
-    pinnedWorkDir: '/srv/project',
-  });
+  const {win, posted} = makeWebview({remote: true});
   send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
 
   // The "..." menu's "Working directory" panel is the one place to
@@ -262,6 +288,16 @@ function testRemoteWorkDirChangesThroughThePanel() {
     'the daemon is asked to list the typed folder first',
   );
   assert.strictEqual(check.path, '/srv/elsewhere');
+  assert.strictEqual(
+    setWorkDirs(posted).length,
+    0,
+    'nothing is sent before the daemon confirms the folder exists',
+  );
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/srv/project',
+    'and nothing is adopted locally either: commands keep the old folder',
+  );
   send(win, {
     type: 'dirListing',
     token: check.token,
@@ -270,19 +306,53 @@ function testRemoteWorkDirChangesThroughThePanel() {
     entries: [],
   });
 
-  const saved = lastMsg(posted, 'saveConfig');
-  assert.ok(
-    saved && saved.config.work_dir === '/srv/elsewhere',
-    'a real folder is stored as the working directory',
+  assert.deepStrictEqual(
+    setWorkDirs(posted),
+    ['/srv/elsewhere'],
+    'a real folder is sent as setWorkDir: the daemon persists it as the ' +
+      'global value and broadcasts workDirChanged to every other client',
   );
-  assert.ok(
-    setWorkDirs(posted).includes('/srv/elsewhere'),
-    'and re-pins this page, otherwise the panel would show one folder ' +
-      'while the tasks kept running in another',
+  assert.strictEqual(
+    lastMsg(posted, 'saveConfig'),
+    null,
+    'the panel does not go through saveConfig; setWorkDir is the one path',
   );
   assert.ok(!panel.classList.contains('open'), 'the panel closes');
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/srv/elsewhere',
+    'this page re-scopes at once instead of waiting for the broadcast',
+  );
   win.close();
-  console.log('  ok - the web client changes its folder through the panel');
+  console.log(
+    '  ok - the web client changes the global folder through the panel',
+  );
+}
+
+function testRemoteFollowsWorkDirChangedBroadcast() {
+  const {win, posted} = makeWebview({remote: true});
+  send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
+  // A pick made on another surface (a VS Code window, another browser
+  // tab) reaches this page as the daemon's broadcast.
+  send(win, {type: 'workDirChanged', workDir: '/srv/picked-elsewhere'});
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/srv/picked-elsewhere',
+    'every client follows the daemon broadcast so all surfaces agree',
+  );
+  assert.strictEqual(
+    openPanelCurrentLine(win),
+    'Current: /srv/picked-elsewhere',
+  );
+  assert.deepStrictEqual(
+    setWorkDirs(posted),
+    [],
+    'a broadcast is adopted, never echoed back as another setWorkDir',
+  );
+  win.close();
+  console.log(
+    '  ok - the web client follows workDirChanged from other surfaces',
+  );
 }
 
 // --- the VS Code webview -------------------------------------------------
@@ -309,27 +379,50 @@ function testWebviewSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir() {
   );
   assert.ok(
     !('work_dir' in saved.config) && !('memory_dir' in saved.config),
-    'a VS Code window must leave work_dir out of what it saves: with ' +
-      'three windows open on three projects, whichever closed its ' +
-      'settings panel last would otherwise own the stored value',
+    'the settings form must leave work_dir out of what it saves: the ' +
+      'global directory is changed only through the Working directory panel',
   );
   assert.deepStrictEqual(
     setWorkDirs(posted),
     [],
-    'and the settings form must not announce a folder either -- the ' +
-      'extension announces the workspace folder itself on connect',
+    'and the webview must not echo the config value as setWorkDir: the ' +
+      'host seeds the daemon with the workspace folder (ifUnset) itself',
   );
   win.close();
   console.log('  ok - the VS Code settings carry no directory fields');
 }
 
+function testWebviewAdoptsGlobalWorkDirAndBroadcast() {
+  const {win, posted} = makeWebview({remote: false});
+  send(win, {type: 'configData', config: {work_dir: '/home/user/ws_a'}});
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/home/user/ws_a',
+    'the host passes config.work_dir through untouched and the webview ' +
+      'runs its commands there, whatever folder the window has open',
+  );
+  send(win, {type: 'workDirChanged', workDir: '/home/user/ws_b'});
+  assert.strictEqual(
+    mentionWorkDir(win, posted),
+    '/home/user/ws_b',
+    'a pick on another surface re-scopes this window too',
+  );
+  assert.deepStrictEqual(setWorkDirs(posted), [], 'never echoed');
+  win.close();
+  console.log(
+    '  ok - the VS Code webview adopts the global directory and its changes',
+  );
+}
+
 function main() {
   testRemoteSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir();
   testRemoteBlankWhenNothingIsStored();
-  testRemoteInstancePrefersItsOwnPin();
-  testRemoteInstanceAdoptsStoredWorkDirWhenUnpinned();
+  testRemoteAdoptsGlobalWorkDirWithoutEcho();
+  testRemoteIgnoresStaleSessionPin();
   testRemoteWorkDirChangesThroughThePanel();
+  testRemoteFollowsWorkDirChangedBroadcast();
   testWebviewSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir();
+  testWebviewAdoptsGlobalWorkDirAndBroadcast();
   console.log('settingsWorkDirField.test.js: all tests passed');
 }
 

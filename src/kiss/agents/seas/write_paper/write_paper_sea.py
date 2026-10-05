@@ -21,7 +21,7 @@ left as ``<<placeholders>>`` (venue, path, topic, sources of truth,
 reviewer model, options); the template's rules (contents and their
 order, facts and numbers, citations, Strunk and White style, the
 AI-slop list, the process and the gates) are appended to the default
-system prompt by :func:`append_to_system_prompt`, so the agent keeps
+system prompt by :func:`add_to_system_prompt`, so the agent keeps
 the full Sorcar toolset, browser tools (related work, venue
 guidelines, citation checks) and ``run_parallel`` (the read-only
 reviewer).
@@ -36,8 +36,8 @@ not re-derive them with ad-hoc greps:
   summarizes the log: errors, undefined references and citations,
   overfull boxes over 10 pt, and the page count.
 
-Module-level getters (``append_to_system_prompt()``, ``tools()``,
-...) follow the SEA contract in :mod:`kiss.server.agent_file`.
+Module-level getters (``add_to_system_prompt()``, ``add_to_tools()``,
+...) follow the SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
 """
 
 from __future__ import annotations
@@ -261,7 +261,6 @@ into the margin.
 File paths, page count, the gate counts before and after, the list of citations verified
 with their source URLs, each reviewer finding and what you did with it, and anything the
 paper claims that you could not verify.
-""" """\
 
 
 ## Lessons from recent runs (rsi7d)
@@ -297,7 +296,12 @@ paper claims that you could not verify.
   When they differ, the `run_parallel` writer sub-agent on that model is your first step
   and you make no edit to the .tex yourself; do not discover at the end that you wrote it.
   Tell the reviewer which model actually wrote the text: never describe your own edits as
-  another model's work."""
+  another model's work.
+- In a revision of a paper that already ends on its last allowed page (zero slack, as
+  `tmp/PROGRESS.md` or memory says), pair every sentence, citation or caption you add
+  with a cut of at least the same length in the same section, in the same edit pass,
+  before the first build; then build once and measure. Adding first and cutting later
+  took three cut rounds and six `build_paper` calls in one round."""
 """The template's rules, appended to the default system prompt."""
 
 # LaTeX environments whose bodies are not prose: verbatim prompts, listings, table
@@ -771,35 +775,30 @@ def build_paper(tex_path: str, tex_bin: str = "") -> str:
     return "\n".join(report)
 
 
-def append_to_system_prompt() -> str:
+def add_to_system_prompt() -> str:
     """Append the paper-writing rules to the default system prompt."""
     return SYSTEM_PROMPT
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Expose the gate checker and the LaTeX builder to the model."""
     return [check_paper, build_paper]
 
 
-def use_web_tools() -> bool:
-    """Browse: related work, venue guidelines and citation sources are on the web."""
-    return True
+DISPATCH_TIMEOUT_SECONDS = 21600
+"""Seconds a ``run_agent`` call waits for a ``/write_paper`` run: six hours."""
 
+def settings() -> dict[str, Any]:
+    """Browse (related work, venue guidelines), fan out (the reviewer), skip the classifier.
 
-def is_parallel() -> bool:
-    """Fan out: the read-only reviewer runs as a ``run_parallel`` sub-agent."""
-    return True
-
-
-def classify_tasks() -> bool:
-    """Skip the task classifier: writing a paper always needs the full system prompt."""
-    return False
-
-
-def dispatch_timeout() -> float:
-    """Seconds the ``/write_paper`` relay waits for the agent before stopping it.
-
-    Writing a paper with its research, experiments, builds and review rounds takes
-    hours; the default 300 s ``run_agent`` wait would stop it during the research.
+    The ``timeout`` tells the dispatcher a ``/write_paper`` run may take
+    up to :data:`DISPATCH_TIMEOUT_SECONDS`.
     """
-    return 6 * 3600
+    return {
+        "use_web_tools": True,
+        "allow_fan_out": True,
+        "auto_classify": False,
+        "timeout": DISPATCH_TIMEOUT_SECONDS,
+    }
+
+

@@ -139,7 +139,11 @@ def test_plain_top_level_runs_are_mined_as_the_sorcar_pseudo_sea(checkout: Path)
     assert runs["stats"]["runs"] == runs_before + 1
     everything = json.loads(sea.sea_runs())["seas"]
     listed = {tid for entry in everything.values() for r in entry["runs"] for tid in [r["task_id"]]}
-    assert plain in listed and sea_run not in listed and child not in listed
+    assert plain in listed and child not in listed
+    # A run that records a SEA but no dispatch or signature matched it is
+    # that SEA's (a replay), never KISS Sorcar's own.
+    demo = [r for r in everything["demo"]["runs"] if r["task_id"] == sea_run]
+    assert len(demo) == 1 and "(recorded sea)" in everything["demo"]["agents"], everything["demo"]
     scanned = json.loads(sea.sea_findings(sea.SORCAR, runs=1000))["runs_scanned"]
     assert plain in scanned and sea_run not in scanned and child not in scanned
 
@@ -441,9 +445,9 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
                 model_name=MODEL,
                 work_dir=str(checkout),
                 max_steps=6,
-                max_budget=sea.max_budget(),
+                max_budget=sea.settings()["max_budget"],
                 model_config={"base_url": url, "api_key": "local"},
-                tools=sea.tools(),
+                tools=sea.add_to_tools(),
                 base_system_prompt=sea.system_prompt(),
                 web_tools=False,
                 use_memory=False,

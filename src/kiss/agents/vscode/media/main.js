@@ -1131,12 +1131,6 @@
       t0: null,
       endTs: 0,
       workDir: '',
-      // A folder chosen in the "Working directory" panel for this tab's
-      // NEXT task (VS Code surface).  Kept apart from `workDir`, which
-      // task replays and the registry rewrite and the tab bar scopes
-      // by: the pick must survive both and must not hide the tab.
-      // Consumed by the submit that uses it.
-      pinnedWorkDir: '',
       streamState: null,
       streamLlmPanel: null,
       streamLlmPanelState: null,
@@ -1331,11 +1325,16 @@
     return /^[A-Za-z]:$/.test(s);
   }
 
+  /**
+   * The directory a tab browses and its next task runs in: the global
+   * working directory (configWorkDir, the daemon's one value every task
+   * on every surface uses), or, until the daemon has reported one, the
+   * folder the tab's last task ran in.
+   */
   function workDirForTab(tabId) {
-    const tab = getTab(tabId);
-    if (tab && tab.pinnedWorkDir) return tab.pinnedWorkDir;
-    if (tab && tab.workDir && !isRootDir(tab.workDir)) return tab.workDir;
     if (configWorkDir && !isRootDir(configWorkDir)) return configWorkDir;
+    const tab = getTab(tabId);
+    if (tab && tab.workDir && !isRootDir(tab.workDir)) return tab.workDir;
     return '';
   }
 
@@ -1840,10 +1839,11 @@
     // function stays self-contained.
     if (document.body.classList.contains('editor-tab-mode')) {
       // The EDITOR TAB is this chat's tab: mirror the root chat tab's
-      // title onto it through the host.
+      // label (the static task panel's text while the root is on
+      // screen, see tabLabel) onto it through the host.
       const root = editorRootTab();
       if (root) {
-        const title = root.title || 'new chat';
+        const title = tabLabel(root) || 'new chat';
         // Mirror the internal tab strip's status icon onto the EDITOR
         // tab: the host paints a spinner while the task runs and a
         // green tick / red cross after it ends (the same states
@@ -1911,7 +1911,8 @@
         'aria-selected',
         tab.id === activeTabId ? 'true' : 'false',
       );
-      el.setAttribute('aria-label', tab.title);
+      const label = tabLabel(tab);
+      el.setAttribute('aria-label', label);
       // All chat tabs swap the one shared chat surface (#output), so a
       // single shared tabpanel is the correct association.
       el.setAttribute('aria-controls', 'output');
@@ -1956,10 +1957,10 @@
         el.appendChild(attention);
       }
 
-      const label = document.createElement('span');
-      label.className = 'chat-tab-label';
-      label.textContent = tab.title;
-      el.appendChild(label);
+      const labelEl = document.createElement('span');
+      labelEl.className = 'chat-tab-label';
+      labelEl.textContent = label;
+      el.appendChild(labelEl);
 
       // Unsaved edits in a content tab's editor show as VS Code's
       // filled dot next to the name, so the user sees what a close
@@ -4597,6 +4598,28 @@
     return t.length > 30 ? t.substring(0, 30) + '\u2026' : t;
   }
 
+  /**
+   * The title a chat tab displays.
+   *
+   * The ACTIVE top-level chat tab names whatever the static task panel
+   * above the transcript names: the tab's own task normally, but also
+   * a neighbouring task the reader scrolled into or a history row's
+   * task shown read-only before any task ran. `tab.title` stays the
+   * tab's own task (its identity for the registry and the share
+   * title); only the label follows the panel. Every other tab - a
+   * background chat, a sub-agent, a file - shows its own title.
+   */
+  function tabLabel(tab) {
+    if (tab.id !== activeTabId || tab.isSubagentTab || tab.isContentTab)
+      return tab.title;
+    const panel = document.getElementById('task-panel');
+    const text = document.getElementById('task-panel-text');
+    if (!panel || !text || !panel.classList.contains('visible'))
+      return tab.title;
+    const shown = (text.textContent || '').trim();
+    return shown ? clipTabTitle(shown) : tab.title;
+  }
+
   // Editor-tabs mode: the panel's single top-level chat tab. Sub-agent
   // and content tabs hang off it; nothing else exists in the panel.
   function editorRootTab() {
@@ -5060,12 +5083,12 @@
   const webToolsToggleBtn = document.getElementById('cfg-use-web-tools');
   // Whether #cfg-use-web-tools reflects a KNOWN state — the persisted
   // config (populateConfigForm ran) or an explicit user toggle.  Until
-  // then a submit must NOT send a per-run ``webTools`` override: the
+  // then a submit must NOT send a per-run ``useWebTools`` override: the
   // checkbox still holds chat.html's hardcoded ``checked``, and an
-  // invented ``webTools: true`` would defeat the daemon's fallback to
+  // invented ``useWebTools: true`` would defeat the daemon's fallback to
   // the persisted "Use web tools" setting (config key
   // ``use_web_browser``).  Unlike ``useWorktree``/``autoCommit`` —
-  // whose wire value IS the source of truth for the run — ``webTools``
+  // whose wire value IS the source of truth for the run — ``useWebTools``
   // has that server-side config fallback, so omitting it is the
   // correct "no opinion yet" signal.
   let webToolsStateKnown = false;
@@ -5906,6 +5929,7 @@
         chatId: metaValueText('meta-chat-id'),
         taskId: metaValueText('meta-task-id'),
         parentTask: metaValueText('meta-parent-id'),
+        agent: metaValueText('meta-agent'),
       },
       taskUpdate: metaInfoState,
     });
@@ -5970,6 +5994,7 @@
     setMetaValue('meta-chat-id', v('chatId'));
     setMetaValue('meta-task-id', v('taskId'));
     setMetaParentTask(v('parentTask') || '\u2014');
+    setMetaAgent(v('agent') || '\u2014');
     const update = ev && ev.taskUpdate && typeof ev.taskUpdate === 'object';
     renderTaskUpdate(update ? ev.taskUpdate : null);
   }
@@ -6805,25 +6830,13 @@
   let scmDirty = false;
 
   /**
-   * The workspace the side views browse: the active tab's work dir.  A
-   * content tab (a file opened from the Explorer, say) has none of its
-   * own and browses the workspace of the chat it was opened from, so
-   * opening a file never flips the tree to another folder.  That is
-   * the owner chat's BROWSE work dir (workDirForTab), not its visibility
-   * scope: a standalone API task may run in a scratch dir while being
-   * shown under the calling workspace, and the Explorer follows the
-   * folder the task really works in.
+   * The workspace the side views browse: the global working directory
+   * (workDirForTab).  Before the daemon has reported one, a content tab
+   * (a file opened from the Explorer, say) browses the folder of the
+   * chat it was opened from, so opening a file never flips the tree.
    */
-  // The folder the user picked with the Explorer's folder picker
-  // (applyPickedWorkDir); '' until they pick one.
-  let pickedWorkDir = '';
-
   function sidebarWorkDir() {
-    // A folder picked with the Explorer's folder picker wins for as
-    // long as it is the workspace (a later change to a different work
-    // dir -- the "Working directory" panel, or the VS Code window's
-    // folder -- ends the override).
-    if (pickedWorkDir && pickedWorkDir === configWorkDir) return pickedWorkDir;
+    if (configWorkDir && !isRootDir(configWorkDir)) return configWorkDir;
     let tab = getTab(activeTabId);
     for (let i = 0; tab && tab.isContentTab && i < tabs.length; i++) {
       const owner = getTab(tab.ownerTabId);
@@ -10132,29 +10145,38 @@
   }
 
   /**
-   * Make *dir* the workspace: the daemon's connection pin (setWorkDir)
-   * and the saved config both follow, and the client re-scopes to the
-   * new workspace right away.
+   * Make *dir* the global working directory (remote webapp: the panel's
+   * Open button and the Explorer's check mark).  The daemon adopts,
+   * persists and broadcasts it (setWorkDir); this client re-scopes
+   * right away rather than waiting for its own broadcast.
    */
   function applyPickedWorkDir(dir) {
-    closeFolderPicker();
-    api.saveConfig({config: {work_dir: dir}});
     api.setWorkDir({workDir: dir});
+    adoptWorkDir(dir);
+    closeWorkDirPanel();
+  }
+
+  /**
+   * Re-scope this client to the global working directory *dir*: the
+   * Explorer, SCM view, history filter and the panel's "Current:" line
+   * follow it, and every tab's next task runs in it (a running task
+   * keeps the folder it started in).  Used for this client's own pick
+   * (applyPickedWorkDir, workDirPicked) and for the daemon's
+   * workDirChanged broadcast of a pick made on another surface.
+   */
+  function adoptWorkDir(dir) {
+    closeFolderPicker();
     if (dir !== configWorkDir) {
       configWorkDir = dir;
       applyWorkspaceScope();
     }
-    // The picked folder is the working directory from now on: the
-    // views browse it even when the active chat had pinned another
-    // folder (sidebarWorkDir), and an idle chat adopts it for its next
-    // task; a running task keeps the folder it started in.
-    pickedWorkDir = dir;
-    const tab = getTab(activeTabId);
-    if (tab && !tab.isContentTab && !tab.isRunning) tab.workDir = dir;
     explorerRoot = '';
     scmWorkDir = '';
     refreshSidebarDataViews(true);
-    closeWorkDirPanel();
+    renderCurrentWorkDir();
+    // The task-info panel's Workdir item falls back to the global
+    // directory while the visible task has no settings of its own.
+    updateMetaTaskDetails(metaShownSettings);
   }
 
   // ---- The "Working directory" panel ("..." menu) ----------------------
@@ -10166,13 +10188,11 @@
   // 'workdir:<seq>') and the directory it is checking.
   let workDirCheckSeq = 0;
   let workDirCheckPath = '';
-  // The tab whose openWorkDir / pickWorkDir request the open panel is
-  // waiting on (VS Code); '' when the panel asked nothing or was closed.
-  // The host's reply names its tab, and only a reply to this request
-  // may close the panel or report into it: the reply to a request made
-  // from a panel the user has since closed still pins its own tab but
-  // leaves a panel reopened for another tab alone.
-  let workDirRequestTabId = '';
+  // Whether the open panel is waiting on an openWorkDir / pickWorkDir
+  // reply from the VS Code host; false once the panel is closed, so a
+  // late reply to a request made from a panel the user has since
+  // closed neither closes nor reports into a reopened one.
+  let workDirRequestPending = false;
 
   function openWorkDirPanel() {
     const panel = document.getElementById('workdir-panel');
@@ -10201,7 +10221,7 @@
     // A check still in flight belongs to the closed panel.
     workDirCheckSeq++;
     workDirCheckPath = '';
-    workDirRequestTabId = '';
+    workDirRequestPending = false;
     const panel = document.getElementById('workdir-panel');
     if (!panel || !panel.classList.contains('open')) return;
     // Focus must not be stranded inside the sheet that just went inert;
@@ -10370,19 +10390,17 @@
   }
 
   /**
-   * Make *dir* the working directory.
+   * Make *dir* the global working directory every task runs in.
    *
-   * In a VS Code webview only the active chat tab changes: the host
-   * checks that *dir* is a folder (openWorkDir -> workDirPicked, or
-   * workDirError) and applyTabWorkDir pins it as the directory the
-   * tab's next task runs in; the window's own folder is left alone.
-   * The request names the tab so a reply that arrives after a tab
-   * switch still lands on the tab that asked.
-   * On the remote webapp the daemon lists *dir* first (listDir with a
+   * In a VS Code webview the host checks that *dir* is a folder and
+   * sends it to the daemon (openWorkDir -> workDirPicked, or
+   * workDirError); the window's own folder is left alone.  On the
+   * remote webapp the daemon lists *dir* first (listDir with a
    * 'workdir:' token): a real folder is adopted through
    * applyPickedWorkDir, anything else is reported (setWorkDirError: in
    * the panel, or as a notification when the Explorer's check mark
-   * asked with the panel closed).
+   * asked with the panel closed).  Either way the daemon persists the
+   * directory and broadcasts workDirChanged to every other surface.
    *
    * @param {string} dir The typed, chosen or previously opened path.
    */
@@ -10397,13 +10415,8 @@
     }
     setWorkDirError('');
     if (!document.body.classList.contains('remote-chat')) {
-      const error = tabWorkDirError(activeTabId);
-      if (error) {
-        setWorkDirError(error);
-        return;
-      }
-      workDirRequestTabId = activeTabId;
-      postToHost({type: 'openWorkDir', path: dir, tabId: activeTabId});
+      workDirRequestPending = true;
+      postToHost({type: 'openWorkDir', path: dir});
       return;
     }
     workDirCheckSeq++;
@@ -10442,58 +10455,20 @@
   }
 
   /**
-   * Why tab *tabId* cannot take a working directory of its own right
-   * now ('' when it can): only an idle chat tab has a "next task".
-   *
-   * @param {string} tabId The tab asked to change.
-   */
-  function tabWorkDirError(tabId) {
-    const tab = getTab(tabId);
-    if (!tab || tab.isContentTab) {
-      return 'Switch to a chat tab to change its working directory.';
-    }
-    if (tab.isRunning) {
-      return (
-        'The running task keeps its working directory; ' +
-        'open a new chat or wait for it to finish.'
-      );
-    }
-    return '';
-  }
-
-  /**
-   * The VS Code host verified *dir* is a folder (workDirPicked): the
-   * next task of the tab that asked runs there.  Nothing else moves --
-   * the window keeps its folder, `configWorkDir` stays the workspace,
-   * `tab.workDir` (what the tab bar scopes by) is untouched
-   * -- so only the tab's pin and the views browsing it change.
-   *
-   * The panel is only closed (or told why the pin was refused) when it
-   * is still waiting on this very request: the user may have closed it
-   * and reopened it for another tab while the host's folder dialog was
-   * up, and that tab's panel, with whatever was typed into it, stays.
+   * The VS Code host verified *dir* is a folder and sent it to the
+   * daemon (workDirPicked): it is the global working directory now, so
+   * this webview re-scopes to it.  The panel is only closed when it is
+   * still waiting on this request: the user may have closed it and
+   * reopened it while the host's folder dialog was up, and that panel,
+   * with whatever was typed into it, stays.
    *
    * @param {string} dir The folder in the host's canonical spelling.
-   * @param {string} tabId The tab that asked (the active one when the
-   *   request was made; it may no longer be active).
    */
-  function applyTabWorkDir(dir, tabId) {
+  function applyHostPickedWorkDir(dir) {
     dir = String(dir || '').trim();
     if (!dir || isRootDir(dir)) return;
-    if (!getTab(tabId)) return;
-    const ownsPanel = tabId === workDirRequestTabId;
-    const error = tabWorkDirError(tabId);
-    if (error) {
-      if (ownsPanel) setWorkDirError(error);
-      return;
-    }
-    getTab(tabId).pinnedWorkDir = dir;
-    if (tabId === activeTabId) {
-      explorerRoot = '';
-      scmWorkDir = '';
-      refreshSidebarDataViews(true);
-    }
-    if (ownsPanel) closeWorkDirPanel();
+    adoptWorkDir(dir);
+    if (workDirRequestPending) closeWorkDirPanel();
   }
 
   /** Wire the "Working directory" menu item and its panel. */
@@ -10534,18 +10509,13 @@
         // The in-page folder browser lists folders through the daemon's
         // listDir, which only the remote webapp's connection relays; a
         // VS Code window uses the editor's own folder dialog (the pick
-        // comes back as workDirPicked, for the active tab alone).
+        // comes back as workDirPicked).
         if (document.body.classList.contains('remote-chat')) {
           openFolderPicker('workdir');
           return;
         }
-        const error = tabWorkDirError(activeTabId);
-        if (error) {
-          setWorkDirError(error);
-          return;
-        }
-        workDirRequestTabId = activeTabId;
-        postToHost({type: 'pickWorkDir', tabId: activeTabId});
+        workDirRequestPending = true;
+        postToHost({type: 'pickWorkDir'});
       });
     }
     if (list) {
@@ -10774,6 +10744,9 @@
   function setTaskText(text) {
     if (!taskPanel || !taskPanelText) return;
     const t = (text || '').trim();
+    const changed =
+      t !== taskPanelText.textContent ||
+      !!t !== taskPanel.classList.contains('visible');
     if (t) {
       taskPanelText.textContent = t;
       taskPanelText.setAttribute('data-tooltip', t);
@@ -10783,6 +10756,10 @@
       taskPanelText.removeAttribute('data-tooltip');
       taskPanel.classList.remove('visible');
     }
+    // The active tab's label (and, in editor-tabs mode, the editor
+    // tab's title) names what the panel names, see tabLabel. Only a
+    // real change repaints: scrolling calls this on every event.
+    if (changed) renderTabBar();
   }
 
   // taskinfo-coverage:start
@@ -10894,6 +10871,53 @@
   }
 
   /**
+   * The Agent row's text: the SEA the task ran as, its kind, tool
+   * profile, the caller's timeout and every inherited or default value
+   * the SEA pinned to its own (chat_sorcar_agent.py task_settings keys
+   * sea, kind, tool_profile, timeout, pinned; kiss.agents.sorcar.run_config).
+   *
+   * @param {object|null} s A task_settings event's settings payload.
+   * @returns {string} The text, '—' when the task ran no SEA and
+   *   nothing was pinned.
+   */
+  function metaAgentText(s) {
+    if (!s || typeof s !== 'object') return '\u2014';
+    const parts = [];
+    if (s.sea)
+      parts.push(String(s.sea) + (s.kind ? ' (' + String(s.kind) + ')' : ''));
+    if (s.tool_profile) parts.push('tools ' + String(s.tool_profile));
+    if (typeof s.timeout === 'number')
+      parts.push('timeout ' + String(s.timeout) + 's');
+    const over = s.pinned && typeof s.pinned === 'object' ? s.pinned : null;
+    const keys = over ? Object.keys(over) : [];
+    if (keys.length) {
+      parts.push(
+        'pinned ' +
+          keys
+            .map(k => {
+              const pair = Array.isArray(over[k]) ? over[k] : [];
+              const show = v => (v === '' ? 'empty' : String(v));
+              return k + '(' + show(pair[0]) + '->' + show(pair[1]) + ')';
+            })
+            .join(', '),
+      );
+    }
+    return parts.length ? parts.join(' \u2022 ') : '\u2014';
+  }
+
+  /**
+   * Show or hide the Agent row: shown whenever the task ran an agent
+   * script or something replaced the caller's settings.
+   *
+   * @param {string} text The row's value text ('—' when none).
+   */
+  function setMetaAgent(text) {
+    const item = document.getElementById('meta-agent-item');
+    if (item) item.hidden = text === '\u2014';
+    setMetaValue('meta-agent', text);
+  }
+
+  /**
    * Paint the task-settings items of the task-info panel (#meta-panel:
    * the remote desktop dock, the sidebar-chat drawer, the mobile
    * drawer): Workdir, Max budget, Date, Base model, Worktree mode,
@@ -10960,6 +10984,7 @@
         : taskId,
     );
     setMetaParentTask(metaText(s ? s.parent_task_id : ''));
+    setMetaAgent(metaAgentText(s));
     setMetaInfoTarget();
   }
   updateMetaTaskDetails(null);
@@ -15708,7 +15733,13 @@
         // reportedChatTabId then) must still toast here — the toast
         // container is window-level, not transcript-bound, so nothing
         // can leak into another conversation's transcript.
+        //
+        // A close shows nothing, so it is never gated: the toast it
+        // retires was shown while its tab was on screen, and the user
+        // may have switched tabs since -- dropping the close would
+        // leave a sticky progress toast on screen for good.
         if (
+          !ev.close &&
           ev.tabId !== undefined &&
           ev.tabId !== reportedChatTabId &&
           !isForActiveTab(ev)
@@ -15986,18 +16017,22 @@
         break;
       case 'workDirError':
         // The VS Code host found no folder at the path asked for by
-        // openWorkDir / pickWorkDir.  It is reported into the panel
-        // only while the panel still waits on that tab's request (a
-        // panel reopened for another tab is not told); a reply from an
-        // older host build names no tab and is shown as before.
-        if (ev.tabId && String(ev.tabId) !== workDirRequestTabId) break;
-        setWorkDirError(String(ev.text || ''));
+        // openWorkDir / pickWorkDir.  Reported into the panel only
+        // while it still waits on that request.
+        if (workDirRequestPending) setWorkDirError(String(ev.text || ''));
         break;
       case 'workDirPicked':
-        // The VS Code host verified the folder: it becomes the working
-        // directory of the chat that asked (the window's folder is
-        // untouched).
-        applyTabWorkDir(ev.path, String(ev.tabId || activeTabId));
+        // The VS Code host verified the folder and made it the global
+        // working directory (the window's folder is untouched).
+        applyHostPickedWorkDir(ev.path);
+        break;
+      case 'workDirChanged':
+        // The daemon's global working directory changed (a pick on this
+        // or any other surface, or a settings save): every client
+        // re-scopes so all surfaces show the same directory.
+        if (typeof ev.workDir === 'string' && ev.workDir !== configWorkDir) {
+          adoptWorkDir(ev.workDir);
+        }
         break;
       case 'myModelsData':
         myModels = Array.isArray(ev.models) ? ev.models : [];
@@ -16723,17 +16758,6 @@
         // A snapshot without a well-formed tab list is junk, not an
         // empty registry: ignore it rather than close every tab.
         if (Array.isArray(ev.tabs)) reconcileTabs(ev.tabs);
-        break;
-
-      case 'workspaceWorkDir':
-        // The extension host reports the window's workspace folder
-        // change directly (its daemon `setWorkDir` produces no
-        // `configData` reply), so the history filter and the Explorer
-        // views re-scope immediately.
-        if (typeof ev.workDir === 'string' && ev.workDir !== configWorkDir) {
-          configWorkDir = ev.workDir;
-          applyWorkspaceScope();
-        }
         break;
 
       case 'triggerStop': {
@@ -20759,22 +20783,19 @@
           return {name: a.name, mimeType: a.type, data: a.data};
         }),
       useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.checked),
-      useParallel: true,
+      isParallel: true,
       autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
     };
     // Only a KNOWN toggle state becomes a per-run override; otherwise
     // the field stays absent and the daemon falls back to the
     // persisted "Use web tools" setting (see webToolsStateKnown).
     if (webToolsToggleBtn && webToolsStateKnown) {
-      msg.webTools = !!webToolsToggleBtn.checked;
+      msg.useWebTools = !!webToolsToggleBtn.checked;
     }
-    const runDir = curTab ? curTab.pinnedWorkDir || curTab.workDir : '';
-    if (runDir) msg.workDir = runDir;
+    // No workDir: the daemon runs every task in its one global working
+    // directory (the "Working directory" panel's pick on any surface).
     // The run's system prompt names the file open in the editor.
     Object.assign(msg, editorContext(false));
-    // The pick was for this task; from here on the run's own work dir
-    // (broadcast with its first event) is what the tab carries.
-    if (curTab) curTab.pinnedWorkDir = '';
     api.send(msg);
     t0 = Date.now();
     endTs = 0;
@@ -23977,7 +23998,9 @@
     if (!myModels.length) {
       const empty = document.createElement('div');
       empty.className = 'custom-models-empty';
-      empty.textContent = 'No custom models in ~/.kiss/MY_MODELS.json';
+      const homeDir = (window.__BRAND__ && window.__BRAND__.homeDir) || '.kiss';
+      empty.textContent =
+        'No custom models in ~/' + homeDir + '/MY_MODELS.json';
       list.appendChild(empty);
       return;
     }
@@ -24085,34 +24108,17 @@
       if (!node || settingsEditedFields.has(node.id)) return;
       node.checked = checked;
     };
-    // The working directory is not a settings field: in VS Code it is
-    // the workspace folder open in the window, on the remote web app it
-    // is chosen in the "Working directory" panel.  The config reply
-    // still decides which history rows and shared tabs this client
-    // shows.
+    // The working directory is not a settings field: it is the daemon's
+    // one global value (every task on every surface runs in it), chosen
+    // in the "Working directory" panel or the remote Explorer.  The
+    // config reply decides which history rows this client shows and
+    // what the Explorer browses.
     const prevConfigWorkDir = configWorkDir;
     configWorkDir = cfg.work_dir || '';
-    if (document.body.classList.contains('remote-chat')) {
-      // A browser tab that already pinned its own working directory
-      // (the WS shim writes sessionStorage `sorcar-work-dir` when the
-      // page posts setWorkDir) keeps it, so a second tab pointed
-      // elsewhere does not drag this one along; a fresh, unpinned tab
-      // adopts the stored value as its own.
-      let pinned = '';
-      try {
-        // eslint-disable-next-line no-undef -- sessionStorage is a browser global
-        pinned = sessionStorage.getItem('sorcar-work-dir') || '';
-      } catch (_e) {}
-      if (pinned) {
-        configWorkDir = pinned;
-      } else if (cfg.work_dir) {
-        api.setWorkDir({workDir: cfg.work_dir});
-      }
+    if (prevConfigWorkDir !== configWorkDir) {
+      applyWorkspaceScope();
+      renderCurrentWorkDir();
     }
-    // Compared AFTER the pinned override above so the web app's
-    // session pin — not the daemon-reported work_dir it supersedes —
-    // decides which history rows and shared tabs this client shows.
-    if (prevConfigWorkDir !== configWorkDir) applyWorkspaceScope();
     // The budget default belongs to Python (`config.DEFAULT_MAX_BUDGET`,
     // read by `vscode_config.DEFAULTS`), and `load_config()` seeds every
     // reply from it, so an effective value is always in `configData`.
@@ -24134,13 +24140,12 @@
     setChecked(webToolsToggleBtn, cfg.use_web_browser !== false);
     // The toggle now mirrors the persisted setting (or a user edit that
     // setChecked preserved), so submits may carry it as the per-run
-    // ``webTools`` override.
+    // ``useWebTools`` override.
     webToolsStateKnown = true;
     setChecked(classifyTasksToggleBtn, cfg.classify_tasks !== false);
-    // Off unless explicitly enabled: the default is the LLM classifier.
     setChecked(
       classifyWithDecisionsToggleBtn,
-      cfg.classify_with_decisions === true,
+      cfg.classify_with_decisions !== false,
     );
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
     // Recorded even while an edit is active (the boxes themselves are

@@ -159,7 +159,7 @@ worker = threading.Thread(
         "prompt": "reset-server-e2e",
         "tabId": tab_id,
         "workDir": "/tmp",
-        "useParallel": False,
+        "isParallel": False,
         "useWorktree": False,
         "autoCommit": False,
     },),

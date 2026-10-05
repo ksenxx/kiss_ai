@@ -26,14 +26,14 @@ task's text (``current_agent().last_user_prompt``) and enforce it:
 ``patch_sea_prompt`` / ``replay_in_clone`` refuse any other SEA.
 
 Either makes the agent go over the runs of every SEA in scope of the last 7
-days in ``~/.kiss/history.db`` and improve each SEA by AI discovery: it
+days in ``$KISS_HOME/history.db`` and improve each SEA by AI discovery: it
 mines the trajectories for agentic mistakes, speed and cost sinks and
 quality problems, proposes concrete instructions, judges them pairwise,
 applies the winners to the SEA's ``SYSTEM_PROMPT`` constant, evaluates
 the change (a real replay of the past task that best exercises the new
 instructions; any run that cost below $500 is eligible) and keeps or
 reverts it.  It also refreshes the observed model evidence the
-autorouter SEA routes on, by rewriting ``~/.kiss/AUTOROUTER.md`` (the
+autorouter SEA routes on, by rewriting ``$KISS_HOME/AUTOROUTER.md`` (the
 file that SEA splices into its prompt; :func:`write_autorouter_evidence`),
 so the evidence never changes a SEA file.  rsi7d is itself one of the indexed SEAs: its
 own finished sweeps are mined and its prompt patched the same way.
@@ -41,7 +41,7 @@ own finished sweeps are mined and its prompt patched the same way.
 KISS Sorcar itself is mined as the pseudo-SEA ``sorcar`` (the top-level
 runs on no SEA) and may be changed too — its system prompt
 ``src/kiss/SYSTEM.md`` / ``SYSTEM_LITE.md``, the user's
-``~/.kiss/AGENTS.md`` and its code under ``src/kiss`` — but only with the
+``$KISS_HOME/AGENTS.md`` and its code under ``src/kiss`` — but only with the
 user's permission: :func:`request_sorcar_permission` asks the user (or
 verifies a permitting sentence of the task text quoted by the agent) and
 :func:`patch_sorcar` refuses any target that was not granted in this run.
@@ -83,11 +83,21 @@ literals or f-strings) of SEA files inside the editable folders: the
 ``--seas-dir`` folder when the scope names one, else the
 ``src/kiss/agents/seas`` and ``src/kiss/agents/third_party_agents``
 directories of the task's work dir (the SEA's own directory when the
-task does not run inside a KISS checkout).  The gate rejects any
+task does not run inside a KISS checkout).  The prompt gate rejects any
 candidate whose AST differs outside the constant's text, so code and
-f-string placeholders are never changed.  SEAs registered from other
-folders (channel agents, user folders) are analysed and reported on,
-never edited.
+f-string placeholders are never changed by ``patch_sea_prompt``.  Code
+(tools, guardrail hooks, helpers) is edited with ``patch_sea_code`` for
+one exact replacement or reworked by a full-tool KISS Sorcar sub-agent
+through ``improve_sea_code`` (undone with ``revert_sea_code``), and
+``settings()`` with ``patch_sea_settings``; every editor keeps the edit
+only when the patched script compiles, loads through the daemon's path
+with every getter evaluated and passes ``sea lint``.  A settings change
+stays pending until ``settle_sea_settings`` keeps it on a successful
+replay or reverts it; the change log under the Sorcar home lets the
+next sweep propose a revert when the SEA got worse (:mod:`sea_tuning`
+holds the deterministic proposals, the acceptance test, the change log
+and the eval-set mining).  SEAs registered from other folders (channel agents, user
+folders) are analysed and reported on, never edited.
 
 Replays in clones
 -----------------
@@ -121,17 +131,25 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from kiss.agents.seas import agents_md
-from kiss.agents.sorcar import agent_dispatch, cron_agent, persistence, sea_commands, task_digest
+from kiss.agents.seas.rsi7d import sea_tuning
+from kiss.agents.sorcar import (
+    agent_dispatch,
+    cron_agent,
+    persistence,
+    sea_commands,
+    sea_lint,
+    task_digest,
+)
 from kiss.agents.sorcar.git_worktree import (
     TASK_RESULT_HEADING,
     USER_PROMPT_HEADING,
     strip_worktree_suffix,
 )
+from kiss.agents.sorcar.sea_settings import execute_python_file
 from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.config import kiss_home
 from kiss.core.utils import rmtree_force
 from kiss.server.agent_state import current_agent
-from kiss.server.tools_file import execute_python_file
 
 DEFAULT_DAYS = 7
 MAX_RUNS_LISTED = 40
@@ -139,7 +157,8 @@ WRAP_COLUMNS = 92
 """Prose written into a SEA prompt is wrapped here; the repo lints lines over 100."""
 SIGNATURE_CHARS = 200
 """Prompt prefix length that identifies a SEA run's ``system_prompt`` event."""
-PROMPT_GETTERS = ("system_prompt", "append_to_system_prompt", "add_to_system_prompt")
+PROMPT_GETTERS = ("system_prompt", "add_to_system_prompt")
+"""The SEA getters whose text is the prompt rsi7d patches, in precedence order."""
 STAMP_PREFIX = "_Observed in the task history"
 """First words of the stamp line ``write_autorouter_evidence`` puts above the evidence."""
 EVIDENCE_NAME = "AUTOROUTER.md"
@@ -161,7 +180,7 @@ SORCAR_AGENT_LABEL = "(KISS Sorcar itself, no SEA)"
 SORCAR_PROMPT_FILES = ("SYSTEM.md", "SYSTEM_LITE.md")
 """The system prompt files in the ``kiss`` package directory (``kiss.core.base`` reads them)."""
 AGENTS_MD = "AGENTS.md"
-"""Target name of the user's ``~/.kiss/AGENTS.md`` instruction file."""
+"""Target name of the user's ``$KISS_HOME/AGENTS.md`` instruction file."""
 _PERMISSION_QUOTE_MIN_CHARS = 12
 _SENTENCE_START = ".!?;:\n"
 _SENTENCE_STOP = ".!?;\n"
@@ -258,12 +277,31 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
   in the report.
 
 ## Hard rules
-- Change SEA files only through `patch_sea_prompt`. It edits one string constant and rejects
-  anything that changes code. Never edit a SEA with
-  Edit/Write, never edit a SEA whose `editable_path` or `prompt_constant` is empty in
-  `indexed_seas()` (user SEAs, and the channel SEAs such as `slack` or `gmail`, whose
-  prompts are assembled at run time): analyse those and put recommendations in the report
-  instead. `/ask` (`seas/ask/ask_sea.py`) does have a prompt constant and is optimized like
+- Change SEA files only through the gated editors, never with Edit/Write:
+  `patch_sea_prompt` (instructions: edits one prompt constant, nothing else may change),
+  `patch_sea_settings` (one `settings()` key; a `timeout` / `max_budget` must pass the
+  acceptance test on the window's runs), `patch_sea_code` (one exact replacement: a new
+  tool in `add_to_tools()`, a guardrail in `tool_call_hook` / `llm_call_hook`, a helper,
+  an import; read the file with `sea_source` first) and `improve_sea_code` (a KISS Sorcar
+  sub-agent with every tool reworks the SEA's folder from your written instructions and
+  evidence: use it when the change spans several places, needs a test, or restructures
+  the prompt). `tune_sea_settings` only computes proposals. Every editor restores the
+  file unless the patched SEA still loads and passes `sea lint` (`patch_sea_code`,
+  `improve_sea_code` and `patch_sea_settings` also run the daemon's full load with every
+  getter evaluated). A code change (tools, guardrails) is kept only when it is also
+  replay-verified (step 5) and `uv run pytest -q
+  src/kiss/tests/agents/seas/test_<name>_sea.py` passes when that test exists; a code
+  change that cannot be replayed is reverted, not reported as "not replay-verified". A
+  settings change is pending until `settle_sea_settings(name, replay_task_id)` keeps it
+  (successful replay) or reverts it (anything else); settle before any other settings
+  change of that SEA. Revert through the same editor (`patch_sea_code(name, old=<new
+  text>, new=<old text>)`, `settle_sea_settings` without a replay, `patch_sea_prompt` with
+  old/new swapped, `revert_sea_code(name)` after `improve_sea_code`), never with `git
+  checkout`, which would also discard earlier accepted edits. Never edit a
+  SEA whose `editable_path` is empty in
+  `indexed_seas()` (user SEAs, and the channel SEAs such as `slack` or `gmail`): analyse
+  those and put recommendations in the report instead. `/ask` (`seas/ask/ask_sea.py`) does
+  have a prompt constant and is optimized like
   the SEAs in `seas/`. Files outside the editable folders (`src/kiss/agents/seas/` and
   `src/kiss/agents/third_party_agents/`, or the `--seas-dir` folder) are KISS Sorcar itself:
   touch them only through `patch_sorcar` after `request_sorcar_permission` (see above),
@@ -308,17 +346,33 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
    the evidence they rest on, and the aspect they improve (quality / mistakes / cost /
    speed). Use `decide` with pairwise "choice" questions to rank candidates; keep the
    winners (at most about 6 new bullets per SEA per run).
-4. Implement. Call `sea_prompt(name)`, then `patch_sea_prompt(name, old, new)` (empty `old`
-   appends the section). Re-read the result and make sure the section is coherent with the
-   rest of the prompt.
+4. Implement. Instructions: call `sea_prompt(name)`, then `patch_sea_prompt(name, old, new)`
+   (empty `old` appends the section); re-read the result and make sure the section is
+   coherent with the rest of the prompt. Settings: `tune_sea_settings(name)` proposes
+   `timeout` / `max_budget` / a narrower `tool_profile` from the window, flags missing
+   tools, and turns an earlier change the runs since have shown to be harmful into a
+   `revert` proposal; apply with `patch_sea_settings(name, key, value)`, replay, then
+   `settle_sea_settings(name, replay_task_id)`. Code: when the evidence shows a missing
+   tool (the agent reaches for a tool the SEA does not give it) or a recurring misuse an
+   instruction did not stop, read the file with `sea_source(name)`; a one-place change
+   goes through `patch_sea_code(name, old, new)` (add the tool to `add_to_tools()` or a
+   guardrail to `tool_call_hook` / `llm_call_hook`); anything larger goes through
+   `improve_sea_code(name, instructions, max_budget)`, whose instructions must name the
+   files, the evidence (task ids, findings) and the intended behaviour, and whose budget
+   counts toward this task's; keep every helper small, typed and documented like the code
+   around it. Eval sets: `export_sea_evals(name)` turns
+   the window's successful runs into a `skillopt` eval-set candidate so the next
+   optimization has real tasks; `frequent_tasks()` lists repeated task texts that deserve a
+   new `/<name>` (report them, do not create the SEA).
 5. Evaluate for real. Pick the past run of the SEA that best exercises the instructions you
    added (the failed or unsuccessful run whose mistake a new bullet targets, else the
    costliest successful run) among the runs that have no external side effects (messaging,
    payments, publishing). Do not restrict yourself to cheap runs: any run whose original
    cost was below $500 is eligible, and a cheaper run is preferred only when it carries the
    same signal. Cap every replay at twice the original run's cost, at most 500, so a
-   regression cannot run away (a SEA that defines its own `max_budget()` getter overrides
-   that cap and limits the replay itself; check with `grep -n "def max_budget" <sea file>`).
+   regression cannot run away (your cap wins over the SEA's own `max_budget` setting; only
+   a SEA that lists `max_budget` in `settings()["locked"]` refuses a different cap, so pass
+   its own value then).
    Two ways to replay:
    - A task that modifies files (a paper, code, a report, a past rsi7d sweep) is replayed
      with `replay_in_clone(task_id, max_budget=<cap>)`. It clones the task's repository at
@@ -329,19 +383,21 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
      result. Delete `tmp/rsi7d/replays` before you finish. Never replay such a task with
      `run_agent` in this checkout.
    - A task that changes nothing on disk is replayed with
-     `run_agent(agent="src/kiss/agents/seas/<name>/<name>_sea.py", task=<the verbatim past
-     task>, max_budget=<cap>)`.
+     `replay_in_place(task_id, max_budget=<cap>)`: this checkout's patched SEA file runs the
+     verbatim past task in this directory, on the SEA's own prompt in a fresh chat. Never
+     replay with `run_agent`: a `run_agent` sub-task inherits rsi7d's system prompt, chat
+     and budget share, so it does not measure the SEA as a user runs it.
    Then compare `run_findings(<new task id>)` with the original run (status, cost, steps,
    signal counts). Keep the change when the replay is not worse on status and signals and
-   not clearly worse on cost/steps; otherwise revert with `git checkout --
-   src/kiss/agents/seas/<name>/<name>_sea.py` and record why in `./tmp/rsi7d/explored-ideas.md` so
+   not clearly worse on cost/steps; otherwise revert it through the editor that made it
+   and record why in `./tmp/rsi7d/explored-ideas.md` so
    the idea is not retried. Spend at most 60% of your remaining budget on replays and check
    `run_findings` of the sweep so far before each one; when no eligible run exists (every
    run cost $500 or more, or all have side effects) or the budget rule forbids the replay
-   (a past rsi7d sweep is a full sweep and rarely fits), keep the change only if it is
-   small, evidence-backed and passes `uv run pytest -q
+   (a past rsi7d sweep is a full sweep and rarely fits), keep a prompt or settings change
+   only if it is small, evidence-backed and passes `uv run pytest -q
    src/kiss/tests/agents/seas/test_<name>_sea.py` (when that test exists), and mark it "not
-   replay-verified" in the report.
+   replay-verified" in the report; revert a code change.
 6. Autorouter evidence. From `model_scorecard()` and the per-SEA models, write a compact
    evidence block for the router with `write_autorouter_evidence(text)`, which rewrites
    `~/{{HOME_DIR}}/AUTOROUTER.md` (the autorouter SEA splices that file into every prompt; its
@@ -368,9 +424,8 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
 - Call `sea_runs()` exactly once per sweep: it returns about 220k chars. Write the per-SEA
   numbers into `tmp/rsi7d/baseline.md` in the next step and never call it again, with or
   without `name`/`days`. A replay's task id comes from the `replay_task_id` field of the JSON
-  `replay_in_clone` returns; `run_agent` returns only success and summary, so after a
-  `run_agent` replay take the newest id in `sea_findings(name, runs=1)["runs_scanned"]`.
-  `run_findings(id)` then gives the replay's status and cost.
+  `replay_in_clone` and `replay_in_place` return; `run_findings(id)` then gives the
+  replay's status and cost.
 - In a worktree, never put a main-checkout path (`/home/ksen/kiss/...`) in a Bash command,
   heredoc bodies included: the guard rejects the whole call. Read the main branch's copy
   with `git show main:<path>` and quote such paths only in `Write`d notes.
@@ -434,8 +489,11 @@ def description() -> str:
     return (
         f"Mines the last 7 days of the indexed SEAs' runs in ~/{HOME_DIR}/history.db for agentic "
         "mistakes, cost sinks and quality problems, applies and evaluates improvements to each "
-        "SEA's SYSTEM_PROMPT (its own included; file-modifying tasks are replayed in a clone "
-        "at the task's commit), refreshes the autorouter SEA's model evidence and, with the "
+        "SEA (its own included): instructions in its prompt, settings() limits tuned from the "
+        "runs, tools and guardrail hooks in its code, through gated editors that keep the "
+        "script loading and lint-clean (file-modifying tasks are replayed in a clone at the "
+        "task's commit); mines eval sets for skillopt; refreshes the autorouter SEA's model "
+        "evidence and, with the "
         "user's permission (asked for, unless the task text grants it), improves KISS Sorcar "
         f"itself: src/kiss/SYSTEM.md, ~/{HOME_DIR}/AGENTS.md and its code. The task text starts "
         "with the scope: `/rsi7d all` (every SEA), `/rsi7d review_paper write_paper` (those "
@@ -577,6 +635,7 @@ def _run_record(
         "duration_s": _duration_s(row),
         "children": len(children),
         "started": task_digest._fmt_ts(task_digest._start_ms(row)),
+        "started_ms": task_digest._start_ms(row),
     }
 
 
@@ -611,7 +670,7 @@ def _runs_by_signature(task_ids: list[str], signatures: dict[str, str]) -> dict[
     *signatures* maps a SEA name to a distinctive prefix of the prompt
     text its getter returns; a SEA's prompt is persisted verbatim in
     the run's ``system_prompt`` event (alone for ``system_prompt()``
-    SEAs, appended to the default prompt for ``append_to_system_prompt()``
+    SEAs, appended to the default prompt for ``add_to_system_prompt()``
     ones), so the prefix identifies runs the server dispatched without a
     ``run_agent`` tool call (the side-channel task-update reports, runs
     started through ``sorcar.run(extension_agent_path=...)``).
@@ -637,8 +696,13 @@ def _mine_sea_runs(days: float = 7, signatures: dict[str, str] | None = None) ->
 
     A run is recognised through its parent's ``run_agent`` tool call
     (``agent`` argument = SEA path or channel name, ``task`` argument =
-    the child's verbatim prompt) or, failing that, through *signatures*
-    (``{sea name: prompt prefix}``, see :func:`_runs_by_signature`).
+    the child's verbatim prompt), failing that through *signatures*
+    (``{sea name: prompt prefix}``, see :func:`_runs_by_signature`),
+    and failing that through the ``sea`` the row records (the agent
+    script's file stem, set by the daemon for every run with an agent
+    path: ``replay_in_clone`` / ``replay_in_place`` replays and other
+    ``dispatch_result`` runs of a SEA whose prompt is too short for a
+    signature).
 
     Returns ``{"days", "window_start", "tasks_in_window", "seas": {name:
     {"agents": [distinct agent arguments], "stats": {...}, "runs": [...]}},
@@ -687,10 +751,16 @@ def _mine_sea_runs(days: float = 7, signatures: dict[str, str] | None = None) ->
         for tid in ids:
             claimed.add(tid)
             matched[name].append(("(system prompt signature)", by_id[tid]))
-    # What is left without a parent and without a recorded SEA ran on
-    # KISS Sorcar's own system prompt: the pseudo-SEA ``sorcar``.
     for tid, row in by_id.items():
-        if tid not in claimed and not row.get("parent_task_id") and not row.get("sea"):
+        if tid in claimed:
+            continue
+        recorded = sea_name_of(row.get("sea"))
+        if recorded:
+            claimed.add(tid)
+            matched[recorded].append(("(recorded sea)", row))
+        elif not row.get("parent_task_id"):
+            # Neither a parent nor a recorded SEA: the run was on KISS
+            # Sorcar's own system prompt, the pseudo-SEA ``sorcar``.
             claimed.add(tid)
             matched[SORCAR].append((SORCAR_AGENT_LABEL, row))
     flags = _final_success(sorted(claimed))
@@ -943,28 +1013,23 @@ def _execute_sea(path: Path) -> dict[str, Any]:
 
 
 def system_prompt() -> str:
-    """Replace the default Sorcar system prompt with the rsi7d procedure (brand rendered)."""
+    """Return :data:`SYSTEM_PROMPT` with the brand placeholders filled."""
     return render_brand(SYSTEM_PROMPT)
 
 
-def max_budget() -> float:
-    """Sweeping several SEAs needs room for replays of past runs that cost up to $500 each.
+def settings() -> dict[str, Any]:
+    """Run :data:`SYSTEM_PROMPT` with memory, without the browser, under a $2000 cap.
 
-    A sub-agent's spend counts toward this task's total, so the cap must
-    hold the mining work plus a few $500-class replays (the procedure
-    limits replays to 60% of the remaining budget).
+    Sweeping several SEAs needs room for replays of past runs that cost
+    up to $500 each: a sub-agent's spend counts toward this task's total,
+    so the cap must hold the mining work plus a few $500-class replays
+    (the procedure limits replays to 60% of the remaining budget).
     """
-    return 2000.0
-
-
-def use_memory() -> bool:
-    """Lessons about SEA failure modes are worth remembering across sweeps."""
-    return True
-
-
-def use_web_tools() -> bool:
-    """Replays and evidence mining are local; no browsing."""
-    return False
+    return {
+        "max_budget": 2000.0,
+        "use_memory": True,
+        "use_web_tools": False,
+    }
 
 
 @dataclass(frozen=True)
@@ -1406,7 +1471,7 @@ def model_scorecard(days: float = DEFAULT_DAYS) -> str:
     unsuccessful, median_own_cost, median_cost_per_step, median_s_per_step,
     median_steps, median_tokens_per_step, tool_error_rate, task_errors and
     error_reasons.  Compare with the catalog prices in
-    ``~/.kiss/MODEL_INFO.json`` when reasoning about cost.
+    ``$KISS_HOME/MODEL_INFO.json`` when reasoning about cost.
     """
     return json.dumps(_model_scorecard(days), indent=1)
 
@@ -1612,17 +1677,428 @@ def patch_sea_prompt(name: str, old: str, new: str) -> str:
     path.write_text(candidate, encoding="utf-8")
     try:
         str(_execute_sea(path)[getter]())
+        findings = sea_lint.lint_sea(path)
     except Exception as exc:  # noqa: BLE001 - any load failure must roll the file back
         path.write_text(source, encoding="utf-8")
         return f"Error: the patched SEA no longer loads ({exc}); file restored"
+    if findings:
+        path.write_text(source, encoding="utf-8")
+        return "Error: sea lint rejects the patched SEA; file restored:\n" + "\n".join(
+            map(str, findings)
+        )
     return (
         f"Patched {constant} of {path} via {getter}(): {len(text)} -> {len(updated)} chars, "
         f"{len(updated.splitlines()) - len(text.splitlines()):+d} lines"
     )
 
 
+def _accept_sea_file(path: Path, source: str, candidate: str) -> str:
+    """Write *candidate* to *path* if the SEA still passes the contract; return an error or ``""``.
+
+    The gate every code edit of a SEA goes through: the module must
+    compile, the script must load through the daemon's own path with
+    every getter evaluated (:func:`sea_commands.check_sea`), and
+    ``sea lint`` must report nothing.  On failure the file holds
+    *source* again.
+    """
+    try:
+        compile(candidate, str(path), "exec")
+    except SyntaxError as exc:
+        return f"the patched file does not compile ({exc})"
+    path.write_text(candidate, encoding="utf-8")
+    try:
+        sea_commands.check_sea(path, require_description=False)
+        findings = sea_lint.lint_sea(path)
+    except Exception as exc:  # noqa: BLE001 - any load failure must roll the file back
+        path.write_text(source, encoding="utf-8")
+        return f"the patched SEA no longer loads ({exc}); file restored"
+    except BaseException:  # a script calling sys.exit() must not leave its patch behind
+        path.write_text(source, encoding="utf-8")
+        raise
+    if findings:
+        path.write_text(source, encoding="utf-8")
+        return "sea lint rejects the patched SEA; file restored:\n" + "\n".join(map(str, findings))
+    return ""
+
+
+def sea_source(name: str, start: int = 1, count: int = 200) -> str:
+    """Return *count* numbered lines of editable SEA *name*'s file from line *start*.
+
+    Read the code before `patch_sea_code`: tools (`add_to_tools`),
+    guardrails (`tool_call_hook` / `llm_call_hook`), `settings()` and the
+    prompt constants all live in this one file.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = max(1, start)
+    chunk = lines[start - 1:start - 1 + max(1, count)]
+    body = "\n".join(f"{start + i:5d}  {line}" for i, line in enumerate(chunk))
+    return f"# {path} ({len(lines)} lines; showing {start}-{start + len(chunk) - 1})\n{body}"
+
+
+def patch_sea_code(name: str, old: str, new: str) -> str:
+    """Replace *old* with *new* once in the code of editable SEA *name*; empty *old* appends.
+
+    The general editor for everything `patch_sea_prompt` cannot touch:
+    a new tool in `add_to_tools()`, a guardrail in `tool_call_hook` /
+    `llm_call_hook`, a helper, an import.  *old* must occur exactly once
+    in the file.  The edit is kept only when the patched module compiles,
+    loads through the daemon's path with every getter evaluated and
+    passes `sea lint`; otherwise the file is restored and the reason
+    returned.  A code change is accepted for good only after a replay
+    (`replay_in_clone` / `replay_in_place`) and the SEA's tests pass.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    source = path.read_text(encoding="utf-8")
+    if old and source.count(old) != 1:
+        return f"Error: old text occurs {source.count(old)} times in {path} (must be exactly once)"
+    if old:
+        candidate = source.replace(old, new)
+    else:
+        candidate = source + ("" if source.endswith("\n") else "\n") + new
+    why = _accept_sea_file(path, source, candidate)
+    if why:
+        return f"Error: {why}"
+    delta = len(candidate.splitlines()) - len(source.splitlines())
+    return f"Patched {path}: {len(source)} -> {len(candidate)} chars, {delta:+d} lines"
+
+
+SNAPSHOT_DIR = Path("tmp") / "rsi7d" / "snapshots"
+"""Where ``improve_sea_code`` keeps the copy of a SEA folder it took before the sub-agent ran."""
+
+IMPROVE_PROMPT = """\
+Improve the Sorcar Extension Agent (SEA) `{name}` in this checkout. Its folder is `{folder}`
+and its script is `{file}`; every change must stay inside that folder (and its test file
+`{test}`, when the change needs one). Instructions and evidence from the rsi7d sweep:
+
+{instructions}
+
+Rules: read the script fully before editing; keep the SEA's contract (module-level
+`description()`, `settings()`, prompt getters, `add_to_tools()` returning callables); keep
+every helper small, typed and documented like the code around it; run
+`uv run sea lint` and the SEA's test file when it exists, and fix what they report. Do not
+commit. Finish with a short summary of what you changed and why.
+"""
+
+
+def improve_sea_code(
+    name: str, instructions: str, max_budget: float, timeout: float = 3600.0, model: str = ""
+) -> str:
+    """Have a full-tool KISS Sorcar sub-agent rework editable SEA *name* as *instructions* say.
+
+    For changes beyond one exact replacement (`patch_sea_code`): a new
+    tool with its test, a restructured prompt, several coordinated
+    edits.  A plain Sorcar task (this checkout's SYSTEM.md, full
+    toolset, *model* or the default, no worktree, no auto-commit) runs in
+    the checkout with the SEA's folder, file and your *instructions*
+    (the ideas and the evidence they rest on), capped by *max_budget*
+    (USD) and *timeout* (seconds).  The folder is copied to
+    `tmp/rsi7d/snapshots/<name>` first; `revert_sea_code(name)` restores
+    that copy.  When the sub-agent returns, the script goes through the
+    same gate as `patch_sea_code` (compile, load with every getter,
+    `sea lint`); a script that fails is restored from the snapshot and
+    the error returned.  Returns JSON with `task_id`, the sub-agent's
+    `result`, the folder's `diff_stat` and any `other_changes` outside
+    the folder.  Then replay (step 5) and keep, or `revert_sea_code`.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    if not hasattr(agent_dispatch, "dispatch_result"):
+        return (
+            "Error: the daemon's installed kiss package predates agent_dispatch.dispatch_result; "
+            "reinstall the extension from this checkout and retry"
+        )
+    folder = path.parent
+    checkout = _folder_checkout(folder)
+    snapshot = _work_root() / SNAPSHOT_DIR / name
+    rmtree_force(snapshot)
+    shutil.copytree(folder, snapshot, ignore=shutil.ignore_patterns("__pycache__"))
+    source = path.read_text(encoding="utf-8")
+    dirty_before = _dirty_files(checkout)
+    test = checkout / "src" / "kiss" / "tests" / "agents" / "seas" / f"test_{name}_sea.py"
+    prompt = IMPROVE_PROMPT.format(
+        name=name, folder=folder, file=path, test=test, instructions=instructions.strip()
+    )
+    outcome = _dispatch_replay(
+        SORCAR, str(_kiss_pkg_dir() / SORCAR_PROMPT_FILES[0]), prompt, str(checkout),
+        model, max_budget, timeout,
+    )
+    report: dict[str, Any] = {
+        "sea": name,
+        "task_id": outcome["replay_task_id"],
+        "result": outcome["result"],
+        "snapshot": str(snapshot),
+    }
+    if path.is_file():
+        why = _accept_sea_file(path, source, path.read_text(encoding="utf-8"))
+    else:
+        why = "the sub-agent deleted the script"
+    if why:
+        _restore_folder(snapshot, folder)
+        report["error"] = f"{why}; folder restored from the snapshot"
+    diff = _git("diff", "--stat", "--", str(folder), cwd=checkout)
+    report["diff_stat"] = diff.stdout.strip() if diff.returncode == 0 else "not a git checkout"
+    report["other_changes"] = sorted(
+        f for f in _dirty_files(checkout) - dirty_before
+        if not (checkout / f).resolve().is_relative_to(folder.resolve())
+    )
+    return json.dumps(report, indent=1, default=str)
+
+
+def revert_sea_code(name: str) -> str:
+    """Restore editable SEA *name*'s folder from the copy `improve_sea_code` took before it ran.
+
+    Undoes the latest `improve_sea_code` of *name* (and nothing else:
+    earlier accepted edits are inside the copy).  Returns what was
+    restored, or an error when no snapshot exists.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    snapshot = _work_root() / SNAPSHOT_DIR / name
+    if not snapshot.is_dir():
+        return f"Error: no snapshot of {name} in {snapshot}; nothing to revert"
+    _restore_folder(snapshot, path.parent)
+    return f"Restored {path.parent} from {snapshot}"
+
+
+def _folder_checkout(folder: Path) -> Path:
+    """Return the git checkout *folder* is in (the folder itself when it is not in one)."""
+    proc = _git("rev-parse", "--show-toplevel", cwd=folder)
+    return Path(proc.stdout.strip()) if proc.returncode == 0 and proc.stdout.strip() else folder
+
+
+def _dirty_files(checkout: Path) -> set[str]:
+    """Return the paths ``git status`` lists as changed or untracked in *checkout*."""
+    proc = _git("status", "--porcelain", "--untracked-files=all", cwd=checkout)
+    if proc.returncode:
+        return set()
+    return {line[3:].strip() for line in proc.stdout.splitlines() if len(line) > 3}
+
+
+def _restore_folder(snapshot: Path, folder: Path) -> None:
+    """Make *folder* identical to *snapshot* (files added since are removed)."""
+    rmtree_force(folder)
+    shutil.copytree(snapshot, folder)
+
+
+def tune_sea_settings(name: str, days: float = DEFAULT_DAYS) -> str:
+    """Propose `settings()` changes for SEA *name* from its runs of the last *days* days.
+
+    Deterministic: `timeout` = 2 x the p95 duration and `max_budget` =
+    1.5 x the p95 cost of the finished runs (never below the current
+    value when a run was stopped by a limit); a narrower `tool_profile`
+    when 10+ runs never called a tool outside it; a flag when runs
+    failed on a missing tool.  Earlier `patch_sea_settings` changes are
+    judged by the runs since: a settled change after which the SEA was
+    stopped by limits more often or got clearly costlier comes back as
+    a `revert` proposal, and a change not yet settled with
+    `settle_sea_settings` blocks every proposal (`pending`).  Apply a
+    proposal with `patch_sea_settings`.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    runs = _sea_runs(days).get("seas", {}).get(name, {}).get("runs", [])
+    report = sea_tuning.propose_settings(
+        runs,
+        sea_commands.sea_settings(path),
+        sea_tuning.load_changes(_change_log(), name),
+        _tools_used([str(r["task_id"]) for r in runs]),
+    )
+    return json.dumps({"sea": name, "days": days, **report}, indent=1, default=str)
+
+
+def _change_log() -> Path:
+    """Return the settings change log (under the Sorcar home, so it outlives this checkout)."""
+    return sea_tuning.change_log_path(kiss_home())
+
+
+def _tools_used(task_ids: list[str]) -> Counter[str]:
+    """Return how often each tool was called across the runs *task_ids*."""
+    used: Counter[str] = Counter()
+    for tid, ev in _events_like(task_ids, '%"tool_call"%'):
+        if ev.get("type") == "tool_call" and ev.get("name"):
+            used[str(ev["name"])] += 1
+    return used
+
+
+def settle_sea_settings(name: str, replay_task_id: str = "") -> str:
+    """Keep or revert the pending `patch_sea_settings` change of SEA *name*.
+
+    The keep-or-revert gate of a settings change: with the id of a
+    successful replay (`replay_in_clone` / `replay_in_place` run after
+    the change) the change is recorded as settled; with an empty id, an
+    unknown id or a failed replay the change is reverted in the file and
+    recorded as reverted.  Until a change is settled, `tune_sea_settings`
+    proposes nothing and `patch_sea_settings` refuses another change.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    log = _change_log()
+    pending = sea_tuning.pending_change(sea_tuning.load_changes(log, name))
+    if pending is None:
+        return f"Error: {name} has no pending settings change"
+    verdict = _replay_verdict(replay_task_id, name, int(pending["at_ms"]))
+    if verdict == "success":
+        sea_tuning.settle_change(log, name, replay_task_id)
+        return (
+            f"Kept settings()[{pending['key']!r}] = {pending['new']!r} of {name} "
+            f"(replay {replay_task_id} succeeded)"
+        )
+    source = path.read_text(encoding="utf-8")
+    old = sea_tuning.REMOVE if pending["old"] is None else pending["old"]  # None: key was absent
+    candidate = sea_tuning.patch_settings_literal(source, str(pending["key"]), old)
+    why = _accept_sea_file(path, source, candidate)
+    if why:
+        return f"Error: {why}"
+    sea_tuning.record_change(log, {
+        "sea": name, "key": pending["key"], "old": pending["new"], "new": pending["old"],
+        "task_id": _own_task_id(), "replay_task_id": replay_task_id, "reverted": True,
+    })
+    return (
+        f"Reverted settings()[{pending['key']!r}] of {name} to {pending['old']!r} "
+        f"({verdict}); record why in ./tmp/rsi7d/explored-ideas.md"
+    )
+
+
+def _replay_verdict(replay_task_id: str, name: str, since_ms: int) -> str:
+    """Return ``"success"`` when *replay_task_id* is a successful run of SEA *name* started
+    after *since_ms*, else the reason it does not count (empty id, unknown task, another
+    SEA, started before the change, or its status)."""
+    if not replay_task_id:
+        return "no replay given"
+    row = _task_row(replay_task_id)
+    if row is None:
+        return f"Error: no task with id {replay_task_id!r}"
+    if sea_name_of(row.get("sea") or "") != name:
+        ran = sea_name_of(row.get("sea") or "") or "no SEA"
+        return f"replay {replay_task_id} ran {ran}, not {name}"
+    if task_digest._start_ms(row) < since_ms:
+        return f"replay {replay_task_id} started before the change"
+    findings = _run_findings(replay_task_id)
+    if isinstance(findings, str):
+        return findings
+    status = str(findings.get("status") or "")
+    return "success" if status == "success" else f"replay status {status!r}"
+
+
+def _own_task_id() -> str:
+    """Return this rsi7d task's persisted id (``""`` outside a task)."""
+    task_id = getattr(current_agent(), "last_task_id", "")
+    return task_id if isinstance(task_id, str) else ""
+
+
+def patch_sea_settings(name: str, key: str, value: str, days: float = DEFAULT_DAYS) -> str:
+    """Set `settings()[key]` of editable SEA *name* to *value* (a JSON literal).
+
+    An AST-confined edit of the dict literal `settings()` returns: the
+    key's value is replaced, or the key inserted, and nothing else
+    changes.  A `timeout` or `max_budget` must pass the acceptance test
+    (no successful run of the last *days* days would have been cut off
+    by it); the patched SEA must load and pass `sea lint`, else the file
+    is restored.  The change is logged as pending: replay a past run,
+    then `settle_sea_settings(name, replay_task_id)` keeps or reverts
+    it; a SEA with a pending change refuses another one.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    log = _change_log()
+    pending = sea_tuning.pending_change(sea_tuning.load_changes(log, name))
+    if pending is not None:
+        return (
+            f"Error: {name} has a pending settings change ({pending['key']!r}: "
+            f"{pending['old']!r} -> {pending['new']!r}); settle it with settle_sea_settings first"
+        )
+    try:
+        parsed = json.loads(value)
+    except ValueError as exc:
+        return f"Error: value must be a JSON literal ({exc})"
+    if key in ("timeout", "max_budget") and isinstance(parsed, int | float):
+        runs = _sea_runs(days).get("seas", {}).get(name, {}).get("runs", [])
+        why = sea_tuning.accepts_runs(key, float(parsed), runs)
+        if why:
+            return f"Error: {why}"
+    source = path.read_text(encoding="utf-8")
+    # The literal's own value (``None`` when the key is absent, so a revert removes it
+    # again instead of writing the kind's default back as a redundant key).
+    try:
+        old = sea_tuning.literal_value(source, key)
+        candidate = sea_tuning.patch_settings_literal(source, key, parsed)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    why = _accept_sea_file(path, source, candidate)
+    if why:
+        return f"Error: {why}"
+    effective = sea_commands.sea_settings(path).get(key)
+    if effective != parsed:
+        # A later ``**spread`` or an extended script shadows the literal: the
+        # acceptance test above judged a value the run would never see.
+        path.write_text(source, encoding="utf-8")
+        return (
+            f"Error: settings()[{key!r}] = {parsed!r} is shadowed (effective value "
+            f"{effective!r}: a `**spread` after the key or an extended script wins); file restored"
+        )
+    sea_tuning.record_change(
+        log, {"sea": name, "key": key, "old": old, "new": parsed, "task_id": _own_task_id()}
+    )
+    return (
+        f"Patched settings()[{key!r}] of {path} to {parsed!r} (pending: replay a past run, "
+        f"then settle_sea_settings({name!r}, <replay_task_id>) keeps or reverts it)"
+    )
+
+
+def export_sea_evals(name: str, days: float = DEFAULT_DAYS, limit: int = 30) -> str:
+    """Write a `skillopt` eval-set candidate from SEA *name*'s successful runs of the window.
+
+    Up to *limit* successful runs (newest first) become tasks: `prompt` =
+    the verbatim task text, `expect` = stable sentences of the result,
+    the newest 30% marked `split: "select"`.  Written to
+    `<sea folder>/evals/<name>_sea_evals_candidates.json` for review;
+    `skillopt` reads it as is.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    runs = _sea_runs(days).get("seas", {}).get(name, {}).get("runs", [])
+    rows = [
+        row for run in runs if run["status"] == "success"
+        for row in [_task_row(run["task_id"])] if row is not None
+    ][:limit]
+    if len(rows) < 2:
+        return (
+            f"Error: {len(rows)} successful run(s) of {name} in the last {days:g} days; an eval "
+            "set needs at least 2 (one train, one select task)"
+        )
+    evals = sea_tuning.eval_candidates(rows)
+    out = path.parent / "evals" / f"{name}_sea_evals_candidates.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(evals, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    with_expect = sum("expect" in t for t in evals["tasks"])
+    return f"Wrote {len(evals['tasks'])} eval tasks ({with_expect} with expectations) to {out}"
+
+
+def frequent_tasks(days: float = DEFAULT_DAYS, min_repeats: int = 3) -> str:
+    """List task texts repeated at least *min_repeats* times in the window: candidates for new SEAs.
+
+    A task a user keeps typing with the same tool profile is a `/<name>`
+    candidate whose `prompt(task)` is the template; report it, do not
+    create the SEA.
+    """
+    rows = _rows_since(days)
+    found = sea_tuning.frequent_task_templates(rows, min_repeats)
+    return json.dumps({"days": days, "min_repeats": min_repeats, "tasks": found[:40]}, indent=1)
+
+
 def write_autorouter_evidence(text: str) -> str:
-    """Rewrite ``~/.kiss/AUTOROUTER.md``, the observed model evidence of the autorouter SEA.
+    """Rewrite ``$KISS_HOME/AUTOROUTER.md``, the observed model evidence of the autorouter SEA.
 
     *text* is Markdown (a table plus a few bullets) describing what the
     task history shows about each model's cost, speed and reliability.
@@ -1802,7 +2278,7 @@ def _kiss_pkg_dir() -> Path:
 def _sorcar_target(target: str) -> Path | str:
     """Resolve *target* to the file ``patch_sorcar`` may change, or return an ``Error: ...``.
 
-    ``AGENTS.md`` is the user's ``~/.kiss/AGENTS.md``; ``SYSTEM.md`` and
+    ``AGENTS.md`` is the user's ``$KISS_HOME/AGENTS.md``; ``SYSTEM.md`` and
     ``SYSTEM_LITE.md`` are the prompt files of the ``kiss`` package; any
     other target is a code file under the checkout's ``src/kiss`` (a path
     relative to the checkout, or absolute), never a SEA file.
@@ -1882,7 +2358,7 @@ def _prompt_grant(quote: str, targets: list[str]) -> str:
 def sorcar_text(target: str = "SYSTEM.md") -> str:
     """Return the current text of a KISS Sorcar target: ``SYSTEM.md`` (the system prompt),
     ``SYSTEM_LITE.md`` (the reduced prompt simple tasks get), ``AGENTS.md`` (the user's
-    ``~/.kiss/AGENTS.md`` instructions) or a code file path under ``src/kiss/``."""
+    ``$KISS_HOME/AGENTS.md`` instructions) or a code file path under ``src/kiss/``."""
     path = _sorcar_target(target)
     if isinstance(path, str):
         return path
@@ -1958,7 +2434,7 @@ def request_sorcar_permission(targets: str, reason: str, prompt_quote: str = "")
 
 
 def patch_sorcar(target: str, old: str, new: str) -> str:
-    """Change KISS Sorcar itself: a system prompt file, ``~/.kiss/AGENTS.md`` or a code file.
+    """Change KISS Sorcar itself: a system prompt file, ``$KISS_HOME/AGENTS.md`` or a code file.
 
     Needs a grant for *target* from ``request_sorcar_permission`` in this
     run.  In ``SYSTEM.md``, ``SYSTEM_LITE.md`` and code files *old* must
@@ -1997,7 +2473,7 @@ def patch_sorcar(target: str, old: str, new: str) -> str:
 
 
 def _patch_agents_md(path: Path, old: str, new: str) -> str:
-    """Remove bullet *old* and/or add bullet *new* to ``~/.kiss/AGENTS.md``, after a backup."""
+    """Remove bullet *old* and/or add bullet *new* to ``$KISS_HOME/AGENTS.md``, after a backup."""
     if not old and not new:
         return "Error: give `old` (the bullet to remove), `new` (the bullet to add) or both"
     backup = _work_root() / "tmp" / "rsi7d" / "AGENTS.md.before"
@@ -2051,6 +2527,158 @@ def _sorcar_system_prompt() -> str:
     return render_brand((_kiss_pkg_dir() / SORCAR_PROMPT_FILES[0]).read_text(encoding="utf-8"))
 
 
+def _replay_sea_file(task_id: str, sea: str) -> Path | str:
+    """Return this checkout's file a replay of *sea* runs, or an ``Error: ...`` string.
+
+    The SEA's editable ``<sea>_sea.py``; for a plain KISS Sorcar run
+    (:data:`SORCAR`) this checkout's (possibly patched) ``SYSTEM.md``,
+    which the replay uses as its base system prompt.
+    """
+    if sea == SORCAR:
+        if not _sorcar_in_scope(_scope()):
+            return _not_editable(sea)
+        system_md = _sorcar_target(SORCAR_PROMPT_FILES[0])
+        if isinstance(system_md, str):
+            return (
+                f"Error: run {task_id} is a plain KISS Sorcar run and cannot be replayed from "
+                f"here: {system_md.removeprefix('Error: ')}"
+            )
+        return system_md
+    editable = _editable_path(sea)
+    if editable is None:
+        return _not_editable(sea)
+    return editable
+
+
+def _legacy_daemon_error(
+    tool: str, task_id: str, max_budget: float, timeout: float, name: str, model: str
+) -> str:
+    """Return the ``Error: ...`` a replay tool answers when this daemon cannot dispatch, else "".
+
+    The daemon imports its own installed kiss package (the VS Code
+    extension's bundled copy), which can be older than this checkout and
+    lack ``agent_dispatch.dispatch_result``; the message names the
+    *tool* call (with its original arguments) to run under this
+    checkout's package instead.
+    """
+    if hasattr(agent_dispatch, "dispatch_result"):
+        return ""
+    return (
+        "Error: the daemon's installed kiss package predates "
+        "agent_dispatch.dispatch_result (commit 12ee8703c), so this tool cannot "
+        "dispatch the replay from inside the daemon. Reinstall the extension from "
+        "this checkout, or run the replay under this checkout's package with "
+        f"`uv run python -c \"from kiss.agents.seas.rsi7d import rsi7d_sea; "
+        f"print(rsi7d_sea.{tool}({task_id!r}, {max_budget!r}, {timeout!r}, "
+        f"{name!r}, {model!r}))\"` "
+        "in the background; that replay has no parent task, so quote its cost "
+        "from run_findings(<replay_task_id>)."
+    )
+
+
+def _dispatch_replay(
+    sea: str, sea_file: str, task: str, work_dir: str,
+    model: str, max_budget: float, timeout: float,
+) -> dict[str, Any]:
+    """Run a replay of *task* as *sea* through the daemon and return its outcome.
+
+    A plain KISS Sorcar replay (*sea* = :data:`SORCAR`) runs with no
+    agent script and *sea_file* (this checkout's ``SYSTEM.md``) as its
+    base system prompt; any other replay runs the agent script
+    *sea_file*.  The replay is dispatched with ``inherit=False``: a
+    faithful replay runs on the SEA's own prompt, in its own chat, with
+    *model*, rather than on rsi7d's replacement system prompt, chat
+    and budget share a ``run_agent`` call would hand it.  The replay
+    runs as an agent job of the calling rsi7d task and is stopped when
+    *timeout* expires: a replay tool has no caller to collect a
+    detached job, so here the bound is on the replay itself.  Returns
+    the ``result`` (the dict ``success``, ``summary``, ``cost``,
+    ``steps``, or the dispatch's error string) and the
+    ``replay_task_id`` (empty when the dispatch failed).
+    """
+    plain = sea == SORCAR
+    owner = current_agent()
+    job = agent_dispatch.start_agent_job(sea, {
+        "name": sea, "prompt": task, "agent_path": "" if plain else sea_file,
+        "work_dir": work_dir, "model_name": model, "budget": max_budget,
+        "timeout": timeout, "parent_agent": owner, "scope_work_dir": str(_work_root()),
+        "options": agent_dispatch.RunOptions(
+            use_worktree=False,
+            auto_commit=False,
+            system_prompt=_sorcar_system_prompt() if plain else "",
+        ),
+    }, owner)
+    try:
+        finished = agent_dispatch.join_agent_job(job, timeout)
+    except BaseException:
+        agent_dispatch.kill_agent_job(job)
+        raise
+    if not finished:
+        agent_dispatch.kill_agent_job(job)
+    agent_dispatch.forget_agent_job(job)
+    result = job.outcome
+    if not isinstance(result, agent_dispatch.TaskResult):
+        # An error string, or ``None`` when the daemon answered neither
+        # the replay nor its stop within the kill grace.
+        return {
+            "replay_task_id": "",
+            "result": result or (
+                f"Error: the {sea} replay did not finish within {timeout:g}s and the "
+                f"daemon did not confirm its stop; it may still be running."
+            ),
+        }
+    return {
+        "replay_task_id": result.task_id,
+        "result": {
+            "success": result.success, "summary": result.text, "cost": result.cost,
+            "steps": result.steps,
+        },
+    }
+
+
+def replay_in_place(
+    task_id: str, max_budget: float, timeout: float = 3600.0, name: str = "", model: str = ""
+) -> str:
+    """Replay past run *task_id* in this task's work directory, with no clone.
+
+    Use it for tasks that change nothing on disk: the replay runs the SEA
+    file of this checkout (with its patched prompt) on the verbatim past
+    task, in this task's directory, without a worktree and without
+    auto-commit, with the original run's model unless *model* is given,
+    capped by *max_budget* (USD) and *timeout* (seconds); *name*
+    overrides the SEA recorded on the run.  Unlike a ``run_agent`` call,
+    which would hand the SEA rsi7d's own replacement system prompt, chat
+    and budget share, the replay runs on the SEA's own prompt in a fresh
+    chat, so it measures the SEA as a user runs it.  A run of KISS Sorcar
+    itself (``sorcar``) is replayed as a plain task on this checkout's
+    ``SYSTEM.md``, patched or not.  Returns JSON with ``replay_task_id``
+    (pass it to ``run_findings``), ``sea``, ``sea_file``, ``work_dir``,
+    ``model``, ``task`` and the replay's ``result``.
+    """
+    error = _legacy_daemon_error("replay_in_place", task_id, max_budget, timeout, name, model)
+    if error:
+        return error
+    row = _task_row(task_id)
+    if row is None:
+        return f"Error: unknown task id {task_id!r}"
+    sea = name or sea_name_of(row.get("sea") or "") or SORCAR
+    sea_file = _replay_sea_file(task_id, sea)
+    if isinstance(sea_file, str):
+        return sea_file
+    prepared: dict[str, Any] = {
+        "sea": sea,
+        "sea_file": str(sea_file),
+        "work_dir": str(_work_root()),
+        "model": model or str(row.get("model") or ""),
+        "task": str(row.get("task") or ""),
+    }
+    prepared.update(_dispatch_replay(
+        sea, prepared["sea_file"], prepared["task"], prepared["work_dir"],
+        prepared["model"], max_budget, timeout,
+    ))
+    return json.dumps(prepared, indent=1)
+
+
 def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
     """Clone the repository of past run *task_id* at the commit it started from.
 
@@ -2067,23 +2695,9 @@ def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
     if row is None:
         return f"Error: unknown task id {task_id!r}"
     sea = name or sea_name_of(row.get("sea") or "") or SORCAR
-    if sea == SORCAR:
-        # A plain KISS Sorcar run: the replay is a plain task whose base
-        # system prompt is this checkout's (possibly patched) SYSTEM.md.
-        if not _sorcar_in_scope(_scope()):
-            return _not_editable(sea)
-        system_md = _sorcar_target(SORCAR_PROMPT_FILES[0])
-        if isinstance(system_md, str):
-            return (
-                f"Error: run {task_id} is a plain KISS Sorcar run and cannot be replayed from "
-                f"here: {system_md.removeprefix('Error: ')}"
-            )
-        sea_file = system_md
-    else:
-        editable = _editable_path(sea)
-        if editable is None:
-            return _not_editable(sea)
-        sea_file = editable
+    sea_file = _replay_sea_file(task_id, sea)
+    if isinstance(sea_file, str):
+        return sea_file
     work_dir = str(row.get("work_dir") or "")
     located = _task_tree(work_dir)
     if located is None:
@@ -2145,53 +2759,20 @@ def replay_in_clone(
     what the replay changed with ``git -C <clone> status --short`` and
     delete the clone when done.
     """
-    if not hasattr(agent_dispatch, "dispatch_result"):
-        # The daemon imports its own installed kiss package (the VS Code
-        # extension's bundled copy), which can be older than this checkout.
-        return (
-            "Error: the daemon's installed kiss package predates "
-            "agent_dispatch.dispatch_result (commit 12ee8703c), so this tool cannot "
-            "dispatch the replay from inside the daemon. Reinstall the extension from "
-            "this checkout, or run the replay under this checkout's package with "
-            f"`uv run python -c \"from kiss.agents.seas.rsi7d import rsi7d_sea; "
-            f"print(rsi7d_sea.replay_in_clone({task_id!r}, {max_budget!r}, {timeout!r}, "
-            f"{name!r}, {model!r}))\"` "
-            "in the background; that replay has no parent task, so quote its cost "
-            "from run_findings(<replay_task_id>)."
-        )
+    error = _legacy_daemon_error("replay_in_clone", task_id, max_budget, timeout, name, model)
+    if error:
+        return error
     prepared = prepare_replay_clone(task_id, name)
     if isinstance(prepared, str):
         return prepared
-    plain = prepared["sea"] == SORCAR
-    result = agent_dispatch.dispatch_result(
-        prepared["sea"],
-        prepared["task"],
-        "" if plain else prepared["sea_file"],
-        prepared["work_dir"],
-        model or prepared["model"],
-        max_budget,
-        timeout,
-        parent_agent=current_agent(),
-        scope_work_dir=str(_work_root()),
-        options=agent_dispatch.RunOptions(
-            use_worktree=False,
-            auto_commit=False,
-            system_prompt=_sorcar_system_prompt() if plain else "",
-        ),
-    )
-    if isinstance(result, str):
-        prepared["replay_task_id"] = ""
-        prepared["result"] = result
-    else:
-        prepared["replay_task_id"] = result.task_id
-        prepared["result"] = {
-            "success": result.success, "summary": result.text, "cost": result.cost,
-            "steps": result.steps,
-        }
+    prepared.update(_dispatch_replay(
+        prepared["sea"], prepared["sea_file"], prepared["task"], prepared["work_dir"],
+        model or prepared["model"], max_budget, timeout,
+    ))
     return json.dumps(prepared, indent=1)
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Trajectory mining, prompt inspection, the gated prompt editors and clone replays."""
     return [
         indexed_seas,
@@ -2204,8 +2785,18 @@ def tools() -> list[Any]:
         model_scorecard,
         sea_prompt,
         patch_sea_prompt,
+        sea_source,
+        patch_sea_code,
+        improve_sea_code,
+        revert_sea_code,
+        tune_sea_settings,
+        patch_sea_settings,
+        settle_sea_settings,
+        export_sea_evals,
+        frequent_tasks,
         write_autorouter_evidence,
         replay_in_clone,
+        replay_in_place,
         sorcar_text,
         request_sorcar_permission,
         patch_sorcar,

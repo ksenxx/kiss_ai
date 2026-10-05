@@ -24,9 +24,10 @@ Depends only on ``websockets`` and the sorcar/core layers.
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -48,20 +49,19 @@ silently misreporting a possibly terminal ``result`` event.
 """
 
 _STOP_CONFIRM_GRACE_SECONDS = 20.0
-"""Bounded wait for a stopped-on-timeout task's terminal status.
+"""Bounded wait for a stopped task's terminal status.
 
-With ``stop_on_timeout`` a timeout sends the daemon a ``stop`` and
-then KEEPS READING until the task's terminal ``status
-running=false`` confirms it is dead, before the ``TimeoutError`` is
-raised.  Without the confirmation the caller would resume — and, in
-the ``run_agent`` channel dispatch, release the process-global
-workspace reservation — while the child might still be starting up on
-the daemon and could bind a LATER dispatch's workspace when its
-channel tools load.  The daemon's stop path force-interrupts a
-non-cooperating task after ~1 s, so confirmation normally arrives
-quickly; this grace bounds the wait against a wedged daemon, after
-which :class:`StopUnconfirmedTimeoutError` is raised (the stop stays
-best-effort at that point).
+A ``stop_on_timeout`` timeout or a *cancel* sends the daemon a
+``stop`` and then KEEPS READING until the task's terminal ``status
+running=false`` confirms it is dead, before the ``TimeoutError`` or
+:class:`CancelledError` is raised.  Without the confirmation the
+caller would report the task stopped while it might still be running
+on the daemon (a channel sub-task still holding its workspace).  The
+daemon's stop path force-interrupts a non-cooperating task after
+~1 s, so confirmation normally arrives quickly; this grace bounds the
+wait against a wedged daemon, after which
+:class:`StopUnconfirmedTimeoutError` (or a ``CancelledError`` with
+``confirmed=False``) is raised and the stop stays best-effort.
 """
 
 
@@ -80,6 +80,30 @@ class StopUnconfirmedTimeoutError(TimeoutError):
     workspace.  Callers that report the timeout onward — the
     ``run_agent`` dispatch — must not claim the task was stopped.
     """
+
+class CancelledError(Exception):
+    """The caller's *cancel* event was set while :func:`run` waited.
+
+    The task is stopped exactly like a ``stop_on_timeout`` timeout: the
+    ``stop`` is sent and the read loop keeps going (bounded by
+    :data:`_STOP_CONFIRM_GRACE_SECONDS`) until the task's terminal
+    ``status running=false`` proves it is dead.  Not a
+    :class:`TimeoutError`: the task did not outlive a deadline, the
+    caller asked for it to go.
+
+    Attributes:
+        result: The task's :class:`TaskResult` with the spend reported
+            so far (all-zero when no ``result`` event arrived).
+        confirmed: ``True`` when the terminal status arrived; ``False``
+            when the grace expired first, so the stop stays best-effort
+            and the task may still be running on the daemon.
+    """
+
+    def __init__(self, message: str, result: TaskResult, confirmed: bool) -> None:
+        super().__init__(message)
+        self.result = result
+        self.confirmed = confirmed
+
 
 class StoppedOnTimeoutError(TimeoutError):
     """Timeout whose ``stop_on_timeout`` stop the daemon confirmed.
@@ -109,11 +133,13 @@ class StoppedOnTimeoutError(TimeoutError):
 
 
 _TOOL_CALL_WAKE_SECONDS = 0.5
-"""Socket read wake-up interval while :func:`run` serves a tool call.
+"""Socket read wake-up interval while :func:`run` serves a tool call or a *cancel* event.
 
 The ``run_agent`` tool's panel has a Stop button; the wait polls the
 tool call's interrupt on every wake (``tool_interrupt.raise_if_interrupted``),
-so this bounds how long that button takes to act.
+so this bounds how long that button takes to act.  A ``run_agent`` job
+thread is not a tool call but watches its *cancel* event on every wake,
+so this also bounds how long an ``agent_job`` kill takes to act.
 """
 
 _NO_DEADLINE_WAKE_SECONDS = 10.0
@@ -147,6 +173,11 @@ class TaskResult:
         task_id: The daemon's persisted ``task_history`` row id of the
             run; ``""`` when the run ended before a row was allocated
             (e.g. the daemon had no model configured).
+        settings: The run's ``task_settings`` event payload (its
+            effective model, work directory, budget, agent script, kind,
+            tool profile, timeout, inherited and overridden values; see
+            :mod:`kiss.agents.sorcar.run_config`); empty when the run
+            ended before the daemon emitted it.
     """
 
     text: str
@@ -156,6 +187,7 @@ class TaskResult:
     steps: int
     chat_id: str = ""
     task_id: str = ""
+    settings: dict[str, Any] = field(default_factory=dict)
 
 
 def _resolve_endpoint_file(endpoint_file: str | Path | None) -> Path:
@@ -234,6 +266,7 @@ def _to_task_result(
     chat_id: str = "",
     task_id: str = "",
     totals: dict[str, Any] | None = None,
+    settings: dict[str, Any] | None = None,
 ) -> TaskResult:
     """Convert the final daemon ``result`` event into a :class:`TaskResult`.
 
@@ -251,6 +284,8 @@ def _to_task_result(
             classifier's spend is folded in only after the agent
             emitted its result, and announced by a later
             ``usage_info``.
+        settings: The ``settings`` payload of the run's
+            ``task_settings`` event, or ``None`` when none was seen.
 
     Returns:
         The parsed :class:`TaskResult`.  The daemon enriches ``result``
@@ -268,75 +303,7 @@ def _to_task_result(
         steps=int(steps or 0),
         chat_id=chat_id,
         task_id=task_id,
-    )
-
-
-def _resolve_py_file(
-    value: str | Path, type_error: str, what: str, allow_path: bool = True,
-) -> str:
-    """Resolve and validate a client-supplied Python-file path.
-
-    Shared tail of :func:`resolve_tools_file` and
-    :func:`resolve_agent_path`: the path is resolved against the
-    CLIENT's working directory (the daemon may run with a different
-    one) and validated eagerly so a bad value fails fast, before any
-    daemon connection is made.
-
-    Args:
-        value: The path to resolve; a wrong-typed value raises.
-        type_error: Error message for a wrong-typed *value*;
-            ``{type}`` and ``{value}`` placeholders are filled in.
-        what: Noun used in the suffix/existence error messages, e.g.
-            ``"tools file"`` or ``"agent script"``.
-        allow_path: Whether a ``pathlib.Path`` *value* is accepted in
-            addition to ``str``.
-
-    Returns:
-        The absolute path as a string.
-
-    Raises:
-        ValueError: When *value* has a wrong type, is not a ``.py``
-            file, or does not exist.
-    """
-    if not isinstance(value, (str, Path) if allow_path else str):
-        raise ValueError(
-            type_error.format(type=type(value).__name__, value=repr(value))
-        )
-    path = Path(value).expanduser().resolve()
-    # Quote the path literally rather than via repr(): repr doubles every
-    # backslash of a Windows path, which misleads the reader.
-    if path.suffix != ".py":
-        raise ValueError(f"{what} '{path}' is not a Python (.py) file")
-    if not path.is_file():
-        raise ValueError(f"{what} '{path}' does not exist")
-    return str(path)
-
-
-def resolve_tools_file(tools: str | Path | None) -> str:
-    """Validate a client-supplied tools path and resolve it absolutely.
-
-    Client-side counterpart of the daemon's
-    ``kiss.server.tools_file.load_tools_file`` (see
-    :func:`_resolve_py_file` for the resolution rules).
-
-    Args:
-        tools: Path to a Python file whose ``get_tools()`` function
-            supplies the agent tools, or ``None`` for no extra tools.
-
-    Returns:
-        The absolute path as a string, or ``""`` when *tools* is
-        ``None``.
-
-    Raises:
-        ValueError: When *tools* is neither ``None`` nor a path, is not
-            a ``.py`` file, or does not exist.
-    """
-    if tools is None:
-        return ""
-    return _resolve_py_file(
-        tools,
-        "tools must be a path to a Python file, got {type}: {value}",
-        "tools file",
+        settings=dict(settings or {}),
     )
 
 
@@ -344,8 +311,10 @@ def resolve_agent_path(agent_path: str | None) -> str:
     """Validate a client-supplied agent-script path and resolve it.
 
     Client-side counterpart of the daemon's
-    ``kiss.server.agent_file.apply_agent_overrides`` (see
-    :func:`_resolve_py_file` for the resolution rules).
+    ``kiss.agents.sorcar.agent_file.apply_agent_overrides``: the path is
+    resolved against the CLIENT's working directory (the daemon may run
+    with a different one) and validated eagerly so a bad value fails
+    fast, before any daemon connection is made.
 
     Args:
         agent_path: Path string of a Python file whose top-level
@@ -362,12 +331,19 @@ def resolve_agent_path(agent_path: str | None) -> str:
     """
     if agent_path is None or agent_path == "":
         return ""
-    return _resolve_py_file(
-        agent_path,
-        "agent_path must be a string path to a Python file, got {type}: {value}",
-        "agent script",
-        allow_path=False,
-    )
+    if not isinstance(agent_path, str):
+        raise ValueError(
+            "agent_path must be a string path to a Python file, got "
+            f"{type(agent_path).__name__}: {agent_path!r}"
+        )
+    path = Path(agent_path).expanduser().resolve()
+    # Quote the path literally rather than via repr(): repr doubles every
+    # backslash of a Windows path, which misleads the reader.
+    if path.suffix != ".py":
+        raise ValueError(f"agent script '{path}' is not a Python (.py) file")
+    if not path.is_file():
+        raise ValueError(f"agent script '{path}' does not exist")
+    return str(path)
 
 
 def _frame_limit_error() -> ConnectionError:
@@ -446,7 +422,6 @@ def run(
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
-    tools: str | Path | None = None,
     extension_agent_path: str = "",
     use_worktree: bool = True,
     auto_commit: bool = True,
@@ -456,14 +431,19 @@ def run(
     classify_tasks: bool | None = None,
     use_memory: bool | None = None,
     is_parallel: bool = True,
-    append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
     tool_profile: str = "",
     docker_image: str = "",
+    inherit_tools: bool = False,
+    workspace: str = "",
+    provenance: dict[str, str] | None = None,
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
+    record_timeout: float | None = None,
     endpoint_file: str | Path | None = None,
+    cancel: threading.Event | None = None,
+    running: threading.Event | None = None,
 ) -> TaskResult:
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
 
@@ -483,8 +463,6 @@ def run(
             whatever folder it runs in.  Empty (the default) records
             nothing.  Irrelevant for a sub-agent run (non-empty
             *parent_task_id*), which gets no registry tab at all.
-            An agent script's ``scope_work_dir()`` getter overrides
-            this value on the daemon.
         parent_task_id: The persisted ``task_history`` row id of the
             CALLING task, when this run is dispatched on behalf of one
             (the ``run_agent`` tool).  Non-empty marks the run as a
@@ -497,21 +475,21 @@ def run(
             running indicator when the run ends.  Empty (the default)
             runs as an ordinary top-level task.  It is a
             client/UI-transport parameter with no agent-script
-            getter: a dispatched script must not be able to re-parent
+            setting: a dispatched script must not be able to re-parent
             itself under an unrelated task.
         parent_tab_id: Frontend tab id of the calling task's tab,
             forwarded on the sub-agent's ``new_tab`` broadcast so the
             webview knows which tab spawned it (nested placement and
             cascade-close).  Only meaningful with *parent_task_id*;
             empty spawns a parentless sub-agent tab, exactly like a
-            headless ``run_parallel`` fan-out.  No agent-script getter.
+            headless ``run_parallel`` fan-out.  No agent-script setting.
         parent_reviewer: Whether the dispatched run belongs to a
             reviewer's sub-tree — the caller is a reviewer sub-agent,
             or *prompt* itself is a review task (see
             :mod:`kiss.agents.sorcar.fanout_guard`).  Stamped on the
             child's ``_subagent_info`` so it and its helpers keep the
             read-only ``review`` tool profile.  Only meaningful with
-            *parent_task_id*; no agent-script getter, for the same
+            *parent_task_id*; no agent-script setting, for the same
             reason as *parent_task_id*.
         side_channel: Whether the run is a side channel of the parent
             — a sub-agent whose result is delivered into the PARENT's
@@ -519,7 +497,7 @@ def run(
             tab is scaffolding that is closed when the run ends and
             never re-opened by a replay.  Persisted on the child's
             history row; only meaningful with *parent_task_id*; no
-            agent-script getter.
+            agent-script setting.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -532,77 +510,74 @@ def run(
             replacing the default system prompt shipped in
             ``src/kiss/SYSTEM.md``.  The daemon still appends its
             per-run operational instructions (work directory, process
-            id, ``~/.kiss/AGENTS.md``) so the agent's tool contract
+            id, ``$KISS_HOME/AGENTS.md``) so the agent's tool contract
             keeps working.  Empty (default) runs with the default
             system prompt as usual.
-        tools: Optional path to a Python file supplying extra tools
-            for the agent.  The file must define a top-level
-            ``get_tools()`` function returning the functions in the
-            file the agent may call; the daemon imports the file,
-            calls ``get_tools()``, and registers the returned
-            callables as agent tools.  Each function's name, docstring
-            (Google-style ``Args:`` section for parameter
-            descriptions), and annotated keyword-bindable parameters
-            define the tool schema the agent sees, exactly like a
-            native tool.  The functions are never serialized by the
-            client — they run **in the daemon process**.  The path is
-            resolved against this process's working directory.  A
-            broken tools file (deleted before the daemon reads it,
-            raising at import time, or missing/misbehaving
-            ``get_tools()``) stops the task: the daemon fails the run
-            and the returned :class:`TaskResult` carries the
-            diagnostic error in its ``text`` with ``success=False``.
         extension_agent_path: Optional path — a string — to a Python
             *agent script*, also called a Sorcar Extension Agent (SEA),
-            that computes this run's parameters **on the daemon**.
-            When non-empty, the daemon imports the file and,
-            for each parameter ``X`` of this function except
-            ``extension_agent_path`` itself (and the getter-less
-            parameters noted below), calls the script's top-level
-            ``X()`` function — when the script defines one — and
-            uses its return value for ``X``, replacing the value passed
-            to this call.  A parameter whose ``X()`` the script
-            does not define keeps the value passed here, which is the
-            parameter's default when the caller did not pass one.  One
-            getter is named differently from its parameter:
-            ``if_append_basic_tools()`` overrides
-            *append_basic_tools*.
+            that configures this run **on the daemon**.  When
+            non-empty, the daemon imports the file and applies its
+            ``settings()`` and getters
+            (:mod:`kiss.agents.sorcar.sea_settings`,
+            :func:`kiss.agents.sorcar.agent_file.apply_agent_overrides`) on top
+            of the values passed to this call: a setting the script
+            declares replaces the parameter of the same name; one it
+            does not declare keeps the value passed here.
 
-            Script format: a plain Python file defining any subset of
-            these zero-argument top-level functions, each returning a
-            value of the corresponding parameter's documented type::
+            Script format — a plain Python file defining any subset of
+            these top-level functions::
 
-                def prompt() -> str: ...          # non-empty
-                def work_dir() -> str: ...
-                def model() -> str: ...
-                def chat_id() -> str: ...
-                def system_prompt() -> str: ...
-                def tools() -> str | Path | list | None: ...  # tools-file path or tool list
-                def use_worktree() -> bool: ...
-                def auto_commit() -> bool: ...
-                def max_budget() -> float | None: ...   # finite
-                def model_config() -> dict | None: ...
-                def if_append_basic_tools() -> bool: ...
-                def append_to_system_prompt() -> str: ...
-                def append_to_prompt() -> str: ...
-                def scope_work_dir() -> str: ...
-                def use_web_tools() -> bool | None: ...
-                def classify_tasks() -> bool | None: ...
-                def use_memory() -> bool | None: ...
-                def is_parallel() -> bool: ...
-                def tool_profile() -> str: ...
-
-            The script may also define two hook getters with no
-            corresponding parameter on this function (a callable
-            cannot travel the wire, so the hooks exist ONLY as
-            agent-script getters)::
-
+                def description() -> str: ...        # /xxx help text
+                def settings() -> dict: ...           # kind + run() keywords
+                def prompt(task: str) -> str: ...     # replaces the task text
+                def system_prompt() -> str: ...       # replaces the base prompt
+                def add_to_system_prompt() -> str: ... # appended to the system prompt
+                def add_to_tools() -> list: ...       # extra tool callables
                 def llm_call_hook() -> Callable | None: ...
                 def tool_call_hook() -> Callable | None: ...
+                def register_as_model() -> bool: ...  # model-picker entry
+                def on_picked_as_model(work_dir: str) -> str: ...
 
-            Each returns a callable — ``llm_call_hook`` and
-            ``tool_call_hook`` respectively — (or ``None`` for "no
-            hook") that the daemon passes to the underlying
+            ``settings()`` returns a dict of a ``kind`` and any of the
+            keyword parameters of this function except the transport,
+            identity and prompt ones (``prompt`` and ``system_prompt``
+            are the functions above, not settings): ``work_dir``,
+            ``model``, ``chat_id``, ``use_worktree``, ``auto_commit``,
+            ``max_budget`` (finite), ``model_config``,
+            ``use_web_tools``, ``auto_classify`` (this function's
+            ``classify_tasks``), ``use_memory``, ``allow_fan_out``
+            (``is_parallel``), ``tool_profile``, ``docker_image``; plus
+            three dispatcher keys: ``extends`` (a base SEA), ``timeout``
+            (seconds a ``run_agent`` call waits for this script's
+            sub-task) and ``locked`` (keys an explicit caller argument
+            may not change).  ``prompt(task)`` receives the task text
+            and returns the prompt body; ``{task_id}`` in its result is
+            replaced by *parent_task_id*.  A ``None`` value means "no
+            override".  A kind is pure defaults under the explicit
+            keys: ``session`` (the default, changes nothing), ``worker``
+            (``use_worktree``, ``auto_commit``, ``auto_classify``,
+            ``allow_fan_out``, ``use_web_tools``, ``use_memory`` all
+            off) and ``channel`` (``worker`` plus ``work_dir:
+            $KISS_HOME/channel_work``; the run gets the channel preamble
+            and a workspace held for the run, and a ``run_agent``
+            sub-task of it inherits nothing from the caller).
+
+            ``add_to_system_prompt()`` returns text ADDED to the run's
+            system prompt after *append_to_system_prompt*, never
+            replacing it.  ``add_to_tools()`` returns a list of tool
+            callables (never a file path) added to the built-in
+            toolset; with ``"tool_profile": "none"`` they and
+            ``finish`` are the run's whole tool set (the built-in
+            toolset is not built, so the default ``SYSTEM.md`` prompt,
+            whose workflow rules name ``Read``, ``Edit``, ``Bash`` and
+            the browser tools, should usually be replaced by a
+            ``system_prompt()`` written for the tools the run has).
+            Each tool's name, docstring (Google-style ``Args:``
+            section) and annotated keyword-bindable parameters define
+            the tool schema the agent sees, exactly like a native tool.
+
+            The hook getters each return a callable (or ``None`` for
+            "no hook") that the daemon passes to the underlying
             :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
             task-executor sub-session of the task's agent (internal
             helper sessions, e.g. the failed-session trajectory
@@ -612,61 +587,37 @@ def run(
             to be sent, and ``tool_call_hook(name, args)`` is called
             before every tool call — the tool executes only when the
             hook returns ``"OK"``; any other returned string is given
-            to the model as the tool's result instead.  Like every
-            getter, they execute **in the daemon process**; the hooks
-            apply to the task's own agent, not to sub-agents it spawns
-            via ``run_parallel``.
+            to the model as the tool's result instead.  The hooks apply
+            to the task's own agent, not to sub-agents it spawns via
+            ``run_parallel``.
 
-            Two more getters make a SEA a *model routing* entry::
+            A SEA whose ``register_as_model()`` returns ``True`` is
+            listed in the model picker under its command name (the
+            bundled ``autorouter`` and ``bestrouter``); picking it runs
+            every task of the tab through the SEA on the model its
+            ``settings()["model"]`` names (else the default model),
+            with its ``add_to_system_prompt()`` protocol added to the
+            system prompt.
 
-                def add_to_system_prompt() -> str: ...   # the routing protocol
-                def register_as_model() -> bool: ...
-
-            ``add_to_system_prompt()`` returns text that is ADDED to
-            the run's system prompt after the *append_to_system_prompt*
-            value (the caller's or an ``append_to_system_prompt()``
-            getter's), never replacing it.  A SEA whose
-            ``register_as_model()`` returns ``True`` is listed in the
-            model picker under its command name (the bundled
-            ``autorouter`` and ``bestrouter``); picking it runs every
-            task of the tab through the SEA on the model its ``model()``
-            getter names (else the default model), with the protocol
-            added to the system prompt.
-
-            The ``X()`` functions are never serialized by the
-            client — they run **in the daemon process**, exactly like a
-            tools file's ``get_tools()``.  ``tools()`` here returns
-            the *path* of a tools file (pass an absolute path — the
-            daemon does not resolve it against this process's working
-            directory), which the daemon then imports and whose
-            ``get_tools()`` (or ``tools()``) it calls as if the path
-            had been passed as *tools*; a ``tools()`` that instead
-            returns a *list* of tool callables (the tools-file
-            contract, as in the channel agent modules) makes the
-            script its own tools file.  ``scope_work_dir()`` overrides
-            the calling workspace recorded on the run's tab (an empty
-            override records none, like an empty client-sent
-            *scope_work_dir*);
-            ``use_web_tools()``, ``classify_tasks()``, and
-            ``use_memory()`` return a bool for a per-run override
-            or ``None`` for the daemon's configured default; and
-            ``is_parallel()`` returns a bool.  ``timeout``,
-            *stop_on_timeout*, *endpoint_file*, *parent_task_id*, and
-            *parent_tab_id* have no getters by design: the first three
-            are client-transport parameters — the script only runs on
-            the daemon that *endpoint_file* selects, *timeout* bounds this
+            Everything the script defines runs **in the daemon
+            process**; nothing is serialized by the client.
+            ``timeout``, *stop_on_timeout*, *endpoint_file*,
+            *scope_work_dir*, *parent_task_id*, and *parent_tab_id*
+            have no settings key by design: the first three are
+            client-transport parameters — the script only runs on the
+            daemon that *endpoint_file* selects, *timeout* bounds this
             client's local wait, and *stop_on_timeout* picks this
-            client's timeout behavior — and *parent_task_id* /
-            *parent_tab_id* are the CALLING task's identity, which the
-            script must not be able to forge.  The
-            *extension_agent_path* itself is resolved against this process's
-            working directory and validated eagerly, like *tools*.  A
+            client's timeout behavior — and *scope_work_dir* /
+            *parent_task_id* / *parent_tab_id* are the CALLING task's
+            identity, which the script must not be able to forge.  The
+            *extension_agent_path* itself is resolved against this
+            process's working directory and validated eagerly.  A
             broken agent script (deleted before the daemon reads it,
-            raising at import time, a non-callable getter ``X``, a
-            raising ``X()``, or a wrong-typed return value) stops the
-            task: the daemon fails the run and the returned
-            :class:`TaskResult` carries the diagnostic error in its
-            ``text`` with ``success=False``.
+            raising at import time, a non-callable getter, a raising
+            ``settings()`` or getter, an unknown settings key or
+            kind, or a wrong-typed value) stops the task: the daemon
+            fails the run and the returned :class:`TaskResult` carries
+            the diagnostic error in its ``text`` with ``success=False``.
         use_worktree: Run the task in an isolated git worktree.
             Defaults to True.
         auto_commit: Auto-commit the task's changes on success.
@@ -711,26 +662,13 @@ def run(
             memory" checkbox, persisted as ``use_memory``, or the
             daemon process's ``KISS_USE_MEMORY`` environment
             variable).  A boolean override never bypasses the memory
-            safety gates: a run without the basic toolset
-            (*append_basic_tools* false), a Docker run, a
+            safety gates: a run without the basic toolset (the
+            ``none`` tool profile), a Docker run, a
             run-to-completion CLI model (``cc/*``, ``codex/*``), or a
             caller-supplied ``model_config["system_instruction"]``
             stays memory-free even with ``True``.
         is_parallel: Whether the agent may spawn parallel sub-agents.
             Defaults to True.
-        append_basic_tools: Whether the agent gets the built-in basic
-            toolset (``Bash``, ``Read``, ``Edit``, ``Write``, browser
-            tools, ``run_agent``, ``ask_user_question``, ``talk``,
-            ``set_model``, ``decide``, ``summary``, ``run_parallel``, ...).
-            Defaults to True.  When False the agent's ONLY tools are
-            ``finish`` and the caller-supplied tools — the ones
-            returned by the *tools* file's ``get_tools()`` — so the
-            *use_web_tools* and *is_parallel* toggles have no tools left
-            to act on.  The default system prompt (``SYSTEM.md``)
-            assumes the basic toolset (its workflow rules name ``Read``,
-            ``Edit``, ``Bash`` and the browser tools), so a restricted
-            run should usually pass a *system_prompt* written for the
-            tools it actually has.
         append_to_system_prompt: Extra text appended to the run's
             system prompt when the agent is executed — after the
             default ``SYSTEM.md`` prompt (or the *system_prompt*
@@ -747,15 +685,21 @@ def run(
             records and what follow-up tasks of the same chat see as
             context.  Empty (default) appends nothing.
         tool_profile: Name of the tool profile the task's built-in
-            toolset is cut down to — one of ``"full"``, ``"review"``,
-            ``"shell"``, ``"assistant"``, ``"bash"`` (the keys of
-            :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`;
-            ``bash`` is the single-command runner of the bundled
-            ``/sh`` agent: ``Bash`` and ``finish`` only).  Empty (the
-            default) keeps the daemon's usual choice (the full toolset).
+            toolset is cut down to — a key of
+            :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`
+            (the composites ``"full"``, ``"review"``, ``"assistant"``,
+            ``"bash"`` or the groups ``"shell"``, ``"edit"``,
+            ``"browser"``, ``"memory"``, ``"agents"``, ``"mcp"``,
+            ``"skills"``, ``"user"``, ``"decide"``, ``"control"``), or
+            several keys joined with ``+`` for the union of their
+            tools (``"shell+edit+memory"``); ``bash`` is the
+            single-command runner of the bundled ``/sh`` agent:
+            ``Bash`` and ``finish`` only; ``none`` keeps no built-in
+            tool at all (``finish`` plus the agent script's
+            ``add_to_tools()``, the bundled ``/ask`` agent).  Empty
+            (the default) keeps the daemon's usual choice (the full
+            toolset).
             An unknown name stops the task with a diagnostic error.
-            Ignored when *append_basic_tools* is False, which builds
-            no built-in toolset at all.
         docker_image: Run the task's file and shell tools (``Bash``,
             ``run_commands_parallel``, ``Read``, ``Edit``, ``Write``)
             inside a Docker container instead of on the daemon's host.
@@ -766,8 +710,38 @@ def run(
             container.  ``bash_job`` and persistent memory are
             unavailable in a Docker run.  Empty (default) runs the
             tools on the host.
+        inherit_tools: Whether the task also gets the extra tools of
+            the task *parent_task_id* names — the tool callables that
+            parent's agent script added through ``add_to_tools()``
+            (and those the parent inherited itself), resolved on the
+            daemon from the running parent (a callable cannot travel
+            the wire).  They are added to the task's built-in toolset
+            after the task's own script's ``add_to_tools()`` tools,
+            skipping names the task already has; a script on the
+            ``none`` tool profile keeps exactly its own set.
+            ``run_agent`` sets this for the
+            sub-tasks it dispatches in path mode, so a sub-task that
+            inherits the caller's system prompt also has the tools
+            that prompt refers to.  ``False`` (default) adds nothing;
+            ignored without *parent_task_id*.
+        workspace: Workspace/account identifier for multi-account
+            channels.  A ``channel``-kind agent script's run holds
+            it (``KISS_CHANNEL_WORKSPACE``) for its whole lifetime, so
+            its channel tools load that account's credentials; empty
+            means ``"default"``.  Ignored by every other run.
+        provenance: Where the command's values come from, ``{setting
+            key: "explicit" | "inherited"}`` (see
+            :mod:`kiss.agents.sorcar.run_config`): a field the caller
+            was given explicitly, or one it filled from the agent
+            calling it.  Recorded in the task's ``task_settings`` event
+            (``inherited``), so the result's ``ran:`` line and the
+            persisted history show which values the sub-task took over.
+            ``None`` (default): every value is a persisted setting or
+            the daemon's default.
         timeout: Maximum seconds to wait for the task to finish;
-            ``None`` waits indefinitely.
+            ``None`` waits indefinitely.  With *stop_on_timeout* it is
+            also sent to the daemon (wire field ``timeout``), which
+            records it in the task's ``task_settings`` event.
         stop_on_timeout: Whether a *timeout* expiry also STOPS the
             task.  ``False`` (the default) keeps the documented
             timeout contract — the caller stops waiting, the task
@@ -779,10 +753,10 @@ def run(
             the stop then staying best-effort) before raising the
             ``TimeoutError``.
             ``True`` is for callers that must not let the task outlive
-            the wait, e.g. the ``run_agent`` channel dispatch, whose
-            process-global workspace reservation is released as soon
-            as the call returns: a surviving sub-task could bind
-            another account's credentials when its channel tools load.
+            the wait (the ``/ask`` side channel, ``commands.py``).  The
+            ``run_agent`` dispatch does not use it: its ``timeout``
+            bounds the call only, and its sub-task is stopped through
+            *cancel* (an ``agent_job`` kill, or the calling run's end).
             When the task finished ON ITS OWN — a SUCCESSFUL terminal
             ``result`` AND the terminal status raced the stop onto the
             wire — the completed :class:`TaskResult` is returned
@@ -796,8 +770,27 @@ def run(
             proves the task is dead, and the grace expiring with just
             the result in hand raises
             :class:`StopUnconfirmedTimeoutError` all the same.
+        record_timeout: A bound to send as the wire field ``timeout``
+            (recorded in the task's ``task_settings`` and checked
+            against a SEA's locked ``timeout``) when this wait itself
+            has none: ``run_agent`` waits here without a deadline on a
+            job thread and bounds the call by joining that thread, so
+            it passes the call's bound through this.  ``None`` sends
+            *timeout* when *stop_on_timeout*, else nothing.
         endpoint_file: Daemon endpoint file override (defaults to
             ``$KISS_SORCAR_LOCAL`` or ``$KISS_HOME/sorcar-local.json``).
+        cancel: An event the caller may set from another thread to
+            stop the task (``agent_job(..., "kill")``): the daemon is
+            sent a ``stop`` and the wait continues until the task's
+            terminal status confirms it is dead (or the confirmation
+            grace expires), then :class:`CancelledError` is raised with
+            ``confirmed`` set accordingly.  ``None`` (the default)
+            waits for the task or the timeout.
+        running: An event set when the task's initial ``status
+            running=true`` arrives — the moment its tab exists on every
+            client — or when this wait ends without one.  A background
+            ``run_agent`` job returns its notice only after it, so the
+            spawn lands inside the tool call's time window.
 
     Returns:
         A :class:`TaskResult` with the result text, success flag, cost
@@ -808,11 +801,10 @@ def run(
         history.
 
     Raises:
-        ValueError: When *prompt* is empty or blank, when *tools*
-            is not the path of an existing Python (``.py``) file (see
-            :func:`resolve_tools_file`), or when *extension_agent_path* is
-            neither empty nor the path string of an existing Python
-            (``.py``) file (see :func:`resolve_agent_path`).
+        ValueError: When *prompt* is empty or blank, or when
+            *extension_agent_path* is neither empty nor the path string
+            of an existing Python (``.py``) file (see
+            :func:`resolve_agent_path`).
         ConnectionError: When no daemon is reachable at the endpoint,
             the daemon drops the connection before the task finishes,
             or a *stop_on_timeout* stop cannot be sent on the broken
@@ -854,7 +846,6 @@ def run(
     """
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
-    tools_file = resolve_tools_file(tools)
     agent_file = resolve_agent_path(extension_agent_path)
     path = _resolve_endpoint_file(endpoint_file)
     tab_id = f"api-{uuid.uuid4().hex}"
@@ -867,6 +858,7 @@ def run(
     ws: ClientConnection | None = None
     aborted: BaseException | None = None
     result_event: dict[str, Any] | None = None
+    settings_event: dict[str, Any] | None = None  # the run's task_settings payload
     totals_event: dict[str, Any] | None = None  # latest spend totals
     charged = {"cost": 0.0, "tokens": 0, "steps": 0}  # see _net_totals
     task_id = ""
@@ -890,42 +882,63 @@ def run(
             "sideChannel": side_channel,
             "model": model,
             "systemPrompt": system_prompt,
-            "toolsFile": tools_file,
             "agentPath": agent_file,
             "useWorktree": use_worktree,
             "autoCommit": auto_commit,
             "maxBudget": max_budget,
             "modelConfig": model_config,
-            "webTools": use_web_tools,
+            "useWebTools": use_web_tools,
             "classifyTasks": classify_tasks,
             "useMemory": use_memory,
-            "useParallel": is_parallel,
-            "appendBasicTools": append_basic_tools,
+            "isParallel": is_parallel,
             "appendToSystemPrompt": append_to_system_prompt,
             "appendToPrompt": append_to_prompt,
             "toolProfile": tool_profile,
             "dockerImage": docker_image,
+            "inheritTools": inherit_tools,
+            "workspace": workspace,
+            "provenance": provenance or {},
+            "timeout": (timeout if stop_on_timeout else None) if record_timeout is None
+            else record_timeout,
         }
         try:
             local_endpoint.send(ws, json.dumps(cmd))
         except ConnectionClosed as exc:
             raise _closed_error(exc) from exc
         started = False
-        stopping = False  # stop-on-timeout sent; awaiting confirmation
+        stopping = False  # stop sent (timeout or cancel); awaiting confirmation
+        cancelled = False  # the stop was requested through *cancel*
         timeout_msg = f"Task did not finish within {timeout} seconds"
-        # Inside a tool call (the run_agent dispatch) the wait wakes
-        # often enough for that call's Stop button to feel immediate.
+        # Inside a tool call, or with a *cancel* event to watch (the
+        # run_agent job thread), the wait wakes often enough for the
+        # call's Stop button or an ``agent_job`` kill to feel immediate.
         wake_seconds = (
             _TOOL_CALL_WAKE_SECONDS
-            if tool_interrupt.current_tool_call() is not None
+            if tool_interrupt.current_tool_call() is not None or cancel is not None
             else _NO_DEADLINE_WAKE_SECONDS
         )
         while True:
             # The calling task's tool-call panel Stop is honored
             # cooperatively: every wake checks it (raising
             # ToolCallInterrupted, which the finally below turns
-            # into a stop of the dispatched task).
+            # into a stop of the dispatched task).  A background job's
+            # kill is the same abort, requested through *cancel*.
             tool_interrupt.raise_if_interrupted()
+            if cancel is not None and cancel.is_set() and not cancelled:
+                # Stop the task and keep reading until its terminal
+                # status confirms it is dead — the same stop-and-confirm
+                # as a stop-on-timeout, decided below in the
+                # ``stopping`` branches with ``cancelled`` set.
+                cancelled = stopping = True
+                deadline = time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
+                try:
+                    _send_stop(ws, tab_id, run_token)
+                except OSError as send_exc:
+                    raise ConnectionError(
+                        "The sorcar daemon connection failed while "
+                        f"stopping the cancelled task: {send_exc}"
+                    ) from send_exc
+                continue
             if deadline is None:
                 # No deadline: wake periodically so an injected
                 # abort (see _NO_DEADLINE_WAKE_SECONDS) can be
@@ -976,6 +989,14 @@ def run(
                         # proves the task thread exited (see the
                         # terminal-status branch below, the one place
                         # a stored result may be returned).
+                        if cancelled:
+                            raise CancelledError(
+                                "the stop was sent but not confirmed",
+                                _to_task_result(
+                            result_event, chat_id, task_id, totals_event, settings_event,
+                        ),
+                                confirmed=False,
+                            )
                         raise StopUnconfirmedTimeoutError(timeout_msg)
                     raise TimeoutError(timeout_msg)
                 # Capped like the no-deadline wait: an injected abort
@@ -1008,9 +1029,13 @@ def run(
                 totals_event = _net_totals(event, charged)
             if etype == "result":
                 result_event = event
+            elif etype == "task_settings" and isinstance(event.get("settings"), dict):
+                settings_event = event["settings"]
             elif etype == "status":
                 if event.get("running"):
                     started = True
+                    if running is not None:
+                        running.set()
                 elif stopping:
                     if result_event is not None and result_event.get("success"):
                         # The task finished ON ITS OWN while the client
@@ -1026,7 +1051,9 @@ def run(
                         # completion — return it instead of discarding
                         # the completed work behind a ``TimeoutError``
                         # that falsely claims the task "was stopped".
-                        return _to_task_result(result_event, chat_id, task_id, totals_event)
+                        return _to_task_result(
+                            result_event, chat_id, task_id, totals_event, settings_event,
+                        )
                     # The terminal status confirms the
                     # stopped-on-timeout task is dead; the run still
                     # timed out.  ``started`` is deliberately not
@@ -1038,9 +1065,19 @@ def run(
                     # ``task_runner._run_task``) — that is a confirmed
                     # stop, not an unconfirmed one.  The stopped task's
                     # failure result still reports its spend.
+                    if cancelled:
+                        raise CancelledError(
+                            "the task was stopped by the caller",
+                            _to_task_result(
+                            result_event, chat_id, task_id, totals_event, settings_event,
+                        ),
+                            confirmed=True,
+                        )
                     raise StoppedOnTimeoutError(
                         timeout_msg,
-                        _to_task_result(result_event, chat_id, task_id, totals_event),
+                        _to_task_result(
+                            result_event, chat_id, task_id, totals_event, settings_event,
+                        ),
                     )
                 elif started or result_event is not None:
                     # A result before any ``running=true`` means the
@@ -1052,22 +1089,30 @@ def run(
                     # in this condition that terminal status would be
                     # ignored and the loop would wait out the whole
                     # timeout (forever with ``timeout=None``).
-                    return _to_task_result(result_event, chat_id, task_id, totals_event)
+                    return _to_task_result(
+                            result_event, chat_id, task_id, totals_event, settings_event,
+                        )
     except BaseException as exc:
         aborted = exc
-        if ws is not None and not isinstance(exc, TimeoutError):
+        if ws is not None and not isinstance(exc, (TimeoutError, CancelledError)):
             # The dispatched task is stopped below, but whatever it
             # already spent stays spent: hand the caller the latest
             # totals so it can still charge them (``run_agent`` folds
             # them into the stopped calling task).
             exc.task_result = _to_task_result(  # type: ignore[attr-defined]
-                result_event, chat_id, task_id, totals_event,
+                result_event, chat_id, task_id, totals_event, settings_event,
             )
         raise
     finally:
+        if running is not None:
+            running.set()
         # Nothing to cascade or close when the connect itself failed:
         # there is no task and no tab on the daemon's side.
-        if ws is not None and aborted is not None and not isinstance(aborted, TimeoutError):
+        if (
+            ws is not None
+            and aborted is not None
+            and not isinstance(aborted, (TimeoutError, CancelledError))
+        ):
             # The wait was aborted — typically by the KeyboardInterrupt
             # injected when the CALLING task is stopped while blocked
             # here.  Cascade the stop to the dispatched task: without
@@ -1077,8 +1122,8 @@ def run(
             # user" is refused with "A task is still running in this
             # folder".  A TimeoutError is excluded on purpose: its
             # documented contract is "the task keeps running", and a
-            # ``stop_on_timeout`` timeout already sent its stop (and
-            # awaited confirmation) inside the read loop.
+            # ``stop_on_timeout`` timeout or a *cancel* already sent its
+            # stop (and awaited confirmation) inside the read loop.
             # Best-effort, like the closeTab below.
             # ``taskId`` carries this run's token so the daemon
             # rejects the stop if the tab was already reused by a

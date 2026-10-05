@@ -29,6 +29,8 @@ from kiss.agents.sorcar.persistence import (
     _append_chat_event,
     _flush_chat_events,
 )
+from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -71,24 +73,34 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     )
     assert sea.system_prompt() == sea.SYSTEM_PROMPT
     assert "task_transcript" in sea.SYSTEM_PROMPT
-    assert sea.tools() == [sea.task_transcript]
-    assert sea.tool_profile() == "bash"
-    assert sea.max_budget() == 1.0
-    for getter in (
-        sea.is_parallel, sea.use_web_tools, sea.use_memory, sea.use_worktree,
-        sea.auto_commit, sea.classify_tasks,
-    ):
-        assert getter() is False, getter.__name__
+    assert sea.add_to_tools() == [sea.task_transcript]
+    assert sea.settings() == {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
+    # ``worker`` turns fan-out, browser, memory, worktree, auto-commit and
+    # the classifier off; ``system_prompt()`` stays a getter the daemon
+    # applies, so ``resolve_settings`` does not carry its text.
+    assert resolve_settings(vars(sea)) == {
+        "kind": "worker",
+        "tool_profile": "bash",
+        "max_budget": 1.0,
+        "allow_fan_out": False,
+        "use_web_tools": False,
+        "use_memory": False,
+        "use_worktree": False,
+        "auto_commit": False,
+        "auto_classify": False,
+    }
+    assert_no_removed_getters(sea)
 
 
 def test_slash_task_update_resolves_to_the_bundled_sea() -> None:
-    """``/task_update <id>`` runs this SEA through ``run_agent`` in the chat."""
+    """``/task_update <id>`` resolves to the id and this SEA, which the chat runs directly."""
     assert sea_commands.get_command("task_update") == _SEA_PATH
-    rewritten = sea_commands.rewrite_prompt_if_command("/task_update deadbeef")
-    assert rewritten is not None
-    prompt, path = rewritten
+    hit = sea_commands.slash_command_task("/task_update deadbeef")
+    assert hit is not None
+    task_text, path = hit
     assert path == _SEA_PATH
-    assert prompt.endswith("TASK TEXT FOR run_agent:\ndeadbeef")
+    assert task_text == "deadbeef"
+    assert sea_commands.sea_settings(path) == resolve_settings(vars(sea))
 
 
 def test_transcript_errors_for_missing_and_unknown_ids() -> None:
@@ -251,6 +263,7 @@ def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path)
         tool_call_body("task_transcript", {"task_id": task_id}, prompt_tokens=500),
         finish_body(report, prompt_tokens=700),
     ]
+    settings = resolve_settings(vars(sea))
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("task-update-sea-test")
         result = agent.run(
@@ -258,14 +271,14 @@ def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path)
             model_name=MODEL,
             work_dir=str(tmp_path),
             max_steps=4,
-            max_budget=sea.max_budget(),
+            max_budget=settings["max_budget"],
             model_config={"base_url": url, "api_key": "local"},
-            tools=sea.tools(),
-            tool_profile=sea.tool_profile(),
+            tools=sea.add_to_tools(),
+            tool_profile=settings["tool_profile"],
             base_system_prompt=sea.system_prompt(),
-            web_tools=sea.use_web_tools(),
-            use_memory=sea.use_memory(),
-            is_parallel=sea.is_parallel(),
+            web_tools=settings["use_web_tools"],
+            use_memory=settings["use_memory"],
+            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

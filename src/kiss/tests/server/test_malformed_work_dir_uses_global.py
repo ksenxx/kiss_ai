@@ -2,22 +2,20 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E: a malformed ``workDir`` never escapes the connection's pinned folder.
+"""E2E: a malformed ``workDir`` resolves to the global working directory.
 
-``ServerApi.dispatch`` stamps the connection's pinned ``work_dir``
-onto every command "lacking" a ``workDir`` — but the check was
-``not cmd.get("workDir")``, so a truthy non-string value (``123``,
-``["x"]``, ``{"x": 1}``) survived dispatch, was blanked by the
-handler's ``_cmd_str`` and then fell back to the DAEMON-GLOBAL work
-dir: another window's folder.  Dispatch must treat a missing, empty
-or non-string ``workDir`` alike and stamp the pin.
+The working directory is one daemon-wide value (the last ``setWorkDir``
+from any connection).  A command whose ``workDir`` is missing, empty or
+a non-string (``123``, ``["x"]``, ``{"x": 1}``, ``True``) must resolve
+against that global directory — never crash, never leak the raw value —
+while an explicit string ``workDir`` still wins, and a malformed
+``setWorkDir`` must not move the global directory.
 
-Each test opens two real ``wss://`` connections: window A pins itself
-to directory A with ``setWorkDir``; window B then pins itself to
-directory B, which also moves the daemon-global fallback to B (the
-last ``setWorkDir`` wins there).  Window A's ``openFile`` /
-``checkPaths`` / ``ready`` with a malformed ``workDir`` must still
-operate in A.
+Each test opens two real ``wss://`` connections: window A picks
+directory A with ``setWorkDir``; window B then picks directory B, which
+makes B the global directory for everyone.  Window A's ``openFile`` /
+``checkPaths`` / ``ready`` with a malformed ``workDir`` therefore
+operate in B.
 """
 
 from __future__ import annotations
@@ -54,8 +52,8 @@ def _no_verify_ssl() -> ssl.SSLContext:
 MALFORMED_WORK_DIRS: tuple[Any, ...] = (123, ["x"], {"x": 1}, True)
 
 
-class TestPinnedWorkDirBeatsMalformedField(IsolatedAsyncioTestCase):
-    """Non-string ``workDir`` resolves to the pin, never the global dir."""
+class TestMalformedWorkDirUsesGlobal(IsolatedAsyncioTestCase):
+    """Non-string ``workDir`` resolves to the global dir, never leaks."""
 
     async def asyncSetUp(self) -> None:
         # resolve(): the server replies with resolved paths, and on macOS
@@ -105,12 +103,12 @@ class TestPinnedWorkDirBeatsMalformedField(IsolatedAsyncioTestCase):
             if msg.get("type") == reply_type:
                 return dict(msg)
 
-    async def _pinned_roundtrip(
+    async def _global_roundtrip(
         self, payloads: list[dict[str, Any]], reply_type: str,
     ) -> dict[str, Any]:
-        """Pin window A to A, window B to B (moving the global fallback
-        to B), then send *payloads* from A and return A's first reply
-        of *reply_type*."""
+        """Window A picks A, then window B picks B (the global directory
+        is now B for both), then send *payloads* from A and return A's
+        first reply of *reply_type*."""
         url = f"wss://127.0.0.1:{self.port}/ws"
         async with (
             connect(url, ssl=_no_verify_ssl()) as ws_a,
@@ -121,21 +119,14 @@ class TestPinnedWorkDirBeatsMalformedField(IsolatedAsyncioTestCase):
             await ws_a.send(json.dumps(
                 {"type": "setWorkDir", "workDir": str(self.dir_a)},
             ))
-            # Commands are sequential PER CONNECTION only, so a reply on
-            # B's socket says nothing about A's progress: A's setWorkDir
-            # must be known complete — through an A-side probe reply —
-            # before B's setWorkDir may move the global fallback, or A
-            # could still move it back to A afterwards.
-            # (``pathsExist`` echoes the workDir the CLIENT sent — the
-            # webview's correlation key — so the pin shows in the
-            # results, which resolve only-in-a.txt against A.)
+            # Commands are sequential PER CONNECTION only: A's pick must
+            # be known complete (an A-side probe resolves against A)
+            # before B's pick, or A could move the global back afterwards.
             await ws_a.send(json.dumps(
                 {"type": "checkPaths", "paths": ["only-in-a.txt"], "tabId": "a"},
             ))
             probe_a = await self._recv_type(ws_a, "pathsExist")
             self.assertEqual(probe_a["results"], {"only-in-a.txt": True})
-            # Window B's pin is complete once its own (unstamped)
-            # checkPaths resolves against B: the global fallback is now B.
             await ws_b.send(json.dumps(
                 {"type": "setWorkDir", "workDir": str(self.dir_b)},
             ))
@@ -151,69 +142,72 @@ class TestPinnedWorkDirBeatsMalformedField(IsolatedAsyncioTestCase):
                 await ws_a.send(json.dumps(payload))
             return await self._recv_type(ws_a, reply_type)
 
-    async def test_open_file_uses_pin_for_every_malformed_work_dir(self) -> None:
+    async def test_open_file_uses_global_for_every_malformed_work_dir(
+        self,
+    ) -> None:
         for bad in MALFORMED_WORK_DIRS:
             with self.subTest(work_dir=bad):
-                reply = await self._pinned_roundtrip(
-                    [{"type": "openFile", "path": "only-in-a.txt",
+                reply = await self._global_roundtrip(
+                    [{"type": "openFile", "path": "only-in-b.txt",
                       "workDir": bad, "tabId": "t"}],
                     "fileContent",
                 )
-                self.assertEqual(reply["content"], "A\n")
+                self.assertEqual(reply["content"], "B\n")
                 self.assertEqual(
-                    reply["path"], str(self.dir_a / "only-in-a.txt"),
+                    reply["path"], str(self.dir_b / "only-in-b.txt"),
                 )
 
-    async def test_check_paths_uses_pin_for_malformed_work_dir(self) -> None:
-        reply = await self._pinned_roundtrip(
+    async def test_check_paths_uses_global_for_malformed_work_dir(self) -> None:
+        reply = await self._global_roundtrip(
             [{"type": "checkPaths", "paths": ["only-in-a.txt", "only-in-b.txt"],
               "workDir": 123, "tabId": "t"}],
             "pathsExist",
         )
         self.assertEqual(
-            reply["results"], {"only-in-a.txt": True, "only-in-b.txt": False},
+            reply["results"], {"only-in-a.txt": False, "only-in-b.txt": True},
         )
         # The echo is the client's key (a non-string counts as none), not
-        # the pin the paths were resolved against.
+        # the directory the paths were resolved against.
         self.assertEqual(reply["workDir"], "")
 
-    async def test_ready_reports_pin_for_malformed_work_dir(self) -> None:
+    async def test_ready_reports_global_for_malformed_work_dir(self) -> None:
         # ``ready`` fans out into ``getConfig`` whose reply names the
-        # work dir the window will run tasks in.
-        reply = await self._pinned_roundtrip(
+        # work dir every window runs tasks in.
+        reply = await self._global_roundtrip(
             [{"type": "ready", "workDir": ["x"], "tabId": "t"}],
             "configData",
         )
-        self.assertEqual(reply["config"]["work_dir"], str(self.dir_a))
+        self.assertEqual(reply["config"]["work_dir"], str(self.dir_b))
 
-    async def test_missing_and_empty_work_dir_still_use_pin(self) -> None:
-        # The two cases the old ``not cmd.get("workDir")`` guard already
-        # handled must keep working after the guard is generalised.
+    async def test_missing_and_empty_work_dir_use_global(self) -> None:
         for payload in (
-            {"type": "checkPaths", "paths": ["only-in-a.txt"], "tabId": "t"},
-            {"type": "checkPaths", "paths": ["only-in-a.txt"], "workDir": "",
+            {"type": "checkPaths", "paths": ["only-in-b.txt"], "tabId": "t"},
+            {"type": "checkPaths", "paths": ["only-in-b.txt"], "workDir": "",
              "tabId": "t"},
         ):
             with self.subTest(payload=payload):
-                reply = await self._pinned_roundtrip([payload], "pathsExist")
-                self.assertEqual(reply["results"], {"only-in-a.txt": True})
+                reply = await self._global_roundtrip([payload], "pathsExist")
+                self.assertEqual(reply["results"], {"only-in-b.txt": True})
                 self.assertEqual(reply["workDir"], "")
 
-    async def test_malformed_set_work_dir_does_not_move_the_pin(self) -> None:
-        reply = await self._pinned_roundtrip(
+    async def test_malformed_set_work_dir_does_not_move_the_global(
+        self,
+    ) -> None:
+        reply = await self._global_roundtrip(
             [
                 {"type": "setWorkDir", "workDir": 5},
-                {"type": "checkPaths", "paths": ["only-in-a.txt"], "tabId": "t"},
+                {"type": "checkPaths", "paths": ["only-in-b.txt"], "tabId": "t"},
             ],
             "pathsExist",
         )
-        self.assertEqual(reply["results"], {"only-in-a.txt": True})
+        self.assertEqual(reply["results"], {"only-in-b.txt": True})
+        self.assertEqual(self.server._vscode_server.work_dir, str(self.dir_b))
 
-    async def test_explicit_string_work_dir_wins_over_pin(self) -> None:
-        reply = await self._pinned_roundtrip(
-            [{"type": "checkPaths", "paths": ["only-in-b.txt"],
-              "workDir": str(self.dir_b), "tabId": "t"}],
+    async def test_explicit_string_work_dir_wins_over_global(self) -> None:
+        reply = await self._global_roundtrip(
+            [{"type": "checkPaths", "paths": ["only-in-a.txt"],
+              "workDir": str(self.dir_a), "tabId": "t"}],
             "pathsExist",
         )
-        self.assertEqual(reply["results"], {"only-in-b.txt": True})
-        self.assertEqual(reply["workDir"], str(self.dir_b))
+        self.assertEqual(reply["results"], {"only-in-a.txt": True})
+        self.assertEqual(reply["workDir"], str(self.dir_a))

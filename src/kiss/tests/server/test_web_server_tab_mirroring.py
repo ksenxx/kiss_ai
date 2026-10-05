@@ -342,7 +342,7 @@ class TestTabMirroring(TabMirroringBase):
             "workDir": self.tmpdir,
             "tabId": "tab-run",
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         })
 
@@ -628,7 +628,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
             "workDir": self.tmpdir,
             "tabId": "tab-tt",
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         })
         stt_b = await self._wait_for_event(
@@ -671,7 +671,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
                 "model": "definitely-not-a-real-model",
                 "workDir": self.tmpdir,
                 "useWorktree": False,
-                "useParallel": False,
+                "isParallel": False,
                 "autoCommit": False,
             }).encode("utf-8") + b"\n")
             await writer.drain()
@@ -726,7 +726,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
     ) -> None:
         """[3c] A reconnect during task setup still repaints the panel.
 
-        A run spends its whole setup (worktree, tools file, agent
+        A run spends its whole setup (worktree, agent script, agent
         script) BEFORE allocating its ``task_history`` row, so a client
         that connects in that window replays the run through
         ``_replay_session``'s pre-history-row branch.  That branch used
@@ -738,7 +738,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
         from kiss.core.models.model_info import get_available_models
 
         # The run must survive ``_run_task``'s model validation to
-        # reach its (slow) tools-file import, so a REAL catalog model
+        # reach its (slow) agent-script import, so a REAL catalog model
         # is needed.  On a keyless machine, fake one provider
         # credential on the daemon-shared config; the run is stopped
         # while still blocked in the tools import, so no LLM is ever
@@ -751,15 +751,15 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
             available = get_available_models()
             self.assertTrue(available)
             model = available[0]
-            # A tools file that blocks its import (interruptibly, with
+            # An agent script that blocks its import (interruptibly, with
             # a 60 s failsafe) holds the run in the pre-history-row
             # setup window while the late client connects.
-            tools_py = Path(self.tmpdir) / "slow_tools.py"
+            tools_py = Path(self.tmpdir) / "slow_agent.py"
             tools_py.write_text(
                 "import time\n"
                 "for _ in range(1200):\n"
                 "    time.sleep(0.05)\n"
-                "def get_tools():\n"
+                "def add_to_tools():\n"
                 "    return []\n",
                 encoding="utf-8",
             )
@@ -774,9 +774,9 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
                     "tabId": tab_id,
                     "model": model,
                     "workDir": self.tmpdir,
-                    "toolsFile": str(tools_py),
+                    "agentPath": str(tools_py),
                     "useWorktree": False,
-                    "useParallel": False,
+                    "isParallel": False,
                     "autoCommit": False,
                 }).encode("utf-8") + b"\n")
                 await writer.drain()

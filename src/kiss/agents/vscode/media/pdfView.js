@@ -52,6 +52,7 @@
   const MAX_CANVAS_PIXELS = 16 * 1024 * 1024;
 
   let pdfjsPromise = null;
+  let pdfjsAttempts = 0;
 
   /**
    * Load pdf.js once: the library module, plus the worker script as a
@@ -59,28 +60,49 @@
    * VS Code webview can only spawn workers from blob:/data: URLs, and a
    * cross-origin worker URL is refused everywhere): pdf.js tears the
    * worker down with the document, so two documents must not share
-   * one.  A failed load is forgotten so the next viewer retries.
+   * one.  A fetch that got no HTTP reply (a TypeError: the connection
+   * dropped or changed) is retried once after a moment, since one such
+   * blip would otherwise leave the tab saying "Cannot display" until
+   * the user reopens it; an HTTP error for the worker is final.  (A
+   * failed import() is a TypeError whatever the cause, so a module
+   * download the server refused gets the one retry too.)  A failed
+   * load is forgotten so the next viewer retries.
    */
   function loadPdfJs() {
     if (pdfjsPromise) return pdfjsPromise;
-    pdfjsPromise = Promise.all([
-      import(PDFJS_BUILD + 'pdf.min.mjs'),
-      fetch(PDFJS_BUILD + 'pdf.worker.min.mjs').then(res => {
-        if (!res.ok) throw new Error('pdf.js worker HTTP ' + res.status);
-        return res.blob();
-      }),
-    ])
-      .then(([lib, workerBlob]) => ({
-        lib,
-        workerUrl: URL.createObjectURL(
-          new Blob([workerBlob], {type: 'text/javascript'}),
-        ),
-      }))
+    pdfjsPromise = fetchPdfJs()
+      .catch(err => {
+        if (!(err instanceof TypeError)) throw err;
+        return new Promise(resolve => setTimeout(resolve, 500)).then(
+          fetchPdfJs,
+        );
+      })
       .catch(err => {
         pdfjsPromise = null;
         throw err;
       });
     return pdfjsPromise;
+  }
+
+  function fetchPdfJs() {
+    // The browser keeps a failed import() in its module map and fails
+    // the same URL again without asking the network, so every attempt
+    // after the first imports the module under its own URL (the CDN
+    // ignores the query).
+    pdfjsAttempts++;
+    const retry = pdfjsAttempts > 1 ? '?retry=' + pdfjsAttempts : '';
+    return Promise.all([
+      import(PDFJS_BUILD + 'pdf.min.mjs' + retry),
+      fetch(PDFJS_BUILD + 'pdf.worker.min.mjs').then(res => {
+        if (!res.ok) throw new Error('pdf.js worker HTTP ' + res.status);
+        return res.blob();
+      }),
+    ]).then(([lib, workerBlob]) => ({
+      lib,
+      workerUrl: URL.createObjectURL(
+        new Blob([workerBlob], {type: 'text/javascript'}),
+      ),
+    }));
   }
 
   function el(tag, className, text) {

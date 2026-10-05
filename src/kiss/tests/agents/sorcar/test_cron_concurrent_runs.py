@@ -29,6 +29,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -126,23 +127,28 @@ def test_prompt_job_runs_in_private_work_dir_and_stops_on_timeout(
 ) -> None:
     from kiss.agents.sorcar import daemon_client
 
-    captured: list[dict[str, object]] = []
+    captured: list[dict[str, Any]] = []
     seen_dirs: list[bool] = []
+    stopped = daemon_client.TaskResult(text="", success=False, cost=0.0, tokens=0, steps=0)
 
-    def capture_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        """The first run finishes; the next two never do until cron kills them."""
         captured.append(kwargs)
         seen_dirs.append(Path(str(kwargs["work_dir"])).is_dir())
+        if len(captured) == 1:
+            return daemon_client.TaskResult(
+                text="hello", success=True, cost=0.0, tokens=0, steps=0,
+            )
+        kwargs["running"].set()
+        kwargs["cancel"].wait()
         if len(captured) == 2:
-            raise TimeoutError("late")
-        if len(captured) == 3:
-            raise daemon_client.StopUnconfirmedTimeoutError("no terminal status")
-        return daemon_client.TaskResult(
-            text="hello", success=True, cost=0.0, tokens=0, steps=0,
-        )
+            raise daemon_client.CancelledError("stopped", stopped, confirmed=True)
+        raise daemon_client.CancelledError("no terminal status", stopped, confirmed=False)
 
     monkeypatch.setattr(daemon_client, "run", capture_run)
     job = _create(cron_job(
         "create", name="llm", prompt="say hi", schedule="every 1m", deliver="none",
+        timeout="0.5",
     ))
     _set_job_fields(job["id"], next_run_at=1.0)
     assert tick(2.0) == 1
@@ -151,10 +157,11 @@ def test_prompt_job_runs_in_private_work_dir_and_stops_on_timeout(
     assert work_dir.name.startswith(job["id"] + "-")
     assert seen_dirs == [True]
     assert not work_dir.exists()
-    assert captured[0]["stop_on_timeout"] is True
+    assert captured[0]["timeout"] is None and captured[0]["record_timeout"] == 0.5
     assert _stored(job["id"])["last_summary"] == "hello"
 
-    # A timed-out run is reported as stopped and its directory removed too.
+    # A run that outlives the job's ``timeout`` is handed back to cron
+    # as a job, which kills it: reported as stopped, directory removed.
     _set_job_fields(job["id"], next_run_at=1.0)
     assert tick(3.0) == 1
     stored = _stored(job["id"])
@@ -176,8 +183,6 @@ def test_prompt_job_runs_in_private_work_dir_and_stops_on_timeout(
     assert str(kept) in stored["last_summary"]
     assert "was stopped" not in stored["last_summary"]
     assert kept.is_dir()
-    # The run's generated SEA is kept with it.
-    assert (kept / cron_agent.PROMPT_SEA_NAME).is_file()
     assert [path.name for path in _runs_dir(tmp_path).iterdir()] == [kept.name]
 
 
@@ -211,6 +216,9 @@ def test_overlapping_tick_runs_idle_jobs_and_skips_the_running_one(tmp_path: Pat
 
 def test_scheduler_thread_does_not_block_on_long_job(tmp_path: Path) -> None:
     slow = _due_command_job("slow", "sleep 1.5; echo slow-done")
+    # The scheduler thread ticks with the real clock: a job due in 1970
+    # would count as missed, so make it due a second ago.
+    _set_job_fields(slow["id"], next_run_at=time.time() - 1)
     stop_event = start_scheduler_thread(interval=0.05)
     try:
         _wait_until(lambda: running_job_ids() == {slow["id"]})
@@ -221,7 +229,7 @@ def test_scheduler_thread_does_not_block_on_long_job(tmp_path: Path) -> None:
             deliver="none",
         ))
         with cron_agent._jobs_lock(blocking=True):
-            _set_job_fields(quick["id"], next_run_at=1.0)
+            _set_job_fields(quick["id"], next_run_at=time.time() - 1)
         _wait_until(lambda: _stored(quick["id"]).get("last_status") == "ok", timeout=1.0)
         assert slow["id"] in running_job_ids()
         _wait_until(lambda: _stored(slow["id"]).get("last_status") == "ok")

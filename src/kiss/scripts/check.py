@@ -276,6 +276,8 @@ def main() -> int:
     checks = [
         (["uv", "sync"], "Install dependencies (uv sync)"),
         (["uv", "run", "generate-api-docs"], "Generate API docs"),
+        (["uv", "run", "sea", "lint"], "Lint agent scripts (sea lint)"),
+        (["uv", "run", "sea", "docs"], "Generate SEA vocabulary tables (sea docs)"),
         (["uv", "run", "python", "-m", "compileall", "-q", "src/"], "Syntax check (compileall)"),
         (["uv", "run", "ruff", "check", "src/"], "Lint code (ruff)"),
         (["uv", "run", "mypy", "src/"], "Type check (mypy)"),
