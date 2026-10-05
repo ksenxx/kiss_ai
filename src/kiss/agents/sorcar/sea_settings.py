@@ -136,9 +136,15 @@ SETTING_DOCS: dict[str, str] = {
                 "relative path is resolved against the script's own folder, not the caller's.",
     "model": "The LLM model, a catalogue name or a model-picker SEA; `\"\"` or `None` keeps "
              "the caller's.",
-    "chat_id": "The chat the run's events go to; default: a new chat.",
-    "use_worktree": "Run in a git worktree of the project (daemon default `True`).",
-    "auto_commit": "Commit the run's changes when it ends (daemon default `True`).",
+    "chat_id": "The chat the run's events go to; default under `run_agent`: the calling "
+               "task's chat, or a new chat when nothing is inherited (a `channel` run, an "
+               "`inherit: false` call); a `/<name>` run keeps the tab's chat.",
+    "use_worktree": "Run in a git worktree of the project; default: the calling task's "
+                    "effective choice, else the persisted setting (an inherited or default "
+                    "`True` is demoted by the classifier for non-implementation tasks, an "
+                    "explicit `True` is kept).",
+    "auto_commit": "Commit the run's changes when it ends; default: the calling task's "
+                   "effective choice, else the persisted setting.",
     "max_budget": "USD budget of the run, a finite number; default: the caller's share or the "
                   "daemon's default.",
     "model_config": "Model configuration dict passed to the LLM (temperature, base URL, ...).",
@@ -146,7 +152,8 @@ SETTING_DOCS: dict[str, str] = {
     "auto_classify": "Let the pre-run classifier decide the worktree mode and lite prompt "
                      "(daemon default: the persisted setting).",
     "use_memory": "Give the run the `memory_*` tools (daemon default: the persisted setting).",
-    "allow_fan_out": "Let the run call `run_parallel` (default `True`).",
+    "allow_fan_out": "Let the run call `run_parallel`; default: whether the calling task may "
+                     "fan out itself, else `True`.",
     "tool_profile": "The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full "
                     "toolset).",
     "docker_image": "Run inside this Docker image (default: the host).",
