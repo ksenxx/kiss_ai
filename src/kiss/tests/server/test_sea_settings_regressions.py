@@ -74,40 +74,40 @@ class _OverflowingNumber(int):
 def test_prompt_settings_are_unknown_keys() -> None:
     # ``prompt`` and ``system_prompt`` are functions, not settings: the
     # key is rejected before its (untrusted) value is ever touched.
-    namespace: dict[str, Any] = {"settings": lambda: {"prompt": _RaisingStr("x")}}
+    declared: dict[str, Any] = {"prompt": _RaisingStr("x")}
     with pytest.raises(SettingsError, match=r"settings\(\) has an unknown key 'prompt'"):
-        resolve_settings(namespace)
-    namespace = {"settings": lambda: {"system_prompt": "x"}}
+        resolve_settings(declared)
+    declared = {"system_prompt": "x"}
     with pytest.raises(SettingsError, match=r"has an unknown key 'system_prompt'"):
-        resolve_settings(namespace)
+        resolve_settings(declared)
 
 
 def test_broken_numeric_value_is_a_settings_error() -> None:
-    namespace = {"settings": lambda: {"timeout": _RaisingNumber(5)}}
+    declared = {"timeout": _RaisingNumber(5)}
     with pytest.raises(SettingsError, match=r"settings\(\)\['timeout'\] returned a broken value"):
-        resolve_settings(namespace)
+        resolve_settings(declared)
 
 
 def test_overflowing_numeric_value_is_reported_as_non_finite() -> None:
-    namespace = {"settings": lambda: {"max_budget": _OverflowingNumber(1)}}
+    declared = {"max_budget": _OverflowingNumber(1)}
     with pytest.raises(SettingsError, match=r"max_budget'\] must return a finite number"):
-        resolve_settings(namespace)
+        resolve_settings(declared)
 
 
 def test_finite_numbers_are_returned_as_floats() -> None:
-    resolved = resolve_settings({"settings": lambda: {"timeout": 7, "max_budget": 2}})
+    resolved = resolve_settings({"timeout": 7, "max_budget": 2})
     assert resolved["timeout"] == 7.0 and isinstance(resolved["timeout"], float)
     assert resolved["max_budget"] == 2.0 and math.isfinite(resolved["max_budget"])
 
 
 def test_unknown_key_with_none_value_is_rejected() -> None:
-    namespace = {"settings": lambda: {"kind": "worker", "tiemout": None}}
+    declared = {"kind": "worker", "tiemout": None}
     with pytest.raises(SettingsError, match="unknown key 'tiemout'"):
-        resolve_settings(namespace)
+        resolve_settings(declared)
 
 
 def test_known_key_with_none_value_is_dropped() -> None:
-    resolved = resolve_settings({"settings": lambda: {"kind": "worker", "timeout": None}})
+    resolved = resolve_settings({"kind": "worker", "timeout": None})
     assert "timeout" not in resolved
     assert resolved["kind"] == "worker"
 
@@ -199,15 +199,25 @@ class SeaSettingsDaemonRegressionTest(DaemonRunApiHarness):
         """
         parent = Path(self.tmpdir) / "probe_agent.py"
         parent.write_text(
-            "def add_to_tools():\n"
-            "    from kiss.tests.server.test_sea_settings_regressions import _probe_tool\n"
-            "    return [_probe_tool]\n",
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def tools(self, tools):
+        from kiss.tests.server.test_sea_settings_regressions import _probe_tool
+        return tools + [_probe_tool]
+""",
         )
         child = Path(self.tmpdir) / "child_agent.py"
         child.write_text(
-            "def add_to_tools():\n"
-            "    from kiss.tests.server.test_sea_settings_regressions import _child_tool\n"
-            "    return [_child_tool]\n",
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def tools(self, tools):
+        from kiss.tests.server.test_sea_settings_regressions import _child_tool
+        return tools + [_child_tool]
+""",
         )
         runs: list[dict[str, Any]] = []
         child_results: list[Any] = []
@@ -244,8 +254,16 @@ class SeaSettingsDaemonRegressionTest(DaemonRunApiHarness):
         """``/chan text`` works in ``~/.kiss/channel_work``, as ``run_agent`` would."""
         _seed_seas_md(
             Path(self.tmpdir) / "user-seas", "chan",
-            "def description():\n    return 'a channel'\n"
-            "def settings():\n    return {'kind': 'channel'}\n",
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'a channel'
+
+    def settings(self, settings):
+        return settings | {'kind': 'channel'}
+""",
         )
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)
@@ -265,7 +283,13 @@ class SeaSettingsDaemonRegressionTest(DaemonRunApiHarness):
         """A plain SEA's slash run stays in the calling project."""
         _seed_seas_md(
             Path(self.tmpdir) / "user-seas", "plain",
-            "def description():\n    return 'plain'\n",
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'plain'
+""",
         )
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)
@@ -280,7 +304,13 @@ class SeaSettingsDaemonRegressionTest(DaemonRunApiHarness):
         """The persisted row reads ``/plain do it`` once the run has ended, not ``do it``."""
         _seed_seas_md(
             Path(self.tmpdir) / "user-seas", "plain",
-            "def description():\n    return 'plain'\n",
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'plain'
+""",
         )
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)

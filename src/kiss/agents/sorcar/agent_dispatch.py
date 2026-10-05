@@ -130,7 +130,7 @@ class RunOptions:
     settings vocabulary (:data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`)
     minus the keys that describe a script — plus ``system_prompt``, the
     replacement base system prompt a programmatic caller may pass (it
-    is not an ``options`` key: a SEA's ``system_prompt()`` is the
+    is not an ``options`` key: a SEA's ``system_prompt`` method is the
     user-facing way).  The tool's ``model``, ``tool_profile``,
     ``max_budget`` and ``timeout`` arguments are shortcuts for the
     options of the same name (:func:`parse_run_options` merges them).
@@ -183,8 +183,7 @@ of the same name (both may be given when they agree).  Plus four
 call-only keys: ``inherit`` (``false``: the sub-task takes nothing
 from the calling task), ``workspace`` (the account a channel agent's
 run holds), ``add_to_prompt`` (text appended to the task) and
-``add_to_system_prompt``, the option form of a SEA's
-``add_to_system_prompt()`` getter.
+``add_to_system_prompt`` (text appended to the system prompt).
 """
 
 ARGUMENT_OPTIONS = ("model", "tool_profile", "max_budget", "timeout")
@@ -201,8 +200,8 @@ OPTION_DOCS: dict[str, str] = {
     "workspace": "The account a `kind: channel` agent's run holds (its channel workspace); "
                  "refused for any other kind and by `run_parallel`.",
     "add_to_prompt": "Text appended to the task after the SEA's `prompt(task)`.",
-    "add_to_system_prompt": "Text appended to the system prompt after the SEA's "
-                            "`add_to_system_prompt()`.",
+    "add_to_system_prompt": "Text appended to the system prompt before the SEA's "
+                            "`system_prompt(system_prompt)` sees it.",
 }
 """Documentation of the option keys that are not ``settings()`` keys, or mean something
 else as an option (``work_dir``: relative to the caller, not the script), for ``sea docs``.
@@ -746,25 +745,24 @@ def inherit_from_parent(
       (``_system_prompt_suffix``), so a run's extra system
       instructions constrain its whole task tree through ``run_agent``
       exactly as through ``run_parallel``.  A SEA's
-      ``system_prompt()`` still replaces the base prompt on the
-      daemon, and its ``add_to_system_prompt()`` text is added after
-      the inherited suffix.
+      ``system_prompt`` method then sees the assembled prompt (base
+      plus suffix) on the daemon and returns the run's.
     - ``add_to_prompt``: the suffix the caller's own task prompt
       was given (``_prompt_suffix``, the ``appendToPrompt`` of its
       run), so the sub-task's prompt ends with the same text.  An
-      SEA's ``prompt(task)`` getter then rewrites the whole
+      SEA's ``prompt(task)`` method then rewrites the whole
       task text on the daemon.
     - ``allow_fan_out``: whether the caller may fan out itself
       (``_is_parallel``), so a sequential caller (a ``worker`` kind,
       a user who turned fan-out off) does not hand ``run_parallel``
       back to its children.
-    - the caller's extra tools (its SEA's ``add_to_tools()``
+    - the caller's extra tools (its SEA's ``tools()``
       list, plus those the caller inherited itself): not resolved
       here — a callable cannot travel the wire — but requested from
       the daemon with the ``inherit_tools`` flag :func:`dispatch_result`
       sends, so the sub-task has the tools the inherited system prompt
       refers to.  The daemon adds them to the sub-task's built-in
-      toolset after the sub-task's own script's ``add_to_tools()``
+      toolset after the sub-task's own SEA's ``tools()``
       tools; a script on the ``none`` tool profile keeps exactly its
       own set.
     - ``use_web_tools`` / ``use_memory``: the caller's per-run
@@ -1139,7 +1137,7 @@ def dispatch_result(
             tool_profile=options.tool_profile,
             docker_image=inherited.docker_image,
             workspace=workspace,
-            # The caller's extra tools (its script's ``add_to_tools()``)
+            # The caller's extra tools (its SEA's ``tools()``)
             # cannot travel the wire: the daemon takes them off the
             # running caller, which ``parent_task_id`` names.
             inherit_tools=inherit,

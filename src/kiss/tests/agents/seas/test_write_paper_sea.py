@@ -13,7 +13,7 @@ there is none (``build_paper`` shells out to ``pdflatex``; there is no
 substitute for it).  The agent-level test runs a real
 :class:`ChatSorcarAgent` ReAct loop against the scripted local
 chat-completions server configured as the daemon configures it from
-the SEA's getters; the only replaced boundary is the LLM endpoint, and
+the SEA's methods; the only replaced boundary is the LLM endpoint, and
 the ``check_paper`` tool really runs on the fixture.
 """
 
@@ -29,6 +29,7 @@ import pytest
 import yaml
 
 from kiss.agents.seas.write_paper import write_paper_sea
+from kiss.agents.seas.write_paper.write_paper_sea import WritePaperSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
@@ -138,31 +139,31 @@ def _line(tex: str, needle: str) -> int:
     return next(i for i, line in enumerate(tex.splitlines(), 1) if needle in line)
 
 
-def test_sea_getters_follow_the_user_contract() -> None:
+def test_sea_methods_follow_the_user_contract() -> None:
     """The SEA appends the template's rules, offers the two tools, browses and fans out."""
-    prompt = write_paper_sea.add_to_system_prompt()
-    assert prompt == write_paper_sea.SYSTEM_PROMPT
+    sea = WritePaperSea()
+    assert sea.system_prompt("ASSEMBLED") == "ASSEMBLED\n\n" + write_paper_sea.SYSTEM_PROMPT
+    prompt = write_paper_sea.SYSTEM_PROMPT
     assert "William Strunk Jr. and E. B. White" in prompt
     assert "Independent review: run the reviewer model read-only" in prompt
     assert "`check_paper`" in prompt and "`build_paper`" in prompt
     assert "Em dashes: zero in prose" in prompt
     assert "Never add .aux" in prompt
-    tools = write_paper_sea.add_to_tools()
-    assert [t.__name__ for t in tools] == ["check_paper", "build_paper"]
+    assert [t.__name__ for t in sea.tools([print])] == ["print", "check_paper", "build_paper"]
     # Browse, fan out, skip the classifier; a ``run_agent`` dispatch waits six hours.
-    assert write_paper_sea.settings() == {
+    assert sea.settings({}) == {
         "use_web_tools": True,
         "allow_fan_out": True,
         "auto_classify": False,
         "timeout": 6 * 3600,
     }
-    assert resolve_settings(vars(write_paper_sea)) == {
-        "kind": "session", **write_paper_sea.settings()
+    assert sea.settings({"model": "m"}) == {"model": "m", **sea.settings({})}
+    assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == {
+        "kind": "session", **sea.settings({})
     }
-    # The default system prompt is kept: the SEA only appends to it (no
-    # ``system_prompt()`` getter), and defines none of the removed
-    # per-field getters, which nothing would read.
-    assert not hasattr(write_paper_sea, "system_prompt")
+    # The default system prompt is kept: ``system_prompt`` only appends to
+    # it, and the module defines none of the removed getters, which
+    # nothing would read.
     assert_no_removed_getters(write_paper_sea)
 
 
@@ -174,7 +175,7 @@ def test_slash_write_paper_resolves_to_the_bundled_sea() -> None:
     task_text, path = hit
     assert path == _SEA_PATH
     assert task_text == "Write a paper on X"
-    assert sea_commands.sea_settings(path) == resolve_settings(vars(write_paper_sea))
+    assert sea_commands.sea_settings(path) == sea_commands.base_settings([WritePaperSea()])
 
 
 def test_check_paper_flags_the_sloppy_prose_and_skips_non_prose(tmp_path: Path) -> None:
@@ -493,7 +494,8 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: P
     the real gate report flowed through the tool-result message.
     """
     path = _write(tmp_path, _SLOPPY_TEX, _SLOPPY_BIB)
-    settings = write_paper_sea.settings()
+    run = sea_commands.evaluate_sea([WritePaperSea()], f"Review {path} for AI slop; do not edit.")
+    settings = run.settings
     script = [
         tool_call_body("check_paper", {"tex_path": str(path)}, prompt_tokens=500),
         finish_body("<pre>summary: 7 gate(s) failed</pre>", prompt_tokens=600),
@@ -501,14 +503,14 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: P
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("write-paper-sea-test")
         result = agent.run(
-            prompt_template=f"Review {path} for AI slop; do not edit.",
+            prompt_template=run.prompt,
             model_name=MODEL,
             work_dir=str(tmp_path),
             max_steps=4,
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
-            system_prompt=write_paper_sea.add_to_system_prompt(),
-            tools=write_paper_sea.add_to_tools(),
+            system_prompt_hook=run.system_prompt_hook,
+            tools_hook=run.tools_hook,
             web_tools=settings["use_web_tools"],
             is_parallel=settings["allow_fan_out"],
             verbose=False,

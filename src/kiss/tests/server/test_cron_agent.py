@@ -44,22 +44,22 @@ def test_agent_script_loaded_run_now_uses_daemon_endpoint_file(
     # this file), whose own _daemon_endpoint_file global is never set:
     # run_now must still target the endpoint file recorded in the canonical
     # module by the daemon's scheduler thread.
-    from kiss.agents.sorcar.agent_file import AgentFileError
-    from kiss.agents.sorcar.sea_settings import execute_python_file
+    import sys
+
+    from kiss.agents.sorcar.sea_commands import load_sea
 
     custom_endpoint = tmp_path / "custom-daemon.json"
     stop_event = start_scheduler_thread(
         interval=999.0, endpoint_file=str(custom_endpoint),
     )
     try:
-        namespace = execute_python_file(
-            cron_agent.__file__, AgentFileError, "agent script",
-        )
-        loaded_cron_job = namespace["add_to_tools"]()[0]
+        sea = load_sea(Path(cron_agent.__file__))
+        loaded_cron_job = sea.tools([])[0]
         # A distinct module copy — the very situation the canonical
         # lookup exists for.
         assert loaded_cron_job is not cron_job
-        assert namespace["_daemon_endpoint_file"] is None
+        assert type(sea).__module__ != cron_agent.__name__
+        assert sys.modules[type(sea).__module__]._daemon_endpoint_file is None
         job = _create(loaded_cron_job(
             "create", name="llm", prompt="say hi", schedule="every 1h",
             deliver="none",

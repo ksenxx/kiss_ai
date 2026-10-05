@@ -34,6 +34,7 @@ import pytest
 from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import (
     WhatsAppAgent,
     WhatsAppChannelBackend,
+    WhatsappSea,
     _bridge_log_path,
     _bridge_pid_path,
     _config,
@@ -43,7 +44,6 @@ from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import (
     _rest_recipient,
     _to_jid,
     _write_qr_html,
-    add_to_tools,
     main,
 )
 from kiss.tests.agents.third_party_agents.whatsapp_bridge import BridgeServer, bridge_server
@@ -599,7 +599,7 @@ class TestRestTools:
 
 
 # ----------------------------------------------------------------------
-# Agent, auth tools, and add_to_tools() contract
+# Agent, auth tools, and WhatsappSea().tools([]) contract
 # ----------------------------------------------------------------------
 
 _AUTH_TOOL_NAMES = [
@@ -645,7 +645,7 @@ class TestAgentAndAuthTools:
 
     def test_tools_module_contract(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path / "nowhere")})
-        names = [t.__name__ for t in add_to_tools()]
+        names = [t.__name__ for t in WhatsappSea().tools([])]
         assert names == _AUTH_TOOL_NAMES
         assert callable(main)
 

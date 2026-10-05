@@ -47,6 +47,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -74,15 +75,41 @@ _QR_LINE_CHARS = frozenset("█▀▄ ")
 _config = ChannelConfig(_WHATSAPP_DIR, ())
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/whatsapp help``."""
-    return (
-        "Sends messages, files and audio and searches contacts, chats and message history on a "
-        "personal WhatsApp account through the locally built lharries/whatsapp-mcp Go bridge, "
-        "pairing once by scanning a QR code from the phone; use it with "
-        "`run_agent(agent=\"whatsapp\", task=\"Send 'Hello!' to +1234567890\")` or the "
-        "`kiss-whatsapp -t '<task>'` CLI (`kiss-whatsapp --channel <chat>` runs one poll tick)."
-    )
+class WhatsappSea(BaseSea):
+    """The ``/whatsapp`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/whatsapp help``."""
+        return (
+            "Sends messages, files and audio and searches contacts, chats and message history on a "
+            "personal WhatsApp account through the locally built lharries/whatsapp-mcp Go bridge, "
+            "pairing once by scanning a QR code from the phone; use it with "
+            "`run_agent(agent=\"whatsapp\", task=\"Send 'Hello!' to +1234567890\")` or the "
+            "`kiss-whatsapp -t '<task>'` CLI (`kiss-whatsapp --channel <chat>` runs one poll tick)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the WhatsApp channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        bridge state persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + WhatsAppAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + WhatsAppAgent.channel_system_prompt
 
 
 def _channel_dir() -> Path:
@@ -1592,32 +1619,6 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         channel_name="WhatsApp",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the WhatsApp channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    bridge state persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return WhatsAppAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return WhatsAppAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

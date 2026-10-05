@@ -38,21 +38,24 @@ already-running daemon and block until it finishes::
     # Continue the same chat (the agent sees the prior task as context):
     follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
-``extension_agent_path="/path/to/my_agent.py"`` names an *agent
-script* — a Sorcar Extension Agent (SEA) — whose ``settings()`` dict
-computes the run's parameters on the daemon — e.g. a ``"model"`` key
-overrides *model*, a ``"prompt"`` key overrides *prompt* — while
-parameters it leaves out keep the values passed to :func:`run` (see
-the :func:`run` docstring for the script format).  The script is also
-the only way to give the agent extra tools: its ``add_to_tools()``
-returns functions (plain synchronous functions with keyword-bindable,
-type-annotated parameters and Google-style docstrings) that are added
-to the built-in toolset; with ``"tool_profile": "none"`` they and
-``finish`` become the whole toolset.  The client never serializes
-Python functions — the daemon loads the script itself, so the tools
-execute **in the daemon process** like native agent tools::
+``extension_agent_path="/path/to/my_agent.py"`` names a Sorcar
+Extension Agent (SEA): a file defining one subclass of
+:class:`kiss.agents.seas.base.base_sea.BaseSea` whose ``settings``
+method computes the run's parameters on the daemon — e.g. a
+``"model"`` key overrides *model* — while parameters it leaves out
+keep the values passed to :func:`run` (see the :func:`run` docstring
+for the file format).  The SEA is also the only way to give the agent
+extra tools: its ``tools(tools)`` method returns the run's toolset
+(the built-in tools it was given plus plain synchronous functions with
+keyword-bindable, type-annotated parameters and Google-style
+docstrings); with ``"tool_profile": "none"`` the list it returns and
+``finish`` are the whole toolset.  The client never serializes Python
+functions — the daemon loads the file itself, so the tools execute
+**in the daemon process** like native agent tools::
 
     # my_agent.py
+    from kiss.agents.seas.base.base_sea import BaseSea
+
     def get_temperature(city: str) -> str:
         \"\"\"Return the current temperature of a city.
 
@@ -61,20 +64,21 @@ execute **in the daemon process** like native agent tools::
         \"\"\"
         return lookup_sensor(city)
 
-    def add_to_tools():
-        \"\"\"Return the tools added to the built-in toolset.\"\"\"
-        return [get_temperature]
+    class WeatherSea(BaseSea):
+        def tools(self, tools):
+            \"\"\"Add the temperature tool to the built-in toolset.\"\"\"
+            return tools + [get_temperature]
 
     result = sorcar.run("What's the temperature in Paris?",
                         extension_agent_path="my_agent.py")
 
-The script may additionally define ``llm_call_hook()`` /
-``tool_call_hook()``, returning functions ``llm_call_hook`` and
-``tool_call_hook`` that the daemon passes to the underlying
+The class may also define ``system_prompt(system_prompt)``,
+``llm_call_hook(new_messages)`` and ``tool_call_hook(name, args)``,
+which the daemon applies to the run and passes to the underlying
 :class:`kiss.core.kiss_agent.KISSAgent` (see
-:meth:`~kiss.core.kiss_agent.KISSAgent.run`); like the tool getters,
-these have no :func:`run` parameter, since a callable cannot travel
-the wire.
+:meth:`~kiss.core.kiss_agent.KISSAgent.run`); like ``tools``, these
+have no :func:`run` parameter, since a callable cannot travel the
+wire.
 
 The function speaks the daemon's JSON protocol over its local WSS
 endpoint, found through ``$KISS_HOME/sorcar-local.json`` (or the file
@@ -299,6 +303,16 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("browserNavigate", required=("tab_id", "action")),
     ApiCommand("browserInput", required=("tab_id", "event")),
     ApiCommand("browserViewport", required=("tab_id",)),
+    ApiCommand("terminalOpen", required=("tab_id",), handler="terminal_open"),
+    ApiCommand(
+        "terminalInput", required=("tab_id", "data"), handler="terminal_input"
+    ),
+    ApiCommand(
+        "terminalResize",
+        required=("tab_id", "cols", "rows"),
+        handler="terminal_resize",
+    ),
+    ApiCommand("terminalClose", required=("tab_id",), handler="terminal_close"),
     ApiCommand("setWorkDir", required=("workDir",)),
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
@@ -523,6 +537,8 @@ class ServerBackend(Protocol):
     async def _handle_list_dir(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
+
+    def _cmd_work_dir(self, cmd: dict[str, Any]) -> str: ...
 
     async def _handle_git_status(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -1302,6 +1318,70 @@ class ServerApi:
         if ctx.is_local:
             return
         await self._backend._handle_list_dir(cmd, ctx.endpoint)
+
+    # The remote webapp's terminal tabs (``kiss.server.terminal_tab``):
+    # a shell on the daemon's machine, owned by the connection that
+    # opened it.  VS Code windows have their own integrated terminal,
+    # so a locally delivered terminal command is dropped like
+    # ``listDir``.  The ``tab_id`` is the terminal tab, never a chat.
+
+    async def terminal_open(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Start (or re-attach) the shell of a terminal tab.
+
+        Args:
+            cmd: The ``terminalOpen`` command (``tab_id``; optional
+                ``cols``, ``rows``, ``workDir``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_local:
+            return
+        self._backend._vscode_server.terminals.open(
+            str(cmd["tab_id"]),
+            ctx.conn_state["conn_id"],
+            self._backend._cmd_work_dir(cmd),
+            cmd.get("cols"),
+            cmd.get("rows"),
+        )
+
+    async def terminal_input(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Write the keystrokes of a terminal tab to its shell.
+
+        Args:
+            cmd: The ``terminalInput`` command (``tab_id``, ``data``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_local:
+            return
+        self._backend._vscode_server.terminals.input(
+            str(cmd["tab_id"]), ctx.conn_state["conn_id"], cmd["data"],
+        )
+
+    async def terminal_resize(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Resize the pty of a terminal tab.
+
+        Args:
+            cmd: The ``terminalResize`` command (``tab_id``, ``cols``,
+                ``rows``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_local:
+            return
+        self._backend._vscode_server.terminals.resize(
+            str(cmd["tab_id"]), ctx.conn_state["conn_id"], cmd["cols"], cmd["rows"],
+        )
+
+    async def terminal_close(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Hang up the shell of a closed terminal tab.
+
+        Args:
+            cmd: The ``terminalClose`` command (``tab_id``).
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_local:
+            return
+        self._backend._vscode_server.terminals.close(
+            str(cmd["tab_id"]), ctx.conn_state["conn_id"],
+        )
 
     async def git_status(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Report working-tree changes for the remote Source Control view.

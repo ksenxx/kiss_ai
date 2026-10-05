@@ -1323,7 +1323,7 @@ def make_mcp_tool_wrapper(
 
 # Names of the agent's built-in tools ("cron_job" is built in only to
 # cron sessions dispatched via run_agent(agent="cron", ...), whose agent
-# script's add_to_tools() supplies it).  A synthesized MCP tool name colliding with any of
+# SEA's tools() supplies it).  A synthesized MCP tool name colliding with any of
 # these (e.g. server "run" + tool "parallel" → "run_parallel") would
 # make KISSAgent._add_functions() raise and abort the whole tool loop,
 # so such names are pre-reserved and the MCP tool gets a numeric suffix

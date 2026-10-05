@@ -62,7 +62,7 @@ def test_delivery_error_notes() -> None:
 
 
 def test_get_tools_and_sorcar_wiring() -> None:
-    assert cron_agent.add_to_tools() == [cron_job, cron_agent.gateway_command]
+    assert cron_agent.CronAgentSea().tools([]) == [cron_job, cron_agent.gateway_command]
     # The module lives in the sorcar package and never imports from
     # kiss.agents.third_party_agents at module scope.
     source_text = Path(cron_agent.__file__).read_text(encoding="utf-8")
@@ -77,9 +77,10 @@ def test_get_tools_and_sorcar_wiring() -> None:
     assert "tools.append(cron_job)" not in agent_text
     assert "from kiss.agents.sorcar.cron_agent import cron_job" not in agent_text
     # The dispatch preamble reaches the session through the agent-script
-    # contract (``add_to_system_prompt()``), not through a prompt prefix.
-    assert cron_agent.add_to_system_prompt() == cron_agent.CRON_DISPATCH_PREAMBLE
-    assert cron_agent.settings()["kind"] == "channel"
+    # contract (the SEA's ``system_prompt`` method), not through a prompt prefix.
+    sea = cron_agent.CronAgentSea()
+    assert sea.system_prompt("S") == "S\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
+    assert sea.settings({})["kind"] == "channel"
     # The system prompt directs scheduling requests to run_agent(agent="cron").
     system_md = Path(cron_agent.__file__).parents[2] / "SYSTEM.md"
     assert 'run_agent tool with "cron"' in system_md.read_text(encoding="utf-8")

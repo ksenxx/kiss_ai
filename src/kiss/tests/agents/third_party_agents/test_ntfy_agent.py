@@ -27,10 +27,8 @@ from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, st
 from kiss.agents.third_party_agents.ntfy.ntfy_sea import (
     NtfyAgent,
     NtfyChannelBackend,
+    NtfySea,
     _config,
-)
-from kiss.agents.third_party_agents.ntfy.ntfy_sea import (
-    add_to_tools as module_tools,
 )
 from kiss.core.config import kiss_home
 
@@ -184,8 +182,8 @@ def test_authenticate_rejects_empty_topic() -> None:
 
 
 def test_tools_module_function() -> None:
-    """The module-level add_to_tools() returns a non-empty tool list."""
-    tools = module_tools()
+    """``NtfySea().tools([])`` returns a non-empty tool list."""
+    tools = NtfySea().tools([])
     assert tools
     assert "check_ntfy_auth" in {t.__name__ for t in tools}
 

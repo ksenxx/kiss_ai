@@ -23,13 +23,11 @@ import kiss.agents.third_party_agents.email.email_sea as email_agent_mod
 from kiss.agents.third_party_agents.email.email_sea import (
     EmailAgent,
     EmailChannelBackend,
+    EmailSea,
     _build_outbound,
     _config,
     _is_automated_mail,
     _normalize_mail,
-)
-from kiss.agents.third_party_agents.email.email_sea import (
-    add_to_tools as module_tools,
 )
 
 _AUTH_TRIO = {"check_email_auth", "authenticate_email", "clear_email_auth"}
@@ -181,8 +179,8 @@ class TestAuthFlow:
         )
 
     def test_module_tools(self) -> None:
-        """The module-level add_to_tools() returns a non-empty tool list."""
-        tools = module_tools()
+        """``EmailSea().tools([])`` returns a non-empty tool list."""
+        tools = EmailSea().tools([])
         assert tools
         assert _AUTH_TRIO <= {t.__name__ for t in tools}
 

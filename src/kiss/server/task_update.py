@@ -31,8 +31,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from kiss.agents.seas.ask import ask_sea
-from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.agents.seas.ask.ask_sea import AskSea
+from kiss.agents.sorcar.sea_commands import evaluate_sea
 from kiss.server.json_printer import stamp_event_ts
 
 log = logging.getLogger(__name__)
@@ -55,9 +55,9 @@ TaskUpdateSeaRunner = Callable[[Any, str], tuple[str, float]]
 def build_prompt(task_id: str) -> str:
     """Return the ``/ask`` prompt the update run answers for *task_id*.
 
-    What a ``/ask`` typed into the task's chat produces:
-    :func:`ask_sea.prompt` applied to the question, with ``{task_id}``
-    filled in as the daemon would.
+    What a ``/ask`` typed into the task's chat produces: the
+    :class:`AskSea` ``prompt`` applied to the question, with
+    ``{task_id}`` filled in as the daemon would.
 
     Args:
         task_id: The ``task_history`` row id of the task to report on.
@@ -65,7 +65,7 @@ def build_prompt(task_id: str) -> str:
     Returns:
         The prompt text.
     """
-    return ask_sea.prompt(UPDATE_QUESTION).replace("{task_id}", task_id)
+    return evaluate_sea([AskSea()], UPDATE_QUESTION, task_id).prompt
 
 
 @dataclasses.dataclass
@@ -326,7 +326,8 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
     parent_tab_id = subagent_parent_tab_id_of(parent_agent)
     sub_tab_id = f"task-{task_id}__update-{int(time.time() * 1000)}"
-    ask_settings = resolve_settings(vars(ask_sea))
+    ask = evaluate_sea([AskSea()], UPDATE_QUESTION, task_id)
+    ask_settings = ask.settings
     model_name = str(ask_settings.get("model") or parent_agent.model_name)
     agent = ChatSorcarAgent("Task update")
     agent._tab_id = sub_tab_id
@@ -348,13 +349,13 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     result = ""
     try:
         result = agent.run(
-            prompt_template=build_prompt(task_id),
+            prompt_template=ask.prompt,
             model_name=model_name,
             work_dir=str(getattr(parent_agent, "work_dir", "") or "."),
             printer=printer,
-            # The ask SEA's ``none`` tool profile: its ``add_to_tools()``
-            # and ``finish`` are the whole tool set, no built-in tools.
-            tools=ask_sea.add_to_tools(),
+            # The ask SEA's ``none`` tool profile: its ``tools()`` and
+            # ``finish`` are the whole tool set, no built-in tools.
+            tools_hook=ask.tools_hook,
             append_basic_tools=False,
             tool_profile=ask_settings["tool_profile"],
             is_parallel=ask_settings["allow_fan_out"],
@@ -363,8 +364,7 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
                 getattr(parent_agent, "model_config", None)
                 if model_name == parent_agent.model_name else None
             ),
-            base_system_prompt=ask_sea.system_prompt(),
-            system_prompt=ask_sea.add_to_system_prompt(),
+            system_prompt_hook=ask.system_prompt_hook,
             web_tools=ask_settings["use_web_tools"],
             use_memory=ask_settings["use_memory"],
         )

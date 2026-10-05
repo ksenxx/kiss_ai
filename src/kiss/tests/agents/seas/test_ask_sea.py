@@ -8,14 +8,14 @@ Four surfaces are pinned here, and only these — the tests use no
 mocks, just the real registry, the real slash-command resolver, the
 real daemon-side loader and the real dispatch code:
 
-1. The ``ask_sea`` module itself: ``system_prompt`` MUST return the
-   bundled SYSTEM_LITE ablation prompt (``_ask_system_lite.md``),
-   ``add_to_system_prompt`` MUST start with the no-internet and
-   answer-quickly directives and carry the answering playbook,
-   ``add_to_tools`` MUST expose the single ``task_context`` tool, and
-   ``settings()`` MUST be a ``worker`` with the ``none`` tool profile
-   (so there is no built-in tool besides ``finish``), and ``prompt()``
-   MUST append the fixed sentence carrying the ``{task_id}`` placeholder.
+1. The ``AskSea`` class itself: ``system_prompt`` MUST replace the
+   assembled prompt with the bundled SYSTEM_LITE ablation prompt
+   (``_ask_system_lite.md``) followed by the no-internet and
+   answer-quickly directives and the answering playbook, ``tools`` MUST
+   add the single ``task_context`` tool, ``settings()`` MUST be a
+   ``worker`` with the ``none`` tool profile (so there is no built-in
+   tool besides ``finish``), and ``prompt()`` MUST append the fixed
+   sentence carrying the ``{task_id}`` placeholder.
 2. The slash-command resolver ``slash_command_task`` MUST recognise
    ``/ask <question>`` and hand back the question verbatim with the
    registered ``ask_sea.py`` path: the daemon runs the SEA directly on
@@ -23,8 +23,8 @@ real daemon-side loader and the real dispatch code:
 3. The daemon-side loader ``apply_agent_overrides`` MUST apply the
    settings to the wire fields, substitute ``{task_id}`` in what
    ``prompt()`` returns with the command's ``parentTaskId`` (empty
-   string when absent) and append the playbook AFTER any caller text
-   on the system-prompt suffix.
+   string when absent) and stage the ``system_prompt`` and ``tools``
+   methods as the daemon-side ``systemPromptHook`` / ``toolsHook``.
 4. The dispatch layer ``_dispatch`` MUST thread the calling task's
    ``last_task_id`` to the daemon as ``parent_task_id`` and pass the
    caller's ``append_to_prompt`` through verbatim: the substitution is
@@ -41,6 +41,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.seas.ask import ask_sea
+from kiss.agents.seas.ask.ask_sea import AskSea
 from kiss.agents.sorcar import agent_dispatch, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
 from kiss.agents.sorcar.agent_file import apply_agent_overrides
@@ -57,7 +58,9 @@ _EXPECTED_ADD_TO_PROMPT = (
     "The question above is about the task with id {task_id}. "
     "Call task_context with that task id, then answer the question."
 )
-_EXPECTED_ADD_TO_SYSTEM_PROMPT = ask_sea.add_to_system_prompt()
+_EXPECTED_SYSTEM_PROMPT = AskSea().system_prompt("ASSEMBLED PROMPT")
+_EXPECTED_LITE = render_brand(ask_sea._SYSTEM_LITE_PATH.read_text(encoding="utf-8"))
+_EXPECTED_PLAYBOOK = _EXPECTED_SYSTEM_PROMPT[len(_EXPECTED_LITE) + 2:]
 _EXPECTED_SUFFIX_START = (
     "**MUST FOLLOW: You MUST NOT USE internet or internet search "
     "at any point. You must answer quickly because the user is waiting.**"
@@ -75,10 +78,12 @@ _EXPECTED_SETTINGS = {
 }
 """``resolve_settings`` output: ``settings()`` plus the ``worker`` preset.
 
-``system_prompt()`` is a getter the daemon applies to ``systemPrompt``
+``system_prompt()`` is a hook the daemon stages as ``systemPromptHook``
 (``apply_agent_overrides``), so its text is not a settings key.
 """
 _ASK_PATH = str(Path(ask_sea.__file__).resolve())
+_EMPTY_SEA = "from kiss.agents.seas.base.base_sea import BaseSea\n\nclass Sea(BaseSea):\n    pass\n"
+"""A SEA that defines nothing: the run is a plain session on the task text."""
 
 
 # ---------------------------------------------------------------------------
@@ -104,23 +109,28 @@ def _reset_registry() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def test_system_prompt_returns_system_lite_md() -> None:
-    """system_prompt MUST return SYSTEM_LITE.md with only the brand placeholders filled."""
-    text = ask_sea.system_prompt()
-    expected = render_brand(ask_sea._SYSTEM_LITE_PATH.read_text(encoding="utf-8"))
-    assert text == expected
+def test_system_prompt_opens_with_system_lite_md() -> None:
+    """system_prompt MUST replace the assembled prompt with SYSTEM_LITE.md, brand filled.
+
+    The assembled prompt the daemon hands in is dropped (the default
+    Sorcar prompt would drown the answering rules); the result starts
+    with ``_ask_system_lite.md`` with only the brand placeholders filled.
+    """
+    text = AskSea().system_prompt("ASSEMBLED PROMPT")
+    assert text == _EXPECTED_SYSTEM_PROMPT
+    assert "ASSEMBLED PROMPT" not in text
+    assert text.startswith(_EXPECTED_LITE + "\n\n")
     assert "{{IDENTITY}}" not in text
     assert BRAND["identity"] in text
     # SYSTEM_LITE.md is the ablation prompt: it MUST contain the
     # ``<identity>`` opening tag the ablation file starts with; a
-    # blank / accidentally-empty file would silently satisfy equality
-    # above.
-    assert "<identity>" in text
+    # blank / accidentally-empty file would silently satisfy the prefix
+    # check above.
+    assert "<identity>" in _EXPECTED_LITE
 
 
-def test_add_to_system_prompt_returns_fixed_suffix() -> None:
-    """add_to_system_prompt MUST open with the two fixed directives
-    and carry the answering playbook.
+def test_system_prompt_ends_with_the_fixed_playbook() -> None:
+    """After SYSTEM_LITE, system_prompt MUST carry the two fixed directives and the playbook.
 
     The no-internet directive comes first, then the answer-quickly
     sentence (the user typed ``/ask`` into a live task and is waiting
@@ -129,7 +139,7 @@ def test_add_to_system_prompt_returns_fixed_suffix() -> None:
     three plain sentences, one ``<p>``) and the pitfalls seen in
     earlier runs (raw DB reads, editing files).
     """
-    text = ask_sea.add_to_system_prompt()
+    text = _EXPECTED_PLAYBOOK
     assert text.startswith(_EXPECTED_SUFFIX_START)
     assert "exactly two tools: `task_context` and `finish`" in text
     assert text.index("task_context(task_id)") < text.index("Call `finish`")
@@ -137,9 +147,10 @@ def test_add_to_system_prompt_returns_fixed_suffix() -> None:
     assert "history.db" in text and "read-only" in text
     assert "task_overview" not in text and "task_transcript" not in text
     assert ask_sea.ADD_TO_PROMPT == _EXPECTED_ADD_TO_PROMPT
-    # The earlier contract's name is gone: the daemon reads only
-    # ``add_to_system_prompt()``, so the old name would be dead code.
+    # The earlier contracts' names are gone: the daemon reads only the
+    # class's ``system_prompt``, so the old names would be dead code.
     assert not hasattr(ask_sea, "append_to_system_prompt")
+    assert not hasattr(ask_sea, "add_to_system_prompt")
 
 
 def test_settings_follow_the_contract() -> None:
@@ -151,25 +162,32 @@ def test_settings_follow_the_contract() -> None:
     ``prompt(question)`` is the question followed by the fixed sentence
     with ``{task_id}`` still a placeholder (the daemon fills it from
     ``parentTaskId``).  The resolved settings add the preset's defaults
-    and nothing else: the getters are applied by the daemon.
+    and nothing else: the other methods are applied by the daemon.
     """
-    assert ask_sea.settings() == {
+    sea = AskSea()
+    assert sea.settings({}) == {
         "kind": "worker", "tool_profile": "none", "locked": ["tool_profile"],
     }
-    assert resolve_settings(vars(ask_sea)) == _EXPECTED_SETTINGS
-    assert ask_sea.prompt("why?") == "why?\n\n" + _EXPECTED_ADD_TO_PROMPT
-    assert _PLACEHOLDER in ask_sea.prompt("why?")
+    assert resolve_settings(sea.settings({})) == _EXPECTED_SETTINGS
+    assert sea_commands.base_settings([sea]) == _EXPECTED_SETTINGS
+    assert sea.prompt("why?") == "why?\n\n" + _EXPECTED_ADD_TO_PROMPT
+    assert _PLACEHOLDER in sea.prompt("why?")
+    assert sea_commands.base_prompt([sea], "why?", "t-9") == (
+        "why?\n\n" + _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "t-9")
+    )
 
 
-def test_add_to_tools_is_task_context_alone_and_legacy_getters_are_gone() -> None:
-    """``add_to_tools`` MUST be ``task_context`` alone; no per-field getter remains.
+def test_tools_adds_task_context_alone_and_legacy_getters_are_gone() -> None:
+    """``tools`` MUST add ``task_context`` alone; no per-field getter remains.
 
     The ``none`` tool profile (not the removed ``tools()`` getter) is
-    what removes the built-in toolset.  Nothing reads the old per-field
-    getters any more, so a SEA defining one would ship dead code that
-    silently does nothing; none may exist.
+    what removes the built-in toolset; ``tools`` keeps whatever the run
+    hands it and appends.  Nothing reads the old module-level getters
+    any more, so a SEA defining one would ship dead code that silently
+    does nothing; none may exist.
     """
-    assert [t.__name__ for t in ask_sea.add_to_tools()] == ["task_context"]
+    assert [t.__name__ for t in AskSea().tools([])] == ["task_context"]
+    assert [t.__name__ for t in AskSea().tools([print])] == ["print", "task_context"]
     assert_no_removed_getters(ask_sea)
     assert not hasattr(ask_sea, "APPEND_TO_PROMPT")
 
@@ -250,7 +268,7 @@ def test_slash_resolver_treats_unrelated_commands_the_same_way(tmp_path: Path) -
     folder = tmp_path / "user-seas"
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "notify").mkdir()
-    (folder / "notify" / "notify_sea.py").write_text("# stub\n", encoding="utf-8")
+    (folder / "notify" / "notify_sea.py").write_text(_EMPTY_SEA, encoding="utf-8")
     kiss_home().mkdir(parents=True, exist_ok=True)
     (kiss_home() / "SEAS.md").write_text(str(folder) + "\n", encoding="utf-8")
     sea_commands.refresh_registry()
@@ -272,7 +290,7 @@ def test_slash_resolver_honours_a_user_sea_shadowing_ask(tmp_path: Path) -> None
     """
     shadow = tmp_path / "user-seas" / "ask"
     shadow.mkdir(parents=True)
-    (shadow / "ask_sea.py").write_text("# stub\n", encoding="utf-8")
+    (shadow / "ask_sea.py").write_text(_EMPTY_SEA, encoding="utf-8")
     kiss_home().mkdir(parents=True, exist_ok=True)
     (kiss_home() / "SEAS.md").write_text(str(shadow.parent) + "\n", encoding="utf-8")
     sea_commands.refresh_registry()
@@ -297,7 +315,7 @@ def test_slash_resolver_rejects_bare_ask_and_answers_help_from_description() -> 
     assert sea_commands.slash_command_task("/ask ") is None
     assert sea_commands.slash_command_task("/ask help") is None
     assert sea_commands.slash_command_task("/ask HELP") is None
-    assert sea_commands.help_text_if_command("/ask help") == ask_sea.description()
+    assert sea_commands.help_text_if_command("/ask help") == AskSea().description()
 
 
 # ---------------------------------------------------------------------------
@@ -306,25 +324,27 @@ def test_slash_resolver_rejects_bare_ask_and_answers_help_from_description() -> 
 
 
 def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
-    """The daemon loader MUST wire the ask settings and getters onto the cmd.
+    """The daemon loader MUST wire the ask settings and methods onto the cmd.
 
     This exercises the real ``apply_agent_overrides`` path —
     :meth:`TaskRunner._run_task_inner` calls it just before the run —
-    so ``system_prompt()`` lands on ``systemPrompt``, the ``worker``
-    preset on ``useWorktree`` / ``autoCommit`` / ``classifyTasks`` /
-    ``isParallel`` / ``useWebTools`` / ``useMemory``, the ``none`` profile
-    on ``toolProfile`` (the daemon derives "no built-in tools" from it:
-    nothing stages ``appendBasicTools`` any more) and ``add_to_tools()``
-    on the daemon-side ``tools`` field.
+    so the ``worker`` preset lands on ``useWorktree`` / ``autoCommit`` /
+    ``classifyTasks`` / ``isParallel`` / ``useWebTools`` / ``useMemory``,
+    the ``none`` profile on ``toolProfile`` (the daemon derives "no
+    built-in tools" from it: nothing stages ``appendBasicTools`` any
+    more), ``system_prompt`` on the daemon-side ``systemPromptHook``
+    (which replaces the assembled prompt) and ``tools`` on the
+    daemon-side ``toolsHook`` (which appends ``task_context``).  No
+    ``systemPrompt`` / ``appendToSystemPrompt`` / ``tools`` field is
+    written any more.
     """
     cmd: dict[str, Any] = {"agentPath": _ASK_PATH, "prompt": "why did the run fail?"}
     overridden = apply_agent_overrides(cmd)
     assert overridden == {
-        "systemPrompt", "appendToSystemPrompt", "prompt", "toolProfile", "tools",
+        "systemPromptHook", "prompt", "toolProfile", "toolsHook",
         "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
     }
-    assert cmd["systemPrompt"] == ask_sea.system_prompt()
-    assert cmd["appendToSystemPrompt"] == _EXPECTED_ADD_TO_SYSTEM_PROMPT
+    assert cmd["systemPromptHook"]("ASSEMBLED PROMPT") == _EXPECTED_SYSTEM_PROMPT
     assert cmd["toolProfile"] == "none"
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
@@ -332,10 +352,11 @@ def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
     assert cmd["isParallel"] is False
     assert cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
-    assert [tool.__name__ for tool in cmd["tools"]] == ["task_context"]
-    assert all(callable(tool) for tool in cmd["tools"])
-    assert "appendBasicTools" not in cmd
-    assert "toolsFile" not in cmd
+    assert [tool.__name__ for tool in cmd["toolsHook"]([])] == ["task_context"]
+    assert all(callable(tool) for tool in cmd["toolsHook"]([]))
+    for field in ("systemPrompt", "appendToSystemPrompt", "tools", "appendBasicTools",
+                  "toolsFile", "llmCallHook", "toolCallHook"):
+        assert field not in cmd, field
     # The question opens the prompt; ``prompt()`` appends the task framing.
     assert cmd["prompt"].startswith("why did the run fail?\n\n")
 
@@ -383,13 +404,13 @@ def test_apply_agent_overrides_substitutes_empty_when_no_parent_task_id() -> Non
         )
 
 
-def test_apply_agent_overrides_keeps_the_callers_prompt_suffix_and_appends_the_system_one() -> None:
-    """The caller's ``appendToPrompt`` is not the SEA's to touch; the system suffix is additive.
+def test_apply_agent_overrides_keeps_the_callers_suffixes_and_stages_the_hook() -> None:
+    """The caller's ``appendToPrompt`` / ``appendToSystemPrompt`` are not the SEA's to touch.
 
-    ``prompt()`` shapes the prompt body; the caller's ``appendToPrompt``
-    stays as sent, and ``add_to_system_prompt()`` is appended after the
-    caller's system-prompt suffix (``CALLER\\n\\nTEXT``) instead of
-    replacing it.
+    ``prompt()`` shapes the prompt body; both caller suffixes stay as
+    sent on the wire.  ``system_prompt`` is staged as the hook the run
+    applies to its assembled prompt (default + caller suffix): for
+    ``/ask`` the hook replaces that text with SYSTEM_LITE + playbook.
     """
     cmd: dict[str, Any] = {
         "agentPath": _ASK_PATH,
@@ -401,22 +422,21 @@ def test_apply_agent_overrides_keeps_the_callers_prompt_suffix_and_appends_the_s
     apply_agent_overrides(cmd)
     assert cmd["appendToPrompt"] == "stale caller suffix"
     assert cmd["prompt"] == "q\n\n" + _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "task-xyz")
-    assert cmd["appendToSystemPrompt"] == (
-        "caller system text\n\n" + _EXPECTED_ADD_TO_SYSTEM_PROMPT
-    )
+    assert cmd["appendToSystemPrompt"] == "caller system text"
+    assert cmd["systemPromptHook"]("DEFAULT\n\ncaller system text") == _EXPECTED_SYSTEM_PROMPT
 
 
-def test_apply_agent_overrides_leaves_a_callers_placeholder_alone_without_prompt_getter(
+def test_apply_agent_overrides_leaves_a_callers_placeholder_alone_without_prompt_method(
     tmp_path: Path,
 ) -> None:
     """The substitution is a property of ``prompt()``'s result, not of the wire fields.
 
-    A script that defines no ``prompt`` leaves the task text and the
+    A SEA whose class defines no ``prompt`` leaves the task text and the
     caller's ``appendToPrompt`` untouched: a literal ``{task_id}`` in
     the caller's own text reaches the run unchanged.
     """
     other = tmp_path / "other_sea.py"
-    other.write_text("# stub\n", encoding="utf-8")
+    other.write_text(_EMPTY_SEA, encoding="utf-8")
     cmd: dict[str, Any] = {
         "agentPath": str(other),
         "prompt": "literal {task_id} in the task",
@@ -435,14 +455,19 @@ def test_apply_agent_overrides_substitutes_for_any_sea_defining_prompt(
 
     The earlier dispatch-side rewrite was special-cased on the file
     name ``ask_sea.py``; the daemon-side one is part of the ``prompt``
-    getter, so a user SEA under any name (including a look-alike such
+    method, so a user SEA under any name (including a look-alike such
     as ``my_ask_sea.py``) gets the same treatment.
     """
     for name in ("notify_sea.py", "my_ask_sea.py", "test_ask_sea.py"):
         script = tmp_path / name
         script.write_text(
-            "def prompt(task):\n"
-            "    return task + ' Report on task {task_id}.'\n",
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def prompt(self, task):
+        return task + ' Report on task {task_id}.'
+""",
             encoding="utf-8",
         )
         cmd: dict[str, Any] = {"agentPath": str(script), "prompt": "q", "parentTaskId": "t-1"}
@@ -454,7 +479,13 @@ def test_add_to_prompt_is_not_a_setting(tmp_path: Path) -> None:
     """A script declaring ``add_to_prompt`` in ``settings()`` MUST fail as an unknown key."""
     script = tmp_path / "old_sea.py"
     script.write_text(
-        "def settings():\n    return {'add_to_prompt': 'Report on task {task_id}.'}\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'add_to_prompt': 'Report on task {task_id}.'}
+""",
         encoding="utf-8",
     )
     with pytest.raises(sea_commands.SeaError, match=r"has an unknown key 'add_to_prompt'"):

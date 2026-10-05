@@ -19,7 +19,6 @@ import re
 import textwrap
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -107,8 +106,9 @@ def test_three_step_walkthrough_registers_standup_command(home: Path) -> None:
     """Following the page's three steps yields ``/standup`` bound to the new file.
 
     Step 1 writes the documented ``standup/standup_sea.py`` (and the
-    snippet must be a working SEA: its ``system_prompt()`` returns text
-    and its ``description()`` is what ``/standup help`` shows).  Step 2
+    snippet must be a working SEA: one ``BaseSea`` subclass whose
+    ``system_prompt(text)`` appends to the run's system prompt and whose
+    ``description()`` is what ``/standup help`` shows).  Step 2
     appends ``~/my-seas`` to SEAS.md.  Step 3 relies on substring
     autocomplete (``st`` matches ``standup``), ``/standup help``
     returning the description, and the ``/standup ...`` prompt being
@@ -122,12 +122,9 @@ def test_three_step_walkthrough_registers_standup_command(home: Path) -> None:
     sea_file = folder / "standup" / "standup_sea.py"
     sea_file.parent.mkdir()
     sea_file.write_text(sea_src, encoding="utf-8")
-    namespace: dict[str, Any] = {}
-    exec(compile(sea_src, str(sea_file), "exec"), namespace)  # noqa: S102
-    system_prompt = namespace["system_prompt"]
-    assert callable(system_prompt)
-    text = system_prompt()
-    assert isinstance(text, str) and "stand-up" in text
+    sea = sea_commands.load_sea(sea_file)
+    text = sea_commands.base_system_prompt([sea], "BASE")
+    assert text.startswith("BASE") and "stand-up" in text
 
     kiss_home().mkdir(parents=True, exist_ok=True)
     with (kiss_home() / "SEAS.md").open("a", encoding="utf-8") as fh:
@@ -137,7 +134,7 @@ def test_three_step_walkthrough_registers_standup_command(home: Path) -> None:
     assert "standup" in commands
     assert [c for c in commands if "st" in c.lower()].count("standup") == 1
 
-    assert sea_commands.help_text_if_command("/standup help") == namespace["description"]()
+    assert sea_commands.help_text_if_command("/standup help") == sea.description().strip()
 
     task = "finished the docs page, next is the release, blocked on review"
     hit = sea_commands.slash_command_task(f"/standup {task}")

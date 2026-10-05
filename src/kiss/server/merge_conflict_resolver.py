@@ -30,8 +30,9 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.seas.merge import merge_sea
+from kiss.agents.seas.merge.merge_sea import MergeSea
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, MergeResult
-from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.agents.sorcar.sea_commands import evaluate_sea
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +53,8 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
 
     Args:
         parent_agent: The agent of the task whose merge conflicted.
-        prompt: The prompt text (:func:`merge_sea.prompt` of
-            :func:`merge_sea.conflict_task`).
+        prompt: The task text (:func:`merge_sea.conflict_task`), shaped
+            by the :class:`MergeSea` ``prompt``.
         repo: The repository root holding the conflicted merge.
     """
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -71,7 +72,8 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
     # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
     parent_tab_id = subagent_parent_tab_id_of(parent_agent)
     sub_tab_id = f"task-{parent_task_id or parent_tab_id}__merge"
-    merge_settings = resolve_settings(vars(merge_sea))
+    merge = evaluate_sea([MergeSea()], prompt)
+    merge_settings = merge.settings
     model_name = str(merge_settings.get("model") or parent_agent.model_name)
     agent = ChatSorcarAgent("Merge conflict resolver")
     agent._tab_id = sub_tab_id
@@ -90,7 +92,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
     }
     try:
         agent.run(
-            prompt_template=prompt,
+            prompt_template=merge.prompt,
             model_name=model_name,
             work_dir=str(repo),
             printer=printer,
@@ -100,7 +102,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
                 getattr(parent_agent, "model_config", None)
                 if model_name == parent_agent.model_name else None
             ),
-            base_system_prompt=merge_sea.system_prompt(),
+            system_prompt_hook=merge.system_prompt_hook,
             web_tools=merge_settings["use_web_tools"],
             use_memory=merge_settings["use_memory"],
         )
@@ -151,9 +153,9 @@ def resolve_merge_conflict(
         return MergeResult.CONFLICT
     try:
         if conflicted:
-            prompt = merge_sea.prompt(merge_sea.conflict_task(
+            prompt = merge_sea.conflict_task(
                 repo, wt.branch, wt.original_branch or "", conflicted, user_prompt,
-            ))
+            )
             try:
                 run_agent(parent_agent, prompt, repo)
             except Exception:

@@ -33,6 +33,7 @@ from urllib.parse import quote_plus
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
@@ -57,14 +58,40 @@ _DINGTALK_DIR = kiss_home() / "third_party_agents" / "dingtalk"
 _config = ChannelConfig(_DINGTALK_DIR, ("webhook_url",))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/dingtalk help``."""
-    return (
-        "Sends messages to a DingTalk group through a custom-robot webhook and receives "
-        "messages from an outgoing robot through an embedded HTTP callback server; use it as "
-        'run_agent(agent="dingtalk", task="...") or the `kiss-dingtalk` CLI '
-        "(`-t <task>` for one task, `--channel <id>` for a poll tick)."
-    )
+class DingtalkSea(BaseSea):
+    """The ``/dingtalk`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/dingtalk help``."""
+        return (
+            "Sends messages to a DingTalk group through a custom-robot webhook and receives "
+            "messages from an outgoing robot through an embedded HTTP callback server; use it as "
+            'run_agent(agent="dingtalk", task="...") or the `kiss-dingtalk` CLI '
+            "(`-t <task>` for one task, `--channel <id>` for a poll tick)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the DingTalk channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + DingTalkAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + DingTalkAgent.channel_system_prompt
 
 
 def _compute_sign(secret: str, timestamp_ms: str) -> str:
@@ -445,32 +472,6 @@ def main() -> None:
         channel_name="DingTalk",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the DingTalk channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return DingTalkAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return DingTalkAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

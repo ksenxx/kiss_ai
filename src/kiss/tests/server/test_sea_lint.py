@@ -33,7 +33,13 @@ from kiss.agents.sorcar.sea_lint import (
 )
 from kiss.agents.sorcar.sea_settings import declares_hidden
 
-DESCRIPTION = 'def description() -> str:\n    return "a test SEA"\n'
+DESCRIPTION = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return "a test SEA"
+"""
 
 
 def write_sea(folder: Path, body: str, name: str = "demo") -> Path:
@@ -66,8 +72,10 @@ def test_renamed_key_is_fixable_and_fix_rewrites_it(tmp_path: Path) -> None:
         tmp_path,
         DESCRIPTION
         + (
-            "def settings() -> dict:\n"
-            "    return {'preset': 'worker', 'is_parallel': False, \"classify_tasks\": True}\n"
+            """
+    def settings(self, settings):
+        return settings | {'preset': 'worker', 'is_parallel': False, "classify_tasks": True}
+"""
         ),
     )
     findings = lint_all([path])
@@ -98,12 +106,14 @@ def test_fix_keeps_prefixes_quotes_and_locks_and_skips_nested_dicts(tmp_path: Pa
         tmp_path,
         DESCRIPTION
         + (
-            "def settings() -> dict:\n"
-            "    return {\n"
-            "        'work_dir': 'café', r\"is_parallel\": False,\n"
-            "        'locked': ['is_parallel', 'model'],\n"
-            "        'model_config': {'preset': 'balanced'}, 'model': 'gpt-4o-mini',\n"
-            "    }\n"
+            """
+    def settings(self, settings):
+        return settings | {
+            'work_dir': 'café', r"is_parallel": False,
+            'locked': ['is_parallel', 'model'],
+            'model_config': {'preset': 'balanced'}, 'model': 'gpt-4o-mini',
+        }
+"""
         ),
     )
     assert codes(lint_all([path])) == ["renamed-key", "renamed-key"]  # the key and its lock entry
@@ -121,17 +131,30 @@ def test_fix_keeps_prefixes_quotes_and_locks_and_skips_nested_dicts(tmp_path: Pa
 
 def test_broken_covers_getter_contract_errors(tmp_path: Path) -> None:
     """``broken`` runs the daemon's load path, so a getter of the wrong type is a finding."""
-    bad_description = write_sea(tmp_path, "def description():\n    return 123\n", "baddesc")
+    bad_description = write_sea(tmp_path, """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 123
+""", "baddesc")
     bad_tools = write_sea(
-        tmp_path, DESCRIPTION + "def add_to_tools():\n    return 123\n", "badtools"
+        tmp_path, DESCRIPTION + """
+    def tools(self, tools):
+        return 123
+""", "badtools"
     )
     bad_prompt = write_sea(
-        tmp_path, DESCRIPTION + "def system_prompt():\n    return 123\n", "badprompt"
+        tmp_path, DESCRIPTION + """
+    def system_prompt(self, system_prompt):
+        return 123
+""", "badprompt"
     )
     findings = lint_all([bad_description, bad_tools, bad_prompt])
     assert codes(findings) == ["broken"] * 3
     assert "description()" in findings[0].message
-    assert "add_to_tools()" in findings[1].message
+    assert "tools()" in findings[1].message
+    assert "must return a list of tool callables" in findings[1].message
     assert "system_prompt()" in findings[2].message
 
 
@@ -140,8 +163,10 @@ def test_redundant_key_names_the_kind_default(tmp_path: Path) -> None:
         tmp_path,
         DESCRIPTION
         + (
-            "def settings() -> dict:\n"
-            "    return {'kind': 'worker', 'use_worktree': False, 'tool_profile': 'bash'}\n"
+            """
+    def settings(self, settings):
+        return settings | {'kind': 'worker', 'use_worktree': False, 'tool_profile': 'bash'}
+"""
         ),
     )
     findings = lint_all([path])
@@ -158,8 +183,10 @@ def test_unknown_model_and_lock_without_value(tmp_path: Path) -> None:
         tmp_path,
         DESCRIPTION
         + (
-            "def settings() -> dict:\n"
-            "    return {'model': 'no-such-model-xyz', 'locked': ['tool_profile', 'model']}\n"
+            """
+    def settings(self, settings):
+        return settings | {'model': 'no-such-model-xyz', 'locked': ['tool_profile', 'model']}
+"""
         ),
     )
     findings = lint_all([path])
@@ -174,14 +201,23 @@ def test_hidden_must_be_a_literal_and_hides_the_command(
     folder = tmp_path / "seas"
     computed = write_sea(
         folder,
-        DESCRIPTION + ("HIDE = True\n\ndef settings() -> dict:\n    return {'hidden': HIDE}\n"),
+        "HIDE = True\n" + DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'hidden': HIDE}
+""",
         "computed",
     )
     literal = write_sea(
-        folder, DESCRIPTION + "def settings() -> dict:\n    return {'hidden': True}\n", "literal"
+        folder, DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'hidden': True}
+""", "literal"
     )
     shown = write_sea(
-        folder, DESCRIPTION + "def settings() -> dict:\n    return {'hidden': False}\n", "shown"
+        folder, DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'hidden': False}
+""", "shown"
     )
     (isolated_home / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
     sea_commands.refresh_registry()
@@ -191,22 +227,27 @@ def test_hidden_must_be_a_literal_and_hides_the_command(
     assert declares_hidden(literal) and not declares_hidden(computed) and not declares_hidden(shown)
     assert codes(lint_all([computed])) == ["hidden-not-literal"]
     assert lint_all([literal]) == [] and lint_all([shown]) == []
-    # A hidden script still loads by path and as an ``extends`` base.
+    # A hidden script still loads by path and as a base class.
     assert sea_settings_of(literal)["hidden"] is True
     child = write_sea(
         folder,
-        DESCRIPTION
-        + (
-            "def settings() -> dict:\n"
-            f"    return {{'extends': {str(literal)!r}, 'tool_profile': 'bash'}}\n"
-        ),
+        f"""
+from kiss.agents.sorcar.sea_commands import sea_class
+
+class Child(sea_class({str(literal)!r})):
+    def settings(self, settings):
+        return settings | {{'tool_profile': 'bash'}}
+""",
         "child",
     )
     sea_commands.refresh_registry()
-    assert "child" in sea_commands.list_commands()
-    assert sea_settings_of(child)["tool_profile"] == "bash" and "hidden" not in sea_settings_of(
-        child
-    )
+    # Only the literal in the child's own source hides it: the inherited
+    # ``hidden`` (part of its effective settings) does not, nor is it a
+    # computed-hidden finding against the child.
+    assert "child" in sea_commands.list_commands() and not declares_hidden(child)
+    assert sea_settings_of(child)["tool_profile"] == "bash"
+    assert sea_settings_of(child)["hidden"] is True
+    assert lint_all([child]) == []
 
 
 def test_stale_docstring_and_home_literal(tmp_path: Path) -> None:
@@ -257,15 +298,24 @@ def test_broken_scripts(tmp_path: Path) -> None:
     syntax = write_sea(tmp_path, "def settings(:\n", "syntax")
     raises = write_sea(tmp_path, "raise RuntimeError('boom')\n", "raises")
     unknown = write_sea(
-        tmp_path, DESCRIPTION + "def settings() -> dict:\n    return {'colour': 1}\n", "unknown"
+        tmp_path, DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'colour': 1}
+""", "unknown"
     )
     removed = write_sea(
         tmp_path,
-        DESCRIPTION + "def settings() -> dict:\n    return {'inherit': False}\n",
+        DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'inherit': False}
+""",
         "removed",
     )
     badkind = write_sea(
-        tmp_path, DESCRIPTION + "def settings() -> dict:\n    return {'kind': 'agent'}\n", "badkind"
+        tmp_path, DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'kind': 'agent'}
+""", "badkind"
     )
     missing = tmp_path / "missing" / "missing_sea.py"
     findings = lint_all([syntax, raises, unknown, removed, badkind, missing])
@@ -280,7 +330,13 @@ def test_broken_scripts(tmp_path: Path) -> None:
 
 def test_registered_command_without_description(isolated_home: Path, tmp_path: Path) -> None:
     folder = tmp_path / "seas"
-    silent = write_sea(folder, "def prompt(task: str) -> str:\n    return task\n", "silent")
+    silent = write_sea(folder, """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def prompt(self, task):
+        return task
+""", "silent")
     (isolated_home / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
     sea_commands.refresh_registry()
     assert silent in registered_seas()
@@ -293,7 +349,7 @@ def test_registered_command_without_description(isolated_home: Path, tmp_path: P
     assert codes(found) == ["no-description"]
     assert found[0].message == "/silent has no description() for its help text"
     # Selecting it by path still sees the registration; only an unregistered
-    # script (loadable by path or ``extends``) needs no description().
+    # script (loadable by path or as a base class) needs no description().
     assert codes(lint_all([silent])) == ["no-description"]
     assert lint_sea(silent, command=None) == []
 
@@ -302,7 +358,10 @@ def test_cli_folder_paths_fix_and_exit_codes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = write_sea(
-        tmp_path, DESCRIPTION + "def settings() -> dict:\n    return {'is_parallel': True}\n"
+        tmp_path, DESCRIPTION + """
+    def settings(self, settings):
+        return settings | {'is_parallel': True}
+"""
     )
     assert main(["lint", str(path.parent)]) == 1
     out = capsys.readouterr().out

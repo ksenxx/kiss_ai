@@ -29,6 +29,7 @@ from urllib.parse import quote
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -45,14 +46,40 @@ _NOTION_VERSION = "2022-06-28"
 _MAX_OUTPUT = 8000
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/notion help``."""
-    return (
-        "Searches Notion, reads and queries databases, reads, creates and updates pages "
-        "and blocks, and reads and adds comments through the Notion REST API with an "
-        'internal-integration token; use run_agent(agent="notion", task="...") or the '
-        "`kiss-notion` CLI."
-    )
+class NotionSea(BaseSea):
+    """The ``/notion`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/notion help``."""
+        return (
+            "Searches Notion, reads and queries databases, reads, creates and updates pages "
+            "and blocks, and reads and adds comments through the Notion REST API with an "
+            'internal-integration token; use run_agent(agent="notion", task="...") or the '
+            "`kiss-notion` CLI."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Notion channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + NotionAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + NotionAgent.channel_system_prompt
 
 
 def _bad_segment(value: str, name: str) -> str | None:
@@ -900,32 +927,6 @@ def main() -> None:
         channel_name="Notion",
         make_backend=None,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Notion channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return NotionAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return NotionAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

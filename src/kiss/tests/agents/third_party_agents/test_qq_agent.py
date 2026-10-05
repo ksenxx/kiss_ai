@@ -27,11 +27,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from kiss.agents.third_party_agents.qq.qq_sea import (
     QQAgent,
     QQChannelBackend,
+    QqSea,
     _config,
     _derive_signing_key,
-)
-from kiss.agents.third_party_agents.qq.qq_sea import (
-    add_to_tools as module_tools,
 )
 
 _SECRET = "kiss-qq-test-secret"
@@ -189,7 +187,7 @@ def test_auth_trio_persistence() -> None:
 def test_tools_module_function() -> None:
     """Module-level tools() returns a non-empty tool list."""
     _config.clear()
-    assert len(module_tools()) >= 3
+    assert len(QqSea().tools([])) >= 3
 
 
 def test_send_messages_with_cached_token() -> None:

@@ -387,6 +387,11 @@ export type FromWebviewMessage =
       height: number;
       visible: boolean;
     }
+  // The remote webapp's terminal tab (terminalTab.js); remote-only.
+  | {type: 'terminalOpen'; tab_id: string; cols?: number; rows?: number}
+  | {type: 'terminalInput'; tab_id: string; data: string}
+  | {type: 'terminalResize'; tab_id: string; cols: number; rows: number}
+  | {type: 'terminalClose'; tab_id: string}
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
   // In-page (browser-mic) capture fallback: the webview recorded the

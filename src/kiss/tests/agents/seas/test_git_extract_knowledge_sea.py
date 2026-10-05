@@ -9,7 +9,7 @@ the test session's temporary ``KISS_HOME`` (see ``conftest.py``); the
 block store, the memory pages, the cron job file and the CLI are all
 the real ones.  The agent-level test runs a real
 :class:`ChatSorcarAgent` ReAct loop against the scripted local
-chat-completions server configured from the SEA's getters, so the
+chat-completions server configured from the SEA's methods, so the
 index report and the page write really flow through tool results.
 """
 
@@ -32,6 +32,9 @@ import yaml
 
 from kiss.agents.seas.git_extract_knowledge import git_extract_knowledge_sea as sea
 from kiss.agents.seas.git_extract_knowledge import git_knowledge_index as index
+from kiss.agents.seas.git_extract_knowledge.git_extract_knowledge_sea import (
+    GitExtractKnowledgeSea,
+)
 from kiss.agents.seas.git_extract_knowledge.git_knowledge_store import (
     KINDS,
     Block,
@@ -133,14 +136,18 @@ def _keys(hits: list[Any]) -> list[str]:
     return [hit.block.key for hit in hits]
 
 
-def test_sea_getters_follow_the_contract(tmp_path: Path) -> None:
+def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     """The settings pin the run: full tools + knowledge tools, no worktree, no web, no memory."""
-    assert sea.settings() == {"kind": "worker", "tool_profile": "full", "allow_fan_out": True}
+    agent = GitExtractKnowledgeSea()
+    assert agent.settings({}) == {
+        "kind": "worker", "tool_profile": "full", "allow_fan_out": True,
+    }
+    assert agent.settings({"model": "m"})["model"] == "m"
     # ``worker`` turns worktree, auto-commit, classifier, browser and memory
     # off; the explicit ``is_parallel`` wins over the preset's ``False``.
-    # ``system_prompt()`` is a getter the daemon applies (checked below
+    # ``system_prompt`` is a hook the daemon applies (checked below
     # through ``apply_agent_overrides``), not a settings key.
-    assert resolve_settings(vars(sea)) == {
+    assert sea_commands.base_settings([agent]) == resolve_settings(agent.settings({})) == {
         "kind": "worker",
         "tool_profile": "full",
         "allow_fan_out": True,
@@ -151,35 +158,38 @@ def test_sea_getters_follow_the_contract(tmp_path: Path) -> None:
         "use_memory": False,
     }
     assert_no_removed_getters(sea)
-    names = [tool.__name__ for tool in sea.add_to_tools()]
+    names = [tool.__name__ for tool in agent.tools([])]
     assert names == [
         "index_repo", "knowledge_status", "knowledge_search", "knowledge_read",
         "list_knowledge_pages", "read_knowledge_page", "search_knowledge_pages",
         "write_knowledge_page", "delete_knowledge_page", "schedule_daily_update",
     ]
-    prompt = sea.system_prompt()
+    assert [tool.__name__ for tool in agent.tools([print])] == ["print", *names]
+    # ``system_prompt`` REPLACES the assembled prompt with the filled template.
+    prompt = agent.system_prompt("ASSEMBLED")
+    assert "ASSEMBLED" not in prompt
     assert "{python}" not in prompt and "{module}" not in prompt
     assert f"{shlex.quote(sys.executable)} -m {sea.MODULE} write-page" in prompt
     assert "ABSOLUTE path" in prompt
     for page in ("overview", "domain-glossary", "architecture", "history", "faq"):
         assert f"`{page}`" in prompt
-    # The real loader accepts the file and stages the ``add_to_tools()``
-    # callables on the daemon-side ``tools`` field and the settings on
-    # their wire fields.
+    # The real loader accepts the file and stages ``tools`` / ``system_prompt``
+    # as the daemon-side hooks and the settings on their wire fields.
     cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH), "workDir": str(tmp_path)}
     assert apply_agent_overrides(cmd) == {
-        "systemPrompt", "tools", "toolProfile", "isParallel", "useWorktree", "autoCommit",
-        "classifyTasks", "useWebTools", "useMemory",
+        "systemPromptHook", "toolsHook", "toolProfile", "isParallel", "useWorktree",
+        "autoCommit", "classifyTasks", "useWebTools", "useMemory",
     }
-    assert [tool.__name__ for tool in cmd["tools"]] == names
-    assert all(callable(tool) for tool in cmd["tools"])
-    assert "toolsFile" not in cmd and "appendBasicTools" not in cmd
+    assert [tool.__name__ for tool in cmd["toolsHook"]([])] == names
+    assert all(callable(tool) for tool in cmd["toolsHook"]([]))
+    for field in ("tools", "toolsFile", "appendBasicTools", "systemPrompt", "prompt"):
+        assert field not in cmd, field
     assert cmd["toolProfile"] == "full"
     assert cmd["isParallel"] is True
     assert cmd["useWorktree"] is False and cmd["autoCommit"] is False
     assert cmd["classifyTasks"] is False and cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
-    assert cmd["systemPrompt"] == prompt
+    assert cmd["systemPromptHook"]("ASSEMBLED") == prompt
 
 
 def test_slash_command_resolves_to_the_bundled_sea() -> None:
@@ -190,7 +200,12 @@ def test_slash_command_resolves_to_the_bundled_sea() -> None:
     task_text, path = hit
     assert path == _SEA_PATH
     assert task_text == "/tmp/repo"
-    assert sea_commands.sea_settings(path) == resolve_settings(vars(sea))
+    assert sea_commands.sea_settings(path) == sea_commands.base_settings(
+        [GitExtractKnowledgeSea()]
+    )
+    assert sea_commands.help_text_if_command("/git_extract_knowledge help") == (
+        GitExtractKnowledgeSea().description()
+    )
 
 
 def test_full_index_builds_every_block_kind_and_the_lookup_page(repo: Path) -> None:
@@ -1051,19 +1066,21 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
         ),
         finish_body("<h3>Memory built</h3>", prompt_tokens=800),
     ]
-    settings = resolve_settings(vars(sea))
+    run = sea_commands.evaluate_sea([GitExtractKnowledgeSea()], str(repo))
+    settings = run.settings
+    assert run.prompt == str(repo)
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("git-knowledge-sea-test")
         result = agent.run(
-            prompt_template=str(repo),
+            prompt_template=run.prompt,
             model_name=MODEL,
             work_dir=str(tmp_path),
             max_steps=6,
             max_budget=5.0,
             model_config={"base_url": url, "api_key": "local"},
-            tools=sea.add_to_tools(),
+            tools_hook=run.tools_hook,
             tool_profile=settings["tool_profile"],
-            base_system_prompt=sea.system_prompt(),
+            system_prompt_hook=run.system_prompt_hook,
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
             is_parallel=settings["allow_fan_out"],
