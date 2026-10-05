@@ -45,7 +45,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
-from kiss.agents.sorcar.run_config import inherited_keys
+from kiss.agents.sorcar.run_config import inherited_keys, is_explicit
 from kiss.agents.sorcar.sea_commands import (
     SeaLayer,
     SeaScriptError,
@@ -59,7 +59,7 @@ from kiss.agents.sorcar.sea_commands import (
 from kiss.agents.sorcar.sea_commands import (
     slash_command_task as _slash_command_task,
 )
-from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, resolve_tool_profile
+from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, canonical_tool_profile
 from kiss.agents.sorcar.task_classifier import classification_enabled
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
@@ -956,10 +956,14 @@ class _TaskRunnerMixin:
                 overridden_fields = self._apply_sea(cmd)
             except AgentFileError as exc:
                 agent_file_error = exc
-            # A ``use_worktree`` an agent script pinned is a decision,
-            # not a default: ``_run_task_inner``'s classifier must not
-            # demote it (it still demotes a client/persisted default).
-            cmd["_seaPinnedWorktree"] = "useWorktree" in overridden_fields
+            # A ``use_worktree`` an agent script pinned, or the calling
+            # tool passed explicitly, is a decision, not a default:
+            # ``_run_task_inner``'s classifier must not demote it (it
+            # still demotes a client/persisted default).
+            cmd["_worktreeDecided"] = (
+                "useWorktree" in overridden_fields
+                or is_explicit(cmd.get("provenance"), "use_worktree")
+            )
             client_task_id = _client_task_id_of(cmd)
             # Capture the state OBJECT up front: the printer bridge re-keys
             # it to the persisted task id mid-run, so a key lookup in the
@@ -1803,11 +1807,15 @@ class _TaskRunnerMixin:
             enabled=_classify_enabled,
         )
         # The verdict only ever DEMOTES a default; a ``use_worktree`` the
-        # run's agent script pinned stands (``_run_task`` marks it), here
-        # and in ``agent.run`` below.
-        worktree_pinned = bool(cmd.pop("_seaPinnedWorktree", False))
+        # run's agent script pinned or the caller passed explicitly
+        # stands (``_run_task`` marks it), here and in ``agent.run``
+        # below.  A demotion is recorded for the run's ``ran:`` line.
+        worktree_pinned = bool(cmd.pop("_worktreeDecided", False))
+        classified: dict[str, list[Any]] = {}
         if _classify_verdict is not None and not worktree_pinned:
-            use_worktree = use_worktree and _classify_verdict.is_development
+            if use_worktree and not _classify_verdict.is_development:
+                classified["use_worktree"] = [True, False]
+                use_worktree = False
             with self._state_lock:
                 state.use_worktree = use_worktree
 
@@ -2031,8 +2039,9 @@ class _TaskRunnerMixin:
             # persisted, so the generic handling below fails the task
             # with the diagnostic instead of leaving a half-set-up run.
             _raw_profile = cmd.get("toolProfile")
-            _tool_profile = _raw_profile.strip() if isinstance(_raw_profile, str) else ""
-            resolve_tool_profile(_tool_profile)
+            _tool_profile = canonical_tool_profile(
+                _raw_profile if isinstance(_raw_profile, str) else ""
+            )
             # The run's effective configuration, folded into its
             # ``task_settings`` event (see kiss.agents.sorcar.run_config):
             # the script's provenance record (``apply_agent_overrides``),
@@ -2045,6 +2054,7 @@ class _TaskRunnerMixin:
                 "tool_profile": _tool_profile,
                 "timeout": _raw_timeout if isinstance(_raw_timeout, int | float) else None,
                 "inherited": inherited_keys(cmd.get("provenance")),
+                **({"classified": classified} if classified else {}),
             }
             # Docker image (or ``container:<id>``) the run's shell and
             # file tools execute in; absent or malformed means the host.

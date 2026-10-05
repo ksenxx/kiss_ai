@@ -132,29 +132,41 @@ def _call_args(function_call: dict[str, Any]) -> dict[str, Any]:
     return raw_args if isinstance(raw_args, dict) else {}
 
 
-def unknown_argument_hint(sig: inspect.Signature | None, args: dict[str, Any]) -> str:
+def unknown_argument_hint(
+    sig: inspect.Signature | None, args: dict[str, Any], tool: Any = None,
+) -> str:
     """Return a hint for the arguments of a tool call that its signature does not take.
 
-    A tool with an ``options`` parameter (``run_agent``, ``run_parallel``)
-    takes its run settings as one JSON object, so a setting passed as a
-    keyword (``use_worktree=False``) is pointed there.  The agent cannot
-    know the accepted keys, so the hint is conditional: the tool itself
-    rejects a key that is not a setting.
+    A tool that knows its own vocabulary says so through an
+    ``unknown_arguments_hint`` attribute, a function from the unknown
+    ``{name: value}`` pairs to the hint text (``run_agent`` and
+    ``run_parallel`` tell an options key from a renamed, removed or
+    misspelled one).  Otherwise a tool with an ``options`` parameter
+    takes its run settings as one JSON object, so a setting passed as
+    a keyword (``use_worktree=False``) is pointed there; the agent
+    cannot know the accepted keys, so that hint is conditional: the
+    tool itself rejects a key that is not a setting.
 
     Args:
         sig: The tool's signature, ``None`` when unknown.
         args: The arguments of the call.
+        tool: The tool callable, for its ``unknown_arguments_hint``.
 
     Returns:
         The hint (starting with a newline), or ``""`` when every
         argument is a parameter or the tool takes no ``options``.
     """
-    if sig is None or "options" not in sig.parameters:
+    if sig is None:
         return ""
-    unknown = [name for name in args if name not in sig.parameters]
+    unknown = {name: args[name] for name in args if name not in sig.parameters}
     if not unknown:
         return ""
-    example = json.dumps({name: args[name] for name in unknown})
+    own_hint = getattr(tool, "unknown_arguments_hint", None)
+    if callable(own_hint):
+        return "\n" + str(own_hint(unknown))
+    if "options" not in sig.parameters:
+        return ""
+    example = json.dumps(unknown)
     return (
         f"\n{', '.join(unknown)} is not an argument; if it is a run setting, pass it in the "
         f"`options` JSON object, e.g. options='{example}' (the accepted keys are listed "
@@ -1184,7 +1196,7 @@ class KISSAgent(Base):
                 sig_str = f"\nExpected signature: {function_name}{sig}" if sig else ""
                 function_response = (
                     f"Failed to call {function_name} with {function_args}: {e}{sig_str}"
-                    f"{unknown_argument_hint(sig, function_args)}\n"
+                    f"{unknown_argument_hint(sig, function_args, fn)}\n"
                 )
                 is_error = True
             end_tool_call(token)

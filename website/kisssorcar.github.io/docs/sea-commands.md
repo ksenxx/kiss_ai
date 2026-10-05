@@ -101,7 +101,7 @@ Details worth knowing:
 
 ## Running a command's SEA from another task
 
-A running task reaches the same SEAs through its `run_agent` tool: `run_agent(agent="sh", task="git status --short")` runs the `/sh` SEA as a sub-task (own tab, own history row, result returned as YAML). `agent` is resolved by three rules: empty or a generic label such as `"general"` or `"reviewer"` runs a plain Sorcar sub-agent; a path (a `.py` suffix or a path separator) runs that script; a registered command name runs that command's SEA (`"write_paper"`, `"sh"`, a channel such as `"slack"`, `"cron"`, a `SEAS.md` folder; case, spaces, hyphens and underscores are ignored). Anything else is an error naming the closest command. The arguments are the same for `run_agent(task, agent, model, tool_profile, max_budget, timeout, options)` and `run_parallel(tasks, agent, model, tool_profile, max_budget, timeout, max_workers, options)` (`run_parallel`'s `timeout` bounds each child); `options` is a JSON object in the SEA settings vocabulary (`work_dir`, `workspace` for a multi-account channel, `add_to_prompt`, `add_to_system_prompt`, `inherit`, the booleans, ...) such as `{"use_web_tools": false}`. `run_agent(..., wait="false")` returns a job id at once instead of blocking; `agent_job(job_id, "wait" | "tail" | "kill")` then returns the result, reports the status or stops the sub-task.
+A running task reaches the same SEAs through its `run_agent` tool: `run_agent(agent="sh", task="git status --short")` runs the `/sh` SEA as a sub-task (own tab, own history row, result returned as YAML). `agent` is resolved by three rules: empty or a generic label such as `"general"` or `"assistant"` runs a plain Sorcar sub-agent (`"reviewer"` is refused: a reviewer is a plain sub-agent with `tool_profile="review"`); a path (a `.py` suffix or a path separator) runs that script; a registered command name runs that command's SEA (`"write_paper"`, `"sh"`, a channel such as `"slack"`, `"cron"`, a `SEAS.md` folder; case, spaces, hyphens and underscores are ignored). Anything else is an error naming the closest command. The arguments are the same for `run_agent(task, agent, model, tool_profile, max_budget, timeout, options)` and `run_parallel(tasks, agent, model, tool_profile, max_budget, timeout, max_workers, options)` (`run_parallel`'s `timeout` bounds each child); `options` is a JSON object in the SEA settings vocabulary (`work_dir`, `workspace` for a multi-account channel, `add_to_prompt`, `add_to_system_prompt`, `inherit`, the booleans, ...) such as `{"use_web_tools": false}`. `run_agent(..., wait="false")` returns a job id at once instead of blocking; `agent_job(job_id, "wait" | "tail" | "kill")` then returns the result, reports the status or stops the sub-task.
 
 A SEA runs in one of three ways; the table says what differs:
 
@@ -131,7 +131,7 @@ success: true
 summary: ...
 ```
 
-`inherited` lists the settings the sub-task took over from the calling task; `pinned` lists each inherited or default value the SEA's `settings()` replaced, as `key(before->pinned)` (here `/sh` ran without a worktree from a task that uses one). An explicit argument never appears under `pinned`: it either won or the call was refused. A SEA reached by its path that is also a registered command ends the line with `(also agent="name")`, the shorter spelling for the next call. The same record is persisted in the sub-task's `task_settings` event (keys `sea`, `kind`, `tool_profile`, `timeout`, `inherited`, `pinned` next to `model`, `work_dir` and `max_budget`), which the task panel shows and `rsi7d` mines.
+`inherited` lists the settings the sub-task took over from the calling task; `pinned` lists each inherited or default value the SEA's `settings()` replaced, as `key(before->pinned)` (here `/sh` ran without a worktree from a task that uses one). An explicit argument never appears under `pinned`: it either won or the call was refused. A plain sub-agent whose worktree default the pre-run classifier dropped (a non-development task) ends with `classified=use_worktree(True->False)`; an explicit `use_worktree` option is never dropped. `tools=review(inferred)` says nobody named the profile: the sub-agent is a reviewer (a child of one, or one whose task reads as a review and asks for no changes) and got the read-only toolset. A SEA reached by its path that is also a registered command ends the line with `(also agent="name")`, the shorter spelling for the next call. The same record is persisted in the sub-task's `task_settings` event (keys `sea`, `kind`, `tool_profile`, `tool_profile_inferred`, `timeout`, `inherited`, `pinned`, `classified` next to `model`, `work_dir` and `max_budget`), which the task panel shows and `rsi7d` mines.
 
 ## The settings vocabulary
 
@@ -144,7 +144,7 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 |---|---|---|---|
 | `kind` | `str` | — | What the run is: `session` (the default, an ordinary Sorcar session), `worker` or `channel`; each is a dict of defaults laid under the explicit keys (see the kind table). A `channel` run holds its channel workspace, gets the channel preamble, never inherits from a calling task and is never a `run_parallel` child or an `extends` base. |
 | `extends` | `str` | — | A base script (command name or `.py` path) whose layers run under this one: settings merge with the later layer winning, `prompt(task)` functions chain, system-prompt additions concatenate, tools union. |
-| `work_dir` | `str` | `workDir` | The directory the run works in; default: the calling task's or the tab's. |
+| `work_dir` | `str` | `workDir` | The directory the run works in; default: the calling task's or the tab's. A relative path is resolved against the script's own folder, not the caller's. |
 | `model` | `str` | `model` | The LLM model, a catalogue name or a model-picker SEA; `""` or `None` keeps the caller's. |
 | `chat_id` | `str` | `chatId` | The chat the run's events go to; default: a new chat. |
 | `use_worktree` | `bool` | `useWorktree` | Run in a git worktree of the project (daemon default `True`). |
@@ -179,7 +179,7 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 <!-- sea-docs: options -->
 | Option | Type | Meaning |
 |---|---|---|
-| `work_dir` | `str` | The directory the run works in; default: the calling task's or the tab's. |
+| `work_dir` | `str` | The directory the sub-task works in; a relative path is resolved against the calling task's directory (a SEA's own `work_dir` setting is relative to the SEA's folder instead). |
 | `model` | `str` | The LLM model, a catalogue name or a model-picker SEA; `""` or `None` keeps the caller's. |
 | `chat_id` | `str` | The chat the run's events go to; default: a new chat. |
 | `use_worktree` | `bool` | Run in a git worktree of the project (daemon default `True`). |

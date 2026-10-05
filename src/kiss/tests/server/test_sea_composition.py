@@ -436,9 +436,13 @@ def test_work_dir_option_and_script_work_dir(
     out = run_agent("t", str(locking), options='{"work_dir": "sub"}')
     assert out.startswith("Error: locking: the script locks work_dir="), out
     assert "(asked for 'sub')" in out
-    # The wire spellings are not option keys; the ``add_to_*`` ones are forwarded.
+    # The wire spellings are not option keys (they name the key they
+    # were renamed to); the ``add_to_*`` ones are forwarded.
     out = run_agent("t", str(plain), options='{"append_to_system_prompt": "x"}')
-    assert out.startswith("Error: options has an unknown key 'append_to_system_prompt'")
+    assert out == (
+        "Error: options key 'append_to_system_prompt' was renamed to "
+        "'add_to_system_prompt'; use the new name."
+    )
     run_agent("t", str(plain), options='{"add_to_system_prompt": "S", "add_to_prompt": "P"}')
     assert captured[-1]["append_to_system_prompt"] == "S"
     assert captured[-1]["append_to_prompt"] == "P"

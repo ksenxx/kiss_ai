@@ -665,11 +665,28 @@ def _extends_chain(
             settings = resolve_settings(namespace)
         except SettingsError as exc:
             raise SeaScriptError(f"agent script {str(sea_path)!r}: {exc}") from exc
+        _anchor_work_dir(settings, sea_path.parent)
         layer = loaded[key] = SeaLayer(sea_path, namespace, settings)
     extends = str(layer.settings.get("extends") or "")
     if not extends:
         return [layer]
     return [*_extends_chain(_resolve_extends(sea_path, extends), [*seen, key], loaded), layer]
+
+
+def _anchor_work_dir(settings: dict[str, Any], script_dir: Path) -> None:
+    """Make a ``work_dir`` setting absolute: ``~`` expanded, a relative path under the script.
+
+    A script says ``"work_dir": "sandbox"`` to mean the ``sandbox``
+    folder next to itself; resolved here, once, every way of running
+    the script (``/command``, ``run_agent``, ``run_parallel``) works
+    in that same folder instead of one relative to whatever the caller
+    or the daemon happened to run in.
+    """
+    work_dir = settings.get("work_dir")
+    if not isinstance(work_dir, str) or not work_dir:
+        return
+    path = Path(work_dir).expanduser()
+    settings["work_dir"] = os.path.normpath(path if path.is_absolute() else script_dir / path)
 
 
 def _resolve_extends(sea_path: Path, spec: str) -> Path:

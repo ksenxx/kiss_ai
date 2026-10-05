@@ -133,10 +133,10 @@ def test_a_setting_passed_as_a_tool_keyword_is_pointed_at_options() -> None:
     )
     assert out.startswith("Failed to call run_agent with ")
     assert "Expected signature: run_agent(task: str, agent: str = ''" in out
+    # The tool knows its vocabulary: the hint is definite, not conditional.
     assert out.rstrip().endswith(
-        "use_worktree is not an argument; if it is a run setting, pass it in the `options` "
-        "JSON object, e.g. options='{\"use_worktree\": false}' (the accepted keys are listed "
-        "under `options`)."
+        "use_worktree is a run setting, not an argument; pass it in the `options` JSON "
+        "object: options='{\"use_worktree\": false}'."
     )
     # A tool without an ``options`` parameter keeps the plain signature message.
     agent.function_map = {"echo": lambda text="": text}
@@ -180,8 +180,13 @@ def test_the_plain_sub_agent_sea_is_named_sorcar() -> None:
     assert default.is_file() and not (default.parents[1] / "dummy").exists()
     assert sea_commands.sea_getter_value(default, "settings") == {"hidden": True}
     assert "`agent=\"sorcar\"`" in sea_commands.sea_getter_value(default, "description")
-    for spelling in ("", "sorcar", "general", "reviewer"):
+    for spelling in ("", "sorcar", "general", "assistant"):
         assert resolve_agent(spelling, "") == (DEFAULT_AGENT_PATH, "sorcar"), spelling
+    # A reviewer is a toolset, not an agent: the name is refused with the spelling.
+    assert resolve_agent("reviewer", "") == (
+        "Error: 'reviewer' is not an agent. A reviewer is a plain sub-agent with the "
+        'read-only toolset: leave agent empty and pass tool_profile="review".'
+    )
     assert sea_commands.get_command("sorcar") is None  # hidden: no /sorcar command
     assert sea_name_of_agent("", []) == "sorcar_sea"
     for rel in ("src/kiss/server/README.md", "src/kiss/agents/third_party_agents/README.md"):

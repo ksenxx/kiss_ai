@@ -33,9 +33,11 @@ RUN_CONFIG_KEYS = (
     "sea",
     "kind",
     "tool_profile",
+    "tool_profile_inferred",
     "timeout",
     "inherited",
     "pinned",
+    "classified",
 )
 """The ``task_settings`` keys :func:`run_config_line` reads besides ``model``, ``work_dir``
 and ``max_budget``.
@@ -43,10 +45,14 @@ and ``max_budget``.
 ``sea``: the SEA's name (its file stem), ``""`` for a plain sub-agent;
 ``kind``: the SEA's ``kind`` setting (``session``, ``worker`` or ``channel``);
 ``tool_profile``: the effective profile, ``""`` for the full toolset;
+``tool_profile_inferred``: ``True`` when nobody named the profile and the run got
+``review`` because it is a reviewer sub-agent (``tools=review(inferred)`` on the line);
 ``timeout``: the caller's wait in seconds, or ``None``;
 ``inherited``: the setting keys filled from the calling agent;
 ``pinned``: ``{key: [before, pinned]}`` for every inherited or default value the SEA's
-``settings()`` replaced.
+``settings()`` replaced;
+``classified``: ``{key: [before, after]}`` for every default the daemon's pre-run
+classifier changed (today only ``use_worktree``, demoted for a non-development task).
 """
 
 PROVENANCE_EXPLICIT = "explicit"
@@ -127,6 +133,17 @@ def inherited_keys(provenance: Any) -> list[str]:
     return [str(key) for key, mark in provenance.items() if mark == PROVENANCE_INHERITED]
 
 
+def is_explicit(provenance: Any, key: str) -> bool:
+    """Return whether a ``run`` command's ``provenance`` marks *key* as passed explicitly.
+
+    Args:
+        provenance: The command's ``provenance`` wire field (anything
+            but a dict counts as empty).
+        key: The setting key (``use_worktree``, ``model``, ...).
+    """
+    return isinstance(provenance, Mapping) and provenance.get(key) == PROVENANCE_EXPLICIT
+
+
 def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
     """Render a task's effective configuration as one line.
 
@@ -134,6 +151,10 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
 
         sh (worker) model=gpt-5 tools=bash budget=$1.00 timeout=3600s
         inherited=model,chat_id,max_budget pinned=use_worktree(True->False)
+
+    A plain sub-agent whose worktree default the classifier dropped
+    ends with ``classified=use_worktree(True->False)`` instead; the
+    entry is absent when the classifier changed nothing.
 
     Args:
         settings: A ``task_settings`` payload (see :data:`RUN_CONFIG_KEYS`);
@@ -149,24 +170,32 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
     kind = str(settings.get("kind") or "session")
     model = str(settings.get("model") or "") or "default"
     tools = str(settings.get("tool_profile") or "") or "full"
+    if settings.get("tool_profile_inferred"):
+        tools += "(inferred)"
     budget = settings.get("max_budget")
     budget_text = f"${budget:.2f}" if isinstance(budget, int | float) else "none"
     timeout = settings.get("timeout")
     timeout_text = f"{timeout:g}s" if isinstance(timeout, int | float) else "none"
     inherited = settings.get("inherited")
     inherited_text = ",".join(str(k) for k in inherited) if inherited else "none"
-    pinned = settings.get("pinned")
-    if isinstance(pinned, Mapping) and pinned:
-        pinned_text = ",".join(
-            f"{key}({_short(before)}->{_short(value)})" for key, (before, value) in pinned.items()
-        )
-    else:
-        pinned_text = "none"
     line = (
         f"{sea} ({kind}) model={model} tools={tools} budget={budget_text} "
-        f"timeout={timeout_text} inherited={inherited_text} pinned={pinned_text}"
+        f"timeout={timeout_text} inherited={inherited_text} "
+        f"pinned={_changes_text(settings.get('pinned')) or 'none'}"
     )
+    classified = _changes_text(settings.get("classified"))
+    if classified:
+        line += f" classified={classified}"
     return f'{line} (also agent="{alias}")' if alias else line
+
+
+def _changes_text(changes: Any) -> str:
+    """Render a ``{key: [before, after]}`` record as ``key(before->after),...``, ``""`` if empty."""
+    if not isinstance(changes, Mapping) or not changes:
+        return ""
+    return ",".join(
+        f"{key}({_short(before)}->{_short(value)})" for key, (before, value) in changes.items()
+    )
 
 
 def _short(value: Any) -> str:

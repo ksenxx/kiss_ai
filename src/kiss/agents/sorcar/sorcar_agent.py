@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import difflib
 import json
 import logging
 import math
@@ -29,6 +30,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     RunOptions,
     fanout_conflict,
     inherit_from_parent,
+    options_keyword_hint,
     parse_run_options,
     resolve_agent,
 )
@@ -45,6 +47,7 @@ from kiss.agents.sorcar.sea_commands import SeaLayer, evaluate_sea, model_sea
 from kiss.agents.sorcar.sea_settings import (
     PRECEDENCE_RULE,
     SeaError,
+    alias_free_profile,
     locked_conflicts,
     merge_settings,
     script_name,
@@ -179,31 +182,59 @@ PROFILE_SEPARATOR = "+"
 """Joins the parts of a composite tool profile name."""
 
 
+
+def canonical_tool_profile(name: str) -> str:
+    """Return *name* with every part a :data:`TOOL_PROFILES` key, or raise.
+
+    Args:
+        name: A profile name: one key or alias, or several joined with
+            ``+``.  Whitespace around a part is ignored; the empty name
+            (no profile chosen) is returned unchanged.
+
+    Returns:
+        The parts, aliases replaced by their key
+        (:data:`~kiss.agents.sorcar.sea_settings.PROFILE_ALIASES`),
+        joined with ``+``.
+
+    Raises:
+        ValueError: If a part is neither a key nor an alias.  The message
+            lists the keys and, when one is spelled closely enough, asks
+            whether that was meant.
+    """
+    canonical = alias_free_profile(name)
+    parts = canonical.split(PROFILE_SEPARATOR) if canonical else []
+    unknown = [part for part in parts if part not in TOOL_PROFILES]
+    if unknown:
+        close = difflib.get_close_matches(unknown[0], list(TOOL_PROFILES), n=1, cutoff=0.7)
+        hint = f" Did you mean {close[0]!r}?" if close else ""
+        raise ValueError(
+            f"tool_profile must be one of {', '.join(TOOL_PROFILES)} "
+            f"(several joined with '+'), got {name!r}.{hint}"
+        )
+    return canonical
+
+
 def resolve_tool_profile(name: str) -> frozenset[str] | None:
     """Return the tool names a (possibly composite) profile *name* allows.
 
-    *name* is one :data:`TOOL_PROFILES` key or several joined with
-    ``+``; the result is the union of their tool sets.  ``None`` means
-    every tool the agent can build: the ``full`` profile, alone or as a
-    part of a composite, and the empty name (no profile chosen).
+    *name* is one :data:`TOOL_PROFILES` key (or an alias of one) or
+    several joined with ``+``; the result is the union of
+    their tool sets.  ``None`` means every tool the agent can build: the
+    ``full`` profile, alone or as a part of a composite, and the empty
+    name (no profile chosen).
 
     Args:
         name: The profile name, e.g. ``"review"`` or ``"shell+edit+browser"``.
-            Whitespace around a part is ignored.
 
     Returns:
         The allowed tool names, or ``None`` for everything.
 
     Raises:
-        ValueError: If a part is not a :data:`TOOL_PROFILES` key.
+        ValueError: If a part is not a :data:`TOOL_PROFILES` key or alias
+            (see :func:`canonical_tool_profile`).
     """
-    parts = [part.strip() for part in name.split(PROFILE_SEPARATOR)] if name.strip() else []
-    unknown = [part for part in parts if part not in TOOL_PROFILES]
-    if unknown:
-        raise ValueError(
-            f"tool_profile must be one of {', '.join(TOOL_PROFILES)} "
-            f"(several joined with '+'), got {name!r}."
-        )
+    canonical = canonical_tool_profile(name)
+    parts = canonical.split(PROFILE_SEPARATOR) if canonical else []
     allowed: frozenset[str] = frozenset()
     for part in parts:
         tools = TOOL_PROFILES[part]
@@ -2015,11 +2046,10 @@ class SorcarAgent(RelentlessAgent):
             A :data:`TOOL_PROFILES` key or a ``+``-joined composite of
             keys (see :func:`resolve_tool_profile`).
         """
-        explicit = str(getattr(self, "_tool_profile_name", "") or "").strip()
+        explicit = str(getattr(self, "_tool_profile_name", "") or "")
         if explicit:
             try:
-                resolve_tool_profile(explicit)
-                return explicit
+                return canonical_tool_profile(explicit)
             except ValueError:
                 pass  # An unknown name falls through to the default rule.
         task = task or str(getattr(self, "task_description", "") or "")
@@ -2290,8 +2320,12 @@ class SorcarAgent(RelentlessAgent):
                     ``"skills"``, ``"user"``, ``"decide"`` and
                     ``"control"`` (summary, set_model) can be joined
                     with ``+`` for the union of their tools, e.g.
-                    ``"shell+edit+memory"``.  Empty (default): review
-                    tasks get ``"review"``, others the full toolset.
+                    ``"shell+edit+memory"``; ``"readonly"`` is accepted
+                    for ``"review"``.  Empty (default): a child of a
+                    reviewer, or one whose task reads as a review and
+                    asks for no changes, gets ``"review"`` (its ``ran``
+                    line says ``tools=review(inferred)``), others the
+                    full toolset.
                 max_budget: Per-child USD budget as a number string;
                     empty shares this task's remaining budget among
                     the children.
@@ -2575,6 +2609,7 @@ class SorcarAgent(RelentlessAgent):
             run_parallel.__doc__ = (run_parallel.__doc__ or "").replace(
                 "{precedence}", PRECEDENCE_RULE
             )
+            run_parallel.unknown_arguments_hint = options_keyword_hint  # type: ignore[attr-defined]
             tools.append(run_parallel)
             tools.append(number_of_cores)
         if allowed is not None:
@@ -3063,8 +3098,7 @@ class SorcarAgent(RelentlessAgent):
             ValueError: If *tool_profile* is neither ``""`` nor a
                 ``+``-joined list of :data:`TOOL_PROFILES` keys.
         """
-        resolve_tool_profile(tool_profile)
-        self._tool_profile_name = tool_profile
+        self._tool_profile_name = canonical_tool_profile(tool_profile)
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
         self._live_browser = live_browser
@@ -3688,6 +3722,7 @@ def run_tasks_parallel(
             if DEFAULT_CONFIG.tool_profiles and reviewer and not is_implementation_task(task)
             else "full"
         )
+        inferred_review = not tool_profile and child_profile == "review"
         sub_agents[idx] = agent
         if chat_id:
             agent.resume_chat_by_id(chat_id)
@@ -3748,7 +3783,10 @@ def run_tasks_parallel(
                 )
                 run_kwargs.update(overrides)
                 agent.run_config.update(sea_config)
+                inferred_review = inferred_review and "tool_profile" not in overrides
             agent.run_config["tool_profile"] = run_kwargs["tool_profile"]
+            if inferred_review:
+                agent.run_config["tool_profile_inferred"] = True
             result: str = with_run_config(
                 agent.run(**run_kwargs), agent.task_settings or agent.run_config,
             )

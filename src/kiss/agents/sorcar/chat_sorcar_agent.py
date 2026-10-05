@@ -450,6 +450,11 @@ class ChatSorcarAgent(SorcarAgent):
         payload.update(self.run_config)
         if tool_profile != "" or "tool_profile" in payload:
             payload["tool_profile"] = tool_profile
+        # Nobody named the profile and the reviewer rule chose
+        # ``review``: say so (``tools=review(inferred)``), so the caller
+        # can tell the inference from a profile it or a SEA asked for.
+        if tool_profile == "review" and not self._tool_profile_name:
+            payload["tool_profile_inferred"] = True
         return payload
 
     def _persist_replay_events_if_missing(

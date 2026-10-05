@@ -132,7 +132,8 @@ SETTING_DOCS: dict[str, str] = {
     "extends": "A base script (command name or `.py` path) whose layers run under this one: "
                "settings merge with the later layer winning, `prompt(task)` functions chain, "
                "system-prompt additions concatenate, tools union.",
-    "work_dir": "The directory the run works in; default: the calling task's or the tab's.",
+    "work_dir": "The directory the run works in; default: the calling task's or the tab's. A "
+                "relative path is resolved against the script's own folder, not the caller's.",
     "model": "The LLM model, a catalogue name or a model-picker SEA; `\"\"` or `None` keeps "
              "the caller's.",
     "chat_id": "The chat the run's events go to; default: a new chat.",
@@ -183,6 +184,9 @@ RENAMED_SETTINGS = {
     "is_parallel": "allow_fan_out",
     "classify_tasks": "auto_classify",
     "preset": "kind",
+    "model_name": "model",
+    "append_to_prompt": "add_to_prompt",
+    "append_to_system_prompt": "add_to_system_prompt",
 }
 """Former settings keys and their current names.
 
@@ -191,13 +195,46 @@ wire field ``isParallel``); ``auto_classify`` whether the daemon's
 classifier decides the run's worktree mode (``classifyTasks``);
 ``kind`` is the one axis that used to be split into ``preset``
 (``session`` / ``worker`` / ``channel``) and ``kind`` (``agent`` /
-``channel``).  The old names are refused with a message naming the
-new one; ``sea lint --fix`` rewrites them in a script.
+``channel``); ``model_name``, ``append_to_prompt`` and
+``append_to_system_prompt`` are the ``run()`` parameter and wire
+spellings callers keep reaching for in place of the settings keys
+``model``, ``add_to_prompt`` and ``add_to_system_prompt``.  The old
+names are refused — in a script's ``settings()`` and in a
+``run_agent`` / ``run_parallel`` ``options`` object alike — with a
+message naming the new one; ``sea lint --fix`` rewrites them in a
+script.
 """
+
+PROFILE_ALIASES = {"readonly": "review", "read_only": "review", "read-only": "review"}
+"""Spellings accepted for a tool-profile key, and the key each means.
+
+``review`` is the read-only profile and callers keep asking for it by
+that property.  Every way a profile name arrives — a script's
+``tool_profile`` setting (:func:`resolve_settings`), a ``run_agent`` /
+``run_parallel`` argument or option, a ``run()`` parameter
+(:func:`kiss.agents.sorcar.sorcar_agent.canonical_tool_profile`) —
+replaces the alias with the key first, so locks, the ``pinned`` record
+and the ``ran:`` line compare and show keys only.
+"""
+
+
+def alias_free_profile(name: str) -> str:
+    """Return the profile *name* with every ``+``-joined part stripped and its alias replaced.
+
+    Unknown parts pass through unchanged: this is spelling, not
+    validation (:func:`kiss.agents.sorcar.sorcar_agent.canonical_tool_profile`
+    validates against the profile table).
+    """
+    if not name.strip():
+        return ""
+    return "+".join(PROFILE_ALIASES.get(p.strip(), p.strip()) for p in name.split("+"))
+
 
 REMOVED_SETTINGS = {
     "inherit": "a `channel` run never inherits from the calling task and every other kind "
                "always does; the caller's `inherit` option opts out of inheriting",
+    "append_basic_tools": "the built-in toolset is chosen by `tool_profile` (`none` gives a "
+                          "run no built-in tools)",
 }
 """Former settings keys with no replacement, and why; refused with the explanation."""
 
@@ -464,6 +501,8 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
     type-checked against :data:`SETTING_TYPES`.  ``work_dir`` and
     ``extends`` are kept as the script returned them; the daemon and
     :func:`kiss.agents.sorcar.sea_commands.sea_layers` resolve them.
+    A ``tool_profile`` alias (``readonly``) becomes its key
+    (:func:`alias_free_profile`).
 
     Args:
         namespace: The script's module namespace (``module.__dict__``).
@@ -515,6 +554,8 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
         key: value for key, value in declared.items()
         if value is not None and not (key == "model" and value == "")
     }
+    if isinstance(declared.get("tool_profile"), str):
+        declared["tool_profile"] = alias_free_profile(declared["tool_profile"])
     for key, value in declared.items():
         expected = SETTING_TYPES[key]
         wrong_bool = isinstance(value, bool) and expected is not bool

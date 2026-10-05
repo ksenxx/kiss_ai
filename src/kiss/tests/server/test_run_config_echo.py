@@ -253,8 +253,9 @@ class RunConfigEchoTest(DaemonLocalHarness):
         finally:
             DEFAULT_CONFIG.tool_profiles = saved
         ran = yaml.safe_load(result)["ran"]
+        # Nobody named the profile: the line says the rule chose it.
         assert ran.startswith(
-            f"sub-agent (session) model={PARENT_MODEL} tools=review budget=$0.30 "
+            f"sub-agent (session) model={PARENT_MODEL} tools=review(inferred) budget=$0.30 "
         ), ran
         # An explicit budget is not inherited; the model and chat are.
         inherited = ran.split("inherited=")[1].split(" ")[0].split(",")

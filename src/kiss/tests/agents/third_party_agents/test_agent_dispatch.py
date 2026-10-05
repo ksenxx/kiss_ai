@@ -362,10 +362,11 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     assert run_agent("say hi", "ntfy", options='{"add_to_system_prompt": true}') == (
         "Error: options['add_to_system_prompt'] must be a JSON str, got bool."
     )
-    # The wire spelling is not an option key; the base prompt is a
-    # script's ``system_prompt()``, not an option either.
-    assert run_agent("say hi", "ntfy", options='{"append_to_prompt": "x"}').startswith(
-        "Error: options has an unknown key 'append_to_prompt'"
+    # The wire spelling is not an option key (the error names the key
+    # it was renamed to); the base prompt is a script's
+    # ``system_prompt()``, not an option either.
+    assert run_agent("say hi", "ntfy", options='{"append_to_prompt": "x"}') == (
+        "Error: options key 'append_to_prompt' was renamed to 'add_to_prompt'; use the new name."
     )
     assert run_agent("say hi", "ntfy", options='{"system_prompt": "x"}').startswith(
         "Error: options has an unknown key 'system_prompt'"

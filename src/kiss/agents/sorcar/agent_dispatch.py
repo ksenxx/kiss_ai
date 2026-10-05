@@ -71,6 +71,7 @@ from kiss.agents.sorcar.sea_commands import sea_script_in
 from kiss.agents.sorcar.sea_settings import (
     META_SETTINGS,
     PRECEDENCE_RULE,
+    REMOVED_SETTINGS,
     RENAMED_SETTINGS,
     SETTING_TYPES,
     declared_literal,
@@ -224,6 +225,9 @@ ARGUMENT_OPTIONS = ("model", "tool_profile", "max_budget", "timeout")
 """The options the ``run_agent`` / ``run_parallel`` tools also take as arguments."""
 
 OPTION_DOCS: dict[str, str] = {
+    "work_dir": "The directory the sub-task works in; a relative path is resolved against "
+                "the calling task's directory (a SEA's own `work_dir` setting is relative "
+                "to the SEA's folder instead).",
     "inherit": "`false`: the sub-task takes nothing from the calling task (no model, chat, "
                "prompt suffixes, tools or container; a `run_parallel` child still gets its "
                "budget share); default `true`. A `channel` run never inherits, so `true` is "
@@ -234,7 +238,8 @@ OPTION_DOCS: dict[str, str] = {
     "add_to_system_prompt": "Text appended to the system prompt after the SEA's "
                             "`add_to_system_prompt()`.",
 }
-"""Documentation of the option keys that are not ``settings()`` keys (``sea docs``).
+"""Documentation of the option keys that are not ``settings()`` keys, or mean something
+else as an option (``work_dir``: relative to the caller, not the script), for ``sea docs``.
 
 Every other option is documented by
 :data:`~kiss.agents.sorcar.sea_settings.SETTING_DOCS`.
@@ -344,8 +349,9 @@ def parse_run_options(
             ``"false"``; ``null`` means "not passed".
         tool_profile: The tool's ``tool_profile`` argument: a shortcut
             for the option of the same name, which may repeat but not
-            contradict it.  Validated against
-            :func:`kiss.agents.sorcar.sorcar_agent.resolve_tool_profile`.
+            contradict it.  Canonicalised by
+            :func:`kiss.agents.sorcar.sorcar_agent.canonical_tool_profile`
+            (``readonly`` becomes ``review``).
         model: The tool's ``model`` argument, the same way.
         max_budget: The tool's ``max_budget`` argument (a positive
             finite number as text), the same way.
@@ -361,7 +367,7 @@ def parse_run_options(
             contradicts the argument of the same name, a number is not
             positive and finite, or the tool profile is unknown.
     """
-    from kiss.agents.sorcar.sorcar_agent import resolve_tool_profile
+    from kiss.agents.sorcar.sorcar_agent import canonical_tool_profile
 
     parsed: dict[str, Any] = {}
     if options.strip():
@@ -375,9 +381,11 @@ def parse_run_options(
             parsed_value = _parse_option(key, value)
             if parsed_value is not None:
                 parsed[key] = parsed_value
+    if parsed.get("tool_profile"):
+        parsed["tool_profile"] = canonical_tool_profile(parsed["tool_profile"])
     arguments = {
         "model": model.strip(),
-        "tool_profile": tool_profile.strip(),
+        "tool_profile": canonical_tool_profile(tool_profile),
         "max_budget": _parse_number("max_budget", max_budget),
         "timeout": _parse_number("timeout", timeout),
     }
@@ -391,8 +399,49 @@ def parse_run_options(
                 f"{argument!r}; pass one of them."
             )
         parsed[key] = argument
-    resolve_tool_profile(parsed.get("tool_profile", ""))
     return RunOptions(**parsed)
+
+
+def options_keyword_hint(unknown: dict[str, Any]) -> str:
+    """Explain the keywords a ``run_agent`` / ``run_parallel`` call passed that are no argument.
+
+    Installed on the two tools as their ``unknown_arguments_hint``
+    (:func:`kiss.core.kiss_agent.unknown_argument_hint`): a run
+    setting passed as a keyword (``use_worktree=False``) is shown as
+    the ``options`` object to pass instead, a renamed or removed key
+    gets its current name or the reason, and anything else the
+    closest option key when one is spelled closely enough.
+
+    Args:
+        unknown: ``{keyword: value}`` for every keyword the signature
+            does not take.
+
+    Returns:
+        One sentence per keyword, newline-joined.
+    """
+    lines = []
+    settings = {k: v for k, v in unknown.items() if k in OPTION_TYPES}
+    if settings:
+        example = json.dumps(settings)
+        lines.append(
+            f"{', '.join(settings)} is a run setting, not an argument; pass it in the "
+            f"`options` JSON object: options='{example}'."
+        )
+    for key, value in unknown.items():
+        if key in settings:
+            continue
+        if key in RENAMED_SETTINGS:
+            example = json.dumps({RENAMED_SETTINGS[key]: value})
+            lines.append(
+                f"{key} was renamed to {RENAMED_SETTINGS[key]}; pass options='{example}'."
+            )
+        elif key in REMOVED_SETTINGS:
+            lines.append(f"{key} was removed: {REMOVED_SETTINGS[key]}.")
+        else:
+            close = difflib.get_close_matches(key, list(OPTION_TYPES), n=1, cutoff=0.7)
+            hint = f" Did you mean the option {close[0]!r}?" if close else ""
+            lines.append(f"{key} is neither an argument nor an options key.{hint}")
+    return "\n".join(lines)
 
 
 def _parse_option(key: str, value: Any) -> Any:
@@ -409,8 +458,12 @@ def _parse_option(key: str, value: Any) -> Any:
                 f"options key {key!r} was renamed to {RENAMED_SETTINGS[key]!r}; "
                 f"use the new name."
             )
+        if key in REMOVED_SETTINGS:
+            raise ValueError(f"options key {key!r} was removed: {REMOVED_SETTINGS[key]}.")
+        close = difflib.get_close_matches(key, list(OPTION_TYPES), n=1, cutoff=0.7)
+        hint = f" Did you mean {close[0]!r}?" if close else ""
         raise ValueError(
-            f"options has an unknown key {key!r}; known keys: {', '.join(OPTION_TYPES)}."
+            f"options has an unknown key {key!r}; known keys: {', '.join(OPTION_TYPES)}.{hint}"
         )
     if value is None:
         return None
@@ -1458,16 +1511,22 @@ _JOB_START_GRACE_SECONDS = 30.0
 
 
 _GENERIC_AGENT_NAMES = frozenset({
-    "general", "agent", "sorcar", "kiss", "codereview", "codereviewer",
-    "reviewer", "review", "analysis", "analyst", "assistant", "default",
-    "llm", "model",
+    "general", "agent", "sorcar", "kiss", "analysis", "analyst", "assistant",
+    "default", "llm", "model",
 })
 """Names models invent for "another copy of me" (16 dispatches in the
 7-day audit of 2026-09-19).  Each means what an empty ``agent`` means: a
 plain Sorcar sub-agent (:data:`DEFAULT_AGENT_PATH`) on the task.
 ``worker`` is not one of them: it is a ``kind`` (a tool-bound run), so
 ``agent="worker"`` gets the usual "no such command" error instead of
-silently running a ``session``."""
+silently running a ``session``; nor are the :data:`_REVIEWER_NAMES`,
+which ask for a toolset, not an agent."""
+
+_REVIEWER_NAMES = frozenset({"reviewer", "review", "codereview", "codereviewer"})
+"""Names that mean "a read-only reviewer".  A reviewer is a plain
+sub-agent with ``tool_profile="review"``; accepting the name as an
+agent would silently run the full toolset, so :func:`resolve_agent`
+refuses it and says how to spell the intent."""
 
 
 def resolve_agent(agent: str, parent_work_dir: str) -> tuple[str, str] | str:
@@ -1475,7 +1534,7 @@ def resolve_agent(agent: str, parent_work_dir: str) -> tuple[str, str] | str:
 
     Three rules, in order, for every spelling a model may use:
 
-    1. empty, or a generic label such as ``"general"`` / ``"reviewer"``
+    1. empty, or a generic label such as ``"general"`` / ``"assistant"``
        (:data:`_GENERIC_AGENT_NAMES`): the plain sub-agent SEA
        :data:`DEFAULT_AGENT_PATH`;
     2. a path (ends in ``.py`` or contains a separator): that agent
@@ -1579,6 +1638,11 @@ def _unknown_agent_error(agent: str, squashed: str, commands: list[str]) -> str:
         An error string naming the closest known command when there is
         one, and listing what ``run_agent`` accepts.
     """
+    if squashed in _REVIEWER_NAMES:
+        return (
+            f"Error: {agent!r} is not an agent. A reviewer is a plain sub-agent with the "
+            f"read-only toolset: leave agent empty and pass tool_profile=\"review\"."
+        )
     by_squashed = {_squash(name): name for name in commands}
     close = difflib.get_close_matches(squashed, list(by_squashed), n=1, cutoff=0.6)
     hint = f" Did you mean {by_squashed[close[0]]!r}?" if close else ""
@@ -1653,14 +1717,19 @@ def make_run_agent_tool(
                 name (``"slack"``, ``"cron"``, ``"write_paper"``) = that
                 command; a path ending in ``.py`` (relative to this
                 task's work directory) = that SEA file.  A generic label
-                (``"general"``, ``"reviewer"``) also means the plain
-                sub-agent.
+                (``"general"``, ``"assistant"``) also means the plain
+                sub-agent; ``"reviewer"`` is not an agent (pass
+                ``tool_profile="review"`` instead).
             model: LLM model; empty = this task's model (the daemon
                 default for a channel/cron sub-task).
-            tool_profile: ``"review"`` (read-only), ``"shell"``,
-                ``"assistant"``, ``"bash"``, ``"none"`` or groups joined
-                with ``+`` (``"shell+edit+browser"``), as for
-                ``run_parallel``; empty = the full toolset.
+            tool_profile: ``"review"`` (read-only; ``"readonly"`` is
+                accepted for it), ``"shell"``, ``"assistant"``,
+                ``"bash"``, ``"none"`` or groups joined with ``+``
+                (``"shell+edit+browser"``), as for ``run_parallel``;
+                empty = the full toolset, except that a sub-task of a
+                reviewer, or one whose task reads as a review, gets
+                ``"review"`` unless the task asks for changes (the
+                ``ran`` line then says ``tools=review(inferred)``).
             max_budget: USD budget as a number string; empty = half of
                 this task's remaining budget (the daemon default for a
                 channel/cron sub-task).
@@ -1672,7 +1741,9 @@ def make_run_agent_tool(
                 keys are the SEA settings vocabulary: ``model``,
                 ``tool_profile``, ``max_budget``, ``timeout`` (the
                 four arguments above are shortcuts for these),
-                ``work_dir`` (relative to this task's), ``chat_id``,
+                ``work_dir`` (relative to this task's; a SEA's own
+                ``work_dir`` setting is relative to the SEA's folder),
+                ``chat_id``,
                 ``workspace`` (the account of a multi-account channel),
                 ``add_to_system_prompt`` / ``add_to_prompt`` (appended
                 text), ``model_config`` (JSON object), ``docker_image``,
@@ -1690,10 +1761,14 @@ def make_run_agent_tool(
         Returns:
             The sub-task's YAML result: a ``ran`` line first (the SEA
             and kind it ran as, its model, tool profile, budget and
-            timeout, which values it inherited from this task and which
+            timeout, which values it inherited from this task, which
             inherited or default values the SEA pinned to its own, e.g.
-            ``pinned=use_worktree(True->False)``; a SEA reached by path
-            that is also a command ends with ``(also agent="name")``),
+            ``pinned=use_worktree(True->False)``, and, when the
+            pre-run classifier dropped a worktree default for a
+            non-development task, ``classified=use_worktree(True->False)``
+            — an explicit ``use_worktree`` option is never dropped; a
+            SEA reached by path that is also a command ends with
+            ``(also agent="name")``),
             then ``success`` and ``summary``; the job notice
             (``wait="false"``); or an error
             message (unknown agent — naming the closest command — a
@@ -1709,4 +1784,5 @@ def make_run_agent_tool(
         .replace("{channels}", ", ".join(available_channels()) or "none installed")
         .replace("{precedence}", PRECEDENCE_RULE)
     )
+    run_agent.unknown_arguments_hint = options_keyword_hint  # type: ignore[attr-defined]
     return run_agent

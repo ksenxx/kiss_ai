@@ -366,7 +366,8 @@ def test_cron_is_a_registered_command_and_agent_resolves_by_three_rules(
     )
     resolve = agent_dispatch.resolve_agent
     assert resolve("", "") == (agent_dispatch.DEFAULT_AGENT_PATH, "sorcar")
-    assert resolve("reviewer", "") == (agent_dispatch.DEFAULT_AGENT_PATH, "sorcar")
+    assert resolve("general", "") == (agent_dispatch.DEFAULT_AGENT_PATH, "sorcar")
+    assert str(resolve("reviewer", "")).startswith("Error: 'reviewer' is not an agent.")
     assert resolve("cron", "") == (str(Path(cron_agent.__file__).resolve()), "cron")
     assert resolve("CRON", "") == (str(Path(cron_agent.__file__).resolve()), "cron")
     resolved = resolve("Home-Assistant", "")

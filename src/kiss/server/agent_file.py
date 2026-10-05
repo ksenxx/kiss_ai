@@ -259,7 +259,7 @@ def apply_agent_overrides(
         field = SETTING_FIELDS.get(key, "")
         # An explicit value that differs from the script's wins; one that
         # agrees keeps the script's write, so the field still counts as
-        # script-pinned (``_seaPinnedWorktree``).
+        # script-pinned (the task runner's ``_worktreeDecided`` mark).
         if field in staged and asked is not None and asked != "" and asked != staged[field]:
             del staged[field]
     if any("prompt" in layer.namespace for layer in layers):
