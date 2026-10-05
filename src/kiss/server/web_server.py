@@ -4070,6 +4070,7 @@ def _build_html() -> str:
         "CTX_MENU_SRC": _media_url("contentContextMenu.js"),
         "TREE_MENU_SRC": _media_url("treeContextMenu.js"),
         "BROWSER_TAB_SRC": _media_url("browserTab.js"),
+        "TERMINAL_TAB_SRC": _media_url("terminalTab.js"),
         "PDF_VIEW_SRC": _media_url("pdfView.js"),
         "MAIN_SRC": _media_url("main.js"),
         "SHIM_SCRIPT": (
@@ -6117,6 +6118,7 @@ class RemoteAccessServer:
                 )
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
+            self._vscode_server.terminals.viewer_gone(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
 
@@ -11000,6 +11002,9 @@ class RemoteAccessServer:
             # The Browser tab dies with this server: a later hand-off in
             # this process must fall back to the default browser.
             set_browser_tab_opener(None)
+            # Terminal-tab shells are hung up (and killed when they
+            # ignore it) rather than left to outlive the daemon.
+            self._vscode_server.terminals.shutdown()
             # Also stop the SEA registry watcher on the blocking
             # start() cleanup path (KeyboardInterrupt / pre-loop
             # SIGTERM).  The async ``stop_async`` path unhooks it via
@@ -11161,6 +11166,8 @@ class RemoteAccessServer:
             # daemon: close it so no orphan browser survives shutdown.
             set_browser_tab_opener(None)
             await asyncio.to_thread(self._vscode_server.browser_tabs.shutdown)
+            # Terminal-tab shells are children of this daemon too.
+            await asyncio.to_thread(self._vscode_server.terminals.shutdown)
             # An interactive merge/discard runs in the default executor,
             # not on a task thread: WAIT for it before anything else is
             # torn down, or the repository keeps being rewritten after

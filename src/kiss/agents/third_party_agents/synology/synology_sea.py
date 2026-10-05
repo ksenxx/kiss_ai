@@ -26,6 +26,7 @@ from urllib.parse import parse_qs
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
@@ -48,14 +49,36 @@ _SYNOLOGY_DIR = kiss_home() / "third_party_agents" / "synology"
 _config = ChannelConfig(_SYNOLOGY_DIR, ("webhook_url",))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/synology help``."""
-    return (
-        "Sends messages to Synology Chat through an incoming webhook and receives messages "
-        "from an outgoing webhook through an embedded HTTP server; use it as "
-        'run_agent(agent="synology", task="...") or the `kiss-synology` CLI '
-        "(`-t <task>` for one task, `--channel <id>` for a poll tick)."
-    )
+class SynologySea(BaseSea):
+    """The ``/synology`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/synology help``."""
+        return (
+            "Sends messages to Synology Chat through an incoming webhook and receives messages "
+            "from an outgoing webhook through an embedded HTTP server; use it as "
+            'run_agent(agent="synology", task="...") or the `kiss-synology` CLI '
+            "(`-t <task>` for one task, `--channel <id>` for a poll tick)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Synology Chat channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + SynologyChatAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
 
 
 def _embedded_token(webhook_url: str) -> str:
@@ -609,27 +632,6 @@ def main() -> None:
         channel_name="Synology Chat",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Synology Chat channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return SynologyChatAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

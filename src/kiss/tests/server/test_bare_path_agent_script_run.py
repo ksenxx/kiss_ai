@@ -87,23 +87,35 @@ class BarePathAgentScriptRunTest(DaemonRunApiHarness):
     def test_agent_script_with_system_prompt_suffix_gets_no_directive(self) -> None:
         """An SEA that only APPENDS to the system prompt keeps its bare-path task.
 
-        Covers the paper SEAs, which define ``add_to_system_prompt()``
-        rather than ``system_prompt()``: the exemption rests on the run
-        being an agent-script run, not on which getter it defines.
+        Covers the paper SEAs, whose ``system_prompt()`` appends to the
+        assembled prompt rather than replacing it: the exemption rests
+        on the run being an agent-script run, not on which method it
+        defines.
         """
         sea = self._sea(
             "reviewer",
-            'def add_to_system_prompt() -> str:\n'
-            '    return "Review the paper whose path is the task."\n',
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        return system_prompt + "\\n\\n" + "Review the paper whose path is the task."
+""",
         )
         sent = self._run(self.repo, extension_agent_path=sea)
         assert f"# Task\n{self.repo}" in sent
         assert DIRECTIVE not in sent
         assert "xdg-open" not in sent
 
-    def test_agent_script_without_any_getter_gets_no_directive(self) -> None:
-        """Even an empty agent script owns the meaning of its bare-path task."""
-        sea = self._sea("empty", "# nothing overridden\n")
+    def test_agent_script_without_any_method_gets_no_directive(self) -> None:
+        """Even an SEA overriding nothing owns the meaning of its bare-path task."""
+        sea = self._sea(
+            "empty",
+            "from kiss.agents.seas.base.base_sea import BaseSea\n"
+            "\n"
+            "class Sea(BaseSea):\n"
+            "    pass  # nothing overridden\n",
+        )
         sent = self._run(self.repo, extension_agent_path=sea)
         assert f"# Task\n{self.repo}" in sent
         assert DIRECTIVE not in sent
@@ -118,8 +130,13 @@ class BarePathAgentScriptRunTest(DaemonRunApiHarness):
         """``<task>`` blocks in an SEA's task text reach the SEA whole, in ONE run."""
         sea = self._sea(
             "knowledge",
-            'def system_prompt() -> str:\n'
-            '    return "You answer questions about the repository named by the task."\n',
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        return "You answer questions about the repository named by the task."
+""",
         )
         task = f"ask {self.repo} what does <task>hello</task> mean?"
         sent = self._run(task, extension_agent_path=sea)

@@ -42,6 +42,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
@@ -71,15 +72,28 @@ _A2A_DIR = kiss_home() / "third_party_agents" / "a2a"
 _config = ChannelConfig(_A2A_DIR, ("bind_host", "port"))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/a2a help``."""
-    return (
-        "Speaks the Agent-to-Agent (A2A) protocol: discovers a peer agent's card and calls "
-        "it over JSON-RPC 2.0 (`message/send` / `tasks/get`), and serves this agent's own "
-        "card and inbound `message/send` requests from an embedded HTTP server; use it as "
-        '`run_agent(agent="a2a", task="Discover the agent at http://host:port and greet '
-        'it")` or through the `kiss-a2a` CLI.'
-    )
+class A2aSea(BaseSea):
+    """The ``/a2a`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/a2a help``."""
+        return (
+            "Speaks the Agent-to-Agent (A2A) protocol: discovers a peer agent's card and calls "
+            "it over JSON-RPC 2.0 (`message/send` / `tasks/get`), and serves this agent's own "
+            "card and inbound `message/send` requests from an embedded HTTP server; use it as "
+            '`run_agent(agent="a2a", task="Discover the agent at http://host:port and greet '
+            'it")` or through the `kiss-a2a` CLI.'
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the A2A channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + A2AAgent()._get_tools()
 
 
 def _rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
@@ -639,17 +653,6 @@ def _make_backend() -> A2AChannelBackend:
 def main() -> None:
     """Run the A2AAgent from the command line with chat persistence."""
     channel_main(A2AAgent, "kiss-a2a", channel_name="A2A", make_backend=_make_backend)
-
-
-def add_to_tools() -> list:
-    """Return the A2A channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return A2AAgent()._get_tools()
 
 
 if __name__ == "__main__":

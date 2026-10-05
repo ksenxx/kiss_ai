@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests of the ``/revise_and_review_paper`` SEA.
 
-The tests exercise the real module: the getters the SEA contract reads,
+The tests exercise the real module: the methods the SEA contract reads,
 the slash-command resolution, the task builders as the fan-out guard
 classifies them, ``loop_status`` on review files written to disk, and a
 ``ChatSorcarAgent`` running with the SEA's configuration against the
@@ -22,6 +22,9 @@ import yaml
 
 from kiss.agents.seas.review_paper import review_paper_sea
 from kiss.agents.seas.revise_and_review_paper import revise_and_review_paper_sea as sea
+from kiss.agents.seas.revise_and_review_paper.revise_and_review_paper_sea import (
+    ReviseAndReviewPaperSea,
+)
 from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import fanout_guard, sea_commands
 from kiss.agents.sorcar.agent_dispatch import (
@@ -31,6 +34,7 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -62,10 +66,11 @@ def _review(tmp_path: Path, name: str, tail: str) -> Path:
     return path
 
 
-def test_sea_getters_follow_the_user_contract() -> None:
+def test_sea_methods_follow_the_user_contract() -> None:
     """The SEA appends the coordinator rules, offers three tools, neither browses nor fans out."""
-    prompt = sea.add_to_system_prompt()
-    assert prompt == sea.SYSTEM_PROMPT
+    agent = ReviseAndReviewPaperSea()
+    assert agent.system_prompt("ASSEMBLED") == "ASSEMBLED\n\n" + sea.SYSTEM_PROMPT
+    prompt = sea.SYSTEM_PROMPT
     assert sea.WRITE_PAPER_SEA in prompt and sea.REVIEW_PAPER_SEA in prompt
     assert Path(sea.WRITE_PAPER_SEA) == Path(write_paper_sea.__file__).resolve()
     assert Path(sea.REVIEW_PAPER_SEA) == Path(review_paper_sea.__file__).resolve()
@@ -74,25 +79,23 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert 'use_memory="false"' in prompt and "Never pass `chat_id`" in prompt
     assert "`writer_task(" in prompt and "`reviewer_task(" in prompt and "`loop_status(" in prompt
     assert "ask the user once with `ask_user_question`" in prompt
-    names = [t.__name__ for t in sea.add_to_tools()]
-    assert names == ["writer_task", "reviewer_task", "loop_status"]
-    assert sea.settings() == {
+    names = [t.__name__ for t in agent.tools([print])]
+    assert names == ["print", "writer_task", "reviewer_task", "loop_status"]
+    assert agent.settings({}) == {
         "use_web_tools": False,
         "allow_fan_out": False,
         "auto_classify": False,
         "tool_profile": "full",
         "timeout": sea.DISPATCH_TIMEOUT_SECONDS,
     }
+    assert agent.settings({"model": "m"}) == {"model": "m", **agent.settings({})}
     assert sea.DISPATCH_TIMEOUT_SECONDS == 86400
     # No preset named, so the resolved settings are these five keys under
     # the default ``session`` preset; the deprecated getters are gone.
-    assert resolve_settings(vars(sea)) == {"kind": "session", **sea.settings()}
-    for legacy in (
-        "system_prompt", "use_web_tools", "allow_fan_out", "auto_classify", "tool_profile",
-        "dispatch_timeout", "append_to_system_prompt",
-    ):
-        assert not hasattr(sea, legacy), legacy
-    assert "strong accept" in sea.description()
+    assert resolve_settings(agent.settings({})) == {"kind": "session", **agent.settings({})}
+    assert sea_commands.base_settings([agent]) == {"kind": "session", **agent.settings({})}
+    assert_no_removed_getters(sea)
+    assert "strong accept" in agent.description()
 
 
 def test_slash_command_resolves_to_the_bundled_sea() -> None:
@@ -111,9 +114,14 @@ def test_slash_command_resolves_to_the_bundled_sea() -> None:
     assert path == _SEA_PATH
     assert task_text == "Writing: a paper. Review: for ICLR."
     settings = sea_commands.sea_settings(path)
-    assert settings == {"kind": "session", **sea.settings()}
+    assert settings == {"kind": "session", **ReviseAndReviewPaperSea().settings({})}
     assert resolve_timeout(None, settings) == 86400.0
-    assert sea_commands.sea_description(_SEA_PATH) == sea.description()
+    loaded = sea_commands.load_sea(_SEA_PATH)
+    assert type(loaded).__name__ == "ReviseAndReviewPaperSea" and loaded.path == _SEA_PATH
+    assert sea_commands.sea_description(loaded) == ReviseAndReviewPaperSea().description()
+    assert sea_commands.help_text_if_command("/revise_and_review_paper help") == (
+        ReviseAndReviewPaperSea().description()
+    )
 
 
 def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path: Path) -> None:
@@ -123,8 +131,8 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
     (the bundled ``sorcar`` SEA) gets :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
     Real SEA files whose ``settings()`` returns a non-numeric, boolean,
     infinite or non-positive ``timeout``, or raises, fail loudly at ``sea_settings`` (a
-    broken script must not run with guessed parameters); a non-positive
-    value falls back to the default and a positive float is kept as is.
+    broken script must not run with guessed parameters); a positive
+    float is kept as is.
     """
     for command, seconds in [("write_paper", 21600.0), ("review_paper", 7200.0)]:
         path = sea_commands.get_command(command)
@@ -140,32 +148,40 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
         folder = tmp_path / f"t{n}"
         folder.mkdir()
         script = folder / f"t{n}_sea.py"
-        script.write_text(f"def description():\n    return 'x'\n{body}", encoding="utf-8")
+        script.write_text(
+            "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
+            "class Sea(BaseSea):\n    def description(self):\n        return 'x'\n" + body,
+            encoding="utf-8",
+        )
         return script
 
     resolved = {
         "": 3600.0,
-        "def settings():\n    return {'timeout': 1800.0}\n": 1800.0,
-        "def settings():\n    return {'timeout': 1800}\n": 1800.0,
+        "    def settings(self, settings):\n        return settings | {'timeout': 1800.0}\n":
+            1800.0,
+        "    def settings(self, settings):\n        return settings | {'timeout': 1800}\n": 1800.0,
         # A removed legacy getter is an ordinary module function: ignored.
-        "def dispatch_timeout():\n    return 1800.0\n": 3600.0,
+        "\ndef dispatch_timeout():\n    return 1800.0\n": 3600.0,
     }
     for n, (body, expected) in enumerate(resolved.items()):
         settings = sea_commands.sea_settings(_script(n, body))
         assert resolve_timeout(None, settings) == expected, body
         # An explicit positive argument always wins over the script.
         assert resolve_timeout(42.0, settings) == 42.0, body
-    broken = [
-        "def settings():\n    return {'timeout': 'soon'}\n",
-        "def settings():\n    return {'timeout': True}\n",
-        "def settings():\n    return {'timeout': float('inf')}\n",
+    broken = {
+        "    def settings(self, settings):\n        return settings | {'timeout': 'soon'}\n":
+            "timeout",
+        "    def settings(self, settings):\n        return settings | {'timeout': True}\n":
+            "timeout",
+        "    def settings(self, settings):\n        return settings | {'timeout': float('inf')}\n":
+            "timeout",
         # A non-positive wait means nothing: refused like an infinite one.
-        "def settings():\n    return {'timeout': 0}\n",
-        "def settings():\n    return {'timeout': -5}\n",
-        "def settings():\n    raise RuntimeError('broken')\n",
-    ]
-    for n, body in enumerate(broken, start=len(resolved)):
-        with pytest.raises(sea_commands.SeaScriptError):
+        "    def settings(self, settings):\n        return settings | {'timeout': 0}\n": "timeout",
+        "    def settings(self, settings):\n        return settings | {'timeout': -5}\n": "timeout",
+        "    def settings(self, settings):\n        raise RuntimeError('broken')\n": "broken",
+    }
+    for n, (body, text) in enumerate(broken.items(), start=len(resolved)):
+        with pytest.raises(sea_commands.SeaScriptError, match=text):
             sea_commands.sea_settings(_script(n, body))
 
 
@@ -370,18 +386,22 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
         ),
         finish_body("<pre>STOP: strong accept after round 1</pre>", prompt_tokens=700),
     ]
-    settings = sea.settings()
+    run = sea_commands.evaluate_sea(
+        [ReviseAndReviewPaperSea()],
+        "Writing: Write for ICLR 2027 at p.tex. Review: for ICLR 2027.",
+    )
+    settings = run.settings
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("revise-review-sea-test")
         result = agent.run(
-            prompt_template="Writing: Write for ICLR 2027 at p.tex. Review: for ICLR 2027.",
+            prompt_template=run.prompt,
             model_name=MODEL,
             work_dir=str(tmp_path),
             max_steps=5,
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
-            system_prompt=sea.add_to_system_prompt(),
-            tools=sea.add_to_tools(),
+            system_prompt_hook=run.system_prompt_hook,
+            tools_hook=run.tools_hook,
             tool_profile=settings["tool_profile"],
             web_tools=settings["use_web_tools"],
             is_parallel=settings["allow_fan_out"],

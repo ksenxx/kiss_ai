@@ -25,6 +25,7 @@ from typing import Any, NamedTuple, cast
 
 import yaml
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.agent_dispatch import (
     RunOptions,
@@ -45,13 +46,12 @@ from kiss.agents.sorcar.fanout_guard import (
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent, resolve_work_dir
 from kiss.agents.sorcar.run_config import note_pinned, with_run_config
-from kiss.agents.sorcar.sea_commands import SeaLayer, evaluate_sea, model_sea
+from kiss.agents.sorcar.sea_commands import evaluate_sea, model_sea
 from kiss.agents.sorcar.sea_settings import (
     PRECEDENCE_RULE,
     SeaError,
     alias_free_profile,
     locked_conflicts,
-    merge_settings,
     script_name,
 )
 from kiss.agents.sorcar.skills import make_skill_tool
@@ -162,7 +162,7 @@ TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     # Single command runner (the bundled ``/sh`` agent): Bash and nothing else.
     "bash": frozenset({"Bash"}),
     # No built-in tool at all: ``finish`` plus whatever the agent
-    # script's ``add_to_tools()`` supplies (the bundled ``/ask`` agent).
+    # SEA's ``tools()`` supplies (the bundled ``/ask`` agent).
     "none": frozenset(),
 }
 """Tool profiles an agent can run with (``finish`` is always added).
@@ -1583,7 +1583,7 @@ class SorcarAgent(RelentlessAgent):
         self._is_parallel: bool = True
         self._append_basic_tools: bool = True
         # The caller's extra tools of the current run (``run(tools=...)``:
-        # a SEA's ``add_to_tools()`` list, plus whatever this
+        # a SEA's ``tools()`` additions, plus whatever this
         # agent itself inherited as a sub-task).  Kept on self so a
         # ``run_agent`` sub-task dispatched DURING the run can take
         # them over (``task_runner`` reads them off the parent agent).
@@ -1884,17 +1884,17 @@ class SorcarAgent(RelentlessAgent):
                 *options* — pin what a fan-out child cannot honour
                 (:func:`kiss.agents.sorcar.agent_dispatch.fanout_conflict`).
         """
-        from kiss.agents.sorcar.sea_commands import SeaScriptError, sea_layers
+        from kiss.agents.sorcar.sea_commands import SeaScriptError, base_settings, sea_layers
 
         run_options = RunOptions(tool_profile=tool_profile) if options is None else options
-        layers: list[SeaLayer] = []
+        layers: list[BaseSea] = []
         settings: dict[str, Any] = {}
         if agent.strip():
             resolved = resolve_agent(agent, self.work_dir)
             if isinstance(resolved, str):
                 raise SeaScriptError(resolved.removeprefix("Error: "))
             layers = sea_layers(Path(resolved[0]))
-            settings = merge_settings([layer.settings for layer in layers])
+            settings = base_settings(layers)
             conflict = fanout_conflict(settings)
             if conflict:
                 raise SeaScriptError(f"{resolved[1]} {conflict}")
@@ -2690,8 +2690,18 @@ class SorcarAgent(RelentlessAgent):
             if tool.__name__ not in names:
                 extra.append(tool)
                 names.add(tool.__name__)
-        self._extra_tools = extra
         all_tools = built_in + extra
+        if self._tools_hook is not None:
+            # The SEA's ``tools()`` sees the whole toolset and returns
+            # the run's.  Of two tools with one name (the SEA adding a
+            # tool its parent, running the same SEA, passed down) the
+            # later one, the SEA's own, stands.  Whatever it kept or
+            # added beyond the built-ins is what this run's sub-tasks
+            # inherit.
+            by_name = {tool.__name__: tool for tool in self._tools_hook(all_tools)}
+            all_tools = list(by_name.values())
+            extra = [tool for tool in all_tools if tool not in built_in]
+        self._extra_tools = extra
         # Always install the steering hooks: they are self-guarding
         # no-ops when no follow-up channel exists (a printer without
         # the duck-typed ``drain_pending_user_messages`` bridge), and
@@ -2985,6 +2995,8 @@ class SorcarAgent(RelentlessAgent):
         tool_profile: str = "",
         live_browser: Any = None,
         prompt_suffix: str = "",
+        system_prompt_hook: Callable[[str], str] | None = None,
+        tools_hook: Callable[[list[Callable[..., Any]]], list[Callable[..., Any]]] | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -3049,9 +3061,9 @@ class SorcarAgent(RelentlessAgent):
                 effect, since the tools they toggle are never built.
             inherited_tools: Extra tools taken over from the task that
                 dispatched this run (a ``run_agent`` sub-task gets the
-                caller's ``add_to_tools()`` tools, see
-                ``task_runner``).  Added after the built-in toolset and
-                *tools*; one whose name this run already has (a
+                caller's SEA ``tools()``, see ``task_runner``).  Added
+                after the built-in toolset and *tools*; one whose name
+                this run already has (a
                 built-in the caller lacked, or one of *tools*) is
                 skipped rather than registered twice.  ``None``
                 (default) adds nothing.
@@ -3097,6 +3109,19 @@ class SorcarAgent(RelentlessAgent):
                 top-level task, ``review`` for a reviewer sub-agent).
                 Applies to this agent only: ``run_parallel`` children
                 pick their own profile.
+            system_prompt_hook: The SEA's ``system_prompt`` method
+                (:func:`kiss.agents.sorcar.sea_commands.base_system_prompt`):
+                called once with the assembled system prompt (base or
+                *base_system_prompt*, plus *system_prompt*) and its
+                return value replaces it; what it appended is forwarded
+                to sub-agents as their suffix, a replacement as their
+                base prompt.  ``None`` (default) changes nothing.
+            tools_hook: The SEA's ``tools`` method
+                (:func:`kiss.agents.sorcar.sea_commands.base_tools`):
+                called once by :meth:`perform_task` with the built-in
+                toolset plus *tools* and *inherited_tools*, and its
+                return value is the run's toolset.  ``None`` (default)
+                changes nothing.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -3113,6 +3138,7 @@ class SorcarAgent(RelentlessAgent):
         self._is_parallel = is_parallel
         self._append_basic_tools = append_basic_tools
         self._inherited_tools = list(inherited_tools or [])
+        self._tools_hook = tools_hook
         self._prompt_suffix = prompt_suffix if prompt_suffix else ""
         # Stored on self (not just a local) so the ``run_parallel``
         # fan-out — which executes DURING ``super().run`` below — can
@@ -3151,6 +3177,18 @@ class SorcarAgent(RelentlessAgent):
                 (self._base_system_prompt or default_base_prompt)
                 + (system_prompt if system_prompt else "")
             )
+            if system_prompt_hook is not None:
+                hooked = system_prompt_hook(system_instructions)
+                # Sub-agents inherit the SEA's effect the way they inherit
+                # the caller's: an appended text as their suffix, anything
+                # else as their whole base prompt (the suffix it rewrote
+                # or dropped must not come back on a sub-agent).
+                if hooked.startswith(system_instructions):
+                    self._system_prompt_suffix += hooked[len(system_instructions):]
+                else:
+                    self._base_system_prompt = hooked
+                    self._system_prompt_suffix = ""
+                system_instructions = hooked
             memory_root = _memory_root_for_run(
                 self._append_basic_tools,
                 docker_image,
@@ -3443,7 +3481,7 @@ def _coerce_tasks(tasks: Any) -> list[str]:
 
 
 def _sea_run_kwargs(
-    layers: list[SeaLayer],
+    seas: list[BaseSea],
     task: str,
     defaults: dict[str, Any],
     parent_agent: Any,
@@ -3453,19 +3491,18 @@ def _sea_run_kwargs(
 
     The in-process counterpart of the daemon's
     :func:`kiss.agents.sorcar.agent_file.apply_agent_overrides`: the SEA's
-    merged settings replace the inherited *defaults* (an explicit
-    fan-out argument was checked against ``locked`` by the caller), its
-    ``prompt(task)`` shapes the prompt, its ``system_prompt()`` replaces
-    the base system prompt, its ``add_to_system_prompt()`` is added
-    after the inherited suffix, and its tools and hooks are passed
-    through.  A fan-out child acts on the parent's tree, in the
-    parent's chat, so a script pinning the opposite is refused (see
+    settings replace the inherited *defaults* (an explicit fan-out
+    argument was checked against ``locked`` by the caller), its
+    ``prompt(task)`` shapes the prompt, and its ``system_prompt``,
+    ``tools`` and hook methods are passed through as the run's hooks.
+    A fan-out child acts on the parent's tree, in the parent's chat, so
+    a SEA pinning the opposite is refused (see
     :func:`check_fanout_settings`); ``timeout`` and ``inherit`` do not
     apply (the caller's own step bounds the children, which always
     inherit).
 
     Args:
-        layers: The script's executed layers.
+        seas: The loaded SEAs.
         task: The child's task text.
         defaults: The keyword arguments the child would run with
             otherwise (read, not modified).
@@ -3481,33 +3518,26 @@ def _sea_run_kwargs(
         ``pinned``; see :mod:`kiss.agents.sorcar.run_config`).
 
     Raises:
-        SeaScriptError: When a getter is broken (see
+        SeaScriptError: When a method is broken (see
             :func:`~kiss.agents.sorcar.sea_commands.evaluate_sea`).
     """
-    run = evaluate_sea(layers, task, _persisted_task_id(parent_agent))
+    run = evaluate_sea(seas, task, _persisted_task_id(parent_agent))
     settings = run.settings
     run_config: dict[str, Any] = {
-        "sea": script_name(str(layers[-1].path)),
-        "kind": settings.get("kind") or "session",
+        "sea": script_name(str(seas[-1].path)),
+        "kind": settings["kind"],
         "pinned": {},
     }
     # ``run()`` only records ``prompt_suffix``: the prompt carries it.
     overrides: dict[str, Any] = {
         "prompt_template": run.prompt + str(defaults.get("prompt_suffix") or ""),
     }
-    if run.system_prompt is not None:
-        overrides["base_system_prompt"] = run.system_prompt
-    if run.add_to_system_prompt:
-        suffix = str(defaults.get("system_prompt") or "")
-        overrides["system_prompt"] = (
-            f"{suffix}\n\n{run.add_to_system_prompt}" if suffix else run.add_to_system_prompt
-        )
-    if run.tools:
-        overrides["tools"] = run.tools
-    if run.llm_call_hook is not None:
-        overrides["llm_call_hook"] = run.llm_call_hook
-    if run.tool_call_hook is not None:
-        overrides["tool_call_hook"] = run.tool_call_hook
+    for kwarg, hook in (
+        ("system_prompt_hook", run.system_prompt_hook), ("tools_hook", run.tools_hook),
+        ("llm_call_hook", run.llm_call_hook), ("tool_call_hook", run.tool_call_hook),
+    ):
+        if hook is not None:
+            overrides[kwarg] = hook
     for key, kwarg in (
         ("model", "model_name"), ("max_budget", "max_budget"),
         ("tool_profile", "tool_profile"), ("docker_image", "docker_image"),
@@ -3527,7 +3557,7 @@ def _sea_run_kwargs(
             defaults.get("model_config"), settings["model_config"],
         )
     if overrides.get("tool_profile", defaults.get("tool_profile")) == "none":
-        # The script fixed the whole toolset: no built-ins, no tools
+        # The SEA fixed the whole toolset: no built-ins, no tools
         # taken over from the parent.
         overrides["append_basic_tools"] = False
         overrides["inherited_tools"] = []
@@ -3554,7 +3584,7 @@ def run_tasks_parallel(
     tool_profile: str = "",
     live_browser: Any = None,
     docker_image: str | None = None,
-    sea_layers: list[SeaLayer] | None = None,
+    sea_layers: list[BaseSea] | None = None,
     run_config: dict[str, Any] | None = None,
     explicit: set[str] | None = None,
     timeout: float | None = None,
@@ -3671,15 +3701,16 @@ def run_tasks_parallel(
         live_browser: The daemon's ``BrowserTabService`` for every child
             (see :meth:`SorcarAgent.run`), so a child's ``show_browser()``
             also reaches the user's Browser tab.
-        sea_layers: The executed layers of the SEA every child
-            runs as (:func:`kiss.agents.sorcar.sea_commands.sea_layers`),
+        sea_layers: The loaded SEA every child runs as
+            (:func:`kiss.agents.sorcar.sea_commands.sea_layers`),
             evaluated per child on its task
             (:func:`~kiss.agents.sorcar.sea_commands.evaluate_sea`): the
-            script's settings apply where *explicit* names no key, its
-            ``prompt(task)`` shapes the child's prompt, its system-prompt
-            texts, tools and hooks apply.  ``None``/empty runs plain
-            sub-agents.  A getter broken for one task fails that child
-            alone (a YAML failure entry), like any other child error.
+            SEA's settings apply where *explicit* names no key, its
+            ``prompt(task)`` shapes the child's prompt, its
+            ``system_prompt``, ``tools`` and hook methods apply.
+            ``None``/empty runs plain sub-agents.  A method broken for
+            one task fails that child alone (a YAML failure entry),
+            like any other child error.
         run_config: The run-configuration record every child starts
             from (its ``inherited`` keys and ``timeout``; see
             :mod:`kiss.agents.sorcar.run_config`), extended per child
@@ -3698,7 +3729,7 @@ def run_tasks_parallel(
         is_parallel: Whether the children may fan out themselves (the
             parent's ``_is_parallel``).
         inherited_tools: The parent's extra tools (its ``_extra_tools``:
-            its SEA's ``add_to_tools()`` plus what it inherited),
+            its SEA's ``tools()`` plus what it inherited),
             added to each child after its own tools under names it
             lacks; dropped for a child on the ``none`` tool profile.
 

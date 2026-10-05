@@ -224,6 +224,11 @@ addopts = "-m 'not slow and not process_killer'"
 #     the SDK.
 filterwarnings = [
     "ignore:'_UnionGenericAlias' is deprecated.*:DeprecationWarning:google.genai.types",
+    # The remote webapp's terminal tab (kiss.server.terminal_tab) starts
+    # its shell with pty.fork() from the multi-threaded daemon, as
+    # pexpect and Jupyter's terminado do: the child only execs, which is
+    # the one thing that is safe after such a fork.
+    "ignore:This process .* is multi-threaded, use of forkpty\\(\\) may lead to deadlocks in the child:DeprecationWarning",
 ]
 
 [tool.coverage.run]

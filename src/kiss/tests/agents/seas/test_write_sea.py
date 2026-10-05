@@ -4,14 +4,15 @@
 # add your name here
 """End-to-end tests of the bundled ``/write`` agent (:mod:`kiss.agents.seas.write.write_sea`).
 
-The SEA defines ``description()``, ``add_to_system_prompt()`` and a
-``settings()`` with ``timeout`` only, so the tests check the things that
-matter: the slash command resolves to this file, a ``run_agent`` dispatch of
-it waits one hour by default (a shorter default wait once stopped a README
-rewrite before it was returned), the daemon-side loader stages its protocol
-as an addition to the system prompt, and a real :class:`ChatSorcarAgent` run
-configured that way (against the scripted local chat-completions server)
-sends the default system prompt with the protocol added, never replaced.
+The SEA class defines ``description()``, a ``system_prompt()`` that appends
+its protocol and a ``settings()`` with ``timeout`` only, so the tests check
+the things that matter: the slash command resolves to this file, a
+``run_agent`` dispatch of it waits one hour by default (a shorter default
+wait once stopped a README rewrite before it was returned), the daemon-side
+loader stages its protocol as a system-prompt hook that appends, and a real
+:class:`ChatSorcarAgent` run configured that way (against the scripted local
+chat-completions server) sends the default system prompt with the protocol
+added, never replaced.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import Any
 import yaml
 
 from kiss.agents.seas.write import write_sea
+from kiss.agents.seas.write.write_sea import WriteSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.agent_dispatch import resolve_timeout
 from kiss.agents.sorcar.agent_file import apply_agent_overrides
@@ -34,8 +36,8 @@ _SEA_PATH = Path(write_sea.__file__).resolve()
 
 def test_protocol_bans_the_tells_and_fixes_the_register() -> None:
     """The added protocol carries the user's constraints in words the model can act on."""
-    protocol = write_sea.add_to_system_prompt()
-    assert protocol == write_sea.SYSTEM_PROMPT
+    assert WriteSea().system_prompt("BASE") == "BASE\n\n" + write_sea.SYSTEM_PROMPT
+    protocol = write_sea.SYSTEM_PROMPT
     assert protocol.startswith("## Writing protocol (write)")
     for phrase in (
         "general reader",
@@ -57,7 +59,7 @@ def test_protocol_bans_the_tells_and_fixes_the_register() -> None:
 
 def test_description_is_one_sentence_naming_the_command() -> None:
     """``/write help`` returns the description without running the SEA."""
-    text = write_sea.description()
+    text = WriteSea().description()
     assert text.count(". ") == 0 and text.endswith(".")
     assert "/write" in text
     assert sea_commands.help_text_if_command("/write help") == text.strip()
@@ -77,7 +79,7 @@ def test_slash_write_resolves_to_the_bundled_sea() -> None:
     task_text, path = hit
     assert path == _SEA_PATH
     assert task_text == "a release note from CHANGELOG.md"
-    assert write_sea.settings() == {"timeout": write_sea.DISPATCH_TIMEOUT_SECONDS}
+    assert WriteSea().settings({}) == {"timeout": write_sea.DISPATCH_TIMEOUT_SECONDS}
     assert write_sea.DISPATCH_TIMEOUT_SECONDS == 3600
     settings = sea_commands.sea_settings(path)
     assert settings == {"kind": "session", "timeout": 3600.0}
@@ -88,14 +90,21 @@ def test_slash_write_resolves_to_the_bundled_sea() -> None:
     assert_no_removed_getters(write_sea)
 
 
-def test_loader_adds_the_protocol_after_the_callers_suffix() -> None:
-    """The daemon-side loader stages the protocol as an addition, touching nothing else."""
+def test_loader_stages_the_protocol_as_a_system_prompt_hook() -> None:
+    """The daemon-side loader stages a hook that appends the protocol, touching nothing else.
+
+    The caller's ``appendToSystemPrompt`` is not the SEA's business: the
+    hook receives the assembled prompt (default + suffix) and appends.
+    """
     cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER"}
-    assert apply_agent_overrides(cmd) == {"appendToSystemPrompt"}
-    assert cmd["appendToSystemPrompt"] == "CALLER\n\n" + write_sea.SYSTEM_PROMPT
+    assert apply_agent_overrides(cmd) == {"systemPromptHook"}
+    assert cmd["appendToSystemPrompt"] == "CALLER"
+    hook = cmd["systemPromptHook"]
+    assert hook("BASE\n\nCALLER") == "BASE\n\nCALLER\n\n" + write_sea.SYSTEM_PROMPT
+    assert "prompt" not in cmd and "toolsHook" not in cmd
     cmd = {"agentPath": str(_SEA_PATH)}
     apply_agent_overrides(cmd)
-    assert cmd["appendToSystemPrompt"] == write_sea.SYSTEM_PROMPT
+    assert cmd["systemPromptHook"]("BASE") == "BASE\n\n" + write_sea.SYSTEM_PROMPT
 
 
 def test_agent_run_sends_the_default_prompt_with_the_protocol_added(tmp_path: Path) -> None:
@@ -118,7 +127,7 @@ def test_agent_run_sends_the_default_prompt_with_the_protocol_added(tmp_path: Pa
             max_steps=3,
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
-            system_prompt=cmd["appendToSystemPrompt"],
+            system_prompt_hook=cmd["systemPromptHook"],
             web_tools=False,
             use_memory=False,
             is_parallel=False,

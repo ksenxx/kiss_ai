@@ -59,6 +59,8 @@ _SEAS_DIR = _SEA_PATH.parents[1]
 
 _PLAIN_SEA = '''"""Demo SEA with a plain prompt constant."""
 
+from kiss.agents.seas.base.base_sea import BaseSea
+
 SYSTEM_PROMPT = (
     "You run demo tasks. Always report the exit code. Always report the exit code. "
     "Always report the exit code. Always report the exit code. Always report the exit code. "
@@ -66,12 +68,17 @@ SYSTEM_PROMPT = (
 )
 
 
-def system_prompt() -> str:
-    """Replace the default prompt."""
-    return SYSTEM_PROMPT
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        """Replace the default prompt."""
+        return SYSTEM_PROMPT
+
+
 '''
 
 _FSTRING_SEA = '''"""Demo SEA with an f-string prompt constant."""
+
+from kiss.agents.seas.base.base_sea import BaseSea
 
 GATE = "uv run pytest -q"
 
@@ -84,28 +91,46 @@ short and cite every file you changed by path.
 """
 
 
-def add_to_system_prompt() -> str:
-    """Append to the default prompt."""
-    return SYSTEM_PROMPT
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        """Append to the default prompt."""
+        return system_prompt + "\\n\\n" + SYSTEM_PROMPT
+
+
 '''
 
 _TEMPLATE_SEA = '''"""Demo SEA whose prompt is a str.format template."""
 
+from kiss.agents.seas.base.base_sea import BaseSea
+
 SYSTEM_PROMPT = "You help {user}. Answer in {language}. Be brief."
 
 
-def system_prompt() -> str:
-    """Formatted at run time by a wrapper."""
-    return SYSTEM_PROMPT
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        """Formatted at run time by a wrapper."""
+        return SYSTEM_PROMPT
+
+
 '''
 
-_NOPROMPT_SEA = '''"""Demo SEA without a prompt getter."""
+_NOPROMPT_SEA = '''"""Demo SEA without a system_prompt method."""
+
+from kiss.agents.seas.base.base_sea import BaseSea
 
 
-def add_to_tools() -> list:
-    """No extra tools."""
-    return []
+class Sea(BaseSea):
+    def tools(self, tools):
+        """No extra tools."""
+        return tools + []
+
+
 '''
+
+
+def _prompt_of(path: Path, system_prompt: str = "") -> str:
+    """Return what the SEA at *path* makes of *system_prompt* (the daemon's prompt fold)."""
+    return sea_commands.base_system_prompt([sea_commands.load_sea(path)], system_prompt)
 
 
 @pytest.fixture
@@ -167,30 +192,36 @@ def _dispatch(agent: str, task: str) -> dict[str, Any]:
 
 def test_sea_getters_and_prompt_follow_the_contract() -> None:
     """The SEA replaces the system prompt, exposes its tools, and runs without a browser."""
+    rsi7d = sea.Rsi7dSea()
     # The prompt names the brand's state directory (``~/{{HOME_DIR}}/...``), rendered on read.
-    assert sea.system_prompt() == render_brand(sea.SYSTEM_PROMPT)
-    assert "{{HOME_DIR}}" in sea.SYSTEM_PROMPT and "{{" not in sea.system_prompt()
-    assert f"~/{HOME_DIR}/MODEL_INFO.json" in sea.system_prompt()
-    assert "--seas-dir" in sea.description() and "--seas-dir" in sea.SYSTEM_PROMPT
-    assert sea.settings() == {"max_budget": 2000.0, "use_memory": True, "use_web_tools": False}
-    # No preset named: the resolved settings are exactly those three keys under
-    # the default ``session`` preset; ``system_prompt()`` is a getter the daemon
+    assert rsi7d.system_prompt("DEFAULT PROMPT") == render_brand(sea.SYSTEM_PROMPT)
+    assert "{{HOME_DIR}}" in sea.SYSTEM_PROMPT and "{{" not in rsi7d.system_prompt("")
+    assert f"~/{HOME_DIR}/MODEL_INFO.json" in rsi7d.system_prompt("")
+    assert "--seas-dir" in rsi7d.description() and "--seas-dir" in sea.SYSTEM_PROMPT
+    declared = {"max_budget": 2000.0, "use_memory": True, "use_web_tools": False}
+    assert rsi7d.settings({}) == declared
+    assert rsi7d.settings({"model": "m", "max_budget": 1.0}) == {"model": "m", **declared}
+    # No kind named: the resolved settings are exactly those three keys under
+    # the default ``session`` kind; ``system_prompt`` is a method the daemon
     # applies separately, not a settings key.
-    assert resolve_settings(vars(sea)) == {"kind": "session", **sea.settings()}
-    assert "system_prompt" not in resolve_settings(vars(sea))
+    assert resolve_settings(declared) == {"kind": "session", **declared}
+    assert "system_prompt" not in resolve_settings(declared)
+    # The class is the contract: the module keeps no getter of the old shape.
     for legacy in (
-        "max_budget",
-        "use_memory",
-        "use_web_tools",
-        "append_to_system_prompt",
+        "settings",
+        "system_prompt",
         "add_to_system_prompt",
+        "append_to_system_prompt",
+        "add_to_tools",
         "tools",
         "tool_profile",
         "model",
         "prompt",
     ):
         assert not hasattr(sea, legacy), legacy
-    names = [t.__name__ for t in sea.add_to_tools()]
+    built_in = [_prompt_of]
+    assert rsi7d.tools(built_in)[:1] == built_in
+    names = [t.__name__ for t in rsi7d.tools([])]
     assert names == [
         "indexed_seas",
         "sea_runs",
@@ -224,7 +255,13 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert sea_commands.slash_command_task("/rsi7d") is None  # a slash command needs task text
     hit = sea_commands.slash_command_task("/rsi7d all")
     assert hit == ("all", _SEA_PATH)
-    assert sea_commands.sea_settings(_SEA_PATH) == resolve_settings(vars(sea))
+    assert sea_commands.sea_settings(_SEA_PATH) == resolve_settings(declared)
+    run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "all")
+    assert run.prompt == "all" and run.settings == resolve_settings(declared)
+    assert run.system_prompt_hook is not None and run.tools_hook is not None
+    assert run.system_prompt_hook("DEFAULT PROMPT") == rsi7d.system_prompt("")
+    assert [t.__name__ for t in run.tools_hook([])] == names
+    assert run.llm_call_hook is None and run.tool_call_hook is None
 
 
 def test_sea_name_of_handles_paths_channels_and_plain_subagents() -> None:
@@ -268,10 +305,10 @@ def test_indexed_seas_reports_editable_paths_and_prompt_shapes(checkout: Path) -
         "SYSTEM_PROMPT",
     )
     assert rows["demo"]["prompt_chars"] > 100
-    assert rows["fdemo"]["prompt_getter"] == "add_to_system_prompt"
+    assert rows["fdemo"]["prompt_getter"] == "system_prompt"  # appends: ``prompt + CONSTANT``
     assert rows["fdemo"]["prompt_constant"] == "SYSTEM_PROMPT"
     assert rows["fdemo"]["prompt_chars"] == len(
-        _FSTRING_SEA.split("SYSTEM_PROMPT = ", 1)[1].split("\n\n\ndef")[0]
+        _FSTRING_SEA.split("SYSTEM_PROMPT = ", 1)[1].split("\n\n\nclass")[0]
     )
     assert (rows["noprompt"]["prompt_getter"], rows["noprompt"]["prompt_constant"]) == ("", "")
     assert rows["rsi7d"]["registered_path"] == str(_SEA_PATH)
@@ -316,11 +353,12 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
     )
     _persist("plain", [_result_event(True)], result="<p>plain</p>", parent_task_id=parent, cost=0.5)
     fdemo = checkout / "fdemo" / "fdemo_sea.py"
-    fdemo_prompt = sea._execute_sea(fdemo)["add_to_system_prompt"]()
+    fdemo_prompt = _prompt_of(fdemo, "DEFAULT PROMPT")
+    assert fdemo_prompt.startswith("DEFAULT PROMPT\n\n# Demo f-string agent")
     side = _persist(
         "What have the task done so far?",
         [
-            {"type": "system_prompt", "text": "DEFAULT PROMPT\n\n" + fdemo_prompt},
+            {"type": "system_prompt", "text": fdemo_prompt},
             _result_event(False),
         ],
         result="<p>partial</p>",
@@ -561,12 +599,12 @@ def test_patch_sea_prompt_edits_plain_constants_through_the_gate(checkout: Path)
     section = "## Lessons from recent runs (rsi7d)\n- Batch independent greps into one Bash call."
     report = sea.patch_sea_prompt("demo", "", section)
     assert report.startswith("Patched SYSTEM_PROMPT of") and "+3 lines" in report
-    prompt = sea._execute_sea(checkout / "demo" / "demo_sea.py")["system_prompt"]()
+    prompt = _prompt_of(checkout / "demo" / "demo_sea.py")
     assert prompt.endswith("Never guess: read the file before editing it. \n\n" + section + "\n")
     assert sea.patch_sea_prompt(
         "demo", "one Bash call.", "one Bash call, never one per grep."
     ).startswith("Patched")
-    prompt = sea._execute_sea(checkout / "demo" / "demo_sea.py")["system_prompt"]()
+    prompt = _prompt_of(checkout / "demo" / "demo_sea.py")
     assert "one Bash call, never one per grep." in prompt
     assert sea.sea_prompt("demo").endswith(prompt)
     assert (
@@ -584,7 +622,7 @@ def test_patch_sea_prompt_edits_plain_constants_through_the_gate(checkout: Path)
     )
     assert sea._editable_path("/etc/passwd") is None
     assert sea.patch_sea_prompt("noprompt", "", "x").endswith(
-        "has no prompt getter returning a module-level string constant"
+        "has no system_prompt method returning a module-level string constant"
     )
     assert sea.sea_prompt("noprompt").startswith("Error:") and sea.sea_prompt("slack").startswith(
         "Error:"
@@ -611,7 +649,7 @@ def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Pa
         )
         in source
     )
-    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    prompt = _prompt_of(path)
     assert "Run the gate `uv run pytest -q` before you finish" in prompt
     assert prompt.endswith("- Quote {GATE} literally.\n")
     # A replacement inside the f-string source doubles braces in the new text.
@@ -619,7 +657,7 @@ def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Pa
         "fdemo", "Keep the summary\nshort", "Keep the summary {short}"
     ).startswith("Patched")
     assert "Keep the summary {{short}}" in path.read_text(encoding="utf-8")
-    assert "Keep the summary {short} and cite" in sea._execute_sea(path)["add_to_system_prompt"]()
+    assert "Keep the summary {short} and cite" in _prompt_of(path)
     ok_source = path.read_text(encoding="utf-8")
     # Closing the literal early would change code: rejected, file untouched.
     bad = sea.patch_sea_prompt("fdemo", "Never edit files", 'x"""\nimport os\ny = f"""z')
@@ -635,13 +673,23 @@ def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Pa
     # A single-quoted f-string takes an appended paragraph too.
     (checkout / "sdemo").mkdir()
     (checkout / "sdemo" / "sdemo_sea.py").write_text(
-        'GATE = "make test"\nSYSTEM_PROMPT = f"Run {GATE}. Be brief."\n\n\n'
-        'def system_prompt() -> str:\n    """Prompt."""\n    return SYSTEM_PROMPT\n',
+        '''
+from kiss.agents.seas.base.base_sea import BaseSea
+
+GATE = "make test"
+SYSTEM_PROMPT = f"Run {GATE}. Be brief."
+
+
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        """Prompt."""
+        return SYSTEM_PROMPT
+''',
         encoding="utf-8",
     )
     assert sea.patch_sea_prompt("sdemo", "", "- Cite files by path.").startswith("Patched")
     assert (
-        sea._execute_sea(checkout / "sdemo" / "sdemo_sea.py")["system_prompt"]()
+        _prompt_of(checkout / "sdemo" / "sdemo_sea.py")
         == "Run make test. Be brief.\n\n- Cite files by path.\n"
     )
     # Replacing text that lives in the appended plain segment must not double
@@ -649,7 +697,7 @@ def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Pa
     assert sea.patch_sea_prompt("sdemo", "files by path", "files {by} path").startswith("Patched")
     assert sea.patch_sea_prompt("sdemo", "Be brief", "Be {brief}").startswith("Patched")
     assert (
-        sea._execute_sea(checkout / "sdemo" / "sdemo_sea.py")["system_prompt"]()
+        _prompt_of(checkout / "sdemo" / "sdemo_sea.py")
         == "Run make test. Be {brief}.\n\n- Cite files {by} path.\n"
     )
     joined = sea.sea_prompt("sdemo")
@@ -672,7 +720,7 @@ def test_patch_sea_prompt_preserves_format_fields_and_restores_on_load_failure(
     )
     assert sea.patch_sea_prompt("tdemo", "Be brief.", "Be very brief.").startswith("Patched")
     assert (
-        sea._execute_sea(checkout / "tdemo" / "tdemo_sea.py")["system_prompt"]()
+        _prompt_of(checkout / "tdemo" / "tdemo_sea.py")
         == "You help {user}. Answer in {language}. Be very brief."
     )
     # A SEA whose prompt getter raises when the prompt contains a marker
@@ -680,10 +728,19 @@ def test_patch_sea_prompt_preserves_format_fields_and_restores_on_load_failure(
     fragile = checkout / "fragile" / "fragile_sea.py"
     fragile.parent.mkdir()
     fragile.write_text(
-        'SYSTEM_PROMPT = "Be good."\n\n\n'
-        'def system_prompt() -> str:\n    """Prompt."""\n'
-        '    if "BOOM" in SYSTEM_PROMPT:\n        raise RuntimeError("boom")\n'
-        "    return SYSTEM_PROMPT\n",
+        '''
+from kiss.agents.seas.base.base_sea import BaseSea
+
+SYSTEM_PROMPT = "Be good."
+
+
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        """Prompt."""
+        if "BOOM" in SYSTEM_PROMPT:
+            raise RuntimeError("boom")
+        return SYSTEM_PROMPT
+''',
         encoding="utf-8",
     )
     original = fragile.read_text(encoding="utf-8")
@@ -706,7 +763,7 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     monkeypatch.setenv("KISS_HOME", str(home))
     path = checkout / "autorouter" / "autorouter_sea.py"
     source = path.read_text(encoding="utf-8")
-    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    prompt = _prompt_of(path)
     assert autorouter_sea.NO_EVIDENCE in prompt and "{observed_evidence()}" not in prompt
     table = "| model | tasks |\n|---|---|\n| model-x | 12 |\n\n- model-x: no failures in 12 tasks."
     # The SEA stamps the file with its own UTC date; a call straddling midnight
@@ -724,28 +781,28 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
         for stamp in (before, after)
     }
     assert path.read_text(encoding="utf-8") == source
-    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    prompt = _prompt_of(path)
     assert written.strip() in prompt and autorouter_sea.NO_EVIDENCE not in prompt
     assert prompt.index("## Observed model evidence") < prompt.index(table) < prompt.index(
         "## Hard rules"
     )
     table_y = "| model | tasks |\n|---|---|\n| model-y | 3 |"
     assert sea.write_autorouter_evidence(table_y).startswith("Wrote ")
-    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    prompt = _prompt_of(path)
     assert "model-x" not in prompt and "model-y | 3" in prompt
     # A caller that repeats the stamp line does not duplicate it; a long
     # bullet is wrapped; a table row that does not fit is refused; an
     # empty text is refused; nothing partial is left behind.
     repeated = f"{sea.STAMP_PREFIX}, refreshed 2020-01-01 by /rsi7d._\n\n- " + "word " * 40
     assert sea.write_autorouter_evidence(repeated).startswith("Wrote ")
-    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    prompt = _prompt_of(path)
     assert prompt.count(sea.STAMP_PREFIX) == 1 and "2020-01-01" not in prompt
     assert "\n  word word" in prompt and max(len(line) for line in prompt.splitlines()) <= 92
     wide = "| model | " + "x" * 100 + " |"
     refused = sea.write_autorouter_evidence(wide)
     assert refused.startswith("Error: a line of the new text is longer than 92 characters")
     assert sea.write_autorouter_evidence("  \n") == "Error: the evidence text is empty"
-    assert "word word" in sea._execute_sea(path)["add_to_system_prompt"]()
+    assert "word word" in _prompt_of(path)
     assert sorted(p.name for p in home.iterdir()) == ["AUTOROUTER.md"]
     # The file goes into every autorouter prompt, so the stamped text is
     # capped at the size the autorouter cuts at; a text that would exceed
@@ -760,7 +817,7 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     stamped = f"{sea.STAMP_PREFIX}, refreshed {after} by /rsi7d._\n\n{rows}\n"
     assert len(stamped) > sea.EVIDENCE_MAX_CHARS
     (home / "AUTOROUTER.md").write_text(stamped, encoding="utf-8")
-    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    prompt = _prompt_of(path)
     spliced = prompt[prompt.index(sea.STAMP_PREFIX) : prompt.index("\n## Hard rules")].strip()
     kept, _blank, marker = spliced.rsplit("\n", 2)
     assert marker == autorouter_sea.EVIDENCE_CUT and _blank == ""
@@ -769,12 +826,12 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     # A file exactly at the cap is spliced whole.
     exact = stamped[: sea.EVIDENCE_MAX_CHARS]
     (home / "AUTOROUTER.md").write_text(exact, encoding="utf-8")
-    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    prompt = _prompt_of(path)
     assert exact.strip() in prompt and autorouter_sea.EVIDENCE_CUT not in prompt
     # Blank file: the SEA falls back to the sentence.  No autorouter SEA in
     # the editable folders: the tool refuses.
     (home / "AUTOROUTER.md").write_text("\n", encoding="utf-8")
-    assert autorouter_sea.NO_EVIDENCE in sea._execute_sea(path)["add_to_system_prompt"]()
+    assert autorouter_sea.NO_EVIDENCE in _prompt_of(path)
     path.unlink()
     refused = sea.write_autorouter_evidence("x")
     assert refused.startswith("Error: 'autorouter' is not an editable SEA")
@@ -921,19 +978,19 @@ def _run_registered(
     agent: WorktreeSorcarAgent, task: str, script: list[bytes], work_dir: Path
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run *agent* on *task* against the scripted model; return the raw result and requests."""
-    settings = resolve_settings(vars(sea))
+    run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], task)
     with serve(script) as (url, requests):
         result = agent.run(
-            prompt_template=task,
+            prompt_template=run.prompt,
             use_worktree=False,
             model_name=MODEL,
             work_dir=str(work_dir),
             max_steps=8,
-            max_budget=settings["max_budget"],
+            max_budget=run.settings["max_budget"],
             model_config={"base_url": url, "api_key": "local"},
-            tools=sea.add_to_tools(),
-            base_system_prompt=sea.system_prompt(),
-            web_tools=settings["use_web_tools"],
+            system_prompt_hook=run.system_prompt_hook,
+            tools_hook=run.tools_hook,
+            web_tools=run.settings["use_web_tools"],
             use_memory=False,
             is_parallel=False,
             verbose=False,
@@ -977,19 +1034,19 @@ def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
     assert parsed["success"] is True and parsed["summary"] == "<p>Patched demo.</p>", parsed
     assert len(agentic) == 4
     names = {t["function"]["name"] for t in agentic[0]["tools"]}
-    assert {t.__name__ for t in sea.add_to_tools()} <= names
+    assert {t.__name__ for t in sea.Rsi7dSea().tools([])} <= names
     # ``decide`` is not asserted: the Jev tool follows the "Use Jev"
     # setting and the OpenRouter key, not the SEA's tool list.
     assert {"Bash", "run_agent", "finish"} <= names
     system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
-    assert str(system["content"]).startswith(sea.system_prompt())
+    assert str(system["content"]).startswith(sea.Rsi7dSea().system_prompt(""))
     listing, refused, patched = _tool_results(agentic)
     scoped = json.loads(listing)
     assert scoped["scope"] == {"seas_dir": "", "names": ["demo", "fdemo"]}
     assert [row["name"] for row in scoped["seas"]] == ["demo", "fdemo"]
     assert refused == "Error: 'tdemo' is outside this run's scope ['demo', 'fdemo']"
     assert patched.startswith("Patched SYSTEM_PROMPT of")
-    demo_prompt = sea._execute_sea(checkout / "demo" / "demo_sea.py")["system_prompt"]()
+    demo_prompt = _prompt_of(checkout / "demo" / "demo_sea.py")
     assert demo_prompt.endswith(section + "\n")
     assert section not in (checkout / "tdemo" / "tdemo_sea.py").read_text(encoding="utf-8")
 
@@ -1036,7 +1093,7 @@ def test_agent_run_with_seas_dir_edits_only_that_folder(checkout: Path, tmp_path
     assert refused == f"Error: 'demo' is not an editable SEA under {folder.resolve()}"
     assert evidence == f"Error: 'autorouter' is not an editable SEA under {folder.resolve()}"
     assert patched.startswith("Patched SYSTEM_PROMPT of")
-    assert sea._execute_sea(alpha)["system_prompt"]().endswith(section + "\n")
+    assert _prompt_of(alpha).endswith(section + "\n")
     assert section not in (checkout / "demo" / "demo_sea.py").read_text(encoding="utf-8")
 
 

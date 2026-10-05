@@ -19,13 +19,15 @@ Three ways to run it::
 
     run_agent(agent="src/kiss/agents/seas/bestrouter/bestrouter_sea.py", task="...")
 
-``settings()`` and the module-level getters (``add_to_system_prompt()``,
-``register_as_model()``, ...) follow the SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
+The :class:`BestrouterSea` methods (``settings()``, ``system_prompt()``,
+``register_as_model()``, ...) follow the SEA contract in :mod:`kiss.agents.seas.base.base_sea`.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from kiss.agents.seas.base.base_sea import BaseSea
 
 PRIMARY_MODEL = "claude-fable-5-1"
 """The model that does every task."""
@@ -57,33 +59,33 @@ Use the model names literally without hallucinating new model names.
 """The routing protocol added to the system prompt of every run."""
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/bestrouter help``."""
-    return (
-        f"Runs every task on {PRIMARY_MODEL} and has {REVIEW_MODEL} review and debug the "
-        "result read-only through run_parallel on at most 75% of the task budget; pick "
-        "`bestrouter` in the model picker, use `/bestrouter <task>` in the chat, or "
-        'run_agent(agent="bestrouter", task="...").'
-    )
+class BestrouterSea(BaseSea):
+    """The ``/bestrouter`` SEA."""
 
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/bestrouter help``."""
+        return (
+            f"Runs every task on {PRIMARY_MODEL} and has {REVIEW_MODEL} review and debug the "
+            "result read-only through run_parallel on at most 75% of the task budget; pick "
+            "`bestrouter` in the model picker, use `/bestrouter <task>` in the chat, or "
+            'run_agent(agent="bestrouter", task="...").'
+        )
 
-def register_as_model() -> bool:
-    """List ``bestrouter`` in the model picker.
+    def register_as_model(self) -> bool:
+        """List ``bestrouter`` in the model picker.
 
-    A picked ``bestrouter`` makes the daemon run every task of the tab
-    through this SEA on :data:`PRIMARY_MODEL` (``settings()`` below), with
-    :data:`SYSTEM_PROMPT` added to the system prompt (``add_to_system_prompt()``).
-    """
-    return True
+        A picked ``bestrouter`` makes the daemon run every task of the tab
+        through this SEA on :data:`PRIMARY_MODEL` (``settings()`` below), with
+        :data:`SYSTEM_PROMPT` added to the system prompt (``system_prompt()``).
+        """
+        return True
 
+    def system_prompt(self, system_prompt: str) -> str:
+        """Add the routing protocol to the default Sorcar system prompt."""
+        return system_prompt + "\n\n" + SYSTEM_PROMPT
 
-def add_to_system_prompt() -> str:
-    """Add the routing protocol to the default Sorcar system prompt."""
-    return SYSTEM_PROMPT
-
-
-def settings() -> dict[str, Any]:
-    """Run every task of the tab on :data:`PRIMARY_MODEL`."""
-    return {"model": PRIMARY_MODEL}
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run every task of the tab on :data:`PRIMARY_MODEL`."""
+        return settings | {"model": PRIMARY_MODEL}
 
 

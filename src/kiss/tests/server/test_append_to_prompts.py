@@ -14,8 +14,8 @@ run's system prompt — right after the default ``SYSTEM.md`` prompt or
 the ``system_prompt`` replacement — and ``append_to_prompt`` is
 appended to the executed task prompt (to EACH subtask of a
 multi-``<task>`` prompt).  Both default to ``""`` (append nothing),
-are extended by an agent script's ``add_to_system_prompt()`` getter
-and ``prompt(task)`` getter, and are treated as untrusted
+are extended by a SEA's ``system_prompt(system_prompt)`` and
+``prompt(task)`` methods, and are treated as untrusted
 wire input by the daemon (non-string appends nothing).
 """
 
@@ -168,21 +168,23 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert SYSTEM_PROMPT[:80] not in sp
 
     def test_agent_script_additions_override(self) -> None:
-        """``add_to_system_prompt()`` and ``prompt(task)`` reach both prompts."""
+        """``system_prompt(system_prompt)`` and ``prompt(task)`` reach both prompts."""
         agent_path = self._write_py(
             "append_prompts_agent.py",
             f'''
-            """Agent script appending to both prompts."""
+            """SEA appending to both prompts."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
-            def add_to_system_prompt() -> str:
-                """Append a system prompt suffix."""
-                return {_SYS_MARKER!r}
+            class Sea(BaseSea):
+                def system_prompt(self, system_prompt: str) -> str:
+                    """Append a system prompt suffix."""
+                    return system_prompt + {_SYS_MARKER!r}
 
-
-            def prompt(task: str) -> str:
-                """Append a prompt suffix."""
-                return task + {_PROMPT_MARKER!r}
+                def prompt(self, task: str) -> str:
+                    """Append a prompt suffix."""
+                    return task + {_PROMPT_MARKER!r}
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -212,10 +214,15 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             '''
             """Agent script with an unknown setting."""
 
+            from kiss.agents.seas.base.base_sea import BaseSea
 
-            def settings() -> dict:
-                """Return a key that is not a setting."""
-                return {"add_to_prompt": "suffix"}
+
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    """Return a key that is not a setting."""
+                    return settings | {"add_to_prompt": "suffix"}
+
+
             ''',
         )
         calls: list[dict[str, Any]] = []

@@ -5,8 +5,8 @@
 """Write agent: prose in a natural human tone that a general reader can follow.
 
 The agent is the plain Sorcar agent with one change: :data:`SYSTEM_PROMPT`,
-a writing protocol, is added to the system prompt through the
-``add_to_system_prompt()`` getter (:mod:`kiss.agents.sorcar.agent_file`, ``ADD_FIELDS``).
+a writing protocol, is added to the system prompt by the SEA's
+``system_prompt`` method (:mod:`kiss.agents.seas.base.base_sea`).
 The protocol fixes the register (concise, professional American English for
 a general audience), lists the vocabulary and sentence patterns that mark
 machine-written text and bans them, and ends with an edit pass that checks the
@@ -28,6 +28,8 @@ final answer.
 from __future__ import annotations
 
 from typing import Any
+
+from kiss.agents.seas.base.base_sea import BaseSea
 
 SYSTEM_PROMPT = """\
 ## Writing protocol (write)
@@ -141,29 +143,30 @@ DISPATCH_TIMEOUT_SECONDS = 3600.0
 """Seconds a ``run_agent`` call waits for a ``/write`` run (the ``timeout`` of :func:`settings`)."""
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/write help``."""
-    return (
-        "Writes concise, professional American English for a general audience that reads "
-        "as if a person wrote it, with the vocabulary and sentence patterns of machine text "
-        "banned; use `/write <what to write, its sources and, optionally, the output path>` "
-        'in the chat or run_agent(agent="write", task="...").'
-    )
+class WriteSea(BaseSea):
+    """The ``/write`` SEA."""
 
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/write help``."""
+        return (
+            "Writes concise, professional American English for a general audience that reads "
+            "as if a person wrote it, with the vocabulary and sentence patterns of machine text "
+            "banned; use `/write <what to write, its sources and, optionally, the output path>` "
+            'in the chat or run_agent(agent="write", task="...").'
+        )
 
-def add_to_system_prompt() -> str:
-    """Add the writing protocol to the default Sorcar system prompt."""
-    return SYSTEM_PROMPT
+    def system_prompt(self, system_prompt: str) -> str:
+        """Add the writing protocol to the default Sorcar system prompt."""
+        return system_prompt + "\n\n" + SYSTEM_PROMPT
 
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Let a ``/write`` run take up to :data:`DISPATCH_TIMEOUT_SECONDS`.
 
-def settings() -> dict[str, Any]:
-    """Let a ``/write`` run take up to :data:`DISPATCH_TIMEOUT_SECONDS`.
-
-    Rewriting a long document means reading every source in full,
-    writing, editing, and running the tests that check the file; the
-    ``timeout`` tells a ``run_agent`` call how long to block for the run
-    before returning its ``agent_job`` id and letting it finish detached.
-    """
-    return {"timeout": DISPATCH_TIMEOUT_SECONDS}
+        Rewriting a long document means reading every source in full,
+        writing, editing, and running the tests that check the file; the
+        ``timeout`` tells a ``run_agent`` call how long to block for the run
+        before returning its ``agent_job`` id and letting it finish detached.
+        """
+        return settings | {"timeout": DISPATCH_TIMEOUT_SECONDS}
 
 

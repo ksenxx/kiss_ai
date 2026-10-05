@@ -1725,6 +1725,11 @@ body.content-tab-open #send-btn { display: none !important; }
 #theme-btn { display: none; }
 body.remote-chat #theme-btn { display: flex; }
 
+/* The terminal tab only exists on the remote webapp; a VS Code window
+   has its own integrated terminal. */
+#terminal-btn { display: none; }
+body.remote-chat #terminal-btn { display: flex; }
+
 /* Anchored to the pill's right edge; positionModelDD() in main.js
    shifts it right when that anchor would push it past the left
    viewport edge (narrow phones, narrow sidebars), so the list is
@@ -5041,6 +5046,48 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+/* A shell on the daemon machine as a tab (terminalTab.js): xterm.js
+   fills the tab; the fit addon sizes the shell's pty to the surface. */
+#content-tab-area .terminal-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  padding: var(--space-1) 0 0 var(--space-1);
+  box-sizing: border-box;
+}
+
+#content-tab-area .terminal-surface {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+#content-tab-area .terminal-surface .xterm {
+  height: 100%;
+}
+
+#content-tab-area .terminal-load-error {
+  padding: var(--space-3);
+  color: var(--error);
+  font-size: var(--fs-sm);
+}
+
+/* xterm.css paints the scroll viewport black (xterm 6 themes its
+   scrollable node, not this one); the rows never fill the last few
+   pixels, which showed as a black strip under a light theme. */
+#content-tab-area .terminal-surface .xterm .xterm-viewport {
+  background-color: transparent;
+}
+
+.content-tab-icon.terminal-tab-icon {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-weight: 700;
+  font-size: var(--fs-xs);
 }
 
 /* The daemon machine's browser streamed as a tab (browserTab.js): an

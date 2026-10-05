@@ -143,38 +143,56 @@ def test_kinds_are_pure_dicts_and_channel_is_worker_plus_work_dir(
     assert table["worker"] == WORKER_DEFAULTS
     assert table["channel"] == {**WORKER_DEFAULTS, "work_dir": str(home.kiss_home / "channel_work")}
     # A kind is defaults only: an explicit key wins; the kind itself is kept.
-    resolved = resolve_settings({"settings": lambda: {"kind": "channel", "work_dir": "/w"}})
+    resolved = resolve_settings({"kind": "channel", "work_dir": "/w"})
     assert resolved["kind"] == "channel" and resolved["work_dir"] == "/w"
-    assert resolve_settings({"settings": lambda: {}})["kind"] == "session"
+    assert resolve_settings({})["kind"] == "session"
     with pytest.raises(
         SettingsError,
         match="settings\\(\\)\\['kind'\\] must be one of session, worker, channel; got 'agent'",
     ):
-        resolve_settings({"settings": lambda: {"kind": "agent"}})
+        resolve_settings({"kind": "agent"})
     # The former second axis is gone: ``preset`` is a renamed key, ``inherit`` a removed one.
     with pytest.raises(
         SettingsError, match="key 'preset' was renamed to 'kind'; run `uv run sea lint --fix`",
     ):
-        resolve_settings({"settings": lambda: {"preset": "worker"}})
+        resolve_settings({"preset": "worker"})
     with pytest.raises(
         SettingsError, match="key 'inherit' was removed: a `channel` run never inherits",
     ):
-        resolve_settings({"settings": lambda: {"inherit": False}})
+        resolve_settings({"inherit": False})
     assert "preset" not in SETTING_TYPES and "inherit" not in SETTING_TYPES
     # None of the script-only keys travels the wire.
-    assert set(DISPATCHER_SETTINGS) == {"kind", "extends", "timeout", "locked", "hidden"}
+    assert set(DISPATCHER_SETTINGS) == {"kind", "timeout", "locked", "hidden"}
     assert not set(DISPATCHER_SETTINGS) & set(SETTING_FIELDS)
 
 
 def test_daemon_keys_on_the_channel_kind(home: IsolatedKissHome, tmp_path: Path) -> None:
-    """Workspace, preamble, scratch work_dir and the extends refusal follow ``kind: "channel"``."""
+    """Workspace, preamble and the scratch work_dir follow ``kind: "channel"``, inherited too."""
     channel = _write(
         tmp_path / "chan" / "chan_sea.py",
-        "def description():\n    return 'p'\ndef settings():\n    return {'kind': 'channel'}\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'p'
+
+    def settings(self, settings):
+        return settings | {'kind': 'channel'}
+""",
     )
     worker = _write(
         tmp_path / "worker" / "worker_sea.py",
-        "def description():\n    return 'w'\ndef settings():\n    return {'kind': 'worker'}\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'w'
+
+    def settings(self, settings):
+        return settings | {'kind': 'worker'}
+""",
     )
     cmd: dict[str, Any] = {"agentPath": str(channel), "prompt": "p", "workspace": "acct"}
     layers = load_layers(cmd)
@@ -186,22 +204,38 @@ def test_daemon_keys_on_the_channel_kind(home: IsolatedKissHome, tmp_path: Path)
     assert cmd["appendToSystemPrompt"].startswith(preamble)
     layers = load_layers({"agentPath": str(worker)})
     assert not is_channel(layers) and channel_workspace({"agentPath": str(worker)}, layers) == ""
-    derived = _write(
-        tmp_path / "derived" / "derived_sea.py",
-        f"def description():\n    return 'd'\n"
-        f"def settings():\n    return {{'extends': {str(channel)!r}}}\n",
-    )
-    with pytest.raises(SeaScriptError, match="cannot extend the channel agent script"):
-        sea_layers(derived)
+    # A SEA deriving from the channel's class is a channel itself.
+    derived = _write(tmp_path / "derived" / "derived_sea.py", f"""
+from kiss.agents.sorcar.sea_commands import sea_class
+
+class Derived(sea_class({str(channel)!r})):
+    def description(self):
+        return 'd'
+""")
+    layers = load_layers({"agentPath": str(derived)})
+    assert is_channel(layers)
+    assert channel_workspace({"agentPath": str(derived)}, layers) == "default"
 
 
 def test_dispatcher_inherits_unless_channel_or_inherit_false(
     captured: list[dict[str, Any]], tmp_path: Path, home: IsolatedKissHome,
 ) -> None:
     """The kind and the call's ``inherit`` option decide the dispatch; a channel never inherits."""
-    plain = _write(tmp_path / "plain_sea.py", "def settings():\n    return {}\n")
+    plain = _write(tmp_path / "plain_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {}
+""")
     channel = _write(
-        tmp_path / "chan_sea.py", "def settings():\n    return {'kind': 'channel'}\n",
+        tmp_path / "chan_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'kind': 'channel'}
+""",
     )
     run_agent = make_run_agent_tool(str(home.repo))
     run_agent("t", str(plain))
@@ -245,11 +279,29 @@ def test_run_parallel_refuses_pinned_settings_and_options_loudly(
     home: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = home.repo
-    _write(repo / "wt_sea.py", "def settings():\n    return {'use_worktree': True}\n")
-    _write(repo / "chat_sea.py", "def settings():\n    return {'chat_id': 'c-9'}\n")
+    _write(repo / "wt_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'use_worktree': True}
+""")
+    _write(repo / "chat_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'chat_id': 'c-9'}
+""")
     _write(
         repo / "fine_sea.py",
-        "def settings():\n    return {'timeout': 5, 'use_worktree': False}\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'timeout': 5, 'use_worktree': False}
+""",
     )
     agent = _bare_agent(repo)
     fanned: list[dict[str, Any]] = []
@@ -299,13 +351,25 @@ def test_run_parallel_refuses_pinned_settings_and_options_loudly(
 
 
 def test_add_to_prompt_setting_is_rejected_and_task_id_lives_in_prompt(tmp_path: Path) -> None:
-    old = _write(tmp_path / "old_sea.py", "def settings():\n    return {'add_to_prompt': 'x'}\n")
+    old = _write(tmp_path / "old_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'add_to_prompt': 'x'}
+""")
     with pytest.raises(SeaScriptError, match=r"settings\(\) has an unknown key 'add_to_prompt'"):
         sea_settings(old)
     assert "add_to_prompt" not in SETTING_TYPES
     new = _write(
         tmp_path / "new_sea.py",
-        "def prompt(task):\n    return task + ' (about task {task_id})'\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def prompt(self, task):
+        return task + ' (about task {task_id})'
+""",
     )
     cmd: dict[str, Any] = {"agentPath": str(new), "prompt": "why?", "parentTaskId": "T-7",
                            "appendToPrompt": "caller {task_id}"}
@@ -314,11 +378,17 @@ def test_add_to_prompt_setting_is_rejected_and_task_id_lives_in_prompt(tmp_path:
     assert cmd["appendToPrompt"] == "caller {task_id}"
     # The non-empty check applies to the text AFTER substitution: with no
     # parent task a prompt made only of the placeholder is empty.
-    only_id = _write(tmp_path / "only_id_sea.py", "def prompt(task):\n    return '{task_id}'\n")
+    only_id = _write(tmp_path / "only_id_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def prompt(self, task):
+        return '{task_id}'
+""")
     layers = sea_layers(only_id)
-    assert sea_commands.sea_prompt(layers, "hello", "T-7") == "T-7"
+    assert sea_commands.base_prompt(layers, "hello", "T-7") == "T-7"
     with pytest.raises(SeaScriptError, match="prompt\\(\\) of agent script .* non-empty string"):
-        sea_commands.sea_prompt(layers, "hello", "")
+        sea_commands.base_prompt(layers, "hello", "")
     # The option form of an appended text stays available to a caller.
     assert agent_dispatch.OPTION_TYPES["add_to_prompt"] is str
     assert run_tool_doc_mentions("add_to_prompt")
@@ -360,7 +430,10 @@ def test_cron_is_a_registered_command_and_agent_resolves_by_three_rules(
     commands = sea_commands.refresh_registry()
     assert "cron" in commands and "ntfy" in commands
     assert sea_commands.get_command("cron") == Path(cron_agent.__file__).resolve()
-    assert sea_commands.help_text_if_command("/cron help") == cron_agent.description()
+    cron_path = Path(cron_agent.__file__).resolve()
+    assert sea_commands.help_text_if_command("/cron help") == (
+        sea_commands.load_sea(cron_path).description()
+    )
     assert sea_commands.slash_command_task("/cron list the jobs") == (
         "list the jobs", Path(cron_agent.__file__).resolve(),
     )
@@ -388,14 +461,38 @@ def test_cron_is_a_registered_command_and_agent_resolves_by_three_rules(
 def test_an_empty_model_setting_means_no_override(
     captured: list[dict[str, Any]], tmp_path: Path,
 ) -> None:
-    blank = _write(tmp_path / "blank_sea.py", "def settings():\n    return {'model': ''}\n")
+    blank = _write(tmp_path / "blank_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': ''}
+""")
     assert "model" not in sea_settings(blank)
-    none = _write(tmp_path / "none_sea.py", "def settings():\n    return {'model': None}\n")
+    none = _write(tmp_path / "none_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': None}
+""")
     assert sea_settings(none) == sea_settings(blank) == {"kind": "session"}
-    named = _write(tmp_path / "named_sea.py", "def settings():\n    return {'model': 'm-1'}\n")
+    named = _write(tmp_path / "named_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm-1'}
+""")
     assert sea_settings(named)["model"] == "m-1"
     # Other empty strings keep their meaning (``chat_id: ""`` is a fresh chat).
-    fresh = _write(tmp_path / "fresh_sea.py", "def settings():\n    return {'chat_id': ''}\n")
+    fresh = _write(tmp_path / "fresh_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'chat_id': ''}
+""")
     assert sea_settings(fresh)["chat_id"] == ""
 
 
@@ -410,17 +507,43 @@ def test_slash_check_reports_the_effective_run_or_the_first_error(
     folder = tmp_path / "seas"
     _write(
         folder / "good" / "good_sea.py",
-        "def description():\n    return 'Good things.'\n"
-        "def settings():\n    return {'kind': 'worker', 'model': 'm-1', 'timeout': 60}\n"
-        "def prompt(task):\n    return '[good] ' + task + ' #{task_id}'\n"
-        "def add_to_system_prompt():\n    return 'protocol'\n"
-        "def probe(x: str) -> str:\n    \"\"\"Probe x.\"\"\"\n    return x\n"
-        "def add_to_tools():\n    return [probe]\n",
+        '''
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'Good things.'
+
+    def settings(self, settings):
+        return settings | {'kind': 'worker', 'model': 'm-1', 'timeout': 60}
+
+    def prompt(self, task):
+        return '[good] ' + task + ' #{task_id}'
+
+    def system_prompt(self, system_prompt):
+        return system_prompt + '\\n\\nprotocol'
+
+    def tools(self, tools):
+        return tools + [probe]
+
+
+def probe(x: str) -> str:
+    """Probe x."""
+    return x
+''',
     )
     _write(
         folder / "broken" / "broken_sea.py",
-        "def description():\n    return 'Broken.'\n"
-        "def settings():\n    return {'kind': 'nope'}\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'Broken.'
+
+    def settings(self, settings):
+        return settings | {'kind': 'nope'}
+""",
     )
     (home.kiss_home / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
     sea_commands.refresh_registry()
@@ -428,14 +551,14 @@ def test_slash_check_reports_the_effective_run_or_the_first_error(
     assert report is not None
     lines = report.splitlines()
     assert lines[0] == "/good: Good things."
-    assert lines[1] == "layers: good"
+    assert lines[1] == "classes: BaseSea > Sea"
     assert lines[2] == "kind: worker"
     settings = json.loads(lines[3].removeprefix("settings: "))
     assert settings["model"] == "m-1" and settings["timeout"] == 60
     assert settings["use_worktree"] is False
     assert lines[4] == "model: m-1"
     assert lines[5] == "tools added: probe"
-    assert lines[6] == "getters and hooks defined: add_to_system_prompt, prompt"
+    assert lines[6] == "methods defined: system_prompt, prompt, tools"
     assert lines[7] == "prompt for <the task text>: [good] <the task text> #<task id>"
     broken = sea_commands.help_text_if_command("/broken CHECK")
     assert broken is not None and broken.startswith("/broken is broken: agent script ")
@@ -444,43 +567,72 @@ def test_slash_check_reports_the_effective_run_or_the_first_error(
     # ``__name__`` (a partial) is reported by its type, not a crash.
     picker = _write(
         tmp_path / "picker_sea.py",
-        "import functools\n"
-        "def description():\n    return 'Picker.'\n"
-        "def register_as_model():\n    return True\n"
-        "def on_picked_as_model(work_dir):\n    return 'ok'\n"
-        "def add_to_tools():\n    return [functools.partial(print, 'x')]\n",
+        """
+import functools
+from kiss.agents.seas.base.base_sea import BaseSea
+class Sea(BaseSea):
+    def description(self):
+        return 'Picker.'
+
+    def register_as_model(self):
+        return True
+
+    def on_picked_as_model(self, work_dir):
+        return 'ok'
+
+    def tools(self, tools):
+        return tools + [functools.partial(print, 'x')]
+""",
     )
     report = sea_commands.sea_check("picker", picker)
     assert "tools added: partial" in report
-    assert "getters and hooks defined: register_as_model, on_picked_as_model" in report
+    assert "methods defined: tools, register_as_model, on_picked_as_model" in report
     bad_register = _write(
         tmp_path / "bad_register_sea.py",
-        "def description():\n    return 'Bad.'\n"
-        "def register_as_model():\n    return 'yes'\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'Bad.'
+
+    def register_as_model(self):
+        return 'yes'
+""",
     )
     assert "register_as_model() of agent script " in sea_commands.sea_check("b", bad_register)
     assert "must return a bool, got str" in sea_commands.sea_check("b", bad_register)
     for body in (
-        "def on_picked_as_model():\n    return 17\n",
-        "def on_picked_as_model(*, work_dir):\n    return 'ok'\n",
+        "    def on_picked_as_model(self):\n        return 17\n",
+        "    def on_picked_as_model(self, *, work_dir):\n        return 'ok'\n",
     ):
         bad_picked = _write(
-            tmp_path / "bad_picked_sea.py", "def description():\n    return 'Bad.'\n" + body,
+            tmp_path / "bad_picked_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'Bad.'
+""" + body,
         )
         report = sea_commands.sea_check("b", bad_picked)
-        assert "must take one positional argument (work_dir)" in report, report
-    not_callable = _write(
-        tmp_path / "bad_picked_sea.py",
-        "def description():\n    return 'Bad.'\non_picked_as_model = None\n",
-    )
-    report = sea_commands.sea_check("b", not_callable)
-    assert report.startswith("/b is broken: on_picked_as_model of agent script "), report
-    assert "must be a callable, got NoneType" in report
-    # A builtin without an introspectable signature is callable with one
-    # argument at pick time; the check accepts it instead of crashing.
+        assert report.startswith("/b is broken: on_picked_as_model() of agent script "), report
+        # Checked by shape, never called: picking a model has side effects.
+        assert "must accept the work directory as its one argument" in report, report
+    # Module-level names are not hooks: only the class's methods count.
     builtin = _write(
         tmp_path / "builtin_picked_sea.py",
-        "def description():\n    return 'Builtin.'\non_picked_as_model = str\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return 'Builtin.'
+
+
+on_picked_as_model = str
+register_as_model = None
+""",
     )
     assert sea_commands.sea_check("b", builtin).startswith("/b: Builtin.")
     # ``check`` is reserved like ``help``: it never runs the SEA.
@@ -704,7 +856,13 @@ class ClassifierNeverDemotesAPinnedWorktreeTest(unittest.TestCase):
         self.server.work_dir = str(self.home.repo)
         self.pinned = _write(
             self.home.repo / "pinned_sea.py",
-            "def settings():\n    return {'use_worktree': True}\n",
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'use_worktree': True}
+""",
         )
 
     def tearDown(self) -> None:

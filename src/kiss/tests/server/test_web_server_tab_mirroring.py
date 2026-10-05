@@ -756,11 +756,15 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
             # setup window while the late client connects.
             tools_py = Path(self.tmpdir) / "slow_agent.py"
             tools_py.write_text(
-                "import time\n"
-                "for _ in range(1200):\n"
-                "    time.sleep(0.05)\n"
-                "def add_to_tools():\n"
-                "    return []\n",
+                """
+import time
+from kiss.agents.seas.base.base_sea import BaseSea
+for _ in range(1200):
+    time.sleep(0.05)
+class Sea(BaseSea):
+    def tools(self, tools):
+        return tools + []
+""",
                 encoding="utf-8",
             )
             tab_id = "api-panel-window"

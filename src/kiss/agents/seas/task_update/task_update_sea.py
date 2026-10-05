@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core.brand import HOME_DIR
 
 PROMPT_TEMPLATE = (
@@ -70,14 +71,33 @@ say so and report its final result.
 """
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/task_update help``."""
-    return (
-        "Reports what a running or finished Sorcar task has done so far and its partial "
-        f"results by reading its persisted transcript from ~/{HOME_DIR}/history.db; use it as "
-        '`/task_update <task_id>` in the chat or `run_agent(agent="task_update", '
-        'task="<task_id>")`.'
-    )
+class TaskUpdateSea(BaseSea):
+    """The ``/task_update`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/task_update help``."""
+        return (
+            "Reports what a running or finished Sorcar task has done so far and its partial "
+            f"results by reading its persisted transcript from ~/{HOME_DIR}/history.db; use it as "
+            '`/task_update <task_id>` in the chat or `run_agent(agent="task_update", '
+            'task="<task_id>")`.'
+        )
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
+        return SYSTEM_PROMPT
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
+        return settings | {
+            "kind": "worker",
+            "tool_profile": "bash",
+            "max_budget": 1.0,
+        }
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the agent's tools: :func:`task_transcript`."""
+        return tools + [task_transcript]
 
 
 def build_prompt(task_id: str) -> str:
@@ -115,24 +135,5 @@ def task_transcript(task_id: str, start: int = 0, count: int = 150) -> str:
     from kiss.agents.sorcar.task_digest import transcript_page
 
     return transcript_page(task_id, start, count)
-
-
-def system_prompt() -> str:
-    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
-    return SYSTEM_PROMPT
-
-
-def settings() -> dict[str, Any]:
-    """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
-    return {
-        "kind": "worker",
-        "tool_profile": "bash",
-        "max_budget": 1.0,
-    }
-
-
-def add_to_tools() -> list[Any]:
-    """Return the agent's tools: :func:`task_transcript`."""
-    return [task_transcript]
 
 

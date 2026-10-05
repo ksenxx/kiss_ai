@@ -380,11 +380,12 @@ class TestMergeSea:
         # preset (no parallelism, web, memory, worktree, commits or
         # classification — a merge runs on the real checkout) with the
         # budget cap; ``system_prompt()`` supplies the base prompt.
-        assert merge_sea.system_prompt() == merge_sea.SYSTEM_PROMPT
-        assert merge_sea.settings() == {
+        sea = merge_sea.MergeSea()
+        assert sea.system_prompt("ASSEMBLED") == merge_sea.SYSTEM_PROMPT
+        assert sea.settings({}) == {
             "kind": "worker", "max_budget": merge_sea.MAX_BUDGET_USD,
         }
-        resolved = resolve_settings(vars(merge_sea))
+        resolved = resolve_settings(sea.settings({}))
         assert resolved["kind"] == "worker"
         assert resolved["allow_fan_out"] is False
         assert resolved["use_web_tools"] is False
@@ -410,11 +411,12 @@ class TestMergeSea:
         assert "- a.py\n- b.md" in task
         assert "<task>\ndo X\n</task>" in task
         assert "<task>" not in merge_sea.conflict_task(Path("/r"), "b", "main", ["a.py"])
-        # ``prompt(task)`` (the SEA getter) adds the standing instructions
+        # ``prompt(task)`` (the SEA method) adds the standing instructions
         # to the facts block and to a ``/merge <text>`` task alike.
-        prompt = merge_sea.prompt(task)
+        sea = merge_sea.MergeSea()
+        prompt = sea.prompt(task)
         assert prompt.startswith(task) and prompt.endswith("Do not commit.")
-        assert "stage the resolved files with `git add`" in merge_sea.prompt("finish merge X")
+        assert "stage the resolved files with `git add`" in sea.prompt("finish merge X")
 
     def test_merge_is_a_registered_slash_command(self) -> None:
         sea_commands._reset_for_tests()

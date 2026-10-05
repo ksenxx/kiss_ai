@@ -47,18 +47,21 @@ _BLOCKING_SCRIPT = textwrap.dedent(
     import pathlib
     import time
 
+    from kiss.agents.seas.base.base_sea import BaseSea
+
     _DIR = pathlib.Path(__file__).resolve().parent
 
 
-    def settings():
-        \"\"\"Block until released, then raise (the task ends in setup).\"\"\"
-        (_DIR / "entered-{marker}").write_text("1", encoding="utf-8")
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            if (_DIR / "release-{marker}").exists():
-                raise RuntimeError("released")
-            time.sleep(0.02)
-        raise RuntimeError("timed out waiting for the release")
+    class Sea(BaseSea):
+        def settings(self, settings):
+            \"\"\"Block until released, then raise (the task ends in setup).\"\"\"
+            (_DIR / "entered-{marker}").write_text("1", encoding="utf-8")
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                if (_DIR / "release-{marker}").exists():
+                    raise RuntimeError("released")
+                time.sleep(0.02)
+            raise RuntimeError("timed out waiting for the release")
     """
 )
 

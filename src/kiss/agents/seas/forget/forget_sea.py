@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from kiss.agents.seas.agents_md import list_instructions, remove_instruction
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core.brand import HOME_DIR
 
 SYSTEM_PROMPT = (
@@ -46,13 +47,32 @@ SYSTEM_PROMPT = (
 """The whole base system prompt of the forget agent (replaces ``SYSTEM.md``)."""
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/forget help``."""
-    return (
-        f"Removes a standing instruction that /remember stored in ~/{HOME_DIR}/AGENTS.md so "
-        "later tasks stop following it; use it as `/forget <instruction text>` in the "
-        'chat or `run_agent(agent="forget", task="<instruction text>")`.'
-    )
+class ForgetSea(BaseSea):
+    """The ``/forget`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/forget help``."""
+        return (
+            f"Removes a standing instruction that /remember stored in ~/{HOME_DIR}/AGENTS.md so "
+            "later tasks stop following it; use it as `/forget <instruction text>` in the "
+            'chat or `run_agent(agent="forget", task="<instruction text>")`.'
+        )
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
+        return SYSTEM_PROMPT
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
+        return settings | {
+            "kind": "worker",
+            "tool_profile": "bash",
+            "max_budget": 1.0,
+        }
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the agent's tools: :func:`forget_instruction` and ``list_instructions``."""
+        return tools + [forget_instruction, list_instructions]
 
 
 def forget_instruction(instruction: str) -> str:
@@ -71,24 +91,5 @@ def forget_instruction(instruction: str) -> str:
         written, or an error listing the stored instructions.
     """
     return remove_instruction(instruction)
-
-
-def system_prompt() -> str:
-    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
-    return SYSTEM_PROMPT
-
-
-def settings() -> dict[str, Any]:
-    """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
-    return {
-        "kind": "worker",
-        "tool_profile": "bash",
-        "max_budget": 1.0,
-    }
-
-
-def add_to_tools() -> list[Any]:
-    """Return the agent's tools: :func:`forget_instruction` and ``list_instructions``."""
-    return [forget_instruction, list_instructions]
 
 

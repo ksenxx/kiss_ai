@@ -43,6 +43,7 @@ from urllib.parse import quote
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -83,13 +84,39 @@ _DEFAULT_OAUTH_BASE = "https://github.com"
 _DEFAULT_SCOPE = "repo read:org read:user"
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/github help``."""
-    return (
-        "Works with GitHub repositories, issues, pull requests, commits and files through the "
-        "GitHub REST API after a device-flow sign-in (outbound only, no message polling); use "
-        'it as run_agent(agent="github", task="...") or the `kiss-github -t <task>` CLI.'
-    )
+class GithubSea(BaseSea):
+    """The ``/github`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/github help``."""
+        return (
+            "Works with GitHub repositories, issues, pull requests, commits and files through the "
+            "GitHub REST API after a device-flow sign-in (outbound only, no message polling); use "
+            'it as run_agent(agent="github", task="...") or the `kiss-github -t <task>` CLI.'
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the GitHub channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + GitHubAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + GitHubAgent.channel_system_prompt
 
 
 def _device_provider() -> DeviceFlowProvider:
@@ -1386,32 +1413,6 @@ def main() -> None:
         channel_name="GitHub",
         make_backend=None,
     )
-
-
-def add_to_tools() -> list:
-    """Return the GitHub channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return GitHubAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return GitHubAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

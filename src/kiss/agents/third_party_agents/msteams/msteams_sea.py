@@ -33,6 +33,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -87,14 +88,40 @@ _NOT_AUTHENTICATED = (
 _TENANT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}")
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/msteams help``."""
-    return (
-        "Lists teams, channels, chats and members and reads or posts channel and chat "
-        "messages in Microsoft Teams through Microsoft Graph as the user signed in with the "
-        'device code flow; use it with `run_agent(agent="msteams", task="...")` or the '
-        "`kiss-msteams -t '...'` CLI."
-    )
+class MsteamsSea(BaseSea):
+    """The ``/msteams`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/msteams help``."""
+        return (
+            "Lists teams, channels, chats and members and reads or posts channel and chat "
+            "messages in Microsoft Teams through Microsoft Graph as the user signed in with the "
+            'device code flow; use it with `run_agent(agent="msteams", task="...")` or the '
+            "`kiss-msteams -t '...'` CLI."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Microsoft Teams channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + MSTeamsAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + MSTeamsAgent.channel_system_prompt
 
 
 def _login_base() -> str:
@@ -853,32 +880,6 @@ def main() -> None:
         channel_name="MS Teams",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Microsoft Teams channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return MSTeamsAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return MSTeamsAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

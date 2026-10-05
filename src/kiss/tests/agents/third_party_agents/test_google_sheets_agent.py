@@ -286,7 +286,7 @@ def test_clear_auth_removes_connection_and_relocks(composio) -> None:
 
 def test_tools_module_function() -> None:
     """Module-level tools() returns the auth tools of a fresh agent."""
-    tools = gsheets_mod.add_to_tools()
+    tools = gsheets_mod.GsheetsSea().tools([])
     assert [t.__name__ for t in tools] == _AUTH_TOOL_NAMES
     assert all(callable(t) for t in tools)
 

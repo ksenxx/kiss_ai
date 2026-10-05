@@ -21,7 +21,7 @@ left as ``<<placeholders>>`` (venue, path, topic, sources of truth,
 reviewer model, options); the template's rules (contents and their
 order, facts and numbers, citations, Strunk and White style, the
 AI-slop list, the process and the gates) are appended to the default
-system prompt by :func:`add_to_system_prompt`, so the agent keeps
+system prompt by the SEA's ``system_prompt`` method, so the agent keeps
 the full Sorcar toolset, browser tools (related work, venue
 guidelines, citation checks) and ``run_parallel`` (the read-only
 reviewer).
@@ -36,8 +36,8 @@ not re-derive them with ad-hoc greps:
   summarizes the log: errors, undefined references and citations,
   overfull boxes over 10 pt, and the page count.
 
-Module-level getters (``add_to_system_prompt()``, ``add_to_tools()``,
-...) follow the SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
+The SEA class's methods (``system_prompt()``, ``tools()``, ...) follow
+the SEA contract in :mod:`kiss.agents.seas.base.base_sea`.
 """
 
 from __future__ import annotations
@@ -48,6 +48,8 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+from kiss.agents.seas.base.base_sea import BaseSea
 
 SYSTEM_PROMPT = """\
 # Paper-writing agent
@@ -455,14 +457,38 @@ _MAX_ITEMS = 25
 """Hits listed per gate before the report says ``... N more``."""
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/write_paper help``."""
-    return (
-        "Writes or revises a LaTeX research paper from your sources and results, running "
-        "AI-slop/consistency gates (`check_paper`) and a pdflatex+bibtex build (`build_paper`) "
-        "with a read-only reviewer model; use `/write_paper <venue, .tex path, topic, sources, "
-        'options>` or run_agent(agent="write_paper", task=...).'
-    )
+class WritePaperSea(BaseSea):
+    """The ``/write_paper`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/write_paper help``."""
+        return (
+            "Writes or revises a LaTeX research paper from your sources and results, running "
+            "AI-slop/consistency gates (`check_paper`) and a pdflatex+bibtex build (`build_paper`) "
+            "with a read-only reviewer model; use `/write_paper <venue, .tex path, topic, sources, "
+            'options>` or run_agent(agent="write_paper", task=...).'
+        )
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Append the paper-writing rules to the default system prompt."""
+        return system_prompt + "\n\n" + SYSTEM_PROMPT
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Expose the gate checker and the LaTeX builder to the model."""
+        return tools + [check_paper, build_paper]
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Browse (related work, venue guidelines), fan out (the reviewer), skip the classifier.
+
+        The ``timeout`` tells the dispatcher a ``/write_paper`` run may take
+        up to :data:`DISPATCH_TIMEOUT_SECONDS`.
+        """
+        return settings | {
+            "use_web_tools": True,
+            "allow_fan_out": True,
+            "auto_classify": False,
+            "timeout": DISPATCH_TIMEOUT_SECONDS,
+        }
 
 
 def _blank(match: re.Match[str]) -> str:
@@ -775,30 +801,6 @@ def build_paper(tex_path: str, tex_bin: str = "") -> str:
     return "\n".join(report)
 
 
-def add_to_system_prompt() -> str:
-    """Append the paper-writing rules to the default system prompt."""
-    return SYSTEM_PROMPT
-
-
-def add_to_tools() -> list[Any]:
-    """Expose the gate checker and the LaTeX builder to the model."""
-    return [check_paper, build_paper]
-
-
 DISPATCH_TIMEOUT_SECONDS = 21600
 """Seconds a ``run_agent`` call waits for a ``/write_paper`` run: six hours."""
-
-def settings() -> dict[str, Any]:
-    """Browse (related work, venue guidelines), fan out (the reviewer), skip the classifier.
-
-    The ``timeout`` tells the dispatcher a ``/write_paper`` run may take
-    up to :data:`DISPATCH_TIMEOUT_SECONDS`.
-    """
-    return {
-        "use_web_tools": True,
-        "allow_fan_out": True,
-        "auto_classify": False,
-        "timeout": DISPATCH_TIMEOUT_SECONDS,
-    }
-
 

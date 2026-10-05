@@ -64,7 +64,7 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         return sea
 
     def test_bundled_sea_help_is_its_description(self) -> None:
-        """``/sh help`` answers with ``sh_sea.description()`` and never runs the SEA."""
+        """``/sh help`` answers with ``sh_sea.ShSea().description()`` and never runs the SEA."""
         calls: list[dict[str, Any]] = []
         self._install_counting_stub(calls)
         result = sorcar.run(
@@ -75,7 +75,7 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is True, result
-        assert result.text == sh_sea.description(), result
+        assert result.text == sh_sea.ShSea().description(), result
         assert "/sh" in result.text
         assert calls == []
         # The exchange is a real history row: prompt, result and end
@@ -90,10 +90,10 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         types = [e.get("type") for e in events]
         assert types[0] == "prompt" and types[-1] == "task_done", types
         results = [e for e in events if e.get("type") == "result"]
-        assert len(results) == 1 and results[0]["text"] == sh_sea.description(), results
+        assert len(results) == 1 and results[0]["text"] == sh_sea.ShSea().description(), results
         assert results[0]["success"] is True and "tabId" not in results[0]
         entry = next(e for e in persistence._load_history() if str(e["id"]) == result.task_id)
-        assert entry["result"] == sh_sea.description()
+        assert entry["result"] == sh_sea.ShSea().description()
         extra = json.loads(str(row["extra"] or "{}"))
         assert extra.get("tokens") == 0 and extra.get("steps") == 0
         assert extra.get("endTs", 0) >= extra.get("startTs", 1)
@@ -102,9 +102,19 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         """``/echo HELP`` is help; ``/echo help me`` runs the echo SEA directly on ``help me``."""
         self._register_user_sea(
             "echo",
-            'def description():\n    return "Echoes; use /echo <text>."\n\n\n'
-            "def settings():\n    return {'use_worktree': False}\n\n\n"
-            "def add_to_system_prompt():\n    return 'ECHO-PROTOCOL'\n",
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return "Echoes; use /echo <text>."
+
+    def settings(self, settings):
+        return settings | {'use_worktree': False}
+
+    def system_prompt(self, system_prompt):
+        return system_prompt + '\\n\\nECHO-PROTOCOL'
+""",
         )
         calls: list[dict[str, Any]] = []
         self._install_counting_stub(calls)
@@ -138,7 +148,13 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
     def test_help_on_a_sea_without_description_fails_with_a_diagnostic(self) -> None:
         """A SEA lacking ``description()`` makes ``/xxx help`` a failed task naming the file."""
         self._register_user_sea(
-            "nodesc", "def settings():\n    return {'use_worktree': False}\n",
+            "nodesc", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'use_worktree': False}
+""",
         )
         calls: list[dict[str, Any]] = []
         self._install_counting_stub(calls)
@@ -147,7 +163,7 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         )
         assert result.success is False, result
         assert "nodesc_sea.py" in result.text and "description()" in result.text, result
-        assert "description() must be a zero-argument function" in result.text, result
+        assert "description() must return a non-empty string" in result.text, result
         assert calls == []
         row = persistence._load_chat_events_by_task_id(result.task_id)
         assert row is not None

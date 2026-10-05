@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar import agent_dispatch, sea_commands
 from kiss.agents.sorcar.agent_dispatch import (
     DEFAULT_AGENT_PATH,
@@ -39,6 +40,7 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.run_config import RUN_CONFIG_KEYS, run_config_line
+from kiss.agents.sorcar.sea_commands import declared_settings
 from kiss.agents.sorcar.sea_docs import precedence_block, precedence_example, render
 from kiss.agents.sorcar.sea_lint import PROSE_FILES, lint_prose
 from kiss.agents.sorcar.sea_settings import (
@@ -46,7 +48,7 @@ from kiss.agents.sorcar.sea_settings import (
     declared_literal,
     declares_hidden,
     kind_defaults,
-    merge_settings,
+    resolve_settings,
 )
 from kiss.core.models.model_info import model
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
@@ -146,22 +148,35 @@ def test_pinned_is_the_run_config_key_and_renders_a_reachable_example() -> None:
 # --- S3: a channel is closed -------------------------------------------------------
 
 
+class _Channel(BaseSea):
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return settings | {"kind": "channel", "work_dir": "/scratch"}
+
+
+class _ChannelWithMemory(_Channel):
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return settings | {"use_memory": True}
+
+
 def test_channel_kind_locks_every_key_it_sets() -> None:
-    channel = {**kind_defaults()["channel"], "kind": "channel", "work_dir": "/scratch"}
-    merged = merge_settings([channel])  # resolved settings carry the kind's defaults
-    assert merged["locked"] == sorted(kind_defaults()["channel"])
-    assert set(merged["locked"]) == {
+    resolved = resolve_settings(declared_settings([_Channel()]))
+    assert resolved["locked"] == sorted(kind_defaults()["channel"])
+    assert set(resolved["locked"]) == {
         "work_dir", "use_worktree", "auto_commit", "auto_classify", "allow_fan_out",
         "use_web_tools", "use_memory",
     }
-    # A base's lock survives in the SEA that extends it; other kinds lock
-    # only what they declare.
-    assert merge_settings([channel, {"kind": "session", "use_memory": True}])["locked"] == (
-        sorted(kind_defaults()["channel"])
+    # The lock survives in a SEA that inherits from the channel (its own
+    # locks are added to the kind's); other kinds lock only what they declare.
+    derived = resolve_settings(declared_settings([_ChannelWithMemory()]))
+    assert derived["use_memory"] is True
+    assert derived["locked"] == sorted(kind_defaults()["channel"])
+    assert resolve_settings({"kind": "channel", "locked": ["model"]})["locked"] == sorted(
+        {"model", *kind_defaults()["channel"]}
     )
-    worker = {**kind_defaults()["worker"], "kind": "worker"}
-    assert "locked" not in merge_settings([worker])
-    assert merge_settings([{**worker, "locked": ["tool_profile"]}])["locked"] == ["tool_profile"]
+    assert "locked" not in resolve_settings({"kind": "worker"})
+    assert resolve_settings({"kind": "worker", "locked": ["tool_profile"]})["locked"] == [
+        "tool_profile"
+    ]
 
 
 # --- S4 / S5: names and hidden SEAs ----------------------------------------------
@@ -273,7 +288,13 @@ def test_run_parallel_honours_inherit_false(
 
 
 def test_workspace_is_refused_for_a_non_channel_sea(tmp_path: Path) -> None:
-    (tmp_path / "helper.py").write_text("def settings() -> dict:\n    return {}\n")
+    (tmp_path / "helper.py").write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {}
+""")
     run_agent = make_run_agent_tool(str(tmp_path))
     assert run_agent("hi", "helper.py", options='{"workspace": "acct"}') == (
         "Error: helper: options['workspace'] applies to a channel agent only; helper is a "

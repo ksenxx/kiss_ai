@@ -34,6 +34,7 @@ from email.message import EmailMessage, Message
 from email.utils import formatdate, make_msgid, parseaddr, parsedate_to_datetime
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -51,14 +52,40 @@ _AUTOMATED_FROM_MARKERS = ("noreply", "no-reply", "donotreply", "mailer-daemon")
 _AUTOMATED_PRECEDENCE = ("bulk", "junk", "list")
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/email help``."""
-    return (
-        "Reads, lists, marks and sends mail in any IMAP/SMTP mailbox (unread mail over "
-        "IMAP4_SSL, replies over SMTP, automated senders skipped); use it with "
-        '`run_agent(agent="email", task="...")` or the `kiss-email -t \'...\'` CLI, '
-        "starting with `kiss-email -t 'authenticate'` to store the mailbox credentials."
-    )
+class EmailSea(BaseSea):
+    """The ``/email`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/email help``."""
+        return (
+            "Reads, lists, marks and sends mail in any IMAP/SMTP mailbox (unread mail over "
+            "IMAP4_SSL, replies over SMTP, automated senders skipped); use it with "
+            '`run_agent(agent="email", task="...")` or the `kiss-email -t \'...\'` CLI, '
+            "starting with `kiss-email -t 'authenticate'` to store the mailbox credentials."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Email channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + EmailAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + EmailAgent.channel_system_prompt
 
 
 def _decode_header_value(value: str) -> str:
@@ -681,32 +708,6 @@ def main() -> None:
         channel_name="Email",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Email channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return EmailAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return EmailAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

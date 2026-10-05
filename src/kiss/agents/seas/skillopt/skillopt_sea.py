@@ -11,9 +11,9 @@ Implements the outer loop of SkillOpt (arXiv 2605.23904) for two kinds of
   text; a rollout runs the default Sorcar agent with the text appended to its
   system prompt.
 * :class:`SeaTarget` — a Sorcar Extension Agent (``*_sea.py``).  The trainable
-  text is the string constant returned by the file's ``system_prompt()``
-  getter (directly or through a module-level constant).  A candidate is a
-  copy of the file with that constant replaced; every other getter is kept,
+  text is the string constant returned by the SEA class's ``system_prompt``
+  method (directly or through a module-level constant).  A candidate is a
+  copy of the file with that constant replaced; every other method is kept,
   so a rollout runs the candidate exactly as ``/name`` would.  A candidate is
   rejected before any rollout when it changes anything but that constant.
 * :class:`ConstantTarget` — any Python module plus the name of a module-level
@@ -110,6 +110,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar.sea_settings import SeaError
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.kiss_agent import KISSAgent
@@ -119,16 +120,34 @@ from kiss.core.utils import substitute_prompt_args
 logger = logging.getLogger(__name__)
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/skillopt help``."""
-    return (
-        "Optimizes the prompt text of a skill (SKILL.md), of a SEA (its system_prompt() "
-        "constant) or of a named module constant against a JSON eval set, writing accepted "
-        "text next to the target as `<target>.proposed`; use `/skillopt optimize <target> "
-        "with <evals.json> for one epoch`, `run_agent(agent=\"skillopt\", task=...)`, or "
-        "`uv run python -m kiss.agents.seas.skillopt.skillopt_sea --target ... --evals ... "
-        "--out-dir ... --model ...`."
-    )
+class SkilloptSea(BaseSea):
+    """The ``/skillopt`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/skillopt help``."""
+        return (
+            "Optimizes the prompt text of a skill (SKILL.md), of a SEA (its system_prompt() "
+            "constant) or of a named module constant against a JSON eval set, writing accepted "
+            "text next to the target as `<target>.proposed`; use `/skillopt optimize <target> "
+            "with <evals.json> for one epoch`, `run_agent(agent=\"skillopt\", task=...)`, or "
+            "`uv run python -m kiss.agents.seas.skillopt.skillopt_sea --target ... --evals ... "
+            "--out-dir ... --model ...`."
+        )
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
+        return SYSTEM_PROMPT
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """A worker with the shell tools, on the real checkout, running :data:`SYSTEM_PROMPT`."""
+        return settings | {
+            "kind": "worker",
+            "tool_profile": "shell",
+        }
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Expose the optimizer to the orchestrating model."""
+        return tools + [optimize, status]
 
 
 # --------------------------------------------------------------------------
@@ -219,13 +238,13 @@ def _assigned_value(node: ast.stmt, name: str) -> ast.expr | None:
 
 
 def _prompt_constant(tree: ast.Module) -> ast.Constant:
-    """Return the string-constant node that ``system_prompt()`` returns in *tree*."""
+    """Return the string-constant node the SEA's ``system_prompt`` method returns in *tree*."""
     func = next(
-        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "system_prompt"),
+        (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "system_prompt"),
         None,
     )
     if func is None:
-        raise ValueError("no top-level system_prompt() function")
+        raise ValueError("no system_prompt() method")
     last = func.body[-1] if func.body else None
     if not isinstance(last, ast.Return) or last.value is None:
         raise ValueError("system_prompt() must end with a return statement")
@@ -326,10 +345,10 @@ class SeaTarget(Target):
             with tempfile.TemporaryDirectory(prefix="skillopt-") as tmp:
                 path = Path(tmp) / self.candidate_name()
                 path.write_text(candidate, encoding="utf-8")
-                # Loaded as a rollout would load it, bases included: a
-                # candidate copy whose ``extends`` cannot be resolved from
-                # a scratch directory is rejected here, not at rollout.
-                returned = _sea_layers(path)[-1].namespace["system_prompt"]()
+                # Loaded as a rollout would load it, base classes included:
+                # a candidate copy whose base cannot be imported from a
+                # scratch directory is rejected here, not at rollout.
+                returned = base_system_prompt(_sea_layers(path), "")
         except Exception as exc:  # noqa: BLE001 - any failure is a gate reason
             return f"candidate cannot be loaded as a SEA: {exc}"
         if returned != text:
@@ -337,34 +356,48 @@ class SeaTarget(Target):
         return ""
 
     def rollout_kwargs(self) -> dict[str, Any]:
-        """Map the file's layers (``extends`` included) onto ``SorcarAgent.run`` arguments.
+        """Map the SEA (its base classes included) onto ``SorcarAgent.run`` arguments.
 
         The composition the daemon applies to a run of the file
-        (:func:`~kiss.agents.sorcar.sea_commands.sea_layers` and
-        :func:`~kiss.agents.sorcar.sea_commands.sea_configuration`; the
-        ``prompt(task)`` chain runs once per rollout, on the real task),
-        so a rollout evaluates the agent the file actually configures.  A
-        relative ``extends`` path resolves against the file's own
-        directory, so a target rolled out from candidate copies must
-        name its base by command name or absolute path.
+        (:func:`~kiss.agents.sorcar.sea_commands.sea_layers` and the
+        ``base_*`` functions of that module; ``prompt(task)`` runs once
+        per rollout, on the real task), so a rollout evaluates the agent
+        the file actually configures.  A target rolled out from
+        candidate copies must import its base class by module or name
+        it by command name or absolute path (``sea_class``), not by a
+        path relative to the file.
 
         Raises:
-            ValueError: When a script of the chain is broken or the
-                effective ``system_prompt()`` is empty.
+            ValueError: When the SEA is broken or its effective
+                ``system_prompt`` is empty.
         """
-        from kiss.agents.sorcar.sea_commands import sea_configuration, sea_prompt
+        from kiss.agents.sorcar.sea_commands import (
+            base_llm_call_hook,
+            base_prompt,
+            base_settings,
+            base_tool_call_hook,
+            base_tools,
+            defines,
+        )
 
-        layers = _sea_layers(self.path)
+        seas = _sea_layers(self.path)
         try:
-            run = sea_configuration(layers)
+            settings = base_settings(seas)
+            if not base_system_prompt(seas, "").strip():
+                raise ValueError(f"{self.path.name}: system_prompt() returned nothing")
         except SeaError as exc:
             raise ValueError(str(exc)) from exc
-        if not run.system_prompt:
-            raise ValueError(f"{self.path.name}: system_prompt() returned nothing")
-        kwargs: dict[str, Any] = {"base_system_prompt": run.system_prompt}
-        if any("prompt" in layer.namespace for layer in layers):
-            # ``prompt(task)`` needs the task: handed to the rollout as a callable.
-            kwargs["prompt"] = functools.partial(sea_prompt, layers)
+        kwargs: dict[str, Any] = {
+            "system_prompt_hook": functools.partial(base_system_prompt, seas),
+        }
+        for key, name, fold in (
+            ("prompt", "prompt", base_prompt),  # needs the task: a callable for the rollout
+            ("tools_hook", "tools", base_tools),
+            ("llm_call_hook", "llm_call_hook", base_llm_call_hook),
+            ("tool_call_hook", "tool_call_hook", base_tool_call_hook),
+        ):
+            if defines(seas, name):
+                kwargs[key] = functools.partial(fold, seas)
         for setting, key in (
             ("tool_profile", "tool_profile"),
             ("allow_fan_out", "is_parallel"),
@@ -374,31 +407,28 @@ class SeaTarget(Target):
             ("model", "model_name"),
             ("model_config", "model_config"),
         ):
-            if setting in run.settings:
-                kwargs[key] = run.settings[setting]
-        if run.add_to_system_prompt:
-            kwargs["system_prompt"] = run.add_to_system_prompt
-        if run.llm_call_hook is not None:
-            kwargs["llm_call_hook"] = run.llm_call_hook
-        if run.tool_call_hook is not None:
-            kwargs["tool_call_hook"] = run.tool_call_hook
-        # ``add_to_tools()`` extends the built-in toolset (a list of
-        # callables, never a file path), as in the daemon's agent-file loader.
-        if any("add_to_tools" in layer.namespace for layer in layers):
-            kwargs["tools"] = run.tools
+            if setting in settings:
+                kwargs[key] = settings[setting]
         if kwargs.get("tool_profile") == "none":
             kwargs["append_basic_tools"] = False
         return kwargs
 
 
 def _sea_layers(path: Path) -> list[Any]:
-    """Execute the SEA at *path* and its ``extends`` chain; ``ValueError`` when broken."""
+    """Load the SEA at *path* (``sea_commands.sea_layers``); ``ValueError`` when broken."""
     from kiss.agents.sorcar.sea_commands import sea_layers
 
     try:
         return sea_layers(path)
     except SeaError as exc:
         raise ValueError(str(exc)) from exc
+
+
+def base_system_prompt(seas: list[Any], system_prompt: str) -> str:
+    """Return *system_prompt* through the SEAs' ``system_prompt`` methods (the launcher's fold)."""
+    from kiss.agents.sorcar.sea_commands import base_system_prompt as fold
+
+    return fold(seas, system_prompt)
 
 
 class ConstantTarget(Target):
@@ -1383,13 +1413,13 @@ def run_optimization(cfg: OptimizeConfig, parent: Any = None) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
-# SEA getters and tools
+# the SEA class and its tools
 # --------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
 You are SkillOpt, an optimizer for agent instruction texts. You can optimize three kinds
 of target: a skill (a SKILL.md file), a Sorcar Extension Agent (a *_sea.py file whose
-system_prompt() getter returns a string constant), or a named module-level string
+system_prompt() method returns a string constant), or a named module-level string
 constant of any Python file (pass `constant`, e.g. SYSTEM_PROMPT, for a SEA that formats
 its prompt inside a class). The optimization loop is implemented in your tools; you
 drive it and report the outcome.
@@ -1508,24 +1538,6 @@ def status(out_dir: str) -> str:
             "out_dir": str(Path(out_dir).expanduser()),
         }
     )
-
-
-def system_prompt() -> str:
-    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
-    return SYSTEM_PROMPT
-
-
-def settings() -> dict[str, Any]:
-    """A worker with the shell tools, on the real checkout, running :data:`SYSTEM_PROMPT`."""
-    return {
-        "kind": "worker",
-        "tool_profile": "shell",
-    }
-
-
-def add_to_tools() -> list[Any]:
-    """Expose the optimizer to the orchestrating model."""
-    return [optimize, status]
 
 
 # --------------------------------------------------------------------------

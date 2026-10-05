@@ -4,40 +4,40 @@
 # add your name here
 """Applying an SEA to a ``run`` command.
 
-The caller of :func:`kiss.server.sorcar.run` may supply an *agent
-script* — a Sorcar Extension Agent, a Python file that configures the
+The caller of :func:`kiss.server.sorcar.run` may supply a Sorcar
+Extension Agent — a Python file defining a subclass of
+:class:`kiss.agents.seas.base.base_sea.BaseSea` that configures the
 run — as a file path on the ``run`` command's ``agentPath`` field.  The
 client validates and resolves the path
 (:func:`kiss.agents.sorcar.daemon_client.resolve_agent_path`); the
-daemon executes the script and the scripts it extends
-(:func:`kiss.agents.sorcar.sea_commands.sea_layers`), evaluates them
-(:func:`kiss.agents.sorcar.sea_commands.evaluate_sea`) and applies the
-result in place on the command dict (:func:`apply_agent_overrides`):
+daemon loads the SEA (:func:`kiss.agents.sorcar.sea_commands.sea_layers`),
+evaluates it (:func:`kiss.agents.sorcar.sea_commands.evaluate_sea`)
+and applies the result in place on the command dict
+(:func:`apply_agent_overrides`):
 
-* the merged ``settings()``: a ``kind`` plus per-run parameters, each
+* the effective settings: a ``kind`` plus per-run parameters, each
   written over the command's corresponding wire field
   (:data:`SETTING_FIELDS`) unless the caller marked that field explicit
   (:data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`: an
   explicit value ranks above the SEA's, a persisted or inherited one
   below it);
-* ``prompt(task)``: the task text replaced by what the function
-  returns (``{task_id}`` in it -> the calling task's id);
-* ``system_prompt()``, written over ``systemPrompt`` (the run's base
-  system prompt);
-* the ``channel`` kind's preamble and ``add_to_system_prompt()``,
-  appended to ``appendToSystemPrompt``;
-* ``add_to_tools()`` callables and ``llm_call_hook()`` /
-  ``tool_call_hook()`` hooks — values no wire field can carry — staged
-  on the daemon-side fields ``tools`` / ``llmCallHook`` / ``toolCallHook``;
+* ``prompt(task)``: the task text replaced by what the method returns
+  (``{task_id}`` in it -> the calling task's id);
+* the ``channel`` kind's preamble, appended to ``appendToSystemPrompt``;
+* the ``system_prompt``, ``tools``, ``llm_call_hook`` and
+  ``tool_call_hook`` methods — callables no wire field can carry —
+  staged on the daemon-side fields :data:`DAEMON_SIDE_FIELDS`, which
+  the run applies where it assembles its system prompt, builds its
+  toolset and makes its calls;
 * for a ``channel`` kind, the workspace the run holds for its
   lifetime (:func:`channel_workspace`), which the task runner enters
-  BEFORE the tools are built — a channel's ``add_to_tools()`` binds the
+  BEFORE the tools are built — a channel's ``tools()`` binds the
   credentials of the workspace active at that moment — and releases
   when the run ends.
 
 The functions execute in the daemon process on the task's worker
-thread.  A broken SEA (malformed field, missing file, import
-failure, a raising getter, a wrong-typed value) raises
+thread.  A broken SEA (malformed field, missing file, import failure,
+no SEA class, a raising method, a wrong-typed value) raises
 :exc:`AgentFileError` so the task stops with a diagnostic instead of
 silently running with the wrong parameters.
 """
@@ -48,12 +48,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT, sea_pinned
 from kiss.agents.sorcar.sea_commands import (
-    SeaLayer,
     SeaScriptError,
+    base_settings,
+    defines,
     evaluate_sea,
-    join_text,
     sea_layers,
 )
 from kiss.agents.sorcar.sea_settings import (
@@ -61,7 +62,6 @@ from kiss.agents.sorcar.sea_settings import (
     SETTING_TYPES,
     SeaError,
     locked_conflicts,
-    merge_settings,
     script_name,
     wire_field,
 )
@@ -74,9 +74,8 @@ class AgentFileError(SeaError):
 
     Raised by :func:`apply_agent_overrides` when the ``agentPath`` wire
     field is malformed, names a missing or non-``.py`` path, names a
-    file that raises at import time, or names a module whose
-    ``settings()`` or getters are non-callable, raise, or return a
-    value of the wrong type.  The task runner turns the raise into a
+    file that raises at import time or defines no SEA class, or one
+    whose methods raise or return a value of the wrong type.  The task runner turns the raise into a
     failed task result whose text carries this exception's diagnostic
     message, so a broken SEA stops the task loudly instead of
     silently running it with parameters the script did not compute.
@@ -104,56 +103,56 @@ CHANNEL_PREAMBLE = (
 """System-prompt preamble of every ``kind: "channel"`` run; ``{name}`` is the script's name."""
 
 
-def is_channel(layers: list[SeaLayer]) -> bool:
-    """Return whether the run of *layers* is a channel agent (``kind: "channel"``)."""
-    if not layers:
-        return False
-    return merge_settings([layer.settings for layer in layers]).get("kind") == "channel"
+def is_channel(seas: list[BaseSea]) -> bool:
+    """Return whether the run of *seas* is a channel agent (``kind: "channel"``)."""
+    return bool(seas) and base_settings(seas)["kind"] == "channel"
 
 
 NO_TOOLS_PROFILE = "none"
 """The tool profile of a run whose only built-in tool is ``finish``."""
 
-DAEMON_SIDE_FIELDS = ("tools", "llmCallHook", "toolCallHook")
-"""Command fields only the daemon's SEA pipeline may set; a client-sent value is dropped."""
+DAEMON_SIDE_FIELDS = ("systemPromptHook", "toolsHook", "llmCallHook", "toolCallHook")
+"""Command fields only the daemon's SEA pipeline may set; a client-sent value is dropped.
+
+The :class:`~kiss.agents.sorcar.sea_commands.SeaRun` hooks, by field.
+"""
 
 
-def channel_workspace(cmd: dict[str, Any], layers: list[SeaLayer]) -> str:
+def channel_workspace(cmd: dict[str, Any], seas: list[BaseSea]) -> str:
     """Return the workspace a run holds for its lifetime; ``""`` unless its kind is ``channel``.
 
     The command's ``workspace`` wire field (the ``run_agent`` option
     ``workspace``, a channel launcher's account), else ``"default"``.
-    Decided from the layers' settings alone, so the task runner can
-    enter the workspace before :func:`apply_agent_overrides` evaluates
-    the channel's ``add_to_tools()``.
+    Decided from the settings alone, so the task runner can enter the
+    workspace before the channel's ``tools()`` runs.
 
     Args:
         cmd: The ``run`` command dict.
-        layers: The run's executed layers (:func:`load_layers`).
+        seas: The run's loaded SEAs (:func:`load_layers`).
     """
-    if not is_channel(layers):
+    if not is_channel(seas):
         return ""
     workspace = cmd.get("workspace")
     return workspace.strip() if isinstance(workspace, str) and workspace.strip() else "default"
 
 
-def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[SeaLayer]:
-    """Execute the SEA a ``run`` command names, and its bases.
+def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[BaseSea]:
+    """Load the SEA a ``run`` command names, under the tab's model-picker SEA.
 
     Args:
         cmd: The ``run`` command dict.  An absent, ``None`` or empty
             ``agentPath`` means "no SEA": an empty list.
-        base: An outermost layer to lay under the script (the tab's
-            model-picker SEA), or ``None``.  With no ``agentPath`` the
-            base alone is the run's script.
+        base: A SEA to lay under the file's (the tab's model-picker
+            SEA), or ``None``.  With no ``agentPath`` the base alone is
+            the run's SEA.
 
     Returns:
-        The layers (see :func:`~kiss.agents.sorcar.sea_commands.sea_layers`).
+        The SEAs (see :func:`~kiss.agents.sorcar.sea_commands.sea_layers`).
 
     Raises:
         AgentFileError: When ``agentPath`` is not a string or names no
-            existing ``.py`` file, or a script of the chain fails to
-            import, has malformed settings or a bad ``extends``.
+            existing ``.py`` file, or a file fails to import, defines
+            no SEA class or has malformed settings.
     """
     raw_path = cmd.get("agentPath")
     if raw_path is None or (isinstance(raw_path, str) and raw_path == ""):
@@ -172,55 +171,54 @@ def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[SeaLayer]
 
 def apply_agent_overrides(
     cmd: dict[str, Any],
-    layers: list[SeaLayer] | None = None,
+    seas: list[BaseSea] | None = None,
 ) -> set[str]:
     """Apply a ``run`` command's SEA configuration, in place.
 
-    Evaluates the script's layers
+    Evaluates the SEAs
     (:func:`~kiss.agents.sorcar.sea_commands.evaluate_sea` on the
     command's ``prompt`` and ``parentTaskId``) and writes the result
-    over the command: one wire field per merged setting
-    (:data:`SETTING_FIELDS`); ``prompt`` when a ``prompt(task)`` getter
-    rewrote the task; ``systemPrompt`` from ``system_prompt()``;
-    ``appendToSystemPrompt`` extended with :data:`CHANNEL_PREAMBLE`
-    (``kind: "channel"``) and ``add_to_system_prompt()``; the
-    daemon-side fields ``tools``, ``llmCallHook`` and ``toolCallHook``.
-    The writes are atomic: they happen only after everything has
-    succeeded, so a broken script leaves the command untouched.
+    over the command: one wire field per effective setting
+    (:data:`SETTING_FIELDS`); ``prompt`` when a ``prompt`` method
+    rewrote the task; ``appendToSystemPrompt`` extended with
+    :data:`CHANNEL_PREAMBLE` (``kind: "channel"``); the daemon-side
+    fields :data:`DAEMON_SIDE_FIELDS` for the methods some class
+    defines.  The writes are atomic: they happen only after everything
+    has succeeded, so a broken SEA leaves the command untouched.
 
     Args:
         cmd: The ``run`` command dict; mutated in place.
-        layers: The already-executed layers (:func:`load_layers`), so
-            a run executes its scripts once; ``None`` loads them from
-            the command's ``agentPath``.  An empty list (no agent
-            script) leaves the command untouched.
+        seas: The already-loaded SEAs (:func:`load_layers`), so a run
+            executes its files once; ``None`` loads them from the
+            command's ``agentPath``.  An empty list (no SEA) leaves the
+            command untouched.
 
     Returns:
         The set of command-field names that were overridden (empty when
-        the command carries no SEA), so the caller can tell an
-        actual script override apart from a client-sent value.
+        the command carries no SEA), so the caller can tell an actual
+        SEA override apart from a client-sent value.
 
     Raises:
         AgentFileError: When the ``agentPath`` field is not a string,
-            is not the path of an existing ``.py`` file, names a module
-            that raises at import time, has malformed settings, a
-            non-callable or raising getter, or a getter returning the
+            is not the path of an existing ``.py`` file, names a file
+            that raises at import time or defines no SEA class, has
+            malformed settings, or a method raises or returns the
             wrong type.
     """
-    if layers is None:
-        layers = load_layers(cmd)
-    if not layers:
+    if seas is None:
+        seas = load_layers(cmd)
+    if not seas:
         return set()
     raw_prompt = cmd.get("prompt")
     parent_task_id = cmd.get("parentTaskId")
     try:
         run = evaluate_sea(
-            layers,
+            seas,
             raw_prompt if isinstance(raw_prompt, str) else "",
             parent_task_id if isinstance(parent_task_id, str) else "",
         )
     except SeaScriptError as exc:
-        logger.warning("SEA %s rejected: %s", layers[-1].path, exc)
+        logger.warning("SEA %s rejected: %s", seas[-1].path, exc)
         raise AgentFileError(str(exc)) from exc
     # Everything below is STAGED and applied to the command only after
     # every getter has succeeded: a broken getter must leave the command
@@ -254,7 +252,7 @@ def apply_agent_overrides(
         scope if isinstance(scope, str) else "",
     )
     if conflict:
-        raise AgentFileError(f"{script_name(str(layers[-1].path))}: {conflict}")
+        raise AgentFileError(f"{script_name(str(seas[-1].path))}: {conflict}")
     for key, asked in explicit.items():
         field = SETTING_FIELDS.get(key, "")
         # An explicit value that differs from the script's wins; one that
@@ -262,33 +260,28 @@ def apply_agent_overrides(
         # script-pinned (the task runner's ``_worktreeDecided`` mark).
         if field in staged and asked is not None and asked != "" and asked != staged[field]:
             del staged[field]
-    if any("prompt" in layer.namespace for layer in layers):
+    if defines(seas, "prompt"):
         staged["prompt"] = run.prompt
-    if run.system_prompt is not None:
-        staged["systemPrompt"] = run.system_prompt
-    system_suffix = cmd.get("appendToSystemPrompt")
-    if run.settings.get("kind") == "channel":
-        system_suffix = _add_text(
-            system_suffix,
-            CHANNEL_PREAMBLE.format(name=script_name(str(layers[-1].path))),
+    if run.settings["kind"] == "channel":
+        suffix = cmd.get("appendToSystemPrompt")
+        preamble = CHANNEL_PREAMBLE.format(name=script_name(str(seas[-1].path)))
+        staged["appendToSystemPrompt"] = (
+            f"{suffix}\n\n{preamble}" if isinstance(suffix, str) and suffix else preamble
         )
-        staged["appendToSystemPrompt"] = system_suffix
-    if run.add_to_system_prompt:
-        staged["appendToSystemPrompt"] = _add_text(system_suffix, run.add_to_system_prompt)
-    if any("add_to_tools" in layer.namespace for layer in layers):
-        staged["tools"] = run.tools
-    if any("llm_call_hook" in layer.namespace for layer in layers):
-        staged["llmCallHook"] = run.llm_call_hook
-    if any("tool_call_hook" in layer.namespace for layer in layers):
-        staged["toolCallHook"] = run.tool_call_hook
+    for field, hook in (
+        ("systemPromptHook", run.system_prompt_hook), ("toolsHook", run.tools_hook),
+        ("llmCallHook", run.llm_call_hook), ("toolCallHook", run.tool_call_hook),
+    ):
+        if hook is not None:
+            staged[field] = hook
     # The provenance record the task runner folds into the run's
     # ``task_settings`` event (see :mod:`kiss.agents.sorcar.run_config`):
     # computed from the command BEFORE the writes, so it names the
     # inherited or persisted values the SEA pinned to its own (explicit
     # values were removed from ``staged`` above and never appear here).
     cmd[RUN_CONFIG_FIELD] = {
-        "sea": script_name(str(layers[-1].path)),
-        "kind": run.settings.get("kind") or "session",
+        "sea": script_name(str(seas[-1].path)),
+        "kind": run.settings["kind"],
         "pinned": sea_pinned(cmd, staged, SETTING_FIELDS),
     }
     cmd.update(staged)
@@ -302,8 +295,3 @@ record in.
 ``{"sea": <SEA name>, "kind": <kind>, "pinned": {key: [before, pinned]}}``;
 absent when the command carries no SEA.
 """
-
-
-def _add_text(base: Any, addition: str) -> str:
-    """Return *addition* appended to *base* (a wire value; non-strings count as empty)."""
-    return join_text(base if isinstance(base, str) else "", addition)

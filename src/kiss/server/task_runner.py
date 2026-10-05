@@ -27,6 +27,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar.agent_file import (
     DAEMON_SIDE_FIELDS,
     NO_TOOLS_PROFILE,
@@ -56,8 +57,8 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.sorcar.run_config import inherited_keys, is_explicit
 from kiss.agents.sorcar.sea_commands import (
-    SeaLayer,
     SeaScriptError,
+    base_settings,
     model_sea,
     run_picked_hook,
     sea_layers,
@@ -312,16 +313,21 @@ def build_task_extra_payload(
     }
 
 
-def _picker_model(layers: list[SeaLayer], picker: Path) -> str:
+def _picker_sea(seas: list[BaseSea], picker: Path) -> BaseSea:
+    """Return the loaded model-picker SEA among *seas* (the one loaded from *picker*)."""
+    return next(sea for sea in seas if sea.path == picker)
+
+
+def _picker_model(seas: list[BaseSea], picker: Path) -> str:
     """Return the real model a run submitted under a model-picker SEA names.
 
     The picker's own ``model`` setting, else the default model: the run
-    must name a real model even when no layer sets one, and when a
-    layer blanks ``model`` back to ``""`` ("the tab's pick", which is
-    the picker entry itself).
+    must name a real model even when no SEA sets one, and when a SEA
+    blanks ``model`` back to ``""`` ("the tab's pick", which is the
+    picker entry itself).
     """
-    picker_layer = next(layer for layer in layers if layer.path == picker)
-    return str(picker_layer.settings.get("model") or get_default_model())
+    settings = base_settings([_picker_sea(seas, picker)])
+    return str(settings.get("model") or get_default_model())
 
 
 def _client_task_id_of(cmd: dict[str, Any]) -> str:
@@ -350,7 +356,7 @@ def _parent_extra_tools(parent_task_id: str) -> list[Callable[..., Any]]:
 
     A ``run_agent`` sub-task dispatched in path mode inherits the
     calling task's system prompt; these are the tools that prompt
-    refers to — the ``add_to_tools()`` tools of the parent's agent
+    refers to — the ``tools()`` of the parent's agent
     script and those the parent inherited itself, which the parent
     agent keeps as ``_extra_tools`` for the duration of its run.  The
     parent is found in this daemon's state registry by its persisted
@@ -862,7 +868,7 @@ class _TaskRunnerMixin:
             cmd["model"] = _picker_model(layers, picked[1])
         # A ``kind: "channel"`` run holds its workspace (the account its
         # channel tools load credentials for) from BEFORE its tools are
-        # built — ``add_to_tools()`` binds the workspace active at that
+        # built — the SEA's ``tools()`` binds the workspace active at that
         # moment — until ``_run_task``'s outer ``finally`` releases what
         # this thread holds (``held_workspace()``); ``/slack ...``,
         # ``run_agent("slack")`` and ``run_agent(".../slack_sea.py")``
@@ -905,10 +911,9 @@ class _TaskRunnerMixin:
             # hook's side effects (autorouter's weekly cron job) get up
             # to PICKED_HOOK_TIMEOUT_SECONDS to land before the task
             # starts.  The already-executed namespace is reused.
-            picker_layer = next(layer for layer in layers if layer.path == picked[1])
             run_picked_hook(
                 picked[0], str(cmd.get("workDir") or self.work_dir),
-                namespace=picker_layer.namespace,
+                sea=_picker_sea(layers, picked[1]),
             )
         return overridden
 
@@ -2091,23 +2096,24 @@ class _TaskRunnerMixin:
                 is_subagent=bool(parent_task_id),
             )
 
-            # The agent script's ``add_to_tools()`` list, staged onto
-            # the command dict's ``tools`` field by
-            # ``apply_agent_overrides`` (which already type-checked it).
-            # ``_run_task`` dropped any client-sent value of the field,
-            # so absent means "no extra tools".  The ``none`` tool
-            # profile strips the run to ``finish`` plus that list.
-            _raw_tools = cmd.get("tools")
-            client_tools: list[Callable[..., Any]] = (
-                list(_raw_tools) if isinstance(_raw_tools, list) else []
+            # The SEA's ``system_prompt`` and ``tools`` methods, staged
+            # as callables the same way; the run applies them where it
+            # assembles its system prompt and builds its toolset.  The
+            # ``none`` tool profile strips the run to ``finish`` plus
+            # what ``tools()`` returns.
+            _raw_system_prompt_hook = cmd.get("systemPromptHook")
+            _system_prompt_hook = (
+                _raw_system_prompt_hook if callable(_raw_system_prompt_hook) else None
             )
+            _raw_tools_hook = cmd.get("toolsHook")
+            _tools_hook = _raw_tools_hook if callable(_raw_tools_hook) else None
             _append_basic_tools = _tool_profile != NO_TOOLS_PROFILE
             # A ``run_agent`` sub-task (wire field ``inheritTools``)
             # also gets the extra tools of the calling task — the
-            # ``add_to_tools()`` tools of ITS agent script, plus those
-            # it inherited itself — so the tools the inherited system
-            # prompt refers to exist.  Not when this run's script
-            # fixed the whole set with the ``none`` profile.
+            # ``tools()`` of ITS SEA, plus those it inherited itself —
+            # so the tools the inherited system prompt refers to exist.
+            # Not when this run's SEA fixed the whole set with the
+            # ``none`` profile.
             _inherited_tools: list[Callable[..., Any]] = []
             if _append_basic_tools and cmd.get("inheritTools") is True:
                 _inherited_tools = _parent_extra_tools(parent_task_id)
@@ -2176,7 +2182,7 @@ class _TaskRunnerMixin:
                             if _agent_model_config is not None
                             else _model_config
                         ),
-                        tools=client_tools,
+                        tools_hook=_tools_hook,
                         append_basic_tools=_append_basic_tools,
                         inherited_tools=_inherited_tools,
                         # Already part of ``task_prompt`` (see the
@@ -2190,6 +2196,7 @@ class _TaskRunnerMixin:
                         # — exactly the ``appendToSystemPrompt``
                         # contract.
                         system_prompt=append_to_system_prompt,
+                        system_prompt_hook=_system_prompt_hook,
                         llm_call_hook=_llm_call_hook,
                         tool_call_hook=_tool_call_hook,
                         tool_profile=_tool_profile,

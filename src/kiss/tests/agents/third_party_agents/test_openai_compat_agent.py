@@ -152,7 +152,7 @@ def test_authenticate_rejects_bad_input(isolated_home: Path) -> None:
 
 def test_tools_module_function(isolated_home: Path) -> None:
     """The module-level tools() returns a non-empty tool list."""
-    tools = oai_mod.add_to_tools()
+    tools = oai_mod.OaiSea().tools([])
     assert tools
     assert "authenticate_openai_compat" in [fn.__name__ for fn in tools]
 

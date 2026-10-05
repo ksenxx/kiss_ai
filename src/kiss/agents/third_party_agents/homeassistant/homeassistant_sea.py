@@ -43,6 +43,7 @@ from urllib.parse import quote, urlparse
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -58,14 +59,40 @@ logger = logging.getLogger(__name__)
 _TIMEOUT = 30
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/homeassistant help``."""
-    return (
-        "Controls a Home Assistant instance through its REST API with a long-lived access "
-        "token (reading entity states, calling services and posting persistent "
-        'notifications); use it as `run_agent(agent="homeassistant", task="Turn off all '
-        'the lights in the kitchen")` or through the `kiss-ha` CLI.'
-    )
+class HomeassistantSea(BaseSea):
+    """The ``/homeassistant`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/homeassistant help``."""
+        return (
+            "Controls a Home Assistant instance through its REST API with a long-lived access "
+            "token (reading entity states, calling services and posting persistent "
+            'notifications); use it as `run_agent(agent="homeassistant", task="Turn off all '
+            'the lights in the kitchen")` or through the `kiss-ha` CLI.'
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Home Assistant channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + HomeAssistantAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + HomeAssistantAgent.channel_system_prompt
 
 
 def _bad_segment(value: str, name: str) -> str | None:
@@ -615,32 +642,6 @@ def main() -> None:
         channel_name="Home Assistant",
         make_backend=None,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Home Assistant channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return HomeAssistantAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return HomeAssistantAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

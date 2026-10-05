@@ -115,7 +115,7 @@ def test_prompt_files_carry_placeholder_and_prompts_are_rendered() -> None:
         assert "{{IDENTITY}}" in raw, name
         assert "You are KISS Sorcar" not in raw, name
         assert "~/{{HOME_DIR}}/history.db" in raw, name
-    for prompt in (SYSTEM_PROMPT, SYSTEM_PROMPT_LITE, ask_sea.system_prompt()):
+    for prompt in (SYSTEM_PROMPT, SYSTEM_PROMPT_LITE, ask_sea.AskSea().system_prompt("")):
         assert prompt.startswith("<identity>\n\n" + BRAND["identity"])
         assert not _PLACEHOLDER.search(prompt)
         assert f"~/{BRAND['home_dir']}/history.db" in prompt

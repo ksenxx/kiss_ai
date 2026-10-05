@@ -6,11 +6,12 @@
 
 ``_stop_task``'s watchdog cancels a run by injecting an asynchronous
 ``KeyboardInterrupt`` into the task thread.  The untrusted-code
-loader — ``apply_agent_overrides`` (agent-script ``settings()`` and
-the ``add_to_tools()`` tool getter) — executes caller-supplied Python
-on that thread and converts EVERY raise, ``BaseException`` included,
-into its diagnostic error type.  An injected stop landing while such
-a getter runs was therefore swallowed:
+loader — ``load_layers`` (which resolves the SEA's ``settings()``)
+and ``apply_agent_overrides`` (which runs its ``prompt()``) —
+executes caller-supplied Python on that thread and converts EVERY
+raise, ``BaseException`` included, into its diagnostic error type.
+An injected stop landing while such a method runs was therefore
+swallowed:
 
 * the run was reported ``"Task failed: AgentFileError: agent script
   '...': settings() raised: KeyboardInterrupt"`` instead of ``"Task
@@ -130,26 +131,33 @@ _BLOCKING_GETTER = textwrap.dedent(
     import pathlib
     import time
 
+    from kiss.agents.seas.base.base_sea import BaseSea
+
     _DIR = pathlib.Path(__file__).resolve().parent
 
 
-    def {getter}():
-        \"\"\"Block until interrupted; raise if released or timed out.\"\"\"
-        (_DIR / "entered-{marker}").write_text("1", encoding="utf-8")
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            if (_DIR / "release").exists():
-                raise RuntimeError("released before the stop landed")
-            time.sleep(0.02)
-        raise RuntimeError("timed out waiting for the stop")
+    class Sea(BaseSea):
+        def {getter}(self, value):
+            \"\"\"Block until interrupted; raise if released or timed out.\"\"\"
+            (_DIR / "entered-{marker}").write_text("1", encoding="utf-8")
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                if (_DIR / "release").exists():
+                    raise RuntimeError("released before the stop landed")
+                time.sleep(0.02)
+            raise RuntimeError("timed out waiting for the stop")
     """
 )
 
 _BROKEN_GETTER = textwrap.dedent(
     """
-    def settings():
-        \"\"\"Raise immediately — a genuinely broken agent script.\"\"\"
-        raise ValueError("script bug")
+    from kiss.agents.seas.base.base_sea import BaseSea
+
+
+    class Sea(BaseSea):
+        def settings(self, settings):
+            \"\"\"Raise immediately — a genuinely broken agent script.\"\"\"
+            raise ValueError("script bug")
     """
 )
 
@@ -251,10 +259,10 @@ class TestStopWrappedInterrupt(TestCase):
         script = self._write_script("agent.py", "settings", "agent")
         self._run_and_stop("wrap-agent-tab", "agent", agentPath=script)
 
-    def test_stop_during_agent_script_tool_getter_is_a_user_stop(self) -> None:
-        """KI inside ``add_to_tools()`` (the tool-getter branch of the loader)."""
-        tools = self._write_script("tools.py", "add_to_tools", "tools")
-        self._run_and_stop("wrap-tools-tab", "tools", agentPath=tools)
+    def test_stop_during_agent_script_prompt_method_is_a_user_stop(self) -> None:
+        """KI inside ``prompt()`` (the other method the loader runs eagerly)."""
+        prompt = self._write_script("prompt.py", "prompt", "prompt")
+        self._run_and_stop("wrap-prompt-tab", "prompt", agentPath=prompt)
 
     def test_broken_script_without_stop_stays_a_task_error(self) -> None:
         """No stop requested → a raising getter keeps its diagnostic.
@@ -286,7 +294,8 @@ class TestStopWrappedInterrupt(TestCase):
 class TestStopInterruptWrappedPredicate(TestCase):
     """Remaining branches of ``_stop_interrupt_wrapped``, on real objects.
 
-    The daemon tests above cover the two production catch sites; the
+    The daemon tests above cover the setup catch site of ``_run_task``
+    (both blocking methods fail before ``_run_task_inner``); the
     predicate's other decision branches are exercised here directly —
     real :class:`AgentState` objects and real exception chains, no
     doubles.  The wire timing needed to land a NON-interrupt script

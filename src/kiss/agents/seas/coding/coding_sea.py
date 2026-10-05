@@ -9,8 +9,8 @@ A trial runs the agent against one running Docker container that holds the
 task's working directory.  The KISS daemon imports a tiny generated SEA file
 per trial (see :func:`write_trial_sea`) that builds one
 :class:`ContainerHarness` from a JSON config and exposes the harness's bound
-methods as the SEA getters.  The trial runners in ``benchmarkings/harnesstax``
-are one such caller.  This module itself defines no prompt getters: a
+methods through a ``TrialSea`` class.  The trial runners in ``benchmarkings/harnesstax``
+are one such caller.  This module's own SEA class defines no prompt: a
 harness needs a running container and a config, so the module is
 ``hidden`` and registers no ``/coding`` chat command.
 
@@ -33,10 +33,10 @@ import shlex
 import subprocess
 import threading
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.coding import coding_test_context as test_context
 from kiss.agents.sorcar.shell_guards import (
     INSTALL_COMMANDS,
@@ -223,20 +223,22 @@ INPUT_FILES_NOTE = (
 )
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/coding help``."""
-    return (
-        "Runs KISS Sorcar unattended inside a Docker container for benchmark trials "
-        "(a ContainerHarness built by write_trial_sea from a JSON config, with the shell "
-        "and file tools executing in the trial container and every call logged to a JSONL "
-        "trajectory); the trial runners load the generated per-trial SEA file by path, so "
-        "this module is hidden from the command list."
-    )
+class CodingSea(BaseSea):
+    """The ``/coding`` SEA."""
 
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/coding help``."""
+        return (
+            "Runs KISS Sorcar unattended inside a Docker container for benchmark trials "
+            "(a ContainerHarness built by write_trial_sea from a JSON config, with the shell "
+            "and file tools executing in the trial container and every call logged to a JSONL "
+            "trajectory); the trial runners load the generated per-trial SEA file by path, so "
+            "this module is hidden from the command list."
+        )
 
-def settings() -> dict[str, Any]:
-    """Return the module's own settings: hidden (only the generated per-trial SEAs run)."""
-    return {"hidden": True}
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Return the module's own settings: hidden (only the generated per-trial SEAs run)."""
+        return settings | {"hidden": True}
 
 
 class ContainerHarness:
@@ -324,12 +326,12 @@ class ContainerHarness:
                 _HARNESSES[config_path] = harness
             return harness
 
-    # ---- SEA parameter getters ------------------------------------------
+    # ---- what the generated trial SEA's methods return ---------------------
 
     def prompt(self, task: str = "") -> str:
         """The task instruction shown to the model, followed by ``ls -la`` of the workdir.
 
-        The SEA ``prompt(task)`` getter: the instruction is the config's
+        The trial SEA's ``prompt(task)``: the instruction is the config's
         ``prompt`` (the trial runner's ``run_agent`` task text is only a
         label), or *task* when the config has none.  The listing costs
         nothing and settles the first question of every run (what is
@@ -359,7 +361,7 @@ class ContainerHarness:
         return SYSTEM_PROMPT.format(workdir=self.workdir, test_context=tests)
 
     def settings(self) -> dict[str, Any]:
-        """The trial's run settings (the SEA ``settings()`` contract).
+        """The trial's run settings (the trial SEA's ``settings``).
 
         A ``worker`` whose sub-agents stay on (they share the trial
         container): the trial's model, hard USD cap and per-trial model
@@ -378,14 +380,6 @@ class ContainerHarness:
             "docker_image": f"container:{self.container}",
             "allow_fan_out": True,
         }
-
-    def llm_call_hook(self) -> Callable[[list], list]:
-        """Return the hook that counts LLM turns and logs the new messages."""
-        return self.on_llm_call
-
-    def tool_call_hook(self) -> Callable[[str, dict[str, Any]], str]:
-        """Return the hook that logs tool calls and answers the interactive ones."""
-        return self.on_tool_call
 
     # ---- hooks ------------------------------------------------------------
 
@@ -899,25 +893,37 @@ def _jsonable(value: Any) -> Any:
 
 
 SEA_TEMPLATE = '''"""Generated per-trial SEA; see kiss.agents.seas.coding.coding_sea."""
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.coding.coding_sea import ContainerHarness
 
 _harness = ContainerHarness.shared({config_path!r})
 
 
-def description() -> str:
-    return (
-        "Runs one coding-benchmark trial inside a Docker container using the "
-        "harness configured in config.json next to this file; generated by "
-        "kiss.agents.seas.coding.coding_sea.write_trial_sea, not meant to be "
-        "invoked by hand."
-    )
+class TrialSea(BaseSea):
+    """One coding-benchmark trial, run by the shared ContainerHarness."""
 
+    def description(self) -> str:
+        return (
+            "Runs one coding-benchmark trial inside a Docker container using the "
+            "harness configured in config.json next to this file; generated by "
+            "kiss.agents.seas.coding.coding_sea.write_trial_sea, not meant to be "
+            "invoked by hand."
+        )
 
-prompt = _harness.prompt
-system_prompt = _harness.system_prompt
-settings = _harness.settings
-llm_call_hook = _harness.llm_call_hook
-tool_call_hook = _harness.tool_call_hook
+    def prompt(self, task: str) -> str:
+        return _harness.prompt(task)
+
+    def system_prompt(self, system_prompt: str) -> str:
+        return _harness.system_prompt()
+
+    def settings(self, settings: dict) -> dict:
+        return settings | _harness.settings()
+
+    def llm_call_hook(self, new_messages: list) -> list:
+        return _harness.on_llm_call(new_messages)
+
+    def tool_call_hook(self, name: str, args: dict) -> str:
+        return _harness.on_tool_call(name, args)
 '''
 
 

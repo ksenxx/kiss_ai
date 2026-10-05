@@ -10,7 +10,7 @@ The tools write the real ``$KISS_HOME/AGENTS.md`` of the test session
 (``KISS_HOME`` is a temporary directory, see ``conftest.py``).  The
 agent-level tests run a real :class:`ChatSorcarAgent` ReAct loop against
 the scripted local chat-completions server configured from each SEA's
-getters, so the tools are really offered and executed, their replies
+methods, so the tools are really offered and executed, their replies
 really reach the model as tool results, and the stored instruction
 really reaches the next task's system prompt.  (The scripted model's
 finish text is fixed, so what the model writes is not under test.)
@@ -28,8 +28,11 @@ import pytest
 import yaml
 
 from kiss.agents.seas import agents_md
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.forget import forget_sea
+from kiss.agents.seas.forget.forget_sea import ForgetSea
 from kiss.agents.seas.remember import remember_sea
+from kiss.agents.seas.remember.remember_sea import RememberSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
@@ -44,6 +47,18 @@ from kiss.tests.agents.sorcar.local_model_server import (
 
 _REMEMBER_PATH = Path(remember_sea.__file__).resolve()
 _FORGET_PATH = Path(forget_sea.__file__).resolve()
+_WORKER_SETTINGS: dict[str, Any] = {
+    "kind": "worker",
+    "tool_profile": "bash",
+    "max_budget": 1.0,
+    "use_worktree": False,
+    "auto_commit": False,
+    "auto_classify": False,
+    "allow_fan_out": False,
+    "use_web_tools": False,
+    "use_memory": False,
+}
+"""Both SEAs' resolved settings: ``settings()`` plus the ``worker`` preset."""
 
 
 @pytest.fixture(autouse=True)
@@ -55,21 +70,23 @@ def _fresh_agents_md() -> Iterator[Path]:
     path.unlink(missing_ok=True)
 
 
-def _run(sea: Any, prompt: str, script: list[bytes], work_dir: Path) -> tuple[Any, list]:
+def _run(sea: BaseSea, prompt: str, script: list[bytes], work_dir: Path) -> tuple[Any, list]:
     """Run *sea* on *prompt* against the scripted model; return (parsed result, requests)."""
-    settings = resolve_settings(vars(sea))
+    run = sea_commands.evaluate_sea([sea], prompt)
+    settings = run.settings
+    assert run.prompt == prompt
     with serve(script) as (url, requests):
-        agent = ChatSorcarAgent(f"{sea.__name__}-test")
+        agent = ChatSorcarAgent(f"{type(sea).__name__}-test")
         result = agent.run(
-            prompt_template=prompt,
+            prompt_template=run.prompt,
             model_name=MODEL,
             work_dir=str(work_dir),
             max_steps=6,
             max_budget=settings["max_budget"],
             model_config={"base_url": url, "api_key": "local"},
-            tools=sea.add_to_tools(),
+            tools_hook=run.tools_hook,
             tool_profile=settings["tool_profile"],
-            base_system_prompt=sea.system_prompt(),
+            system_prompt_hook=run.system_prompt_hook,
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
             is_parallel=settings["allow_fan_out"],
@@ -83,33 +100,26 @@ def _system_message(request: dict[str, Any]) -> str:
     return str(next(m for m in request["messages"] if m["role"] == "system")["content"])
 
 
-def test_sea_getters_follow_the_contract() -> None:
+def test_sea_methods_follow_the_contract() -> None:
     """Both SEAs pin their run: own prompt, own tool, bash profile, no extras."""
-    assert remember_sea.system_prompt() == remember_sea.SYSTEM_PROMPT
+    # ``system_prompt`` replaces the assembled prompt; ``tools`` appends.
+    assert RememberSea().system_prompt("ASSEMBLED") == remember_sea.SYSTEM_PROMPT
     assert "`remember_instruction`" in remember_sea.SYSTEM_PROMPT
-    assert remember_sea.add_to_tools() == [
-        remember_sea.remember_instruction, agents_md.list_instructions,
+    assert RememberSea().tools([print]) == [
+        print, remember_sea.remember_instruction, agents_md.list_instructions,
     ]
-    assert forget_sea.system_prompt() == forget_sea.SYSTEM_PROMPT
+    assert ForgetSea().system_prompt("ASSEMBLED") == forget_sea.SYSTEM_PROMPT
     assert "`forget_instruction`" in forget_sea.SYSTEM_PROMPT
     assert "`list_instructions`" in forget_sea.SYSTEM_PROMPT
-    assert forget_sea.add_to_tools() == [forget_sea.forget_instruction, agents_md.list_instructions]
-    for sea in (remember_sea, forget_sea):
-        assert sea.settings() == {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
+    assert ForgetSea().tools([]) == [forget_sea.forget_instruction, agents_md.list_instructions]
+    for module, sea in ((remember_sea, RememberSea()), (forget_sea, ForgetSea())):
+        assert sea.settings({}) == {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
+        assert sea.settings({"model": "m"})["model"] == "m"
         # ``resolve_settings`` evaluates ``settings()`` plus the ``worker``
-        # preset only; ``system_prompt()`` is a getter the daemon applies.
-        assert resolve_settings(vars(sea)) == {
-            "kind": "worker",
-            "tool_profile": "bash",
-            "max_budget": 1.0,
-            "use_worktree": False,
-            "auto_commit": False,
-            "auto_classify": False,
-            "allow_fan_out": False,
-            "use_web_tools": False,
-            "use_memory": False,
-        }, sea.__name__
-        assert_no_removed_getters(sea)
+        # preset only; ``system_prompt`` is a hook the daemon applies.
+        assert resolve_settings(sea.settings({})) == _WORKER_SETTINGS, module.__name__
+        assert sea_commands.base_settings([sea]) == _WORKER_SETTINGS, module.__name__
+        assert_no_removed_getters(module)
 
 
 def test_slash_commands_resolve_to_the_bundled_seas() -> None:
@@ -126,8 +136,10 @@ def test_slash_commands_resolve_to_the_bundled_seas() -> None:
     task_text, path = hit
     assert path == _FORGET_PATH
     assert task_text == "Always reply tersely"
-    for path, sea in ((_REMEMBER_PATH, remember_sea), (_FORGET_PATH, forget_sea)):
-        assert sea_commands.sea_settings(path) == resolve_settings(vars(sea))
+    for path in (_REMEMBER_PATH, _FORGET_PATH):
+        assert sea_commands.sea_settings(path) == _WORKER_SETTINGS
+    assert sea_commands.help_text_if_command("/remember help") == RememberSea().description()
+    assert sea_commands.help_text_if_command("/forget help") == ForgetSea().description()
 
 
 def test_remember_creates_the_file_and_appends_bullets(_fresh_agents_md: Path) -> None:
@@ -352,7 +364,7 @@ def test_remember_agent_stores_the_prompt_verbatim(tmp_path: Path, _fresh_agents
         tool_call_body("remember_instruction", {"instruction": instruction}, prompt_tokens=400),
         finish_body("<p>Remembered.</p>", prompt_tokens=500),
     ]
-    parsed, agentic = _run(remember_sea, instruction, script, tmp_path)
+    parsed, agentic = _run(RememberSea(), instruction, script, tmp_path)
     assert parsed["success"] is True
     assert parsed["summary"] == "<p>Remembered.</p>"
     assert _fresh_agents_md.read_text() == f"# User instructions\n\n- {instruction}\n"
@@ -392,7 +404,7 @@ def test_forget_agent_removes_the_instruction_the_next_task_was_following(
         ),
         finish_body("<p>Forgot it.</p>", prompt_tokens=600),
     ]
-    parsed, agentic = _run(forget_sea, "forget the British English one", script, tmp_path)
+    parsed, agentic = _run(ForgetSea(), "forget the British English one", script, tmp_path)
     assert parsed["success"] is True
     assert parsed["summary"] == "<p>Forgot it.</p>"
     assert _fresh_agents_md.read_text() == "# User instructions\n\n- Prefer uv over pip\n"

@@ -12,7 +12,7 @@ out to it and there is no substitute.  The gate tests run
 :func:`check_review` on real review files.  The agent-level test runs a
 real :class:`ChatSorcarAgent` ReAct loop against the scripted local
 chat-completions server configured as the daemon configures it from the
-SEA's getters; the only replaced boundary is the LLM endpoint, and the
+SEA's methods; the only replaced boundary is the LLM endpoint, and the
 tools really run.
 
 Branches not covered here: ``pdftotext`` exiting non-zero on a file that
@@ -30,6 +30,7 @@ import pytest
 import yaml
 
 from kiss.agents.seas.review_paper import review_paper_sea
+from kiss.agents.seas.review_paper.review_paper_sea import ReviewPaperSea
 from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -150,10 +151,11 @@ def _gate(report: str, name: str) -> str:
     return next(line for line in report.splitlines() if line.startswith(f"{name}: "))
 
 
-def test_sea_getters_follow_the_user_contract() -> None:
+def test_sea_methods_follow_the_user_contract() -> None:
     """The SEA appends the reviewing rules, offers the two tools, browses and fans out."""
-    prompt = review_paper_sea.add_to_system_prompt()
-    assert prompt == review_paper_sea.SYSTEM_PROMPT
+    sea = ReviewPaperSea()
+    assert sea.system_prompt("ASSEMBLED") == "ASSEMBLED\n\n" + review_paper_sea.SYSTEM_PROMPT
+    prompt = review_paper_sea.SYSTEM_PROMPT
     assert "William Strunk Jr. and E. B. White" in prompt
     assert review_paper_sea.SECOND_OPINION_MODEL in prompt
     assert "Run the `check_review` tool with the word limit" in prompt
@@ -168,21 +170,21 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert "\n       Scores\n       Originality: N/10." in prompt
     assert all(f"       {d}: N/10." in prompt for d in review_paper_sea._DIMENSIONS)
     assert review_paper_sea._HEADINGS[-1] == "Scores"
-    assert [t.__name__ for t in review_paper_sea.add_to_tools()] == ["read_paper", "check_review"]
+    assert [t.__name__ for t in sea.tools([print])] == ["print", "read_paper", "check_review"]
     # Browse, fan out, skip the classifier; a ``run_agent`` dispatch waits two hours.
-    assert review_paper_sea.settings() == {
+    assert sea.settings({}) == {
         "use_web_tools": True,
         "allow_fan_out": True,
         "auto_classify": False,
         "timeout": 2 * 3600,
     }
-    assert resolve_settings(vars(review_paper_sea)) == {
-        "kind": "session", **review_paper_sea.settings()
+    assert sea.settings({"model": "m"}) == {"model": "m", **sea.settings({})}
+    assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == {
+        "kind": "session", **sea.settings({})
     }
-    # The default system prompt is kept: the SEA only appends to it (no
-    # ``system_prompt()`` getter), and defines none of the removed
-    # per-field getters, which nothing would read.
-    assert not hasattr(review_paper_sea, "system_prompt")
+    # The default system prompt is kept: ``system_prompt`` only appends to
+    # it, and the module defines none of the removed getters, which
+    # nothing would read.
     assert_no_removed_getters(review_paper_sea)
     # The paper's word gates are reused minus the one about draft talk (a review
     # is allowed to say "reviewer" and "submission").
@@ -201,7 +203,7 @@ def test_slash_review_paper_resolves_to_the_bundled_sea() -> None:
     task_text, path = hit
     assert path == _SEA_PATH
     assert task_text == "Review x.pdf for ICLR"
-    assert sea_commands.sea_settings(path) == resolve_settings(vars(review_paper_sea))
+    assert sea_commands.sea_settings(path) == sea_commands.base_settings([ReviewPaperSea()])
 
 
 @pytest.mark.skipif(shutil.which("pdftotext") is None, reason="poppler not installed")
@@ -367,9 +369,12 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
     """
     paper = tmp_path / "paper.tex"
     paper.write_text("\\section{Intro}\nWe measure 329 tasks.", encoding="utf-8")
-    settings = review_paper_sea.settings()
     review = tmp_path / "review.txt"
     review.write_text(_SLOPPY_REVIEW, encoding="utf-8")
+    run = sea_commands.evaluate_sea(
+        [ReviewPaperSea()], f"Review {paper} for ICLR 2027; write to {review}."
+    )
+    settings = run.settings
     script = [
         tool_call_body("read_paper", {"paper_path": str(paper)}, prompt_tokens=500),
         tool_call_body("check_review", {"review_path": str(review)}, prompt_tokens=600),
@@ -378,14 +383,14 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("review-paper-sea-test")
         result = agent.run(
-            prompt_template=f"Review {paper} for ICLR 2027; write to {review}.",
+            prompt_template=run.prompt,
             model_name=MODEL,
             work_dir=str(tmp_path),
             max_steps=5,
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
-            system_prompt=review_paper_sea.add_to_system_prompt(),
-            tools=review_paper_sea.add_to_tools(),
+            system_prompt_hook=run.system_prompt_hook,
+            tools_hook=run.tools_hook,
             web_tools=settings["use_web_tools"],
             is_parallel=settings["allow_fan_out"],
             verbose=False,

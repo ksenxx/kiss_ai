@@ -45,6 +45,8 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.sea_settings import settings_functions
+
 MIN_RUNS = 3
 """Finished runs needed before a limit is proposed (fewer is no evidence)."""
 
@@ -375,17 +377,22 @@ def start_of(node: ast.expr, offsets: list[int]) -> int:
 
 
 def settings_literal(tree: ast.Module) -> ast.Dict | None:
-    """Return the dict literal the module-level ``settings()`` returns, or ``None``.
+    """Return the dict literal the SEA's ``settings`` method returns, or ``None``.
 
-    Only a ``return {...}`` of a literal dict is editable: a computed
-    dict (``return {**base, ...}`` counts as a literal; ``return
-    build()`` does not) has no place to write a key.
+    Only a ``return {...}`` or ``return settings | {...}`` of a literal
+    dict is editable: a computed dict (``return {**base, ...}`` counts
+    as a literal; ``return build()`` does not) has no place to write a
+    key.
     """
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "settings":
-            returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
-            if len(returns) == 1 and isinstance(returns[0].value, ast.Dict):
-                return returns[0].value
+    for node in settings_functions(tree):
+        returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
+        if len(returns) != 1:
+            continue
+        value = returns[0].value
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+            value = value.right
+        if isinstance(value, ast.Dict):
+            return value
     return None
 
 

@@ -91,12 +91,14 @@ def test_bundled_routers_are_the_model_picker_seas() -> None:
 
 def test_bestrouter_protocol_names_its_models_literally() -> None:
     """The protocol fixes the primary and the review model by name and the 75% cap."""
-    assert bestrouter_sea.register_as_model() is True
-    assert bestrouter_sea.settings() == {"model": bestrouter_sea.PRIMARY_MODEL}
+    sea = bestrouter_sea.BestrouterSea()
+    assert sea.register_as_model() is True
+    assert sea.settings({"kind": "worker"}) == {
+        "kind": "worker", "model": bestrouter_sea.PRIMARY_MODEL,
+    }
     assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-1"
-    assert not hasattr(bestrouter_sea, "model"), "settings() replaced the model() getter"
-    protocol = bestrouter_sea.add_to_system_prompt()
-    assert protocol == bestrouter_sea.SYSTEM_PROMPT
+    protocol = bestrouter_sea.SYSTEM_PROMPT
+    assert sea.system_prompt("BASE") == "BASE\n\n" + protocol
     assert protocol.startswith(BESTROUTER_MARKER)
     flat = " ".join(protocol.split())
     for phrase in (
@@ -111,10 +113,13 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
     for name in (bestrouter_sea.PRIMARY_MODEL, bestrouter_sea.REVIEW_MODEL):
         assert name in MODEL_INFO, name
     assert "codex" not in bestrouter_sea.REVIEW_MODEL
-    assert "bestrouter" in bestrouter_sea.description()
-    # The protocol relies on run_parallel, so the SEA must not withhold it.
-    assert not hasattr(bestrouter_sea, "is_parallel")
-    assert not hasattr(bestrouter_sea, "system_prompt")
+    assert "bestrouter" in sea.description()
+    # The protocol relies on run_parallel, so the SEA must not withhold it:
+    # it appends to the system prompt, keeps every tool and leaves the
+    # fan-out and prompt untouched.
+    assert sea.settings({"allow_fan_out": True})["allow_fan_out"] is True
+    assert sea.tools([print]) == [print]
+    assert sea.prompt("the task") == "the task"
 
 
 class SeaModelEntriesTest(DaemonRunApiHarness):
@@ -189,11 +194,18 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         return models[0]
 
     def _write_user_sea(self, name: str, body: str) -> Path:
-        """Create ``<tmpdir>/user_seas/<name>/<name>_sea.py`` with a description plus *body*."""
+        """Create ``<tmpdir>/user_seas/<name>/<name>_sea.py``: a ``Sea`` class with *body*.
+
+        *body* holds the class's methods (indented by four spaces); the
+        class describes itself by *name*.
+        """
         path = Path(self.tmpdir) / "user_seas" / name / f"{name}_sea.py"
         path.parent.mkdir(parents=True)
         path.write_text(
-            f"def description() -> str:\n    return {name!r}\n{body}", encoding="utf-8"
+            "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+            "class Sea(BaseSea):\n"
+            f"    def description(self):\n        return {name!r}\n{body}",
+            encoding="utf-8",
         )
         return path
 
@@ -220,22 +232,33 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
     def test_picker_lists_a_user_sea_that_registers_as_model(self) -> None:
         """A ``SEAS.md`` SEA joins the picker when ``register_as_model()`` is True, only then."""
         router = self._write_user_sea(
-            "myrouter", "def register_as_model() -> bool:\n    return True\n"
+            "myrouter",
+            "    def register_as_model(self):\n        return True\n",
         )
-        self._write_user_sea("notamodel", "def register_as_model() -> bool:\n    return False\n")
         self._write_user_sea(
-            "broken", "def register_as_model() -> bool:\n    raise RuntimeError('boom')\n"
+            "notamodel",
+            "    def register_as_model(self):\n        return False\n",
+        )
+        self._write_user_sea(
+            "broken",
+            "    def register_as_model(self):\n        raise RuntimeError('boom')\n",
+        )
+        self._write_user_sea(
+            "notabool",
+            "    def register_as_model(self):\n        return 'yes'\n",
         )
         self._write_user_sea("plain", "")
         self._register_user_seas()
         names = [m["name"] for m in self._models_event()["models"]]
         assert "myrouter" in names
-        assert not {"notamodel", "broken", "plain"} & set(names)
+        assert not {"notamodel", "broken", "notabool", "plain"} & set(names)
         assert sea_commands.model_sea("myrouter") == router
         # An edit that drops the registration is seen on the next lookup.
         router.write_text(
-            "def description() -> str:\n    return 'x'\n"
-            "def register_as_model() -> bool:\n    return False\n",
+            "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+            "class Sea(BaseSea):\n"
+            "    def description(self):\n        return 'x'\n\n"
+            "    def register_as_model(self):\n        return False\n",
             encoding="utf-8",
         )
         assert sea_commands.model_sea("myrouter") is None
@@ -303,8 +326,9 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         """A registered SEA whose settings name no ``model`` runs on the default model."""
         self._write_user_sea(
             "myrouter",
-            "def register_as_model() -> bool:\n    return True\n"
-            "def add_to_system_prompt() -> str:\n    return 'MYROUTER PROTOCOL'\n",
+            "    def register_as_model(self):\n        return True\n\n"
+            "    def system_prompt(self, system_prompt):\n"
+            "        return system_prompt + '\\n\\nMYROUTER PROTOCOL'\n",
         )
         self._register_user_seas()
         run = self._run("say hello", model="myrouter")
@@ -314,23 +338,31 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
     def test_explicit_agent_script_runs_on_top_of_the_router(self) -> None:
         """An ``agentPath`` run keeps the router pick as its base layer.
 
-        The script's ``system_prompt()`` is the base prompt, the router's
-        model is the model, and the router's protocol
-        (``add_to_system_prompt()``) is still appended, so a sub-agent or
-        a slash command on a router tab follows the same routing rules.
+        The router's model is the model and its ``system_prompt`` runs
+        first, so the script's own ``system_prompt`` receives the
+        assembled prompt with the routing protocol already appended: a
+        sub-agent or a slash command on a router tab follows the same
+        routing rules.
         """
         sea = Path(self.tmpdir) / "plain_sea.py"
         sea.write_text(
-            'def system_prompt() -> str:\n    return "PLAIN SEA PROMPT"\n', encoding="utf-8"
+            "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+            "class Sea(BaseSea):\n"
+            "    def system_prompt(self, system_prompt):\n"
+            "        return system_prompt + '\\n\\nPLAIN SEA PROTOCOL'\n",
+            encoding="utf-8",
         )
         run = self._run("say hello", model=AUTOROUTER, extension_agent_path=str(sea))
         assert run["model_name"] == orchestrator_model()
-        assert run["system_prompt"].startswith("PLAIN SEA PROMPT")
-        assert AUTOROUTER_MARKER in run["system_prompt"]
+        assert run["system_prompt"].startswith("<identity>"), run["system_prompt"][:200]
+        assert run["system_prompt"].index(AUTOROUTER_MARKER) < run["system_prompt"].index(
+            "PLAIN SEA PROTOCOL"
+        )
         run = self._run("say hello", model=BESTROUTER, extension_agent_path=str(sea))
         assert run["model_name"] == "claude-fable-5-1"
-        assert run["system_prompt"].startswith("PLAIN SEA PROMPT")
-        assert BESTROUTER_MARKER in run["system_prompt"]
+        assert run["system_prompt"].index(BESTROUTER_MARKER) < run["system_prompt"].index(
+            "PLAIN SEA PROTOCOL"
+        )
 
     def test_agent_script_blank_model_setting_still_gets_a_real_model(self) -> None:
         """A ``settings()["model"]`` of ``""`` means "the tab's pick" — never the router."""
@@ -339,8 +371,16 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
             vs._default_model = AUTOROUTER
         sea = Path(self.tmpdir) / "blankmodel_sea.py"
         sea.write_text(
-            'def settings() -> dict:\n    return {"model": ""}\n'
-            'def system_prompt() -> str:\n    return "BLANK MODEL SEA"\n',
+            """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {"model": ""}
+
+    def system_prompt(self, system_prompt):
+        return "BLANK MODEL SEA"
+""",
             encoding="utf-8",
         )
         run = self._run("say hello", extension_agent_path=str(sea))
@@ -356,24 +396,35 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         """
         sea = Path(self.tmpdir) / "pickbest_sea.py"
         sea.write_text(
-            f'def settings() -> dict:\n    return {{"model": "{BESTROUTER}"}}\n'
-            'def system_prompt() -> str:\n    return "PICKS BESTROUTER"\n',
+            "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+            "class Sea(BaseSea):\n"
+            "    def settings(self, settings):\n"
+            f"        return settings | {{'model': '{BESTROUTER}'}}\n\n"
+            "    def system_prompt(self, system_prompt):\n"
+            "        return system_prompt + '\\n\\nPICKS BESTROUTER'\n",
             encoding="utf-8",
         )
         run = self._run("say hello", model="gpt-6-astra", extension_agent_path=str(sea))
         assert run["model_name"] == "claude-fable-5-1"
-        assert run["system_prompt"].startswith("PICKS BESTROUTER")
+        assert "PICKS BESTROUTER" in run["system_prompt"]
         # The same name under the bestrouter tab: the picker's model, once.
         run = self._run("say hello", model=BESTROUTER, extension_agent_path=str(sea))
         assert run["model_name"] == "claude-fable-5-1"
         assert run["system_prompt"].count(BESTROUTER_MARKER) == 1
+        assert "PICKS BESTROUTER" in run["system_prompt"]
 
     def test_agent_script_extending_the_tab_picker_runs_the_picker_once(self) -> None:
-        """A script that ``extends`` the tab's picker gets ONE picker layer, not two."""
+        """A script that subclasses the tab's picker gets ONE picker layer, not two.
+
+        The base class's ``system_prompt`` runs first (base first), so the
+        router's protocol precedes the subclass's own.
+        """
         sea = Path(self.tmpdir) / "onbest_sea.py"
         sea.write_text(
-            f'def settings() -> dict:\n    return {{"extends": "{BESTROUTER}"}}\n'
-            'def add_to_system_prompt() -> str:\n    return "ONBEST PROTOCOL"\n',
+            "from kiss.agents.sorcar.sea_commands import sea_class\n\n\n"
+            f"class Sea(sea_class('{BESTROUTER}')):\n"
+            "    def system_prompt(self, system_prompt):\n"
+            "        return system_prompt + '\\n\\nONBEST PROTOCOL'\n",
             encoding="utf-8",
         )
         run = self._run("say hello", model=BESTROUTER, extension_agent_path=str(sea))
@@ -402,8 +453,8 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         """A picked SEA whose ``settings()`` raises stops the task with the diagnostic."""
         self._write_user_sea(
             "badmodel",
-            "def register_as_model() -> bool:\n    return True\n"
-            "def settings() -> dict:\n    raise RuntimeError('no model today')\n",
+            "    def register_as_model(self):\n        return True\n\n"
+            "    def settings(self, settings):\n        raise RuntimeError('no model today')\n",
         )
         self._register_user_seas()
         runs: list[dict[str, Any]] = []
@@ -412,7 +463,8 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         self._raw_daemon_run({"model": "badmodel", "prompt": "say hello"}, events)
         results = [e for e in events if e.get("type") == "result"]
         assert results, events
-        assert "settings() raised: RuntimeError: no model today" in str(results[-1]), results[-1]
+        assert "settings() of agent script" in str(results[-1]), results[-1]
+        assert "badmodel_sea.py' raised: RuntimeError: no model today" in str(results[-1])
         assert runs == []
 
     def test_persisted_router_pick_is_not_a_model_for_direct_runs(self) -> None:
@@ -428,14 +480,16 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
     def test_slash_command_keeps_its_own_agent(self) -> None:
         """``/sh ...`` runs the sh SEA directly as the tab's agent, on top of the pick.
 
-        The run's ``agentPath`` is the ``/sh`` SEA (its base system prompt
-        and ``bash`` tool profile shape the run), the LLM's task is the
-        trailing ``echo hi`` (no ``run_agent`` relay), and the bestrouter
-        pick is the base layer: its model and its routing protocol.
+        The run's ``agentPath`` is the ``/sh`` SEA (its ``bash`` tool
+        profile shapes the run), the LLM's task is the trailing ``echo
+        hi`` (no ``run_agent`` relay), and the bestrouter pick is the
+        base layer: its model.  The sh SEA's ``system_prompt`` replaces
+        the whole assembled prompt, the router's appended protocol
+        included, so the Bash-only worker runs on its own prompt.
         """
         run = self._run("/sh echo hi", model=BESTROUTER)
         assert run["model_name"] == "claude-fable-5-1"
-        assert BESTROUTER_MARKER in run["system_prompt"]
+        assert BESTROUTER_MARKER not in run["system_prompt"]
         assert run["prompt"] == "# Task\necho hi", run["prompt"]
         assert run["system_prompt"].startswith(sh_sea.SYSTEM_PROMPT), run["system_prompt"]
         assert run["tool_names"] == ["Bash", "finish"], run["tool_names"]
@@ -480,17 +534,17 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         calls = Path(self.tmpdir) / "hook_calls.txt"
         hooked = self._write_user_sea(
             "hooked",
-            "def register_as_model() -> bool:\n    return True\n"
-            "def on_picked_as_model(work_dir: str) -> str:\n"
-            f"    with open({str(calls)!r}, 'a') as f:\n"
-            "        f.write(work_dir + '\\n')\n"
-            "    return 'hook ran in ' + work_dir\n",
+            "    def register_as_model(self):\n        return True\n\n"
+            "    def on_picked_as_model(self, work_dir):\n"
+            f"        with open({str(calls)!r}, 'a') as f:\n"
+            "            f.write(work_dir + '\\n')\n"
+            "        return 'hook ran in ' + work_dir\n",
         )
         self._write_user_sea(
             "badhook",
-            "def register_as_model() -> bool:\n    return True\n"
-            "def on_picked_as_model(work_dir: str) -> str:\n"
-            "    raise RuntimeError('hook exploded')\n",
+            "    def register_as_model(self):\n        return True\n\n"
+            "    def on_picked_as_model(self, work_dir):\n"
+            "        raise RuntimeError('hook exploded')\n",
         )
         self._register_user_seas()
         with self.assertLogs("kiss.sea_commands", level="INFO") as logs:
@@ -553,10 +607,11 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         """A hook that never returns holds the run for the timeout only, then is logged."""
         self._write_user_sea(
             "stuckhook",
-            "import threading\n"
-            "def register_as_model() -> bool:\n    return True\n"
-            "def on_picked_as_model(work_dir: str) -> str:\n"
-            "    threading.Event().wait()\n    return 'never'\n",
+            "    def register_as_model(self):\n        return True\n\n"
+            "    def on_picked_as_model(self, work_dir):\n"
+            "        import threading\n"
+            "        threading.Event().wait()\n"
+            "        return 'never'\n",
         )
         self._register_user_seas()
         original = sea_commands.PICKED_HOOK_TIMEOUT_SECONDS

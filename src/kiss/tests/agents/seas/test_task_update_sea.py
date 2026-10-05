@@ -9,7 +9,7 @@ The ``task_transcript`` tool is exercised against tasks persisted in
 the test session's real SQLite history (``KISS_HOME`` is a temporary
 directory, see ``conftest.py``); the agent-level test runs a real
 :class:`ChatSorcarAgent` ReAct loop against the scripted local
-chat-completions server configured from the SEA's getters, so the
+chat-completions server configured from the SEA's methods, so the
 digest really flows through the tool result into the finish summary.
 """
 
@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from kiss.agents.seas.task_update import task_update_sea as sea
+from kiss.agents.seas.task_update.task_update_sea import TaskUpdateSea
 from kiss.agents.sorcar import sea_commands, task_digest
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
@@ -66,19 +67,22 @@ def _entries(digest: str) -> list[str]:
     return [line for line in digest.splitlines() if line.startswith("[")]
 
 
-def test_sea_getters_and_prompt_follow_the_contract() -> None:
+def test_sea_methods_and_prompt_follow_the_contract() -> None:
     """The SEA pins its run: transcript tool, bash profile, no extras."""
     assert sea.build_prompt("abc123") == (
         "What have the task with abc123 done so far and what are the partial results?"
     )
-    assert sea.system_prompt() == sea.SYSTEM_PROMPT
+    agent = TaskUpdateSea()
+    # ``system_prompt`` replaces the assembled prompt with the fixed one.
+    assert agent.system_prompt("ASSEMBLED") == sea.SYSTEM_PROMPT
     assert "task_transcript" in sea.SYSTEM_PROMPT
-    assert sea.add_to_tools() == [sea.task_transcript]
-    assert sea.settings() == {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
+    assert agent.tools([]) == [sea.task_transcript]
+    assert agent.tools([print]) == [print, sea.task_transcript]
+    assert agent.settings({}) == {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
     # ``worker`` turns fan-out, browser, memory, worktree, auto-commit and
-    # the classifier off; ``system_prompt()`` stays a getter the daemon
-    # applies, so ``resolve_settings`` does not carry its text.
-    assert resolve_settings(vars(sea)) == {
+    # the classifier off; ``system_prompt`` is a hook the daemon applies,
+    # so the resolved settings do not carry its text.
+    assert sea_commands.base_settings([agent]) == resolve_settings(agent.settings({})) == {
         "kind": "worker",
         "tool_profile": "bash",
         "max_budget": 1.0,
@@ -100,7 +104,10 @@ def test_slash_task_update_resolves_to_the_bundled_sea() -> None:
     task_text, path = hit
     assert path == _SEA_PATH
     assert task_text == "deadbeef"
-    assert sea_commands.sea_settings(path) == resolve_settings(vars(sea))
+    assert sea_commands.sea_settings(path) == sea_commands.base_settings([TaskUpdateSea()])
+    assert sea_commands.help_text_if_command("/task_update help") == (
+        TaskUpdateSea().description()
+    )
 
 
 def test_transcript_errors_for_missing_and_unknown_ids() -> None:
@@ -263,19 +270,22 @@ def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path)
         tool_call_body("task_transcript", {"task_id": task_id}, prompt_tokens=500),
         finish_body(report, prompt_tokens=700),
     ]
-    settings = resolve_settings(vars(sea))
+    run = sea_commands.evaluate_sea([TaskUpdateSea()], sea.build_prompt(task_id))
+    settings = run.settings
+    assert run.prompt == sea.build_prompt(task_id)
+    assert run.tools_hook is not None and run.system_prompt_hook is not None
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("task-update-sea-test")
         result = agent.run(
-            prompt_template=sea.build_prompt(task_id),
+            prompt_template=run.prompt,
             model_name=MODEL,
             work_dir=str(tmp_path),
             max_steps=4,
             max_budget=settings["max_budget"],
             model_config={"base_url": url, "api_key": "local"},
-            tools=sea.add_to_tools(),
+            tools_hook=run.tools_hook,
             tool_profile=settings["tool_profile"],
-            base_system_prompt=sea.system_prompt(),
+            system_prompt_hook=run.system_prompt_hook,
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
             is_parallel=settings["allow_fan_out"],

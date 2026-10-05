@@ -4,16 +4,16 @@
 # add your name here
 """End-to-end: a path-mode ``run_agent`` sub-task inherits the caller's extra tools.
 
-A task whose agent script adds tools through ``add_to_tools()`` runs
+A task whose SEA adds tools through ``tools()`` runs
 on a real daemon; its scripted model dispatches three ``run_agent``
 sub-tasks.  Each sub-task's model request is a real chat-completions
 call, so its ``tools`` array is exactly the toolset the sub-agent got:
 
 * the plain sub-agent (``sorcar_sea.py``) has the parent's tool, and a
   parent tool named like one of the sub-agent's built-ins is skipped;
-* a sub-task whose own script also uses ``add_to_tools()`` has both
+* a sub-task whose own SEA also defines ``tools()`` has both
   sets, and a tool both scripts define by the same name once;
-* a sub-task whose script fixes the whole toolset (``add_to_tools()``
+* a sub-task whose SEA fixes the whole toolset (``tools()``
   with ``settings()['tool_profile'] == "none"``) keeps exactly that set.
 
 The tool callables cannot travel the wire: ``run_agent`` sends the
@@ -49,6 +49,8 @@ from kiss.tests.server.parallel_agent_harness import (
 )
 
 PARENT_SCRIPT = textwrap.dedent('''
+    from kiss.agents.seas.base.base_sea import BaseSea
+
     def parent_ledger(entry: str) -> str:
         """Record *entry* in the parent's ledger."""
         return "recorded " + entry
@@ -59,23 +61,25 @@ PARENT_SCRIPT = textwrap.dedent('''
         return 2
 
 
-    def add_to_tools():
-        return [parent_ledger, number_of_cores]
+    class Sea(BaseSea):
+        def tools(self, tools):
+            return tools + [parent_ledger, number_of_cores]
 
+        def settings(self, settings):
+            # Without run_parallel the parent has no built-in
+            # number_of_cores, so its own tool of that name registers; a
+            # sub-task WITH run_parallel has the built-in and must skip the
+            # inherited one instead of failing on the duplicate name.
+            return settings | {"allow_fan_out": False}
 
-    def settings():
-        # Without run_parallel the parent has no built-in
-        # number_of_cores, so its own tool of that name registers; a
-        # sub-task WITH run_parallel has the built-in and must skip the
-        # inherited one instead of failing on the duplicate name.
-        return {"allow_fan_out": False}
-
-
-    def add_to_system_prompt():
-        return "PARENT-PROTOCOL: record every decision with parent_ledger."
+        def system_prompt(self, system_prompt):
+            protocol = "PARENT-PROTOCOL: record every decision with parent_ledger."
+            return system_prompt + "\\n\\n" + protocol
 ''')
 
 CHILD_ADDING_SCRIPT = textwrap.dedent('''
+    from kiss.agents.seas.base.base_sea import BaseSea
+
     def child_probe(what: str) -> str:
         """Probe *what*."""
         return "probed " + what
@@ -86,23 +90,31 @@ CHILD_ADDING_SCRIPT = textwrap.dedent('''
         return "child recorded " + entry
 
 
-    def add_to_tools():
-        return [child_probe, parent_ledger]
+    class Sea(BaseSea):
+        def tools(self, tools):
+            # ``tools`` already holds the inherited parent_ledger: the
+            # SEA sees the whole toolset, so its own copy replaces it.
+            kept = [t for t in tools if t.__name__ != "parent_ledger"]
+            return kept + [child_probe, parent_ledger]
 ''')
 
 CHILD_FIXED_SCRIPT = textwrap.dedent('''
+    from kiss.agents.seas.base.base_sea import BaseSea
+
     def only_tool(what: str) -> str:
         """The one tool of this agent."""
         return what
 
 
-    def settings():
-        # ``none``: no built-in toolset, so add_to_tools() is the whole set.
-        return {"tool_profile": "none"}
+    class Sea(BaseSea):
+        def settings(self, settings):
+            # ``none``: no built-in toolset, so tools() is the whole set.
+            return settings | {"tool_profile": "none"}
+
+        def tools(self, tools):
+            return tools + [only_tool]
 
 
-    def add_to_tools():
-        return [only_tool]
 ''')
 
 
@@ -165,7 +177,7 @@ def daemon(env: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch) -> Iterator[s
 def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
     env: IsolatedKissHome, daemon: str,
 ) -> None:
-    """Three sub-tasks of one ``add_to_tools()`` parent: plain, adding, fixed toolset."""
+    """Three sub-tasks of one ``tools()`` parent: plain, adding, fixed toolset."""
     repo = env.repo
     (repo / "parent_sea.py").write_text(PARENT_SCRIPT, encoding="utf-8")
     (repo / "child_adding_sea.py").write_text(CHILD_ADDING_SCRIPT, encoding="utf-8")

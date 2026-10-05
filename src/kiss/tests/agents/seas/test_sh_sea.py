@@ -7,7 +7,7 @@
 The agent-level tests run a real :class:`ChatSorcarAgent` ReAct loop
 against the scripted local chat-completions server
 (:mod:`kiss.tests.agents.sorcar.local_model_server`) configured
-exactly as the daemon configures it from the SEA's getters: the
+exactly as the daemon configures it from the SEA's methods: the
 ``bash`` tool profile and the SEA's system prompt.  The only replaced
 boundary is the LLM endpoint; the Bash tool really runs the command
 in the work directory and its output really flows through the tool
@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from kiss.agents.seas.sh import sh_sea
+from kiss.agents.seas.sh.sh_sea import ShSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
@@ -47,24 +48,30 @@ def _system_message(request: dict[str, Any]) -> str:
     return str(next(m for m in request["messages"] if m["role"] == "system")["content"])
 
 
-def test_sea_getters_follow_the_user_contract() -> None:
-    """The SEA's getters pin the run: Bash-only, no worktree, no extras."""
+def test_sea_methods_follow_the_user_contract() -> None:
+    """The SEA's methods pin the run: Bash-only, no worktree, no extras."""
     # The prompt's wording is free to evolve; the contract is that the
     # agent runs the user's command through Bash and hands the raw
-    # output to ``finish``.
-    prompt = sh_sea.system_prompt()
+    # output to ``finish``.  ``system_prompt`` REPLACES the assembled
+    # prompt (the default Sorcar prompt would drown the three rules).
+    sea = ShSea()
+    prompt = sea.system_prompt("ASSEMBLED")
     assert prompt == sh_sea.SYSTEM_PROMPT
+    assert "ASSEMBLED" not in prompt
     assert "call the Bash tool with the user's command exactly as written" in prompt
     assert "call the `finish` tool" in prompt
     assert "must never be empty" in prompt
-    assert sh_sea.settings() == {
+    assert sea.settings({}) == {
         "kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"],
+    }
+    assert sea.settings({"model": "m"}) == {
+        "model": "m", "kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"],
     }
     assert TOOL_PROFILES["bash"] == frozenset({"Bash"})
     # The ``worker`` preset turns worktree, auto-commit, classifier,
-    # fan-out, browser and memory off; ``system_prompt()`` stays a getter
-    # the daemon applies, so ``resolve_settings`` does not carry its text.
-    assert resolve_settings(vars(sh_sea)) == {
+    # fan-out, browser and memory off; ``system_prompt`` is a hook the
+    # daemon applies, so the resolved settings do not carry its text.
+    assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == {
         "kind": "worker",
         "tool_profile": "bash",
         "locked": ["tool_profile"],
@@ -86,7 +93,8 @@ def test_slash_sh_resolves_to_the_bundled_sea() -> None:
     task_text, path = hit
     assert path == _SEA_PATH
     assert task_text == "git status --short"
-    assert sea_commands.sea_settings(path) == resolve_settings(vars(sh_sea))
+    assert sea_commands.sea_settings(path) == sea_commands.base_settings([ShSea()])
+    assert type(sea_commands.load_sea(path)).__name__ == "ShSea"
 
 
 def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) -> None:
@@ -105,17 +113,20 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
         ),
         finish_body("<pre>sh-sea-output 42</pre>", prompt_tokens=600),
     ]
-    settings = resolve_settings(vars(sh_sea))
+    run = sea_commands.evaluate_sea([ShSea()], command)
+    settings = run.settings
+    assert run.prompt == command
+    assert run.tools_hook is None and run.system_prompt_hook is not None
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("sh-sea-test")
         result = agent.run(
-            prompt_template=command,
+            prompt_template=run.prompt,
             model_name=MODEL,
             work_dir=str(tmp_path),
             max_steps=4,
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
-            base_system_prompt=sh_sea.system_prompt(),
+            system_prompt_hook=run.system_prompt_hook,
             tool_profile=settings["tool_profile"],
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],

@@ -29,10 +29,10 @@ Three ways to run it::
     through this SEA (see ``register_as_model()`` below)
 
 The routing protocol (:data:`SYSTEM_PROMPT`) is added to the default Sorcar
-system prompt through the ``add_to_system_prompt()`` getter; the
+system prompt by the ``system_prompt`` method; the
 deterministic parts — the priced candidate menu, the pick, the cost estimate
 and the decision ledger — are the tools this module exposes through
-``add_to_tools()``.  Candidate order per tier is :data:`TIERS`, ranked by measured
+``tools()``.  Candidate order per tier is :data:`TIERS`, ranked by measured
 coding quality per dollar (researched 2026-09-24); prices and availability
 come from :mod:`kiss.core.models.model_info` at call time, so the menu is
 always the one this installation can run.  The prompt's "Observed model
@@ -47,9 +47,9 @@ refusing text over the same cap, and the protocol treats it as the
 posterior over the tier-order prior.
 
 ``settings()`` (a sequential ``worker`` that picks its model per run) and
-the getters ``add_to_system_prompt()`` / ``register_as_model()`` /
-``on_picked_as_model()`` follow the SEA contract in
-:mod:`kiss.agents.sorcar.sea_settings`.  Picking ``autorouter`` in the model picker
+the methods ``system_prompt()`` / ``register_as_model()`` /
+``on_picked_as_model()`` of :class:`AutorouterSea` follow the SEA contract in
+:mod:`kiss.agents.seas.base.base_sea`.  Picking ``autorouter`` in the model picker
 also keeps the evidence fresh: the ``on_picked_as_model(work_dir)`` hook
 (:func:`schedule_weekly_rsi7d`) makes sure an enabled weekly cron job that
 runs ``/rsi7d autorouter`` exists, creating or resuming it when it does not.
@@ -65,6 +65,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
@@ -350,14 +351,68 @@ outcome, escalations, ledger path.
 """The routing protocol; the operating manual for the orchestrating model."""
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/autorouter help``."""
-    return (
-        "Splits a task into units, runs each on the cheapest model tier (small, medium, "
-        "frontier) that passes its acceptance check, escalating on failure and logging every "
-        f"decision to ~/{HOME_DIR}/MODEL_DECISIONS.md; pick `autorouter` in the model picker, use "
-        '`/autorouter <task>` in the chat, or run_agent(agent="autorouter", task="...").'
-    )
+class AutorouterSea(BaseSea):
+    """The ``/autorouter`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/autorouter help``."""
+        return (
+            "Splits a task into units, runs each on the cheapest model tier (small, medium, "
+            "frontier) that passes its acceptance check, escalating on failure and logging every "
+            f"decision to ~/{HOME_DIR}/MODEL_DECISIONS.md; pick `autorouter` in the model picker, "
+            "use "
+            '`/autorouter <task>` in the chat, or run_agent(agent="autorouter", task="...").'
+        )
+
+    def register_as_model(self) -> bool:
+        """List ``autorouter`` in the model picker.
+
+        A picked ``autorouter`` makes the daemon run every task of the tab
+        through this SEA on :func:`orchestrator_model` (the ``model`` of
+        :func:`settings`), with :data:`SYSTEM_PROMPT` added to the system prompt
+        (:meth:`system_prompt`).
+        """
+        return True
+
+    def on_picked_as_model(self, work_dir: str) -> str:
+        """Schedule the weekly ``/rsi7d autorouter`` job when ``autorouter`` is picked as the model.
+
+        The daemon runs this hook when ``autorouter`` is picked in the model
+        picker and once per run whose model is ``autorouter``
+        (``sea_commands.run_picked_hook``), and logs the returned note.
+
+        Args:
+            work_dir: Work directory of the run.
+
+        Returns:
+            :func:`schedule_weekly_rsi7d`'s note.
+        """
+        return schedule_weekly_rsi7d(work_dir)
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Add the routing protocol to the default Sorcar system prompt."""
+        return system_prompt + "\n\n" + SYSTEM_PROMPT
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Configure a routed session: the orchestrator model, no fan-out, no browser, no memory.
+
+        ``allow_fan_out`` is off because ``run_parallel`` forwards the parent's
+        system-prompt additions to every worker, which would turn each routed
+        unit into another router without the routing tools; ``run_agent`` is
+        the dispatch primitive (one unit per call).  Classification is off so
+        the router always sees the full protocol.
+        """
+        return settings | {
+            "model": orchestrator_model(),
+            "allow_fan_out": False,
+            "auto_classify": False,
+            "use_web_tools": False,
+            "use_memory": False,
+        }
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Expose the priced menu, the pick, the cost estimate, the observed costs, the ledger."""
+        return tools + [model_menu, pick_model, estimate_cost, observed_call_costs, log_decision]
 
 
 def _priced(
@@ -643,17 +698,6 @@ def orchestrator_model() -> str:
     return ranked[0] if ranked else get_default_model()
 
 
-def register_as_model() -> bool:
-    """List ``autorouter`` in the model picker.
-
-    A picked ``autorouter`` makes the daemon run every task of the tab
-    through this SEA on :func:`orchestrator_model` (the ``model`` of
-    :func:`settings`), with :data:`SYSTEM_PROMPT` added to the system prompt
-    (:func:`add_to_system_prompt`).
-    """
-    return True
-
-
 def kiss_checkout(work_dir: str) -> str:
     """Return the KISS git checkout that contains *work_dir*, or ``""``.
 
@@ -760,49 +804,5 @@ def schedule_weekly_rsi7d(work_dir: str) -> str:
     from kiss.agents.sorcar.cron_agent import cron_job
 
     return cron_job("ensure", **weekly_rsi7d_job(work_dir))
-
-
-def on_picked_as_model(work_dir: str) -> str:
-    """Schedule the weekly ``/rsi7d autorouter`` job when ``autorouter`` is picked as the model.
-
-    The daemon runs this hook when ``autorouter`` is picked in the model
-    picker and once per run whose model is ``autorouter``
-    (``sea_commands.run_picked_hook``), and logs the returned note.
-
-    Args:
-        work_dir: Work directory of the run.
-
-    Returns:
-        :func:`schedule_weekly_rsi7d`'s note.
-    """
-    return schedule_weekly_rsi7d(work_dir)
-
-
-def add_to_system_prompt() -> str:
-    """Add the routing protocol to the default Sorcar system prompt."""
-    return SYSTEM_PROMPT
-
-
-def settings() -> dict[str, Any]:
-    """Configure a routed session: the orchestrator model, no fan-out, no browser, no memory.
-
-    ``allow_fan_out`` is off because ``run_parallel`` forwards the parent's
-    system-prompt additions to every worker, which would turn each routed
-    unit into another router without the routing tools; ``run_agent`` is
-    the dispatch primitive (one unit per call).  Classification is off so
-    the router always sees the full protocol.
-    """
-    return {
-        "model": orchestrator_model(),
-        "allow_fan_out": False,
-        "auto_classify": False,
-        "use_web_tools": False,
-        "use_memory": False,
-    }
-
-
-def add_to_tools() -> list[Any]:
-    """Expose the priced menu, the pick, the cost estimate, the observed costs and the ledger."""
-    return [model_menu, pick_model, estimate_cost, observed_call_costs, log_decision]
 
 

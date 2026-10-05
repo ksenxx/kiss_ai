@@ -50,6 +50,14 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server.task_runner import inject_keyboard_interrupt
 from kiss.tests.local_ws import fake_daemon
 
+_HELPER_SEA = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+"""
+
 
 @pytest.fixture(autouse=True)
 def _standalone_daemon_endpoint(monkeypatch: pytest.MonkeyPatch):
@@ -160,7 +168,7 @@ def test_run_agent_folds_post_result_spend_into_the_caller(
     ], end="finish")
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     parent = SorcarAgent("spend-parent")
     try:
         out = make_run_agent_tool(str(tmp_path), parent_agent=parent)(
@@ -227,7 +235,7 @@ def test_stopped_caller_is_still_charged_the_childs_spend(
     daemon = _ScriptedDaemon([_usage("$56.4700", 700000, 120)], end="hold")
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     parent = SorcarAgent("stopped-parent")
     tool = make_run_agent_tool(str(tmp_path), parent_agent=parent)
     try:
@@ -262,7 +270,7 @@ def test_interrupt_before_any_spend_charges_nothing(
     daemon = _ScriptedDaemon([], end="hold")
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     parent = SorcarAgent("idle-parent")
     tool = make_run_agent_tool(str(tmp_path), parent_agent=parent)
     try:
@@ -283,7 +291,7 @@ def test_dropped_connection_charges_the_spend_seen_so_far(
     daemon = _ScriptedDaemon([_usage("$0.5000", 1000, 2)], end="drop")
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     parent = SorcarAgent("dropped-parent")
     try:
         out = make_run_agent_tool(str(tmp_path), parent_agent=parent)(
@@ -315,7 +323,7 @@ def _fold_into(
     daemon = _ScriptedDaemon(stream, end="finish")
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     try:
         make_run_agent_tool(str(tmp_path), parent_agent=parent)(
             "child", str(script), timeout="30",

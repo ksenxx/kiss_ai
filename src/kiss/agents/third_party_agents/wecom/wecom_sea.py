@@ -26,6 +26,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -40,13 +41,39 @@ _WECOM_DIR = kiss_home() / "third_party_agents" / "wecom"
 _config = ChannelConfig(_WECOM_DIR, ("webhook_url",))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/wecom help``."""
-    return (
-        "Posts text and markdown messages to a WeCom (WeChat Work) group through a "
-        "group-robot incoming webhook (outbound only, no inbound messages); use "
-        'run_agent(agent="wecom", task="...") or the `kiss-wecom` CLI.'
-    )
+class WecomSea(BaseSea):
+    """The ``/wecom`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/wecom help``."""
+        return (
+            "Posts text and markdown messages to a WeCom (WeChat Work) group through a "
+            "group-robot incoming webhook (outbound only, no inbound messages); use "
+            'run_agent(agent="wecom", task="...") or the `kiss-wecom` CLI.'
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the WeCom channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + WeComAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + WeComAgent.channel_system_prompt
 
 
 class WeComChannelBackend(ToolMethodBackend):
@@ -231,32 +258,6 @@ def main() -> None:
     enterprise AES envelope, which this outbound-only adapter omits.
     """
     channel_main(WeComAgent, "kiss-wecom", channel_name="WeCom")
-
-
-def add_to_tools() -> list:
-    """Return the WeCom channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return WeComAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return WeComAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

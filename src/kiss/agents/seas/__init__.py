@@ -56,12 +56,13 @@ such folder as the chat slash command ``/<name>`` (``/merge``, ``/sh``,
 ``/revise_and_review_paper``, ``/git_extract_knowledge``, ``/remember``, ``/forget``,
 ...); a script
 placed directly in the package, outside its own folder, is not
-registered.  Every SEA
-defines ``description()``, a zero-argument function returning one
-sentence on what it does and how to use it, which ``/<name> help``
-prints without running the SEA.  A SEA whose ``register_as_model()``
-returns ``True`` is also listed in the model picker under its name
-(``autorouter``, ``bestrouter``): picking it runs every task of the tab
-through the SEA, with the model routing protocol its
-``add_to_system_prompt()`` returns added to the system prompt.
+registered.  Every SEA file
+defines one subclass of :class:`kiss.agents.seas.base.base_sea.BaseSea`
+whose ``description()`` returns one sentence on what it does and how
+to use it, which ``/<name> help`` prints without running the SEA.  A
+SEA whose ``register_as_model()`` returns ``True`` is also listed in
+the model picker under its name (``autorouter``, ``bestrouter``):
+picking it runs every task of the tab through the SEA, with the model
+routing protocol its ``system_prompt`` method appends to the system
+prompt.
 """
