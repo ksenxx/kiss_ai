@@ -429,7 +429,7 @@ def test_new_agent_loads_persisted_config() -> None:
 
 def test_tools_module_function() -> None:
     """Module-level tools() returns a non-empty tool list."""
-    tools = notion_mod.add_to_tools()
+    tools = notion_mod.NotionSea().tools([])
     assert len(tools) >= 3
     assert all(callable(t) for t in tools)
 

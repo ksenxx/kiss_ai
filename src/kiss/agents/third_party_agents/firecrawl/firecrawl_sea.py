@@ -31,6 +31,7 @@ from urllib.parse import quote, urlparse
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -49,14 +50,40 @@ _SEARCH_SOURCES = ("web", "news", "images")
 _RESULT_FIELDS = ("title", "url", "description", "snippet", "date", "imageUrl")
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/firecrawl help``."""
-    return (
-        "Scrapes pages, maps sites, searches the web and manages crawls through the "
-        "Firecrawl v2 REST API (cloud or self-hosted, authenticated with an API key); "
-        'use it as `run_agent(agent="firecrawl", task="Scrape https://example.com and '
-        'summarize it")` or through the `kiss-firecrawl` CLI.'
-    )
+class FirecrawlSea(BaseSea):
+    """The ``/firecrawl`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/firecrawl help``."""
+        return (
+            "Scrapes pages, maps sites, searches the web and manages crawls through the "
+            "Firecrawl v2 REST API (cloud or self-hosted, authenticated with an API key); "
+            'use it as `run_agent(agent="firecrawl", task="Scrape https://example.com and '
+            'summarize it")` or through the `kiss-firecrawl` CLI.'
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Firecrawl channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + FirecrawlAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + FirecrawlAgent.channel_system_prompt
 
 
 def _bad_segment(value: str, name: str) -> str | None:
@@ -670,32 +697,6 @@ def main() -> None:
         channel_name="Firecrawl",
         make_backend=None,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Firecrawl channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return FirecrawlAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return FirecrawlAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

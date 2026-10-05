@@ -76,6 +76,14 @@ from kiss.tests.agents.sorcar.test_dispatch_stop_cascade import (
 )
 from kiss.tests.local_ws import fake_daemon
 
+_HELPER_SEA = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+"""
+
 
 @pytest.fixture(autouse=True)
 def _standalone_daemon_endpoint(monkeypatch: pytest.MonkeyPatch):
@@ -331,7 +339,7 @@ def test_run_agent_tool_waits_past_delayed_result(
     daemon = _SlowFinishDaemon(delay=1.5)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "slow_helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     try:
         out = make_run_agent_tool(str(tmp_path))(
             "say hi slowly", str(script), timeout=timeout_arg,
@@ -413,7 +421,7 @@ def test_run_agent_tool_timeout_detaches_the_task_into_a_job(
     daemon = _StopConfirmingDaemon()
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     try:
         out = make_run_agent_tool(str(tmp_path))(
             "never finishes", str(script), timeout="0.5",
@@ -455,7 +463,7 @@ def test_killing_a_detached_job_charges_the_stopped_tasks_spend(
     })
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     parent = SorcarAgent("dispatch-timeout-parent")
     try:
         out = make_run_agent_tool(str(tmp_path), parent_agent=parent)(
@@ -525,7 +533,7 @@ def test_run_agent_tool_reports_unconfirmed_stop(
     daemon = _RecordingDaemon(mode="silent")
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     try:
         out = make_run_agent_tool(str(tmp_path))(
             "never finishes", str(script), timeout="0.5",
@@ -663,7 +671,13 @@ def test_empty_timeout_applies_the_default_constant(
     daemon = _StopConfirmingDaemon()
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+""")
     try:
         out = make_run_agent_tool(str(tmp_path))("never finishes", str(script))
         assert "is still running after 0.3s as job agent-" in out, out
@@ -684,7 +698,13 @@ def test_empty_timeout_takes_the_script_timeout_setting(
     daemon = _StopConfirmingDaemon()
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def settings() -> dict:\n    return {'timeout': 0.3}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'timeout': 0.3}
+""")
     try:
         out = make_run_agent_tool(str(tmp_path))("never finishes", str(script))
         assert "is still running after 0.3s as job agent-" in out, out
@@ -717,7 +737,13 @@ def test_invalid_timeout_rejected_before_dispatch(
     never see a ``run`` command.
     """
     script = tmp_path / "helper.py"
-    script.write_text("def settings() -> dict:\n    return {'timeout': 5}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'timeout': 5}
+""")
     daemon = _StopConfirmingDaemon()
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     try:

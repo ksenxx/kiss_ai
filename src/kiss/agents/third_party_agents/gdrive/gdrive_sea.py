@@ -33,6 +33,7 @@ from urllib.parse import quote
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
@@ -59,14 +60,40 @@ _FOLDER_MIME = "application/vnd.google-apps.folder"
 _SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet"
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/gdrive help``."""
-    return (
-        "Lists, searches, reads, uploads, moves and shares files in the user's Google Drive "
-        "through the Drive v3 REST API with sign-in and calls proxied by Composio; use it with "
-        '`run_agent(agent="gdrive", task="Find my spreadsheets modified this week")` or the '
-        "`kiss-gdrive -t '<task>'` CLI (outbound-only, no --channel poll mode)."
-    )
+class GdriveSea(BaseSea):
+    """The ``/gdrive`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/gdrive help``."""
+        return (
+            "Lists, searches, reads, uploads, moves and shares files in the user's Google Drive "
+            "through the Drive v3 REST API with sign-in and calls proxied by Composio; use it with "
+            '`run_agent(agent="gdrive", task="Find my spreadsheets modified this week")` or the '
+            "`kiss-gdrive -t '<task>'` CLI (outbound-only, no --channel poll mode)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Google Drive channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        Composio connection recorded under ``~/.kiss`` and returns its
+        authentication and backend tools.
+        """
+        return tools + GoogleDriveAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + GoogleDriveAgent.channel_system_prompt
 
 
 def _bad_segment(value: str, name: str) -> str | None:
@@ -551,32 +578,6 @@ def main() -> None:
         channel_name="Google Drive",
         make_backend=None,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Google Drive channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    Composio connection recorded under ``~/.kiss`` and returns its
-    authentication and backend tools.
-    """
-    return GoogleDriveAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return GoogleDriveAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

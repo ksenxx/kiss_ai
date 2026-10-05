@@ -220,10 +220,15 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             '''
             """SEA with a mistyped docker_image setting."""
 
+            from kiss.agents.seas.base.base_sea import BaseSea
 
-            def settings() -> dict:
-                """Wrong type."""
-                return {"docker_image": 42}
+
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    """Wrong type."""
+                    return settings | {"docker_image": 42}
+
+
             ''',
         )
         result = sorcar.run(

@@ -36,8 +36,8 @@ only changed files and new commits are indexed, and the agent revises
 the pages the changes affect.  ``ask <question>`` answers from the
 memory.
 
-Module-level getters (``system_prompt()``, ``add_to_tools()``, ...) follow the
-SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
+The SEA class's methods (``system_prompt()``, ``tools()``, ...) follow the
+SEA contract in :mod:`kiss.agents.seas.base.base_sea`.
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.git_extract_knowledge.git_knowledge_index import (
     IndexReport,
     KnowledgeError,
@@ -236,15 +237,45 @@ describe it as current.
 _resolved: dict[str, Path] = {}
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/git_extract_knowledge help``."""
-    return (
-        "Indexes every tracked file and commit of a git repository into its domain memory "
-        "(curated Markdown pages plus a full-text block store) and schedules a daily "
-        "incremental refresh; use `/git_extract_knowledge <repo path or clone URL>`, "
-        "`/git_extract_knowledge update <repo>`, `/git_extract_knowledge ask <question>` or "
-        'run_agent(agent="git_extract_knowledge", task=...).'
-    )
+class GitExtractKnowledgeSea(BaseSea):
+    """The ``/git_extract_knowledge`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/git_extract_knowledge help``."""
+        return (
+            "Indexes every tracked file and commit of a git repository into its domain memory "
+            "(curated Markdown pages plus a full-text block store) and schedules a daily "
+            "incremental refresh; use `/git_extract_knowledge <repo path or clone URL>`, "
+            "`/git_extract_knowledge update <repo>`, `/git_extract_knowledge ask <question>` or "
+            'run_agent(agent="git_extract_knowledge", task=...).'
+        )
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return :data:`SYSTEM_PROMPT` with the interpreter and module filled in."""
+        return SYSTEM_PROMPT.replace(
+            "{python}", shlex.quote(sys.executable),
+        ).replace("{module}", MODULE)
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """A worker with the full toolset that may fan out, on the real checkout.
+
+        No worktree or auto-commit (it indexes repositories, it does not
+        change them), no classifier, no browser, no memory; fan-out stays on
+        for the per-repository indexing sub-agents.
+        """
+        return settings | {
+            "kind": "worker",
+            "tool_profile": "full",
+            "allow_fan_out": True,
+        }
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the knowledge tools added to the built-in toolset."""
+        return tools + [
+            index_repo, knowledge_status, knowledge_search, knowledge_read,
+            list_knowledge_pages, read_knowledge_page, search_knowledge_pages,
+            write_knowledge_page, delete_knowledge_page, schedule_daily_update,
+        ]
 
 
 def _repo(spec: str) -> Path:
@@ -641,37 +672,7 @@ def schedule_daily_update(repo: str, max_budget: float = DAILY_UPDATE_BUDGET_USD
     )
 
 
-# ----- SEA getters --------------------------------------------------------------
-
-
-def system_prompt() -> str:
-    """Return :data:`SYSTEM_PROMPT` with the interpreter and module filled in."""
-    return SYSTEM_PROMPT.replace(
-        "{python}", shlex.quote(sys.executable),
-    ).replace("{module}", MODULE)
-
-
-def settings() -> dict[str, Any]:
-    """A worker with the full toolset that may fan out, on the real checkout.
-
-    No worktree or auto-commit (it indexes repositories, it does not
-    change them), no classifier, no browser, no memory; fan-out stays on
-    for the per-repository indexing sub-agents.
-    """
-    return {
-        "kind": "worker",
-        "tool_profile": "full",
-        "allow_fan_out": True,
-    }
-
-
-def add_to_tools() -> list[Any]:
-    """Return the knowledge tools added to the built-in toolset."""
-    return [
-        index_repo, knowledge_status, knowledge_search, knowledge_read,
-        list_knowledge_pages, read_knowledge_page, search_knowledge_pages,
-        write_knowledge_page, delete_knowledge_page, schedule_daily_update,
-    ]
+# ----- the SEA class --------------------------------------------------------------
 
 
 # ----- CLI ----------------------------------------------------------------------

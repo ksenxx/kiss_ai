@@ -23,6 +23,7 @@ import threading
 import time
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -42,15 +43,37 @@ _config = ChannelConfig(
 )
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/irc help``."""
-    return (
-        "Joins IRC channels and sends and reads messages on the IRC server configured in "
-        f"~/{HOME_DIR}/third_party_agents/irc/config.json (server, nick, optional "
-        "TLS); use it with "
-        "`run_agent(agent=\"irc\", task=...)` or the `kiss-irc -t \"<task>\"` CLI "
-        "(`kiss-irc --channel <#channel>` polls a channel and answers new messages)."
-    )
+class IrcSea(BaseSea):
+    """The ``/irc`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/irc help``."""
+        return (
+            "Joins IRC channels and sends and reads messages on the IRC server configured in "
+            f"~/{HOME_DIR}/third_party_agents/irc/config.json (server, nick, optional "
+            "TLS); use it with "
+            "`run_agent(agent=\"irc\", task=...)` or the `kiss-irc -t \"<task>\"` CLI "
+            "(`kiss-irc --channel <#channel>` polls a channel and answers new messages)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the IRC channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + IRCAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
 
 
 def _use_tls_enabled(cfg: dict[str, str]) -> bool:
@@ -108,7 +131,7 @@ class IRCChannelBackend(ToolMethodBackend):
     def _send_raw(self, line: str) -> None:
         """Send a raw IRC line, connecting on demand.
 
-        A fresh backend built by this module's ``add_to_tools()`` inside
+        A fresh backend built by this module's SEA ``tools()`` inside
         the kiss-web daemon starts disconnected; the first send
         connects it from the persisted config instead of silently
         dropping the line.
@@ -536,27 +559,6 @@ def main() -> None:
         channel_name="IRC",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the IRC channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return IRCAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

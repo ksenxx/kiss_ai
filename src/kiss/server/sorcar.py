@@ -38,21 +38,24 @@ already-running daemon and block until it finishes::
     # Continue the same chat (the agent sees the prior task as context):
     follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
-``extension_agent_path="/path/to/my_agent.py"`` names an *agent
-script* — a Sorcar Extension Agent (SEA) — whose ``settings()`` dict
-computes the run's parameters on the daemon — e.g. a ``"model"`` key
-overrides *model*, a ``"prompt"`` key overrides *prompt* — while
-parameters it leaves out keep the values passed to :func:`run` (see
-the :func:`run` docstring for the script format).  The script is also
-the only way to give the agent extra tools: its ``add_to_tools()``
-returns functions (plain synchronous functions with keyword-bindable,
-type-annotated parameters and Google-style docstrings) that are added
-to the built-in toolset; with ``"tool_profile": "none"`` they and
-``finish`` become the whole toolset.  The client never serializes
-Python functions — the daemon loads the script itself, so the tools
-execute **in the daemon process** like native agent tools::
+``extension_agent_path="/path/to/my_agent.py"`` names a Sorcar
+Extension Agent (SEA): a file defining one subclass of
+:class:`kiss.agents.seas.base.base_sea.BaseSea` whose ``settings``
+method computes the run's parameters on the daemon — e.g. a
+``"model"`` key overrides *model* — while parameters it leaves out
+keep the values passed to :func:`run` (see the :func:`run` docstring
+for the file format).  The SEA is also the only way to give the agent
+extra tools: its ``tools(tools)`` method returns the run's toolset
+(the built-in tools it was given plus plain synchronous functions with
+keyword-bindable, type-annotated parameters and Google-style
+docstrings); with ``"tool_profile": "none"`` the list it returns and
+``finish`` are the whole toolset.  The client never serializes Python
+functions — the daemon loads the file itself, so the tools execute
+**in the daemon process** like native agent tools::
 
     # my_agent.py
+    from kiss.agents.seas.base.base_sea import BaseSea
+
     def get_temperature(city: str) -> str:
         \"\"\"Return the current temperature of a city.
 
@@ -61,20 +64,21 @@ execute **in the daemon process** like native agent tools::
         \"\"\"
         return lookup_sensor(city)
 
-    def add_to_tools():
-        \"\"\"Return the tools added to the built-in toolset.\"\"\"
-        return [get_temperature]
+    class WeatherSea(BaseSea):
+        def tools(self, tools):
+            \"\"\"Add the temperature tool to the built-in toolset.\"\"\"
+            return tools + [get_temperature]
 
     result = sorcar.run("What's the temperature in Paris?",
                         extension_agent_path="my_agent.py")
 
-The script may additionally define ``llm_call_hook()`` /
-``tool_call_hook()``, returning functions ``llm_call_hook`` and
-``tool_call_hook`` that the daemon passes to the underlying
+The class may also define ``system_prompt(system_prompt)``,
+``llm_call_hook(new_messages)`` and ``tool_call_hook(name, args)``,
+which the daemon applies to the run and passes to the underlying
 :class:`kiss.core.kiss_agent.KISSAgent` (see
-:meth:`~kiss.core.kiss_agent.KISSAgent.run`); like the tool getters,
-these have no :func:`run` parameter, since a callable cannot travel
-the wire.
+:meth:`~kiss.core.kiss_agent.KISSAgent.run`); like ``tools``, these
+have no :func:`run` parameter, since a callable cannot travel the
+wire.
 
 The function speaks the daemon's JSON protocol over its local WSS
 endpoint, found through ``$KISS_HOME/sorcar-local.json`` (or the file

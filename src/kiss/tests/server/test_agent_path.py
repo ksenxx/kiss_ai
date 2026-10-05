@@ -205,6 +205,10 @@ class AgentPathApiTest(unittest.TestCase):
             seen["_append_basic_tools_attr"] = getattr(
                 self_agent, "_append_basic_tools", None,
             )
+            # The SEA's ``tools`` method, applied by ``perform_task``
+            # (below the stubbed boundary): recorded for the tests to
+            # call on a sample toolset.
+            seen["_tools_hook_attr"] = getattr(self_agent, "_tools_hook", None)
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.001
             self_agent.total_steps = 1
@@ -224,9 +228,9 @@ class AgentPathApiTest(unittest.TestCase):
         parameter and the script's ``settings()`` sets each — the
         daemon-built agent must see the SCRIPT's values, proving the
         settings were applied on the daemon and won over the passed
-        arguments.  ``system_prompt()`` wins over the client's system
-        prompt, and ``add_to_tools()`` with ``tool_profile: "none"``
-        makes the script's tools the whole tool set.
+        arguments.  ``system_prompt()`` replaces the client's system
+        prompt, and ``tools()`` with ``tool_profile: "none"`` makes the
+        script's tools the whole tool set.
         """
         available = get_available_models()
         assert available, "test needs at least one available model"
@@ -237,7 +241,9 @@ class AgentPathApiTest(unittest.TestCase):
         agent_path = self._write_py(
             "my_agent.py",
             f'''
-            """Agent script overriding every supported parameter."""
+            """SEA overriding every supported parameter."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
             def scripted_tool(x: int) -> int:
@@ -249,35 +255,33 @@ class AgentPathApiTest(unittest.TestCase):
                 return 2 * x
 
 
-            def prompt(task):
-                return "scripted prompt marker"
+            class Sea(BaseSea):
+                def prompt(self, task):
+                    return "scripted prompt marker"
 
+                def settings(self, settings):
+                    return settings | {{
+                        "work_dir": {repo2!r},
+                        "model": {script_model!r},
+                        "use_worktree": False,
+                        "auto_commit": False,
+                        "max_budget": 1.25,
+                        "model_config": {{"base_url": "http://localhost:1234/v1"}},
+                        # The script's False values must win over the
+                        # client-passed True values.
+                        "use_web_tools": False,
+                        "use_memory": False,
+                        "allow_fan_out": False,
+                        # ``none`` switches the basic toolset off, so
+                        # ``tools()`` becomes the whole tool set.
+                        "tool_profile": "none",
+                    }}
 
-            def settings():
-                return {{
-                    "work_dir": {repo2!r},
-                    "model": {script_model!r},
-                    "use_worktree": False,
-                    "auto_commit": False,
-                    "max_budget": 1.25,
-                    "model_config": {{"base_url": "http://localhost:1234/v1"}},
-                    # The script's False values must win over the
-                    # client-passed True values.
-                    "use_web_tools": False,
-                    "use_memory": False,
-                    "allow_fan_out": False,
-                    # ``none`` switches the basic toolset off, so
-                    # ``add_to_tools()`` becomes the whole tool set.
-                    "tool_profile": "none",
-                }}
+                def system_prompt(self, system_prompt):
+                    return "scripted system prompt"
 
-
-            def system_prompt():
-                return "scripted system prompt"
-
-
-            def add_to_tools():
-                return [scripted_tool]
+                def tools(self, tools):
+                    return tools + [scripted_tool]
             ''',
         )
         seen: dict[str, Any] = {}
@@ -318,8 +322,13 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_web_tools_attr"] is False
         assert seen["_is_parallel_attr"] is False
         assert seen["_use_memory_attr"] is False
-        assert [t.__name__ for t in seen["tools"]] == ["scripted_tool"]
-        assert seen["tools"][0](x=21) == 42
+        # The daemon passes no ``tools``: the SEA's ``tools()`` is the
+        # agent's tools hook, applied to the built-in toolset by
+        # ``perform_task``.
+        assert seen["tools"] == []
+        scripted = seen["_tools_hook_attr"]([])
+        assert [t.__name__ for t in scripted] == ["scripted_tool"]
+        assert scripted[0](x=21) == 42
         # ``tool_profile: "none"`` means ONLY these tools (+ finish):
         # the basic toolset is switched off.
         assert seen["_append_basic_tools_attr"] is False
@@ -338,9 +347,14 @@ class AgentPathApiTest(unittest.TestCase):
             '''
             """Agent script overriding only the prompt."""
 
+            from kiss.agents.seas.base.base_sea import BaseSea
 
-            def prompt(task):
-                return "prompt from script (" + task + ")"
+
+            class Sea(BaseSea):
+                def prompt(self, task):
+                    return "prompt from script (" + task + ")"
+
+
             ''',
         )
         seen: dict[str, Any] = {}
@@ -365,17 +379,20 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["max_budget"] == 3.5
         assert seen["_is_parallel_attr"] is True
         assert seen["tools"] == []
+        assert seen["_tools_hook_attr"] is None
 
-    def test_add_to_tools_keeps_basic_tools(self) -> None:
-        """An ``add_to_tools()`` script adds its tools and keeps the basic toolset.
+    def test_tools_method_keeps_basic_tools(self) -> None:
+        """A ``tools()`` SEA adds its tools and keeps the basic toolset.
 
-        The agent sees the script's tools, with the basic toolset kept
-        on.
+        The agent's tools hook appends the script's tool to whatever
+        toolset it is handed, with the basic toolset kept on.
         """
         agent_path = self._write_py(
             "add_tools_agent.py",
             '''
             """Agent script adding a tool to the basic toolset."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
             def script_tool() -> str:
@@ -383,8 +400,11 @@ class AgentPathApiTest(unittest.TestCase):
                 return "script"
 
 
-            def add_to_tools():
-                return [script_tool]
+            class Sea(BaseSea):
+                def tools(self, tools):
+                    return tools + [script_tool]
+
+
             ''',
         )
         seen: dict[str, Any] = {}
@@ -397,7 +417,10 @@ class AgentPathApiTest(unittest.TestCase):
             timeout=60,
         )
         assert result.success is True
-        assert [t.__name__ for t in seen["tools"]] == ["script_tool"]
+        assert seen["tools"] == []
+        assert [t.__name__ for t in seen["_tools_hook_attr"]([print])] == [
+            "print", "script_tool",
+        ]
         assert seen["_append_basic_tools_attr"] is True
 
     def test_chat_id_continues_existing_chat(self) -> None:
@@ -438,11 +461,14 @@ class AgentPathApiTest(unittest.TestCase):
         agent_path = self._write_py(
             "chat_agent.py",
             f'''
-            """Agent script pinning the chat id."""
+            """SEA pinning the chat id."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
-            def settings():
-                return {{"chat_id": {first.chat_id!r}}}
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    return settings | {{"chat_id": {first.chat_id!r}}}
             ''',
         )
         second = sorcar.run(
@@ -461,7 +487,14 @@ class AgentPathApiTest(unittest.TestCase):
         assert "chat marker answer" in prompts_seen[1]
 
     def test_broken_agent_scripts_fail_the_task_with_diagnostics(self) -> None:
-        """Import errors, broken ``settings()``, raising getters and bad returns stop the task."""
+        """Import errors, missing classes, broken ``settings()``/``prompt()`` stop the task.
+
+        Every error the loader meets while staging the SEA — before
+        the agent is built — fails the task with the ``AgentFileError``
+        text as its result.  (The ``system_prompt`` and ``tools``
+        methods run later, on the assembled prompt and toolset: see
+        :meth:`test_broken_hook_methods_fail_the_run`.)
+        """
         seen: dict[str, Any] = {}
         self._install_recording_stub(seen)
         cases = [
@@ -472,72 +505,130 @@ class AgentPathApiTest(unittest.TestCase):
             ),
             (
                 "raising_settings_agent.py",
-                "def settings():\n    raise ValueError('no settings today')\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        raise ValueError('no settings today')
+""",
                 ["settings()", "raised", "ValueError", "no settings today"],
             ),
             (
-                "raising_getter_agent.py",
-                "def system_prompt():\n    raise ValueError('no prompt today')\n",
-                ["system_prompt()", "raised", "no prompt today"],
+                "raising_prompt_agent.py",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def prompt(self, task):
+        raise ValueError('no prompt today')
+""",
+                ["prompt()", "raised", "no prompt today"],
             ),
             (
                 "badtype_agent.py",
-                "def settings():\n    return {'max_budget': 'lots'}\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'max_budget': 'lots'}
+""",
                 ["settings()['max_budget']", "must be int or float", "str"],
             ),
             (
                 "nondict_settings_agent.py",
-                "def settings():\n    return 3\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return 3
+""",
                 ["settings()", "must return a dict", "int"],
             ),
             (
                 "unknown_key_agent.py",
-                "def settings():\n    return {'prompt_x': 'hi'}\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'prompt_x': 'hi'}
+""",
                 ["settings()", "unknown key 'prompt_x'"],
             ),
             (
                 "unknown_kind_agent.py",
-                "def settings():\n    return {'kind': 'rocket'}\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'kind': 'rocket'}
+""",
                 ["settings()['kind'] must be one of session, worker, channel; got 'rocket'"],
             ),
             (
-                "noncallable_settings_agent.py",
-                "settings = 'not a function'\n",
-                ["settings", "must be a function returning a dict"],
+                "getters_only_agent.py",
+                "def settings():\n    return {}\n\nadd_to_tools = 'not a function'\n",
+                ["must define exactly one subclass of BaseSea", "found none"],
             ),
             (
-                "noncallable_getter_agent.py",
-                "add_to_tools = 'not a function'\n",
-                ["add_to_tools", "must be a callable", "str"],
+                "two_classes_agent.py",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class First(BaseSea):
+    pass
+
+class Second(BaseSea):
+    pass
+""",
+                ["must define exactly one subclass of BaseSea", "found First, Second"],
+            ),
+            (
+                "raising_init_agent.py",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def __init__(self):
+        raise RuntimeError('no instance today')
+""",
+                ["Sea() raised", "no instance today"],
             ),
             (
                 "empty_prompt_agent.py",
-                "def prompt(task):\n    return '  '\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def prompt(self, task):
+        return '  '
+""",
                 ["prompt()", "must return a non-empty string"],
             ),
             (
                 "prompt_setting_agent.py",
-                "def settings():\n    return {'prompt': 'x'}\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'prompt': 'x'}
+""",
                 ["settings() has an unknown key 'prompt'"],
             ),
             (
-                "none_getter_agent.py",
-                "system_prompt = None\n",
-                ["system_prompt", "must be a callable", "NoneType"],
-            ),
-            (
-                "badtype_system_prompt_agent.py",
-                "def system_prompt():\n    return 5\n",
-                ["system_prompt()", "must return a string", "int"],
-            ),
-            (
-                "badtype_add_to_tools_agent.py",
-                "def add_to_tools():\n    return 5\n",
-                ["add_to_tools()", "must return a list of tool callables", "int"],
-            ),
-            (
                 "nan_budget_agent.py",
-                "def settings():\n    return {'max_budget': float('nan')}\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'max_budget': float('nan')}
+""",
                 [
                     "settings()['max_budget']",
                     "must return a finite number or None",
@@ -545,7 +636,13 @@ class AgentPathApiTest(unittest.TestCase):
             ),
             (
                 "inf_budget_agent.py",
-                "def settings():\n    return {'max_budget': float('inf')}\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'max_budget': float('inf')}
+""",
                 [
                     "settings()['max_budget']",
                     "must return a finite number or None",
@@ -553,7 +650,13 @@ class AgentPathApiTest(unittest.TestCase):
             ),
             (
                 "huge_budget_agent.py",
-                "def settings():\n    return {'max_budget': 10 ** 400}\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'max_budget': 10 ** 400}
+""",
                 [
                     "settings()['max_budget']",
                     "must return a finite number or None",
@@ -561,11 +664,16 @@ class AgentPathApiTest(unittest.TestCase):
             ),
             (
                 "evil_value_agent.py",
-                "class _Evil(str):\n"
-                "    def __str__(self):\n"
-                "        raise RuntimeError('evil str')\n"
-                "def prompt(task):\n"
-                "    return _Evil('x')\n",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class _Evil(str):
+    def __str__(self):
+        raise RuntimeError('evil str')
+class Sea(BaseSea):
+    def prompt(self, task):
+        return _Evil('x')
+""",
                 ["prompt()", "returned a broken value", "evil str"],
             ),
         ]
@@ -587,17 +695,74 @@ class AgentPathApiTest(unittest.TestCase):
             "a broken agent script must stop the task before the agent runs"
         )
 
+    def test_broken_hook_methods_fail_the_run(self) -> None:
+        """A raising or mistyped ``system_prompt()`` fails the run before the LLM is called.
+
+        The method is applied by ``SorcarAgent.run`` on the assembled
+        prompt, so its error surfaces inside the run: the task fails,
+        the LLM (the stubbed parent ``run``) is never reached, and the
+        diagnostic is the task's persisted result.  The ``sorcar.run``
+        client sees ``success=False`` with an empty text, as the daemon
+        broadcasts no ``result`` event for an agent that RETURNED a
+        failure summary.
+        """
+        seen: dict[str, Any] = {}
+        self._install_recording_stub(seen)
+        cases = [
+            (
+                "raising_system_prompt_agent.py",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        raise ValueError('no prompt today')
+""",
+                ["system_prompt() of agent script", "raised", "no prompt today"],
+            ),
+            (
+                "badtype_system_prompt_agent.py",
+                """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        return 5
+""",
+                ["system_prompt() of agent script", "must return a string", "int"],
+            ),
+        ]
+        for name, source, expected_parts in cases:
+            with self.subTest(script=name):
+                agent_path = self._write_py(name, source)
+                result = sorcar.run(
+                    "should not run the agent",
+                    work_dir=self.repo,
+                    extension_agent_path=agent_path,
+                    endpoint_file=self.endpoint_file,
+                    timeout=60,
+                )
+                assert result.success is False
+                persisted = {
+                    row["id"]: str(row["result"])
+                    for row in _persistence._load_history()
+                }
+                for part in expected_parts:
+                    assert part in persisted[result.task_id], (part, persisted)
+        assert "prompt_template" not in seen, (
+            "a broken system_prompt() must stop the run before the LLM is called"
+        )
+
     def test_broken_script_leaves_command_untouched(self) -> None:
-        """A later failing getter must not apply earlier overrides.
+        """A later failing method must not apply earlier overrides.
 
         ``apply_agent_overrides`` is the daemon-side loader; drive it
         directly with a real script whose ``settings()`` succeeds (a
         ``chat_id`` and ``use_worktree`` override) and whose LATER
-        ``add_to_system_prompt()`` raises: the command must come out
-        exactly as it went in — a direct ``_run_task`` caller seeds its
-        run state from the command, so a partial override surviving
-        the failure would leak the broken script's chat id into a
-        later run.
+        ``prompt()`` raises: the command must come out exactly as it
+        went in — a direct ``_run_task`` caller seeds its run state
+        from the command, so a partial override surviving the failure
+        would leak the broken script's chat id into a later run.
         """
         from kiss.agents.sorcar.agent_file import (
             AgentFileError,
@@ -607,15 +772,17 @@ class AgentPathApiTest(unittest.TestCase):
         agent_path = self._write_py(
             "partial_agent.py",
             '''
-            """Agent script whose later getter fails."""
+            """SEA whose later method fails."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
-            def settings():
-                return {"chat_id": "hijacked-chat", "use_worktree": False}
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    return settings | {"chat_id": "hijacked-chat", "use_worktree": False}
 
-
-            def add_to_system_prompt():
-                raise RuntimeError("late failure")
+                def prompt(self, task):
+                    raise RuntimeError("late failure")
             ''',
         )
         cmd = {
@@ -628,7 +795,7 @@ class AgentPathApiTest(unittest.TestCase):
         original = dict(cmd)
         with self.assertRaises(AgentFileError) as ctx:
             apply_agent_overrides(cmd)
-        assert "add_to_system_prompt()" in str(ctx.exception)
+        assert "prompt() of agent script" in str(ctx.exception)
         assert "late failure" in str(ctx.exception)
         assert cmd == original
 
@@ -640,7 +807,13 @@ class AgentPathApiTest(unittest.TestCase):
                 endpoint_file=self.endpoint_file,
             )
         not_py = Path(self.tmpdir) / "agent.txt"
-        not_py.write_text("def settings():\n    return {'model': 'x'}\n")
+        not_py.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'x'}
+""")
         with self.assertRaises(ValueError):
             sorcar.run("hi", extension_agent_path=str(not_py), endpoint_file=self.endpoint_file)
         with self.assertRaises(ValueError):

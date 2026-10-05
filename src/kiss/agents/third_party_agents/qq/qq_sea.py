@@ -39,6 +39,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
@@ -69,14 +70,40 @@ _QQ_DIR = kiss_home() / "third_party_agents" / "qq"
 _config = ChannelConfig(_QQ_DIR, ("appid", "secret"))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/qq help``."""
-    return (
-        "Channel agent for the official QQ bot platform that sends group and C2C (private) "
-        "messages with a bot appid/secret and receives inbound events on an embedded "
-        'Ed25519-verified webhook server; use run_agent(agent="qq", task="...") or the '
-        "`kiss-qq -t '<task>'` CLI (start with the task `authenticate`)."
-    )
+class QqSea(BaseSea):
+    """The ``/qq`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/qq help``."""
+        return (
+            "Channel agent for the official QQ bot platform that sends group and C2C (private) "
+            "messages with a bot appid/secret and receives inbound events on an embedded "
+            'Ed25519-verified webhook server; use run_agent(agent="qq", task="...") or the '
+            "`kiss-qq -t '<task>'` CLI (start with the task `authenticate`)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the QQ channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + QQAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + QQAgent.channel_system_prompt
 
 
 def _derive_signing_key(secret: str) -> Ed25519PrivateKey:
@@ -524,32 +551,6 @@ def main() -> None:
         channel_name="QQ",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the QQ channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return QQAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return QQAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

@@ -95,6 +95,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.config import kiss_home
 from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
@@ -1793,22 +1794,47 @@ CRON_DISPATCH_PREAMBLE = (
 )
 """Guidance appended to the system prompt of every cron-management session.
 
-Returned by :func:`add_to_system_prompt`, which the daemon applies when
+Appended by the SEA's ``system_prompt`` method, which the daemon applies when
 ``run_agent`` is called with ``"cron"`` as the agent (after the
 ``channel`` kind's generic preamble).
 """
 
 
-def add_to_tools() -> list:
-    """Return the cron tools (``kiss.server.sorcar.run`` agent-script contract).
+class CronAgentSea(BaseSea):
+    """The ``/cron_agent`` SEA."""
 
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``.
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the cron tools (``kiss.server.sorcar.run`` agent-script contract).
 
-    Returns:
-        The :func:`cron_job` and :func:`gateway_command` tools.
-    """
-    return [cron_job, gateway_command]
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``.
+
+        Returns:
+            The :func:`cron_job` and :func:`gateway_command` tools.
+        """
+        return tools + [cron_job, gateway_command]
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/cron help``."""
+        return (
+            "Scheduled automations: create, list, pause, resume, remove or run now "
+            "the cron jobs of this KISS home (a polled messaging gateway is a cron "
+            "job too)."
+        )
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Configure a cron-management session: a ``channel`` worker in the cron work directory.
+
+        ``channel``: no git lifecycle (managing the JSON job store needs
+        none), nothing inherited from the calling task, the channel
+        preamble in the system prompt.  Classification is off: unattended
+        scheduled automations should not spend a classifier round trip.
+        """
+        return settings | {"kind": "channel", "work_dir": cron_work_dir()}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return :data:`CRON_DISPATCH_PREAMBLE`, appended to the session's system prompt."""
+        return system_prompt + "\n\n" + CRON_DISPATCH_PREAMBLE
 
 
 def cron_work_dir() -> str:
@@ -1825,31 +1851,6 @@ def cron_work_dir() -> str:
     work_dir = _cron_dir() / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
     return str(work_dir)
-
-
-def description() -> str:
-    """Return the one-sentence help text shown by ``/cron help``."""
-    return (
-        "Scheduled automations: create, list, pause, resume, remove or run now "
-        "the cron jobs of this KISS home (a polled messaging gateway is a cron "
-        "job too)."
-    )
-
-
-def settings() -> dict[str, Any]:
-    """Configure a cron-management session: a ``channel`` worker in the cron work directory.
-
-    ``channel``: no git lifecycle (managing the JSON job store needs
-    none), nothing inherited from the calling task, the channel
-    preamble in the system prompt.  Classification is off: unattended
-    scheduled automations should not spend a classifier round trip.
-    """
-    return {"kind": "channel", "work_dir": cron_work_dir()}
-
-
-def add_to_system_prompt() -> str:
-    """Return :data:`CRON_DISPATCH_PREAMBLE`, appended to the session's system prompt."""
-    return CRON_DISPATCH_PREAMBLE
 
 
 def main() -> None:

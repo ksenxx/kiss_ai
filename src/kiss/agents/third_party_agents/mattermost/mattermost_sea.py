@@ -23,6 +23,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -45,14 +46,36 @@ _config = ChannelConfig(
 )
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/mattermost help``."""
-    return (
-        "Channel agent for Mattermost that lists teams, channels and users and reads, posts "
-        "and manages messages through the REST API with a personal access token stored under "
-        f"~/{HOME_DIR}/third_party_agents/mattermost; use "
-        "`run_agent(agent=\"mattermost\", task=...)` or the `kiss-mattermost` CLI."
-    )
+class MattermostSea(BaseSea):
+    """The ``/mattermost`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/mattermost help``."""
+        return (
+            "Channel agent for Mattermost that lists teams, channels and users and reads, posts "
+            "and manages messages through the REST API with a personal access token stored under "
+            f"~/{HOME_DIR}/third_party_agents/mattermost; use "
+            "`run_agent(agent=\"mattermost\", task=...)` or the `kiss-mattermost` CLI."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Mattermost channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + MattermostAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
 
 
 def _base_url_from_config(cfg: dict[str, Any]) -> str:
@@ -919,27 +942,6 @@ def main() -> None:
         channel_name="Mattermost",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Mattermost channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return MattermostAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import json
 import sys
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -38,14 +39,36 @@ _config = ChannelConfig(
 )
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/feishu help``."""
-    return (
-        "Channel agent for Feishu/Lark that authenticates with an app_id/app_secret and can "
-        "list chats, get chat and user info, and list, send, reply to and delete messages; "
-        'use run_agent(agent="feishu", task="...") or the `kiss-feishu -t \'<task>\'` CLI '
-        "(start with the task `authenticate`)."
-    )
+class FeishuSea(BaseSea):
+    """The ``/feishu`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/feishu help``."""
+        return (
+            "Channel agent for Feishu/Lark that authenticates with an app_id/app_secret and can "
+            "list chats, get chat and user info, and list, send, reply to and delete messages; "
+            'use run_agent(agent="feishu", task="...") or the `kiss-feishu -t \'<task>\'` CLI '
+            "(start with the task `authenticate`)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Feishu/Lark channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + FeishuAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
 
 
 class FeishuChannelBackend(ToolMethodBackend):
@@ -497,27 +520,6 @@ def main() -> None:
         channel_name="Feishu",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Feishu/Lark channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return FeishuAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

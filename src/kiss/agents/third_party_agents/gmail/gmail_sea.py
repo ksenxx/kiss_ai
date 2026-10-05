@@ -26,6 +26,7 @@ from typing import Any
 
 from googleapiclient.discovery import build
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
@@ -40,14 +41,40 @@ from kiss.agents.third_party_agents._google_workspace_utils import (
 _SERVICE = "gmail"
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/gmail help``."""
-    return (
-        "Channel agent for Gmail that reads, searches, sends, labels and trashes email "
-        "through a Composio-connected Google account (the user connects with a Composio "
-        "Connect Link and Composio's proxy holds the token); use "
-        '`run_agent(agent="gmail", task=...)` or the `kiss-gmail` CLI.'
-    )
+class GmailSea(BaseSea):
+    """The ``/gmail`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/gmail help``."""
+        return (
+            "Channel agent for Gmail that reads, searches, sends, labels and trashes email "
+            "through a Composio-connected Google account (the user connects with a Composio "
+            "Connect Link and Composio's proxy holds the token); use "
+            '`run_agent(agent="gmail", task=...)` or the `kiss-gmail` CLI.'
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Gmail channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        Composio connection recorded under ``~/.kiss`` and returns its
+        authentication and backend tools.
+        """
+        return tools + GmailAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + GmailAgent.channel_system_prompt
 
 
 def _build_service() -> Any:
@@ -875,32 +902,6 @@ class GmailAgent(BaseChannelAgent):
 def main() -> None:
     """Run the GmailAgent from the command line with chat persistence."""
     channel_main(GmailAgent, "kiss-gmail")
-
-
-def add_to_tools() -> list:
-    """Return the Gmail channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    Composio connection recorded under ``~/.kiss`` and returns its
-    authentication and backend tools.
-    """
-    return GmailAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return GmailAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

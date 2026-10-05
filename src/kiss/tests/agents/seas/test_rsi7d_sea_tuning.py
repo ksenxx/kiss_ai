@@ -33,33 +33,39 @@ from kiss.agents.sorcar.persistence import (
 
 
 def _returned_literal(source: str, function: str) -> Any:
-    """Evaluate the literal that ``def <function>`` in ``source`` returns."""
-    for node in ast.parse(source).body:
+    """Evaluate the dict literal ``def <function>`` in ``source`` returns (after any ``x |``)."""
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.FunctionDef) and node.name == function:
             ret = node.body[-1]
             assert isinstance(ret, ast.Return) and ret.value is not None
-            return ast.literal_eval(ret.value)
+            value = ret.value.right if isinstance(ret.value, ast.BinOp) else ret.value
+            return ast.literal_eval(value)
     raise AssertionError(f"no def {function} in source")
 
 
 DEMO_SEA = '''"""Demo SEA: a worker with a tool."""
 
+from kiss.agents.seas.base.base_sea import BaseSea
+
 SYSTEM_PROMPT = "You run demo tasks. Report the exit code."
 
 
-def description() -> str:
-    """Help text."""
-    return "Runs demo tasks."
+class Sea(BaseSea):
+    def description(self):
+        """Help text."""
+        return "Runs demo tasks."
 
+    def settings(self, settings):
+        """Run settings."""
+        return settings | {"kind": "worker", "tool_profile": "bash"}
 
-def settings() -> dict:
-    """Run settings."""
-    return {"kind": "worker", "tool_profile": "bash"}
+    def system_prompt(self, system_prompt):
+        """Replace the default prompt."""
+        return SYSTEM_PROMPT
 
-
-def system_prompt() -> str:
-    """Replace the default prompt."""
-    return SYSTEM_PROMPT
+    def tools(self, tools):
+        """Extra tools."""
+        return tools + [count_words]
 
 
 def count_words(text: str) -> str:
@@ -67,9 +73,6 @@ def count_words(text: str) -> str:
     return str(len(text.split()))
 
 
-def add_to_tools() -> list:
-    """Extra tools."""
-    return [count_words]
 '''
 
 
@@ -188,9 +191,20 @@ def test_acceptance_refuses_a_limit_that_cuts_a_successful_run() -> None:
 
 def test_patch_settings_literal_is_confined_to_the_dict() -> None:
     source = (
-        "X = 1\n\ndef settings() -> dict:\n"
-        "    return {'kind': 'worker', 'timeout': 60,  # note\n"
-        "            'tool_profile': 'bash'}\n\n\ndef other():\n    return {'timeout': 1}\n"
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+X = 1
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'kind': 'worker', 'timeout': 60,  # note
+                'tool_profile': 'bash'}
+
+
+def other():
+    return {'timeout': 1}
+"""
     )
     out = sea_tuning.patch_settings_literal(source, "timeout", 1800)
     assert "'timeout': 1800,  # note" in out and "def other():\n    return {'timeout': 1}" in out
@@ -202,30 +216,88 @@ def test_patch_settings_literal_is_confined_to_the_dict() -> None:
         "tool_profile": "bash",
         "max_budget": 2.5,
     }
-    assert sea_tuning.patch_settings_literal("def settings():\n    return {}\n", "timeout", 5) == (
-        'def settings():\n    return { "timeout": 5}\n'
+    assert sea_tuning.patch_settings_literal("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {}
+""", "timeout", 5) == (
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | { "timeout": 5}
+"""
     )
-    trailing = "def settings():\n    return {\n        'kind': 'worker',\n    }\n"
+    trailing = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {
+            'kind': 'worker',
+        }
+"""
     out = sea_tuning.patch_settings_literal(trailing, "timeout", 5)
     assert (
-        out == "def settings():\n    return {\n        'kind': 'worker',\n"
-        "        'timeout': 5,\n    }\n"
+        out == """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {
+            'kind': 'worker',
+            'timeout': 5,
+        }
+"""
     )
     # A trailing comment never swallows the new entry; a missing comma is added.
     commented = (
-        "def settings():\n    return {\n        'kind': 'worker'  # worker defaults\n    }\n"
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {
+            'kind': 'worker'  # worker defaults
+        }
+"""
     )
     out = sea_tuning.patch_settings_literal(commented, "timeout", 5)
     assert out == (
-        "def settings():\n    return {\n        'kind': 'worker',  # worker defaults\n"
-        "        'timeout': 5,\n    }\n"
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {
+            'kind': 'worker',  # worker defaults
+            'timeout': 5,
+        }
+"""
     )
     assert _returned_literal(out, "settings") == {"kind": "worker", "timeout": 5}
-    only_comment = "def settings():\n    return {\n        # nothing yet\n    }\n"
+    only_comment = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {
+            # nothing yet
+        }
+"""
     out = sea_tuning.patch_settings_literal(only_comment, "timeout", 5)
-    assert out.endswith('        # nothing yet\n        "timeout": 5,\n    }\n')
+    assert out.endswith('            # nothing yet\n            "timeout": 5,\n        }\n')
     with pytest.raises(ValueError, match="does not return a single dict literal"):
-        sea_tuning.patch_settings_literal("def settings():\n    return build()\n", "timeout", 5)
+        sea_tuning.patch_settings_literal("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | build()
+""", "timeout", 5)
 
 
 def test_eval_candidates_and_frequent_tasks() -> None:
@@ -285,25 +357,41 @@ def test_sea_source_and_patch_sea_code_through_the_gate(checkout: Path) -> None:
     listing = sea.sea_source("tunedemo", start=1, count=3)
     assert listing.startswith(f"# {path} (") and listing.endswith(
         '    1  """Demo SEA: a worker with a tool."""\n    2  \n'
-        '    3  SYSTEM_PROMPT = "You run demo tasks. Report the exit code."'
+        "    3  from kiss.agents.seas.base.base_sea import BaseSea"
     )
     assert sea.sea_source("slack").startswith("Error: 'slack' is not an editable SEA")
 
     # A new tool plus a guardrail hook: the file reloads and exposes both.
     report = sea.patch_sea_code(
         "tunedemo",
-        'def add_to_tools() -> list:\n    """Extra tools."""\n    return [count_words]\n',
-        'def shout(text: str) -> str:\n    """Return *text* upper-cased."""\n'
-        "    return text.upper()\n\n\n"
-        'def tool_call_hook():\n    """Refuse rm -rf."""\n    def hook(name, args):\n'
-        "        if name == 'Bash' and 'rm -rf' in str(args):\n            return 'refused'\n"
-        "        return None\n    return hook\n\n\n"
-        'def add_to_tools() -> list:\n    """Extra tools."""\n    return [count_words, shout]\n',
+        '''
+    def tools(self, tools):
+        """Extra tools."""
+        return tools + [count_words]
+''',
+        '''
+    def tool_call_hook(self, name, args):
+        """Refuse rm -rf."""
+        if name == 'Bash' and 'rm -rf' in str(args):
+            return 'refused'
+        return 'OK'
+
+    def tools(self, tools):
+        """Extra tools."""
+        return tools + [count_words, shout]
+
+
+def shout(text: str) -> str:
+    """Return *text* upper-cased."""
+    return text.upper()
+''',
     )
-    assert report.startswith(f"Patched {path}:") and "+14 lines" in report
-    _layers, cmd, _d = sea_commands.check_sea(path)
-    assert sorted(t.__name__ for t in cmd["tools"]) == ["count_words", "shout"]
-    assert callable(sea._execute_sea(path)["tool_call_hook"]())
+    assert report.startswith(f"Patched {path}:") and "+11 lines" in report
+    seas, _cmd, _d = sea_commands.check_sea(path)
+    assert sorted(t.__name__ for t in sea_commands.base_tools(seas, [])) == ["count_words", "shout"]
+    patched = seas[-1]
+    assert patched.tool_call_hook("Bash", {"command": "rm -rf /"}) == "refused"
+    assert patched.tool_call_hook("Bash", {"command": "ls"}) == "OK"
 
     # Appending with an empty ``old`` adds at the end of the file.
     assert sea.patch_sea_code("tunedemo", "", "\nEXTRA = 1\n").startswith("Patched")
@@ -572,18 +660,53 @@ def test_narrower_profile_is_proposed_only_on_strong_evidence() -> None:
 
 def test_settings_literal_remove(checkout: Path) -> None:
     """``REMOVE`` deletes an entry wherever it stands; an absent key is a no-op."""
-    multi = 'def settings() -> dict:\n    return {\n        "kind": "worker",\n' \
-            '        "timeout": 7200,  # why\n        "max_budget": 3.0,\n    }\n'
+    multi = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {
+            "kind": "worker",
+            "timeout": 7200,  # why
+            "max_budget": 3.0,
+        }
+"""
     assert sea_tuning.patch_settings_literal(multi, "timeout", sea_tuning.REMOVE) == (
-        'def settings() -> dict:\n    return {\n        "kind": "worker",\n'
-        '        "max_budget": 3.0,\n    }\n'
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {
+            "kind": "worker",
+            "max_budget": 3.0,
+        }
+"""
     )
-    inline = 'def settings():\n    return {"kind": "worker", "timeout": 7200, "max_budget": 3.0}\n'
+    inline = """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {"kind": "worker", "timeout": 7200, "max_budget": 3.0}
+"""
     assert sea_tuning.patch_settings_literal(inline, "timeout", sea_tuning.REMOVE) == (
-        'def settings():\n    return {"kind": "worker", "max_budget": 3.0}\n'
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {"kind": "worker", "max_budget": 3.0}
+"""
     )
     assert sea_tuning.patch_settings_literal(inline, "max_budget", sea_tuning.REMOVE) == (
-        'def settings():\n    return {"kind": "worker", "timeout": 7200}\n'
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {"kind": "worker", "timeout": 7200}
+"""
     )
     assert sea_tuning.patch_settings_literal(inline, "absent", sea_tuning.REMOVE) == inline
 
@@ -628,7 +751,13 @@ def test_improve_and_revert_sea_code_snapshot_and_gate(
     assert "def extra" not in path.read_text()
 
     def dispatch_and_break(*args: Any, **kwargs: Any) -> Any:
-        path.write_text("def settings() -> dict:\n    return {'timeout': 'soon'}\n")
+        path.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'timeout': 'soon'}
+""")
         return real(*args, **kwargs)
 
     monkeypatch.setattr(agent_dispatch, "dispatch_result", dispatch_and_break)
@@ -725,15 +854,52 @@ def test_only_the_change_still_in_effect_can_be_proposed_for_revert() -> None:
 
 def test_remove_handles_parenthesised_values_and_commas_on_the_next_line() -> None:
     assert sea_tuning.patch_settings_literal(
-        'def settings():\n    return {"kind": "worker", "timeout": ((7200)), "x": 1}\n',
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {"kind": "worker", "timeout": ((7200)), "x": 1}
+""",
         "timeout", sea_tuning.REMOVE,
-    ) == 'def settings():\n    return {"kind": "worker", "x": 1}\n'
+    ) == """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {"kind": "worker", "x": 1}
+"""
     assert sea_tuning.patch_settings_literal(
-        'def settings():\n    return {"kind": "worker", "timeout": 7200\n, "max_budget": 3}\n',
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {"kind": "worker", "timeout": 7200
+    , "max_budget": 3}
+""",
         "timeout", sea_tuning.REMOVE,
-    ) == 'def settings():\n    return {"kind": "worker", "max_budget": 3}\n'
-    assert sea_tuning.literal_value('def settings():\n    return {"a": (1)}\n', "a") == 1
-    assert sea_tuning.literal_value("def settings():\n    return build()\n", "a") is None
+    ) == """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {"kind": "worker", "max_budget": 3}
+"""
+    assert sea_tuning.literal_value("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {"a": (1)}
+""", "a") == 1
+    assert sea_tuning.literal_value("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | build()
+""", "a") is None
 
 
 def test_own_task_id_reads_the_persisted_id() -> None:

@@ -47,6 +47,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.sorcar.sorcar_agent import _agent_usage
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import agent_state, task_update
 from kiss.server.task_update import (
@@ -378,8 +379,11 @@ def test_run_task_update_sea_runs_as_a_subagent_in_the_parents_chat(tmp_path: Pa
     names = {t["function"]["name"] for t in agentic[0]["tools"]}
     assert names == {"finish", "task_context"}
     system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
-    assert str(system["content"]).startswith(ask_sea.system_prompt())
-    assert ask_sea.add_to_system_prompt() in str(system["content"])
+    # The ask SEA's ``system_prompt`` replaces the assembled prompt: the
+    # default base prompt the run would otherwise start from is gone.
+    assert str(system["content"]).startswith(ask_sea.AskSea().system_prompt("ASSEMBLED"))
+    assert SYSTEM_PROMPT not in str(system["content"])
+    assert SYSTEM_PROMPT_LITE not in str(system["content"])
     user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
     prompt = task_update.build_prompt(task_id)
     assert prompt.startswith(task_update.UPDATE_QUESTION)

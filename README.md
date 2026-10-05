@@ -216,30 +216,16 @@ follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
 ### Sorcar Extension Agents (SEAs)
 
-A **Sorcar Extension Agent (SEA)** is a plain Python file, `<name>/<name>_sea.py`, whose path you pass as `extension_agent_path` to `sorcar.run()` (or as the `agent` of the `run_agent` tool). The daemon imports it on every run and reads a few optional top-level functions. `settings()` returns a dict holding a `kind` and any of `run()`'s per-run parameters (`model`, `max_budget`, `tool_profile`, `work_dir`, `use_worktree`, `auto_commit`, `use_web_tools`, `use_memory`, `allow_fan_out`, `auto_classify`, `model_config`, `docker_image`, ...), plus `extends` (a base SEA, by command name or path, whose configuration this one refines), `timeout` (seconds a `run_agent` call waits for the script before handing back a job id; 3600 by default), `locked` (keys an explicit `run_agent` argument may not change), `hidden` (`True` keeps the SEA out of the command list, so it is no `/command` and no `run_agent` agent name; it is still loadable by path and as an `extends` base, and the hidden `sorcar` SEA is what an empty `agent` means) and `kind` (`session`, `worker` or `channel`). A kind is only a dict of defaults: `session` (the default) is empty; `worker` turns off worktree, auto-commit, classifier, fan-out, browser and memory; `channel` is `worker` plus a `work_dir` of `~/.kiss/channel_work`, for an agent of an external service that holds its channel workspace, gets the channel preamble and never inherits from a calling task. Explicit keys override the kind's defaults; an explicit `run_agent` argument or option overrides the SEA's value unless the SEA lists the key in `locked`, and parameters the SEA leaves out keep the caller's values. `settings()` is data; text comes from three functions: `prompt(task)` receives the task text and returns the prompt body (`{task_id}` in it becomes the calling task's id), `system_prompt()` replaces the base system prompt, `add_to_system_prompt()` appends to it; `add_to_tools()` returns extra tool callables added to the built-in toolset; `"tool_profile": "none"` drops the built-in toolset so those callables plus `finish` are the agent's entire tool set. Every SEA also defines `description()`, one sentence that `/<name> help` prints; `/<name> check` executes the script and prints the effective settings, model, tools and sample prompt a run would use, or the first error. The older one-function-per-field form (`model()`, `max_budget()`, `tools()`, `dispatch_timeout()`, `append_to_prompt()`, ...) is no longer read. Two hook getters, `llm_call_hook()` and `tool_call_hook()`, return functions that run before each model call and tool call of the task's executor sessions (internal helper sessions and `run_parallel` sub-agents are not hooked; a tool hook returning anything but `"OK"` suppresses the call and hands its string to the model). One file is a complete custom agent:
+A **Sorcar Extension Agent (SEA)** is a Python file, `<name>/<name>_sea.py`, that defines one class deriving from `kiss.agents.seas.base.base_sea.BaseSea`; you pass the file's path as `extension_agent_path` to `sorcar.run()` (or as the `agent` of the `run_agent` tool). The daemon executes it on every run, instantiates the class and calls the methods it defines; every method has an identity default on `BaseSea`. `settings(self, settings)` receives the dict the base classes built and returns the dict to use (`settings | {...}`): a `kind` and any of `run()`'s per-run parameters (`model`, `max_budget`, `tool_profile`, `work_dir`, `use_worktree`, `auto_commit`, `use_web_tools`, `use_memory`, `allow_fan_out`, `auto_classify`, `model_config`, `docker_image`, ...), plus `timeout` (seconds a `run_agent` call waits for the script before handing back a job id; 3600 by default), `locked` (keys an explicit `run_agent` argument may not change), `hidden` (`True` keeps the SEA out of the command list, so it is no `/command` and no `run_agent` agent name; it is still loadable by path and as a base class, and the hidden `sorcar` SEA is what an empty `agent` means) and `kind` (`session`, `worker` or `channel`). A kind is only a dict of defaults: `session` (the default) is empty; `worker` turns off worktree, auto-commit, classifier, fan-out, browser and memory; `channel` is `worker` plus a `work_dir` of `$KISS_HOME/channel_work`, for an agent of an external service that holds its channel workspace, gets the channel preamble and never inherits from a calling task. Explicit keys override the kind's defaults; an explicit `run_agent` argument or option overrides the SEA's value unless the SEA lists the key in `locked`, and parameters the SEA leaves out keep the caller's values. `settings()` is data; text and code come from the other methods: `prompt(self, task)` receives the task text and returns the prompt body (`{task_id}` in it becomes the calling task's id), `system_prompt(self, system_prompt)` receives the assembled system prompt and returns the one to use (return your own text to replace it, `system_prompt + "\n\n" + more` to append), `tools(self, tools)` receives the run's toolset and returns the run's (`tools + [mine]` adds tool callables to the built-in toolset; `"tool_profile": "none"` drops the built-in toolset so the returned callables plus `finish` are the agent's entire tool set). A SEA builds on another by Python inheritance (`class MySea(ShSea)`, or `sea_class("sh")` from `kiss.agents.sorcar.sea_commands`); the launcher applies the base class's methods first, so methods never call `super()`. Every command SEA also defines `description()`, one sentence that `/<name> help` prints; `/<name> check` loads the class and prints its inheritance chain, effective settings, model, tools, defined methods and the sample prompt a run would use, or the first error. Two hook methods, `llm_call_hook(self, new_messages)` and `tool_call_hook(self, name, args)`, run before each model call and tool call of the task's executor sessions (internal helper sessions and `run_parallel` sub-agents are not hooked; a tool hook returning anything but `"OK"` suppresses the call and hands its string to the model). One file is a complete custom agent:
 
 ```python
 # weather/weather_sea.py — a minimal SEA
+from typing import Any
+
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 
-def description() -> str:
-    return "Reports the current weather in San Francisco from wttr.in."
-
-def settings() -> dict:
-    """A worker run whose only tools are get_weather and finish."""
-    return {
-        "kind": "worker",
-        "max_budget": 0.50,
-        "tool_profile": "none",
-    }
-
-def prompt(task: str) -> str:
-    return f"Look up the current weather in {task or 'San Francisco'} and report it."
-
-def system_prompt() -> str:
-    return ("You are a weather assistant. Use the get_weather tool "
-            "to look up weather, then call finish with the result.")
 
 def get_weather(city: str) -> str:
     """Return current weather for a city from wttr.in.
@@ -251,9 +237,29 @@ def get_weather(city: str) -> str:
     resp.raise_for_status()
     return resp.text.strip()
 
-def add_to_tools() -> list:
-    """Extra tools; with tool_profile "none" above they are the whole tool set besides finish."""
-    return [get_weather]
+
+class WeatherSea(BaseSea):
+    def description(self) -> str:
+        return "Reports the current weather in San Francisco from wttr.in."
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """A worker run whose only tools are get_weather and finish."""
+        return settings | {
+            "kind": "worker",
+            "max_budget": 0.50,
+            "tool_profile": "none",
+        }
+
+    def prompt(self, task: str) -> str:
+        return f"Look up the current weather in {task or 'San Francisco'} and report it."
+
+    def system_prompt(self, system_prompt: str) -> str:
+        return ("You are a weather assistant. Use the get_weather tool "
+                "to look up weather, then call finish with the result.")
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """With tool_profile "none" above, get_weather and finish are the whole tool set."""
+        return tools + [get_weather]
 ```
 
 ```python

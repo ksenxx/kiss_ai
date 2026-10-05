@@ -14,8 +14,8 @@ script:
   whose ``{task_id}`` the daemon substitutes with the calling (parent)
   task's id, so the answering agent knows which task the user is
   asking about,
-* ``add_to_system_prompt()`` — the no-internet directive plus the
-  answering playbook.
+* ``system_prompt()`` — the SYSTEM_LITE prompt, the no-internet
+  directive and the answering playbook.
 
 The answering session is a two-step Q&A, modelled on Guv's "Ask about
 this chat" side channel: one call of :func:`task_context` returns the
@@ -28,13 +28,13 @@ steps on the missing ``sqlite3`` CLI, a schema dump and raw event JSON
 (median 9 steps, $0.91 and 99 s per answer); with no other tool to
 reach for, the answer comes straight from the context.
 
-Configuration: :func:`settings` picks the ``worker`` kind with the
-``none`` tool profile (no built-in tool besides ``finish`` — the parent
-task is still running in the same working tree, so the answerer must
-never edit files or run commands), the SYSTEM_LITE ablation prompt as
-the base system prompt; :func:`prompt` appends :data:`ADD_TO_PROMPT`,
-:func:`add_to_system_prompt` supplies the playbook and
-:func:`add_to_tools` makes :func:`task_context` the only tool.
+Configuration (:class:`AskSea`): ``settings`` picks the ``worker``
+kind with the ``none`` tool profile (no built-in tool besides
+``finish`` — the parent task is still running in the same working
+tree, so the answerer must never edit files or run commands);
+``prompt`` appends :data:`ADD_TO_PROMPT`; ``system_prompt`` replaces
+the assembled prompt with the SYSTEM_LITE ablation prompt plus the
+playbook; ``tools`` makes :func:`task_context` the only tool.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core.brand import render_brand
 
 # The /ask base prompt: the SYSTEM_LITE ablation prompt with the brand
@@ -93,62 +94,65 @@ instruction must be typed into the running task's chat without /ask, and \
 answer what you can."""
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/ask help``."""
-    return (
-        "Answers a question about the currently running task in two or three plain "
-        "sentences, from its status, progress log and latest transcript entries, "
-        "without editing files, running commands or using the internet; "
-        "type `/ask <question>` into the task's chat tab."
-    )
+class AskSea(BaseSea):
+    """The ``/ask`` SEA."""
 
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/ask help``."""
+        return (
+            "Answers a question about the currently running task in two or three plain "
+            "sentences, from its status, progress log and latest transcript entries, "
+            "without editing files, running commands or using the internet; "
+            "type `/ask <question>` into the task's chat tab."
+        )
 
-def system_prompt() -> str:
-    """Return the SYSTEM_LITE ablation prompt as the base system prompt.
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Configure the answering session: a worker with no built-in tools.
 
-    Reads the bundled ``_ask_system_lite.md`` next to this module and
-    fills the brand placeholders.
-    """
-    return render_brand(_SYSTEM_LITE_PATH.read_text(encoding="utf-8"))
+        ``worker``: no worktree, auto-commit, classifier, fan-out, browser or
+        memory — the answer comes from ``task_context`` alone, quickly.
+        ``tool_profile: "none"`` keeps even the built-in toolset out, so the
+        answerer (which shares the running task's tree) cannot run commands
+        or touch files; it is ``locked``, so a ``run_agent(agent="ask",
+        tool_profile=...)`` that asks for tools is refused instead of
+        running an answerer with them.
+        """
+        return settings | {"kind": "worker", "tool_profile": "none", "locked": ["tool_profile"]}
 
+    def prompt(self, task: str) -> str:
+        """Return the question followed by :data:`ADD_TO_PROMPT`.
 
-def settings() -> dict[str, Any]:
-    """Configure the answering session: a worker with no built-in tools.
+        ``{task_id}`` in the result is the calling task's id, filled in by
+        the daemon: it names the task the question is about.
+        """
+        return task + "\n\n" + ADD_TO_PROMPT
 
-    ``worker``: no worktree, auto-commit, classifier, fan-out, browser or
-    memory — the answer comes from ``task_context`` alone, quickly.
-    ``tool_profile: "none"`` keeps even the built-in toolset out, so the
-    answerer (which shares the running task's tree) cannot run commands
-    or touch files; it is ``locked``, so a ``run_agent(agent="ask",
-    tool_profile=...)`` that asks for tools is refused instead of
-    running an answerer with them.  ``system_prompt`` is the
-    SYSTEM_LITE ablation prompt (``_ask_system_lite.md`` next to this
-    module, brand placeholders filled).
-    """
-    return {"kind": "worker", "tool_profile": "none", "locked": ["tool_profile"]}
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the answering agent's whole system prompt, replacing the assembled one.
 
+        The SYSTEM_LITE ablation prompt (the bundled ``_ask_system_lite.md``
+        next to this module, brand placeholders filled) followed by the
+        no-internet and answer-quickly directives and the answering
+        playbook (:data:`_PLAYBOOK`): the two-call recipe (``task_context``
+        then ``finish``) and the style of the answer.  Both dispatch paths
+        (the ``/ask`` chat command and the running tab's side channel) go
+        through this method, so there is exactly one copy of the text.
+        The ``{{HOME_DIR}}`` placeholder names the brand's state directory
+        (``~/.kiss`` for stock KISS Sorcar).
+        """
+        lite = render_brand(_SYSTEM_LITE_PATH.read_text(encoding="utf-8"))
+        return lite + "\n\n" + render_brand(_PLAYBOOK)
 
-def prompt(task: str) -> str:
-    """Return the question followed by :data:`ADD_TO_PROMPT`.
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the only tool: :func:`task_context`.
 
-    ``{task_id}`` in the result is the calling task's id, filled in by
-    the daemon: it names the task the question is about.
-    """
-    return task + "\n\n" + ADD_TO_PROMPT
-
-
-def add_to_system_prompt() -> str:
-    """Return the fixed suffix appended to the answering agent's system prompt.
-
-    The no-internet and answer-quickly directives followed by the
-    answering playbook (:data:`_PLAYBOOK`): the two-call recipe
-    (``task_context`` then ``finish``) and the style of the answer.
-    The daemon appends it for both dispatch paths (the ``/ask`` chat
-    command and the running tab's side channel), so there is exactly
-    one copy of the text.  The ``{{HOME_DIR}}`` placeholder names the
-    brand's state directory (``~/.kiss`` for stock KISS Sorcar).
-    """
-    return render_brand(_PLAYBOOK)
+        With the ``none`` tool profile (see :meth:`settings`) the built-in
+        toolset is never built: the parent task is still running in the
+        same working tree, so the answerer must not run commands or touch
+        files; and every extra tool schema is a temptation to take a step
+        the user has to wait for.
+        """
+        return tools + [task_context]
 
 
 def task_context(task_id: str) -> str:
@@ -174,17 +178,3 @@ def task_context(task_id: str) -> str:
     from kiss.agents.sorcar.task_digest import context
 
     return context(task_id)
-
-
-def add_to_tools() -> list[Any]:
-    """Return the only tool: :func:`task_context`.
-
-    With the ``none`` tool profile (see :func:`settings`) the built-in
-    toolset is never built: the parent task is still running in the
-    same working tree, so the answerer must not run commands or touch
-    files; and every extra tool schema is a temptation to take a step
-    the user has to wait for.
-    """
-    return [task_context]
-
-

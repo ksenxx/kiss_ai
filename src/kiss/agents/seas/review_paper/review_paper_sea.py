@@ -18,7 +18,7 @@ through ``run_agent`` with the instructions as the task.  The task text
 supplies the paper (a PDF, .tex, .md or .txt file), the
 venue, the output path, the word limit, the cutoff date for the
 related-work search and, optionally, a second model that checks the
-review.  :func:`add_to_system_prompt` adds the reviewing rules (read
+review.  The SEA's ``system_prompt`` adds the reviewing rules (read
 everything, search the related work, judge the novelty, pinpoint
 problems by page and section, suggest how to fix them, write like
 Strunk and White, no AI slop) to the default system prompt, so the
@@ -48,8 +48,8 @@ Two tools implement the mechanical steps:
   scores, named related work, the slop and reviewer-boilerplate lists)
   and lists every hit with its line number.
 
-Module-level getters (``add_to_system_prompt()``, ``add_to_tools()``,
-...) follow the SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
+The SEA class's methods (``system_prompt()``, ``tools()``, ...) follow
+the SEA contract in :mod:`kiss.agents.seas.base.base_sea`.
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.write_paper.write_paper_sea import (
     _GATES,
     _duplicated_sentences,
@@ -364,16 +365,41 @@ _MIN_MARGIN_LINES = 20
 """Length of a counting chain of bare-number lines before it is taken for margin numbers."""
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/review_paper help``."""
-    return (
-        "Reviews a research paper (PDF, .tex, .md or .txt) for a venue like a careful human "
-        "reviewer, searching the related work and writing a Summary/Strengths/Weaknesses/"
-        "Detailed review/Scores (seven dimensions, 1 to 10) review that passes the "
-        "word-limit and AI-slop gates; use it as "
-        "`/review_paper Review <paper path> for <venue>; <word limit> words; to <output path>` "
-        "or `run_agent(agent=\"review_paper\", task=...)`."
-    )
+class ReviewPaperSea(BaseSea):
+    """The ``/review_paper`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/review_paper help``."""
+        return (
+            "Reviews a research paper (PDF, .tex, .md or .txt) for a venue like a careful human "
+            "reviewer, searching the related work and writing a Summary/Strengths/Weaknesses/"
+            "Detailed review/Scores (seven dimensions, 1 to 10) review that passes the "
+            "word-limit and AI-slop gates; use it as "
+            "`/review_paper Review <paper path> for <venue>; <word limit> words; to <output path>` "
+            "or `run_agent(agent=\"review_paper\", task=...)`."
+        )
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Append the reviewing rules to the default system prompt."""
+        return system_prompt + "\n\n" + SYSTEM_PROMPT
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Expose the paper reader and the review checker to the model."""
+        return tools + [read_paper, check_review]
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Browse (related work), fan out (second opinion), skip the classifier, wait two hours.
+
+        Reading the paper, searching the related work and the second-opinion
+        round take far longer than the default ``run_agent`` wait; the
+        ``timeout`` tells the dispatcher how long a ``/review_paper`` run may run.
+        """
+        return settings | {
+            "use_web_tools": True,
+            "allow_fan_out": True,
+            "auto_classify": False,
+            "timeout": DISPATCH_TIMEOUT_SECONDS,
+        }
 
 
 def _strip_margin_numbers(text: str) -> str:
@@ -594,31 +620,6 @@ def check_review(review_path: str, word_limit: int = DEFAULT_WORD_LIMIT) -> str:
     return "\n".join(lines)
 
 
-def add_to_system_prompt() -> str:
-    """Append the reviewing rules to the default system prompt."""
-    return SYSTEM_PROMPT
-
-
-def add_to_tools() -> list[Any]:
-    """Expose the paper reader and the review checker to the model."""
-    return [read_paper, check_review]
-
-
 DISPATCH_TIMEOUT_SECONDS = 7200
 """Seconds a ``run_agent`` call waits for a ``/review_paper`` run: two hours."""
-
-def settings() -> dict[str, Any]:
-    """Browse (related work), fan out (second opinion), skip the classifier, wait two hours.
-
-    Reading the paper, searching the related work and the second-opinion
-    round take far longer than the default ``run_agent`` wait; the
-    ``timeout`` tells the dispatcher how long a ``/review_paper`` run may run.
-    """
-    return {
-        "use_web_tools": True,
-        "allow_fan_out": True,
-        "auto_classify": False,
-        "timeout": DISPATCH_TIMEOUT_SECONDS,
-    }
-
 

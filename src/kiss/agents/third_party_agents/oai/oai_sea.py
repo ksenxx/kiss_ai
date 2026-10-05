@@ -55,6 +55,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     start_http_server,
@@ -81,20 +82,32 @@ _config = ChannelConfig(_OPENAI_COMPAT_DIR, ("api_key", "port"))
 _chat_map_lock = threading.Lock()
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/oai help``."""
-    return (
-        "Exposes the kiss-web daemon as an OpenAI-compatible chat API (`GET /v1/models`, "
-        "`POST /v1/chat/completions` with a bearer api_key) so Open WebUI, LibreChat or any "
-        "`openai` SDK client can chat with Sorcar; configure it with "
-        "`kiss-oai -t 'configure the OpenAI-compatible API server'` and start it with "
-        "`kiss-oai --serve` (a terminal setup, not a chat command)."
-    )
+class OaiSea(BaseSea):
+    """The ``/oai`` SEA."""
 
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/oai help``."""
+        return (
+            "Exposes the kiss-web daemon as an OpenAI-compatible chat API (`GET /v1/models`, "
+            "`POST /v1/chat/completions` with a bearer api_key) so Open WebUI, LibreChat or any "
+            "`openai` SDK client can chat with Sorcar; configure it with "
+            "`kiss-oai -t 'configure the OpenAI-compatible API server'` and start it with "
+            "`kiss-oai --serve` (a terminal setup, not a chat command)."
+        )
 
-def settings() -> dict:
-    """Return the SEA's settings: hidden, since the server is set up from a terminal."""
-    return {"hidden": True}
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Return the SEA's settings: hidden, since the server is set up from a terminal."""
+        return settings | {"hidden": True}
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the OpenAI-compatible API tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + OpenAICompatAgent()._get_tools()
 
 
 def _chat_map_path() -> Path:
@@ -705,17 +718,6 @@ def main() -> None:
         channel_name="OpenAI-compatible API",
         make_backend=None,
     )
-
-
-def add_to_tools() -> list:
-    """Return the OpenAI-compatible API tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return OpenAICompatAgent()._get_tools()
 
 
 if __name__ == "__main__":

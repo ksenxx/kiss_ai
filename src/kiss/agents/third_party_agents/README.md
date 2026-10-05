@@ -124,19 +124,22 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 (bash, file editing, browser automation). The channel agent instance is the *carrier*
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
-- Every module defines `description()`, the one-sentence summary `/xxx help` prints;
-  `settings()`, which returns `{"kind": "channel"}` (the worker defaults — worktree,
-  auto-commit, classifier, fan-out, web tools and memory off — plus a run in
-  `~/.kiss/channel_work` that inherits nothing from the calling task); an
-  `add_to_tools()` function; and, when its agent class sets `channel_system_prompt`,
-  `add_to_system_prompt()` returning that text. The daemon calls
-  `add_to_tools()` to build the channel's tool list, added to the standard toolset: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
+- Every module defines one SEA class deriving from
+  `kiss.agents.seas.base.base_sea.BaseSea` (`SlackSea`, `GmailSea`, ...) with
+  `description(self)`, the one-sentence summary `/xxx help` prints;
+  `settings(self, settings)`, which returns `settings | {"kind": "channel"}` (the
+  worker defaults — worktree, auto-commit, classifier, fan-out, web tools and memory
+  off — plus a run in `$KISS_HOME/channel_work` that inherits nothing from the calling
+  task); `tools(self, tools)`; and, when its agent class sets `channel_system_prompt`,
+  `system_prompt(self, system_prompt)` returning `system_prompt + "\n\n" +` that text.
+  The daemon calls `tools()` with the standard toolset and the method appends the
+  channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
-  It appends the channel preamble (`agent_file.CHANNEL_PREAMBLE`: use the channel tools
-  directly, never call `run_agent`, never edit source or run tests) and then the
-  `add_to_system_prompt()` guidance to the run's **system** prompt; the task text itself
-  is not modified (the `kiss-<channel>` CLI launcher no longer appends
+  The daemon appends the channel preamble (`agent_file.CHANNEL_PREAMBLE`: use the
+  channel tools directly, never call `run_agent`, never edit source or run tests) to
+  the run's **system** prompt before `system_prompt()` adds the channel guidance; the
+  task text itself is not modified (the `kiss-<channel>` CLI launcher no longer appends
   `channel_system_prompt` to the prompt either).
 - Config lives under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME` overrides
   `~/.kiss`). On Linux, outbound API secrets for the 18 Muse-covered services (see
@@ -412,7 +415,7 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
 `src/kiss/agents/seas/ask/ask_sea.py`, next to the other Sorcar-extending SEAs, and is
 described here because it is used from the same chat surfaces. On an idle tab,
 `/ask <question>` runs the SEA directly in the tab, like every slash command, with your
-question as the task; the SEA's `prompt(task)` getter appends an instruction naming
+question as the task; the SEA's `prompt(task)` method appends an instruction naming
 the task you are asking about (`{task_id}`, filled in by the daemon from the run's
 parent task id) and telling the agent to call `task_context` on it. The answering session has exactly two tools: `task_context(task_id)`
 and `finish`. `task_context` (over `kiss.agents.sorcar.task_digest.context`) returns the
@@ -420,12 +423,12 @@ whole context in one call: the task's status, model, spend and the sub-agents it
 dispatched, the newest 8k characters of the progress log the task keeps in its work dir
 (`PROGRESS_LOG.md`, `PROGRESS.md` or `tmp/PROGRESS.md`, freshest wins), and its digested
 transcript entries oldest first, the whole text capped at 60k characters by dropping the
-oldest entries. The script's `system_prompt()` swaps the system prompt for the compact SYSTEM_LITE prompt (the
+oldest entries. The class's `system_prompt()` swaps the system prompt for the compact SYSTEM_LITE prompt (the
 bundled `seas/ask/_ask_system_lite.md`, a copy of the ablation prompt with the brand
-identity as a `{{IDENTITY}}` placeholder), its `add_to_system_prompt()` adds a
-no-internet, answer-quickly directive and a playbook asking for two or three plain
-sentences drawn only from the context, and `add_to_tools()` supplies the single
-`task_context` tool under `"tool_profile": "none"`, so no built-in tool (no shell, no
+identity as a `{{IDENTITY}}` placeholder) followed by a no-internet, answer-quickly
+directive and a playbook asking for two or three plain sentences drawn only from the
+context, and its `tools()` supplies the single `task_context` tool under
+`"tool_profile": "none"`, so no built-in tool (no shell, no
 file access) is offered; the `worker` kind turns off web tools, memory and parallel
 sub-agents, so there are no browser tools, no memory tools, and no fan-out either; it
 cannot touch the running task's working tree. Typed into a tab whose task is still running, the question

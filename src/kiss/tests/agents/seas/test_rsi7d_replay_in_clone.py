@@ -45,12 +45,17 @@ from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
 _DEMO_SEA = '''"""Demo SEA replayed in a clone."""
 
+from kiss.agents.seas.base.base_sea import BaseSea
+
 SYSTEM_PROMPT = "You are the demo agent. Do exactly what the task says and finish."
 
 
-def system_prompt() -> str:
-    """Replace the default prompt."""
-    return SYSTEM_PROMPT
+class Sea(BaseSea):
+    def system_prompt(self, system_prompt):
+        """Replace the default prompt."""
+        return SYSTEM_PROMPT
+
+
 '''
 
 

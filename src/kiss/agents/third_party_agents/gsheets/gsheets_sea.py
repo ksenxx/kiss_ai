@@ -27,6 +27,7 @@ import threading
 from typing import Any
 from urllib.parse import quote
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
@@ -45,14 +46,40 @@ _SERVICE = "google_sheets"
 _TIMEOUT = 30
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/gsheets help``."""
-    return (
-        "Google Sheets agent (signed in through Composio) that creates and lists spreadsheets, "
-        "adds sheets, and reads, updates, appends, clears and batch-updates cell ranges; use "
-        'run_agent(agent="gsheets", task="...") or the `kiss-gsheets -t \'<task>\'` CLI '
-        "(outbound-only, no message polling)."
-    )
+class GsheetsSea(BaseSea):
+    """The ``/gsheets`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/gsheets help``."""
+        return (
+            "Google Sheets agent (signed in through Composio) that creates and lists spreadsheets, "
+            "adds sheets, and reads, updates, appends, clears and batch-updates cell ranges; use "
+            'run_agent(agent="gsheets", task="...") or the `kiss-gsheets -t \'<task>\'` CLI '
+            "(outbound-only, no message polling)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Google Sheets channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        Composio connection recorded under ``~/.kiss`` and returns its
+        authentication and backend tools.
+        """
+        return tools + GoogleSheetsAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + GoogleSheetsAgent.channel_system_prompt
 
 
 def _bad_segment(value: str, name: str) -> str | None:
@@ -570,32 +597,6 @@ def main() -> None:
         channel_name="Google Sheets",
         make_backend=None,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Google Sheets channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    Composio connection recorded under ``~/.kiss`` and returns its
-    authentication and backend tools.
-    """
-    return GoogleSheetsAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return GoogleSheetsAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
@@ -52,14 +53,36 @@ _API_BASE = "https://openapi.zalo.me/v2.0/oa"
 _config = ChannelConfig(_ZALO_DIR, ("access_token",))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/zalo help``."""
-    return (
-        "Sends and receives Zalo Official Account messages through the Zalo OA API with an "
-        "access token and an embedded webhook server; use it as "
-        'run_agent(agent="zalo", task="...") or the `kiss-zalo` CLI '
-        "(`-t <task>` for one task, `--channel <id>` for a poll tick)."
-    )
+class ZaloSea(BaseSea):
+    """The ``/zalo`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/zalo help``."""
+        return (
+            "Sends and receives Zalo Official Account messages through the Zalo OA API with an "
+            "access token and an embedded webhook server; use it as "
+            'run_agent(agent="zalo", task="...") or the `kiss-zalo` CLI '
+            "(`-t <task>` for one task, `--channel <id>` for a poll tick)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Zalo channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + ZaloAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
 
 
 def _scrub_config_token() -> None:
@@ -642,27 +665,6 @@ def main() -> None:
         channel_name="Zalo",
         make_backend=_make_backend,
     )
-
-
-def add_to_tools() -> list:
-    """Return the Zalo channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return ZaloAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
 
 
 if __name__ == "__main__":

@@ -91,7 +91,7 @@ one exact replacement or reworked by a full-tool KISS Sorcar sub-agent
 through ``improve_sea_code`` (undone with ``revert_sea_code``), and
 ``settings()`` with ``patch_sea_settings``; every editor keeps the edit
 only when the patched script compiles, loads through the daemon's path
-with every getter evaluated and passes ``sea lint``.  A settings change
+with every method evaluated and passes ``sea lint``.  A settings change
 stays pending until ``settle_sea_settings`` keeps it on a successful
 replay or reverts it; the change log under the Sorcar home lets the
 next sweep propose a revert when the SEA got worse (:mod:`sea_tuning`
@@ -131,6 +131,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from kiss.agents.seas import agents_md
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.rsi7d import sea_tuning
 from kiss.agents.sorcar import (
     agent_dispatch,
@@ -145,7 +146,6 @@ from kiss.agents.sorcar.git_worktree import (
     USER_PROMPT_HEADING,
     strip_worktree_suffix,
 )
-from kiss.agents.sorcar.sea_settings import execute_python_file
 from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.config import kiss_home
 from kiss.core.utils import rmtree_force
@@ -157,8 +157,8 @@ WRAP_COLUMNS = 92
 """Prose written into a SEA prompt is wrapped here; the repo lints lines over 100."""
 SIGNATURE_CHARS = 200
 """Prompt prefix length that identifies a SEA run's ``system_prompt`` event."""
-PROMPT_GETTERS = ("system_prompt", "add_to_system_prompt")
-"""The SEA getters whose text is the prompt rsi7d patches, in precedence order."""
+PROMPT_METHOD = "system_prompt"
+"""The SEA method whose returned constant is the prompt rsi7d patches."""
 STAMP_PREFIX = "_Observed in the task history"
 """First words of the stamp line ``write_autorouter_evidence`` puts above the evidence."""
 EVIDENCE_NAME = "AUTOROUTER.md"
@@ -281,14 +281,14 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
   `patch_sea_prompt` (instructions: edits one prompt constant, nothing else may change),
   `patch_sea_settings` (one `settings()` key; a `timeout` / `max_budget` must pass the
   acceptance test on the window's runs), `patch_sea_code` (one exact replacement: a new
-  tool in `add_to_tools()`, a guardrail in `tool_call_hook` / `llm_call_hook`, a helper,
+  tool in `tools()`, a guardrail in `tool_call_hook` / `llm_call_hook`, a helper,
   an import; read the file with `sea_source` first) and `improve_sea_code` (a KISS Sorcar
   sub-agent with every tool reworks the SEA's folder from your written instructions and
   evidence: use it when the change spans several places, needs a test, or restructures
   the prompt). `tune_sea_settings` only computes proposals. Every editor restores the
   file unless the patched SEA still loads and passes `sea lint` (`patch_sea_code`,
   `improve_sea_code` and `patch_sea_settings` also run the daemon's full load with every
-  getter evaluated). A code change (tools, guardrails) is kept only when it is also
+  method evaluated). A code change (tools, guardrails) is kept only when it is also
   replay-verified (step 5) and `uv run pytest -q
   src/kiss/tests/agents/seas/test_<name>_sea.py` passes when that test exists; a code
   change that cannot be replayed is reverted, not reported as "not replay-verified". A
@@ -355,7 +355,7 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
    `settle_sea_settings(name, replay_task_id)`. Code: when the evidence shows a missing
    tool (the agent reaches for a tool the SEA does not give it) or a recurring misuse an
    instruction did not stop, read the file with `sea_source(name)`; a one-place change
-   goes through `patch_sea_code(name, old, new)` (add the tool to `add_to_tools()` or a
+   goes through `patch_sea_code(name, old, new)` (add the tool to `tools()` or a
    guardrail to `tool_call_hook` / `llm_call_hook`); anything larger goes through
    `improve_sea_code(name, instructions, max_budget)`, whose instructions must name the
    files, the evidence (task ids, findings) and the intended behaviour, and whose budget
@@ -484,23 +484,76 @@ _ERROR_KIND_WORDS = ("ERROR", "FAIL", "EXCEPTION", "TRACEBACK")
 """Words that mark an uppercased event type (``TASK_ERROR``, ...) as an error event."""
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/rsi7d help``."""
-    return (
-        f"Mines the last 7 days of the indexed SEAs' runs in ~/{HOME_DIR}/history.db for agentic "
-        "mistakes, cost sinks and quality problems, applies and evaluates improvements to each "
-        "SEA (its own included): instructions in its prompt, settings() limits tuned from the "
-        "runs, tools and guardrail hooks in its code, through gated editors that keep the "
-        "script loading and lint-clean (file-modifying tasks are replayed in a clone at the "
-        "task's commit); mines eval sets for skillopt; refreshes the autorouter SEA's model "
-        "evidence and, with the "
-        "user's permission (asked for, unless the task text grants it), improves KISS Sorcar "
-        f"itself: src/kiss/SYSTEM.md, ~/{HOME_DIR}/AGENTS.md and its code. The task text starts "
-        "with the scope: `/rsi7d all` (every SEA), `/rsi7d review_paper write_paper` (those "
-        "SEAs), `/rsi7d --seas-dir <folder> [<name> ...]` (the SEAs of that folder, which "
-        "become the editable ones); instructions may follow. Or "
-        '`run_agent(agent="rsi7d", task="all")`.'
-    )
+class Rsi7dSea(BaseSea):
+    """The ``/rsi7d`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/rsi7d help``."""
+        return (
+            f"Mines the last 7 days of the indexed SEAs' runs in ~/{HOME_DIR}/history.db for "
+            "agentic "
+            "mistakes, cost sinks and quality problems, applies and evaluates improvements to each "
+            "SEA (its own included): instructions in its prompt, settings() limits tuned from the "
+            "runs, tools and guardrail hooks in its code, through gated editors that keep the "
+            "script loading and lint-clean (file-modifying tasks are replayed in a clone at the "
+            "task's commit); mines eval sets for skillopt; refreshes the autorouter SEA's model "
+            "evidence and, with the "
+            "user's permission (asked for, unless the task text grants it), improves KISS Sorcar "
+            f"itself: src/kiss/SYSTEM.md, ~/{HOME_DIR}/AGENTS.md and its code. The task text "
+            "starts "
+            "with the scope: `/rsi7d all` (every SEA), `/rsi7d review_paper write_paper` (those "
+            "SEAs), `/rsi7d --seas-dir <folder> [<name> ...]` (the SEAs of that folder, which "
+            "become the editable ones); instructions may follow. Or "
+            '`run_agent(agent="rsi7d", task="all")`.'
+        )
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return :data:`SYSTEM_PROMPT` with the brand placeholders filled."""
+        return render_brand(SYSTEM_PROMPT)
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run :data:`SYSTEM_PROMPT` with memory, without the browser, under a $2000 cap.
+
+        Sweeping several SEAs needs room for replays of past runs that cost
+        up to $500 each: a sub-agent's spend counts toward this task's total,
+        so the cap must hold the mining work plus a few $500-class replays
+        (the procedure limits replays to 60% of the remaining budget).
+        """
+        return settings | {
+            "max_budget": 2000.0,
+            "use_memory": True,
+            "use_web_tools": False,
+        }
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Trajectory mining, prompt inspection, the gated prompt editors and clone replays."""
+        return tools + [
+            indexed_seas,
+            sea_runs,
+            sea_findings,
+            run_findings,
+            run_overview,
+            run_transcript,
+            run_entry,
+            model_scorecard,
+            sea_prompt,
+            patch_sea_prompt,
+            sea_source,
+            patch_sea_code,
+            improve_sea_code,
+            revert_sea_code,
+            tune_sea_settings,
+            patch_sea_settings,
+            settle_sea_settings,
+            export_sea_evals,
+            frequent_tasks,
+            write_autorouter_evidence,
+            replay_in_clone,
+            replay_in_place,
+            sorcar_text,
+            request_sorcar_permission,
+            patch_sorcar,
+        ]
 
 
 def _is_error_kind(kind: str) -> bool:
@@ -668,10 +721,10 @@ def _runs_by_signature(task_ids: list[str], signatures: dict[str, str]) -> dict[
     """Return ``{sea name: [task ids]}`` of *task_ids* whose system prompt carries a SEA signature.
 
     *signatures* maps a SEA name to a distinctive prefix of the prompt
-    text its getter returns; a SEA's prompt is persisted verbatim in
-    the run's ``system_prompt`` event (alone for ``system_prompt()``
-    SEAs, appended to the default prompt for ``add_to_system_prompt()``
-    ones), so the prefix identifies runs the server dispatched without a
+    text its ``system_prompt`` returns; a SEA's prompt is persisted verbatim in
+    the run's ``system_prompt`` event (alone for a SEA whose
+    ``system_prompt`` replaces the prompt, after the default prompt for
+    one that appends), so the prefix identifies runs the server dispatched without a
     ``run_agent`` tool call (the side-channel task-update reports, runs
     started through ``sorcar.run(extension_agent_path=...)``).
     """
@@ -1007,29 +1060,11 @@ def _format_fields(text: str) -> set[str]:
     return {name for _, name, _, _ in string.Formatter().parse(text) if name is not None}
 
 
-def _execute_sea(path: Path) -> dict[str, Any]:
-    """Execute the SEA file at *path* and return its namespace."""
-    return execute_python_file(str(path), ValueError, "SEA")
+def _sea_prompt_text(path: Path) -> str:
+    """Return what the SEA at *path* makes of an empty system prompt (its own prompt text)."""
+    from kiss.agents.sorcar.sea_commands import base_system_prompt, load_sea
 
-
-def system_prompt() -> str:
-    """Return :data:`SYSTEM_PROMPT` with the brand placeholders filled."""
-    return render_brand(SYSTEM_PROMPT)
-
-
-def settings() -> dict[str, Any]:
-    """Run :data:`SYSTEM_PROMPT` with memory, without the browser, under a $2000 cap.
-
-    Sweeping several SEAs needs room for replays of past runs that cost
-    up to $500 each: a sub-agent's spend counts toward this task's total,
-    so the cap must hold the mining work plus a few $500-class replays
-    (the procedure limits replays to 60% of the remaining budget).
-    """
-    return {
-        "max_budget": 2000.0,
-        "use_memory": True,
-        "use_web_tools": False,
-    }
+    return base_system_prompt([load_sea(path)], "").strip()
 
 
 @dataclass(frozen=True)
@@ -1188,23 +1223,28 @@ def _not_editable(name: str) -> str:
 
 
 def _prompt_constant(source: str) -> tuple[str, str]:
-    """Return ``(getter, constant)`` of the prompt getter that returns a module constant.
+    """Return ``(method, constant)`` of the ``system_prompt`` method that returns a module constant.
 
-    ``("system_prompt", "SYSTEM_PROMPT")`` for the common shape; the
-    constant is ``""`` when the getter returns something other than a
-    module-level string constant (an inline literal, an expression) and
-    both are ``""`` when the file defines no prompt getter.
+    ``("system_prompt", "SYSTEM_PROMPT")`` for the common shape (the
+    method returns the constant, or the given prompt plus the constant);
+    the constant is ``""`` when the method returns something else (an
+    inline literal, an expression) and both are ``""`` when the file
+    defines no ``system_prompt`` method.
     """
     tree = ast.parse(source)
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in PROMPT_GETTERS:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == PROMPT_METHOD:
             last = node.body[-1] if node.body else None
-            if isinstance(last, ast.Return) and isinstance(last.value, ast.Name):
+            value = last.value if isinstance(last, ast.Return) else None
+            # ``system_prompt + "\n\n" + CONSTANT``: the constant is the right operand
+            while isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+                value = value.right
+            if isinstance(value, ast.Name):
                 try:
-                    _prompt_node(tree, last.value.id)
+                    _prompt_node(tree, value.id)
                 except ValueError:
                     return node.name, ""
-                return node.name, last.value.id
+                return node.name, value.id
             return node.name, ""
     return "", ""
 
@@ -1339,24 +1379,17 @@ def _sorcar_info() -> dict[str, Any]:
 
 
 def _signatures() -> dict[str, str]:
-    """Return ``{sea name: prompt prefix}`` of every editable SEA whose prompt getter loads.
+    """Return ``{sea name: prompt prefix}`` of every editable SEA whose ``system_prompt`` loads.
 
-    The prefix (the first 200 characters of what the getter returns)
+    The prefix (the first 200 characters of the SEA's own prompt text)
     identifies a run's ``system_prompt`` event when no ``run_agent``
     tool call links it to the SEA.
     """
     signatures: dict[str, str] = {}
     for name, path in sorted(_editable_seas().items()):
         try:
-            namespace = _execute_sea(path)
+            text = _sea_prompt_text(path)
         except Exception:  # noqa: BLE001 - a SEA that does not load has no runs to mine
-            continue
-        getter = next((namespace[g] for g in PROMPT_GETTERS if callable(namespace.get(g))), None)
-        if getter is None:
-            continue
-        try:
-            text = str(getter()).strip()
-        except Exception:  # noqa: BLE001 - same
             continue
         if len(text) >= SIGNATURE_CHARS:
             signatures[name] = text[:SIGNATURE_CHARS]
@@ -1484,7 +1517,7 @@ def sea_prompt(name: str) -> str:
     source = path.read_text(encoding="utf-8")
     getter, constant = _prompt_constant(source)
     if not constant:
-        return f"Error: {path} has no prompt getter returning a module-level string constant"
+        return f"Error: {path} has no system_prompt method returning a module-level string constant"
     node, text = _prompt_text(source, constant)
     shape = (
         "an f-string: the text below is its source literal, {NAME} are placeholders evaluated "
@@ -1628,7 +1661,7 @@ def patch_sea_prompt(name: str, old: str, new: str) -> str:
     rejected when the resulting module does not compile, when anything
     outside the constant's text changes (code, f-string placeholders),
     when the prompt's ``str.format`` fields change or when the SEA no
-    longer loads or its prompt getter fails; the file is untouched then.
+    longer loads or its ``system_prompt`` fails; the file is untouched then.
     Prose lines of *new* are wrapped at 92 columns (table rows are kept
     and must already fit).  Returns a one-line description of the change.
     """
@@ -1638,7 +1671,7 @@ def patch_sea_prompt(name: str, old: str, new: str) -> str:
     source = path.read_text(encoding="utf-8")
     getter, constant = _prompt_constant(source)
     if not constant:
-        return f"Error: {path} has no prompt getter returning a module-level string constant"
+        return f"Error: {path} has no system_prompt method returning a module-level string constant"
     node, text = _prompt_text(source, constant)
     if old and text.count(old) != 1:
         return (
@@ -1676,7 +1709,7 @@ def patch_sea_prompt(name: str, old: str, new: str) -> str:
         return f"Error: {why}"
     path.write_text(candidate, encoding="utf-8")
     try:
-        str(_execute_sea(path)[getter]())
+        _sea_prompt_text(path)
         findings = sea_lint.lint_sea(path)
     except Exception as exc:  # noqa: BLE001 - any load failure must roll the file back
         path.write_text(source, encoding="utf-8")
@@ -1697,7 +1730,7 @@ def _accept_sea_file(path: Path, source: str, candidate: str) -> str:
 
     The gate every code edit of a SEA goes through: the module must
     compile, the script must load through the daemon's own path with
-    every getter evaluated (:func:`sea_commands.check_sea`), and
+    every method evaluated (:func:`sea_commands.check_sea`), and
     ``sea lint`` must report nothing.  On failure the file holds
     *source* again.
     """
@@ -1724,7 +1757,7 @@ def _accept_sea_file(path: Path, source: str, candidate: str) -> str:
 def sea_source(name: str, start: int = 1, count: int = 200) -> str:
     """Return *count* numbered lines of editable SEA *name*'s file from line *start*.
 
-    Read the code before `patch_sea_code`: tools (`add_to_tools`),
+    Read the code before `patch_sea_code`: tools (`tools()`),
     guardrails (`tool_call_hook` / `llm_call_hook`), `settings()` and the
     prompt constants all live in this one file.
     """
@@ -1742,10 +1775,10 @@ def patch_sea_code(name: str, old: str, new: str) -> str:
     """Replace *old* with *new* once in the code of editable SEA *name*; empty *old* appends.
 
     The general editor for everything `patch_sea_prompt` cannot touch:
-    a new tool in `add_to_tools()`, a guardrail in `tool_call_hook` /
+    a new tool in `tools()`, a guardrail in `tool_call_hook` /
     `llm_call_hook`, a helper, an import.  *old* must occur exactly once
     in the file.  The edit is kept only when the patched module compiles,
-    loads through the daemon's path with every getter evaluated and
+    loads through the daemon's path with every method evaluated and
     passes `sea lint`; otherwise the file is restored and the reason
     returned.  A code change is accepted for good only after a replay
     (`replay_in_clone` / `replay_in_place`) and the SEA's tests pass.
@@ -1777,8 +1810,8 @@ and its script is `{file}`; every change must stay inside that folder (and its t
 
 {instructions}
 
-Rules: read the script fully before editing; keep the SEA's contract (module-level
-`description()`, `settings()`, prompt getters, `add_to_tools()` returning callables); keep
+Rules: read the script fully before editing; keep the SEA's contract (one `BaseSea`
+subclass with `description()`, `settings()`, `system_prompt()`, `tools()` methods); keep
 every helper small, typed and documented like the code around it; run
 `uv run sea lint` and the SEA's test file when it exists, and fix what they report. Do not
 commit. Finish with a short summary of what you changed and why.
@@ -1799,7 +1832,7 @@ def improve_sea_code(
     (USD) and *timeout* (seconds).  The folder is copied to
     `tmp/rsi7d/snapshots/<name>` first; `revert_sea_code(name)` restores
     that copy.  When the sub-agent returns, the script goes through the
-    same gate as `patch_sea_code` (compile, load with every getter,
+    same gate as `patch_sea_code` (compile, load with every method,
     `sea lint`); a script that fails is restored from the snapshot and
     the error returned.  Returns JSON with `task_id`, the sub-agent's
     `result`, the folder's `diff_stat` and any `other_changes` outside
@@ -2772,32 +2805,3 @@ def replay_in_clone(
     return json.dumps(prepared, indent=1)
 
 
-def add_to_tools() -> list[Any]:
-    """Trajectory mining, prompt inspection, the gated prompt editors and clone replays."""
-    return [
-        indexed_seas,
-        sea_runs,
-        sea_findings,
-        run_findings,
-        run_overview,
-        run_transcript,
-        run_entry,
-        model_scorecard,
-        sea_prompt,
-        patch_sea_prompt,
-        sea_source,
-        patch_sea_code,
-        improve_sea_code,
-        revert_sea_code,
-        tune_sea_settings,
-        patch_sea_settings,
-        settle_sea_settings,
-        export_sea_evals,
-        frequent_tasks,
-        write_autorouter_evidence,
-        replay_in_clone,
-        replay_in_place,
-        sorcar_text,
-        request_sorcar_permission,
-        patch_sorcar,
-    ]

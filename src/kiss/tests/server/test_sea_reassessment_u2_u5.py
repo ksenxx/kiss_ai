@@ -35,7 +35,12 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.run_config import RUN_CONFIG_KEYS, is_explicit, run_config_line
-from kiss.agents.sorcar.sea_commands import sea_layers, sea_settings
+from kiss.agents.sorcar.sea_commands import (
+    declared_settings,
+    own_settings,
+    sea_layers,
+    sea_settings,
+)
 from kiss.agents.sorcar.sea_docs import options_table
 from kiss.agents.sorcar.sea_settings import (
     PROFILE_ALIASES,
@@ -212,11 +217,18 @@ def test_relative_script_work_dir_resolves_against_the_script_folder(
     caller = tmp_path / "caller"
     (caller / "sub").mkdir(parents=True)
     folder = tmp_path / "seas" / "box"
-    sea = _write(folder / "box_sea.py", "def settings():\n    return {'work_dir': 'sandbox'}\n")
+    sea = _write(folder / "box_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'work_dir': 'sandbox'}
+""")
     assert sea_settings(sea)["work_dir"] == str(folder / "sandbox")
-    # ``resolve_settings`` alone keeps the script's spelling; the loader anchors it.
-    layer = sea_layers(sea)[-1]
-    assert resolve_settings(layer.namespace)["work_dir"] == "sandbox"
+    # The script's own ``settings`` keeps its spelling; the fold anchors it at
+    # the folder of the file whose method set it.
+    assert own_settings(sea_layers(sea)[-1])["work_dir"] == "sandbox"
+    assert declared_settings(sea_layers(sea))["work_dir"] == str(folder / "sandbox")
     # Every way of running the script sees the same folder, whatever the caller's.
     run_agent = make_run_agent_tool(str(caller))
     run_agent("t", str(sea))
@@ -229,23 +241,57 @@ def test_relative_script_work_dir_resolves_against_the_script_folder(
     run_agent("t", str(sea), options='{"work_dir": "sub"}')
     assert captured[-1]["work_dir"] == str(caller / "sub")
     # ``..`` and ``~`` keep their meaning; an absolute path is untouched.
-    up = _write(folder / "up_sea.py", "def settings():\n    return {'work_dir': '../shared'}\n")
+    up = _write(folder / "up_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'work_dir': '../shared'}
+""")
     assert sea_settings(up)["work_dir"] == str(tmp_path / "seas" / "shared")
-    home = _write(folder / "home_sea.py", "def settings():\n    return {'work_dir': '~'}\n")
+    home = _write(folder / "home_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'work_dir': '~'}
+""")
     assert sea_settings(home)["work_dir"] == str(Path.home())
-    absolute = _write(
-        folder / "abs_sea.py", f"def settings():\n    return {{'work_dir': {str(caller)!r}}}\n",
-    )
+    absolute = _write(folder / "abs_sea.py", f"""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {{'work_dir': {str(caller)!r}}}
+""")
     assert sea_settings(absolute)["work_dir"] == str(caller)
-    # A base layer's relative work_dir is relative to the BASE's folder.
+    # A relative work_dir inherited from a base class stays relative to the
+    # folder of the file whose ``settings`` set it (the base's); a subclass
+    # that wants its own folder sets its own relative path.
     base = _write(
-        tmp_path / "base" / "base_sea.py", "def settings():\n    return {'work_dir': 'data'}\n",
+        tmp_path / "base" / "base_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'work_dir': 'data'}
+""",
     )
-    child = _write(
-        folder / "child_sea.py",
-        f"def settings():\n    return {{'extends': {str(base)!r}}}\n",
-    )
+    child = _write(folder / "child_sea.py", f"""
+from kiss.agents.sorcar.sea_commands import sea_class
+
+class Child(sea_class({str(base)!r})):
+    pass
+""")
     assert sea_settings(child)["work_dir"] == str(tmp_path / "base" / "data")
+    own = _write(folder / "own_sea.py", f"""
+from kiss.agents.sorcar.sea_commands import sea_class
+
+class Own(sea_class({str(base)!r})):
+    def settings(self, settings):
+        return settings | {{'work_dir': 'data'}}
+""")
+    assert sea_settings(own)["work_dir"] == str(folder / "data")
     assert "relative path is resolved against the script's own folder" in SETTING_DOCS["work_dir"]
 
 
@@ -256,7 +302,13 @@ def test_relative_work_dir_that_a_script_locks_compares_resolved(
     (folder / "sandbox").mkdir(parents=True)
     sea = _write(
         folder / "locked_sea.py",
-        "def settings():\n    return {'work_dir': 'sandbox', 'locked': ['work_dir']}\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'work_dir': 'sandbox', 'locked': ['work_dir']}
+""",
     )
     run_agent = make_run_agent_tool(str(tmp_path))
     out = run_agent("t", str(sea), options=json.dumps({"work_dir": str(folder / "sandbox")}))
@@ -362,11 +414,17 @@ def test_a_scripts_profile_alias_is_its_key_for_locks_and_records(
     tmp_path: Path, captured: list[dict[str, Any]],
 ) -> None:
     assert resolve_settings(
-        {"settings": lambda: {"tool_profile": " readonly + bash"}}
+        {"tool_profile": " readonly + bash"}
     )["tool_profile"] == "review+bash"
     sea = _write(
         tmp_path / "alias_sea.py",
-        "def settings():\n    return {'tool_profile': 'readonly', 'locked': ['tool_profile']}\n",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'tool_profile': 'readonly', 'locked': ['tool_profile']}
+""",
     )
     assert sea_settings(sea)["tool_profile"] == "review"
     assert locked_conflicts(sea_settings(sea), {"tool_profile": "review"}) == ""
@@ -407,9 +465,9 @@ def test_unknown_option_keys_name_their_new_name_or_the_closest_key() -> None:
     for old, new in RENAMED_SETTINGS.items():
         message = f"settings\\(\\) key {old!r} was renamed to {new!r}"
         with pytest.raises(SettingsError, match=message):
-            resolve_settings({"settings": lambda old=old: {old: "x"}})
+            resolve_settings({old: "x"})
     with pytest.raises(SettingsError, match="'append_basic_tools' was removed"):
-        resolve_settings({"settings": lambda: {"append_basic_tools": True}})
+        resolve_settings({"append_basic_tools": True})
 
 
 def test_stray_keywords_get_the_tools_own_hint(tmp_path: Path) -> None:

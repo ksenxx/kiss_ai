@@ -127,8 +127,8 @@ def test_auth_trio_roundtrip_and_persistence() -> None:
 
 
 def test_module_add_to_tools_nonempty() -> None:
-    """The module-level ``add_to_tools()`` agent-script contract returns tools."""
-    tools = webhook_agent_mod.add_to_tools()
+    """``WebhookSea().tools([])`` returns the webhook tools."""
+    tools = webhook_agent_mod.WebhookSea().tools([])
     assert tools
     assert _AUTH_TRIO <= {t.__name__ for t in tools}
 

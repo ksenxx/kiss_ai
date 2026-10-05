@@ -169,7 +169,7 @@ def test_authenticate_rejects_bad_input() -> None:
 
 def test_tools_module_function() -> None:
     """The module-level ``tools()`` returns a non-empty tool list."""
-    tools = a2a_mod.add_to_tools()
+    tools = a2a_mod.A2aSea().tools([])
     assert tools
     assert _AUTH_TRIO <= _tool_names(tools)
 

@@ -39,6 +39,7 @@ from urllib.parse import quote
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -81,14 +82,40 @@ _OVERLEAF_DIR = kiss_home() / "third_party_agents" / "overleaf"
 _config = ChannelConfig(_OVERLEAF_DIR, ("session_cookie",))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/overleaf help``."""
-    return (
-        "Lists, reads and edits Overleaf projects and their files through the editor's web "
-        "routes using the user's pasted `overleaf_session2` browser cookie (outbound only, no "
-        'message polling); use it as run_agent(agent="overleaf", task="...") or the '
-        "`kiss-overleaf -t <task>` CLI."
-    )
+class OverleafSea(BaseSea):
+    """The ``/overleaf`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/overleaf help``."""
+        return (
+            "Lists, reads and edits Overleaf projects and their files through the editor's web "
+            "routes using the user's pasted `overleaf_session2` browser cookie (outbound only, no "
+            'message polling); use it as run_agent(agent="overleaf", task="...") or the '
+            "`kiss-overleaf -t <task>` CLI."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Overleaf channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + OverleafAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + OverleafAgent.channel_system_prompt
 
 
 def _error(message: str) -> str:
@@ -1607,32 +1634,6 @@ def main() -> None:
     inbound message stream to poll.
     """
     channel_main(OverleafAgent, "kiss-overleaf", channel_name="Overleaf", make_backend=None)
-
-
-def add_to_tools() -> list:
-    """Return the Overleaf channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return OverleafAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return OverleafAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

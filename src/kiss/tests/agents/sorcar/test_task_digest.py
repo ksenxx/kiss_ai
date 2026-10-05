@@ -30,7 +30,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _save_task_result,
 )
-from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.agents.sorcar.sea_commands import evaluate_sea
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -468,12 +468,13 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
     receives the playbook as the system-prompt suffix, gets the real
     context back as a tool result and finishes with the answer.
 
-    The run is configured the way the daemon configures it: the
-    ``worker`` preset's flags, the ``none`` tool profile (from which
-    the daemon derives ``append_basic_tools=False``), the
-    ``system_prompt()`` getter as the base prompt, ``add_to_system_prompt()``
-    as the suffix, ``add_to_tools()`` as the extra tools and
-    ``prompt(task)`` with ``{task_id}`` filled in as the task.
+    The run is configured the way the daemon configures it
+    (``evaluate_sea`` on the SEA): the ``worker`` kind's flags, the
+    ``none`` tool profile (from which the daemon derives
+    ``append_basic_tools=False``), the ``system_prompt`` method as the
+    system-prompt hook (it replaces the assembled prompt), the ``tools``
+    method as the tools hook and ``prompt(task)`` with ``{task_id}``
+    filled in as the task.
     """
     task_id = _persist("Run the benchmark", _running_task_events())
     answer = "<p>2 of 10 trials are done; the last step failed to edit paper.tex.</p>"
@@ -481,24 +482,26 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
         tool_call_body("task_context", {"task_id": task_id}, prompt_tokens=500),
         finish_body(answer, prompt_tokens=700),
     ]
-    settings = resolve_settings(vars(ask_sea))
+    sea = ask_sea.AskSea()
+    run = evaluate_sea([sea], "how many trials are done?", task_id)
+    settings = run.settings
     assert settings["tool_profile"] == "none"
-    assert "add_to_prompt" not in settings
-    prompt = ask_sea.prompt("how many trials are done?").format(task_id=task_id)
-    assert prompt.endswith(ask_sea.ADD_TO_PROMPT.format(task_id=task_id))
+    assert settings["kind"] == "worker"
+    assert run.prompt.endswith(ask_sea.ADD_TO_PROMPT.format(task_id=task_id))
+    assert run.system_prompt_hook is not None and run.tools_hook is not None
+    assert run.llm_call_hook is None and run.tool_call_hook is None
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("ask-sea-test")
         result = agent.run(
-            prompt_template=prompt,
+            prompt_template=run.prompt,
             model_name=MODEL,
             work_dir=str(tmp_path),
             max_steps=4,
             model_config={"base_url": url, "api_key": "local"},
-            tools=ask_sea.add_to_tools(),
             tool_profile=settings["tool_profile"],
             append_basic_tools=settings["tool_profile"] != "none",
-            base_system_prompt=ask_sea.system_prompt(),
-            system_prompt=ask_sea.add_to_system_prompt(),
+            system_prompt_hook=run.system_prompt_hook,
+            tools_hook=run.tools_hook,
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
             is_parallel=settings["allow_fan_out"],
@@ -514,8 +517,8 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"task_context", "finish"}
         system = str(next(m for m in request["messages"] if m["role"] == "system")["content"])
-        assert system.startswith(ask_sea.system_prompt())
-        assert ask_sea.add_to_system_prompt() in system
+        assert system.startswith(sea.system_prompt("<the assembled prompt>"))
+        assert "<the assembled prompt>" not in system
     user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
     assert f"task with id {task_id}" in str(user["content"])
     tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]

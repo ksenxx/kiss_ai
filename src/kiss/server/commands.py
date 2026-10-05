@@ -1407,9 +1407,9 @@ class _CommandsMixin:
         :func:`~kiss.server.task_update.charge_side_channel_usage`.
 
         The answering session is dispatched with the owner as its
-        ``parent_task_id``: the daemon applies the ask script's
+        ``parent_task_id``: the daemon applies the ask SEA's
         ``prompt(task)`` (which names that id as the task the question
-        is about) and ``add_to_system_prompt()``.
+        is about) and ``system_prompt``.
 
         Args:
             tab_id: The frontend tab whose ``/ask`` produced this
