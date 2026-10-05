@@ -19,6 +19,12 @@ raises cannot be reached on the Linux hosts these tests run on without
 replacing module globals, so they are not exercised here.  The browser
 half (xterm.js, the "..." menu item, the tab) is covered by
 ``tests/agents/vscode/test_remote_terminal_tab.py``.
+
+The service runs the developer's ``$SHELL`` as an interactive login
+shell, dotfiles included (a ``cd`` in ``~/.zshrc`` moves it out of the
+work dir, zsh refuses the first ``exit`` while a job runs and prompts
+with ``%``, not ``$``).  The tests therefore point ``SHELL`` at
+:func:`hermetic_shell`, a wrapper for ``bash --noprofile --norc``.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -37,6 +44,7 @@ from typing import Any
 
 import pytest
 
+from kiss.core.processes import find_bash
 from kiss.server import terminal_tab
 from kiss.server.terminal_tab import TerminalService, default_shell
 from kiss.server.web_server import RemoteAccessServer
@@ -45,6 +53,39 @@ from kiss.tests.local_ws import open_local_connection
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="terminal tabs need a pty",
 )
+
+
+def hermetic_shell(directory: Path) -> Path:
+    """Write and return a ``$SHELL`` for the tests: bash without any dotfile.
+
+    The wrapper execs ``bash --noprofile --norc`` with the arguments the
+    service passes (``-l`` on macOS), so the shell starts in the work
+    dir whatever the developer's own shell and rc files do, exits on
+    the first ``exit``, prompts with ``$`` and prints nothing first
+    (macOS's ``/bin/bash`` greets a login shell with its "now zsh"
+    notice unless ``BASH_SILENCE_DEPRECATION_WARNING`` is set).
+
+    Args:
+        directory: Where to write the wrapper (a per-test temp dir).
+
+    Returns:
+        The absolute path of the executable wrapper.
+    """
+    bash = find_bash()
+    assert bash, "the terminal tests need bash on PATH"
+    wrapper = directory / "test-shell"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "export BASH_SILENCE_DEPRECATION_WARNING=1\n"
+        f'exec "{bash}" --noprofile --norc "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+@pytest.fixture(autouse=True)
+def _bash_without_dotfiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SHELL", str(hermetic_shell(tmp_path)))
 
 
 class ConnPrinter:
@@ -256,8 +297,10 @@ def test_a_shell_that_exits_at_once_still_reports_opened_before_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``terminalOpened`` is announced before the reader starts, so even
-    ``/bin/true`` as the shell yields opened -> exit, never the reverse."""
-    monkeypatch.setenv("SHELL", "/bin/true")
+    ``true`` as the shell yields opened -> exit, never the reverse."""
+    true = shutil.which("true")  # /bin/true on Linux, /usr/bin/true on macOS
+    assert true
+    monkeypatch.setenv("SHELL", true)
     printer = ConnPrinter()
     svc = TerminalService(printer)
     for i in range(10):

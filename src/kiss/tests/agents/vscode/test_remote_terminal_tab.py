@@ -18,7 +18,10 @@ same shell, and a theme switch recolours the terminal.
 
 Driven against the production ``RemoteAccessServer`` + daemon of
 ``ExplorerHarness`` with headless Chromium; xterm.js is downloaded from
-jsDelivr as in production.
+jsDelivr as in production.  The shell is the dotfile-free bash of
+``tests/server/test_terminal_tab_service.py`` (``hermetic_shell``), so
+the ``pwd`` and ``$``-prompt assertions do not depend on the
+developer's own shell and rc files.
 """
 
 from __future__ import annotations
@@ -40,10 +43,19 @@ from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
     harness,  # noqa: F401  (module fixture used by param name)
 )
+from kiss.tests.server.test_terminal_tab_service import hermetic_shell
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="terminal tabs need a pty",
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _bash_without_dotfiles(tmp_path_factory: pytest.TempPathFactory):
+    """Every shell the in-process daemon spawns is a dotfile-free bash."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("SHELL", str(hermetic_shell(tmp_path_factory.mktemp("shell"))))
+        yield
 
 _XTERM = ".terminal-tab-view .xterm"
 _SCREEN_TEXT = (
@@ -116,6 +128,14 @@ def _wait_for_output(page, needle: str, timeout: int = 20000) -> str:
     return _screen(page)
 
 
+def _wait_for_sizes(page, count: int) -> None:
+    """Wait until the screen shows *count* ``rows cols`` lines (``stty size`` answers)."""
+    page.wait_for_function(
+        "n => ((" + _SCREEN_TEXT + ").match(/^\\d+ \\d+$/gm) || []).length >= n",
+        arg=count, timeout=20000,
+    )
+
+
 def _sessions(harness: ExplorerHarness) -> int:
     return harness.server._vscode_server.terminals.session_count()
 
@@ -183,17 +203,14 @@ def test_resizing_the_window_resizes_the_pty(browser, harness):
     try:
         _open_terminal(page)
         page.keyboard.type("stty size\n")
-        text = _wait_for_output(page, "\n")
+        _wait_for_sizes(page, 1)
         rows, cols = (
-            int(x) for x in re.findall(r"(?m)^(\d+) (\d+)$", text)[-1]
+            int(x) for x in re.findall(r"(?m)^(\d+) (\d+)$", _screen(page))[-1]
         )
         page.set_viewport_size({"width": 900, "height": 500})
         page.wait_for_timeout(600)
         page.keyboard.type("stty size\n")
-        page.wait_for_function(
-            "n => ((" + _SCREEN_TEXT + ").match(/^\\d+ \\d+$/gm) || []).length >= n",
-            arg=2, timeout=20000,
-        )
+        _wait_for_sizes(page, 2)
         rows2, cols2 = (
             int(x) for x in re.findall(r"(?m)^(\d+) (\d+)$", _screen(page))[-1]
         )

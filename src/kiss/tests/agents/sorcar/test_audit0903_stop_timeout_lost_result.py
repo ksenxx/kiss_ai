@@ -86,6 +86,13 @@ from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
 from kiss.tests.local_ws import make_test_tls
 
 _TOKEN = "audit0903-token"
+# A minimal SEA for ``run_agent(agent=...)``: one ``BaseSea`` subclass per file.
+_HELPER_SEA = (
+    "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+    "class Sea(BaseSea):\n"
+    "    def settings(self, settings):\n"
+    "        return settings | {'model': 'm'}\n"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -320,7 +327,7 @@ def test_run_agent_tool_returns_result_when_finish_races_timeout(
     daemon = _RacingFinishDaemon(finish_delay=0.6)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     try:
         out = make_run_agent_tool(str(tmp_path))(
             "finishes while stop is in flight", str(script), timeout="0.3",
@@ -412,7 +419,7 @@ def test_run_agent_tool_reports_unconfirmed_stop_despite_result(
     daemon = _RacingFinishDaemon(finish_delay=0.6, send_terminal_status=False)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     try:
         out = make_run_agent_tool(str(tmp_path))(
             "finishes without terminal status", str(script), timeout="0.3",

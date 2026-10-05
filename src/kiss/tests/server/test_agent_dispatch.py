@@ -224,7 +224,7 @@ def test_agent_script_tools_rejects_paths_tuples_and_non_callables(
         ("        return '/some/tools.py'\n", "list of tool callables.*got str"),
         (
             "        from pathlib import Path\n        return Path('/some/tools.py')\n",
-            "list of tool callables.*got PosixPath",
+            "list of tool callables.*got (Posix|Windows)Path",
         ),
         ("        return [1]\n", "list of tool callables.*got list"),
         ("        return tuple(tools)\n", "list of tool callables.*got tuple"),

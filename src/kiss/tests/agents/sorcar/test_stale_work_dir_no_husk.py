@@ -44,6 +44,14 @@ from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
 from kiss.core.kiss_agent import KISSAgent
 from kiss.tests.agents.sorcar.test_dispatch_timeout import _LocalDaemon, _send_event
 
+# A minimal SEA for ``run_agent(agent=...)``: one ``BaseSea`` subclass per file.
+_HELPER_SEA = (
+    "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+    "class Sea(BaseSea):\n"
+    "    def settings(self, settings):\n"
+    "        return settings | {'model': 'm'}\n"
+)
+
 
 def _git(repo: Path, *args: str) -> None:
     """Run git in *repo*, asserting success."""
@@ -205,7 +213,7 @@ def test_run_agent_from_stale_worktree_creates_no_husk(
     daemon = _RecordingDaemon()
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     try:
         out = make_run_agent_tool(str(wt / "sub"))("say hi", str(script))
         parsed = yaml.safe_load(out)

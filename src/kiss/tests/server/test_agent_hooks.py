@@ -17,12 +17,14 @@ thread → ``apply_agent_overrides`` hook staging →
 ``RelentlessAgent.perform_task`` → ``KISSAgent.run`` — executes for
 real without any model API calls.
 
-Contract under test: an agent script's ``llm_call_hook()`` /
-``tool_call_hook()`` getters return the ``llm_call_hook`` /
-``tool_call_hook`` functions the underlying :class:`KISSAgent` receives;
-without them (or with a getter returning ``None``) the executor
-receives ``None``; a wrong-typed getter result stops the task loudly;
-and a non-callable hook field arriving over the wire is ignored.
+Contract under test: the ``llm_call_hook`` / ``tool_call_hook`` methods
+of an agent script's ``BaseSea`` subclass become the ``llm_call_hook`` /
+``tool_call_hook`` callables the underlying :class:`KISSAgent` receives
+(``evaluate_sea`` wraps each in a ``functools.partial`` that runs the
+script's method); a hook the script does not override reaches the
+executor as ``None``; a ``tool_call_hook`` that is not a method stops
+the task loudly; and a non-callable hook field arriving over the wire
+is ignored.
 """
 
 from __future__ import annotations
@@ -57,11 +59,11 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         return executor_calls[0]
 
     def _write_hooks_agent(self) -> str:
-        """Write an agent script defining both hook getters.
+        """Write an agent script whose SEA overrides both hook methods.
 
         The hooks stamp marker files under the test tmpdir when
-        invoked, so the test can prove the recorded callables are the
-        script's own functions executing in the daemon process.
+        invoked, so the test can prove the recorded callables run the
+        script's own methods in the daemon process.
 
         Returns:
             The absolute path of the written agent script.
@@ -73,50 +75,42 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
 
             from pathlib import Path
 
+            from kiss.agents.seas.base.base_sea import BaseSea
+
             MARKER_DIR = Path(r"{self.tmpdir}")
 
 
-            def _llm_hook(new_messages):
-                """Stamp a marker and append a message to the batch.
+            class Sea(BaseSea):
+                def llm_call_hook(self, new_messages):
+                    """Stamp a marker and append a message to the batch.
 
-                Args:
-                    new_messages: Messages about to be sent to the LLM.
-                """
-                marker = MARKER_DIR / "llm_hook_called.txt"
-                marker.write_text(str(len(new_messages)))
-                return [*new_messages, dict(role="user", content="hooked")]
+                    Args:
+                        new_messages: Messages about to be sent to the LLM.
+                    """
+                    marker = MARKER_DIR / "llm_hook_called.txt"
+                    marker.write_text(str(len(new_messages)))
+                    return [*new_messages, dict(role="user", content="hooked")]
 
+                def tool_call_hook(self, name, args):
+                    """Stamp a marker; allow finish, veto everything else.
 
-            def _tool_hook(name, args):
-                """Stamp a marker; allow finish, veto everything else.
-
-                Args:
-                    name: Tool name about to be called.
-                    args: The tool call's arguments dict.
-                """
-                marker = MARKER_DIR / "tool_hook_called.txt"
-                marker.write_text(name)
-                return "OK" if name == "finish" else "blocked by hook"
-
-
-            def llm_call_hook():
-                """Return the LLM-call hook."""
-                return _llm_hook
-
-
-            def tool_call_hook():
-                """Return the tool-call hook."""
-                return _tool_hook
+                    Args:
+                        name: Tool name about to be called.
+                        args: The tool call's arguments dict.
+                    """
+                    marker = MARKER_DIR / "tool_hook_called.txt"
+                    marker.write_text(name)
+                    return "OK" if name == "finish" else "blocked by hook"
             ''',
         )
 
     def test_agent_script_hooks_reach_executor(self) -> None:
-        """Both hook getters' functions reach ``KISSAgent.run`` unchanged.
+        """Both hook methods reach ``KISSAgent.run`` as callables.
 
-        The recorded callables must be the agent script's own
-        ``llm_call_hook`` / ``tool_call_hook``: invoking them performs
-        the script-defined behavior (message rewrite, tool veto) and
-        stamps the script's marker files.
+        The recorded callables must run the agent script's own
+        ``llm_call_hook`` / ``tool_call_hook`` methods: invoking them
+        performs the script-defined behavior (message rewrite, tool
+        veto) and stamps the script's marker files.
         """
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
@@ -165,35 +159,29 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         assert call["tool_call_hook"] is None
 
     def test_hook_getter_returning_none_passes_none(self) -> None:
-        """A hook getter may return ``None``, meaning "no hook".
+        """A SEA that overrides only one hook installs no other hook.
 
-        The script defines both getters; only ``llm_call_hook()``
-        returns a callable — the executor must get that callable and a
-        ``None`` tool-call hook.
+        The script overrides ``llm_call_hook`` and leaves
+        ``tool_call_hook`` to the do-nothing default of ``BaseSea`` —
+        the executor must get a callable LLM hook and a ``None``
+        tool-call hook.
         """
         agent_path = self._write_py(
             "half_hooks_agent.py",
             '''
-            """Agent script with one real hook and one None hook."""
+            """Agent script with one real hook and the default for the other."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
-            def _reverse_messages(new_messages):
-                """Reverse the batch of new messages.
+            class Sea(BaseSea):
+                def llm_call_hook(self, new_messages):
+                    """Reverse the batch of new messages.
 
-                Args:
-                    new_messages: Messages about to be sent to the LLM.
-                """
-                return list(reversed(new_messages))
-
-
-            def llm_call_hook():
-                """Return the LLM-call hook."""
-                return _reverse_messages
-
-
-            def tool_call_hook():
-                """Install no tool-call hook."""
-                return None
+                    Args:
+                        new_messages: Messages about to be sent to the LLM.
+                    """
+                    return list(reversed(new_messages))
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -213,16 +201,17 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         assert call["tool_call_hook"] is None
 
     def test_wrong_typed_hook_getter_fails_task(self) -> None:
-        """A non-callable ``tool_call_hook()`` result stops the task."""
+        """A ``tool_call_hook`` that is not a method stops the task."""
         agent_path = self._write_py(
             "bad_hook_agent.py",
             '''
-            """Agent script with a wrong-typed hook getter."""
+            """Agent script whose tool_call_hook is a plain attribute."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
-            def tool_call_hook() -> int:
-                """Return the wrong type."""
-                return 42
+            class Sea(BaseSea):
+                tool_call_hook = 42
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -237,7 +226,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         )
         assert result.success is False
         assert "tool_call_hook" in result.text
-        assert "a callable or None" in result.text
+        assert "must be a method, got int" in result.text
         assert calls == [], "no executor session may start for a broken script"
 
     def test_wire_non_callable_hook_fields_ignored(self) -> None:

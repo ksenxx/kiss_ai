@@ -56,7 +56,6 @@ from kiss.server.task_runner import (
 if TYPE_CHECKING:
     from kiss.server.browser_tab import BrowserTabService
     from kiss.server.file_index import FileIndexRegistry
-    from kiss.server.terminal_tab import TerminalTabService
     from kiss.server.json_printer import JsonPrinter
     from kiss.server.tab_registry import TabRegistry
 
@@ -363,7 +362,6 @@ class _CommandsMixin:
         _autocommit_tabs: set[str]
         tab_registry: TabRegistry
         browser_tabs: BrowserTabService
-        terminal_tabs: TerminalTabService
 
         def _broadcast_tabs_state(self) -> None: ...
 
@@ -1804,31 +1802,6 @@ class _CommandsMixin:
             bool(cmd.get("visible", True)),
         )
 
-    def _cmd_terminal_open(self, cmd: dict[str, Any]) -> None:
-        """Start a shell in the working directory and announce its tab on every surface."""
-        work_dir = str(cmd.get("workDir") or "") or self.work_dir
-        self.terminal_tabs.open(work_dir, cmd.get("connId", ""))
-
-    def _cmd_terminal_attach(self, cmd: dict[str, Any]) -> None:
-        """A client shows a terminal tab: replay its backlog and stream it from now on."""
-        self.terminal_tabs.attach(
-            str(cmd.get("tab_id") or ""), cmd.get("connId", ""), cmd.get("cols"), cmd.get("rows")
-        )
-
-    def _cmd_terminal_input(self, cmd: dict[str, Any]) -> None:
-        """Keystrokes (or a paste) for the shell of a terminal tab."""
-        self.terminal_tabs.input(
-            str(cmd.get("tab_id") or ""), str(cmd.get("data") or ""), bool(cmd.get("binary"))
-        )
-
-    def _cmd_terminal_resize(self, cmd: dict[str, Any]) -> None:
-        """The viewing surface's terminal now has this many columns and rows."""
-        self.terminal_tabs.resize(str(cmd.get("tab_id") or ""), cmd.get("cols"), cmd.get("rows"))
-
-    def _cmd_terminal_close(self, cmd: dict[str, Any]) -> None:
-        """Close a terminal tab everywhere and end its shell."""
-        self.terminal_tabs.close(str(cmd.get("tab_id") or ""))
-
     def _cmd_new_chat(self, cmd: dict[str, Any]) -> None:
         """Start a new chat session."""
         self._new_chat(cmd.get("tabId", ""))
@@ -2592,11 +2565,6 @@ class _CommandsMixin:
         "browserNavigate": _cmd_browser_navigate,
         "browserInput": _cmd_browser_input,
         "browserViewport": _cmd_browser_viewport,
-        "terminalOpen": _cmd_terminal_open,
-        "terminalAttach": _cmd_terminal_attach,
-        "terminalInput": _cmd_terminal_input,
-        "terminalResize": _cmd_terminal_resize,
-        "terminalClose": _cmd_terminal_close,
     }
 
 

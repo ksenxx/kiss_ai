@@ -44,6 +44,13 @@ from kiss.tests.core.test_budget_enforcement_e2e import (
 
 _CHEAP = (10, 5)
 _STOPPED_COST = "$1.0842"
+# A minimal SEA for ``run_agent(agent=...)``: one ``BaseSea`` subclass per file.
+_HELPER_SEA = (
+    "from kiss.agents.seas.base.base_sea import BaseSea\n\n\n"
+    "class Sea(BaseSea):\n"
+    "    def settings(self, settings):\n"
+    "        return settings | {'model': 'm'}\n"
+)
 
 
 def _send_response(handler: BaseHTTPRequestHandler, resp: dict[str, Any], stream: bool) -> None:
@@ -151,7 +158,7 @@ def test_leftover_job_spend_is_published_after_the_result(
     })
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text(_HELPER_SEA)
     _RunAgentThenFinishHandler.requests = 0
     _RunAgentThenFinishHandler.script = str(script)
     srv, url = _start_server(_RunAgentThenFinishHandler)

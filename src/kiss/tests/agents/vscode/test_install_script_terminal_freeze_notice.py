@@ -147,7 +147,8 @@ def _build_sandbox(
             #!/bin/bash
             printf '%s\\n' "$*" >> {code_calls.as_posix()!r}
             case " $* " in
-                *" --extensions-dir "*) [ {server_install_exit} = 0 ] || exit {server_install_exit} ;;
+                *" --extensions-dir "*)
+                    [ {server_install_exit} = 0 ] || exit {server_install_exit} ;;
             esac
             echo "Installing extensions..."
             echo "{_CODE_STUB_DONE}"
@@ -551,9 +552,13 @@ def test_step_5_5_runs_post_install_hooks_before_the_reload_marker(
     assert "README" not in text, "a file without the executable bit is not a hook"
 
 
-def _run_step_5_5(tmp_path: Path, **sandbox_kwargs: bool) -> tuple[str, Path]:
+def _run_step_5_5(
+    tmp_path: Path, skip_launch: bool = False, server_install_fails: bool = False,
+) -> tuple[str, Path]:
     """Run the step [5/5] harness to completion; return (pty text, log)."""
-    harness, log = _build_sandbox(tmp_path, **sandbox_kwargs)
+    harness, log = _build_sandbox(
+        tmp_path, skip_launch=skip_launch, server_install_fails=server_install_fails,
+    )
     proc, master = _spawn_on_pty(harness)
     try:
         out = _read_until(master, _LAST_BLOCK_LINE.encode())
