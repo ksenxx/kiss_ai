@@ -173,7 +173,7 @@ runs the task text as its prompt.
 A SEA pins the parameters of its run with ONE optional top-level
 function, `settings()`, returning a dict of data: a `kind` (a named
 dict of defaults) and any of the keys below (`sea_settings.SETTING_TYPES`).
-Every key but `kind`, `extends`, `timeout` and `locked`
+Every key but `kind`, `extends`, `timeout`, `locked` and `hidden`
 (`sea_settings.DISPATCHER_SETTINGS`) is a parameter of `sorcar.run()` and
 lands on that parameter's wire field; the wire
 name is the keyword in camelCase (`agent_file.wire_field`:
@@ -329,8 +329,9 @@ block is generated from the constant):
 Example of a refused call: `Error: sh: the script locks
 tool_profile='bash' (asked for 'review')`.  A `/<name>` run in a tab
 and a `run()` call with an `extension_agent_path` pass nothing
-explicitly, so there the SEA's settings apply over the tab's or the
-client's values.  The `ran:` line of every sub-task result reports the
+explicitly (unless the `run()` call marks values `"explicit"` in its
+`provenance` argument, as the dispatcher does), so there the SEA's
+settings apply over the tab's or the client's values.  The `ran:` line of every sub-task result reports the
 outcome: `inherited=` names the keys taken from the calling task,
 `pinned=` the inherited or default values the SEA's `settings()`
 replaced (`pinned=use_worktree(True->False)` for `/sh` run from a
@@ -429,7 +430,7 @@ A running agent dispatches a SEA with the `run_agent` tool
 
 ```text
 run_agent(task, agent="", model="", tool_profile="", max_budget="", timeout="", options="", wait="")
-run_parallel(tasks, agent="", model="", tool_profile="", max_budget="", max_workers="", options="")
+run_parallel(tasks, agent="", model="", tool_profile="", max_budget="", timeout="", max_workers="", options="")
 agent_job(job_id, action="tail", timeout_seconds="")
 ```
 
@@ -442,7 +443,8 @@ and `add_to_system_prompt`); `model`, `tool_profile`, `max_budget` and
 `timeout` (number strings) are shortcuts for the options of the same
 name (either way, but not differently in both).  Every value given is
 explicit: it wins over the SEA's settings, or is refused when the SEA
-locks the key.  Each option only overrides the inherited value: `work_dir` (relative to
+locks the key.  Each option replaces the inherited value (and the
+SEA's, unless locked) of one key: `work_dir` (relative to
 the calling task's directory), `chat_id`, `workspace` (the account of
 a multi-account channel; refused for any SEA that is not a `kind:
 "channel"`), `model_config`, `inherit`,
@@ -476,8 +478,11 @@ SEA path and takes the same dispatch
    (`third_party_agents/<name>/<name>_sea.py`), `cron`
    (`sea_commands.BUILTIN_COMMANDS`, the scheduled-automations agent
    `kiss.agents.sorcar.cron_agent`) or a `SEAS.md` folder: that
-   command's script, located by path, never imported in the calling
-   process.
+   command's script, located by path.  The calling process executes
+   the script and its `extends` bases once to read their merged
+   `settings()` (`sea_commands.sea_settings`: the kind, `timeout` and
+   `work_dir` the dispatch needs); the run itself, with the getters
+   and tools, happens on the daemon.
 
 Anything else returns `Error: unknown agent '...' — not a registered
 slash command and not a path to a .py SEA file.` with the closest
@@ -589,6 +594,26 @@ The `run()` parameters without a `settings()` key (the allowlist is
 - **`stop_on_timeout`** — whether a `timeout` expiry also stops the
   task, awaiting the stop's confirmation (default `False`: the task
   keeps running); a client-side choice the script must not override.
+- **`record_timeout`** — a bound sent as the wire field `timeout` (so
+  the daemon records it in the task's `task_settings` event and checks
+  it against a SEA's locked `timeout`) when the client's own wait has
+  none: `run_agent` waits without a deadline on a job thread and bounds
+  the call by joining that thread, so it passes the call's bound here.
+- **`cancel` / `running`** — two `threading.Event`s of the client's
+  wait: setting `cancel` from another thread stops the task
+  (`agent_job(id, "kill")`, or the calling run's end) and the wait
+  continues until the task's terminal status confirms it is dead or
+  the confirmation grace expires, then raises `CancelledError` with
+  `confirmed` set accordingly; `running` is set when the task's
+  initial `status running=true` arrives, the moment its tab exists on
+  every surface (a background `run_agent` job returns its notice only
+  after it), or when the wait ends without one.
+- **`provenance`** — `{setting key: "explicit" | "inherited"}`, where
+  each of the command's values came from (`kiss.agents.sorcar.run_config`);
+  the dispatcher fills it from what the call passed and what it took
+  from the calling agent, the daemon records it in the task's
+  `task_settings` event, and the result's `ran:` line reads its
+  `inherited=` list from there.
 - **`endpoint_file`** — selects which daemon to connect to (default:
   `$KISS_SORCAR_LOCAL`, else `$KISS_HOME/sorcar-local.json`, the file the
   daemon writes with its WSS URL and per-start local token); the script
@@ -637,9 +662,10 @@ The `run()` parameters without a `settings()` key (the allowlist is
 
 - **`model`** — leave the key out to keep the caller's model (the
   tab's pick, or the calling task's model for a `run_agent`
-  dispatch).  An explicit empty string `""` blanks the command's
-  model back to the tab's selected model, and to the daemon's
-  configured default model when the tab has none
+  dispatch).  An explicit empty string `""` or `None` is dropped like
+  an absent key (`sea_settings.resolve_settings`), so it keeps the
+  caller's model too; a run whose command names no model at all gets
+  the tab's selected model, else the daemon's configured default
   (`task_runner._tab_model`).  A non-empty string must name a model in
   the daemon's available model list or the task fails.
 - **`chat_id`** — an empty string `""` starts a fresh chat.  A
@@ -700,7 +726,7 @@ The `run()` parameters without a `settings()` key (the allowlist is
 - **`auto_classify`** — per-run pre-run task classification.
   `None` falls back to the daemon's configured default (the settings
   panel's "Classify tasks before running" checkbox, persisted as
-  `auto_classify`).
+  `classify_tasks`; `task_classifier.classification_enabled`).
 - **`use_memory`** — per-run persistent agent memory
   (`kiss.core.memoryfield`): the seven `memory_*` tools plus the
   memory protocol prompt block.  `True` enables, `False` disables,
@@ -746,13 +772,16 @@ The `run()` parameters without a `settings()` key (the allowlist is
   sub-agents (`run_parallel`); `run_agent` stays available either way.
 - **`tool_profile`** — the name of the tool profile the run's
   built-in toolset is cut down to: `"full"` (everything), `"review"`
-  (read, run, browse and talk; no editing or dispatch), `"assistant"`
+  (the `shell` and `browser` groups, the four read-only memory tools
+  `memory_search`, `memory_pull`, `memory_read` and `memory_list`,
+  `decide`, `summary` and `talk`; no editing, memory writing or
+  dispatch), `"assistant"`
   (the `shell` group plus `ask_user_question`, `talk`, `decide`,
   `summary`, `set_model`), `"bash"` (`Bash` only — the bundled `/sh`
   agent's choice), or a tool group: `"shell"` (`Bash`, `bash_job`,
   `Read`, `run_commands_parallel`), `"edit"` (`Edit`, `Write`),
-  `"browser"`, `"memory"`, `"agents"` (`run_agent`, `run_parallel`,
-  `number_of_cores`), `"mcp"` (the configured servers' tools and the
+  `"browser"`, `"memory"`, `"agents"` (`run_agent`, `agent_job`,
+  `run_parallel`, `number_of_cores`), `"mcp"` (the configured servers' tools and the
   sign-in pair), `"skills"`, `"user"` (`ask_user_question`, `talk`),
   `"decide"`, `"control"` (`summary`, `set_model`).  Join several with
   `+` to keep the union of their tools (`"shell+edit+memory"`);
@@ -1248,9 +1277,13 @@ def run(
     docker_image: str = "",
     inherit_tools: bool = False,
     workspace: str = "",
+    provenance: dict[str, str] | None = None,
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
+    record_timeout: float | None = None,
     endpoint_file: str | Path | None = None,
+    cancel: threading.Event | None = None,
+    running: threading.Event | None = None,
 ) -> TaskResult
 ```
 
@@ -1314,8 +1347,8 @@ class TaskResult:
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` have the lowest precedence, so a `SEAS.md`
-  folder can shadow them.  The 17 bundled SEA folders register
-  these commands: `/ask` (answers a question about the current task
+  folder can shadow them.  Of the 17 bundled SEA folders, 15 register
+  a command and two (`coding`, `sorcar`) are hidden: `/ask` (answers a question about the current task
   in two or three sentences from one `task_context` call over its
   status, spend, progress log and digested persisted events; its only
   tools are `task_context` and `finish`, so it never touches the task's
@@ -1325,10 +1358,11 @@ class TaskResult:
   command, and the task-info panel's Task update is the same agent
   run in-process by `kiss.server.task_update`), `/autorouter` (runs a task on the cheapest model tier
   that will finish it), `/bestrouter` (runs a task on
-  `claude-fable-5-1` and has `gpt-6-astra` review it), `/coding` (unattended coding in a Docker
-  container; the module defines no top-level `settings()`, its
-  `ContainerHarness` methods are exposed by generated per-trial SEAs,
-  so the bare command runs Sorcar with its defaults), `/forget`
+  `claude-fable-5-1` and has `gpt-6-astra` review it), the hidden
+  `coding` SEA (unattended coding in a Docker container for benchmark
+  trials; its `settings()` is `{"hidden": True}`, so there is no
+  `/coding` command: the trial runners load the generated per-trial
+  SEAs, which expose its `ContainerHarness` methods, by path), `/forget`
   (removes a standing instruction from `$KISS_HOME/AGENTS.md`),
   `/git_extract_knowledge` (builds and refreshes a repository's
   knowledge memory and can schedule its daily refresh), `/merge`
@@ -1356,8 +1390,8 @@ class TaskResult:
   is empty or a generic label).  The other modules in that package
   (`coding/coding_test_context.py`,
   `git_extract_knowledge/git_knowledge_index.py`,
-  `git_extract_knowledge/git_knowledge_store.py`, the shared
-  `agents_md.py`) are helpers, not commands: only
+  `git_extract_knowledge/git_knowledge_store.py`, `rsi7d/sea_tuning.py`,
+  the shared `agents_md.py`) are helpers, not commands: only
   `<name>/<name>_sea.py` folders are registered.  Syntax,
   precedence and the dispatch flow are
   documented in

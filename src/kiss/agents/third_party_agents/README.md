@@ -75,11 +75,14 @@ are the daemon defaults unless the caller passes them), and carries that channel
 authenticated tools; the daemon appends the channel preamble to its system prompt,
 which tells it to use those tools directly, without exploring source code. The `agent`
 argument is optional: omitting it (or passing it blank, or a generic label such as
-`"general"` or `"reviewer"`) runs the bundled `src/kiss/agents/seas/sorcar/sorcar_sea.py`,
+`"general"` or `"assistant"`) runs the bundled `src/kiss/agents/seas/sorcar/sorcar_sea.py`,
 a plain Sorcar sub-session with the standard toolset, on the task in the caller's work
-directory. The same argument also takes `"cron"`, a path to an agent script, or the name
-of a registered slash command; the call waits for the SEA's `timeout` setting, else
-3600 s, unless `timeout` is passed.
+directory (`"reviewer"` is refused with a pointer to `tool_profile="review"`: a reviewer
+is a plain sub-agent with the read-only toolset, not an agent of its own). The same
+argument also takes `"cron"`, a path to an agent script, or the name of a registered
+slash command; the call waits for the SEA's `timeout` setting, else 3600 s, unless
+`timeout` is passed, and when the wait expires the sub-task keeps running as an
+`agent_job` whose id the call returns.
 
 > Send "dinner at 7" to Telegram chat 123456789.
 
@@ -417,7 +420,7 @@ whole context in one call: the task's status, model, spend and the sub-agents it
 dispatched, the newest 8k characters of the progress log the task keeps in its work dir
 (`PROGRESS_LOG.md`, `PROGRESS.md` or `tmp/PROGRESS.md`, freshest wins), and its digested
 transcript entries oldest first, the whole text capped at 60k characters by dropping the
-oldest entries. The script's `settings()` swaps the system prompt for the compact SYSTEM_LITE prompt (the
+oldest entries. The script's `system_prompt()` swaps the system prompt for the compact SYSTEM_LITE prompt (the
 bundled `seas/ask/_ask_system_lite.md`, a copy of the ablation prompt with the brand
 identity as a `{{IDENTITY}}` placeholder), its `add_to_system_prompt()` adds a
 no-internet, answer-quickly directive and a playbook asking for two or three plain
@@ -631,7 +634,12 @@ gateway-capable channel (25 of the 32 messaging channels; a `[SILENT]` or `NO_RE
 result suppresses delivery). Jobs due at the same time run concurrently, each in its
 own scratch directory (`~/.kiss/cron/runs/<job_id>-<random>`, removed when the run
 ends); the daemon's scheduler tick never waits for a long job, and a job whose previous
-run is still in progress in that scheduler is not started again until it finishes. A
+run is still in progress in that scheduler is not started again until it finishes.
+Like cron, the scheduler never catches up on occurrences that passed while no daemon
+was running (stopped, restarted by an install, or the machine asleep): a repeating job
+found more than ten minutes overdue (`cron_agent.MISSED_RUN_GRACE_SECONDS`) is
+rescheduled from now without running, so a daemon back after a day does not fire every
+daily job at once; a one-shot job is exempt and runs late rather than never. A
 job that must work inside a specific project ("run the tests in ~/proj every night and
 fix them") names that directory instead; a prompt job in a Git repository can
 additionally ask for a worktree and auto-commit like a chat task. A run is stopped
