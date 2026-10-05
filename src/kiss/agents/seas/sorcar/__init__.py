@@ -2,4 +2,4 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The ``/dummy`` Sorcar Extension Agent (``dummy_sea.py``) and its helpers."""
+"""The plain-sub-agent Sorcar Extension Agent (``sorcar_sea.py``), the default of ``run_agent``."""

@@ -5,7 +5,7 @@
 """Signal Agent — channel agent with Signal CLI tools.
 
 Uses signal-cli subprocess to send/receive Signal messages. Stores
-configuration in ``~/.kiss/third_party_agents/signal/config.json``.
+configuration in ``$KISS_HOME/third_party_agents/signal/config.json``.
 
 Connecting works like linking Signal Desktop: ``authenticate_signal()``
 without a phone number runs ``signal-cli link`` and renders the linking
@@ -843,15 +843,30 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the Signal channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the Signal channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return SignalAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
+
+
+def add_to_system_prompt() -> str:
+    """Return the channel guidance appended to the run's system prompt."""
+    return SignalAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

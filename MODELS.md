@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **710 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **713 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -10,7 +10,7 @@ KISS Sorcar ships a catalog of **710 models** across **9 provider categories**, 
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 416 |
+| OpenRouter | 419 |
 | Claude Code CLI (`cc/*`) | 16 |
 | Codex CLI (`codex/*`) | 10 |
 
@@ -19,7 +19,7 @@ Current catalog capability totals:
 - **689** generation-capable models
 - **526** function-calling-capable models
 - **7** embedding models
-- **6** decision models
+- **9** decision models
 
 Full model list:
 
@@ -328,7 +328,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (416)</strong></summary>
+<summary><strong>OpenRouter (419)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -367,6 +367,8 @@ Full model list:
 - `openrouter/bytedance-seed/seed-2.0-lite`
 - `openrouter/bytedance-seed/seed-2.0-mini`
 - `openrouter/bytedance/ui-tars-1.5-7b`
+- `openrouter/cloudflare/clef`
+- `openrouter/cloudflare/clef-flash`
 - `openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition`
 - `openrouter/cohere/command-a`
 - `openrouter/cohere/command-a-plus`
@@ -579,6 +581,7 @@ Full model list:
 - `openrouter/openai/o4-mini-high`
 - `openrouter/perceptron/perceptron-mk1`
 - `openrouter/perceptron/perceptron-mk1.5`
+- `openrouter/perplexity/pplx-decider-v1-27b`
 - `openrouter/perplexity/sonar`
 - `openrouter/perplexity/sonar-deep-research`
 - `openrouter/perplexity/sonar-pro`

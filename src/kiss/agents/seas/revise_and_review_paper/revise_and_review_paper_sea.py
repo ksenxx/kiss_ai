@@ -40,8 +40,8 @@ Three tools make the mechanical steps deterministic:
 * :func:`loop_status` parses the ``Recommendation:`` and score lines
   of every round's review and says whether to stop or continue.
 
-Module-level getters (``append_to_system_prompt()``, ``tools()``,
-...) follow the SEA contract in :mod:`kiss.server.agent_file`.
+Module-level getters (``add_to_system_prompt()``, ``add_to_tools()``,
+...) follow the SEA contract in :mod:`kiss.agents.sorcar.agent_file`.
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ REVIEWER_TIMEOUT_SECONDS = 3600
 """``run_agent`` timeout of a review round."""
 
 DISPATCH_TIMEOUT_SECONDS = 24 * 3600
-"""Wait of the slash-command relay for the whole loop (see :func:`dispatch_timeout`)."""
+"""Seconds a ``run_agent`` call waits for the whole loop (the ``timeout`` of :func:`settings`)."""
 
 SYSTEM_PROMPT = f"""\
 # Revise-and-review loop coordinator
@@ -118,15 +118,15 @@ before the first round; the writer and the reviewer run unattended and must not 
 Both agents run through `run_agent` with the absolute path of their SEA file:
 
 - writer: `run_agent(task=<writer_task output>, agent="{WRITE_PAPER_SEA}",
-  use_worktree="false", auto_commit="false", timeout="{WRITER_TIMEOUT_SECONDS}",
-  max_budget=<share>)`;
+  options='{{"use_worktree": false, "auto_commit": false}}',
+  timeout="{WRITER_TIMEOUT_SECONDS}", max_budget=<share>)`;
 - reviewer: `run_agent(task=<reviewer_task output>, agent="{REVIEW_PAPER_SEA}",
-  use_worktree="false", auto_commit="false", use_memory="false",
+  options='{{"use_worktree": false, "auto_commit": false, "use_memory": false}}',
   timeout="{REVIEWER_TIMEOUT_SECONDS}", max_budget=<share>)`.
 
-Pass `model_name` when the user names a writer or reviewer model; use model names
-literally. Never pass `chat_id`: every round is a new session, and the paper, its sources
-and the review files carry the state. Pass the tool outputs of `writer_task` and
+Pass `model` when the user names a writer or reviewer model; use model names
+literally. Never pass `chat_id` in `options`: every round is a new session, and the
+paper, its sources and the review files carry the state. Pass the tool outputs of `writer_task` and
 `reviewer_task` as the task text verbatim; do not paraphrase them, and never paste an
 earlier review, your own opinion of the paper, or the round history into the reviewer's
 task. The writer and the reviewer share your working directory (`pwd` first; when the
@@ -194,13 +194,30 @@ the PDF, the review file) before rerunning it once with a larger timeout.
 Keep `<work dir>/reports/<stem>-revise-review-log.md`: one section per round with the
 recommendation and score lines, each weakness and what the writer did with it (fixed
 where, experiment run with its numbers, declined why), the experiments run, the child's
-cost and time. Update `./tmp/PROGRESS.md` after each round. Git add the paper directory
+cost and time. Update `<work dir>/tmp/revise_review/PROGRESS.md` after each round (the
+writer writes its own `./tmp/PROGRESS.md` in the shared work dir and overwrites yours).
+Git add the paper directory
 (`.tex`, `.bib`, figures, scripts, raw results, `.pdf`; never `.aux`, `.bbl`, `.blg`,
 `.log`, `.out`), the review files and the log; the children run with auto-commit off.
 
 Report back: the recommendation of every round, the final paper's `.tex` and `.pdf` paths
 and page count, every review path, the log path, the cost of each round and the total,
 why the loop stopped, and the weaknesses still open when the target was not reached.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- Override a `loop_status` STOP at most once per loop, and only under the rule above (a
+  weakness no earlier round attempted, with evidence the user allows). The STOP after
+  that extra round is final even if the fresh review names new fixable points: every
+  fresh reviewer does. Unless the user's task text itself says not to stop before every
+  comment is addressed, three overrides in one loop bought rounds 4 to 6 (about $66 of
+  children) and the verdicts went weak accept, weak reject, weak accept, weak reject,
+  weak reject, weak reject.
+- Take each child's cost and step count from the text of its `run_agent` result and
+  write them into the log at once; never query the task database (`history.db`) for them (a quoting
+  error in the sqlite query cost two steps and the result was already on hand).
 """
 """The coordinator's rules, appended to the default system prompt."""
 
@@ -484,41 +501,31 @@ def loop_status(reviews: str, max_rounds: int = DEFAULT_MAX_ROUNDS, overrides: s
     return "\n".join(lines)
 
 
-def append_to_system_prompt() -> str:
+def add_to_system_prompt() -> str:
     """Append the coordinator's rules to the default system prompt."""
     return SYSTEM_PROMPT
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Expose the task builders and the loop decision to the model."""
     return [writer_task, reviewer_task, loop_status]
 
 
-def use_web_tools() -> bool:
-    """No browsing: the writer and the reviewer browse; the coordinator only dispatches them."""
-    return False
+def settings() -> dict[str, Any]:
+    """A sequential coordinator with the full toolset that may run for a day.
 
-
-def is_parallel() -> bool:
-    """No ``run_parallel``: the rounds are sequential ``run_agent`` calls."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """Skip the task classifier: the loop always needs the full system prompt."""
-    return False
-
-
-def tool_profile() -> str:
-    """Keep the full toolset: a task text that reads as a review would otherwise put the
-    coordinator on the read-only ``review`` profile, which has no ``run_agent``."""
-    return "full"
-
-
-def dispatch_timeout() -> float:
-    """Seconds the ``/revise_and_review_paper`` relay waits for the loop before stopping it.
-
-    The rounds run for hours; the default 300 s ``run_agent`` wait would stop the loop
-    during the first writing round.
+    The rounds run as ``run_agent`` sub-tasks, so fan-out stays off; the
+    ``full`` profile keeps ``run_agent`` available even when a reviewer
+    dispatches the loop (the read-only ``review`` profile has none).  The
+    ``timeout`` tells the dispatcher a ``/revise_and_review_paper`` run
+    may take up to a day.
     """
-    return DISPATCH_TIMEOUT_SECONDS
+    return {
+        "use_web_tools": False,
+        "allow_fan_out": False,
+        "auto_classify": False,
+        "tool_profile": "full",
+        "timeout": DISPATCH_TIMEOUT_SECONDS,
+    }
+
+

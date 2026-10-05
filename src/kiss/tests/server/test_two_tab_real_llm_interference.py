@@ -401,7 +401,7 @@ class _TwoTabFixture(unittest.TestCase):
             "model": "gpt-4o-mini",
             "workDir": str(self.work_a),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         }
         cmd_b = {
@@ -410,7 +410,7 @@ class _TwoTabFixture(unittest.TestCase):
             "model": "gpt-4o-mini",
             "workDir": str(self.work_b),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         }
 
@@ -687,7 +687,7 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
             "model": "gpt-4o-mini",
             "workDir": str(self.work_a),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         }
         cmd_b = {
@@ -696,7 +696,7 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
             "model": "gpt-4o-mini",
             "workDir": str(self.work_b),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         }
         self.server._cmd_run(cmd_a)

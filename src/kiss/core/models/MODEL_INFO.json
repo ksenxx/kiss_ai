@@ -762,6 +762,7 @@
     "context_length": 32768,
     "input_price_per_1M": 0.3,
     "output_price_per_1M": 2.5,
+    "image_output_price_per_1M": 30.0,
     "fc": true,
     "emb": false,
     "gen": true
@@ -796,6 +797,7 @@
     "context_length": 131072,
     "input_price_per_1M": 2.0,
     "output_price_per_1M": 12.0,
+    "image_output_price_per_1M": 120.0,
     "fc": true,
     "emb": false,
     "gen": true
@@ -804,6 +806,7 @@
     "context_length": 65536,
     "input_price_per_1M": 0.5,
     "output_price_per_1M": 3.0,
+    "image_output_price_per_1M": 60.0,
     "fc": true,
     "emb": false,
     "gen": true
@@ -821,6 +824,7 @@
     "context_length": 65536,
     "input_price_per_1M": 0.25,
     "output_price_per_1M": 1.5,
+    "image_output_price_per_1M": 30.0,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -2980,6 +2984,26 @@
     "use_responses_api": true,
     "cache_read_price_per_1M": 0.1
   },
+  "openrouter/cloudflare/clef": {
+    "context_length": 65536,
+    "input_price_per_1M": 0.24,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": false,
+    "gen": false,
+    "dec": true,
+    "comment": "NEW"
+  },
+  "openrouter/cloudflare/clef-flash": {
+    "context_length": 65536,
+    "input_price_per_1M": 0.09,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": false,
+    "gen": false,
+    "dec": true,
+    "comment": "NEW"
+  },
   "openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition": {
     "context_length": 128000,
     "input_price_per_1M": 0.2,
@@ -3115,13 +3139,13 @@
   },
   "openrouter/deepseek/deepseek-v4-flash": {
     "context_length": 500000,
-    "input_price_per_1M": 0.028,
-    "output_price_per_1M": 0.056,
+    "input_price_per_1M": 0.03,
+    "output_price_per_1M": 1.28,
     "fc": true,
     "emb": false,
     "gen": true,
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.0056
+    "cache_read_price_per_1M": 0.03
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "context_length": 500000,
@@ -3132,7 +3156,7 @@
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.0188
+    "cache_read_price_per_1M": 0.0152
   },
   "openrouter/deepseek/deepseek-v4-flash-vision-exp": {
     "context_length": 500000,
@@ -3157,14 +3181,14 @@
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "context_length": 500000,
-    "input_price_per_1M": 0.22,
-    "output_price_per_1M": 4.2,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 5.0,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.14
+    "cache_read_price_per_1M": 0.36
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "context_length": 500000,
@@ -3442,13 +3466,13 @@
   },
   "openrouter/google/gemma-4-26b-a4b-it": {
     "context_length": 262144,
-    "input_price_per_1M": 0.068,
-    "output_price_per_1M": 0.225,
+    "input_price_per_1M": 0.09,
+    "output_price_per_1M": 0.3,
     "fc": true,
     "emb": false,
     "gen": true,
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.0375
+    "cache_read_price_per_1M": 0.05
   },
   "openrouter/google/gemma-4-31b-it": {
     "context_length": 262144,
@@ -3671,11 +3695,12 @@
   },
   "openrouter/meta-llama/llama-3.3-70b-instruct": {
     "context_length": 131072,
-    "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.32,
+    "input_price_per_1M": 0.22,
+    "output_price_per_1M": 0.5,
     "fc": false,
     "emb": false,
-    "gen": false
+    "gen": false,
+    "cache_read_price_per_1M": 0.11
   },
   "openrouter/meta-llama/llama-4-maverick": {
     "context_length": 500000,
@@ -4010,9 +4035,9 @@
   },
   "openrouter/moonshotai/kimi-k3": {
     "context_length": 500000,
-    "input_price_per_1M": 0.99,
-    "output_price_per_1M": 13.0,
-    "cache_read_price_per_1M": 0.8,
+    "input_price_per_1M": 0.67,
+    "output_price_per_1M": 14.0,
+    "cache_read_price_per_1M": 0.22,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -4022,9 +4047,9 @@
   },
   "openrouter/moonshotai/kimi-k3-high": {
     "context_length": 500000,
-    "input_price_per_1M": 0.99,
-    "output_price_per_1M": 13.0,
-    "cache_read_price_per_1M": 0.8,
+    "input_price_per_1M": 0.67,
+    "output_price_per_1M": 14.0,
+    "cache_read_price_per_1M": 0.22,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -4035,9 +4060,9 @@
   },
   "openrouter/moonshotai/kimi-k3-low": {
     "context_length": 500000,
-    "input_price_per_1M": 0.99,
-    "output_price_per_1M": 13.0,
-    "cache_read_price_per_1M": 0.8,
+    "input_price_per_1M": 0.67,
+    "output_price_per_1M": 14.0,
+    "cache_read_price_per_1M": 0.22,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -4048,9 +4073,9 @@
   },
   "openrouter/moonshotai/kimi-k3-max": {
     "context_length": 500000,
-    "input_price_per_1M": 0.99,
-    "output_price_per_1M": 13.0,
-    "cache_read_price_per_1M": 0.8,
+    "input_price_per_1M": 0.67,
+    "output_price_per_1M": 14.0,
+    "cache_read_price_per_1M": 0.22,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -4166,13 +4191,13 @@
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "context_length": 262144,
     "input_price_per_1M": 0.06,
-    "output_price_per_1M": 0.17,
+    "output_price_per_1M": 0.16,
     "fc": false,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.02975
+    "cache_read_price_per_1M": 0.03
   },
   "openrouter/openai/gpt-3.5-turbo": {
     "context_length": 16385,
@@ -5250,6 +5275,16 @@
     "comment": "NEW",
     "use_responses_api": true
   },
+  "openrouter/perplexity/pplx-decider-v1-27b": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.04,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": false,
+    "gen": false,
+    "dec": true,
+    "comment": "NEW"
+  },
   "openrouter/perplexity/sonar": {
     "context_length": 127072,
     "input_price_per_1M": 1.0,
@@ -5703,11 +5738,12 @@
   "openrouter/qwen/qwen3.6-27b": {
     "context_length": 262144,
     "input_price_per_1M": 0.32,
-    "output_price_per_1M": 3.2,
+    "output_price_per_1M": 3.25,
     "fc": true,
     "emb": false,
     "gen": true,
-    "use_responses_api": true
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.03
   },
   "openrouter/qwen/qwen3.6-35b-a3b": {
     "context_length": 262144,
@@ -5796,14 +5832,15 @@
   },
   "openrouter/qwen/qwen3.8-27b": {
     "context_length": 500000,
-    "input_price_per_1M": 0.42,
-    "output_price_per_1M": 3.0,
+    "input_price_per_1M": 0.425,
+    "output_price_per_1M": 2.55,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.085
+    "cache_read_price_per_1M": 0.085,
+    "cache_write_price_per_1M": 0.53125
   },
   "openrouter/qwen/qwen3.8-flash": {
     "context_length": 500000,
@@ -6002,14 +6039,14 @@
   },
   "openrouter/tencent/hy3": {
     "context_length": 262144,
-    "input_price_per_1M": 0.132,
-    "output_price_per_1M": 0.528,
+    "input_price_per_1M": 0.083,
+    "output_price_per_1M": 0.33,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.033
+    "cache_read_price_per_1M": 0.020625
   },
   "openrouter/tencent/hy3-preview": {
     "context_length": 262144,
@@ -6023,14 +6060,14 @@
   },
   "openrouter/tencent/hy4-preview": {
     "context_length": 500000,
-    "input_price_per_1M": 0.834,
-    "output_price_per_1M": 2.501,
+    "input_price_per_1M": 0.751,
+    "output_price_per_1M": 2.251,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.042
+    "cache_read_price_per_1M": 0.0378
   },
   "openrouter/thedrummer/cydonia-24b-v4.1": {
     "context_length": 131072,
@@ -6488,49 +6525,49 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 500000,
-    "input_price_per_1M": 0.41,
-    "output_price_per_1M": 3.99,
+    "input_price_per_1M": 0.019,
+    "output_price_per_1M": 16.0,
     "fc": true,
     "emb": false,
     "gen": true,
     "thinking": "high",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.26
+    "cache_read_price_per_1M": 0.0192
   },
   "openrouter/z-ai/glm-5.2-high": {
     "context_length": 500000,
-    "input_price_per_1M": 0.41,
-    "output_price_per_1M": 3.99,
+    "input_price_per_1M": 0.019,
+    "output_price_per_1M": 16.0,
     "fc": true,
     "emb": false,
     "gen": true,
     "thinking": "high",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.26,
+    "cache_read_price_per_1M": 0.0192,
     "alias_of": "openrouter/z-ai/glm-5.2"
   },
   "openrouter/z-ai/glm-5.2-max": {
     "context_length": 500000,
-    "input_price_per_1M": 0.41,
-    "output_price_per_1M": 3.99,
+    "input_price_per_1M": 0.019,
+    "output_price_per_1M": 16.0,
     "fc": true,
     "emb": false,
     "gen": true,
     "thinking": "max",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.26,
+    "cache_read_price_per_1M": 0.0192,
     "alias_of": "openrouter/z-ai/glm-5.2"
   },
   "openrouter/z-ai/glm-5.3": {
     "context_length": 500000,
-    "input_price_per_1M": 1.4,
-    "output_price_per_1M": 4.4,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 7.0,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.14
+    "cache_read_price_per_1M": 0.045
   },
   "openrouter/z-ai/glm-5.3-flash": {
     "context_length": 500000,
@@ -6622,25 +6659,25 @@
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.02,
-    "output_price_per_1M": 0.6,
+    "input_price_per_1M": 0.003,
+    "output_price_per_1M": 2.4,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.01
+    "cache_read_price_per_1M": 0.003
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.22,
+    "input_price_per_1M": 0.19,
     "output_price_per_1M": 4.2,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.14
+    "cache_read_price_per_1M": 0.19
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "context_length": 500000,
@@ -6651,7 +6688,7 @@
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.0188
+    "cache_read_price_per_1M": 0.0152
   },
   "openrouter/~google/gemini-flash-latest": {
     "context_length": 500000,
@@ -6677,7 +6714,7 @@
   },
   "openrouter/~moonshotai/kimi-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.99,
+    "input_price_per_1M": 0.66,
     "output_price_per_1M": 13.0,
     "fc": true,
     "emb": false,
@@ -7001,18 +7038,18 @@
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.035
+    "cache_read_price_per_1M": 0.0232
   },
   "openrouter/~z-ai/glm-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.12,
-    "output_price_per_1M": 4.0,
+    "input_price_per_1M": 0.03,
+    "output_price_per_1M": 12.0,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.08
+    "cache_read_price_per_1M": 0.03
   },
   "text-embedding-3-large": {
     "context_length": 8191,

@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """End-to-end tests for tool profiles (WP1b),
-``run_parallel(model_name=..., tool_profile=...)`` (WP3), and the cost-lever
+``run_parallel(model=..., tool_profile=...)`` (WP3), and the cost-lever
 config toggles (WP0).
 
 The fan-out tests spawn real ``ChatSorcarAgent`` children against the
@@ -27,7 +27,13 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar import sorcar_agent as sa
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.fanout_guard import is_implementation_task
-from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES, SorcarAgent
+from kiss.agents.sorcar.sorcar_agent import (
+    BROWSER_TOOL_NAMES,
+    TOOL_GROUPS,
+    TOOL_PROFILES,
+    SorcarAgent,
+    resolve_tool_profile,
+)
 from kiss.core.config import DEFAULT_CONFIG, Config
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
 
@@ -130,12 +136,23 @@ class TestToolProfiles:
                 "number_of_cores"} <= names
 
     def test_review_profile_is_read_only(self, tmp_path: Path) -> None:
-        agent = _bare_agent(tmp_path, _tool_profile_name="review")
+        """``review`` reads, runs, browses and talks; it never edits or dispatches."""
+        agent = _bare_agent(tmp_path, _tool_profile_name="review", _use_web_tools=True)
         names = _names(agent._get_tools())
         assert names <= set(TOOL_PROFILES["review"])  # type: ignore[arg-type]
-        assert {"Bash", "Read", "run_commands_parallel", "summary"} <= names
-        assert not names & {"Edit", "Write", "run_agent", "run_parallel", "talk",
+        assert {"Bash", "Read", "run_commands_parallel", "summary", "talk"} <= names
+        assert BROWSER_TOOL_NAMES <= names
+        assert agent.web_use_tool is not None
+        assert not names & {"Edit", "Write", "run_agent", "run_parallel",
                             "set_model", "ask_user_question"}
+
+    def test_review_profile_honours_web_tools_off(self, tmp_path: Path) -> None:
+        """With "Use web tools" off the review profile builds no browser."""
+        agent = _bare_agent(tmp_path, _tool_profile_name="review", _use_web_tools=False)
+        names = _names(agent._get_tools())
+        assert not names & BROWSER_TOOL_NAMES
+        assert agent.web_use_tool is None
+        assert "talk" in names
 
     def test_shell_profile(self, tmp_path: Path) -> None:
         agent = _bare_agent(tmp_path, _tool_profile_name="shell")
@@ -177,6 +194,88 @@ class TestToolProfiles:
         run_parallel = _tool(_bare_agent(tmp_path), "run_parallel")
         out = run_parallel('["do x"]', tool_profile="admin")
         assert out.startswith("Error: tool_profile must be one of full, review, shell")
+        # A composite is rejected as a whole when one part is unknown.
+        out = run_parallel('["do x"]', tool_profile="shell+admin")
+        assert out.startswith("Error: tool_profile must be one of")
+        assert "'shell+admin'" in out
+
+
+class TestComposableProfiles:
+    """Group profiles and ``+``-joined composites (:func:`resolve_tool_profile`)."""
+
+    def test_every_group_is_a_profile(self) -> None:
+        assert set(TOOL_GROUPS) <= set(TOOL_PROFILES)
+        assert set(TOOL_GROUPS) == {
+            "shell", "edit", "browser", "memory", "agents", "mcp", "skills",
+            "user", "decide", "control",
+        }
+        # The groups partition the built-in tool names: no tool in two groups.
+        names = [name for group in TOOL_GROUPS.values() for name in group]
+        assert len(names) == len(set(names))
+        assert TOOL_PROFILES["assistant"] == (
+            TOOL_GROUPS["shell"] | TOOL_GROUPS["user"] | TOOL_GROUPS["decide"]
+            | TOOL_GROUPS["control"]
+        )
+
+    def test_resolve_unions_parts_and_full_absorbs(self) -> None:
+        assert resolve_tool_profile("") is None
+        assert resolve_tool_profile("full") is None
+        assert resolve_tool_profile("shell+full") is None
+        assert resolve_tool_profile(" shell + edit ") == (
+            TOOL_GROUPS["shell"] | TOOL_GROUPS["edit"]
+        )
+        assert resolve_tool_profile("review+edit") == (
+            TOOL_PROFILES["review"] | TOOL_GROUPS["edit"]  # type: ignore[operator]
+        )
+        for bad in ("admin", "shell+admin", "+", "shell+", "shell++edit"):
+            with pytest.raises(ValueError, match="tool_profile must be one of"):
+                resolve_tool_profile(bad)
+
+    def test_shell_plus_edit_is_the_file_toolset(self, tmp_path: Path) -> None:
+        agent = _bare_agent(tmp_path, _tool_profile_name="shell+edit")
+        assert agent._tool_profile() == "shell+edit"
+        assert _names(agent._get_tools()) == {
+            "Bash", "bash_job", "Read", "run_commands_parallel", "Edit", "Write",
+        }
+
+    def test_agents_group_builds_dispatch_and_fanout(self, tmp_path: Path) -> None:
+        """``agents`` builds ``run_agent`` and, in parallel mode, the fan-out."""
+        agent = _bare_agent(tmp_path, _tool_profile_name="agents")
+        assert _names(agent._get_tools()) == {
+            "run_agent", "agent_job", "run_parallel", "number_of_cores",
+        }
+        serial = _bare_agent(tmp_path, _tool_profile_name="agents", _is_parallel=False)
+        assert _names(serial._get_tools()) == {"run_agent", "agent_job"}
+
+    def test_mcp_group_builds_the_sign_in_pair(self, tmp_path: Path) -> None:
+        agent = _bare_agent(tmp_path, _tool_profile_name="mcp")
+        assert _names(agent._get_tools()) == {
+            "connect_mcp_server", "finish_mcp_server_connect",
+        }
+
+    def test_skills_group_builds_the_skill_tool(self, tmp_path: Path) -> None:
+        (tmp_path / ".kiss" / "skills" / "demo").mkdir(parents=True)
+        (tmp_path / ".kiss" / "skills" / "demo" / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: A demo skill.\n---\nDo the demo.\n"
+        )
+        agent = _bare_agent(tmp_path, _tool_profile_name="skills")
+        assert _names(agent._get_tools()) == {"skill"}
+        # The same work dir with a profile lacking the group builds no skill tool.
+        assert "skill" not in _names(
+            _bare_agent(tmp_path, _tool_profile_name="shell")._get_tools()
+        )
+
+    def test_user_control_and_browser_groups(self, tmp_path: Path) -> None:
+        agent = _bare_agent(
+            tmp_path, _tool_profile_name="user+control+browser", _use_web_tools=True,
+        )
+        names = _names(agent._get_tools())
+        assert names == {"ask_user_question", "talk", "summary", "set_model"} | BROWSER_TOOL_NAMES
+        assert agent.web_use_tool is not None
+
+    def test_full_in_a_composite_means_everything(self, tmp_path: Path) -> None:
+        agent = _bare_agent(tmp_path, _tool_profile_name="shell+full")
+        assert {"Bash", "Edit", "Write", "run_agent", "run_parallel"} <= _names(agent._get_tools())
 
 
 def _child_rows(parent_agent: ChatSorcarAgent) -> list[tuple[str, float, str]]:
@@ -209,7 +308,7 @@ class TestFanoutPropagation:
             agent._last_task_id = uuid.uuid4().hex
             run_parallel = _tool(agent, "run_parallel")
             out = run_parallel(
-                '["Review module A for bugs"]', model_name=MODEL, tool_profile="review",
+                '["Review module A for bugs"]', model=MODEL, tool_profile="review",
             )
         # run_parallel returns a YAML list of per-child YAML result strings.
         result = yaml.safe_load(yaml.safe_load(out)[0])
@@ -244,7 +343,7 @@ class TestFanoutPropagation:
             agent._chat_id = ""
             agent._last_task_id = uuid.uuid4().hex
             run_parallel = _tool(agent, "run_parallel")
-            out = run_parallel('["summarize a"]', model_name="no-such-model-cost-levers")
+            out = run_parallel('["summarize a"]', model="no-such-model-cost-levers")
         assert requests == []
         assert yaml.safe_load(yaml.safe_load(out)[0])["success"] is False
         rows = _child_rows(agent)

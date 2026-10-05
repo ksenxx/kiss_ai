@@ -10,16 +10,16 @@ task's working directory.  The KISS daemon imports a tiny generated SEA file
 per trial (see :func:`write_trial_sea`) that builds one
 :class:`ContainerHarness` from a JSON config and exposes the harness's bound
 methods as the SEA getters.  The trial runners in ``benchmarkings/harnesstax``
-are one such caller.  This module itself defines no top-level getters: a
-harness needs a running container and a config, so the ``/coding`` chat
-command that its file name registers runs Sorcar with its defaults.
+are one such caller.  This module itself defines no prompt getters: a
+harness needs a running container and a config, so the module is
+``hidden`` and registers no ``/coding`` chat command.
 
 The harness is KISS Sorcar's full built-in toolset except the browser and
 persistent-memory tools, driven by a short system prompt written for
 unattended engineering work in a container (:data:`SYSTEM_PROMPT`).  The shell and
 file tools execute inside the trial container through the daemon's Docker mode
-(``docker_image() -> "container:<id>"``), so nothing the agent does touches
-the host.  There is no cap on the number of steps; the only limit is the
+(``settings()["docker_image"] == "container:<id>"``), so nothing the agent does
+touches the host.  There is no cap on the number of steps; the only limit is the
 per-trial USD budget.  Every LLM call and every tool call is appended to a
 JSONL trajectory file for later analysis.
 """
@@ -229,9 +229,14 @@ def description() -> str:
         "Runs KISS Sorcar unattended inside a Docker container for benchmark trials "
         "(a ContainerHarness built by write_trial_sea from a JSON config, with the shell "
         "and file tools executing in the trial container and every call logged to a JSONL "
-        "trajectory); use `/coding <task>` or `run_agent(agent=\"coding\", task=...)`, which "
-        "run Sorcar with its defaults since the harness itself needs a running container."
+        "trajectory); the trial runners load the generated per-trial SEA file by path, so "
+        "this module is hidden from the command list."
     )
+
+
+def settings() -> dict[str, Any]:
+    """Return the module's own settings: hidden (only the generated per-trial SEAs run)."""
+    return {"hidden": True}
 
 
 class ContainerHarness:
@@ -321,17 +326,21 @@ class ContainerHarness:
 
     # ---- SEA parameter getters ------------------------------------------
 
-    def prompt(self) -> str:
+    def prompt(self, task: str = "") -> str:
         """The task instruction shown to the model, followed by ``ls -la`` of the workdir.
 
-        The listing costs nothing and settles the first question of every run
-        (what is here?), so the model sees the task's own binaries and data
-        from the start.
+        The SEA ``prompt(task)`` getter: the instruction is the config's
+        ``prompt`` (the trial runner's ``run_agent`` task text is only a
+        label), or *task* when the config has none.  The listing costs
+        nothing and settles the first question of every run (what is
+        here?), so the model sees the task's own binaries and data from
+        the start.
         """
+        instruction = self.task_prompt or task
         listing = self.workdir_listing()
         if not listing:
-            return self.task_prompt
-        return (f"{self.task_prompt}\n\n---\n`ls -la {self.workdir}` when the run started:\n"
+            return instruction
+        return (f"{instruction}\n\n---\n`ls -la {self.workdir}` when the run started:\n"
                 f"{listing}")
 
     def workdir_listing(self) -> str:
@@ -344,65 +353,31 @@ class ContainerHarness:
             lines = lines[:MAX_LISTING_LINES] + [f"[{len(lines) - MAX_LISTING_LINES} more entries]"]
         return "\n".join(lines)
 
-    def model(self) -> str:
-        """The model the trial runs with."""
-        return self.model_name
-
     def system_prompt(self) -> str:
         """The unattended-engineering prompt (replaces Sorcar's default prompt)."""
         tests = TEST_CONTEXT_NOTE if self.test_context else ""
         return SYSTEM_PROMPT.format(workdir=self.workdir, test_context=tests)
 
-    def max_budget(self) -> float:
-        """Hard USD cap for the trial."""
-        return self.budget
+    def settings(self) -> dict[str, Any]:
+        """The trial's run settings (the SEA ``settings()`` contract).
 
-    def model_config(self) -> dict[str, Any] | None:
-        """Per-trial model request overrides, or ``None`` for the provider defaults."""
-        return self.model_overrides or None
-
-    def work_dir(self) -> str:
-        """Host scratch directory the daemon runs the task in (the tools run in the container)."""
-        return self.host_work_dir
-
-    def docker_image(self) -> str:
-        """Attach the run's tools to the trial container."""
-        return f"container:{self.container}"
-
-    @staticmethod
-    def if_append_basic_tools() -> bool:
-        """The full built-in toolset (minus the tools switched off below)."""
-        return True
-
-    @staticmethod
-    def use_worktree() -> bool:
-        """No host git worktree: all edits happen inside the container."""
-        return False
-
-    @staticmethod
-    def auto_commit() -> bool:
-        """Nothing to commit on the host."""
-        return False
-
-    @staticmethod
-    def use_web_tools() -> bool:
-        """No browser tools: the run is container-isolated."""
-        return False
-
-    @staticmethod
-    def classify_tasks() -> bool:
-        """No pre-run task classification."""
-        return False
-
-    @staticmethod
-    def use_memory() -> bool:
-        """No persistent memory across trials."""
-        return False
-
-    @staticmethod
-    def is_parallel() -> bool:
-        """Sub-agents are part of the basic toolset; they share the trial container."""
-        return True
+        A ``worker`` whose sub-agents stay on (they share the trial
+        container): the trial's model, hard USD cap and per-trial model
+        overrides (``None`` for the provider defaults), the host scratch
+        directory the daemon runs the task in (the tools run in the
+        container the ``docker_image`` attaches), no host git worktree or
+        auto-commit (all edits happen inside the container), no
+        pre-run classification, no browser, no persistent memory.
+        """
+        return {
+            "kind": "worker",
+            "model": self.model_name,
+            "max_budget": self.budget,
+            "model_config": self.model_overrides or None,
+            "work_dir": self.host_work_dir,
+            "docker_image": f"container:{self.container}",
+            "allow_fan_out": True,
+        }
 
     def llm_call_hook(self) -> Callable[[list], list]:
         """Return the hook that counts LLM turns and logs the new messages."""
@@ -939,19 +914,8 @@ def description() -> str:
 
 
 prompt = _harness.prompt
-model = _harness.model
 system_prompt = _harness.system_prompt
-max_budget = _harness.max_budget
-model_config = _harness.model_config
-work_dir = _harness.work_dir
-docker_image = _harness.docker_image
-if_append_basic_tools = _harness.if_append_basic_tools
-use_worktree = _harness.use_worktree
-auto_commit = _harness.auto_commit
-use_web_tools = _harness.use_web_tools
-classify_tasks = _harness.classify_tasks
-use_memory = _harness.use_memory
-is_parallel = _harness.is_parallel
+settings = _harness.settings
 llm_call_hook = _harness.llm_call_hook
 tool_call_hook = _harness.tool_call_hook
 '''

@@ -15,7 +15,7 @@ in and clicks Accept in their own browser and ``finish_msteams_auth()``
 stores the delegated token pair in the Muse vault, whose daemon
 refreshes it (no client secret exists).  Every Graph call acts as the
 signed-in user.  Stores non-secret metadata (``tenant_id``, optional
-``bot_id``) in ``~/.kiss/third_party_agents/msteams/config.json``.
+``bot_id``) in ``$KISS_HOME/third_party_agents/msteams/config.json``.
 
 Usage::
 
@@ -855,15 +855,30 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the Microsoft Teams channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the Microsoft Teams channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return MSTeamsAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
+
+
+def add_to_system_prompt() -> str:
+    """Return the channel guidance appended to the run's system prompt."""
+    return MSTeamsAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

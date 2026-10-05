@@ -44,7 +44,8 @@ from kiss.agents.seas.skillopt.skillopt_sea import (
     verify,
 )
 from kiss.agents.sorcar import sea_commands
-from kiss.server.agent_file import apply_agent_overrides
+from kiss.agents.sorcar.agent_file import apply_agent_overrides
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -115,7 +116,9 @@ def test_sea_target_reads_splices_and_validates_the_prompt_constant(tmp_path: Pa
     candidate = target.materialize(tricky, tmp_path / "cand")
     assert candidate.path.name == "sh_candidate.py"
     assert candidate.text() == tricky
-    # Every getter but the prompt is untouched: the candidate is loaded like a SEA.
+    # Everything but the prompt is untouched: the candidate is loaded like a
+    # SEA, so its ``settings()`` (``worker`` preset, Bash profile) reach the
+    # rollout exactly as the daemon would apply them.
     kwargs = candidate.rollout_kwargs()
     assert kwargs["base_system_prompt"] == tricky
     assert kwargs["tool_profile"] == "bash"
@@ -167,7 +170,7 @@ def test_sea_target_accepts_inline_literals_and_rejects_other_shapes(tmp_path: P
     with pytest.raises(ValueError, match="return statement"):
         SeaTarget(no_return).text()
     without = tmp_path / "without_sea.py"
-    without.write_text("def tools():\n    return []\n", encoding="utf-8")
+    without.write_text("def add_to_tools():\n    return []\n", encoding="utf-8")
     with pytest.raises(ValueError, match="no top-level system_prompt"):
         SeaTarget(without).text()
     empty = tmp_path / "empty_sea.py"
@@ -180,58 +183,91 @@ def test_sea_target_accepts_inline_literals_and_rejects_other_shapes(tmp_path: P
         load_target(tmp_path / "x.txt")
 
 
-def test_sea_target_maps_every_getter_and_a_tools_file(tmp_path: Path) -> None:
-    """Optional getters (tools list or path, hooks, model, ...) all reach the rollout kwargs."""
-    tools_file = tmp_path / "extra_tools.py"
-    tools_file.write_text(
-        'def greet(name: str) -> str:\n    """Greet.\n\n    Args:\n        name: Who.\n\n'
-        '    Returns:\n        Text.\n    """\n    return "hi " + name\n\n\n'
-        "def tools():\n    return [greet]\n",
-        encoding="utf-8",
-    )
+def test_sea_target_maps_every_setting_and_getter(tmp_path: Path) -> None:
+    """Every ``settings()`` key and getter (add_to_tools, hooks, ...) reaches the rollout kwargs."""
     sea = tmp_path / "full_sea.py"
     sea.write_text(
         "PROMPT = 'p'\n\n\ndef system_prompt():\n    return PROMPT\n\n\n"
-        "def tool_profile():\n    return 'shell'\n\n\ndef model():\n    return 'm'\n\n\n"
-        "def model_config():\n    return {'k': 1}\n\n\ndef append_to_system_prompt():\n"
-        "    return 'suffix'\n\n\ndef if_append_basic_tools():\n    return False\n\n\n"
-        "def docker_image():\n    return 'img'\n\n\ndef use_web_tools():\n    return True\n\n\n"
+        "def prompt(task):\n    return 'fixed prompt suffix'\n\n\n"
+        "def settings():\n    return {\n"
+        "        'tool_profile': 'none', 'model': 'm', 'model_config': {'k': 1},\n"
+        "        'docker_image': 'img', 'use_web_tools': True,\n    }\n\n\n"
+        "def add_to_system_prompt():\n    return 'suffix'\n\n\n"
         "def llm_call_hook():\n    return lambda m: m\n\n\ndef tool_call_hook():\n"
         "    return lambda n, a: 'OK'\n\n\n"
-        "def prompt():\n    return 'fixed prompt'\n\n\ndef append_to_prompt():\n"
-        "    return ' suffix'\n\n\nfrom pathlib import Path\n\n\n"
-        f"def tools():\n    return Path({str(tools_file)!r})\n",
+        'def greet(name: str) -> str:\n    """Greet.\n\n    Args:\n        name: Who.\n\n'
+        '    Returns:\n        Text.\n    """\n    return "hi " + name\n\n\n'
+        "def add_to_tools():\n    return [greet]\n",
         encoding="utf-8",
     )
     kwargs = SeaTarget(sea).rollout_kwargs()
     assert kwargs["base_system_prompt"] == "p"
-    assert kwargs["tool_profile"] == "shell"
+    assert kwargs["tool_profile"] == "none"
     assert kwargs["model_name"] == "m"
     assert kwargs["model_config"] == {"k": 1}
     assert kwargs["system_prompt"] == "suffix"
+    # The ``none`` profile with ``add_to_tools()`` fixes the whole tool set: no basic tools.
     assert kwargs["append_basic_tools"] is False
     assert kwargs["docker_image"] == "img"
     assert kwargs["web_tools"] is True
     assert callable(kwargs["llm_call_hook"]) and callable(kwargs["tool_call_hook"])
     assert [t.__name__ for t in kwargs["tools"]] == ["greet"]
-    assert kwargs["prompt"] == "fixed prompt" and kwargs["append_to_prompt"] == " suffix"
-    inline_tools = tmp_path / "list_sea.py"
-    inline_tools.write_text(
+    assert kwargs["prompt"]("any task") == "fixed prompt suffix"
+    assert "add_to_prompt" not in kwargs
+    added_tools = tmp_path / "list_sea.py"
+    added_tools.write_text(
         "def helper():\n    return 1\n\n\ndef system_prompt():\n    return 'q'\n\n\n"
-        "def tools():\n    return [helper]\n",
+        "def add_to_tools():\n    return (helper,)\n",
         encoding="utf-8",
     )
-    assert [t.__name__ for t in SeaTarget(inline_tools).rollout_kwargs()["tools"]] == ["helper"]
+    added = SeaTarget(added_tools).rollout_kwargs()
+    # ``add_to_tools()`` extends the basic toolset: no profile is forced
+    # and the eval set's ``append_basic_tools`` default stands.
+    assert [t.__name__ for t in added["tools"]] == ["helper"]
+    assert "append_basic_tools" not in added and "tool_profile" not in added
+    # Removed legacy getters are ordinary module functions: they configure nothing.
+    legacy = tmp_path / "legacy_sea.py"
+    legacy.write_text(
+        "def helper():\n    return 1\n\n\ndef system_prompt():\n    return 'q'\n\n\n"
+        "def tools():\n    return [helper]\n\n\ndef model():\n    return 'm'\n\n\n"
+        "def tool_profile():\n    return 'shell'\n\n\ndef append_to_system_prompt():\n"
+        "    return 'suffix'\n",
+        encoding="utf-8",
+    )
+    assert SeaTarget(legacy).rollout_kwargs() == {"base_system_prompt": "q"}
+
+
+def test_sea_target_rejects_invalid_tool_getters(tmp_path: Path) -> None:
+    """Same contract as the daemon: ``add_to_tools()`` returns callables, never a path."""
+    for name, body in (
+        ("path", "    return '/some/tools.py'"),
+        ("ints", "    return [1]"),
+    ):
+        bad = tmp_path / f"bad_{name}_sea.py"
+        bad.write_text(
+            f"def system_prompt():\n    return 'q'\n\n\ndef add_to_tools():\n{body}\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="add_to_tools\\(\\) .*must return a list"):
+            SeaTarget(bad).rollout_kwargs()
+    malformed = tmp_path / "malformed_sea.py"
+    malformed.write_text(
+        "def system_prompt():\n    return 'q'\n\n\n"
+        "def settings():\n    return {'tool_profile': 7}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="must be str, got int"):
+        SeaTarget(malformed).rollout_kwargs()
 
 
 def test_sea_fingerprint_detects_code_changes_outside_the_prompt(tmp_path: Path) -> None:
     """The confinement gate compares ASTs with the prompt blanked."""
     base = (
         "X = 'a'\n\n\ndef system_prompt():\n    return X\n\n\n"
-        "def use_worktree():\n    return False\n"
+        "def settings():\n    return {'use_worktree': False}\n"
     )
     same_code = base.replace("'a'", "'totally different prompt'")
-    changed = base.replace("return False", "return True")
+    changed = base.replace("False", "True")
     find = skillopt_sea._prompt_constant
     assert skillopt_sea._fingerprint(base, find) == skillopt_sea._fingerprint(same_code, find)
     assert skillopt_sea._fingerprint(base, find) != skillopt_sea._fingerprint(changed, find)
@@ -507,7 +543,10 @@ def test_one_round_accepts_a_candidate_that_passes_more_selection_tasks(tmp_path
         ns["system_prompt"]()
         == sh_sea.system_prompt().rstrip("\n") + "\nReturn the exact output.\n"
     )
-    assert ns["tool_profile"]() == "bash"
+    # Every other line of the SEA is kept: its ``settings()`` still pin the Bash profile.
+    assert ns["settings"]() == sh_sea.settings() == {
+        "kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"],
+    }
     assert sea.read_text(encoding="utf-8") == _SH_SEA.read_text(encoding="utf-8")
 
     out = tmp_path / "out"
@@ -797,7 +836,8 @@ def test_cost_cap_crashed_rollouts_and_epoch_batches(tmp_path: Path) -> None:
     # An unknown tool_profile makes SorcarAgent.run raise: a failed rollout, not a crash.
     broken = tmp_path / "broken_sea.py"
     broken.write_text(
-        "def system_prompt():\n    return 'p'\n\n\ndef tool_profile():\n    return 'bogus'\n",
+        "def system_prompt():\n    return 'p'\n\n\n"
+        "def settings():\n    return {'tool_profile': 'bogus'}\n",
         encoding="utf-8",
     )
     three = _evals(tmp_path, [{"id": t, "prompt": f"echo {t}", "expect": [t]} for t in "abc"])
@@ -821,13 +861,13 @@ def test_cost_cap_crashed_rollouts_and_epoch_batches(tmp_path: Path) -> None:
     assert [r["train_tasks"] for r in report["rounds"][4:]] == [["a", "b"], ["c"]]
 
 
-def test_run_rollout_applies_eval_defaults_and_prompt_getters(tmp_path: Path) -> None:
-    """Eval-set ``rollout`` defaults reach ``SorcarAgent.run``; prompt getters shape the prompt."""
+def test_run_rollout_applies_eval_defaults_and_prompt_settings(tmp_path: Path) -> None:
+    """Eval-set ``rollout`` defaults reach ``SorcarAgent.run``; prompt settings shape the prompt."""
     fixed = tmp_path / "fixed_sea.py"
     fixed.write_text(
-        "def system_prompt():\n    return 'p'\n\n\ndef prompt():\n    return 'fixed prompt'\n\n\n"
-        "def append_to_prompt():\n    return ' suffix'\n\n\n"
-        "def tool_profile():\n    return 'bash'\n",
+        "def system_prompt():\n    return 'p'\n\n\n"
+        "def prompt(task):\n    return 'fixed prompt suffix'\n\n\n"
+        "def settings():\n    return {'tool_profile': 'bash'}\n",
         encoding="utf-8",
     )
     task = EvalTask(id="t", prompt="ignored task prompt", expect=["done"])
@@ -852,6 +892,54 @@ def test_run_rollout_applies_eval_defaults_and_prompt_getters(tmp_path: Path) ->
     assert rollout.passed is False and rollout.verdict == "missing expected text: ['done']"
 
 
+def test_run_rollout_sub_task_inherits_the_prompt_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``run_agent`` sub-task of a rollout gets the eval set's ``prompt_suffix``.
+
+    ``run_rollout`` appends the defaults' ``prompt_suffix`` to the prompt
+    (after the SEA's ``prompt(task)`` shaped it) and hands it to
+    ``SorcarAgent.run(prompt_suffix=...)``, so the dispatch inherits it
+    like a daemon-run task's ``appendToPrompt``; the SEA's own suffix
+    belongs to the prompt body and is not inherited.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    sea = tmp_path / "suffix_sea.py"
+    sea.write_text(
+        "def system_prompt():\n    return 'p'\n\n\n"
+        "def prompt(task):\n    return task + '\\n\\nROLLOUT-SUFFIX'\n",
+        encoding="utf-8",
+    )
+    dispatched: list[dict[str, Any]] = []
+
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        dispatched.append({"prompt": prompt, **kwargs})
+        return daemon_client.TaskResult(
+            text="child ok", success=True, cost=0.0, tokens=1, steps=1, chat_id="c",
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
+    task = EvalTask(id="t", prompt="parent task", expect=["done"])
+    bodies = [
+        tool_call_body("run_agent", {"task": "child task", "agent": "", "timeout": "30"}, 500),
+        finish_body("<p>done</p>", 600),
+    ]
+    with serve(bodies) as (url, requests):
+        cfg = _config(tmp_path, sea, tmp_path / "unused.json", url)
+        rollout = run_rollout(
+            SeaTarget(sea), task, cfg, tmp_path / "w1",
+            {"max_steps": 7, "prompt_suffix": "\n\nEVAL-SUFFIX"},
+        )
+    assert rollout.passed, rollout
+    user = [m for m in requests[0]["messages"] if m["role"] == "user"]
+    assert str(user[0]["content"]).rstrip().endswith("ROLLOUT-SUFFIX\n\nEVAL-SUFFIX")
+    (call,) = dispatched
+    assert call["prompt"] == "child task"
+    assert call["append_to_prompt"] == "\n\nEVAL-SUFFIX"
+
+
 def test_missing_split_is_an_error(tmp_path: Path) -> None:
     """An eval set with no train task (or no selection task) cannot be optimized."""
     sea = _copy_sh_sea(tmp_path)
@@ -868,19 +956,39 @@ def test_missing_split_is_an_error(tmp_path: Path) -> None:
 def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     """The SkillOpt SEA is registered as ``/skillopt`` and exposes optimize/status."""
     assert skillopt_sea.system_prompt().startswith("You are SkillOpt")
-    assert [t.__name__ for t in skillopt_sea.tools()] == ["optimize", "status"]
-    assert skillopt_sea.tool_profile() == "shell"
-    assert skillopt_sea.use_worktree() is False
-    assert skillopt_sea.auto_commit() is False
-    assert skillopt_sea.classify_tasks() is False
-    assert skillopt_sea.is_parallel() is False
-    assert skillopt_sea.use_web_tools() is False
-    assert skillopt_sea.use_memory() is False
+    assert [t.__name__ for t in skillopt_sea.add_to_tools()] == ["optimize", "status"]
+    assert skillopt_sea.settings() == {"kind": "worker", "tool_profile": "shell"}
+    # ``worker`` turns worktree, auto-commit, classifier, fan-out, browser
+    # and memory off; ``system_prompt()`` is a getter, not a settings key.
+    assert resolve_settings(vars(skillopt_sea)) == {
+        "kind": "worker",
+        "tool_profile": "shell",
+        "use_worktree": False,
+        "auto_commit": False,
+        "auto_classify": False,
+        "allow_fan_out": False,
+        "use_web_tools": False,
+        "use_memory": False,
+    }
+    assert skillopt_sea.system_prompt() == skillopt_sea.SYSTEM_PROMPT
+    for legacy in (
+        "tool_profile", "use_worktree", "auto_commit", "auto_classify", "allow_fan_out",
+        "use_web_tools", "use_memory", "tools", "append_to_system_prompt", "model", "prompt",
+    ):
+        assert not hasattr(skillopt_sea, legacy), legacy
     assert sea_commands.get_command("skillopt") == _SKILLOPT_SEA
+    assert sea_commands.slash_command_task("/skillopt x.py evals.json") == (
+        "x.py evals.json", _SKILLOPT_SEA
+    )
+    assert sea_commands.sea_settings(_SKILLOPT_SEA) == resolve_settings(vars(skillopt_sea))
     cmd: dict[str, Any] = {"agentPath": str(_SKILLOPT_SEA)}
-    assert "autoCommit" in apply_agent_overrides(cmd)
+    assert apply_agent_overrides(cmd) == {
+        "systemPrompt", "tools", "toolProfile", "useWorktree", "autoCommit", "classifyTasks",
+        "isParallel", "useWebTools", "useMemory",
+    }
     assert cmd["autoCommit"] is False and cmd["useWorktree"] is False
-    assert cmd["toolProfile"] == "shell" and cmd["toolsFile"] == str(_SKILLOPT_SEA)
+    assert cmd["toolProfile"] == "shell" and all(callable(tool) for tool in cmd["tools"])
+    assert "appendBasicTools" not in cmd
     assert cmd["systemPrompt"] == skillopt_sea.SYSTEM_PROMPT
     assert skillopt_sea.status(str(tmp_path / "none")) == f"no state.json under {tmp_path / 'none'}"
     # The tool wrapper with a zero cost cap runs no round and needs no model.
@@ -921,3 +1029,43 @@ def test_cli_runs_the_optimizer(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert code == 0 and len(requests) == 3
     out = capsys.readouterr().out
     assert "rounds done: 1" in out and "analysts proposed no patches" in out
+
+
+def test_sea_target_rollout_composes_extends_and_runs_prompt_only_on_the_real_task(
+    tmp_path: Path,
+) -> None:
+    """A rollout evaluates the whole ``extends`` chain; ``prompt(task)`` sees no placeholder."""
+    base = tmp_path / "base_sea.py"
+    base.write_text(
+        'def helper(x: str) -> str:\n    """Help.\n\n    Args:\n        x: X.\n\n'
+        '    Returns:\n        X.\n    """\n    return x\n\n\n'
+        "def settings():\n    return {'tool_profile': 'none'}\n\n\n"
+        "def add_to_tools():\n    return [helper]\n\n\n"
+        "def add_to_system_prompt():\n    return 'BASE RULES'\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "strict_sea.py"
+    target.write_text(
+        "import json\n\n\nPROMPT = 'strict'\n\n\n"
+        f"def settings():\n    return {{'extends': {str(base)!r}}}\n\n\n"
+        "def system_prompt():\n    return PROMPT\n\n\n"
+        "def prompt(task):\n    return json.loads(task)['text']\n",
+        encoding="utf-8",
+    )
+    kwargs = SeaTarget(target).rollout_kwargs()
+    assert kwargs["base_system_prompt"] == "strict"
+    assert kwargs["system_prompt"] == "BASE RULES"
+    assert kwargs["tool_profile"] == "none" and kwargs["append_basic_tools"] is False
+    assert [t.__name__ for t in kwargs["tools"]] == ["helper"]
+    assert kwargs["prompt"]('{"text": "real task"}') == "real task"
+    # A candidate copy in a scratch directory still finds the absolute base.
+    assert SeaTarget(target).validate("tuned") == ""
+    # A relative base cannot be found from a candidate copy: rejected at validation.
+    relative = tmp_path / "relative_sea.py"
+    relative.write_text(
+        "PROMPT = 'rel'\n\n\ndef settings():\n    return {'extends': 'base_sea.py'}\n\n\n"
+        "def system_prompt():\n    return PROMPT\n",
+        encoding="utf-8",
+    )
+    assert SeaTarget(relative).rollout_kwargs()["system_prompt"] == "BASE RULES"
+    assert "not an existing Python" in SeaTarget(relative).validate("tuned")

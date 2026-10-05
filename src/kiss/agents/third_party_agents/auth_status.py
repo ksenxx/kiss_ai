@@ -35,6 +35,7 @@ source has its credential.
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import os
 import re
@@ -42,12 +43,34 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any
 
-from kiss.agents.sorcar.agent_dispatch import _agent_class, available_channels
+from kiss.agents.sorcar.agent_dispatch import available_channels
+from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
 from kiss.agents.third_party_agents._composio_google import TOOLKITS
 
 # Per-run deadline for the whole probe; channels still running when it
 # expires are reported as unknown.
 PROBE_TIMEOUT_SECONDS = 20.0
+
+
+def _agent_class(module: Any) -> type[BaseChannelAgent] | None:
+    """Return the channel agent class *module* defines, or ``None``.
+
+    The channel-agent contract: each channel module defines exactly
+    one :class:`BaseChannelAgent` subclass of its own.  Classes merely
+    imported into the module are ignored.
+
+    Args:
+        module: An imported ``<channel>.<channel>_sea`` module.
+    """
+    for value in vars(module).values():
+        if (
+            inspect.isclass(value)
+            and value.__module__ == module.__name__
+            and issubclass(value, BaseChannelAgent)
+            and value is not BaseChannelAgent
+        ):
+            return value
+    return None
 _MAX_WORKERS = 8
 
 # Muse vault service names that differ from the channel name and are

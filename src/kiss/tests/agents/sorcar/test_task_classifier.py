@@ -1093,7 +1093,7 @@ def test_simple_task_runs_with_lite_prompt(env: IsolatedKissHome) -> None:
     result = _run_minimal_sorcar(
         agent, _SIMPLE_TASK + " Call the finish tool with the answer.",
     )
-    assert yaml.safe_load(result)["success"] is True
+    assert yaml.safe_load(result)["success"] is True, result
     assert agent.system_prompt.startswith(SYSTEM_PROMPT_LITE)
     assert not agent.system_prompt.startswith(SYSTEM_PROMPT)
     # The classifier's own spend was folded into the run totals.
@@ -1117,7 +1117,7 @@ def test_non_simple_verdict_keeps_full_prompt(
     result = _run_minimal_sorcar(
         agent, "Call the finish tool with the word DONE.",
     )
-    assert yaml.safe_load(result)["success"] is True
+    assert yaml.safe_load(result)["success"] is True, result
     assert agent.system_prompt.startswith(SYSTEM_PROMPT)
 
 
@@ -1132,7 +1132,7 @@ def test_disabled_classifier_keeps_full_prompt(
     result = _run_minimal_sorcar(
         agent, _SIMPLE_TASK + " Call the finish tool with the answer.",
     )
-    assert yaml.safe_load(result)["success"] is True
+    assert yaml.safe_load(result)["success"] is True, result
     assert agent.system_prompt.startswith(SYSTEM_PROMPT)
 
 
@@ -1153,7 +1153,7 @@ def test_base_system_prompt_override_beats_verdict(
         "Call the finish tool with the word DONE.",
         base_system_prompt=custom,
     )
-    assert yaml.safe_load(result)["success"] is True
+    assert yaml.safe_load(result)["success"] is True, result
     assert agent.system_prompt.startswith(custom)
 
 

@@ -28,6 +28,7 @@ from kiss.core.brand import (
     BRAND,
     BRAND_FILE,
     DEFAULT_BRAND,
+    HOME_DIR,
     PRODUCT_NAME,
     load_brand,
     render_brand,
@@ -133,7 +134,9 @@ def test_remote_webapp_page_is_branded() -> None:
     assert json.loads(brand_json.group(1)) == {
         "productName": PRODUCT_NAME,
         "shortName": BRAND["short_name"],
+        "homeDir": HOME_DIR,
     }
+    assert f"Refresh the model catalog in ~/{HOME_DIR}/MODEL_INFO.json" in page
     assert not _PLACEHOLDER.search(page)
     # brand.css is part of the offline app shell the service worker precaches.
     assert any(url.startswith("/media/brand.css?v=") for url in web_server._app_shell_urls())

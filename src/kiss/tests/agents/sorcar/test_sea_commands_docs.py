@@ -5,7 +5,7 @@
 """Keep ``docs/sea-commands.md`` truthful against the real registry.
 
 The public page ``website/kisssorcar.github.io/docs/sea-commands.md``
-tells external contributors how ``~/.kiss/SEAS.md`` is parsed and how
+tells external contributors how ``$KISS_HOME/SEAS.md`` is parsed and how
 ``/xxx text`` reaches a SEA.  These tests pull the examples straight
 out of that Markdown and run them through
 :mod:`kiss.agents.sorcar.sea_commands`, so a behaviour change that
@@ -88,7 +88,7 @@ def test_seas_md_example_parses_as_documented(home: Path, monkeypatch: pytest.Mo
     ``#`` comment line; the page promises each of those is handled.
     """
     monkeypatch.setenv("WORK", str(home / "work"))
-    block = _fenced_block(_DOC.read_text(), "# ~/.kiss/SEAS.md")
+    block = _fenced_block(_DOC.read_text(), "# $KISS_HOME/SEAS.md")
     kiss_home().mkdir(parents=True, exist_ok=True)
     (kiss_home() / "SEAS.md").write_text(block, encoding="utf-8")
 
@@ -112,7 +112,8 @@ def test_three_step_walkthrough_registers_standup_command(home: Path) -> None:
     appends ``~/my-seas`` to SEAS.md.  Step 3 relies on substring
     autocomplete (``st`` matches ``standup``), ``/standup help``
     returning the description, and the ``/standup ...`` prompt being
-    rewritten into a run_agent directive on that file.
+    split into that file and the verbatim task text the daemon runs it
+    on.
     """
     doc = _DOC.read_text()
     sea_src = _fenced_block(doc, "# ~/my-seas/standup/standup_sea.py")
@@ -139,12 +140,12 @@ def test_three_step_walkthrough_registers_standup_command(home: Path) -> None:
     assert sea_commands.help_text_if_command("/standup help") == namespace["description"]()
 
     task = "finished the docs page, next is the release, blocked on review"
-    hit = sea_commands.rewrite_prompt_if_command(f"/standup {task}")
+    hit = sea_commands.slash_command_task(f"/standup {task}")
     assert hit is not None
-    rewritten, path = hit
+    task_text, path = hit
     assert path.resolve() == sea_file.resolve()
-    assert f'agent = "{path}"' in rewritten
-    assert rewritten.endswith(task)
+    assert task_text == task
+    assert sea_commands.sea_settings(path)["kind"] == "session"
 
 
 def test_documented_edge_cases_hold(home: Path) -> None:
@@ -177,10 +178,10 @@ def test_documented_edge_cases_hold(home: Path) -> None:
     assert "main" not in commands
     assert "loose" not in commands
 
-    assert sea_commands.rewrite_prompt_if_command("/deploy") is None
-    assert sea_commands.rewrite_prompt_if_command("/nosuch ship") is None
-    assert sea_commands.rewrite_prompt_if_command(" /deploy ship") is None
-    assert sea_commands.rewrite_prompt_if_command("/deployx ship") is None
-    hit = sea_commands.rewrite_prompt_if_command("/deploy <task>a</task><task>b</task>")
+    assert sea_commands.slash_command_task("/deploy") is None
+    assert sea_commands.slash_command_task("/nosuch ship") is None
+    assert sea_commands.slash_command_task(" /deploy ship") is None
+    assert sea_commands.slash_command_task("/deployx ship") is None
+    hit = sea_commands.slash_command_task("/deploy <task>a</task><task>b</task>")
     assert hit is not None
-    assert hit[0].endswith("<task>a</task><task>b</task>")
+    assert hit[0] == "<task>a</task><task>b</task>"

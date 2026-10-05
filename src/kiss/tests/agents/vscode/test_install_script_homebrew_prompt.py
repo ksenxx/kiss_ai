@@ -38,12 +38,33 @@ from __future__ import annotations
 import os
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
+
+from kiss.tests.conftest import posix_only
+
+pytestmark = posix_only("bash install.sh under a pty")
+
+
+def _reset_signals() -> None:
+    """Restore default terminal-signal dispositions in the pty child.
+
+    A non-interactive shell starts asynchronous (``cmd &``) children with
+    SIGINT/SIGQUIT ignored, and ignored dispositions survive fork+exec
+    — so when the pytest session itself is launched as a background job
+    (``nohup pytest &`` from a CI or parallel-suite harness), install.sh
+    would start with SIGINT ignored, its ``trap handle_interrupt INT``
+    would silently never install and the Ctrl-C typed below would do
+    nothing.  Resetting to ``SIG_DFL`` post-fork/pre-exec restores the
+    disposition a real terminal gives the script.
+    """
+    for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_DFL)
 
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
@@ -468,6 +489,7 @@ def test_terminal_ctrl_c_at_the_question_asks_again(tmp_path: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
+        preexec_fn=_reset_signals,
     )
     assert proc.stdin is not None
     try:

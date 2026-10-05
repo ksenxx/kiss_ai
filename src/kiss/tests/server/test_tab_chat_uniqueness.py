@@ -170,7 +170,7 @@ class TestOneTabPerChat(TabMirroringBase):
             "workDir": self.tmpdir,
             "tabId": "tab-r2",
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         })
         snap = await self._wait_for_snapshot_with(

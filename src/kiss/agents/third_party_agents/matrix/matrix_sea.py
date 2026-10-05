@@ -5,7 +5,7 @@
 """Matrix Agent — channel agent with Matrix protocol tools.
 
 Provides authenticated access to Matrix via matrix-nio. Stores credentials
-in ``~/.kiss/third_party_agents/matrix/config.json``.
+in ``$KISS_HOME/third_party_agents/matrix/config.json``.
 
 Sign-in works the way the Muse app connects a service when the homeserver
 offers the Matrix OAuth 2.0 API (matrix.org and every homeserver backed
@@ -1173,15 +1173,30 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the Matrix channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the Matrix channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    the API's ``extension_agent_path``: builds a fresh agent from the
+    credentials persisted under ``$KISS_HOME`` and returns its
     authentication and backend tools.
     """
     return MatrixAgent()._get_tools()
+
+
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"kind": "channel"}
+
+
+def add_to_system_prompt() -> str:
+    """Return the channel guidance appended to the run's system prompt."""
+    return MatrixAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

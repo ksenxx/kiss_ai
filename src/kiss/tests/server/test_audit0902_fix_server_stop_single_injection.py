@@ -111,7 +111,7 @@ def _start_blocked_worker(
             "prompt": f"stop-once-{tab_id}",
             "tabId": tab_id,
             "workDir": work_dir,
-            "useParallel": False,
+            "isParallel": False,
             "useWorktree": False,
             "autoCommit": False,
             "_state_key": state.task_id,
@@ -247,7 +247,7 @@ class TestStopInjectsOnce(TestCase):
             target=vscode._run_task,
             args=({
                 "type": "run", "prompt": "stop-swallow", "tabId": "stop-swallow",
-                "workDir": self.work_dir, "useParallel": False,
+                "workDir": self.work_dir, "isParallel": False,
                 "useWorktree": False, "autoCommit": False,
                 "_state_key": state.task_id,
             },),

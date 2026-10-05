@@ -567,12 +567,12 @@ def test_authenticate_verifies_saves_and_clears(overleaf_server) -> None:
     fresh = OverleafAgent()
     assert fresh._backend._host == base_url
     assert fresh._backend.connection_info == f"Overleaf session configured for {base_url}."
-    assert len(overleaf_mod.tools()) > 3
+    assert len(overleaf_mod.add_to_tools()) > 3
 
     assert "cleared" in tools["clear_overleaf_auth"]()
     assert not _config.path.exists()
     assert agent._is_authenticated() is False
-    assert len(overleaf_mod.tools()) == 3
+    assert len(overleaf_mod.add_to_tools()) == 3
 
 
 def test_authenticate_and_use_localhost_host(overleaf_server) -> None:

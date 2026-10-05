@@ -26,6 +26,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -437,6 +438,91 @@ def test_tick_one_shot_disables_job(tmp_path: Path) -> None:
     ).read_text(encoding="utf-8")
 
 
+def test_tick_after_downtime_skips_missed_repeating_runs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A scheduler starting a day late does not fire every missed job at once.
+
+    This is what happened after ``install.sh`` restarted the kiss-web
+    daemon: every daily job whose time had passed while the daemon was
+    down ran together on the first tick.  Missed occurrences of
+    repeating jobs are now skipped (rescheduled from now, like cron);
+    a one-shot still runs late, once (``test_tick_one_shot_disables_job``
+    ticks a one-shot two billion seconds late).
+    """
+    schedules = {"nightly": "0 5 * * *", "sync": "every 4h", "poll": "every 1m"}
+    jobs = {
+        name: _create(cron_job(
+            "create", name=name, command=f"echo {name} ran", schedule=schedule,
+        ))
+        for name, schedule in schedules.items()
+    }
+    now = _ts(2026, 10, 4, 11, 12)
+    for job in jobs.values():
+        _set_job_fields(job["id"], next_run_at=now - 26 * 3600)
+    with caplog.at_level("WARNING", logger="kiss.agents.sorcar.cron_agent"):
+        assert tick(now) == 0
+    for name, job in jobs.items():
+        stored = next(j for j in load_jobs() if j["id"] == job["id"])
+        assert stored["enabled"] is True
+        assert stored["last_run_at"] is None, name
+        assert stored["next_run_at"] == compute_next_run(schedules[name], now), name
+        assert not (tmp_path / "cron" / "output" / f"{job['id']}.md").exists(), name
+        assert f"skipping the run of {name!r}" in caplog.text
+    assert "due 1 day, 2:00:00 ago, past the 0:10:00 grace window" in caplog.text
+    # The jobs resume their normal cadence: only the minutely poll is due
+    # a minute later, and it runs.
+    assert tick(now + 60) == 1
+    assert "poll ran" in (
+        tmp_path / "cron" / "output" / f"{jobs['poll']['id']}.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_tick_grace_window_boundary(tmp_path: Path) -> None:
+    """A run late by at most the grace window still happens; one second more is missed."""
+    late = _create(cron_job("create", name="late", command="echo late", schedule="every 1h"))
+    missed = _create(cron_job(
+        "create", name="missed", command="echo missed", schedule="every 1h",
+    ))
+    now = 2_000_000_000.0
+    _set_job_fields(late["id"], next_run_at=now - cron_agent.MISSED_RUN_GRACE_SECONDS)
+    _set_job_fields(missed["id"], next_run_at=now - cron_agent.MISSED_RUN_GRACE_SECONDS - 1)
+    assert tick(now) == 1
+    by_id = {job["id"]: job for job in load_jobs()}
+    assert by_id[late["id"]]["last_status"] == "ok"
+    assert by_id[late["id"]]["last_run_at"] == now
+    assert by_id[missed["id"]]["last_run_at"] is None
+    assert by_id[missed["id"]]["next_run_at"] == now + 3600
+    assert not (tmp_path / "cron" / "output" / f"{missed['id']}.md").exists()
+
+
+def test_missed_run_of_never_matching_cron_logs_never(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missed job whose expression has no future occurrence is logged as ``never``."""
+    job = _create(cron_job("create", name="feb31", command="echo x", schedule="0 0 1 1 *"))
+    now = 2_000_000_000.0
+    _set_job_fields(job["id"], schedule="0 0 31 2 *", next_run_at=now - 86400)
+    with caplog.at_level("WARNING", logger="kiss.agents.sorcar.cron_agent"):
+        assert tick(now) == 0
+    assert "next run at never" in caplog.text
+    assert load_jobs()[0]["next_run_at"] is None
+
+
+def test_infinitely_overdue_job_is_disabled_and_the_rest_run() -> None:
+    """A ``-Infinity`` timestamp (json accepts it) is malformed, not a tick-wide crash."""
+    bad = _create(cron_job("create", name="bad", command="echo bad", schedule="every 1h"))
+    good = _create(cron_job("create", name="good", command="echo good", schedule="every 1h"))
+    now = 2_000_000_000.0
+    _set_job_fields(bad["id"], next_run_at=float("-inf"))
+    _set_job_fields(good["id"], next_run_at=now - 1)
+    assert tick(now) == 1
+    by_id = {job["id"]: job for job in load_jobs()}
+    assert by_id[bad["id"]]["enabled"] is False
+    assert by_id[bad["id"]]["last_summary"].startswith("disabled: malformed job:")
+    assert by_id[good["id"]]["last_summary"] == "good"
+
+
 def test_silent_command_delivers_nothing(tmp_path: Path) -> None:
     job = _create(cron_job("create", name="quiet", command="true", schedule="every 1m"))
     _set_job_fields(job["id"], next_run_at=1.0)
@@ -494,25 +580,20 @@ def test_tick_skips_when_lock_held() -> None:
     assert tick(2.0) == 1
 
 
-def test_prompt_job_runs_as_generated_sea(
+def test_prompt_job_runs_the_cron_prompt_sea(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A prompt job is launched as a generated SEA through ``run_agent``.
+    """A prompt job is launched as the bundled ``cron_prompt_sea.py`` through ``run_agent``.
 
-    ``_run_prompt_job`` writes ``cron_prompt_sea.py`` into the run's
-    scratch directory and dispatches it with the ``run_agent`` tool,
-    so the daemon receives an ``extension_agent_path`` and the SEA's
-    getters — not values pinned on the wire — configure the run: the
-    preamble-prefixed prompt, the job's model and budget, the scratch
-    ``work_dir``, and ``use_worktree`` / ``auto_commit`` /
-    ``classify_tasks`` pinned off (the scratch directory is no git
-    repository and an unattended automation never classifies).  The
-    real path is exercised up to the daemon-client boundary; only that
-    boundary call is captured, and the SEA it names is then applied
-    with the daemon's own loader to read the effective run settings.
+    The job's prompt (preamble-prefixed) is the task, and its model,
+    budget, work directory and git flags travel as the tool's arguments
+    and ``options`` — nothing is written to disk.  The real path is
+    exercised up to the daemon-client boundary; only that boundary call
+    is captured, and the SEA it names is then applied with the daemon's
+    own loader to read the effective run settings.
     """
     from kiss.agents.sorcar import daemon_client
-    from kiss.server.agent_file import apply_agent_overrides
+    from kiss.agents.sorcar.agent_file import apply_agent_overrides
 
     captured: list[dict[str, object]] = []
 
@@ -531,37 +612,37 @@ def test_prompt_job_runs_as_generated_sea(
     }
     status, text = cron_agent._run_prompt_job(job, work_dir)
     assert (status, text) == ("ok", "hello")
-    sea_path = work_dir / cron_agent.PROMPT_SEA_NAME
-    assert captured[0]["extension_agent_path"] == str(sea_path)
-    assert captured[0]["timeout"] == cron_agent.PROMPT_TIMEOUT_SECONDS
-    assert captured[0]["stop_on_timeout"] is True
+    assert not list(work_dir.iterdir())
+    sent = captured[0]
+    assert sent["extension_agent_path"] == str(cron_agent.PROMPT_SEA_PATH)
+    assert sent["prompt"] == cron_agent.PROMPT_PREAMBLE + "say 'hi'\n"
+    assert sent["model"] == "some-model"
+    assert sent["max_budget"] == 1.5
+    assert sent["work_dir"] == str(work_dir)
+    assert sent["use_worktree"] is False
+    assert sent["auto_commit"] is False
+    assert sent["record_timeout"] == cron_agent.PROMPT_TIMEOUT_SECONDS
     # Top-level task: no parent, so no reviewer sub-tree marking.
-    assert captured[0]["parent_task_id"] == ""
+    assert sent["parent_task_id"] == ""
     cmd: dict[str, object] = {
-        "agentPath": str(sea_path), "prompt": str(captured[0]["prompt"]),
-        "useWorktree": True, "autoCommit": True, "classifyTasks": None,
+        "agentPath": str(cron_agent.PROMPT_SEA_PATH), "prompt": str(sent["prompt"]),
+        "classifyTasks": None,
     }
-    assert apply_agent_overrides(cmd) == {
-        "prompt", "workDir", "model", "maxBudget", "useWorktree",
-        "autoCommit", "classifyTasks",
-    }
+    assert apply_agent_overrides(cmd) == {"classifyTasks"}
     assert cmd["prompt"] == cron_agent.PROMPT_PREAMBLE + "say 'hi'\n"
-    assert cmd["workDir"] == str(work_dir)
-    assert cmd["model"] == "some-model"
-    assert cmd["maxBudget"] == 1.5
-    assert cmd["useWorktree"] is False
-    assert cmd["autoCommit"] is False
     assert cmd["classifyTasks"] is False
 
 
-def test_prompt_sea_defaults_and_silent_result(
+def test_prompt_job_defaults_and_silent_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unset model/budget become daemon defaults; [SILENT] is silent."""
+    """An unset model/budget leave the daemon defaults in force; [SILENT] is silent."""
     from kiss.agents.sorcar import daemon_client
-    from kiss.server.agent_file import apply_agent_overrides
+
+    captured: list[dict[str, object]] = []
 
     def silent_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+        captured.append(kwargs)
         return daemon_client.TaskResult(
             text="[SILENT]", success=True, cost=0.0, tokens=0, steps=0,
         )
@@ -571,32 +652,29 @@ def test_prompt_sea_defaults_and_silent_result(
     work_dir.mkdir()
     job = {"id": "abcd1234", "prompt": "say hi", "max_budget": 0}
     assert cron_agent._run_prompt_job(job, work_dir) == ("silent", None)
-    cmd: dict[str, object] = {
-        "agentPath": str(work_dir / cron_agent.PROMPT_SEA_NAME),
-        "prompt": "x", "model": "wire-model", "maxBudget": 3.0,
-    }
-    apply_agent_overrides(cmd)
-    assert cmd["model"] == ""
-    assert cmd["maxBudget"] is None
+    assert captured[0]["max_budget"] is None
+    assert captured[0]["model"] == ""
 
 
-def test_prompt_sea_source_survives_adversarial_text(tmp_path: Path) -> None:
-    """Quotes, triple quotes, backslashes and unicode in job fields round-trip.
+def test_prompt_job_text_survives_adversarial_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quotes, triple quotes, backslashes and unicode in job fields round-trip."""
+    from kiss.agents.sorcar import daemon_client
 
-    Job values are embedded only as ``repr()`` literals — never inside
-    the static module docstring — so a name or prompt containing a
-    triple quote cannot end a string early and break the generated SEA.
-    """
-    from kiss.server.agent_file import apply_agent_overrides
+    captured: list[dict[str, object]] = []
 
+    def capture_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+        captured.append({"prompt": prompt, **kwargs})
+        return daemon_client.TaskResult(text="ok", success=True, cost=0.0, tokens=0, steps=0)
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
     name = 'bad """ name ' + "''' with \\ backslash"
     prompt = 'line1\n"""\n' + "'''\n\\n ünïcode \x00 {braces} #comment"
     job = {"id": "abcd1234", "name": name, "prompt": prompt, "model_name": name}
-    sea_path = cron_agent._write_prompt_sea(job, tmp_path)
-    cmd: dict[str, object] = {"agentPath": str(sea_path), "prompt": "x"}
-    apply_agent_overrides(cmd)
-    assert cmd["prompt"] == cron_agent.PROMPT_PREAMBLE + prompt
-    assert cmd["model"] == name
+    cron_agent._run_prompt_job(job, tmp_path)
+    assert captured[0]["prompt"] == cron_agent.PROMPT_PREAMBLE + prompt
+    assert captured[0]["model"] == name
 
 
 def test_prompt_job_marker_in_endpoint_path_is_not_a_timeout(
@@ -656,7 +734,7 @@ def test_cli_create_list_tick_manage(
     )
     job_id = str(yaml.safe_load(out)["created"]["id"])
     assert "cli job" in _run_cli(monkeypatch, capsys, "--list")
-    _set_job_fields(job_id, next_run_at=1.0)
+    _set_job_fields(job_id, next_run_at=time.time() - 1)
     assert "ran 1 job(s)" in _run_cli(monkeypatch, capsys, "--tick")
     assert "ran:" in _run_cli(monkeypatch, capsys, "--run", job_id)
     assert load_jobs()[0]["last_summary"] == "from cli"
@@ -676,15 +754,55 @@ def test_cli_nothing_to_do(
 
 
 def test_agent_script_getters(tmp_path: Path) -> None:
-    # The agent-script contract used by run_agent(agent="cron", ...): the
-    # dispatched session runs in ~/.kiss/cron/work with no git
-    # lifecycle.
-    work_dir = cron_agent.work_dir()
+    """The SEA contract used by ``run_agent(agent="cron", ...)``.
+
+    ``settings()`` picks the ``channel`` preset in ``~/.kiss/cron/work``,
+    so the resolved settings (what the dispatcher and the daemon read)
+    turn the git lifecycle, classification and inheritance off; the
+    cron guidance reaches the session through ``add_to_system_prompt()``
+    (the daemon appends it to the system prompt suffix), not the task.
+    """
+    from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
+    from kiss.agents.sorcar.sea_commands import sea_settings
+    from kiss.agents.sorcar.sea_settings import kind_defaults
+
+    work_dir = cron_agent.cron_work_dir()
     assert work_dir == str(tmp_path / "cron" / "work")
     assert Path(work_dir).is_dir()
-    assert cron_agent.use_worktree() is False
-    assert cron_agent.auto_commit() is False
+    assert cron_agent.settings() == {"kind": "channel", "work_dir": work_dir}
+    resolved = sea_settings(Path(cron_agent.__file__))
+    # Every key the channel kind sets is implicitly locked
+    # (sea_settings.merge_settings): a call cannot give cron a worktree.
+    assert resolved == {
+        "kind": "channel", **kind_defaults()["channel"],
+        "work_dir": work_dir, "locked": sorted(kind_defaults()["channel"]),
+    }
+    assert resolved["kind"] == "channel"
+    assert resolved["kind"] == "channel"
+    assert resolved["use_worktree"] is False
+    assert resolved["auto_commit"] is False
+    assert resolved["auto_classify"] is False
+    assert cron_agent.add_to_system_prompt() == cron_agent.CRON_DISPATCH_PREAMBLE
     assert "cron_job" in cron_agent.CRON_DISPATCH_PREAMBLE
+    assert [tool.__name__ for tool in cron_agent.add_to_tools()] == [
+        "cron_job", "gateway_command",
+    ]
+    # Applied by the daemon: the channel preamble (named after the script)
+    # then the cron guidance land on the system prompt suffix, after the
+    # caller's own text; the task prompt is untouched.
+    cmd: dict[str, object] = {
+        "agentPath": cron_agent.__file__, "prompt": "schedule it",
+        "appendToSystemPrompt": "CALLER",
+    }
+    apply_agent_overrides(cmd)
+    assert cmd["prompt"] == "schedule it"
+    assert cmd["workDir"] == work_dir
+    assert cmd["useWorktree"] is False
+    assert cmd["autoCommit"] is False
+    assert cmd["appendToSystemPrompt"] == (
+        "CALLER\n\n" + CHANNEL_PREAMBLE.format(name="cron_agent")
+        + "\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
+    )
 
 
 def test_store_is_plain_json_list(tmp_path: Path) -> None:
@@ -730,7 +848,7 @@ def test_scheduler_thread_runs_due_jobs_and_stops() -> None:
     job = _create(cron_job(
         "create", name="sched", command="echo scheduled", schedule="every 1h",
     ))
-    _set_job_fields(job["id"], next_run_at=1.0)
+    _set_job_fields(job["id"], next_run_at=time.time() - 1)
     stop_event = start_scheduler_thread(interval=0.05)
     try:
         deadline = time.time() + 10
@@ -791,15 +909,14 @@ def test_repeating_job_without_until_delivered_keeps_running() -> None:
 def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A job with work_dir/use_worktree/auto_commit/timeout configures its SEA and run.
+    """A job with work_dir/use_worktree/auto_commit/timeout configures its run.
 
     This is the shape of a "run the tests in my repo nightly" job: the
-    SEA's ``work_dir()`` names the project instead of the scratch
+    ``work_dir`` option names the project instead of the scratch
     directory, the git toggles are on, and ``run_agent`` waits for the
     job's own timeout instead of :data:`PROMPT_TIMEOUT_SECONDS`.
     """
     from kiss.agents.sorcar import daemon_client
-    from kiss.server.agent_file import apply_agent_overrides
 
     captured: list[dict[str, object]] = []
 
@@ -825,16 +942,14 @@ def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
     assert job["timeout"] == 21600.0
     stored = load_jobs()[0]
     assert cron_agent._run_prompt_job(stored, scratch) == ("ok", "done")
-    sea_path = scratch / cron_agent.PROMPT_SEA_NAME
-    assert captured[0]["extension_agent_path"] == str(sea_path)
-    assert captured[0]["timeout"] == 21600.0
-    cmd: dict[str, object] = {"agentPath": str(sea_path), "prompt": "x"}
-    apply_agent_overrides(cmd)
-    assert cmd["workDir"] == str(project.resolve())
-    assert cmd["useWorktree"] is True
-    assert cmd["autoCommit"] is True
-    assert cmd["classifyTasks"] is False
-    assert cmd["model"] == "some-model"
+    sent = captured[0]
+    assert sent["extension_agent_path"] == str(cron_agent.PROMPT_SEA_PATH)
+    assert sent["record_timeout"] == 21600.0
+    assert sent["work_dir"] == str(project.resolve())
+    assert sent["use_worktree"] is True
+    assert sent["auto_commit"] is True
+    assert sent["classify_tasks"] is None  # pinned off by the SEA on the daemon
+    assert sent["model"] == "some-model"
 
 
 def test_create_validates_work_dir_timeout_and_git_flags(tmp_path: Path) -> None:
@@ -926,29 +1041,38 @@ def test_unconfirmed_prompt_timeout_names_the_job_work_dir(
     Only the SEA lives in the scratch directory; the possibly still
     running task works in the job's ``work_dir``, so that is the
     directory the error names, with the kept scratch directory beside it.
+    The stand-in daemon wait never finishes and, once the job's 0.5-s
+    ``run_agent`` bound hands the task back and cron kills it, reports
+    the stop as unconfirmed.
     """
     from kiss.agents.sorcar import daemon_client
 
-    def hang(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
-        raise daemon_client.StopUnconfirmedTimeoutError("no terminal status")
+    def hang(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        kwargs["running"].set()
+        kwargs["cancel"].wait()
+        raise daemon_client.CancelledError(
+            "no terminal status",
+            daemon_client.TaskResult(text="", success=False, cost=0.0, tokens=0, steps=0),
+            confirmed=False,
+        )
 
     monkeypatch.setattr(daemon_client, "run", hang)
     project = tmp_path / "project"
     project.mkdir()
     job = _create(cron_job(
         "create", name="slow", prompt="think hard", schedule="every 1d",
-        work_dir=str(project), timeout="2.5",
+        work_dir=str(project), timeout="0.5",
     ))
     _set_job_fields(job["id"], next_run_at=1.0)
     assert tick(2.0) == 1
     stored = load_jobs()[0]
     assert stored["last_status"] == "error"
-    assert "timed out after 2.5s" in stored["last_summary"]
+    assert "timed out after 0.5s" in stored["last_summary"]
     assert f"running in {project.resolve()}" in stored["last_summary"]
     assert "MAY STILL BE RUNNING" in stored["last_summary"]
     kept = [p for p in (tmp_path / "cron" / "runs").iterdir() if p.is_dir()]
-    assert len(kept) == 1 and (kept[0] / cron_agent.PROMPT_SEA_NAME).exists()
-    assert f"SEA directory {kept[0]}" in stored["last_summary"]
+    assert len(kept) == 1 and kept[0].is_dir()
+    assert f"scratch directory {kept[0]}" in stored["last_summary"]
 
 
 def test_cli_create_with_work_dir_flags(

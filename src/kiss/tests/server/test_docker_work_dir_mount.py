@@ -100,7 +100,9 @@ class DockerWorkDirMountTest(DaemonRunApiHarness):
                 "read": tools["Read"](NOTE),
             }
             if run_parallel_task and run_parallel_task not in record["task"]:
-                record["run_parallel"] = tools["run_parallel"](f'["{run_parallel_task}"]', "1")
+                record["run_parallel"] = tools["run_parallel"](
+                    f'["{run_parallel_task}"]', max_workers="1",
+                )
             if "run_parallel" in record or not run_parallel_task:
                 tools["Write"]("index/notes/from_container.txt", "written in the container\n")
             calls.append(record)

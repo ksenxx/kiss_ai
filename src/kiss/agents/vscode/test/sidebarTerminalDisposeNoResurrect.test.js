@@ -207,10 +207,13 @@ async function runTests() {
     1,
     'sanity: exactly one daemon connection before dispose',
   );
+  // The working directory is a global value chosen by the user, so the
+  // view no longer watches the window's workspace folders at all; the
+  // assertions below pin that a late message never registers one either.
   assert.strictEqual(
     activeWorkspaceSubs,
-    1,
-    'sanity: one live workspace-folders subscription before dispose',
+    0,
+    'sanity: no workspace-folders subscription (the work dir is global)',
   );
 
   // --- Terminal teardown ---

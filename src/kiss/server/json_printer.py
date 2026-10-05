@@ -1940,7 +1940,11 @@ class JsonPrinter(Printer):
         Returns:
             str: Always the empty string.
         """
-        self._check_stop()
+        # An ``llm_call`` is the billing record of a call already paid
+        # for; a Stop must not drop it (the stopped call's own record is
+        # printed while the Stop is in flight).
+        if type != "llm_call":
+            self._check_stop()
         if type == "text":
             from io import StringIO
 

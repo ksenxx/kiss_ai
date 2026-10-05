@@ -274,18 +274,20 @@ def _tool_result_response_dict(content: Any) -> dict[str, Any]:
     return {"result": content}
 
 
-def _audio_token_count(details: Any) -> int:
-    """Return the AUDIO ``token_count`` in a Gemini per-modality token list.
+def _modality_token_count(
+    details: Any, modality: types.MediaModality = types.MediaModality.AUDIO
+) -> int:
+    """Return the *modality* ``token_count`` in a Gemini per-modality token list.
 
     Args:
-        details: ``usage_metadata.prompt_tokens_details`` or
-            ``cache_tokens_details``: a list of ``ModalityTokenCount``,
-            or ``None`` when the response omits it.
+        details: ``usage_metadata.prompt_tokens_details``,
+            ``cache_tokens_details`` or ``candidates_tokens_details``: a
+            list of ``ModalityTokenCount``, or ``None`` when the response
+            omits it.
+        modality: The modality to count (AUDIO by default).
     """
     return sum(
-        d.token_count or 0
-        for d in details or ()
-        if d.modality == types.MediaModality.AUDIO
+        d.token_count or 0 for d in details or () if d.modality == modality
     )
 
 
@@ -882,7 +884,10 @@ class GeminiModel(Model):
 
     def extract_input_output_token_counts_from_response(
         self, response: Any
-    ) -> tuple[int, int, int, int] | tuple[int, int, int, int, int, int, int, int]:
+    ) -> (
+        tuple[int, int, int, int]
+        | tuple[int, int, int, int, int, int, int, int, int]
+    ):
         """Extracts token counts from a Gemini API response.
 
         Gemini prices audio input above text on several models (e.g.
@@ -891,30 +896,41 @@ class GeminiModel(Model):
         (``prompt_tokens_details``) and of its cached part
         (``cache_tokens_details``) are split out for
         :func:`~kiss.core.models.model_info.calculate_cost` to bill at
-        the model's audio rates.
+        the model's audio rates.  Image models price generated images
+        far above text output (gemini-3.1-flash-image: $60 vs $3 per
+        1M), so the IMAGE share of ``candidates_tokens_details`` is
+        split out too.
 
         Returns:
             ``(input_tokens, output_tokens, cache_read_tokens,
             cache_write_tokens)`` with text counts only, or, when the
-            prompt holds audio, the 8-tuple that adds
-            ``cache_write_1h_tokens`` (0), ``audio_input_tokens``
-            (uncached), ``audio_output_tokens`` (0) and
-            ``audio_cache_read_tokens``.
+            prompt holds audio or the output holds images, the 9-tuple
+            that adds ``cache_write_1h_tokens`` (0),
+            ``audio_input_tokens`` (uncached), ``audio_output_tokens``
+            (0), ``audio_cache_read_tokens`` and
+            ``image_output_tokens``.
         """
         if hasattr(response, "usage_metadata") and response.usage_metadata:
             um = response.usage_metadata
-            prompt_tokens = um.prompt_token_count or 0
-            output_tokens = um.candidates_token_count or 0
+            candidates_tokens = um.candidates_token_count or 0
+            image_output = min(
+                _modality_token_count(
+                    getattr(um, "candidates_tokens_details", None),
+                    types.MediaModality.IMAGE,
+                ),
+                candidates_tokens,
+            )
             thoughts_tokens = getattr(um, "thoughts_token_count", 0) or 0
-            output_tokens += thoughts_tokens
+            output_tokens = candidates_tokens - image_output + thoughts_tokens
+            prompt_tokens = um.prompt_token_count or 0
             cached_tokens = getattr(um, "cached_content_token_count", 0) or 0
             tool_use_tokens = getattr(um, "tool_use_prompt_token_count", 0) or 0
             cached_audio = min(
-                _audio_token_count(getattr(um, "cache_tokens_details", None)),
+                _modality_token_count(getattr(um, "cache_tokens_details", None)),
                 cached_tokens,
             )
             audio_tokens = max(
-                _audio_token_count(getattr(um, "prompt_tokens_details", None))
+                _modality_token_count(getattr(um, "prompt_tokens_details", None))
                 - cached_audio,
                 0,
             )
@@ -922,10 +938,10 @@ class GeminiModel(Model):
                 max(prompt_tokens - cached_tokens - audio_tokens, 0) + tool_use_tokens
             )
             text_cached = cached_tokens - cached_audio
-            if audio_tokens or cached_audio:
+            if audio_tokens or cached_audio or image_output:
                 return (
                     input_tokens, output_tokens, text_cached, 0, 0,
-                    audio_tokens, 0, cached_audio,
+                    audio_tokens, 0, cached_audio, image_output,
                 )
             return input_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
