@@ -269,6 +269,32 @@ def test_lint_checks_declares_claims_against_the_script(tmp_path: Path) -> None:
     assert lint_prose() == []
 
 
+def test_lint_flags_prose_claiming_a_timeout_stops_the_sub_task(tmp_path: Path) -> None:
+    """The pre-U1 wording ("then stops the sub-task") is a stale-prose finding.
+
+    Four such sentences survived U1 with the lint green (third
+    reassessment, F1); this rule catches each of their spellings.
+    """
+    stale = (
+        "it waits for the SEA's `timeout`, else 3600 seconds, then stops the sub-task.",
+        "seconds a `run_agent` call waits for this SEA before stopping it.",
+        "A `run_agent` call waits for its sub-task and stops it when the wait runs out.",
+        "defaults to 3600; on expiry the sub-task is stopped and the call returns an error.",
+    )
+    for index, sentence in enumerate(stale):
+        [finding] = lint_prose(_prose_root(tmp_path / f"stale{index}", sentence))
+        assert finding.code == "stale-prose"
+        assert finding.message.startswith("line 3: claims a run_agent timeout stops the sub-task")
+    # The corrected wording, and agent_job's own kill action, pass.
+    fine = (
+        "on expiry the sub-task is not stopped — it keeps running as an `agent_job`.",
+        'agent_job then waits for the result ("wait") or stops the sub-task ("kill").',
+        "Sub-agent task did not finish within 30 s and was stopped.",
+    )
+    for index, sentence in enumerate(fine):
+        assert lint_prose(_prose_root(tmp_path / f"fine{index}", sentence)) == []
+
+
 # --- T6: the ran line of a path dispatch names the command --------------------------
 
 

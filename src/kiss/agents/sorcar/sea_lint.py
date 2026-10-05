@@ -199,6 +199,13 @@ STALE_PROSE = (
                    r"|\bstill wins?\b"),
         "claims a SEA's settings win over a call; state sea_settings.PRECEDENCE_RULE instead",
     ),
+    (
+        re.compile(r"(?i)\b(?:then|before) stop(?:s|ping) (?:it|the sub-task)\b"
+                   r"|\bstops it when the wait runs out\b"
+                   r"|\bon expiry the sub-task is stopped\b"),
+        "claims a run_agent timeout stops the sub-task; since U1 the call returns the "
+        "agent_job id and the sub-task keeps running",
+    ),
 )
 """``(pattern, message)`` pairs of the ``stale-prose`` rule."""
 

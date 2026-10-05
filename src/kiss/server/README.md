@@ -395,12 +395,16 @@ string, yields a diagnostic instead.
 
 ### `timeout` — optional, for SEAs that run longer than an hour
 
-A `run_agent` call waits for its sub-task and stops it when the wait
-runs out (`agent_dispatch.resolve_timeout`): an explicit `timeout`
+A `run_agent` call waits for its sub-task for a bounded time
+(`agent_dispatch.resolve_timeout`): an explicit `timeout`
 argument wins; an empty one takes the SEA's `settings()["timeout"]`
 when that is positive; with neither,
-`DEFAULT_DISPATCH_TIMEOUT_SECONDS`, 3600 s.  A SEA whose
-runs may take longer declares it (`/write_paper` 6 h, `/review_paper`
+`DEFAULT_DISPATCH_TIMEOUT_SECONDS`, 3600 s.  When the bound expires
+the sub-task is NOT stopped: it keeps running as an `agent_job` and
+the call returns the job's id (`agent_job(id, "wait")` collects the
+result, `"kill"` stops it; a job still running when the calling task
+ends is killed).  A SEA whose runs may take longer than an hour
+declares it so a caller is not handed a job id too early (`/write_paper` 6 h, `/review_paper`
 2 h, `/revise_and_review_paper` 24 h); `/write` pins the default
 explicitly:
 
