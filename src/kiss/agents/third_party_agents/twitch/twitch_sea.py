@@ -28,6 +28,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -56,14 +57,40 @@ _DEFAULT_SCOPES = (
 )
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/twitch help``."""
-    return (
-        "Channel agent for Twitch (Helix API and chat, signed in with the OAuth2 device code "
-        "grant) that gets stream, channel and user info, lists chatters, sends chat messages, "
-        'bans users, and lists or creates clips; use run_agent(agent="twitch", task="...") '
-        "or the `kiss-twitch -t '<task>'` CLI (start with the task `authenticate`)."
-    )
+class TwitchSea(BaseSea):
+    """The ``/twitch`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/twitch help``."""
+        return (
+            "Channel agent for Twitch (Helix API and chat, signed in with the OAuth2 device code "
+            "grant) that gets stream, channel and user info, lists chatters, sends chat messages, "
+            'bans users, and lists or creates clips; use run_agent(agent="twitch", task="...") '
+            "or the `kiss-twitch -t '<task>'` CLI (start with the task `authenticate`)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the Twitch channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + TwitchAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + TwitchAgent.channel_system_prompt
 
 
 def _device_provider() -> DeviceFlowProvider:
@@ -815,32 +842,6 @@ class TwitchAgent(BaseChannelAgent):
 def main() -> None:
     """Run the TwitchAgent from the command line with chat persistence."""
     channel_main(TwitchAgent, "kiss-twitch")
-
-
-def add_to_tools() -> list:
-    """Return the Twitch channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return TwitchAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return TwitchAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

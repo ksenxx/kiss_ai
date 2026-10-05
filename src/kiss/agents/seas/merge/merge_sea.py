@@ -19,11 +19,11 @@ Two ways to run it:
    auto-commit), with the user's text as the task — for example
    ``/merge finish the conflicted merge of kiss/wt-foo into main``.
 
-Both ways run the same prompt: :func:`prompt` (the SEA ``prompt(task)``
-getter) wraps the task — the user's text, or the facts block
+Both ways run the same prompt: :class:`MergeSea`'s ``prompt(task)``
+wraps the task — the user's text, or the facts block
 :func:`conflict_task` builds for an auto-commit run — with the standing
-merge instructions.  The getters follow the SEA contract in
-:mod:`kiss.agents.sorcar.sea_settings`.
+merge instructions.  The methods follow the SEA contract in
+:mod:`kiss.agents.seas.base.base_sea`.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core.brand import PRODUCT_NAME
 
 MAX_BUDGET_USD = 5.0
@@ -82,45 +83,45 @@ Rules you MUST follow:
 """
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/merge help``."""
-    return (
-        "Resolves the git merge conflicts left in the current repository by reading both "
-        "sides of every conflict block, writing a resolution that keeps the intent of both, "
-        "and staging the resolved files without committing; use it as `/merge <task>` in "
-        "the chat (e.g. `/merge finish the conflicted merge of kiss/wt-foo into main`) or "
-        'as `run_agent(agent="merge", task=...)`.'
-    )
+class MergeSea(BaseSea):
+    """The ``/merge`` SEA."""
 
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/merge help``."""
+        return (
+            "Resolves the git merge conflicts left in the current repository by reading both "
+            "sides of every conflict block, writing a resolution that keeps the intent of both, "
+            "and staging the resolved files without committing; use it as `/merge <task>` in "
+            "the chat (e.g. `/merge finish the conflicted merge of kiss/wt-foo into main`) or "
+            'as `run_agent(agent="merge", task=...)`.'
+        )
 
-def system_prompt() -> str:
-    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
-    return SYSTEM_PROMPT
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
+        return SYSTEM_PROMPT
 
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """A worker on the real checkout (a merge must not run in a worktree).
 
-def settings() -> dict[str, Any]:
-    """A worker on the real checkout (a merge must not run in a worktree).
+        The budget is capped at :data:`MAX_BUDGET_USD`.
+        """
+        return settings | {
+            "kind": "worker",
+            "max_budget": MAX_BUDGET_USD,
+        }
 
-    The budget is capped at :data:`MAX_BUDGET_USD`.
-    """
-    return {
-        "kind": "worker",
-        "max_budget": MAX_BUDGET_USD,
-    }
+    def prompt(self, task: str) -> str:
+        """Return the prompt of a run on *task*: the task, then the standing instructions.
 
-
-def prompt(task: str) -> str:
-    """Return the prompt of a run on *task*: the task, then the standing instructions.
-
-    The SEA ``prompt(task)`` getter, so ``/merge <text>`` and
-    ``run_agent(agent="merge", task=...)`` get the same instructions as
-    an auto-commit run (:func:`conflict_task`).
-    """
-    return (
-        f"{task.strip()}\n\n"
-        "Resolve every conflict, remove all conflict markers, and stage the "
-        "resolved files with `git add`. Do not commit."
-    )
+        The SEA ``prompt(task)`` method, so ``/merge <text>`` and
+        ``run_agent(agent="merge", task=...)`` get the same instructions as
+        an auto-commit run (:func:`conflict_task`).
+        """
+        return (
+            f"{task.strip()}\n\n"
+            "Resolve every conflict, remove all conflict markers, and stage the "
+            "resolved files with `git add`. Do not commit."
+        )
 
 
 def conflict_task(

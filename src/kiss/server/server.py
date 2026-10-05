@@ -87,6 +87,7 @@ from kiss.server.task_runner import (
     parse_task_tags,
 )
 from kiss.server.task_update import mark_legacy_updates_as_side_channels
+from kiss.server.terminal_tab import TerminalService
 
 __all__ = [
     "VSCodeServer",
@@ -468,6 +469,9 @@ class VSCodeServer(
         self.browser_tabs = BrowserTabService(
             self.printer, Path(_persistence._KISS_DIR) / "browser-tab-profile",
         )
+        # The remote webapp's terminal tabs: one pty shell each, owned
+        # by the connection that opened it (``terminalOpen``).
+        self.terminals = TerminalService(self.printer)
         # The printer's local talk bookkeeping only knows which
         # connection addressed which tab and whether a chat webview is
         # attached; whether a tab is SHOWN by a local webview is decided

@@ -194,10 +194,16 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             f'''
             """SEA attaching its tools to a test container."""
 
+            from kiss.agents.seas.base.base_sea import BaseSea
 
-            def settings() -> dict:
-                """The container the run's tools execute in; no worktree."""
-                return {{"docker_image": "container:{self.container.id}", "use_worktree": False}}
+
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    """The container the run's tools execute in; no worktree."""
+                    return settings | {{
+                        "docker_image": "container:{self.container.id}",
+                        "use_worktree": False,
+                    }}
             ''',
         )
         result = sorcar.run(
@@ -220,10 +226,15 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             '''
             """SEA with a mistyped docker_image setting."""
 
+            from kiss.agents.seas.base.base_sea import BaseSea
 
-            def settings() -> dict:
-                """Wrong type."""
-                return {"docker_image": 42}
+
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    """Wrong type."""
+                    return settings | {"docker_image": 42}
+
+
             ''',
         )
         result = sorcar.run(

@@ -4,10 +4,10 @@
 # add your name here
 """``sea lint``: a deterministic checker (and codemod) over every agent script (SEA).
 
-The SEA contract lives in :mod:`kiss.agents.sorcar.sea_settings`
-(``settings()`` keys, kinds and their defaults) and
-:mod:`kiss.agents.sorcar.sea_commands` (getters, ``extends`` layers,
-the ``/command`` registry).  This module checks every script against
+The SEA contract lives in :class:`kiss.agents.seas.base.base_sea.BaseSea`
+(the methods), :mod:`kiss.agents.sorcar.sea_settings` (``settings``
+keys, kinds and their defaults) and :mod:`kiss.agents.sorcar.sea_commands`
+(the launcher, the ``/command`` registry).  This module checks every script against
 it, so a contract change is enforced by ``uv run check`` instead of by
 hand-grepping scripts and docstrings
 (``reports/sea-run-agent-semantics-and-automation-2026-10-04.md``, A1).
@@ -15,10 +15,11 @@ hand-grepping scripts and docstrings
 Rules, each a :class:`Finding` code:
 
 ``broken``
-    The script does not load or its settings / getters violate the
-    contract (import error, unknown, renamed or removed key, ill-typed
-    value, unknown kind, ``extends`` cycle, a getter returning the
-    wrong type).  A renamed key is reported as ``renamed-key`` instead.
+    The script does not load or its settings / methods violate the
+    contract (import error, no or several ``BaseSea`` subclasses,
+    unknown, renamed or removed key, ill-typed value, unknown kind, a
+    method returning the wrong type).  A renamed key is reported as
+    ``renamed-key`` instead.
 ``renamed-key``
     ``settings()`` uses a former key name
     (:data:`~kiss.agents.sorcar.sea_settings.RENAMED_SETTINGS`);
@@ -40,9 +41,9 @@ Rules, each a :class:`Finding` code:
 ``stale-docstring``
     A docstring of the script (module, class, function or constant)
     mentions a getter the contract no longer has (``model()``,
-    ``tool_profile()``, ``is_parallel()``, ``dispatch_timeout()``,
-    ``append_to_system_prompt()``, ... as ``name()`` or
-    ``:func:`name```), or makes one of the ``stale-prose`` claims
+    ``tool_profile()``, ``add_to_tools()``, ``add_to_system_prompt()``,
+    ``add_to_prompt()``, ... as ``name()`` or ``:func:`name```), or
+    makes one of the ``stale-prose`` claims
     below (a ``~/.kiss/`` path, settings that "win over" a call, a
     timeout that "stops" the sub-task).
 ``home-literal``
@@ -78,12 +79,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kiss.agents.sorcar.sea_commands import (
+    BASE_FOLDER,
+    base_settings,
     bundled_commands,
     check_sea,
+    defines,
     get_command,
     list_commands,
+    load_sea,
     model_sea,
-    sea_getter_value,
+    own_settings,
 )
 from kiss.agents.sorcar.sea_settings import (
     META_SETTINGS,
@@ -91,6 +96,7 @@ from kiss.agents.sorcar.sea_settings import (
     SeaError,
     declares_hidden,
     kind_defaults,
+    settings_functions,
 )
 
 REMOVED_GETTERS = (
@@ -104,10 +110,14 @@ REMOVED_GETTERS = (
     "auto_commit",
     "append_to_system_prompt",
     "append_to_prompt",
+    "add_to_system_prompt",
+    "add_to_prompt",
+    "add_to_tools",
     "docker_image",
 )
 """Former getter names: a docstring mentioning ``<name>()`` describes a contract that no longer
-exists."""
+exists (the ``add_to_*`` getters became the ``prompt``, ``system_prompt`` and ``tools``
+methods, which receive the current value and return the new one)."""
 
 BUNDLED_SEA_DIRS = ("agents/seas", "agents/sorcar", "agents/third_party_agents")
 """Where the bundled scripts live, relative to the ``kiss`` package."""
@@ -138,7 +148,10 @@ class Finding:
 def bundled_seas() -> list[Path]:
     """Return every bundled script, sorted: the ``*_sea.py`` files and the built-in commands."""
     package = Path(__file__).resolve().parents[2]
-    scripts = {path for sub in BUNDLED_SEA_DIRS for path in (package / sub).rglob("*_sea.py")}
+    scripts = {
+        path for sub in BUNDLED_SEA_DIRS for path in (package / sub).rglob("*_sea.py")
+        if path.parent.name != BASE_FOLDER  # base_sea.py is the contract, not a SEA
+    }
     return sorted(scripts | set(bundled_commands().values()))
 
 
@@ -243,7 +256,7 @@ def _stale_declares_claim(match: re.Match[str]) -> str:
         except (ValueError, SyntaxError):
             return f"the quoted settings of `/{name}` are not a dict literal"
     try:
-        declared = sea_getter_value(path, "settings") or {}
+        declared = own_settings(load_sea(path))
     except SeaError as exc:
         return f"`/{name}` does not load: {exc}"
     if claimed != declared:
@@ -310,20 +323,14 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
         return findings
     try:
         # Exactly what the daemon does for a run of the script, plus the
-        # getter checks ``/<name> check`` makes.
-        layers, _cmd, _description = check_sea(path, require_description=False)
+        # method checks ``/<name> check`` makes.
+        seas, _cmd, _description = check_sea(path, require_description=False)
+        merged = base_settings(seas)
+        declared = own_settings(seas[-1])
     except SeaError as exc:
         findings.append(Finding(path, "broken", str(exc)))
         return findings
-    own = layers[-1]
-    namespace = own.namespace
-    settings_fn = namespace.get("settings")
-    try:
-        declared = settings_fn() if callable(settings_fn) else {}
-    except Exception as exc:  # noqa: BLE001 - a second call may fail where the loader's passed
-        return [*findings, Finding(path, "broken", f"settings() raised on a second call: {exc}")]
-    declared = declared if isinstance(declared, dict) else {}
-    kind = own.settings["kind"]
+    kind = merged["kind"]
     defaults = kind_defaults()[kind]
     for key, value in declared.items():
         if key not in META_SETTINGS and key in defaults and defaults[key] == value:
@@ -334,7 +341,7 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
                     f"settings()[{key!r}] = {value!r} repeats the default of kind {kind!r}",
                 )
             )
-    if command is not None and not callable(namespace.get("description")):
+    if command is not None and not defines(seas, "description"):
         findings.append(
             Finding(
                 path,
@@ -342,7 +349,7 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
                 f"/{command} has no description() for its help text",
             )
         )
-    model = own.settings.get("model")
+    model = merged.get("model")
     if isinstance(model, str) and model and not _known_model(model):
         findings.append(
             Finding(
@@ -351,7 +358,6 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
                 f"settings()['model'] = {model!r} is no catalogued model or model-picker SEA",
             )
         )
-    merged = _merged(layers)
     for key in merged.get("locked") or ():
         if key not in merged:
             findings.append(
@@ -371,13 +377,6 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
             )
         )
     return findings
-
-
-def _merged(layers: list) -> dict:
-    """Return the merged settings of *layers*."""
-    from kiss.agents.sorcar.sea_settings import merge_settings
-
-    return merge_settings([layer.settings for layer in layers])
 
 
 def _known_model(name: str) -> bool:
@@ -473,7 +472,7 @@ def _code_strings(tree: ast.Module) -> list[ast.Constant]:
 
 
 def _settings_dict_keys(tree: ast.Module) -> list[ast.Constant]:
-    """Return the string constants naming settings keys inside the module's ``settings`` function.
+    """Return the string constants naming settings keys inside the SEA's ``settings`` method.
 
     The keys of every dict literal in the function except dicts that
     are the *value* of another dict's key (``model_config``'s contents
@@ -481,9 +480,7 @@ def _settings_dict_keys(tree: ast.Module) -> list[ast.Constant]:
     which name keys too.
     """
     keys: list[ast.Constant] = []
-    for node in tree.body:
-        if not (isinstance(node, ast.FunctionDef) and node.name == "settings"):
-            continue
+    for node in settings_functions(tree):
         nested = {
             id(value)
             for sub in ast.walk(node)

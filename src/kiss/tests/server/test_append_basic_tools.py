@@ -16,10 +16,10 @@ agent-script overrides → ``WorktreeSorcarAgent.run`` →
 real without any model API calls.
 
 Contract under test: without an agent script, or with one defining
-``add_to_tools()``, the agent gets the built-in basic toolset (plus the
+``tools()``, the agent gets the built-in basic toolset (plus the
 script's tools); with a script whose ``settings()`` picks the ``none``
 tool profile the agent's ONLY tools are ``finish`` and the tools its
-``add_to_tools()`` returned.  Extra tools reach the agent through the
+``tools()`` returned.  Extra tools reach the agent through the
 agent script alone: the ``run`` command has no tools or
 append-basic-tools wire field, and a client sending either anyway is
 ignored.
@@ -278,28 +278,30 @@ class DaemonRunApiHarness(unittest.TestCase):
     def _write_tools_agent(
         self, returns: str = "[client_tool]", only_script_tools: bool = False,
     ) -> str:
-        """Write an agent script whose ``add_to_tools()`` returns *returns*; return its path.
+        """Write a SEA whose ``tools()`` returns ``tools + <returns>``; return its path.
 
         Args:
-            returns: Python expression for ``add_to_tools()``'s return
-                value; the script defines one ``client_tool`` to refer to.
-            only_script_tools: When true the script's ``settings()``
-                picks the ``none`` tool profile, so the run gets only
+            returns: Python expression (a list) added to the tools the
+                run has; the script defines one ``client_tool`` to refer to.
+            only_script_tools: When true the SEA's ``settings()`` picks
+                the ``none`` tool profile, so the run gets only
                 ``finish`` plus the returned tools (no basic toolset).
         """
-        settings_fn = (
+        settings_method = (
             '''
-            def settings() -> dict:
-                """Drop the built-in toolset: only finish + add_to_tools()."""
-                return {"tool_profile": "none"}
+                def settings(self, settings):
+                    """Drop the built-in toolset: only finish + tools()."""
+                    return settings | {"tool_profile": "none"}
             '''
             if only_script_tools else ""
         )
-        name = "only_tools_agent.py" if only_script_tools else "add_to_tools_agent.py"
+        name = "only_tools_agent.py" if only_script_tools else "tools_agent.py"
         return self._write_py(
             name,
             f'''
-            """Agent script supplying tools through add_to_tools()."""
+            """SEA supplying tools through tools()."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
             def client_tool(x: int) -> int:
@@ -310,11 +312,12 @@ class DaemonRunApiHarness(unittest.TestCase):
                 """
                 return 2 * x
 
-            {settings_fn}
 
-            def add_to_tools():
-                """Return the tools the agent may call."""
-                return {returns}
+            class Sea(BaseSea):
+                {settings_method}
+                def tools(self, tools):
+                    """Return the tools the agent may call."""
+                    return tools + {returns}
             ''',
         )
 
@@ -369,15 +372,15 @@ class DaemonRunApiHarness(unittest.TestCase):
 
 
 class AppendBasicToolsApiTest(DaemonRunApiHarness):
-    """Drive ``sorcar.run`` with ``add_to_tools()`` scripts against a real daemon.
+    """Drive ``sorcar.run`` with ``tools()`` scripts against a real daemon.
 
     Covers both an additive script (the basic toolset stays) and one
     whose ``settings()`` picks the ``none`` tool profile (only finish
     + the script's tools).
     """
 
-    def test_add_to_tools_appends_basic_tools(self) -> None:
-        """An ``add_to_tools()`` script keeps the built-in basic toolset.
+    def test_tools_method_keeps_basic_tools(self) -> None:
+        """A ``tools()`` SEA keeps the built-in basic toolset.
 
         The executor must see the basic tools (Bash/Read/Edit/Write,
         summary, run_agent, ask_user_question, talk, set_model,
@@ -411,7 +414,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
 
         The executor's tool list must be EXACTLY ``finish`` (prepended
         by ``RelentlessAgent.perform_task``) followed by the tools the
-        script's ``add_to_tools()`` returned — no Bash, no summary, no
+        script's ``tools()`` returned — no Bash, no summary, no
         run_agent, nothing else.
         """
         calls: list[dict[str, Any]] = []
@@ -427,8 +430,8 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert result.success is True
         assert self._executor_tool_names(calls) == ["finish", "client_tool"]
 
-    def test_none_profile_empty_add_to_tools_only_finish(self) -> None:
-        """A ``none``-profile script whose ``add_to_tools()`` is empty: finish only."""
+    def test_none_profile_empty_tools_only_finish(self) -> None:
+        """A ``none``-profile script whose ``tools()`` is empty: finish only."""
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
         result = sorcar.run(
@@ -451,12 +454,19 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         agent_path = self._write_py(
             "own_tools_agent.py",
             '''
-            """Agent script whose add_to_tools() is the whole tool set."""
+            """Agent script whose tools() is the whole tool set."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
-            def settings() -> dict:
-                """Run with no built-in tools."""
-                return {"tool_profile": "none"}
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    """Run with no built-in tools."""
+                    return settings | {"tool_profile": "none"}
+
+                def tools(self, tools):
+                    """Run with only finish and script_tool."""
+                    return tools + [script_tool]
 
 
             def script_tool() -> str:
@@ -465,13 +475,10 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
 
 
             def helper() -> str:
-                """Defined at top level but not returned by add_to_tools()."""
+                """Defined at top level but not returned by tools()."""
                 return "helper"
 
 
-            def add_to_tools() -> list:
-                """Run with only finish and script_tool."""
-                return [script_tool]
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -487,8 +494,8 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert result.success is True
         assert self._executor_tool_names(calls) == ["finish", "script_tool"]
 
-    def test_agent_script_add_to_tools_extends_the_basic_toolset(self) -> None:
-        """A script ``add_to_tools()`` adds its tools to the basic toolset.
+    def test_agent_script_tools_extends_the_basic_toolset(self) -> None:
+        """A script ``tools()`` adds its tools to the basic toolset.
 
         The executor sees Bash/Read/... plus ``finish`` and the
         script's tool.
@@ -498,15 +505,20 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             '''
             """Agent script adding a tool to the basic toolset."""
 
+            from kiss.agents.seas.base.base_sea import BaseSea
+
 
             def script_tool() -> str:
                 """Return a marker."""
                 return "script"
 
 
-            def add_to_tools() -> list:
-                """Add script_tool to the basic toolset."""
-                return [script_tool]
+            class Sea(BaseSea):
+                def tools(self, tools):
+                    """Add script_tool to the basic toolset."""
+                    return tools + [script_tool]
+
+
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -524,24 +536,27 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         for expected in ("Bash", "Read", "Edit", "Write", "finish", "script_tool"):
             assert expected in names, f"{expected} missing from {names}"
 
-    def test_agent_script_add_to_tools_path_fails_task(self) -> None:
-        """An ``add_to_tools()`` returning a file path stops the task loudly."""
+    def test_agent_script_tools_path_fails_task(self) -> None:
+        """A ``tools()`` returning a file path stops the task loudly."""
         other_script = self._write_tools_agent()
         agent_path = self._write_py(
             "path_tools_agent.py",
             f'''
-            """Agent script with a path-returning add_to_tools()."""
+            """SEA with a path-returning tools()."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
 
 
-            def add_to_tools() -> str:
-                """Return a path (not accepted)."""
-                return {other_script!r}
+            class Sea(BaseSea):
+                def tools(self, tools) -> str:
+                    """Return a path (not accepted)."""
+                    return {other_script!r}
             ''',
         )
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
         result = sorcar.run(
-            "script with broken getter",
+            "script with broken tools()",
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
@@ -549,9 +564,16 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        assert "add_to_tools()" in result.text
-        assert "list of tool callables" in result.text
         assert calls == [], "no executor session may start for a broken script"
+        # The hook runs lazily inside ``SorcarAgent.perform_task``, so
+        # the diagnostics are the task's persisted result (the daemon
+        # broadcasts no ``result`` event for an agent that RETURNED a
+        # failure summary, so ``result.text`` stays empty here).
+        persisted = {
+            row["id"]: str(row["result"]) for row in _persistence._load_history()
+        }
+        assert "tools() of agent script" in persisted[result.task_id]
+        assert "list of tool callables" in persisted[result.task_id]
 
     def test_restricted_failure_skips_summarizer(self) -> None:
         """A restricted run's failure path launches no Read/Bash summarizer.
@@ -623,19 +645,19 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert "finish" in names
 
     def test_client_sent_wire_fields_are_ignored(self) -> None:
-        """``appendBasicTools`` / ``tools`` sent by a client are ignored.
+        """``appendBasicTools`` / ``toolsHook`` sent by a client are ignored.
 
         Both are daemon-side fields staged by the agent-script loader,
         never wire input: a raw command carrying ``appendBasicTools``
-        (a bool ``False`` or a string ``"false"``) or a ``tools`` JSON
+        (a bool ``False`` or a string ``"false"``) or a ``toolsHook`` JSON
         value keeps the full toolset instead of stripping tools or
         crashing the task thread.
         """
         for extra in (
             {"appendBasicTools": "false"},
             {"appendBasicTools": False},
-            {"appendBasicTools": False, "tools": ["/some/tools.py"]},
-            {"tools": "/some/tools.py", "toolsFile": "/some/tools.py"},
+            {"appendBasicTools": False, "toolsHook": ["/some/tools.py"]},
+            {"toolsHook": "/some/tools.py", "systemPromptHook": "x", "tools": "/some/tools.py"},
         ):
             calls: list[dict[str, Any]] = []
             self._install_executor_stub(calls)

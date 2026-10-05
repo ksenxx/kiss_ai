@@ -7,9 +7,9 @@
 A real daemon runs a parent whose scripted model calls ``run_parallel``
 with ``agent`` naming a SEA file.  Each child's request to the stand-in
 model shows the SEA's configuration: its ``system_prompt()`` as the
-base prompt, its ``add_to_system_prompt()`` after the parent's own
+base prompt, its ``system_prompt()`` addition after the parent's own
 suffix, its ``prompt(task)`` wrapping the child's task, its
-``add_to_tools()`` tool, and its ``tool_profile`` setting.  A channel
+``tools()`` tool, and its ``tool_profile`` setting.  A channel
 agent or an unknown agent is refused with an error string the parent
 sees.  The children inherit the parent's model and sequential/parallel
 choice through the same table as ``run_agent``.
@@ -37,29 +37,27 @@ from kiss.tests.server.parallel_agent_harness import (
 )
 
 CHILD_SEA = textwrap.dedent('''
+    from kiss.agents.seas.base.base_sea import BaseSea
+
     def child_probe(what: str) -> str:
         """Probe *what*."""
         return what
 
 
-    def settings():
-        return {"tool_profile": "bash", "allow_fan_out": False}
+    class Sea(BaseSea):
+        def settings(self, settings):
+            return settings | {"tool_profile": "bash", "allow_fan_out": False}
 
+        def prompt(self, task):
+            return "[child-sea] " + task + "\\n\\nCHILD-ADD"
 
-    def prompt(task: str) -> str:
-        return "[child-sea] " + task + "\\n\\nCHILD-ADD"
+        def system_prompt(self, system_prompt):
+            # The hook sees the assembled prompt (the parent's inherited
+            # suffix included) and may wrap it on both sides.
+            return "CHILD-SEA SYSTEM PROMPT\\n\\n" + system_prompt + "\\n\\nCHILD-SEA PROTOCOL"
 
-
-    def system_prompt() -> str:
-        return "CHILD-SEA SYSTEM PROMPT"
-
-
-    def add_to_system_prompt() -> str:
-        return "CHILD-SEA PROTOCOL"
-
-
-    def add_to_tools():
-        return [child_probe]
+        def tools(self, tools):
+            return tools + [child_probe]
 ''')
 
 
@@ -180,24 +178,30 @@ def test_run_parallel_children_run_as_the_named_agent_script(
 
 
 PARENT_SEA = textwrap.dedent('''
+    from kiss.agents.seas.base.base_sea import BaseSea
+
     def parent_probe(what: str) -> str:
         """Parent probe *what*."""
         return what
 
 
-    def add_to_tools():
-        return [parent_probe]
+    class Sea(BaseSea):
+        def tools(self, tools):
+            return tools + [parent_probe]
 ''')
 
 PICKY_SEA_TEMPLATE = textwrap.dedent('''
-    def settings():
-        return {{"model_config": {model_config!r}}}
+    from kiss.agents.seas.base.base_sea import BaseSea
 
 
-    def prompt(task: str) -> str:
-        if "KID-BAD" in task:
-            raise KeyError("no prompt for " + task)
-        return "[picky] " + task
+    class Sea(BaseSea):
+        def settings(self, settings):
+            return settings | {{"model_config": {model_config!r}}}
+
+        def prompt(self, task):
+            if "KID-BAD" in task:
+                raise KeyError("no prompt for " + task)
+            return "[picky] " + task
 ''')
 
 
@@ -207,7 +211,7 @@ def test_run_parallel_children_inherit_the_parent_and_a_broken_child_fails_alone
     """The fan-out inheritance matches ``run_agent``'s; a per-task getter failure is per child.
 
     The children end their prompt with the parent's own prompt suffix,
-    carry the parent's extra tool (its script's ``add_to_tools()``),
+    carry the parent's extra tool (its SEA's ``tools()``),
     run on the model configuration the child SEA names (a second
     stand-in server), and a ``prompt(task)`` that raises for ONE task
     fails that child alone while its sibling's result is collected.

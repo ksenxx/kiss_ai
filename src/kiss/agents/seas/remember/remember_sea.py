@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from kiss.agents.seas.agents_md import add_instruction, list_instructions
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.core.brand import HOME_DIR
 
 SYSTEM_PROMPT = (
@@ -41,13 +42,32 @@ SYSTEM_PROMPT = (
 """The whole base system prompt of the remember agent (replaces ``SYSTEM.md``)."""
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/remember help``."""
-    return (
-        f"Stores the prompt as a standing instruction in ~/{HOME_DIR}/AGENTS.md so every "
-        "future Sorcar task follows it; use `/remember <instruction>` in the chat or "
-        'run_agent(agent="remember", task="<instruction>"), and `/forget` to remove it.'
-    )
+class RememberSea(BaseSea):
+    """The ``/remember`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/remember help``."""
+        return (
+            f"Stores the prompt as a standing instruction in ~/{HOME_DIR}/AGENTS.md so every "
+            "future Sorcar task follows it; use `/remember <instruction>` in the chat or "
+            'run_agent(agent="remember", task="<instruction>"), and `/forget` to remove it.'
+        )
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
+        return SYSTEM_PROMPT
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
+        return settings | {
+            "kind": "worker",
+            "tool_profile": "bash",
+            "max_budget": 1.0,
+        }
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the agent's tools: :func:`remember_instruction` and ``list_instructions``."""
+        return tools + [remember_instruction, list_instructions]
 
 
 def remember_instruction(instruction: str) -> str:
@@ -65,24 +85,5 @@ def remember_instruction(instruction: str) -> str:
         nothing was written.
     """
     return add_instruction(instruction)
-
-
-def system_prompt() -> str:
-    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
-    return SYSTEM_PROMPT
-
-
-def settings() -> dict[str, Any]:
-    """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
-    return {
-        "kind": "worker",
-        "tool_profile": "bash",
-        "max_budget": 1.0,
-    }
-
-
-def add_to_tools() -> list[Any]:
-    """Return the agent's tools: :func:`remember_instruction` and ``list_instructions``."""
-    return [remember_instruction, list_instructions]
 
 

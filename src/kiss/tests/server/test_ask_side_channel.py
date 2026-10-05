@@ -220,7 +220,7 @@ def test_ask_message_bypasses_pending_queue_and_dispatches() -> None:
 
 
 def test_ask_help_answers_with_the_description_without_dispatch() -> None:
-    """``/ask help`` on a live tab is answered with ``ask_sea.description()``.
+    """``/ask help`` on a live tab is answered with the ask SEA's ``description()``.
 
     Like every ``/xxx help``, it never launches the answering agent:
     the echo and ONE ``ask_answer`` carrying the bundled ``ask`` SEA's
@@ -247,7 +247,7 @@ def test_ask_help_answers_with_the_description_without_dispatch() -> None:
     assert [e for e in events if e.get("type") == "ask_answer"] == [{
         "type": "ask_answer",
         "question": "HELP",
-        "text": ask_sea.description(),
+        "text": ask_sea.AskSea().description(),
         "success": True,
         "tabId": "tab-1",
         "taskId": "task-abc",
@@ -278,7 +278,7 @@ def test_ask_check_answers_with_the_dry_run_report_without_dispatch() -> None:
     (answer,) = [e for e in events if e.get("type") == "ask_answer"]
     assert answer["success"] is True and answer["question"] == "check"
     assert answer["text"] == sea_commands.sea_check("ask", Path(ask_sea.__file__))
-    assert answer["text"].startswith("/ask: " + ask_sea.description())
+    assert answer["text"].startswith("/ask: " + ask_sea.AskSea().description())
     assert "tools added: task_context" in answer["text"]
 
 
@@ -453,9 +453,9 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     - ``prompt`` is the user's question (verbatim).
     - ``extension_agent_path`` is the resolved ``ask_sea.py`` path.
     - ``parent_task_id`` is the OWNER's task id: the daemon applies the
-      ask SEA's getters itself — its ``prompt(task)``
-      (``{task_id}`` -> the owner id) and ``add_to_system_prompt()`` — so
-      the side channel passes NO ``append_to_prompt`` /
+      ask SEA's methods itself — its ``prompt(task)`` (``{task_id}`` ->
+      the owner id), ``system_prompt`` and ``tools`` as the run's hooks —
+      so the side channel passes NO ``append_to_prompt`` /
       ``append_to_system_prompt`` of its own.
     - ``parent_tab_id`` / ``chat_id`` reach the daemon so the sub-agent
       tab lands in the running task's tab.
@@ -496,14 +496,16 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
         "The question above is about the task with id task-abc. "
         "Call task_context with that task id, then answer the question."
     )
-    assert "appendToPrompt" not in cmd
-    assert cmd["appendToSystemPrompt"] == ask_sea.add_to_system_prompt()
-    assert cmd["appendToSystemPrompt"].startswith(
+    assert "appendToPrompt" not in cmd and "appendToSystemPrompt" not in cmd
+    hooked = cmd["systemPromptHook"]("<the assembled prompt>")
+    assert hooked == ask_sea.AskSea().system_prompt("<the assembled prompt>")
+    assert "<the assembled prompt>" not in hooked
+    assert (
         "**MUST FOLLOW: You MUST NOT USE internet or internet search at any point. "
         "You must answer quickly because the user is waiting.**"
-    )
+    ) in hooked
     assert cmd["toolProfile"] == "none"
-    assert [t.__name__ for t in cmd["tools"]] == ["task_context"]
+    assert [t.__name__ for t in cmd["toolsHook"]([])] == ["task_context"]
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
 
@@ -525,7 +527,13 @@ def test_side_channel_ask_sea_path_resolves_to_bundled_seas_file(
     shadow = tmp_path / "user-seas" / "ask"
     shadow.mkdir(parents=True)
     (shadow / "ask_sea.py").write_text(
-        'def description() -> str:\n    return "shadow"\n', encoding="utf-8",
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def description(self):
+        return "shadow"
+""", encoding="utf-8",
     )
     kiss_home().mkdir(parents=True, exist_ok=True)
     seas_md = kiss_home() / "SEAS.md"

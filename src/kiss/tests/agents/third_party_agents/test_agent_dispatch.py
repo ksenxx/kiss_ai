@@ -45,6 +45,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     make_run_agent_tool,
 )
 from kiss.agents.sorcar.agent_file import apply_agent_overrides, channel_workspace, load_layers
+from kiss.agents.sorcar.sea_commands import load_sea
 from kiss.agents.third_party_agents.auth_status import _agent_class
 from kiss.core.config import kiss_home
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
@@ -97,7 +98,13 @@ def _write_helper_script(caller: Path) -> Path:
     """Create *caller* with a minimal ``helper.py`` agent script; return the script path."""
     caller.mkdir()
     script = caller / "helper.py"
-    script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+""")
     return script
 
 
@@ -227,7 +234,13 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
 
     # Path mode: executes in the caller's project (scope == work_dir).
     script = caller / "helper.py"
-    script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+""")
     captured_dispatch.clear()
     tool("say hi", str(script))
     assert captured_dispatch[0]["work_dir"] == str(caller)
@@ -301,7 +314,13 @@ def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
         # the persisted settings; classification follows the daemon's
         # configured default; the script's settings change nothing.
         script = caller / "helper.py"
-        script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
+        script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+""")
         captured_dispatch.clear()
         tool("say hi", str(script))
         sent = captured_dispatch[0]
@@ -392,7 +411,7 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     )
     out = run_agent("say hi", "ntfy", options='{"tool_profile": "bogus"}')
     assert out.startswith("Error: tool_profile must be one of ")
-    # Extra tools come only from the agent script's ``add_to_tools()``:
+    # Extra tools come only from the agent script's ``tools()``:
     # the tool has no tools-path arguments, and the old per-option
     # keyword arguments (and the ``model_name`` alias) are gone.
     import inspect
@@ -453,7 +472,7 @@ def test_run_options_are_forwarded_to_daemon(
     ``"true"`` / ``"false"``, ``null`` as "not passed".  No tools path
     travels: the daemon client's ``run`` has no tools parameter, so
     the sub-task's extra tools can only come from the agent script's
-    own ``add_to_tools()``.  The real dispatch path is
+    own ``tools()``.  The real dispatch path is
     exercised up to the daemon-client boundary; only that boundary
     call is captured.
     """
@@ -648,7 +667,13 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
     import os
 
     script = tmp_path / "my_researcher.py"
-    script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+""")
     # ``workspace`` is a channel option: a session SEA refuses it.
     out = run_agent("say hi", str(script), options='{"workspace": "ignored-ws"}')
     assert out == (
@@ -759,7 +784,13 @@ def test_relative_path_resolves_against_captured_work_dir(
     project = tmp_path / "project"
     (project / "agents").mkdir(parents=True)
     script = project / "agents" / "reviewer.py"
-    script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+""")
     elsewhere = tmp_path / "daemon_cwd"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
@@ -782,7 +813,13 @@ def test_path_mode_runs_in_captured_work_dir(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     script = project / "helper.py"
-    script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+""")
     out = make_run_agent_tool(str(project))("say hi", str(script))
     assert out.startswith("Error: the helper agent task could not run:")
     assert not (tmp_path / "agent_work").exists()
@@ -795,7 +832,13 @@ def test_standalone_relative_path_resolves_against_cwd(
     # Without a captured work directory (standalone tool), a relative
     # path resolves against the process working directory.
     script = tmp_path / "local_agent.py"
-    script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+""")
     monkeypatch.chdir(tmp_path)
     out = run_agent("say hi", "local_agent.py")
     assert out.startswith("Error: the local_agent agent task could not run:")
@@ -833,7 +876,13 @@ def test_dispatch_uses_recorded_daemon_endpoint(
     out = run_agent("say hi", "ntfy")
     assert "recorded-daemon.json" in out
     script = tmp_path / "probe_agent.py"
-    script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
+    script.write_text("""
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'model': 'm'}
+""")
     out = run_agent("say hi", str(script))
     assert "recorded-daemon.json" in out
 
@@ -860,19 +909,17 @@ def test_every_channel_module_is_dispatchable() -> None:
             str,
         ), channel
         assert module.__file__ and Path(module.__file__).is_file(), channel
-        assert callable(getattr(module, "add_to_tools", None)), channel
-        assert not hasattr(module, "tools"), channel
-        # Every channel module is a ``channel``-preset agent script
-        # whose ``add_to_system_prompt()`` carries the channel's
-        # guidance (the agent class's ``channel_system_prompt``).
-        assert module.settings()["kind"] == "channel", channel
+        # Every channel module is a ``channel``-preset SEA whose
+        # ``tools()`` adds the channel's tools to the toolset and whose
+        # ``system_prompt()`` appends the channel's guidance (the agent
+        # class's ``channel_system_prompt``) to the assembled prompt.
+        sea = load_sea(Path(module.__file__))
+        assert sea.settings({})["kind"] == "channel", channel
+        assert sea.tools([]) and all(callable(t) for t in sea.tools([])), channel
         guidance = getattr(cls, "channel_system_prompt", "")
-        addition = getattr(module, "add_to_system_prompt", None)
-        if guidance:
-            assert callable(addition), channel
-            assert addition() == guidance, channel
-        else:
-            assert addition is None or addition() == "", channel
+        assert sea.system_prompt("ASSEMBLED") == (
+            "ASSEMBLED\n\n" + guidance if guidance else "ASSEMBLED"
+        ), channel
 
 
 def test_channel_module_is_a_valid_agent_script() -> None:
@@ -881,33 +928,37 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     Passing a channel module as ``extension_agent_path`` makes the
     daemon apply its ``settings()`` (the ``channel`` preset: no
     worktree, no auto-commit, no classifier, no fan-out, no browser,
-    no memory), stage its ``add_to_tools()`` callables on top of the
-    built-in toolset, and append the channel preamble plus the
-    module's ``add_to_system_prompt()`` guidance to the system prompt.
-    The dispatcher sends the task text verbatim: nothing of the
-    channel guidance travels in the prompt any more.
+    no memory), stage its ``tools()`` as the run's tools hook (the
+    channel tools on top of the built-in toolset), append the channel
+    preamble to the system-prompt suffix, and stage its
+    ``system_prompt()`` as the run's system-prompt hook (the channel
+    guidance).  The dispatcher sends the task text verbatim: nothing
+    of the channel guidance travels in the prompt any more.
     """
     import kiss.agents.third_party_agents.ntfy.ntfy_sea as ntfy_sea
     from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE
 
-    cmd = {"agentPath": ntfy_sea.__file__, "appendToSystemPrompt": "Caller suffix."}
+    cmd: dict[str, Any] = {"agentPath": ntfy_sea.__file__, "appendToSystemPrompt": "Caller suffix."}
     overridden = apply_agent_overrides(cmd)
     assert overridden == {
-        "tools", "useWorktree", "autoCommit", "classifyTasks", "isParallel",
-        "useWebTools", "useMemory", "appendToSystemPrompt", "workDir",
+        "toolsHook", "systemPromptHook", "useWorktree", "autoCommit", "classifyTasks",
+        "isParallel", "useWebTools", "useMemory", "appendToSystemPrompt", "workDir",
     }
     assert cmd["workDir"] == str(kiss_home() / "channel_work")
     assert channel_workspace(cmd, load_layers(cmd)) == "default"
-    assert cmd["tools"] and all(callable(t) for t in cmd["tools"])
+    tools = cmd["toolsHook"]([])
+    assert tools and all(callable(t) for t in tools)
     assert "appendBasicTools" not in cmd
-    assert "toolProfile" not in cmd  # ``add_to_tools()`` keeps the built-in toolset
+    assert "toolProfile" not in cmd  # ``tools()`` keeps the built-in toolset
     assert "toolsFile" not in cmd
     for field in ("useWorktree", "autoCommit", "classifyTasks", "isParallel",
                   "useWebTools", "useMemory"):
         assert cmd[field] is False, field
     assert cmd["appendToSystemPrompt"] == (
         "Caller suffix.\n\n" + CHANNEL_PREAMBLE.format(name="ntfy")
-        + "\n\n" + ntfy_sea.NtfyAgent.channel_system_prompt
+    )
+    assert cmd["systemPromptHook"]("ASSEMBLED") == (
+        "ASSEMBLED\n\n" + ntfy_sea.NtfyAgent.channel_system_prompt
     )
     assert "prompt" not in cmd
 

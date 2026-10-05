@@ -12,15 +12,22 @@ with the standard system prompt and tools.  It is ``hidden``: an empty
 """
 
 
-def settings() -> dict:
-    """Return the SEA's settings: hidden from the command list, nothing else."""
-    return {"hidden": True}
+from typing import Any
+
+from kiss.agents.seas.base.base_sea import BaseSea
 
 
-def description() -> str:
-    """Return the one-sentence help text of the plain sub-agent."""
-    return (
-        "Runs the task as a plain Sorcar sub-agent with the default system "
-        "prompt, tools and work directory; ask for it with an empty `agent` "
-        "argument (or `agent=\"sorcar\"`) of run_agent."
-    )
+class SorcarSea(BaseSea):
+    """The plain Sorcar sub-agent."""
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Return the SEA's settings: hidden from the command list, nothing else."""
+        return settings | {"hidden": True}
+
+    def description(self) -> str:
+        """Return the one-sentence help text of the plain sub-agent."""
+        return (
+            "Runs the task as a plain Sorcar sub-agent with the default system "
+            "prompt, tools and work directory; ask for it with an empty `agent` "
+            "argument (or `agent=\"sorcar\"`) of run_agent."
+        )

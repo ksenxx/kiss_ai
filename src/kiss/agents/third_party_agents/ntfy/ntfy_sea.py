@@ -39,6 +39,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -58,15 +59,42 @@ _NTFY_DIR = kiss_home() / "third_party_agents" / "ntfy"
 _config = ChannelConfig(_NTFY_DIR, ("topic",))
 
 
-def description() -> str:
-    """Return the one-sentence help text shown by ``/ntfy help``."""
-    return (
-        "Publishes notifications to and reads messages from the ntfy topic configured in "
-        f"~/{HOME_DIR}/third_party_agents/ntfy/config.json (optional self-hosted server and access "
-        "token); use it with `run_agent(agent=\"ntfy\", task=...)` or the "
-        "`kiss-ntfy -t \"<task>\"` CLI (`kiss-ntfy --channel <topic>` polls the topic and "
-        "answers new messages)."
-    )
+class NtfySea(BaseSea):
+    """The ``/ntfy`` SEA."""
+
+    def description(self) -> str:
+        """Return the one-sentence help text shown by ``/ntfy help``."""
+        return (
+            "Publishes notifications to and reads messages from the ntfy topic configured in "
+            f"~/{HOME_DIR}/third_party_agents/ntfy/config.json (optional self-hosted server and "
+            "access "
+            "token); use it with `run_agent(agent=\"ntfy\", task=...)` or the "
+            "`kiss-ntfy -t \"<task>\"` CLI (`kiss-ntfy --channel <topic>` polls the topic and "
+            "answers new messages)."
+        )
+
+    def tools(self, tools: list[Any]) -> list[Any]:
+        """Return the ntfy channel tools (the SEA ``tools`` method).
+
+        Called by the kiss-web daemon when this module's path is passed as
+        the API's ``extension_agent_path``: builds a fresh agent from the
+        credentials persisted under ``$KISS_HOME`` and returns its
+        authentication and backend tools.
+        """
+        return tools + NtfyAgent()._get_tools()
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+        No git lifecycle, nothing inherited from the calling task, the
+        channel preamble in the system prompt (see
+        :mod:`kiss.agents.sorcar.sea_settings`).
+        """
+        return settings | {"kind": "channel"}
+
+    def system_prompt(self, system_prompt: str) -> str:
+        """Return the channel guidance appended to the run's system prompt."""
+        return system_prompt + "\n\n" + NtfyAgent.channel_system_prompt
 
 
 def _scrub_config_token() -> None:
@@ -641,32 +669,6 @@ def _make_backend() -> NtfyChannelBackend:
 def main() -> None:
     """Run the NtfyAgent from the command line with chat persistence."""
     channel_main(NtfyAgent, "kiss-ntfy", channel_name="ntfy", make_backend=_make_backend)
-
-
-def add_to_tools() -> list:
-    """Return the ntfy channel tools (``kiss.server.sorcar.run`` agent-script contract).
-
-    Called by the kiss-web daemon when this module's path is passed as
-    the API's ``extension_agent_path``: builds a fresh agent from the
-    credentials persisted under ``$KISS_HOME`` and returns its
-    authentication and backend tools.
-    """
-    return NtfyAgent()._get_tools()
-
-
-def settings() -> dict:
-    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-    No git lifecycle, nothing inherited from the calling task, the
-    channel preamble in the system prompt (see
-    :mod:`kiss.agents.sorcar.sea_settings`).
-    """
-    return {"kind": "channel"}
-
-
-def add_to_system_prompt() -> str:
-    """Return the channel guidance appended to the run's system prompt."""
-    return NtfyAgent.channel_system_prompt
 
 
 if __name__ == "__main__":

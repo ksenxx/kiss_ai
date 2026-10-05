@@ -305,10 +305,15 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             '''
             """Agent script choosing the shell profile."""
 
+            from kiss.agents.seas.base.base_sea import BaseSea
 
-            def settings() -> dict:
-                """Pick the shell profile."""
-                return {"tool_profile": "shell"}
+
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    """Pick the shell profile."""
+                    return settings | {"tool_profile": "shell"}
+
+
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -332,10 +337,15 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             '''
             """Agent script with a wrong-typed profile setting."""
 
+            from kiss.agents.seas.base.base_sea import BaseSea
 
-            def settings() -> dict:
-                """Return the wrong type for tool_profile."""
-                return {"tool_profile": 7}
+
+            class Sea(BaseSea):
+                def settings(self, settings):
+                    """Return the wrong type for tool_profile."""
+                    return settings | {"tool_profile": 7}
+
+
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -372,7 +382,13 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         script = self._write_py(
             "plain_agent.py",
             '''
-            """Agent script with no settings: the tool's arguments decide."""
+            """SEA with no settings: the tool's arguments decide."""
+
+            from kiss.agents.seas.base.base_sea import BaseSea
+
+
+            class Sea(BaseSea):
+                pass
             ''',
         )
         calls: list[dict[str, Any]] = []

@@ -759,8 +759,8 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     ``settings()`` picks the ``channel`` preset in ``~/.kiss/cron/work``,
     so the resolved settings (what the dispatcher and the daemon read)
     turn the git lifecycle, classification and inheritance off; the
-    cron guidance reaches the session through ``add_to_system_prompt()``
-    (the daemon appends it to the system prompt suffix), not the task.
+    cron guidance reaches the session through ``system_prompt()``
+    (the daemon applies it as the run's system-prompt hook), not the task.
     """
     from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
     from kiss.agents.sorcar.sea_commands import sea_settings
@@ -769,7 +769,8 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     work_dir = cron_agent.cron_work_dir()
     assert work_dir == str(tmp_path / "cron" / "work")
     assert Path(work_dir).is_dir()
-    assert cron_agent.settings() == {"kind": "channel", "work_dir": work_dir}
+    sea = cron_agent.CronAgentSea()
+    assert sea.settings({}) == {"kind": "channel", "work_dir": work_dir}
     resolved = sea_settings(Path(cron_agent.__file__))
     # Every key the channel kind sets is implicitly locked
     # (sea_settings.merge_settings): a call cannot give cron a worktree.
@@ -782,27 +783,33 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     assert resolved["use_worktree"] is False
     assert resolved["auto_commit"] is False
     assert resolved["auto_classify"] is False
-    assert cron_agent.add_to_system_prompt() == cron_agent.CRON_DISPATCH_PREAMBLE
+    assert sea.system_prompt("BASE") == "BASE\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
     assert "cron_job" in cron_agent.CRON_DISPATCH_PREAMBLE
-    assert [tool.__name__ for tool in cron_agent.add_to_tools()] == [
-        "cron_job", "gateway_command",
-    ]
+    assert [tool.__name__ for tool in sea.tools([])] == ["cron_job", "gateway_command"]
     # Applied by the daemon: the channel preamble (named after the script)
-    # then the cron guidance land on the system prompt suffix, after the
-    # caller's own text; the task prompt is untouched.
-    cmd: dict[str, object] = {
+    # lands on the system prompt suffix after the caller's own text, the
+    # cron guidance is the system-prompt hook the run applies to the
+    # assembled prompt, the tools hook adds the cron tools to the run's
+    # built-ins; the task prompt is untouched.
+    cmd: dict[str, Any] = {
         "agentPath": cron_agent.__file__, "prompt": "schedule it",
         "appendToSystemPrompt": "CALLER",
     }
-    apply_agent_overrides(cmd)
+    overridden = apply_agent_overrides(cmd)
+    assert {"systemPromptHook", "toolsHook", "appendToSystemPrompt"} <= overridden
     assert cmd["prompt"] == "schedule it"
     assert cmd["workDir"] == work_dir
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
     assert cmd["appendToSystemPrompt"] == (
         "CALLER\n\n" + CHANNEL_PREAMBLE.format(name="cron_agent")
-        + "\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
     )
+    assert cmd["systemPromptHook"]("ASSEMBLED") == (
+        "ASSEMBLED\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
+    )
+    assert [tool.__name__ for tool in cmd["toolsHook"]([print])] == [
+        "print", "cron_job", "gateway_command",
+    ]
 
 
 def test_store_is_plain_json_list(tmp_path: Path) -> None:

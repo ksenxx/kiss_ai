@@ -27,10 +27,8 @@ import requests
 from kiss.agents.third_party_agents.weixin.weixin_sea import (
     WeixinAgent,
     WeixinChannelBackend,
+    WeixinSea,
     _config,
-)
-from kiss.agents.third_party_agents.weixin.weixin_sea import (
-    add_to_tools as module_tools,
 )
 
 
@@ -204,7 +202,7 @@ def test_auth_trio_persistence() -> None:
 def test_tools_module_function() -> None:
     """Module-level tools() returns a non-empty tool list."""
     _config.clear()
-    assert len(module_tools()) >= 3
+    assert len(WeixinSea().tools([])) >= 3
 
 
 def test_send_reuses_cached_token() -> None:

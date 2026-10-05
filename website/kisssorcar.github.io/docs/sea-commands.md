@@ -12,7 +12,7 @@ Typing this in the chat box of the VS Code extension or the web app:
 
 runs the `slack/slack_sea.py` agent directly, in the tab's own run, on the task "tell #eng that the deploy is done": the daemon makes that file the run's agent script and your text its prompt, so the SEA's `settings()`, system prompt and tools apply to the very session you are looking at. There is no relay turn in which a model is told to call `run_agent`, no nested sub-agent tab, and no chance for the model to pick a different agent or explore the code first. A slash command is therefore the predictable way to invoke a specific SEA; from inside a running task, `run_agent(agent="slack", task="...")` dispatches the same SEA as a sub-task.
 
-Any file that is a valid SEA works: a bundled channel agent, or a file of your own whose `settings()` dict and `description()`, `prompt(task)`, `system_prompt()`, `add_to_system_prompt()` and `add_to_tools()` functions configure the run. `prompt(task)` receives the text after the command and returns the prompt body; `settings()["extends"]` lays another SEA (by command name or path) under yours, and the model picked on the tab (`bestrouter`, `autorouter`) is the outermost layer of every run there. The SEA file format is described in [Client Interfaces: Sorcar Extension Agents](cli.md#sorcar-extension-agents-seas).
+Any file that is a valid SEA works: a bundled channel agent, or a file of your own that defines one class deriving from `kiss.agents.seas.base.base_sea.BaseSea`, whose `description()`, `settings(settings)`, `prompt(task)`, `system_prompt(system_prompt)`, `tools(tools)`, `tool_call_hook(name, args)` and `llm_call_hook(new_messages)` methods configure the run. `prompt(task)` receives the text after the command and returns the prompt body; a SEA builds on another by deriving from its class (`class MySea(sea_class("sh"))`, or import the bundled class), and the model picked on the tab (`bestrouter`, `autorouter`) is applied before the SEA of every run there. The SEA file format is described in [Client Interfaces: Sorcar Extension Agents](cli.md#sorcar-extension-agents-seas).
 
 ## Where commands come from
 
@@ -79,8 +79,9 @@ The daemon rescans `SEAS.md` and every listed folder every 2 seconds. Adding a l
         prompt       = ship v2.3
         |
         v
-  daemon imports deploy_sea.py, applies its settings(), system prompt
-  and tools to this run, and the model works on "ship v2.3"
+  daemon executes deploy_sea.py, instantiates its BaseSea subclass,
+  applies its settings(), prompt(), system_prompt() and tools() to
+  this run, and the model works on "ship v2.3"
         |
         v
   the result is the task result in your tab
@@ -92,8 +93,8 @@ Details worth knowing:
 - **Only at position 0.** The command must be the first character of the prompt with no leading whitespace or blank line. `/deploy` on a later line of a multi-line prompt is ordinary text.
 - **Exact word match.** `/deployx ship` looks up a command named `deployx`; it does not match `/deploy`.
 - **Text is required.** `/deploy` alone, or a `/name` that is not registered, is not a command: it is sent to the model as a normal prompt and answered like any other question.
-- **`/deploy help` shows the description.** One of the two reserved sub-tasks (any letter case, nothing after it): the daemon does not run the SEA or call a model; it imports `deploy_sea.py`, calls its `description()` and posts the returned sentence as the task result. A SEA without a callable `description()` returning a non-empty string gets a diagnostic instead.
-- **`/deploy check` shows what a run would use.** The other reserved sub-task executes the script (and what it `extends`) without running a task and posts: the layers, the effective settings after the kind's defaults, the model a run takes, the names of the tools `add_to_tools()` adds, which getters and hooks are defined, and the prompt `prompt(task)` yields for a sample task (`{task_id}` shown as `<task id>`). A broken script yields the first error in the words the daemon would use, so a settings typo is found before the first run.
+- **`/deploy help` shows the description.** One of the two reserved sub-tasks (any letter case, nothing after it): the daemon does not run the SEA or call a model; it loads the class in `deploy_sea.py`, calls its `description()` and posts the returned sentence as the task result. A SEA whose `description()` does not return a non-empty string gets a diagnostic instead.
+- **`/deploy check` shows what a run would use.** The other reserved sub-task loads the class without running a task and posts: the classes of its inheritance chain, the kind, the effective settings after the kind's defaults, the model a run takes, the names of the tools `tools()` adds, which methods are defined, and the prompt `prompt(task)` yields for a sample task (`{task_id}` shown as `<task id>`). A broken script yields the first error in the words the daemon would use, so a settings typo is found before the first run.
 - **`<task>` blocks stay intact.** A prompt such as `/deploy <task>build</task><task>publish</task>` reaches the SEA as one sub-task with the tags in place; the daemon does not split it into two Sorcar tasks.
 - **History keeps what you typed.** The task panel, the task list, the chat history, and the frequent-task chips record `/deploy ship v2.3`; the model sees `ship v2.3` as its task.
 - **Where the run happens.** The SEA runs in the tab's working directory with the tab's settings (model, worktree, auto-commit, ...) unless its own `settings()` say otherwise: `/sh` declares `{"kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"]}`, so it runs with the Bash tool alone, directly on the checkout, without a worktree or auto-commit. A tab passes nothing explicitly, so for every run setting the SEA's `settings()` apply over the tab's values (see the precedence rule below).
@@ -142,9 +143,8 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 <!-- sea-docs: settings -->
 | Key | Type | `run` wire field | Meaning |
 |---|---|---|---|
-| `kind` | `str` | — | What the run is: `session` (the default, an ordinary Sorcar session), `worker` or `channel`; each is a dict of defaults laid under the explicit keys (see the kind table). A `channel` run holds its channel workspace, gets the channel preamble, never inherits from a calling task and is never a `run_parallel` child or an `extends` base. |
-| `extends` | `str` | — | A base script (command name or `.py` path) whose layers run under this one: settings merge with the later layer winning, `prompt(task)` functions chain, system-prompt additions concatenate, tools union. |
-| `work_dir` | `str` | `workDir` | The directory the run works in; default: the calling task's or the tab's. A relative path is resolved against the script's own folder, not the caller's. |
+| `kind` | `str` | — | What the run is: `session` (the default, an ordinary Sorcar session), `worker` or `channel`; each is a dict of defaults laid under the explicit keys (see the kind table). A `channel` run holds its channel workspace, gets the channel preamble, never inherits from a calling task and is never a `run_parallel` child. |
+| `work_dir` | `str` | `workDir` | The directory the run works in; default: the calling task's or the tab's. A relative path is resolved against the script's own folder, not the caller's (one a base class sets: against the base's file). |
 | `model` | `str` | `model` | The LLM model, a catalogue name or a model-picker SEA; `""` or `None` keeps the caller's. |
 | `chat_id` | `str` | `chatId` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a `channel` run, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
 | `use_worktree` | `bool` | `useWorktree` | Run in a git worktree of the project; default: the calling task's effective choice, else the persisted setting (an inherited or default `True` is demoted by the classifier for non-implementation tasks, an explicit `True` is kept). |
@@ -159,7 +159,7 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 | `docker_image` | `str` | `dockerImage` | Run inside this Docker image (default: the host). |
 | `timeout` | `int \| float` | — | Seconds the call blocks for the run: the call's `timeout` argument or option wins, then this setting, then the default, which is 3600 for a `run_agent` call (when it expires the run keeps going as an `agent_job` and the call returns its job id; a job still running when the calling task ends is killed) and no limit of its own for a `run_parallel` child (a thread of the calling task, bounded by it); ignored by `/<name>`. |
 | `locked` | `list` | — | Keys an explicit `run_agent` / `run_parallel` argument or option may not change: a differing value is an error. |
-| `hidden` | `bool` | — | `True`: the script is no `/command` and no `run_agent` agent name (loadable by path and as an `extends` base only). It must be the literal `True` in `settings()` because the command registry reads it from the source without running the script (a computed value is ignored). |
+| `hidden` | `bool` | — | `True`: the script is no `/command` and no `run_agent` agent name (loadable by path and as a base class only). It must be the literal `True` in the class's `settings()` because the command registry reads it from the source without running the script (a computed value is ignored). |
 <!-- /sea-docs -->
 
 ### Kinds
@@ -196,30 +196,33 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 | `inherit` | `bool` | `false`: the sub-task takes nothing from the calling task (no model, chat, prompt suffixes, tools or container; a `run_parallel` child still gets its budget share); default `true`. A `channel` run never inherits, so `true` is refused there. |
 | `workspace` | `str` | The account a `kind: channel` agent's run holds (its channel workspace); refused for any other kind and by `run_parallel`. |
 | `add_to_prompt` | `str` | Text appended to the task after the SEA's `prompt(task)`. |
-| `add_to_system_prompt` | `str` | Text appended to the system prompt after the SEA's `add_to_system_prompt()`. |
+| `add_to_system_prompt` | `str` | Text appended to the system prompt before the SEA's `system_prompt(system_prompt)` sees it. |
 <!-- /sea-docs -->
 
 ## Add your own command in three steps
 
-1. Create a parent folder, a folder named after the command, and the SEA file inside it. Every SEA must define `description()`, one sentence that says what it does and how to use it (this is what `/standup help` prints). The smallest useful SEA adds a system prompt; everything else keeps the daemon's defaults:
+1. Create a parent folder, a folder named after the command, and the SEA file inside it. The file defines one class deriving from `BaseSea`; a command's class must define `description()`, one sentence that says what it does and how to use it (this is what `/standup help` prints). The smallest useful SEA adds to the system prompt; everything else keeps the daemon's defaults:
 
    ```python
    # ~/my-seas/standup/standup_sea.py
-   def description():
-       return (
-           "Turns your text into a three-bullet daily stand-up note "
-           "(done, next, blocked); use it as /standup <what happened>."
-       )
+   from kiss.agents.seas.base.base_sea import BaseSea
 
 
-   def system_prompt():
-       return (
-           "You write terse daily stand-up notes from the user's text. "
-           "Three bullets: done, next, blocked. No preamble."
-       )
+   class StandupSea(BaseSea):
+       def description(self) -> str:
+           return (
+               "Turns your text into a three-bullet daily stand-up note "
+               "(done, next, blocked); use it as /standup <what happened>."
+           )
+
+       def system_prompt(self, system_prompt: str) -> str:
+           return system_prompt + (
+               "\n\nYou write terse daily stand-up notes from the user's text. "
+               "Three bullets: done, next, blocked. No preamble."
+           )
    ```
 
-   Helper modules, prompt files and data the SEA needs go into the same `standup/` folder. To change how the run is configured, add a `settings()` function returning a dict: a `kind` plus any of the per-run settings listed in [Client Interfaces](cli.md#sorcar-extension-agents-seas) (`model`, `max_budget`, `tool_profile`, `timeout`, ...), for example `{"kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"]}` (what `/sh` declares) or `{"timeout": 3600}` (`/write`). A kind is only a dict of defaults under your keys: `session` (the default) is empty, `worker` turns worktree, auto-commit, classifier, fan-out, browser and memory off, and `channel` is `worker` plus a `work_dir` of `$KISS_HOME/channel_work`, for an agent of an external service (it holds its channel workspace, gets the channel preamble and never inherits from a calling task). `settings()` is data; text and code come from the getters: `system_prompt()`, `add_to_system_prompt()`, `prompt(task)` (its result may contain `{task_id}`, replaced by the calling task's id), `add_to_tools()` and the hooks. For a SEA that carries its own tools, return a list of callables from `add_to_tools()`; they are added to the built-in toolset, or become the agent's only tools besides `finish` when `settings()` also sets `"tool_profile": "none"` (what `/ask` does). The bundled channel agents are a good template (see [`src/kiss/agents/third_party_agents/`](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents), one folder per agent).
+   Helper modules, prompt files and data the SEA needs go into the same `standup/` folder. To change how the run is configured, add a `settings(self, settings)` method returning `settings | {...}`: a `kind` plus any of the per-run settings listed in [Client Interfaces](cli.md#sorcar-extension-agents-seas) (`model`, `max_budget`, `tool_profile`, `timeout`, ...), for example `{"kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"]}` (what `/sh` declares) or `{"timeout": 3600}` (`/write`). A kind is only a dict of defaults under your keys: `session` (the default) is empty, `worker` turns worktree, auto-commit, classifier, fan-out, browser and memory off, and `channel` is `worker` plus a `work_dir` of `$KISS_HOME/channel_work`, for an agent of an external service (it holds its channel workspace, gets the channel preamble and never inherits from a calling task). `settings()` is data; text and code come from the other methods: `system_prompt(system_prompt)` (return the argument plus your text to append, anything else to replace), `prompt(task)` (its result may contain `{task_id}`, replaced by the calling task's id), `tools(tools)` and the two call hooks. For a SEA that carries its own tools, return `tools + [your callables]` from `tools()`; with `"tool_profile": "none"` in `settings()` the method receives `[]` and what it returns plus `finish` is the agent's whole toolset (what `/ask` does). To build on another SEA, derive from its class (`class MySea(sea_class("sh"))`, with `sea_class` from `kiss.agents.sorcar.sea_commands`, or import the bundled class); the launcher runs the base's methods first, so do not call `super()`. The bundled channel agents are a good template (see [`src/kiss/agents/third_party_agents/`](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents), one folder per agent).
 
 2. Register the folder:
 
@@ -229,7 +232,7 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 
 3. Within two seconds, type `/st` in the chat box: the popup offers `/standup`. Send `/standup help` to see the description you wrote, then `/standup finished the docs page, next is the release, blocked on review` and the note comes back in the chat.
 
-If the command does not appear, check that the script is `<folder>/<folder>_sea.py` (`standup/standup_sea.py`, not `standup_sea.py` at the top of `~/my-seas`), that the folder name uses only `A-Z a-z 0-9 _ -`, and that the folder line in `SEAS.md` resolves to the folder you expect (remember that relative paths are anchored at `~`, not at the project). A broken SEA (import error, `settings()` or another function raising, wrong return type, unknown, renamed or removed settings key, unknown kind) is still listed as a command; the failure surfaces as a diagnostic in the task result when you run it.
+If the command does not appear, check that the script is `<folder>/<folder>_sea.py` (`standup/standup_sea.py`, not `standup_sea.py` at the top of `~/my-seas`), that the folder name uses only `A-Z a-z 0-9 _ -`, and that the folder line in `SEAS.md` resolves to the folder you expect (remember that relative paths are anchored at `~`, not at the project). A broken SEA (import error, no or several `BaseSea` subclasses, `settings()` or another method raising, wrong return type, unknown, renamed or removed settings key, unknown kind) is still listed as a command; the failure surfaces as a diagnostic in the task result when you run it.
 
 ## Bundled commands
 
