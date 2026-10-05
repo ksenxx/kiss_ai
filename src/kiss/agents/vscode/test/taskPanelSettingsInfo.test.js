@@ -245,7 +245,7 @@ test('a run with an agent script shows the Agent row; a plain run hides it', () 
       tool_profile: 'bash',
       timeout: 3600,
       inherited: ['model', 'chat_id'],
-      overridden: {tool_profile: ['review', 'bash'], work_dir: ['', '/tmp/x']},
+      pinned: {use_worktree: [true, false], work_dir: ['', '/tmp/x']},
     },
     tabId: TAB,
     taskId: 'task-3',
@@ -254,7 +254,7 @@ test('a run with an agent script shows the Agent row; a plain run hides it', () 
   assert.strictEqual(
     doc.getElementById('meta-agent').textContent,
     'sh (worker) \u2022 tools bash \u2022 timeout 3600s \u2022 ' +
-      'overridden tool_profile(review->bash), work_dir(empty->/tmp/x)',
+      'pinned use_worktree(true->false), work_dir(empty->/tmp/x)',
   );
   send(win, {type: 'clear', chat_id: 'chat-abc', tabId: TAB});
   assert.ok(doc.getElementById('meta-agent-item').hidden, 'a new run clears the row');

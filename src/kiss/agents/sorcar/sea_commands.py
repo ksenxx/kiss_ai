@@ -29,8 +29,8 @@ The registry is built from four sources, in decreasing precedence:
 
 1. ``src/kiss/agents/third_party_agents/`` (highest precedence,
    discovered through the ``kiss.agents.third_party_agents`` package).
-2. The folders listed one per line in ``~/.kiss/SEAS.md`` (or
-   ``$KISS_HOME/SEAS.md``).  Later lines in the file override earlier
+2. The folders listed one per line in ``$KISS_HOME/SEAS.md`` (the
+   Sorcar home's ``SEAS.md``).  Later lines in the file override earlier
    lines — i.e. the folder at the bottom of ``SEAS.md`` beats the one
    at the top when both contain the same command name.  Blank lines
    and lines starting with ``#`` are ignored; ``~`` and environment
@@ -338,7 +338,7 @@ def refresh_registry() -> list[str]:
     Precedence (highest wins):
 
     1. ``src/kiss/agents/third_party_agents/`` (the bundled channel SEAs).
-    2. Folders in ``~/.kiss/SEAS.md``, from bottom line to top line.
+    2. Folders in ``$KISS_HOME/SEAS.md``, from bottom line to top line.
     3. ``src/kiss/agents/seas/`` (the bundled Sorcar-extending SEAs).
 
     Concretely: the merge walks the sources from LOWEST precedence to

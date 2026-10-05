@@ -849,15 +849,15 @@ type ToWebviewMessageBody =
         // The run configuration (kiss.agents.sorcar.run_config): the
         // agent script the task ran as, its kind, the effective tool
         // profile, the caller's timeout, the setting keys inherited
-        // from the calling task and the asked-for values the script
-        // replaced ({key: [asked, forced]}).  Absent for a run that is
-        // neither a daemon task nor a sub-agent.
+        // from the calling task and the inherited or default values the
+        // SEA pinned to its own ({key: [before, pinned]}).  Absent for a
+        // run that is neither a daemon task nor a sub-agent.
         sea?: string;
         kind?: string;
         tool_profile?: string;
         timeout?: number | null;
         inherited?: string[];
-        overridden?: Record<string, [unknown, unknown]>;
+        pinned?: Record<string, [unknown, unknown]>;
       };
       taskId?: string;
     }

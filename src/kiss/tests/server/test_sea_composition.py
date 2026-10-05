@@ -158,10 +158,10 @@ def test_settings_vocabulary_has_no_prompt_keys() -> None:
     # channel workspace and the two appended texts.
     assert set(agent_dispatch.OPTION_TYPES) == (
         set(SETTING_TYPES)
-        - {"extends", "kind", "locked", "hidden", "timeout", "model", "max_budget", "tool_profile"}
+        - {"extends", "kind", "locked", "hidden", "timeout", "model", "max_budget"}
     ) | {"inherit", "workspace", "add_to_prompt", "add_to_system_prompt"}
     assert set(RunOptions.__dataclass_fields__) == set(agent_dispatch.OPTION_TYPES) | {
-        "system_prompt", "tool_profile"
+        "system_prompt"
     }
 
 
@@ -370,7 +370,7 @@ def test_prompt_getter_is_checked(tmp_path: Path) -> None:
     assert run.prompt == "kept" and run.tools == []
     cmd: dict[str, Any] = {"agentPath": str(sea), "prompt": "kept"}
     assert apply_agent_overrides(cmd) == set()
-    assert cmd.pop("_runConfig") == {"sea": "noprompt", "kind": "session", "overridden": {}}
+    assert cmd.pop("_runConfig") == {"sea": "noprompt", "kind": "session", "pinned": {}}
     assert cmd == {"agentPath": str(sea), "prompt": "kept"}
     with pytest.raises(AgentFileError, match="must be a path string"):
         apply_agent_overrides({"agentPath": 7, "prompt": "p"})

@@ -51,7 +51,7 @@ def description() -> str:
         "Reports the current weather in San Francisco from wttr.in; "
         "pass its path as extension_agent_path or send `/weather now` "
         "(any text after the command) once its parent folder is listed "
-        "in ~/.kiss/SEAS.md."
+        "in $KISS_HOME/SEAS.md."
     )
 
 
@@ -139,7 +139,7 @@ runs the task text as its prompt.
 1. **Client side** — `sorcar.run()` validates that `extension_agent_path`
    points to an existing `.py` file, resolves it to an absolute path,
    and sends it as `"agentPath"` on the wire.  `None` or `""` means
-   no agent script; any other non-string value (including a
+   no SEA; any other non-string value (including a
    `pathlib.Path`), a non-`.py` path, or a nonexistent file raises
    `ValueError` immediately (before any daemon connection).
 
@@ -317,18 +317,23 @@ an unknown base and a `kind: "channel"` base are errors.
 ### Precedence
 
 One rule decides every setting of a dispatched run
-(`sea_settings.locked_conflicts`):
+(`sea_settings.PRECEDENCE_RULE`, enforced by `locked_conflicts`; this
+block is generated from the constant):
 
-> explicit `run_agent` / `run_parallel` arguments and `options` > SEA
-> `settings()` > values inherited from the calling task > the user's
-> persisted settings.
+<!-- sea-docs: precedence -->
+> For every setting of a sub-task: what the call passes explicitly (a `run_agent` / `run_parallel` argument or `options` key) wins, then the SEA's `settings()`, then what the calling task passes on (and, for `/<name>`, the chat panel's persisted settings), then the user's defaults. A SEA may list keys in `locked`: a call that passes a different value for a locked key is refused with an error, never silently overruled.
+<!-- /sea-docs -->
 
-A SEA that must keep a value lists the key in `settings()["locked"]`;
-an explicit argument that differs from a locked value is an error
-(`Error: sh: the script locks tool_profile='bash' (asked for
-'review')`), never a silent replacement.  A `/<name>` run in a tab and
-a `run()` call with an `extension_agent_path` pass nothing explicitly,
-so there the SEA's settings win over the tab's or the client's values.
+Example of a refused call: `Error: sh: the script locks
+tool_profile='bash' (asked for 'review')`.  A `/<name>` run in a tab
+and a `run()` call with an `extension_agent_path` pass nothing
+explicitly, so there the SEA's settings apply over the tab's or the
+client's values.  The `ran:` line of every sub-task result reports the
+outcome: `inherited=` names the keys taken from the calling task,
+`pinned=` the inherited or default values the SEA's `settings()`
+replaced (`pinned=use_worktree(True->False)` for `/sh` run from a
+worktree task); an explicit argument never appears there, because it
+either won or was refused.
 
 Inheritance (`agent_dispatch.inherit_from_parent`) applies to every
 dispatched script that is not a `channel`, unless the call's `inherit`
@@ -346,22 +351,22 @@ its run was given, so a run's extra system instructions constrain its
 whole task tree as they do through `run_parallel`; the classifier's
 lite-vs-full choice is not among them, the sub-task is classified on
 its own), the text appended to its own prompt, the extra tools its
-own agent script added (so the tools the inherited system prompt
+own SEA added (so the tools the inherited system prompt
 refers to exist; not into a run on the `none` profile), its web-tools
 and memory settings, whether it may fan out itself (`allow_fan_out`),
 its live Docker container (`container:<id>`), and
 its effective worktree and auto-commit choices after the classifier's
 demotion (both `False` when the container is inherited: the sub-task
 then works in the caller's tree).  `run_parallel` children are built
-from the same table.  The script's `settings()` still win
-over the inherited values.  A `channel` script (`agent="slack"`,
-`agent="cron"`, ...) inherits none
-of these: it runs on the daemon's default model and budget unless the
-call passes its own, and the kind's `use_worktree: False` /
-`auto_commit: False` / `auto_classify: False` win over whatever the
-call's `options` say.  A `use_worktree` any script pins is a decision
-the task classifier never demotes (it still demotes a client's or
-persisted default).
+from the same table (the precedence rule above decides between the
+inherited values and the SEA's).  A `channel` SEA (`agent="slack"`,
+`agent="cron"`, ...) inherits none of these: it runs on the daemon's
+default model and budget unless the call passes its own, and every
+key the kind sets (`work_dir`, `use_worktree`, `auto_commit`,
+`auto_classify`, `allow_fan_out`, `use_web_tools`, `use_memory`) is
+locked, so a call whose `options` contradict one is refused.  A
+`use_worktree` any SEA pins is a decision the task classifier never
+demotes (it still demotes a client's or persisted default).
 
 ### `description()` — mandatory, not a run parameter
 
@@ -419,17 +424,17 @@ agent_job(job_id, action="tail", timeout_seconds="")
 
 `task` is the sub-task's task text (the SEA's `prompt(task)`, if
 defined, turns it into the prompt); `model`, `tool_profile` and
-`max_budget` override the inherited model, toolset and budget (a
-SEA's `model` / `tool_profile` / `max_budget` settings still win);
-`timeout` is the wait above, as a number string; `options` is a JSON
-object in the `settings()` vocabulary (`agent_dispatch.OPTION_TYPES`:
-every settings key except `kind`, `extends`, `locked`, `timeout`,
-`model`, `max_budget` and `tool_profile`, plus `inherit`, `workspace`,
-`add_to_prompt` and `add_to_system_prompt`), each only to override the
-inherited value: `work_dir` (relative to the calling task's
-directory), `chat_id`, `workspace` (the account of a multi-account
-channel, forwarded to the daemon, which holds it for a `kind:
-"channel"` run and ignores it otherwise), `model_config`, `inherit`,
+`max_budget` are explicit values (they win over the SEA's settings, or
+are refused when the SEA locks the key); `timeout` is the wait above,
+as a number string; `options` is a JSON object in the `settings()`
+vocabulary (`agent_dispatch.OPTION_TYPES`: every settings key except
+`kind`, `extends`, `locked`, `timeout`, `model` and `max_budget`, plus
+`inherit`, `workspace`, `add_to_prompt` and `add_to_system_prompt`;
+`tool_profile` may be given either way but not differently in both),
+each only to override the inherited value: `work_dir` (relative to
+the calling task's directory), `chat_id`, `workspace` (the account of
+a multi-account channel; refused for any SEA that is not a `kind:
+"channel"`), `model_config`, `inherit`,
 `use_worktree`, `auto_commit`, `auto_classify`, `use_web_tools`,
 `use_memory`, `allow_fan_out`, `docker_image`, `add_to_prompt` and
 `add_to_system_prompt`, e.g. `'{"use_web_tools": false}'`.  `wait="false"`
@@ -444,13 +449,13 @@ blocks for its result, `"tail"` reports whether it still runs,
 loop turns into a stop of the sub-task confirmed by its terminal
 status (an unconfirmed stop is reported as such, never as "stopped").
 `agent` names WHICH agent to run; every spelling resolves to one
-agent-script path and takes the same dispatch
+SEA path and takes the same dispatch
 (`agent_dispatch.resolve_agent` tries, in order):
 
 1. empty, or a generic label a model may invent (`general`, `reviewer`,
-   `worker`, `assistant`, `default`, ...): the plain sub-agent,
-   `seas/dummy/dummy_sea.py`;
-2. a path (a `.py` suffix or a path separator): that agent script, a
+   `assistant`, `default`, ...; not `worker`, which is a kind): the
+   plain sub-agent, `seas/dummy/dummy_sea.py`;
+2. a path (a `.py` suffix or a path separator): that SEA file, a
    relative path resolved against the calling task's work directory;
 3. a registered slash-command name (case, spaces, hyphens and
    underscores are ignored, so "Home Assistant" is `homeassistant`):
@@ -462,7 +467,7 @@ agent-script path and takes the same dispatch
    process.
 
 Anything else returns `Error: unknown agent '...' — not a registered
-slash command and not a path to a .py agent script.` with the closest
+slash command and not a path to a .py SEA file.` with the closest
 command and the registered commands.  The sub-task is reported under
 the resolved name: the command name, else the script's file stem
 without `_sea`.
@@ -483,8 +488,10 @@ tab is the outermost layer under `/sh ...`: `/sh`'s own `agentPath`
 stays, on the picker's model and with the picker's routing protocol.
 
 `run_parallel(tasks, ..., agent=...)` runs the same SEA in-process for
-every fan-out child: its settings win over the call's arguments, its
-`prompt(task)` shapes each child's prompt, its system-prompt texts,
+every fan-out child under the same precedence rule: the call's
+arguments and `options` win, then the SEA's settings, then what the
+children inherit; its `prompt(task)` shapes each child's prompt, its
+system-prompt texts,
 tools and hooks apply (`sorcar_agent._sea_run_kwargs`).  The children
 inherit what a `run_agent` sub-task inherits (the parent's model and
 configuration, chat, system-prompt texts, prompt suffix, extra tools,
@@ -496,7 +503,8 @@ and chat, so a SEA — or the call's `options` — pinning
 `chat_id` or a `workspace`, and a `kind: "channel"` SEA, are refused
 with an error that says to use `run_agent`
 (`agent_dispatch.fanout_conflict`); a SEA's `timeout` bounds each
-child only when the call passes none, and children always inherit.
+child only when the call passes none, and `inherit: false` makes the
+children take nothing from the caller but their budget share.
 
 ### `add_to_system_prompt()`, `register_as_model()` and `on_picked_as_model()` — model routing SEAs
 
@@ -517,7 +525,7 @@ not a run parameter: `kiss.agents.sorcar.sea_commands.model_seas()`
 lists every registered SEA whose `register_as_model()` returns `True`,
 the daemon offers them in the model picker (vendor `Router`, once at
 least one catalog model is runnable), and a task run with such a pick
-becomes an agent-script run of the SEA on the model its
+becomes a run of the SEA on the model its
 `settings()["model"]` names (else the default model) — `/xxx` slash
 commands and runs that already carry an `agentPath` keep their agent
 and only take that model.  The bundled `autorouter` and `bestrouter`
@@ -539,7 +547,7 @@ being chosen.  `kiss.agents.sorcar.sea_commands.run_picked_hook` runs it
 on a daemon thread at two moments: when the user picks the SEA in the
 model picker (`selectModel`, with the tab's registered work directory,
 else the daemon's global one, without waiting), and once per run whose model is the SEA (after the
-agent-script overrides, with the run's effective work directory,
+SEA overrides, with the run's effective work directory,
 waiting at most `PICKED_HOOK_TIMEOUT_SECONDS`, 15 s, before the task
 starts).  It is not a run parameter: the return value is only logged,
 a hook that raises is logged as a warning, and one that blocks is
@@ -637,7 +645,7 @@ The `run()` parameters without a `settings()` key (the allowlist is
   (`RelentlessAgent.perform_task`): the work directory (omitted when
   the tools run in an attached container that does not mount it), the
   process id, the task settings, and the user's standing instructions
-  from `~/.kiss/AGENTS.md` (`$KISS_HOME/AGENTS.md`, the file the
+  from `$KISS_HOME/AGENTS.md` (the file the
   bundled `/remember` and `/forget` SEAs maintain) when that file
   exists.  A `model_config["system_instruction"]` value, if present,
   takes precedence over the composed prompt (`KISSAgent.run` only
@@ -659,7 +667,7 @@ The `run()` parameters without a `settings()` key (the allowlist is
       )
   ```
 
-  A run with an agent script executes its prompt as one task: the
+  A run with a SEA executes its prompt as one task: the
   task runner does not split `<task>` blocks into subtasks for an
   `agentPath` run (they are the SEA's to interpret), so the text is
   appended once.  A prompt that is nothing but a filesystem path is
@@ -692,7 +700,7 @@ The `run()` parameters without a `settings()` key (the allowlist is
   `codex/*`), or a caller-supplied
   `model_config["system_instruction"]` stays memory-free even with
   `True`.  Pages live in the directory named by the `memory_dir`
-  setting, or `~/.kiss/memories` (`$KISS_HOME/memories`) when unset;
+  setting, or `$KISS_HOME/memories` when unset;
   a run whose work directory is inside a git repository also attaches
   that repository's domain memory, a sub-directory named after the
   repository's main checkout directory (linked worktrees resolve to it
@@ -763,7 +771,7 @@ The `run()` parameters without a `settings()` key (the allowlist is
 
 The script may also define two hook getters with no corresponding
 `sorcar.run()` parameter or `settings()` key — a callable cannot be
-JSON-serialized, so the hooks exist ONLY as agent-script functions,
+JSON-serialized, so the hooks exist ONLY as SEA functions,
 evaluated in the daemon process:
 
 | Function               | Return type          | Staged command field |
@@ -936,8 +944,8 @@ Errors fall into two categories depending on where they are caught:
 the daemon):
 - `prompt` is empty or blank
 - `extension_agent_path` is neither `None`/`""` nor a string
-- The agent-script path is not a `.py` file
-- The agent-script file does not exist
+- The SEA path is not a `.py` file
+- The SEA file does not exist
 
 **Daemon-side errors** (the task starts, then fails with
 `result.success == False` and the diagnostic in `result.text`, which
@@ -1014,7 +1022,7 @@ When `model_config` contains a `base_url`, the model factory bypasses
 its normal provider routing and creates an OpenAI-compatible model
 pointing at that URL.  The daemon still runs its model-availability
 preflight first: `model` must name a generation-capable model from
-the bundled catalog or from `~/.kiss/MY_MODELS.json` whose provider is
+the bundled catalog or from `$KISS_HOME/MY_MODELS.json` whose provider is
 usable (an API key for HTTP providers, the executable on `PATH` for
 `cc/*` / `codex/*`), so replace `my-custom-model` above with such a
 name; otherwise the task fails with `No model available.  Set at least
@@ -1042,9 +1050,10 @@ full KISS Sorcar toolset so it can also read files, run commands, etc.
 """
 
 import json
-import os
 import sqlite3
 import threading
+
+from kiss.core.config import kiss_home
 
 
 def description() -> str:
@@ -1060,13 +1069,13 @@ def description() -> str:
 # Guarded with CREATE IF NOT EXISTS: the file is re-executed from
 # source on every run.
 
-_DB_PATH = os.path.expanduser("~/.kiss/task_manager.db")
+_DB_PATH = kiss_home() / "task_manager.db"
 _lock = threading.Lock()
 
 
 def _get_db() -> sqlite3.Connection:
     """Return a connection to the task database, creating it if needed."""
-    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
@@ -1258,7 +1267,7 @@ class TaskResult:
 - Extra tools come only from `add_to_tools()`, returning a **list of
   callables**; the built-in toolset plus yours is the most common
   pattern, `"tool_profile": "none"` gives an exact tool set.
-- The agent script is **re-imported from source** on every run.
+- The SEA is **re-imported from source** on every run.
   Edits take effect immediately without restarting the daemon.
 - `max_budget` and `timeout` must be **finite** numbers.  `NaN`,
   `±inf`, or an overflowing value raises `AgentFileError`.
@@ -1280,7 +1289,7 @@ class TaskResult:
   other thread.  The bundled `seas/autorouter/autorouter_sea.py`,
   `seas/rsi7d/rsi7d_sea.py` and `seas/skillopt/skillopt_sea.py` use it.
 - Put the SEA in a folder named after the command, `xxx/xxx_sea.py`,
-  and list that folder's parent in `~/.kiss/SEAS.md` (one folder per
+  and list that folder's parent in `$KISS_HOME/SEAS.md` (one folder per
   line; blank lines and `#` comments are ignored) to expose it as the
   chat command `/xxx`; `/xxx some text` runs the SEA on "some text"
   directly in the tab's run, and `/xxx help` prints its
@@ -1307,12 +1316,12 @@ class TaskResult:
   container; the module defines no top-level `settings()`, its
   `ContainerHarness` methods are exposed by generated per-trial SEAs,
   so the bare command runs Sorcar with its defaults), `/forget`
-  (removes a standing instruction from `~/.kiss/AGENTS.md`),
+  (removes a standing instruction from `$KISS_HOME/AGENTS.md`),
   `/git_extract_knowledge` (builds and refreshes a repository's
   knowledge memory and can schedule its daily refresh), `/merge`
   (resolves git merge conflicts and stages the resolved files; commits
   only when asked), `/remember` (appends a standing instruction to
-  `~/.kiss/AGENTS.md`), `/review_paper` (reviews a research paper for
+  `$KISS_HOME/AGENTS.md`), `/review_paper` (reviews a research paper for
   a venue, scoring seven dimensions from 1 to 10), `/revise_and_review_paper` (writes a paper with
   `/write_paper`, has `/review_paper` review it fresh, and repeats until
   strong accept or no further improvement; task text carries `Writing:`

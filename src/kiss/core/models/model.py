@@ -1335,7 +1335,14 @@ class Model(ABC):
         }
 
     def _parse_docstring_params(self, docstring: str) -> dict[str, str]:
-        """Parses parameter descriptions from a docstring.
+        """Parses parameter descriptions from a Google-style ``Args:`` section.
+
+        An entry is ``name: text`` or ``name (type): text`` at the
+        section's base indentation; lines indented deeper continue the
+        entry and are joined with single spaces, so a description that
+        wraps over several lines reaches the model whole.  A blank line
+        or a ``Returns:`` / ``Raises:`` / ``Example:`` heading ends the
+        section.
 
         Args:
             docstring: The docstring to parse.
@@ -1344,28 +1351,31 @@ class Model(ABC):
             dict[str, str]: A dictionary mapping parameter names to descriptions.
         """
         param_descriptions: dict[str, str] = {}
-        lines = docstring.split("\n")
         in_args_section = False
+        base_indent: int | None = None
+        current: str | None = None
 
-        for line in lines:
+        for line in docstring.split("\n"):
             stripped = line.strip()
             if stripped.lower().startswith("args:"):
-                in_args_section = True
+                in_args_section, base_indent, current = True, None, None
                 continue
-            elif stripped.lower().startswith(("returns:", "raises:", "example:")):
+            if stripped.lower().startswith(("returns:", "raises:", "example:")) or (
+                in_args_section and not stripped
+            ):
                 in_args_section = False
                 continue
-
-            if in_args_section and ":" in stripped:
-                parts = stripped.split(":", 1)
-                if len(parts) == 2:  # pragma: no branch
-                    param_part = parts[0].strip()
-                    desc_part = parts[1].strip()
-                    if "(" in param_part:
-                        param_name = param_part.split("(")[0].strip()
-                    else:
-                        param_name = param_part
-                    param_descriptions[param_name] = desc_part
+            if not in_args_section:
+                continue
+            indent = len(line) - len(line.lstrip())
+            if base_indent is None:
+                base_indent = indent
+            if indent > base_indent and current is not None:
+                param_descriptions[current] += " " + stripped
+            elif ":" in stripped:
+                param_part, desc_part = (part.strip() for part in stripped.split(":", 1))
+                current = param_part.split("(")[0].strip()
+                param_descriptions[current] = desc_part
 
         return param_descriptions
 

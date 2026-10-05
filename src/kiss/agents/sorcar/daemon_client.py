@@ -508,7 +508,7 @@ def run(
             replacing the default system prompt shipped in
             ``src/kiss/SYSTEM.md``.  The daemon still appends its
             per-run operational instructions (work directory, process
-            id, ``~/.kiss/AGENTS.md``) so the agent's tool contract
+            id, ``$KISS_HOME/AGENTS.md``) so the agent's tool contract
             keeps working.  Empty (default) runs with the default
             system prompt as usual.
         extension_agent_path: Optional path — a string — to a Python
@@ -556,7 +556,7 @@ def run(
             (``use_worktree``, ``auto_commit``, ``auto_classify``,
             ``allow_fan_out``, ``use_web_tools``, ``use_memory`` all
             off) and ``channel`` (``worker`` plus ``work_dir:
-            ~/.kiss/channel_work``; the run gets the channel preamble
+            $KISS_HOME/channel_work``; the run gets the channel preamble
             and a workspace held for the run, and a ``run_agent``
             sub-task of it inherits nothing from the caller).
 

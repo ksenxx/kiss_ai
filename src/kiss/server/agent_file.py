@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Applying an agent script (SEA) to a ``run`` command.
+"""Applying an SEA to a ``run`` command.
 
 The caller of :func:`kiss.server.sorcar.run` may supply an *agent
 script* — a Sorcar Extension Agent, a Python file that configures the
@@ -16,8 +16,10 @@ result in place on the command dict (:func:`apply_agent_overrides`):
 
 * the merged ``settings()``: a ``kind`` plus per-run parameters, each
   written over the command's corresponding wire field
-  (:data:`SETTING_FIELDS`), so a script's choice wins over whatever
-  the caller sent;
+  (:data:`SETTING_FIELDS`) unless the caller marked that field explicit
+  (:data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`: an
+  explicit value ranks above the SEA's, a persisted or inherited one
+  below it);
 * ``prompt(task)``: the task text replaced by what the function
   returns (``{task_id}`` in it -> the calling task's id);
 * ``system_prompt()``, written over ``systemPrompt`` (the run's base
@@ -34,7 +36,7 @@ result in place on the command dict (:func:`apply_agent_overrides`):
   when the run ends.
 
 The functions execute in the daemon process on the task's worker
-thread.  A broken agent script (malformed field, missing file, import
+thread.  A broken SEA (malformed field, missing file, import
 failure, a raising getter, a wrong-typed value) raises
 :exc:`AgentFileError` so the task stops with a diagnostic instead of
 silently running with the wrong parameters.
@@ -46,7 +48,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT, sea_overrides
+from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT, sea_pinned
 from kiss.agents.sorcar.sea_commands import (
     SeaLayer,
     SeaScriptError,
@@ -68,7 +70,7 @@ logger = logging.getLogger("kiss-vscode")
 
 
 class AgentFileError(SeaError):
-    """A ``run`` command's agent script is broken and the task must stop.
+    """A ``run`` command's SEA is broken and the task must stop.
 
     Raised by :func:`apply_agent_overrides` when the ``agentPath`` wire
     field is malformed, names a missing or non-``.py`` path, names a
@@ -76,7 +78,7 @@ class AgentFileError(SeaError):
     ``settings()`` or getters are non-callable, raise, or return a
     value of the wrong type.  The task runner turns the raise into a
     failed task result whose text carries this exception's diagnostic
-    message, so a broken agent script stops the task loudly instead of
+    message, so a broken SEA stops the task loudly instead of
     silently running it with parameters the script did not compute.
     """
 
@@ -136,11 +138,11 @@ def channel_workspace(cmd: dict[str, Any], layers: list[SeaLayer]) -> str:
 
 
 def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[SeaLayer]:
-    """Execute the agent script a ``run`` command names, and its bases.
+    """Execute the SEA a ``run`` command names, and its bases.
 
     Args:
         cmd: The ``run`` command dict.  An absent, ``None`` or empty
-            ``agentPath`` means "no agent script": an empty list.
+            ``agentPath`` means "no SEA": an empty list.
         base: An outermost layer to lay under the script (the tab's
             model-picker SEA), or ``None``.  With no ``agentPath`` the
             base alone is the run's script.
@@ -160,7 +162,7 @@ def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[SeaLayer]
         raw_path = str(base)
     if not isinstance(raw_path, str):
         raise AgentFileError(
-            f"agent script field must be a path string, got {type(raw_path).__name__}"
+            f"SEA field must be a path string, got {type(raw_path).__name__}"
         )
     try:
         return sea_layers(Path(raw_path), base)
@@ -172,7 +174,7 @@ def apply_agent_overrides(
     cmd: dict[str, Any],
     layers: list[SeaLayer] | None = None,
 ) -> set[str]:
-    """Apply a ``run`` command's agent-script configuration, in place.
+    """Apply a ``run`` command's SEA configuration, in place.
 
     Evaluates the script's layers
     (:func:`~kiss.agents.sorcar.sea_commands.evaluate_sea` on the
@@ -195,7 +197,7 @@ def apply_agent_overrides(
 
     Returns:
         The set of command-field names that were overridden (empty when
-        the command carries no agent script), so the caller can tell an
+        the command carries no SEA), so the caller can tell an
         actual script override apart from a client-sent value.
 
     Raises:
@@ -218,7 +220,7 @@ def apply_agent_overrides(
             parent_task_id if isinstance(parent_task_id, str) else "",
         )
     except SeaScriptError as exc:
-        logger.warning("agent script %s rejected: %s", layers[-1].path, exc)
+        logger.warning("SEA %s rejected: %s", layers[-1].path, exc)
         raise AgentFileError(str(exc)) from exc
     # Everything below is STAGED and applied to the command only after
     # every getter has succeeded: a broken getter must leave the command
@@ -281,12 +283,13 @@ def apply_agent_overrides(
         staged["toolCallHook"] = run.tool_call_hook
     # The provenance record the task runner folds into the run's
     # ``task_settings`` event (see :mod:`kiss.agents.sorcar.run_config`):
-    # computed from the command BEFORE the writes, so it names what the
-    # caller sent and what the script replaced it with.
+    # computed from the command BEFORE the writes, so it names the
+    # inherited or persisted values the SEA pinned to its own (explicit
+    # values were removed from ``staged`` above and never appear here).
     cmd[RUN_CONFIG_FIELD] = {
         "sea": script_name(str(layers[-1].path)),
         "kind": run.settings.get("kind") or "session",
-        "overridden": sea_overrides(cmd, staged, SETTING_FIELDS),
+        "pinned": sea_pinned(cmd, staged, SETTING_FIELDS),
     }
     cmd.update(staged)
     return set(staged)
@@ -296,8 +299,8 @@ RUN_CONFIG_FIELD = "_runConfig"
 """The daemon-side ``run`` command field :func:`apply_agent_overrides` leaves its provenance
 record in.
 
-``{"sea": <script name>, "kind": <kind>, "overridden": {key: [asked, forced]}}``;
-absent when the command carries no agent script.
+``{"sea": <SEA name>, "kind": <kind>, "pinned": {key: [before, pinned]}}``;
+absent when the command carries no SEA.
 """
 
 

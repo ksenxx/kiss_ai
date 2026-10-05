@@ -2,9 +2,9 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The contract of an agent script (SEA) and the loader that executes one.
+"""The contract of an SEA and the loader that executes one.
 
-An agent script configures the session that runs it with optional
+A SEA configures the session that runs it with optional
 module-level functions.  The run parameters come from ``settings()``::
 
     def settings() -> dict:
@@ -20,11 +20,9 @@ per-run parameters of :func:`kiss.server.sorcar.run` listed in
 ``timeout`` (seconds a ``run_agent`` call waits for this script's
 sub-task, and the limit of each ``run_parallel`` child) and ``locked``
 (the keys an explicit caller argument may not replace).  Against the
-caller, one precedence rule (:func:`locked_conflicts`): an explicit
-``run_agent`` / ``run_parallel`` argument or option wins over the
-script's settings, which win over what the calling task passes on (and
-over a chat panel's persisted settings for ``/<name>``); an argument
-that differs from a ``locked`` setting is an error.
+caller there is one precedence rule, :data:`PRECEDENCE_RULE`, enforced
+by :func:`locked_conflicts` and rendered by ``sea docs`` into every
+page that states it.
 
 Getters are text and code: ``system_prompt()`` replaces the base
 system prompt, ``add_to_system_prompt()`` appends to it, and
@@ -86,6 +84,21 @@ from typing import Any
 from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
+
+PRECEDENCE_RULE = (
+    "For every setting of a sub-task: what the call passes explicitly (a `run_agent` / "
+    "`run_parallel` argument or `options` key) wins, then the SEA's `settings()`, then what "
+    "the calling task passes on (and, for `/<name>`, the chat panel's persisted settings), "
+    "then the user's defaults. A SEA may list keys in `locked`: a call that passes a "
+    "different value for a locked key is refused with an error, never silently overruled."
+)
+"""The one precedence rule of SEA settings, stated once.
+
+:func:`locked_conflicts` enforces the ``locked`` clause; ``sea docs``
+renders the sentence into the ``<!-- sea-docs: precedence -->`` block of
+every documentation page, and the ``run_agent`` / ``run_parallel`` tool
+docstrings quote it, so a change here changes every statement of it.
+"""
 
 SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
     "kind": str,
@@ -217,7 +230,7 @@ def kind_defaults() -> dict[str, dict[str, Any]]:
     tool-bound run on the caller's tree: no worktree, no auto-commit,
     no classifier, no fan-out, no browser, no memory.  ``channel`` is
     a worker for an external service with a ``work_dir`` of the shared
-    ``~/.kiss/channel_work`` scratch directory (never the caller's
+    ``channel_work`` scratch directory under the Sorcar home (never the caller's
     project, whose git lifecycle it does not join); the daemon and the
     dispatcher give a channel its workspace and preamble and never let
     it inherit from a calling task.  Computed on every call so a
@@ -231,7 +244,7 @@ def kind_defaults() -> dict[str, dict[str, Any]]:
 
 
 class SeaError(Exception):
-    """Base of every "this agent script is broken" error.
+    """Base of every "this SEA is broken" error.
 
     :exc:`kiss.agents.sorcar.sea_commands.SeaScriptError` (raised by the
     registry and the dispatcher) and
@@ -264,7 +277,7 @@ def wire_field(key: str) -> str:
 
 
 def script_name(path: str) -> str:
-    """Return an agent script's display name: its file stem without a ``_sea`` suffix.
+    """Return a SEA's display name: its file stem without a ``_sea`` suffix.
 
     The name ``run_agent`` reports the sub-task under (``"the write_paper
     agent task ..."``) and the ``{name}`` of the channel preamble.
@@ -276,12 +289,12 @@ def safe_message(exc: BaseException) -> str:
     """Format an untrusted exception without trusting its ``__str__``.
 
     ``str(exc)`` runs the exception's ``__str__``, which — for an
-    exception minted by an untrusted agent script — may itself raise
+    exception minted by an untrusted SEA — may itself raise
     anything.  A diagnostic built here must never leak such a secondary
     raise, so the conversion is guarded and falls back to the type name.
 
     Args:
-        exc: The exception raised by untrusted agent-script code.
+        exc: The exception raised by untrusted SEA code.
 
     Returns:
         ``"TypeName: message"`` when the message renders, else ``"TypeName"``.
@@ -296,11 +309,11 @@ def safe_message(exc: BaseException) -> str:
 def execute_python_file(
     raw_path: Any,
     error_cls: type[Exception] = SeaError,
-    label: str = "agent script",
+    label: str = "SEA",
 ) -> dict[str, Any]:
     """Execute a caller-supplied Python file and return its namespace.
 
-    The one loader of agent scripts (the daemon's ``agentPath``, the
+    The one loader of SEAs (the daemon's ``agentPath``, the
     slash-command registry, the dispatcher, SEAs that load other
     scripts such as ``skillopt``).  The source is compiled and executed
     directly (no ``__pycache__`` read or write), so every call observes
@@ -322,7 +335,7 @@ def execute_python_file(
             string, but treated as untrusted.
         error_cls: The exception class to raise on any failure, so each
             caller keeps its own diagnostic type.
-        label: Human-readable name of the file kind (``"agent script"``,
+        label: Human-readable name of the file kind (``"SEA"``,
             ``"SEA"``), used in diagnostic messages.
 
     Returns:
@@ -378,60 +391,67 @@ def execute_python_file(
 
 
 class SettingsError(SeaError, ValueError):
-    """An agent script's settings are malformed (wrong type, unknown key or kind)."""
+    """A SEA's settings are malformed (wrong type, unknown key or kind)."""
 
 
 def declares_hidden(path: Path) -> bool:
-    """Return whether the script at *path* writes ``"hidden": True`` in ``settings()``.
+    """Return whether the SEA at *path* writes ``"hidden": True`` in ``settings()``.
 
     Read from the source (``ast``), never by executing the script: the
     command registry calls this for every scanned folder, and a hidden
-    script (a test fixture, protocol plumbing, a base other scripts
-    extend) must be excluded without running it.  Hence the contract
-    that ``hidden`` is a literal ``True`` in a dict inside
-    ``settings()``; a computed value is accepted by
-    :func:`resolve_settings` but does not hide the script.  The answer
-    is cached per path until the file's size or mtime changes, so a
-    registry refresh costs one ``stat`` per script, not a parse.
+    SEA (a test fixture, protocol plumbing, a base other SEAs extend)
+    must be excluded without running it.  Hence the contract that
+    ``hidden`` is a literal ``True`` in a dict inside ``settings()``; a
+    computed value is accepted by :func:`resolve_settings` but does not
+    hide the SEA.
+    """
+    return declared_literal(path, "hidden") is True
+
+
+def declared_literal(path: Path, key: str) -> Any:
+    """Return the literal value ``settings()`` of the SEA at *path* writes for *key*, or ``None``.
+
+    Parsed from the source, never executed (see :func:`declares_hidden`);
+    only a constant value under a string-literal key in a dict inside
+    ``settings()`` counts.  The parse is cached per path until the
+    file's size or mtime changes, so a registry refresh costs one
+    ``stat`` per SEA.
     """
     try:
         stat = path.stat()
         stamp = (stat.st_mtime_ns, stat.st_size)
     except OSError:
-        return False
-    cached = _HIDDEN_CACHE.get(path)
-    if cached is not None and cached[0] == stamp:
-        return cached[1]
-    hidden = _parses_hidden(path)
-    _HIDDEN_CACHE[path] = (stamp, hidden)
-    return hidden
+        return None
+    cached = _LITERAL_CACHE.get(path)
+    if cached is None or cached[0] != stamp:
+        cached = (stamp, _settings_literals(path))
+        _LITERAL_CACHE[path] = cached
+    return cached[1].get(key)
 
 
-_HIDDEN_CACHE: dict[Path, tuple[tuple[int, int], bool]] = {}
-"""``path -> ((mtime_ns, size), hidden)`` memo of :func:`declares_hidden`."""
+_LITERAL_CACHE: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
+"""``path -> ((mtime_ns, size), {key: literal value})`` memo of :func:`declared_literal`."""
 
 
-def _parses_hidden(path: Path) -> bool:
-    """Parse *path* and return whether ``settings()`` holds a literal ``"hidden": True``."""
+def _settings_literals(path: Path) -> dict[str, Any]:
+    """Parse *path*; return the constant ``"key": value`` entries of the dicts in ``settings()``."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, ValueError):
-        return False
+        return {}
+    literals: dict[str, Any] = {}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == "settings":
             for sub in ast.walk(node):
                 if isinstance(sub, ast.Dict):
                     for key, value in zip(sub.keys, sub.values, strict=True):
-                        if (
-                            isinstance(key, ast.Constant) and key.value == "hidden"
-                            and isinstance(value, ast.Constant) and value.value is True
-                        ):
-                            return True
-    return False
+                        if isinstance(key, ast.Constant) and isinstance(value, ast.Constant):
+                            literals[str(key.value)] = value.value
+    return literals
 
 
 def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the effective settings of the agent script executed into *namespace*.
+    """Return the effective settings of the SEA executed into *namespace*.
 
     Evaluates the script's ``settings()`` (when defined) and merges the
     ``kind``'s defaults under its keys.  Every value is
@@ -535,9 +555,11 @@ def merge_settings(chain: list[dict[str, Any]]) -> dict[str, Any]:
     if chain and "hidden" in chain[-1]:
         merged["hidden"] = chain[-1]["hidden"]
     locks = {key for s in chain for key in s.get("locked", ())}
-    if merged.get("kind") == "channel" and "work_dir" in merged:
-        # A channel runs in its own scratch directory, never the caller's.
-        locks.add("work_dir")
+    if merged.get("kind") == "channel":
+        # A channel is closed: it runs in its own scratch directory, never
+        # the caller's, and no call may give it a worktree, auto-commit,
+        # the classifier, fan-out, the browser or memory.
+        locks.update(key for key in kind_defaults()["channel"] if key in merged)
     if locks:
         # A base that locks a key keeps it locked in every script extending it.
         merged["locked"] = sorted(locks)

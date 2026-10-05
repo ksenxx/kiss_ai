@@ -239,7 +239,7 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
     assert apply_agent_overrides(cmd) == set()
     # The only write is the provenance record of a script that replaced nothing.
     assert cmd.pop("_runConfig") == {
-        "sea": "old_contract_agent", "kind": "session", "overridden": {},
+        "sea": "old_contract_agent", "kind": "session", "pinned": {},
     }
     assert cmd == {
         "agentPath": str(script),

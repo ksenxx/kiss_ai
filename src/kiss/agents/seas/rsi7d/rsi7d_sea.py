@@ -86,12 +86,17 @@ directories of the task's work dir (the SEA's own directory when the
 task does not run inside a KISS checkout).  The prompt gate rejects any
 candidate whose AST differs outside the constant's text, so code and
 f-string placeholders are never changed by ``patch_sea_prompt``.  Code
-(tools, guardrail hooks, helpers) is edited with ``patch_sea_code`` and
-``settings()`` with ``patch_sea_settings``; both keep the edit only when
-the patched script compiles, loads through the daemon's path with every
-getter evaluated and passes ``sea lint`` (:mod:`sea_tuning` holds the
-deterministic limit proposals, the acceptance test and the eval-set
-mining).  SEAs registered from other folders (channel agents, user
+(tools, guardrail hooks, helpers) is edited with ``patch_sea_code`` for
+one exact replacement or reworked by a full-tool KISS Sorcar sub-agent
+through ``improve_sea_code`` (undone with ``revert_sea_code``), and
+``settings()`` with ``patch_sea_settings``; every editor keeps the edit
+only when the patched script compiles, loads through the daemon's path
+with every getter evaluated and passes ``sea lint``.  A settings change
+stays pending until ``settle_sea_settings`` keeps it on a successful
+replay or reverts it; the change log under the Sorcar home lets the
+next sweep propose a revert when the SEA got worse (:mod:`sea_tuning`
+holds the deterministic proposals, the acceptance test, the change log
+and the eval-set mining).  SEAs registered from other folders (channel agents, user
 folders) are analysed and reported on, never edited.
 
 Replays in clones
@@ -272,21 +277,27 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
   in the report.
 
 ## Hard rules
-- Change SEA files only through the three gated editors, never with Edit/Write:
+- Change SEA files only through the gated editors, never with Edit/Write:
   `patch_sea_prompt` (instructions: edits one prompt constant, nothing else may change),
   `patch_sea_settings` (one `settings()` key; a `timeout` / `max_budget` must pass the
-  acceptance test on the window's runs) and `patch_sea_code` (everything else: a new tool
-  in `add_to_tools()`, a guardrail in `tool_call_hook` / `llm_call_hook`, a helper, an
-  import; read the file with `sea_source` first). `tune_sea_settings` only computes
-  limits. Every editor restores the file unless the patched SEA still loads and passes
-  `sea lint` (`patch_sea_code` and `patch_sea_settings` also run the daemon's full load
-  with every getter evaluated). A code change (tools, guardrails) is kept only when it is
-  also replay-verified (step 5) and `uv run pytest -q
+  acceptance test on the window's runs), `patch_sea_code` (one exact replacement: a new
+  tool in `add_to_tools()`, a guardrail in `tool_call_hook` / `llm_call_hook`, a helper,
+  an import; read the file with `sea_source` first) and `improve_sea_code` (a KISS Sorcar
+  sub-agent with every tool reworks the SEA's folder from your written instructions and
+  evidence: use it when the change spans several places, needs a test, or restructures
+  the prompt). `tune_sea_settings` only computes proposals. Every editor restores the
+  file unless the patched SEA still loads and passes `sea lint` (`patch_sea_code`,
+  `improve_sea_code` and `patch_sea_settings` also run the daemon's full load with every
+  getter evaluated). A code change (tools, guardrails) is kept only when it is also
+  replay-verified (step 5) and `uv run pytest -q
   src/kiss/tests/agents/seas/test_<name>_sea.py` passes when that test exists; a code
-  change that cannot be replayed is reverted, not reported as "not replay-verified".
-  Revert through the same editor (`patch_sea_code(name, old=<new text>, new=<old text>)`,
-  `patch_sea_settings` with the previous value, `patch_sea_prompt` with old/new swapped),
-  never with `git checkout`, which would also discard earlier accepted edits. Never edit a
+  change that cannot be replayed is reverted, not reported as "not replay-verified". A
+  settings change is pending until `settle_sea_settings(name, replay_task_id)` keeps it
+  (successful replay) or reverts it (anything else); settle before any other settings
+  change of that SEA. Revert through the same editor (`patch_sea_code(name, old=<new
+  text>, new=<old text>)`, `settle_sea_settings` without a replay, `patch_sea_prompt` with
+  old/new swapped, `revert_sea_code(name)` after `improve_sea_code`), never with `git
+  checkout`, which would also discard earlier accepted edits. Never edit a
   SEA whose `editable_path` is empty in
   `indexed_seas()` (user SEAs, and the channel SEAs such as `slack` or `gmail`): analyse
   those and put recommendations in the report instead. `/ask` (`seas/ask/ask_sea.py`) does
@@ -338,13 +349,18 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
 4. Implement. Instructions: call `sea_prompt(name)`, then `patch_sea_prompt(name, old, new)`
    (empty `old` appends the section); re-read the result and make sure the section is
    coherent with the rest of the prompt. Settings: `tune_sea_settings(name)` proposes
-   `timeout` / `max_budget` from the window and flags tool-profile problems; apply with
-   `patch_sea_settings(name, key, value)`. Code: when the evidence shows a missing tool
-   (the agent reaches for a tool the SEA does not give it) or a recurring misuse an
-   instruction did not stop, read the file with `sea_source(name)` and use
-   `patch_sea_code(name, old, new)` to add the tool to `add_to_tools()` or a guardrail to
-   `tool_call_hook` (refuse or rewrite the call) / `llm_call_hook`; keep every helper small,
-   typed and documented like the code around it. Eval sets: `export_sea_evals(name)` turns
+   `timeout` / `max_budget` / a narrower `tool_profile` from the window, flags missing
+   tools, and turns an earlier change the runs since have shown to be harmful into a
+   `revert` proposal; apply with `patch_sea_settings(name, key, value)`, replay, then
+   `settle_sea_settings(name, replay_task_id)`. Code: when the evidence shows a missing
+   tool (the agent reaches for a tool the SEA does not give it) or a recurring misuse an
+   instruction did not stop, read the file with `sea_source(name)`; a one-place change
+   goes through `patch_sea_code(name, old, new)` (add the tool to `add_to_tools()` or a
+   guardrail to `tool_call_hook` / `llm_call_hook`); anything larger goes through
+   `improve_sea_code(name, instructions, max_budget)`, whose instructions must name the
+   files, the evidence (task ids, findings) and the intended behaviour, and whose budget
+   counts toward this task's; keep every helper small, typed and documented like the code
+   around it. Eval sets: `export_sea_evals(name)` turns
    the window's successful runs into a `skillopt` eval-set candidate so the next
    optimization has real tasks; `frequent_tasks()` lists repeated task texts that deserve a
    new `/<name>` (report them, do not create the SEA).
@@ -618,6 +634,7 @@ def _run_record(
         "duration_s": _duration_s(row),
         "children": len(children),
         "started": task_digest._fmt_ts(task_digest._start_ms(row)),
+        "started_ms": task_digest._start_ms(row),
     }
 
 
@@ -1749,21 +1766,232 @@ def patch_sea_code(name: str, old: str, new: str) -> str:
     return f"Patched {path}: {len(source)} -> {len(candidate)} chars, {delta:+d} lines"
 
 
+SNAPSHOT_DIR = Path("tmp") / "rsi7d" / "snapshots"
+"""Where ``improve_sea_code`` keeps the copy of a SEA folder it took before the sub-agent ran."""
+
+IMPROVE_PROMPT = """\
+Improve the Sorcar Extension Agent (SEA) `{name}` in this checkout. Its folder is `{folder}`
+and its script is `{file}`; every change must stay inside that folder (and its test file
+`{test}`, when the change needs one). Instructions and evidence from the rsi7d sweep:
+
+{instructions}
+
+Rules: read the script fully before editing; keep the SEA's contract (module-level
+`description()`, `settings()`, prompt getters, `add_to_tools()` returning callables); keep
+every helper small, typed and documented like the code around it; run
+`uv run sea lint` and the SEA's test file when it exists, and fix what they report. Do not
+commit. Finish with a short summary of what you changed and why.
+"""
+
+
+def improve_sea_code(
+    name: str, instructions: str, max_budget: float, timeout: float = 3600.0, model: str = ""
+) -> str:
+    """Have a full-tool KISS Sorcar sub-agent rework editable SEA *name* as *instructions* say.
+
+    For changes beyond one exact replacement (`patch_sea_code`): a new
+    tool with its test, a restructured prompt, several coordinated
+    edits.  A plain Sorcar task (this checkout's SYSTEM.md, full
+    toolset, *model* or the default, no worktree, no auto-commit) runs in
+    the checkout with the SEA's folder, file and your *instructions*
+    (the ideas and the evidence they rest on), capped by *max_budget*
+    (USD) and *timeout* (seconds).  The folder is copied to
+    `tmp/rsi7d/snapshots/<name>` first; `revert_sea_code(name)` restores
+    that copy.  When the sub-agent returns, the script goes through the
+    same gate as `patch_sea_code` (compile, load with every getter,
+    `sea lint`); a script that fails is restored from the snapshot and
+    the error returned.  Returns JSON with `task_id`, the sub-agent's
+    `result`, the folder's `diff_stat` and any `other_changes` outside
+    the folder.  Then replay (step 5) and keep, or `revert_sea_code`.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    if not hasattr(agent_dispatch, "dispatch_result"):
+        return (
+            "Error: the daemon's installed kiss package predates agent_dispatch.dispatch_result; "
+            "reinstall the extension from this checkout and retry"
+        )
+    folder = path.parent
+    checkout = _folder_checkout(folder)
+    snapshot = _work_root() / SNAPSHOT_DIR / name
+    rmtree_force(snapshot)
+    shutil.copytree(folder, snapshot, ignore=shutil.ignore_patterns("__pycache__"))
+    source = path.read_text(encoding="utf-8")
+    dirty_before = _dirty_files(checkout)
+    test = checkout / "src" / "kiss" / "tests" / "agents" / "seas" / f"test_{name}_sea.py"
+    prompt = IMPROVE_PROMPT.format(
+        name=name, folder=folder, file=path, test=test, instructions=instructions.strip()
+    )
+    outcome = _dispatch_replay(
+        SORCAR, str(_kiss_pkg_dir() / SORCAR_PROMPT_FILES[0]), prompt, str(checkout),
+        model, max_budget, timeout,
+    )
+    report: dict[str, Any] = {
+        "sea": name,
+        "task_id": outcome["replay_task_id"],
+        "result": outcome["result"],
+        "snapshot": str(snapshot),
+    }
+    if path.is_file():
+        why = _accept_sea_file(path, source, path.read_text(encoding="utf-8"))
+    else:
+        why = "the sub-agent deleted the script"
+    if why:
+        _restore_folder(snapshot, folder)
+        report["error"] = f"{why}; folder restored from the snapshot"
+    diff = _git("diff", "--stat", "--", str(folder), cwd=checkout)
+    report["diff_stat"] = diff.stdout.strip() if diff.returncode == 0 else "not a git checkout"
+    report["other_changes"] = sorted(
+        f for f in _dirty_files(checkout) - dirty_before
+        if not (checkout / f).resolve().is_relative_to(folder.resolve())
+    )
+    return json.dumps(report, indent=1, default=str)
+
+
+def revert_sea_code(name: str) -> str:
+    """Restore editable SEA *name*'s folder from the copy `improve_sea_code` took before it ran.
+
+    Undoes the latest `improve_sea_code` of *name* (and nothing else:
+    earlier accepted edits are inside the copy).  Returns what was
+    restored, or an error when no snapshot exists.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    snapshot = _work_root() / SNAPSHOT_DIR / name
+    if not snapshot.is_dir():
+        return f"Error: no snapshot of {name} in {snapshot}; nothing to revert"
+    _restore_folder(snapshot, path.parent)
+    return f"Restored {path.parent} from {snapshot}"
+
+
+def _folder_checkout(folder: Path) -> Path:
+    """Return the git checkout *folder* is in (the folder itself when it is not in one)."""
+    proc = _git("rev-parse", "--show-toplevel", cwd=folder)
+    return Path(proc.stdout.strip()) if proc.returncode == 0 and proc.stdout.strip() else folder
+
+
+def _dirty_files(checkout: Path) -> set[str]:
+    """Return the paths ``git status`` lists as changed or untracked in *checkout*."""
+    proc = _git("status", "--porcelain", "--untracked-files=all", cwd=checkout)
+    if proc.returncode:
+        return set()
+    return {line[3:].strip() for line in proc.stdout.splitlines() if len(line) > 3}
+
+
+def _restore_folder(snapshot: Path, folder: Path) -> None:
+    """Make *folder* identical to *snapshot* (files added since are removed)."""
+    rmtree_force(folder)
+    shutil.copytree(snapshot, folder)
+
+
 def tune_sea_settings(name: str, days: float = DEFAULT_DAYS) -> str:
-    """Propose `settings()` limits for SEA *name* from its runs of the last *days* days.
+    """Propose `settings()` changes for SEA *name* from its runs of the last *days* days.
 
     Deterministic: `timeout` = 2 x the p95 duration and `max_budget` =
     1.5 x the p95 cost of the finished runs (never below the current
-    value when a run was stopped by a limit), plus a flag when runs
-    failed on a missing tool (`tool_profile` / `use_web_tools`).  Apply a
+    value when a run was stopped by a limit); a narrower `tool_profile`
+    when 10+ runs never called a tool outside it; a flag when runs
+    failed on a missing tool.  Earlier `patch_sea_settings` changes are
+    judged by the runs since: a settled change after which the SEA was
+    stopped by limits more often or got clearly costlier comes back as
+    a `revert` proposal, and a change not yet settled with
+    `settle_sea_settings` blocks every proposal (`pending`).  Apply a
     proposal with `patch_sea_settings`.
     """
     path = _editable_path(name)
     if path is None:
         return _not_editable(name)
     runs = _sea_runs(days).get("seas", {}).get(name, {}).get("runs", [])
-    report = sea_tuning.propose_settings(runs, sea_commands.sea_settings(path))
+    report = sea_tuning.propose_settings(
+        runs,
+        sea_commands.sea_settings(path),
+        sea_tuning.load_changes(_change_log(), name),
+        _tools_used([str(r["task_id"]) for r in runs]),
+    )
     return json.dumps({"sea": name, "days": days, **report}, indent=1, default=str)
+
+
+def _change_log() -> Path:
+    """Return the settings change log (under the Sorcar home, so it outlives this checkout)."""
+    return sea_tuning.change_log_path(kiss_home())
+
+
+def _tools_used(task_ids: list[str]) -> Counter[str]:
+    """Return how often each tool was called across the runs *task_ids*."""
+    used: Counter[str] = Counter()
+    for tid, ev in _events_like(task_ids, '%"tool_call"%'):
+        if ev.get("type") == "tool_call" and ev.get("name"):
+            used[str(ev["name"])] += 1
+    return used
+
+
+def settle_sea_settings(name: str, replay_task_id: str = "") -> str:
+    """Keep or revert the pending `patch_sea_settings` change of SEA *name*.
+
+    The keep-or-revert gate of a settings change: with the id of a
+    successful replay (`replay_in_clone` / `replay_in_place` run after
+    the change) the change is recorded as settled; with an empty id, an
+    unknown id or a failed replay the change is reverted in the file and
+    recorded as reverted.  Until a change is settled, `tune_sea_settings`
+    proposes nothing and `patch_sea_settings` refuses another change.
+    """
+    path = _editable_path(name)
+    if path is None:
+        return _not_editable(name)
+    log = _change_log()
+    pending = sea_tuning.pending_change(sea_tuning.load_changes(log, name))
+    if pending is None:
+        return f"Error: {name} has no pending settings change"
+    verdict = _replay_verdict(replay_task_id, name, int(pending["at_ms"]))
+    if verdict == "success":
+        sea_tuning.settle_change(log, name, replay_task_id)
+        return (
+            f"Kept settings()[{pending['key']!r}] = {pending['new']!r} of {name} "
+            f"(replay {replay_task_id} succeeded)"
+        )
+    source = path.read_text(encoding="utf-8")
+    old = sea_tuning.REMOVE if pending["old"] is None else pending["old"]  # None: key was absent
+    candidate = sea_tuning.patch_settings_literal(source, str(pending["key"]), old)
+    why = _accept_sea_file(path, source, candidate)
+    if why:
+        return f"Error: {why}"
+    sea_tuning.record_change(log, {
+        "sea": name, "key": pending["key"], "old": pending["new"], "new": pending["old"],
+        "task_id": _own_task_id(), "replay_task_id": replay_task_id, "reverted": True,
+    })
+    return (
+        f"Reverted settings()[{pending['key']!r}] of {name} to {pending['old']!r} "
+        f"({verdict}); record why in ./tmp/rsi7d/explored-ideas.md"
+    )
+
+
+def _replay_verdict(replay_task_id: str, name: str, since_ms: int) -> str:
+    """Return ``"success"`` when *replay_task_id* is a successful run of SEA *name* started
+    after *since_ms*, else the reason it does not count (empty id, unknown task, another
+    SEA, started before the change, or its status)."""
+    if not replay_task_id:
+        return "no replay given"
+    row = _task_row(replay_task_id)
+    if row is None:
+        return f"Error: no task with id {replay_task_id!r}"
+    if sea_name_of(row.get("sea") or "") != name:
+        ran = sea_name_of(row.get("sea") or "") or "no SEA"
+        return f"replay {replay_task_id} ran {ran}, not {name}"
+    if task_digest._start_ms(row) < since_ms:
+        return f"replay {replay_task_id} started before the change"
+    findings = _run_findings(replay_task_id)
+    if isinstance(findings, str):
+        return findings
+    status = str(findings.get("status") or "")
+    return "success" if status == "success" else f"replay status {status!r}"
+
+
+def _own_task_id() -> str:
+    """Return this rsi7d task's persisted id (``""`` outside a task)."""
+    task_id = getattr(current_agent(), "last_task_id", "")
+    return task_id if isinstance(task_id, str) else ""
 
 
 def patch_sea_settings(name: str, key: str, value: str, days: float = DEFAULT_DAYS) -> str:
@@ -1774,11 +2002,20 @@ def patch_sea_settings(name: str, key: str, value: str, days: float = DEFAULT_DA
     changes.  A `timeout` or `max_budget` must pass the acceptance test
     (no successful run of the last *days* days would have been cut off
     by it); the patched SEA must load and pass `sea lint`, else the file
-    is restored.
+    is restored.  The change is logged as pending: replay a past run,
+    then `settle_sea_settings(name, replay_task_id)` keeps or reverts
+    it; a SEA with a pending change refuses another one.
     """
     path = _editable_path(name)
     if path is None:
         return _not_editable(name)
+    log = _change_log()
+    pending = sea_tuning.pending_change(sea_tuning.load_changes(log, name))
+    if pending is not None:
+        return (
+            f"Error: {name} has a pending settings change ({pending['key']!r}: "
+            f"{pending['old']!r} -> {pending['new']!r}); settle it with settle_sea_settings first"
+        )
     try:
         parsed = json.loads(value)
     except ValueError as exc:
@@ -1789,7 +2026,10 @@ def patch_sea_settings(name: str, key: str, value: str, days: float = DEFAULT_DA
         if why:
             return f"Error: {why}"
     source = path.read_text(encoding="utf-8")
+    # The literal's own value (``None`` when the key is absent, so a revert removes it
+    # again instead of writing the kind's default back as a redundant key).
     try:
+        old = sea_tuning.literal_value(source, key)
         candidate = sea_tuning.patch_settings_literal(source, key, parsed)
     except ValueError as exc:
         return f"Error: {exc}"
@@ -1805,7 +2045,13 @@ def patch_sea_settings(name: str, key: str, value: str, days: float = DEFAULT_DA
             f"Error: settings()[{key!r}] = {parsed!r} is shadowed (effective value "
             f"{effective!r}: a `**spread` after the key or an extended script wins); file restored"
         )
-    return f"Patched settings()[{key!r}] of {path} to {parsed!r}"
+    sea_tuning.record_change(
+        log, {"sea": name, "key": key, "old": old, "new": parsed, "task_id": _own_task_id()}
+    )
+    return (
+        f"Patched settings()[{key!r}] of {path} to {parsed!r} (pending: replay a past run, "
+        f"then settle_sea_settings({name!r}, <replay_task_id>) keeps or reverts it)"
+    )
 
 
 def export_sea_evals(name: str, days: float = DEFAULT_DAYS, limit: int = 30) -> str:
@@ -2525,8 +2771,11 @@ def add_to_tools() -> list[Any]:
         patch_sea_prompt,
         sea_source,
         patch_sea_code,
+        improve_sea_code,
+        revert_sea_code,
         tune_sea_settings,
         patch_sea_settings,
+        settle_sea_settings,
         export_sea_evals,
         frequent_tasks,
         write_autorouter_evidence,

@@ -5,10 +5,16 @@
 """The default Sorcar Extension Agent: a plain Sorcar session.
 
 ``run_agent`` runs this SEA when its ``agent`` argument is empty.  It
-defines no ``run`` parameter getters, so the sub-task is an ordinary
-Sorcar session on the given task in the calling task's work directory
-with the standard system prompt and tools.
+pins no setting, so the sub-task is an ordinary Sorcar session on the
+given task in the calling task's work directory with the standard
+system prompt and tools.  It is ``hidden``: an empty ``agent`` is the
+way to ask for it, so it is no ``/dummy`` command and no agent name.
 """
+
+
+def settings() -> dict:
+    """Return the SEA's settings: hidden from the command list, nothing else."""
+    return {"hidden": True}
 
 
 def description() -> str:

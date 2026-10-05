@@ -4,9 +4,10 @@
 # add your name here
 """``sea docs``: render the SEA vocabulary tables from the code that defines them.
 
-The settings keys, the kinds, the ``run_agent`` options and the bundled
-commands each have one source of truth in the code
-(:data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`,
+The precedence rule, the settings keys, the kinds, the ``run_agent``
+options and the bundled commands each have one source of truth in the
+code (:data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`,
+:data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`,
 :func:`~kiss.agents.sorcar.sea_settings.kind_defaults`,
 :data:`~kiss.agents.sorcar.agent_dispatch.OPTION_TYPES`,
 :func:`~kiss.agents.sorcar.sea_commands.bundled_commands`).  The
@@ -32,6 +33,7 @@ from kiss.agents.sorcar.sea_commands import bundled_commands, sea_description
 from kiss.agents.sorcar.sea_settings import (
     DISPATCHER_SETTINGS,
     KIND_DOCS,
+    PRECEDENCE_RULE,
     SETTING_DOCS,
     SETTING_TYPES,
     kind_defaults,
@@ -44,6 +46,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 
 GENERATED_FILES = (
     "website/kisssorcar.github.io/docs/sea-commands.md",
+    "website/kisssorcar.github.io/docs/cli.md",
     "src/kiss/server/README.md",
 )
 """Pages (relative to :data:`REPO_ROOT`) whose ``sea-docs`` blocks are regenerated."""
@@ -59,6 +62,11 @@ def type_name(expected: type | tuple[type, ...]) -> str:
     return " \\| ".join(
         t.__name__ for t in (expected if isinstance(expected, tuple) else (expected,))
     )
+
+
+def precedence_block() -> str:
+    """The one precedence rule, as a quoted paragraph."""
+    return "> " + PRECEDENCE_RULE
 
 
 def settings_table() -> str:
@@ -120,6 +128,7 @@ def commands_table() -> str:
 
 
 TABLES = {
+    "precedence": precedence_block,
     "settings": settings_table,
     "kinds": kinds_table,
     "options": options_table,

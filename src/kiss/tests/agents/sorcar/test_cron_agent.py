@@ -771,10 +771,11 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     assert Path(work_dir).is_dir()
     assert cron_agent.settings() == {"kind": "channel", "work_dir": work_dir}
     resolved = sea_settings(Path(cron_agent.__file__))
-    # A channel's work_dir is implicitly locked (sea_settings.merge_settings).
+    # Every key the channel kind sets is implicitly locked
+    # (sea_settings.merge_settings): a call cannot give cron a worktree.
     assert resolved == {
         "kind": "channel", **kind_defaults()["channel"],
-        "work_dir": work_dir, "locked": ["work_dir"],
+        "work_dir": work_dir, "locked": sorted(kind_defaults()["channel"]),
     }
     assert resolved["kind"] == "channel"
     assert resolved["kind"] == "channel"

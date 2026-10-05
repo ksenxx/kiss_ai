@@ -123,11 +123,14 @@ class TestUnknownAgentHints:
         monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
         expected = _run_agent("", "review it", "")
         assert expected.startswith("Error: the dummy agent task could not run:")
-        for name in ("code-review", "general", "Agent", "sorcar", "analysis", " worker "):
+        for name in ("code-review", "general", "Agent", "sorcar", "analysis", " Reviewer "):
             assert resolve_agent(name, "") == (DEFAULT_AGENT_PATH, "dummy")
             out = _run_agent("", "review it", name)
             assert out == expected
             assert "unknown agent" not in out and "Commands:" not in out
+        # ``worker`` is a kind, not a generic label: naming it is the usual error.
+        for name in ("worker", "subagent", "helper"):
+            assert str(resolve_agent(name, "")).startswith(f"Error: unknown agent '{name}'")
 
     def test_misspelled_channel_gets_a_suggestion(self) -> None:
         channels = available_channels()

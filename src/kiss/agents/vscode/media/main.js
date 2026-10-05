@@ -10871,14 +10871,14 @@
   }
 
   /**
-   * The Agent row's text: the agent script (SEA) the task ran as, its
-   * kind, tool profile, the caller's timeout and every asked-for value
-   * the script replaced (chat_sorcar_agent.py task_settings keys sea,
-   * kind, tool_profile, timeout, overridden; kiss.agents.sorcar.run_config).
+   * The Agent row's text: the SEA the task ran as, its kind, tool
+   * profile, the caller's timeout and every inherited or default value
+   * the SEA pinned to its own (chat_sorcar_agent.py task_settings keys
+   * sea, kind, tool_profile, timeout, pinned; kiss.agents.sorcar.run_config).
    *
    * @param {object|null} s A task_settings event's settings payload.
-   * @returns {string} The text, '—' when the task ran no script and
-   *   nothing was replaced.
+   * @returns {string} The text, '—' when the task ran no SEA and
+   *   nothing was pinned.
    */
   function metaAgentText(s) {
     if (!s || typeof s !== 'object') return '\u2014';
@@ -10888,12 +10888,11 @@
     if (s.tool_profile) parts.push('tools ' + String(s.tool_profile));
     if (typeof s.timeout === 'number')
       parts.push('timeout ' + String(s.timeout) + 's');
-    const over =
-      s.overridden && typeof s.overridden === 'object' ? s.overridden : null;
+    const over = s.pinned && typeof s.pinned === 'object' ? s.pinned : null;
     const keys = over ? Object.keys(over) : [];
     if (keys.length) {
       parts.push(
-        'overridden ' +
+        'pinned ' +
           keys
             .map(k => {
               const pair = Array.isArray(over[k]) ? over[k] : [];

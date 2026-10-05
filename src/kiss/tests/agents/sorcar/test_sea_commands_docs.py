@@ -5,7 +5,7 @@
 """Keep ``docs/sea-commands.md`` truthful against the real registry.
 
 The public page ``website/kisssorcar.github.io/docs/sea-commands.md``
-tells external contributors how ``~/.kiss/SEAS.md`` is parsed and how
+tells external contributors how ``$KISS_HOME/SEAS.md`` is parsed and how
 ``/xxx text`` reaches a SEA.  These tests pull the examples straight
 out of that Markdown and run them through
 :mod:`kiss.agents.sorcar.sea_commands`, so a behaviour change that
@@ -88,7 +88,7 @@ def test_seas_md_example_parses_as_documented(home: Path, monkeypatch: pytest.Mo
     ``#`` comment line; the page promises each of those is handled.
     """
     monkeypatch.setenv("WORK", str(home / "work"))
-    block = _fenced_block(_DOC.read_text(), "# ~/.kiss/SEAS.md")
+    block = _fenced_block(_DOC.read_text(), "# $KISS_HOME/SEAS.md")
     kiss_home().mkdir(parents=True, exist_ok=True)
     (kiss_home() / "SEAS.md").write_text(block, encoding="utf-8")
 

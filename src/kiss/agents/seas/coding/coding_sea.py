@@ -10,9 +10,9 @@ task's working directory.  The KISS daemon imports a tiny generated SEA file
 per trial (see :func:`write_trial_sea`) that builds one
 :class:`ContainerHarness` from a JSON config and exposes the harness's bound
 methods as the SEA getters.  The trial runners in ``benchmarkings/harnesstax``
-are one such caller.  This module itself defines no top-level getters: a
-harness needs a running container and a config, so the ``/coding`` chat
-command that its file name registers runs Sorcar with its defaults.
+are one such caller.  This module itself defines no prompt getters: a
+harness needs a running container and a config, so the module is
+``hidden`` and registers no ``/coding`` chat command.
 
 The harness is KISS Sorcar's full built-in toolset except the browser and
 persistent-memory tools, driven by a short system prompt written for
@@ -229,9 +229,14 @@ def description() -> str:
         "Runs KISS Sorcar unattended inside a Docker container for benchmark trials "
         "(a ContainerHarness built by write_trial_sea from a JSON config, with the shell "
         "and file tools executing in the trial container and every call logged to a JSONL "
-        "trajectory); use `/coding <task>` or `run_agent(agent=\"coding\", task=...)`, which "
-        "run Sorcar with its defaults since the harness itself needs a running container."
+        "trajectory); the trial runners load the generated per-trial SEA file by path, so "
+        "this module is hidden from the command list."
     )
+
+
+def settings() -> dict[str, Any]:
+    """Return the module's own settings: hidden (only the generated per-trial SEAs run)."""
+    return {"hidden": True}
 
 
 class ContainerHarness:

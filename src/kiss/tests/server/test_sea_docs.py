@@ -32,6 +32,7 @@ from kiss.agents.sorcar.sea_docs import (
 )
 from kiss.agents.sorcar.sea_settings import (
     DISPATCHER_SETTINGS,
+    PRECEDENCE_RULE,
     SETTING_TYPES,
     kind_defaults,
     wire_field,
@@ -123,8 +124,9 @@ def test_bundled_pages_are_current() -> None:
     """The gate ``uv run check`` runs: the committed tables match the code."""
     for rel in GENERATED_FILES:
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert "<!-- sea-docs: settings -->" in text
+        assert "<!-- sea-docs: precedence -->" in text
         assert render(text) == text, f"{rel} is stale: run `uv run sea docs`"
+        assert text.count(PRECEDENCE_RULE) == 1, f"{rel} must state the rule once, generated"
 
 
 def test_run_agent_description_names_every_option(tmp_path: Path) -> None:

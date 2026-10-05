@@ -24,7 +24,11 @@ from kiss.agents.seas.review_paper import review_paper_sea
 from kiss.agents.seas.revise_and_review_paper import revise_and_review_paper_sea as sea
 from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import fanout_guard, sea_commands
-from kiss.agents.sorcar.agent_dispatch import DEFAULT_DISPATCH_TIMEOUT_SECONDS, resolve_timeout
+from kiss.agents.sorcar.agent_dispatch import (
+    DEFAULT_AGENT_PATH,
+    DEFAULT_DISPATCH_TIMEOUT_SECONDS,
+    resolve_timeout,
+)
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.sorcar.local_model_server import (
@@ -126,9 +130,9 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
         path = sea_commands.get_command(command)
         assert path is not None
         assert resolve_timeout("", sea_commands.sea_settings(path)) == seconds, command
-    dummy = sea_commands.get_command("dummy")
-    assert dummy is not None
-    dummy_settings = sea_commands.sea_settings(dummy)
+    # ``dummy`` is hidden (no ``/dummy`` command): it is reached by path.
+    assert sea_commands.get_command("dummy") is None
+    dummy_settings = sea_commands.sea_settings(Path(DEFAULT_AGENT_PATH))
     assert "timeout" not in dummy_settings
     assert resolve_timeout("", dummy_settings) == DEFAULT_DISPATCH_TIMEOUT_SECONDS == 3600.0
 

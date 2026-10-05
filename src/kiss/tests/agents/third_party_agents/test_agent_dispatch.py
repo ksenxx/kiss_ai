@@ -105,9 +105,10 @@ def test_available_channels_discovery() -> None:
     channels = available_channels()
     for expected in ("slack", "telegram", "discord", "email", "ntfy"):
         assert expected in channels
-    # Infrastructure and private modules are not user-facing channels.
-    for hidden in ("a2a", "oai", "channel_cli", "backend_utils"):
-        assert hidden not in channels
+    # SEAs of another kind (``a2a``, a session with peer-agent tools),
+    # hidden SEAs (``oai``) and private modules are not channels.
+    for other in ("a2a", "oai", "channel_cli", "backend_utils"):
+        assert other not in channels
     assert channels == sorted(channels)
 
 
@@ -120,7 +121,7 @@ def test_docstring_lists_channels() -> None:
 def test_unknown_agent_error() -> None:
     out = run_agent("say hi", "no_such_channel")
     assert out.startswith("Error: unknown agent")
-    assert "not a path to a .py agent script" in out
+    assert "not a path to a .py SEA file" in out
     assert "slack" in out
 
 
@@ -381,9 +382,15 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     out = run_agent("say hi", "ntfy", tool_profile="bogus")
     assert out.startswith("Error: tool_profile must be one of ")
     assert out.endswith("got 'bogus'.")
-    # ``tool_profile`` is the tool's own argument, not an options key.
-    out = run_agent("say hi", "ntfy", options='{"tool_profile": "review"}')
-    assert out.startswith("Error: options has an unknown key 'tool_profile'")
+    # ``tool_profile`` is both an argument and an options key; the two
+    # may repeat but not contradict each other.
+    out = run_agent("say hi", "ntfy", tool_profile="review", options='{"tool_profile": "bash"}')
+    assert out == (
+        "Error: options['tool_profile'] = 'bash' contradicts the tool_profile argument "
+        "'review'; pass one of them."
+    )
+    out = run_agent("say hi", "ntfy", options='{"tool_profile": "bogus"}')
+    assert out.startswith("Error: tool_profile must be one of ")
     # Extra tools come only from the agent script's ``add_to_tools()``:
     # the tool has no tools-path arguments, and the old per-option
     # keyword arguments (and the ``model_name`` alias) are gone.
@@ -398,42 +405,39 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
             run_agent("say hi", "ntfy", **{kwarg: str(tmp_path / "x.py")})
 
 
-def test_channel_and_cron_options_are_forwarded_but_pinned_off_on_the_daemon(
+def test_channel_and_cron_refuse_options_that_contradict_the_kind(
     tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
-    """Asking a channel/cron sub-task for a worktree is forwarded, then overridden.
+    """Asking a channel/cron sub-task for a worktree is refused, never silently undone.
 
-    The dispatcher forwards the caller's ``options`` verbatim for every
-    agent; the ``channel`` preset of the channel/cron module's
-    ``settings()`` wins on the daemon, so the sub-task still runs
-    without a git worktree or auto-commit (see
-    ``test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings``).
+    Every key the ``channel`` kind sets is locked
+    (``sea_settings.merge_settings``), so an explicit option that
+    differs from it is a ``locked`` conflict under the one precedence
+    rule; an option that agrees is forwarded as usual.
     """
-    # (options, wire use_worktree, wire auto_commit); an option left out
-    # follows the persisted setting, on by default.
     cases = (
-        ('{"use_worktree": true}', True, True),
-        ('{"auto_commit": "TRUE"}', True, True),
-        ('{"use_worktree": "false", "auto_commit": true}', False, True),
-        ('{"use_worktree": true, "auto_commit": false}', True, False),
+        ('{"use_worktree": true}', "use_worktree=False (asked for True)"),
+        ('{"auto_commit": "TRUE"}', "auto_commit=False (asked for True)"),
+        ('{"use_worktree": "false", "auto_commit": true}', "auto_commit=False (asked for True)"),
+        ('{"use_memory": true}', "use_memory=False (asked for True)"),
+        ('{"allow_fan_out": true}', "allow_fan_out=False (asked for True)"),
     )
     for agent in ("ntfy", "cron"):
-        for options, use_worktree, auto_commit in cases:
+        for options, clash in cases:
             captured_dispatch.clear()
             out = run_agent("say hi", agent, options=options)
-            assert "Error" not in out, out
-            sent = captured_dispatch[0]
-            assert sent["use_worktree"] is use_worktree, (agent, options)
-            assert sent["auto_commit"] is auto_commit, (agent, options)
-            cmd = _daemon_run_command(sent)
-            apply_agent_overrides(cmd)
-            assert cmd["useWorktree"] is False, (agent, options)
-            assert cmd["autoCommit"] is False, (agent, options)
+            assert out == f"Error: {agent}: the script locks {clash}", (agent, options)
+            assert not captured_dispatch
 
     captured_dispatch.clear()
-    run_agent("say hi", "ntfy", options='{"use_worktree": "false", "auto_commit": " False "}')
+    out = run_agent("say hi", "ntfy", options='{"use_worktree": "false", "auto_commit": " False "}')
+    assert "Error" not in out, out
     assert captured_dispatch[0]["use_worktree"] is False
     assert captured_dispatch[0]["auto_commit"] is False
+    cmd = _daemon_run_command(captured_dispatch[0])
+    apply_agent_overrides(cmd)
+    assert cmd["useWorktree"] is False
+    assert cmd["autoCommit"] is False
 
 
 def test_run_options_are_forwarded_to_daemon(
@@ -524,16 +528,12 @@ def test_run_options_are_forwarded_to_daemon(
     assert captured_dispatch[0]["is_parallel"] is True
     assert captured_dispatch[0]["chat_id"] == ""
 
-    # The dispatcher forwards an explicit auto_classify for every
-    # agent alike; for cron and the channel agents the module's
-    # ``channel`` preset then pins classification off on the daemon.
+    # For cron and the channel agents the ``channel`` kind locks
+    # classification off: asking for it is refused, agreeing is forwarded.
     captured_dispatch.clear()
-    tool("run 'echo hi' every 5 minutes", "cron", options='{"auto_classify": true}')
-    assert captured_dispatch[0]["classify_tasks"] is True
-    cmd = _daemon_run_command(captured_dispatch[0])
-    apply_agent_overrides(cmd)
-    assert cmd["classifyTasks"] is False
-    captured_dispatch.clear()
+    out = tool("run 'echo hi' every 5 minutes", "cron", options='{"auto_classify": true}')
+    assert out == "Error: cron: the script locks auto_classify=False (asked for True)"
+    assert not captured_dispatch
     tool("say hi", "ntfy", options='{"auto_classify": "False", "use_memory": false}')
     assert captured_dispatch[0]["classify_tasks"] is False
     assert captured_dispatch[0]["use_memory"] is False
@@ -648,7 +648,13 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
 
     script = tmp_path / "my_researcher.py"
     script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
+    # ``workspace`` is a channel option: a session SEA refuses it.
     out = run_agent("say hi", str(script), options='{"workspace": "ignored-ws"}')
+    assert out == (
+        "Error: my_researcher: options['workspace'] applies to a channel agent only; "
+        "my_researcher is a session SEA"
+    )
+    out = run_agent("say hi", str(script))
     assert out.startswith("Error: the my_researcher agent task could not run:")
     assert "no-daemon.json" in out
     # Path mode never touches the channel workspace env var.
@@ -676,7 +682,7 @@ def test_default_agent_is_the_bundled_dummy_sea(
     # The dummy SEA defines no getters: a plain Sorcar session.
     cmd = {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
     assert apply_agent_overrides(cmd) == set()
-    assert cmd.pop("_runConfig") == {"sea": "dummy", "kind": "session", "overridden": {}}
+    assert cmd.pop("_runConfig") == {"sea": "dummy", "kind": "session", "pinned": {}}
     assert cmd == {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
 
     caller = tmp_path / "caller_project"
@@ -723,7 +729,7 @@ def test_tool_schema_requires_only_task() -> None:
         "task", "agent", "model", "tool_profile", "max_budget", "timeout", "options", "wait",
     ]
     agent_doc = params["properties"]["agent"]["description"]
-    assert "plain Sorcar sub-agent" in agent_doc
+    assert "plain Sorcar" in agent_doc
     assert "JSON object" in params["properties"]["options"]["description"]
     # The full docstring names the keys ``options`` accepts.
     for key in ("workspace", "use_worktree", "model_config", "chat_id", "inherit"):

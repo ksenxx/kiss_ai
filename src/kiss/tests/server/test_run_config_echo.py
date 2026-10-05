@@ -31,7 +31,7 @@ import yaml
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.agent_dispatch import RunOptions, _run_agent, dispatch_result
-from kiss.agents.sorcar.run_config import note_override, run_config_line, with_run_config
+from kiss.agents.sorcar.run_config import note_pinned, run_config_line, with_run_config
 from kiss.agents.sorcar.sea_settings import SeaError
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
 from kiss.core.config import DEFAULT_CONFIG
@@ -144,7 +144,7 @@ class RunConfigEchoTest(DaemonLocalHarness):
         inherited = ran.split("inherited=")[1].split(" ")[0].split(",")
         assert {"model", "chat_id", "max_budget"} <= set(inherited), ran
         # Only the inherited budget share was replaced; the explicit profile stood.
-        assert ran.endswith("overridden=max_budget(1.5->0.75)"), ran
+        assert ran.endswith("pinned=max_budget(1.5->0.75)"), ran
 
     def test_locked_setting_refuses_a_differing_explicit_argument(self) -> None:
         """A locked ``tool_profile`` is an error for ``review``, fine when asked for ``shell``."""
@@ -209,12 +209,12 @@ class RunConfigEchoTest(DaemonLocalHarness):
         assert settings["model"] == PARENT_MODEL
         assert "chat_id" in settings["inherited"] and "model" in settings["inherited"]
         # The explicit profile and memory flag stood; the inherited budget share did not.
-        assert settings["overridden"] == {"max_budget": [1.5, 0.75]}
+        assert settings["pinned"] == {"max_budget": [1.5, 0.75]}
         persisted = self._persisted_settings(result.task_id)
-        for key in ("sea", "kind", "tool_profile", "timeout", "inherited", "overridden"):
+        for key in ("sea", "kind", "tool_profile", "timeout", "inherited", "pinned"):
             assert persisted[key] == settings[key], (key, persisted, settings)
 
-    def test_plain_dispatch_records_no_script_and_nothing_overridden(self) -> None:
+    def test_plain_dispatch_records_no_sea_and_nothing_pinned(self) -> None:
         """Without a replacing script the line says so, and explicit values stay explicit."""
         parent = _parent(self.repo)
         result = dispatch_result(
@@ -230,14 +230,14 @@ class RunConfigEchoTest(DaemonLocalHarness):
         )
         assert not isinstance(result, str), result
         settings = result.settings
-        assert settings["sea"] == "plain" and settings["overridden"] == {}, result
+        assert settings["sea"] == "plain" and settings["pinned"] == {}, result
         assert settings["model"] == OTHER_MODEL and settings["max_budget"] == 0.2
         assert "model" not in settings["inherited"]
         assert "max_budget" not in settings["inherited"]
         assert "chat_id" in settings["inherited"]
         line = run_config_line({**settings, "timeout": 30.0})
         assert line.startswith(f"plain (session) model={OTHER_MODEL} tools=full budget=$0.20 ")
-        assert line.endswith("overridden=none")
+        assert line.endswith("pinned=none")
 
     def test_reviewer_child_records_the_effective_review_profile(self) -> None:
         """A reviewer-marked child asked for no profile runs ``review`` and says so."""
@@ -319,7 +319,7 @@ class RunConfigEchoTest(DaemonLocalHarness):
         assert ran.startswith(f"echo (session) model={PARENT_MODEL} tools=review budget=$0.75 ")
         assert "timeout=none" in ran
         assert "inherited=" in ran and "model" in ran.split("inherited=")[1].split(" ")[0]
-        assert ran.endswith("overridden=max_budget(1.5->0.75)"), ran
+        assert ran.endswith("pinned=max_budget(1.5->0.75)"), ran
         assert parsed["success"] is True and parsed["summary"] == "done"
         # Without the explicit profile the script's applies and is recorded as inherited-over.
         (result,) = parent._run_tasks_parallel(["child two"], agent=str(self.sea))
@@ -363,7 +363,7 @@ def test_with_run_config_prefixes_a_non_mapping_result() -> None:
     settings = {"sea": "x", "kind": "session", "model": "m"}
     assert with_run_config("plain text", settings) == (
         "ran: x (session) model=m tools=full budget=none timeout=none "
-        "inherited=none overridden=none\nplain text"
+        "inherited=none pinned=none\nplain text"
     )
     assert with_run_config("- a\n- b\n", settings).startswith("ran: x (session)")
     assert with_run_config("key: [unclosed", settings).startswith("ran: x (session)")
@@ -377,27 +377,27 @@ def test_with_run_config_prefixes_a_non_mapping_result() -> None:
 def test_run_config_line_shortens_long_values() -> None:
     """Overridden values longer than 40 characters are cut; empty ones read ``empty``."""
     long = "x" * 60
-    line = run_config_line({"overridden": {"work_dir": ["", long]}, "max_budget": 2})
+    line = run_config_line({"pinned": {"work_dir": ["", long]}, "max_budget": 2})
     assert "work_dir(empty->" + "x" * 37 + "...)" in line
     assert "budget=$2.00" in line
-    assert run_config_line({"inherited": []}).endswith("inherited=none overridden=none")
+    assert run_config_line({"inherited": []}).endswith("inherited=none pinned=none")
 
 
-def test_note_override_reduces_dicts_to_their_keys_and_skips_unasked() -> None:
+def test_note_pinned_reduces_dicts_to_their_keys_and_skips_unasked() -> None:
     """``model_config`` may hold an API key: only its key names are recorded."""
-    overridden: dict[str, list[Any]] = {}
-    note_override(
-        overridden, "model_config", {"api_key": "SECRET", "base_url": "o"}, {"base_url": "n"}
+    pinned: dict[str, list[Any]] = {}
+    note_pinned(
+        pinned, "model_config", {"api_key": "SECRET", "base_url": "o"}, {"base_url": "n"}
     )
-    note_override(overridden, "model", None, "m")
-    note_override(overridden, "work_dir", "", "/x")
-    note_override(overridden, "use_memory", False, False)
-    note_override(overridden, "use_web_tools", False, True)
-    assert overridden == {
+    note_pinned(pinned, "model", None, "m")
+    note_pinned(pinned, "work_dir", "", "/x")
+    note_pinned(pinned, "use_memory", False, False)
+    note_pinned(pinned, "use_web_tools", False, True)
+    assert pinned == {
         "model_config": ["dict(api_key, base_url)", "dict(base_url)"],
         "use_web_tools": [False, True],
     }
-    assert "SECRET" not in run_config_line({"overridden": overridden})
+    assert "SECRET" not in run_config_line({"pinned": pinned})
 
 
 def test_locked_conflicts_covers_dispatcher_keys_paths_and_extends(tmp_path: Path) -> None:
@@ -459,12 +459,12 @@ def test_sea_run_kwargs_keeps_an_explicit_model_config(tmp_path: Path) -> None:
     }
     overrides, record = _sea_run_kwargs(layers, "t", defaults, None, {"model", "model_config"})
     assert "model_name" not in overrides and "model_config" not in overrides, overrides
-    assert record["overridden"] == {}
+    assert record["pinned"] == {}
     # Without the explicit keys the script's model applies and resets the config.
     overrides, record = _sea_run_kwargs(layers, "t", defaults, None, set())
     assert overrides["model_name"] == "sea-model"
     assert overrides["model_config"] == {"base_url": "https://sea.invalid"}
-    assert set(record["overridden"]) == {"model", "model_config"}
+    assert set(record["pinned"]) == {"model", "model_config"}
     # Only the model explicit: the script's model does not apply, so the
     # caller's config is not cleared for a model that never changed.
     overrides, _ = _sea_run_kwargs(layers, "t", defaults, None, {"model"})

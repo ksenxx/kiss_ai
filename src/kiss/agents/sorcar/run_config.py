@@ -7,16 +7,19 @@
 Every task's ``task_settings`` event (the persisted display event
 :meth:`kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent._task_settings_payload`
 builds) carries, besides the model, work directory and budget, the
-run-configuration keys of :data:`RUN_CONFIG_KEYS`: which agent script
-(SEA) ran, its kind, the tool profile, the caller's timeout, which
-values were inherited from the calling agent and which of the
-caller's values the script replaced.  :func:`run_config_line` renders
-that record as the ``ran:`` line every ``run_agent`` / ``run_parallel``
-result starts with, so the calling model sees what its sub-task
-actually ran with (and self-corrects an argument the script silently
-replaced), and ``rsi7d`` can mine the persisted events for the
-configuration causes of failures (``reports/sea-run-agent-semantics-
-and-automation-2026-10-04.md``, P3 / A4).
+run-configuration keys of :data:`RUN_CONFIG_KEYS`: which SEA ran, its
+kind, the tool profile, the caller's timeout, which values were
+inherited from the calling agent and which inherited or default values
+the SEA pinned to its own.  :func:`run_config_line` renders that record
+as the ``ran:`` line every ``run_agent`` / ``run_parallel`` result
+starts with, so the calling model sees what its sub-task actually ran
+with, and ``rsi7d`` can mine the persisted events for the configuration
+causes of failures.
+
+An explicit argument of the call is never pinned over: it wins, or (for
+a ``locked`` key) the call is refused before anything runs
+(:data:`kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`).  So
+``pinned`` only ever lists values the caller did not choose itself.
 """
 
 from __future__ import annotations
@@ -32,17 +35,18 @@ RUN_CONFIG_KEYS = (
     "tool_profile",
     "timeout",
     "inherited",
-    "overridden",
+    "pinned",
 )
 """The ``task_settings`` keys :func:`run_config_line` reads besides ``model``, ``work_dir``
 and ``max_budget``.
 
-``sea``: the script's name (its file stem), ``""`` for a plain sub-agent;
-``kind``: the script's ``kind`` setting (``session``, ``worker`` or ``channel``);
+``sea``: the SEA's name (its file stem), ``""`` for a plain sub-agent;
+``kind``: the SEA's ``kind`` setting (``session``, ``worker`` or ``channel``);
 ``tool_profile``: the effective profile, ``""`` for the full toolset;
 ``timeout``: the caller's wait in seconds, or ``None``;
 ``inherited``: the setting keys filled from the calling agent;
-``overridden``: ``{key: [asked, forced]}`` for every non-empty value the script replaced.
+``pinned``: ``{key: [before, pinned]}`` for every inherited or default value the SEA's
+``settings()`` replaced.
 """
 
 PROVENANCE_EXPLICIT = "explicit"
@@ -55,23 +59,23 @@ persisted setting or the daemon's default.
 """
 
 
-def note_override(overridden: dict[str, list[Any]], key: str, asked: Any, forced: Any) -> None:
-    """Record that an agent script replaced the value *asked* for *key* with *forced*.
+def note_pinned(pinned: dict[str, list[Any]], key: str, before: Any, value: Any) -> None:
+    """Record that a SEA pinned *key* to *value* in place of the inherited or default *before*.
 
-    Nothing is recorded when the caller asked for nothing (``None`` or
-    ``""``) or for the same value.  Dict values (``model_config``, which
+    Nothing is recorded when there was nothing to replace (``None`` or
+    ``""``) or the values agree.  Dict values (``model_config``, which
     may hold an API key) are reduced to their key names, so the record
     can be persisted, broadcast and echoed to the calling model.
 
     Args:
-        overridden: The ``overridden`` record to extend in place.
+        pinned: The ``pinned`` record to extend in place.
         key: The setting key.
-        asked: The value the command carried.
-        forced: The value the script's settings write.
+        before: The value the run would have had without the SEA.
+        value: The value the SEA's settings write.
     """
-    if asked is None or asked == "" or asked == forced:
+    if before is None or before == "" or before == value:
         return
-    overridden[key] = [_recordable(asked), _recordable(forced)]
+    pinned[key] = [_recordable(before), _recordable(value)]
 
 
 def _recordable(value: Any) -> Any:
@@ -81,34 +85,34 @@ def _recordable(value: Any) -> Any:
     return value
 
 
-def sea_overrides(
+def sea_pinned(
     before: Mapping[str, Any],
     staged: Mapping[str, Any],
     fields: Mapping[str, str],
 ) -> dict[str, list[Any]]:
-    """Return which non-empty command values an agent script replaced.
+    """Return which non-empty command values a SEA pinned to its own.
 
     Prompt getters (``system_prompt`` and the two suffixes) are not
-    settings and never count as overrides: a script with a
-    ``system_prompt()`` replaces the inherited one by design.
+    settings and never count: a SEA with a ``system_prompt()`` replaces
+    the inherited one by design.
 
     Args:
         before: The ``run`` command as the caller sent it.
-        staged: The wire fields the script's settings write
+        staged: The wire fields the SEA's settings write
             (``{wire field: value}``).
         fields: ``{setting key: wire field}`` (``SETTING_FIELDS``).
 
     Returns:
-        ``{setting key: [asked, forced]}`` for every field in *fields*
+        ``{setting key: [before, pinned]}`` for every field in *fields*
         whose command value was neither absent, ``None`` nor ``""`` and
-        differs from the staged value (see :func:`note_override`).
+        differs from the staged value (see :func:`note_pinned`).
         Empty when nothing was replaced.
     """
-    overridden: dict[str, list[Any]] = {}
+    pinned: dict[str, list[Any]] = {}
     for key, field in fields.items():
         if field in staged:
-            note_override(overridden, key, before.get(field), staged[field])
-    return overridden
+            note_pinned(pinned, key, before.get(field), staged[field])
+    return pinned
 
 
 def inherited_keys(provenance: Any) -> list[str]:
@@ -126,10 +130,10 @@ def inherited_keys(provenance: Any) -> list[str]:
 def run_config_line(settings: Mapping[str, Any]) -> str:
     """Render a task's effective configuration as one line.
 
-    Example::
+    Example (``/sh`` run from a task that uses a worktree)::
 
         sh (worker) model=gpt-5 tools=bash budget=$1.00 timeout=3600s
-        inherited=model,chat_id,max_budget overridden=tool_profile(review->bash)
+        inherited=model,chat_id,max_budget pinned=use_worktree(True->False)
 
     Args:
         settings: A ``task_settings`` payload (see :data:`RUN_CONFIG_KEYS`);
@@ -148,22 +152,21 @@ def run_config_line(settings: Mapping[str, Any]) -> str:
     timeout_text = f"{timeout:g}s" if isinstance(timeout, int | float) else "none"
     inherited = settings.get("inherited")
     inherited_text = ",".join(str(k) for k in inherited) if inherited else "none"
-    overridden = settings.get("overridden")
-    if isinstance(overridden, Mapping) and overridden:
-        overridden_text = ",".join(
-            f"{key}({_short(asked)}->{_short(forced)})"
-            for key, (asked, forced) in overridden.items()
+    pinned = settings.get("pinned")
+    if isinstance(pinned, Mapping) and pinned:
+        pinned_text = ",".join(
+            f"{key}({_short(before)}->{_short(value)})" for key, (before, value) in pinned.items()
         )
     else:
-        overridden_text = "none"
+        pinned_text = "none"
     return (
         f"{sea} ({kind}) model={model} tools={tools} budget={budget_text} "
-        f"timeout={timeout_text} inherited={inherited_text} overridden={overridden_text}"
+        f"timeout={timeout_text} inherited={inherited_text} pinned={pinned_text}"
     )
 
 
 def _short(value: Any) -> str:
-    """Return *value* for the ``overridden`` list: ``""`` as ``empty``, long text cut."""
+    """Return *value* for the ``pinned`` list: ``""`` as ``empty``, long text cut."""
     text = "empty" if value == "" else str(value)
     return text if len(text) <= 40 else text[:37] + "..."
 

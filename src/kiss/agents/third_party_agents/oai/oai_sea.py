@@ -87,10 +87,14 @@ def description() -> str:
         "Exposes the kiss-web daemon as an OpenAI-compatible chat API (`GET /v1/models`, "
         "`POST /v1/chat/completions` with a bearer api_key) so Open WebUI, LibreChat or any "
         "`openai` SDK client can chat with Sorcar; configure it with "
-        "`kiss-oai -t 'configure the OpenAI-compatible API server'`, start it with "
-        "`kiss-oai --serve`, and check it with "
-        '`run_agent(agent="oai", task="Report the API server status")`.'
+        "`kiss-oai -t 'configure the OpenAI-compatible API server'` and start it with "
+        "`kiss-oai --serve` (a terminal setup, not a chat command)."
     )
+
+
+def settings() -> dict:
+    """Return the SEA's settings: hidden, since the server is set up from a terminal."""
+    return {"hidden": True}
 
 
 def _chat_map_path() -> Path:

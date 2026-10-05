@@ -79,7 +79,11 @@ def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     seas = tmp_path / "src" / "kiss" / "agents" / "seas"
     (seas / "tunedemo").mkdir(parents=True)
     (seas / "tunedemo" / "tunedemo_sea.py").write_text(DEMO_SEA, encoding="utf-8")
+    (seas.parents[1] / "SYSTEM.md").write_text("You are a test Sorcar.\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    log = sea._change_log()
+    if log.is_file():
+        log.unlink()  # the session home is shared: start every test with no pending change
     return seas
 
 
@@ -362,9 +366,52 @@ def test_tune_patch_settings_and_export_evals_use_the_persisted_runs(checkout: P
         "(largest duration_s 900); refused"
     )
     assert sea.patch_sea_settings("tunedemo", "timeout", "7200") == (
-        f"Patched settings()['timeout'] of {path} to 7200"
+        f"Patched settings()['timeout'] of {path} to 7200 (pending: replay a past run, then "
+        "settle_sea_settings('tunedemo', <replay_task_id>) keeps or reverts it)"
     )
-    assert sea.patch_sea_settings("tunedemo", "max_budget", "3.0").endswith("to 3.0")
+    # The change is pending: nothing else may change until it is settled,
+    # and the tuner proposes nothing but the settlement.
+    assert sea.patch_sea_settings("tunedemo", "max_budget", "3.0") == (
+        "Error: tunedemo has a pending settings change ('timeout': None -> 7200); settle it "
+        "with settle_sea_settings first"
+    )
+    report = json.loads(sea.tune_sea_settings("tunedemo"))
+    assert report["proposals"] == {} and report["pending"]["key"] == "timeout"
+    assert report["flags"][-1].startswith("settings()['timeout'] changed None -> 7200 at ")
+    # Settled by a successful run of this SEA started after the change (a replay).
+    replay = persist_run("replay", "Replayed fine.", True, 0.5, 0)
+    assert sea.settle_sea_settings("tunedemo", replay) == (
+        f"Kept settings()['timeout'] = 7200 of tunedemo (replay {replay} succeeded)"
+    )
+    assert sea.settle_sea_settings("tunedemo", replay) == (
+        "Error: tunedemo has no pending settings change"
+    )
+    assert sea.patch_sea_settings("tunedemo", "max_budget", "3.0").startswith(
+        f"Patched settings()['max_budget'] of {path} to 3.0 (pending"
+    )
+    # Settled without a replay: reverted, and the added key is removed again.
+    assert sea.settle_sea_settings("tunedemo") == (
+        "Reverted settings()['max_budget'] of tunedemo to None (no replay given); record why "
+        "in ./tmp/rsi7d/explored-ideas.md"
+    )
+    assert "max_budget" not in sea_commands.sea_settings(path)
+    assert sea.patch_sea_settings("tunedemo", "max_budget", "3.0").startswith("Patched")
+    # A failed replay reverts too, with the replay's status as the reason.
+    failed = persist_run("replay", "Error: it broke", False, 0.5, 0)
+    assert sea.settle_sea_settings("tunedemo", failed).startswith(
+        "Reverted settings()['max_budget'] of tunedemo to None (replay status "
+    )
+    assert sea.patch_sea_settings("tunedemo", "max_budget", "3.0").startswith("Patched")
+    assert sea.settle_sea_settings("tunedemo", "no-such-task").startswith(
+        "Reverted settings()['max_budget'] of tunedemo to None (Error: no task with id "
+    )
+    assert sea.patch_sea_settings("tunedemo", "max_budget", "3.0").startswith("Patched")
+    # The earlier replay predates this change and does not count; a new one does.
+    assert "started before the change" in sea.settle_sea_settings("tunedemo", replay)
+    assert sea.patch_sea_settings("tunedemo", "max_budget", "3.0").startswith("Patched")
+    time.sleep(0.01)
+    fresh = persist_run("replay", "ok", True, 0.1, 0)
+    assert sea.settle_sea_settings("tunedemo", fresh).startswith("Kept")
     assert sea_commands.sea_settings(path)["timeout"] == 7200
     # A value shadowed by a later ``**spread`` never reaches the run: refused and restored.
     before = path.read_text(encoding="utf-8")
@@ -400,20 +447,313 @@ def test_tune_patch_settings_and_export_evals_use_the_persisted_runs(checkout: P
     out = sea.export_sea_evals("tunedemo")
     target = checkout / "tunedemo" / "evals" / "tunedemo_sea_evals_candidates.json"
     assert (
-        out == f"Wrote 3 eval tasks (2 with expectations) to {target}"
-    )  # "Listed every tool." is too short to pin
+        out == f"Wrote 5 eval tasks (2 with expectations) to {target}"
+    )  # "Listed every tool.", "Replayed fine." and "ok" are too short to pin
     evals = json.loads(target.read_text(encoding="utf-8"))
     # Newest start first: the runs were persisted with start = now - duration.
     assert [t["prompt"] for t in evals["tasks"]] == [
+        "replay",
+        "replay",
         "summarize the readme",
         "count words in README",
         "list tools",
     ]
-    assert [t["split"] for t in evals["tasks"]] == ["select", "train", "train"]
-    assert evals["tasks"][0]["expect"] == [
+    assert evals["tasks"][2]["expect"] == [
         "The readme describes the install steps and the test command."
     ]
     assert all(t["source_task_id"] for t in evals["tasks"])
 
     frequent = json.loads(sea.frequent_tasks(min_repeats=1))
     assert {"task": "list tools", "count": 1, "models": {"model-a": 1}} in frequent["tasks"]
+
+
+# --- the closed loop: change log, revert proposals, narrowing -----------------
+
+
+def test_change_log_pending_and_compare() -> None:
+    """``pending_change`` / ``compare_change`` on literal records."""
+    changes = [
+        {"key": "timeout", "old": None, "new": 7200, "at_ms": 1000, "at": "t1",
+         "replay_task_id": "", "reverted": False},
+    ]
+    assert sea_tuning.pending_change([]) is None
+    assert sea_tuning.pending_change(changes) == changes[0]
+    settled = {**changes[0], "replay_task_id": "r1"}
+    assert sea_tuning.pending_change([settled]) is None
+    reverted = {**changes[0], "old": 7200, "new": None, "at_ms": 2000, "reverted": True}
+    assert sea_tuning.pending_change([changes[0], reverted]) is None
+    # A revert of one key leaves a later pending change of another key pending.
+    other = {**changes[0], "key": "max_budget", "at_ms": 3000}
+    assert sea_tuning.pending_change([changes[0], reverted, other]) == other
+
+    def run(started_ms: int, ok: bool, cost: float) -> dict[str, Any]:
+        return {
+            "status": "success" if ok else "failed",
+            "result": "" if ok else "the agent task did not finish within 100s",
+            "cost": cost, "duration_s": 10, "started_ms": started_ms,
+        }
+
+    before = [run(100, True, 1.0), run(200, True, 1.0), run(300, False, 1.0)]
+    after_bad = [run(1100, False, 1.0), run(1200, False, 1.0), run(1300, True, 1.0)]
+    compared = sea_tuning.compare_change(before + after_bad, settled)
+    assert compared["before"] == 3 and compared["after"] == 3 and compared["worse"]
+    assert compared["basis"].startswith("3 runs before / 3 after the change of t1: limit-stop "
+                                        "rate 33% -> 67%")
+    after_costly = [run(1100, True, 2.0), run(1200, True, 2.0), run(1300, True, 2.0)]
+    assert sea_tuning.compare_change(before + after_costly, settled)["worse"]  # p95 cost x2
+    after_good = [run(1100, True, 1.0), run(1200, True, 1.0), run(1300, True, 1.0)]
+    assert not sea_tuning.compare_change(before + after_good, settled)["worse"]
+    assert not sea_tuning.compare_change(before + after_bad[:2], settled)["worse"]  # < MIN_RUNS
+    assert sea_tuning.compare_change([], settled)["basis"].endswith("p95 cost 0.00 -> 0.00")
+
+    # ``propose_settings`` turns a settled change that made things worse into a revert
+    # proposal, ignores unsettled or reverted records, and blocks on a pending one.
+    report = sea_tuning.propose_settings(before + after_bad, {"timeout": 7200}, [settled])
+    assert report["proposals"]["timeout"] == {
+        "current": 7200, "proposed": None, "basis": "revert: " + compared["basis"],
+    }
+    assert report["pending"] is None
+    report = sea_tuning.propose_settings(before + after_bad, {"timeout": 7200}, [reverted])
+    assert "revert" not in json.dumps(report["proposals"])
+    report = sea_tuning.propose_settings(before + after_bad, {"timeout": 7200}, changes)
+    assert report["proposals"] == {} and report["pending"] == changes[0]
+    assert report["flags"][-1].startswith("settings()['timeout'] changed None -> 7200 at t1")
+
+
+def test_change_log_round_trip(tmp_path: Path) -> None:
+    """``record_change`` / ``load_changes`` / ``settle_change`` on a JSONL file."""
+    log = sea_tuning.change_log_path(tmp_path)
+    assert log == tmp_path / "rsi7d" / "settings_changes.jsonl"
+    assert sea_tuning.load_changes(log, "x") == []
+    assert sea_tuning.settle_change(log, "x", "r1") is None
+    first = sea_tuning.record_change(
+        log, {"sea": "x", "key": "timeout", "old": None, "new": 10, "task_id": "t"}
+    )
+    assert first["replay_task_id"] == "" and first["reverted"] is False and first["at_ms"] > 0
+    sea_tuning.record_change(log, {"sea": "y", "key": "timeout", "old": 1, "new": 2, "task_id": ""})
+    assert sea_tuning.load_changes(log, "x") == [first]
+    settled = sea_tuning.settle_change(log, "x", "r1")
+    assert settled == {**first, "replay_task_id": "r1"}
+    assert sea_tuning.load_changes(log, "x") == [settled]
+    assert sea_tuning.load_changes(log, "y")[0]["new"] == 2  # the other SEA's line is intact
+    assert sea_tuning.settle_change(log, "x", "r2") is None
+
+
+def test_narrower_profile_is_proposed_only_on_strong_evidence() -> None:
+    from collections import Counter
+
+    done = [{"status": "success"}] * sea_tuning.NARROW_MIN_RUNS
+    shell_only = Counter({"Bash": 30, "Read": 12, "finish": 10, "count_words": 2})
+    # ``finish`` and a SEA's own tool are outside every profile and do not count.
+    assert sea_tuning.narrower_profile(done, {}, shell_only) == {
+        "current": "", "proposed": "shell",
+        "basis": f"{len(done)} runs called only Bash, Read; every one is in the 'shell' profile",
+    }
+    assistant = sea_tuning.narrower_profile(done, {}, Counter({"Bash": 1, "talk": 1}))
+    assert assistant is not None and assistant["proposed"] == "assistant"
+    review = sea_tuning.narrower_profile(done, {}, Counter({"go_to_url": 1}))
+    assert review is not None and review["proposed"] == "review"
+    # Already narrowed, too few runs, no governed tool calls, or a tool outside every
+    # narrowing profile (``Edit``, ``run_parallel``): nothing is proposed, never widened.
+    assert sea_tuning.narrower_profile(done, {"tool_profile": "shell"}, shell_only) is None
+    assert sea_tuning.narrower_profile(done[:-1], {}, shell_only) is None
+    assert sea_tuning.narrower_profile(done, {}, Counter()) is None
+    assert sea_tuning.narrower_profile(done, {}, Counter({"finish": 3})) is None
+    assert sea_tuning.narrower_profile(done, {}, None) is None
+    assert sea_tuning.narrower_profile(done, {}, Counter({"Bash": 1, "Edit": 1})) is None
+    assert sea_tuning.narrower_profile(done, {}, Counter({"run_parallel": 1})) is None
+    report = sea_tuning.propose_settings(
+        [{"status": "success", "duration_s": 10, "cost": 0.1}] * sea_tuning.NARROW_MIN_RUNS,
+        {"timeout": 60, "max_budget": 0.5},
+        tools_used=shell_only,
+    )
+    assert report["proposals"]["tool_profile"]["proposed"] == "shell"
+
+
+def test_settings_literal_remove(checkout: Path) -> None:
+    """``REMOVE`` deletes an entry wherever it stands; an absent key is a no-op."""
+    multi = 'def settings() -> dict:\n    return {\n        "kind": "worker",\n' \
+            '        "timeout": 7200,  # why\n        "max_budget": 3.0,\n    }\n'
+    assert sea_tuning.patch_settings_literal(multi, "timeout", sea_tuning.REMOVE) == (
+        'def settings() -> dict:\n    return {\n        "kind": "worker",\n'
+        '        "max_budget": 3.0,\n    }\n'
+    )
+    inline = 'def settings():\n    return {"kind": "worker", "timeout": 7200, "max_budget": 3.0}\n'
+    assert sea_tuning.patch_settings_literal(inline, "timeout", sea_tuning.REMOVE) == (
+        'def settings():\n    return {"kind": "worker", "max_budget": 3.0}\n'
+    )
+    assert sea_tuning.patch_settings_literal(inline, "max_budget", sea_tuning.REMOVE) == (
+        'def settings():\n    return {"kind": "worker", "timeout": 7200}\n'
+    )
+    assert sea_tuning.patch_settings_literal(inline, "absent", sea_tuning.REMOVE) == inline
+
+
+def test_improve_and_revert_sea_code_snapshot_and_gate(
+    checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``improve_sea_code`` snapshots, dispatches a full-tool Sorcar run and gates the result;
+    ``revert_sea_code`` restores the snapshot.
+
+    The dispatch is the real ``agent_dispatch.dispatch_result`` with no
+    daemon running, so it returns its error string and changes nothing;
+    the gate is exercised by editing the file the way a sub-agent would
+    between the snapshot and the check.
+    """
+    from kiss.agents.sorcar import agent_dispatch
+
+    path = checkout / "tunedemo" / "tunedemo_sea.py"
+    assert sea.improve_sea_code("slack", "x", 1.0).startswith("Error:")
+    assert sea.revert_sea_code("tunedemo") == (
+        f"Error: no snapshot of tunedemo in {checkout.parents[3] / sea.SNAPSHOT_DIR / 'tunedemo'}"
+        "; nothing to revert"
+    )
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(checkout / "no-daemon.json"))
+    seen: list[str] = []
+    real = agent_dispatch.dispatch_result
+
+    def dispatch_and_edit(*args: Any, **kwargs: Any) -> Any:
+        seen.append(args[1])
+        path.write_text(path.read_text() + "\n\ndef extra() -> int:\n    return 1\n")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_dispatch, "dispatch_result", dispatch_and_edit)
+    report = json.loads(sea.improve_sea_code("tunedemo", "add an extra() helper", 2.0, 30.0))
+    assert report["task_id"] == "" and "could not run" in report["result"]
+    assert "add an extra() helper" in seen[0] and str(path) in seen[0]
+    assert "error" not in report and "def extra" in path.read_text()
+    assert report["other_changes"] == []
+    snapshot = Path(report["snapshot"])
+    assert "def extra" not in (snapshot / "tunedemo_sea.py").read_text()
+    assert sea.revert_sea_code("tunedemo") == f"Restored {path.parent} from {snapshot}"
+    assert "def extra" not in path.read_text()
+
+    def dispatch_and_break(*args: Any, **kwargs: Any) -> Any:
+        path.write_text("def settings() -> dict:\n    return {'timeout': 'soon'}\n")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_dispatch, "dispatch_result", dispatch_and_break)
+    report = json.loads(sea.improve_sea_code("tunedemo", "break it", 2.0, 30.0))
+    assert report["error"].startswith("the patched SEA no longer loads (")
+    assert report["error"].endswith("; folder restored from the snapshot")
+    assert path.read_text() == DEMO_SEA
+
+    def dispatch_and_delete(*args: Any, **kwargs: Any) -> Any:
+        path.unlink()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_dispatch, "dispatch_result", dispatch_and_delete)
+    report = json.loads(sea.improve_sea_code("tunedemo", "delete it", 2.0, 30.0))
+    assert report["error"] == "the sub-agent deleted the script; folder restored from the snapshot"
+    assert path.read_text() == DEMO_SEA
+
+
+# --- review fixes (gpt-6-astra, 2026-10-05) ----------------------------------------
+
+
+def test_settle_accepts_only_a_later_successful_replay_of_the_same_sea(checkout: Path) -> None:
+    path = checkout / "tunedemo" / "tunedemo_sea.py"
+    earlier = persist_run("old run", "Fine.", True, 0.1, 10)
+    other = persist_run("other sea", "Fine.", True, 0.1, 10, sea="slack_sea")
+    time.sleep(0.01)
+    assert sea.patch_sea_settings("tunedemo", "timeout", "7200").startswith("Patched")
+    # Neither an unrelated SEA's run nor a run from before the change settles it.
+    assert sea.settle_sea_settings("tunedemo", other).startswith(
+        f"Reverted settings()['timeout'] of tunedemo to None (replay {other} ran slack, not "
+        "tunedemo)"
+    )
+    assert sea.patch_sea_settings("tunedemo", "timeout", "7200").startswith("Patched")
+    assert sea.settle_sea_settings("tunedemo", earlier).startswith(
+        f"Reverted settings()['timeout'] of tunedemo to None (replay {earlier} started before "
+        "the change)"
+    )
+    assert sea.patch_sea_settings("tunedemo", "timeout", "7200").startswith("Patched")
+    later = persist_run("replay", "Fine.", True, 0.1, 0)
+    assert sea.settle_sea_settings("tunedemo", later).startswith("Kept")
+    assert sea_commands.sea_settings(path)["timeout"] == 7200
+
+
+def test_revert_removes_a_key_that_was_absent_even_when_the_kind_gave_it_a_value(
+    checkout: Path,
+) -> None:
+    """The record holds the literal's own value, not the kind default, so the revert of
+    ``use_web_tools: true`` on a worker removes the key instead of writing the redundant
+    ``False`` back (which ``sea lint`` would refuse, leaving the change pending for good)."""
+    path = checkout / "tunedemo" / "tunedemo_sea.py"
+    assert sea_commands.sea_settings(path)["use_web_tools"] is False  # the worker default
+    assert sea.patch_sea_settings("tunedemo", "use_web_tools", "true").startswith("Patched")
+    assert sea_commands.sea_settings(path)["use_web_tools"] is True
+    assert sea.settle_sea_settings("tunedemo") == (
+        "Reverted settings()['use_web_tools'] of tunedemo to None (no replay given); record "
+        "why in ./tmp/rsi7d/explored-ideas.md"
+    )
+    assert path.read_text(encoding="utf-8") == DEMO_SEA
+    assert sea_tuning.pending_change(sea_tuning.load_changes(sea._change_log(), "tunedemo")) is None
+    # A computed entry cannot be recorded for a revert: refused before anything changes.
+    source = path.read_text(encoding="utf-8")
+    computed = source.replace('"tool_profile": "bash"', '"tool_profile": str("ba" + "sh")')
+    path.write_text(computed, encoding="utf-8")
+    assert sea.patch_sea_settings("tunedemo", "tool_profile", '"shell"') == (
+        "Error: settings()['tool_profile'] is computed (str('ba' + 'sh')); change it with "
+        "patch_sea_code"
+    )
+    assert path.read_text(encoding="utf-8") == computed
+
+
+def test_only_the_change_still_in_effect_can_be_proposed_for_revert() -> None:
+    def run(started_ms: int, ok: bool) -> dict[str, Any]:
+        return {
+            "status": "success" if ok else "failed",
+            "result": "" if ok else "did not finish within 60s",
+            "cost": 1.0, "duration_s": 10, "started_ms": started_ms,
+        }
+
+    runs = [run(100, True), run(200, True), run(300, True)]  # before the first change
+    runs += [run(1100, False), run(1200, False), run(1300, False)]  # the 60 -> 120 change hurt
+    runs += [run(2100, True), run(2200, True), run(2300, True)]  # 120 -> 240 fixed it
+    first = {"key": "timeout", "old": 60, "new": 120, "at_ms": 1000, "at": "t1",
+             "replay_task_id": "r1", "reverted": False}
+    second = {**first, "old": 120, "new": 240, "at_ms": 2000, "at": "t2", "replay_task_id": "r2"}
+    assert sea_tuning.latest_settled([first, second]) == [second]
+    assert sea_tuning.latest_settled([first, {**second, "replay_task_id": ""}]) == [first]
+    report = sea_tuning.propose_settings(runs, {"timeout": 240}, [first, second])
+    assert "revert" not in json.dumps(report["proposals"])
+    # Had the file still held 120, the superseded record would not be judged either;
+    # only a settled change whose value is current can be proposed for revert.
+    report = sea_tuning.propose_settings(runs, {"timeout": 120}, [first])
+    assert report["proposals"]["timeout"]["basis"].startswith("revert: 3 runs before / 6 after")
+
+
+def test_remove_handles_parenthesised_values_and_commas_on_the_next_line() -> None:
+    assert sea_tuning.patch_settings_literal(
+        'def settings():\n    return {"kind": "worker", "timeout": ((7200)), "x": 1}\n',
+        "timeout", sea_tuning.REMOVE,
+    ) == 'def settings():\n    return {"kind": "worker", "x": 1}\n'
+    assert sea_tuning.patch_settings_literal(
+        'def settings():\n    return {"kind": "worker", "timeout": 7200\n, "max_budget": 3}\n',
+        "timeout", sea_tuning.REMOVE,
+    ) == 'def settings():\n    return {"kind": "worker", "max_budget": 3}\n'
+    assert sea_tuning.literal_value('def settings():\n    return {"a": (1)}\n', "a") == 1
+    assert sea_tuning.literal_value("def settings():\n    return build()\n", "a") is None
+
+
+def test_own_task_id_reads_the_persisted_id() -> None:
+    """The change log names the rsi7d task by the id ``ChatSorcarAgent`` persists
+    (``last_task_id``), found through ``current_agent`` on the task thread."""
+    import threading
+
+    from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+    from kiss.server import agent_state
+
+    assert sea._own_task_id() == ""
+    agent = WorktreeSorcarAgent("rsi7d-tuning-test")
+    agent._last_task_id = "persisted-rsi7d-task"
+    state = agent_state.AgentState(
+        "rsi7d-tuning-test", agent=agent, task_thread=threading.current_thread(),
+        is_task_active=True,
+    )
+    agent_state.register(state)
+    try:
+        assert agent.last_task_id == "persisted-rsi7d-task"
+        assert sea._own_task_id() == "persisted-rsi7d-task"
+    finally:
+        agent_state.unregister(state.task_id, state)

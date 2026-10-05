@@ -36,4 +36,6 @@ class TestCliHelpers:
             assert kwargs["prompt_template"] == "do something"
             assert kwargs["work_dir"] == d
             assert kwargs["model_config"]["base_url"] == "http://localhost:1234"
-            assert kwargs["web_tools"] is True
+            assert kwargs["web_tools"] is None  # not given; ``--no-web`` makes it False
+            args = parser.parse_args(["-t", "x", "-w", d, "--no-web"])
+            assert _build_run_kwargs(args)["web_tools"] is False

@@ -45,6 +45,14 @@ Rules, each a :class:`Finding` code:
     A ``~/.kiss`` path in a code string (not prose): the home directory
     is the brand's (``~/.s10s`` for Seamless Loop) and ``$KISS_HOME``
     may move it; use :func:`kiss.core.config.kiss_home`.
+``stale-prose``
+    A sentence about SEA semantics that the code no longer backs, in
+    the documentation pages ``sea docs`` generates into and in the
+    dispatcher modules (:data:`PROSE_FILES`): a ``~/.kiss/`` home path
+    (write ``$KISS_HOME/``), or the pre-2026-10-04 claim that a SEA's
+    settings "still win" / "win over" a call (the one rule is
+    :data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`).  Text
+    inside a generated ``<!-- sea-docs: ... -->`` block is skipped.
 
 Cost and duration rules (a ``max_budget`` below the script's observed
 cost, a ``timeout`` below its observed duration) need the task history
@@ -147,11 +155,11 @@ def default_targets(registered: bool) -> list[Path]:
 
 
 def lint_all(paths: Iterable[Path] | None = None, registered: bool = False) -> list[Finding]:
-    """Lint *paths*, or the default targets.
+    """Lint *paths*, or the default targets (then also the prose of :data:`PROSE_FILES`).
 
     Args:
         paths: Scripts (or SEA folders) to check; ``None`` checks
-            :func:`default_targets`.
+            :func:`default_targets` and the prose files.
         registered: With ``paths=None``, also check the user's
             registered scripts.
 
@@ -163,6 +171,58 @@ def lint_all(paths: Iterable[Path] | None = None, registered: bool = False) -> l
     findings: list[Finding] = []
     for script in scripts:
         findings.extend(lint_sea(script, commands.get(script)))
+    if paths is None:
+        findings.extend(lint_prose())
+    return findings
+
+
+PROSE_FILES = (
+    "website/kisssorcar.github.io/docs/sea-commands.md",
+    "website/kisssorcar.github.io/docs/cli.md",
+    "src/kiss/server/README.md",
+    "src/kiss/agents/sorcar/sea_settings.py",
+    "src/kiss/agents/sorcar/agent_dispatch.py",
+    "src/kiss/agents/sorcar/sorcar_agent.py",
+    "src/kiss/agents/sorcar/run_config.py",
+    "src/kiss/server/agent_file.py",
+)
+"""Files (relative to the checkout) whose prose the ``stale-prose`` rule reads."""
+
+STALE_PROSE = (
+    (re.compile(r"~/\.kiss/"), "a `~/.kiss/` home path; write `$KISS_HOME/`"),
+    (
+        re.compile(r"(?i)\b(?:settings|script|SEA)(?:'s)?(?: \w+){0,3} (?:still )?wins? over\b"
+                   r"|\bstill wins?\b"),
+        "claims a SEA's settings win over a call; state sea_settings.PRECEDENCE_RULE instead",
+    ),
+)
+"""``(pattern, message)`` pairs of the ``stale-prose`` rule."""
+
+_GENERATED_BLOCK = re.compile(r"<!-- sea-docs: \w+ -->.*?<!-- /sea-docs -->", re.DOTALL)
+
+
+def _blank_lines(match: re.Match[str]) -> str:
+    """Return as many newlines as *match* spans, so line numbers after it stay right."""
+    return "\n" * match.group(0).count("\n")
+
+
+def lint_prose(root: Path | None = None) -> list[Finding]:
+    """Return the ``stale-prose`` findings of :data:`PROSE_FILES` under *root* (the checkout).
+
+    A file that does not exist (an installed package without the
+    website) is skipped.
+    """
+    root = root or Path(__file__).resolve().parents[4]
+    findings: list[Finding] = []
+    for rel in PROSE_FILES:
+        path = root / rel
+        if not path.is_file():
+            continue
+        text = _GENERATED_BLOCK.sub(_blank_lines, path.read_text("utf-8"))
+        for number, line in enumerate(text.splitlines(), 1):
+            for pattern, message in STALE_PROSE:
+                if pattern.search(line):
+                    findings.append(Finding(path, "stale-prose", f"line {number}: {message}"))
     return findings
 
 
