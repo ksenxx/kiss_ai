@@ -157,7 +157,7 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 | `allow_fan_out` | `bool` | `isParallel` | Let the run call `run_parallel` (default `True`). |
 | `tool_profile` | `str` | `toolProfile` | The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full toolset). |
 | `docker_image` | `str` | `dockerImage` | Run inside this Docker image (default: the host). |
-| `timeout` | `int \| float` | — | Seconds the run may take: the call's `timeout` argument or option wins, then this setting, then the default, which is 3600 for a `run_agent` call (the sub-task is stopped when it expires) and no limit of its own for a `run_parallel` child (a thread of the calling task, bounded by it); ignored by `/<name>`. |
+| `timeout` | `int \| float` | — | Seconds the call blocks for the run: the call's `timeout` argument or option wins, then this setting, then the default, which is 3600 for a `run_agent` call (when it expires the run keeps going as an `agent_job` and the call returns its job id; a job still running when the calling task ends is killed) and no limit of its own for a `run_parallel` child (a thread of the calling task, bounded by it); ignored by `/<name>`. |
 | `locked` | `list` | — | Keys an explicit `run_agent` / `run_parallel` argument or option may not change: a differing value is an error. |
 | `hidden` | `bool` | — | `True`: the script is no `/command` and no `run_agent` agent name (loadable by path and as an `extends` base only). It must be the literal `True` in `settings()` because the command registry reads it from the source without running the script (a computed value is ignored). |
 <!-- /sea-docs -->
@@ -192,7 +192,7 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 | `allow_fan_out` | `bool` | Let the run call `run_parallel` (default `True`). |
 | `tool_profile` | `str` | The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full toolset). |
 | `docker_image` | `str` | Run inside this Docker image (default: the host). |
-| `timeout` | `int \| float` | Seconds the run may take: the call's `timeout` argument or option wins, then this setting, then the default, which is 3600 for a `run_agent` call (the sub-task is stopped when it expires) and no limit of its own for a `run_parallel` child (a thread of the calling task, bounded by it); ignored by `/<name>`. |
+| `timeout` | `int \| float` | Seconds the call blocks for the run: the call's `timeout` argument or option wins, then this setting, then the default, which is 3600 for a `run_agent` call (when it expires the run keeps going as an `agent_job` and the call returns its job id; a job still running when the calling task ends is killed) and no limit of its own for a `run_parallel` child (a thread of the calling task, bounded by it); ignored by `/<name>`. |
 | `inherit` | `bool` | `false`: the sub-task takes nothing from the calling task (no model, chat, prompt suffixes, tools or container; a `run_parallel` child still gets its budget share); default `true`. A `channel` run never inherits, so `true` is refused there. |
 | `workspace` | `str` | The account a `kind: channel` agent's run holds (its channel workspace); refused for any other kind and by `run_parallel`. |
 | `add_to_prompt` | `str` | Text appended to the task after the SEA's `prompt(task)`. |

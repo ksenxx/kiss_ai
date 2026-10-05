@@ -711,9 +711,11 @@ def _run_prompt_job(
         ``(status, summary)`` where status is ``"ok"``, ``"error"`` or
         ``"silent"`` (summary ``None`` — nothing to deliver).  Failures
         to reach the daemon, agent-script errors and a confirmed
-        timeout (the task was stopped after the job's ``timeout``,
-        default :data:`PROMPT_TIMEOUT_SECONDS`) come back as
-        ``"error"`` with the ``run_agent`` error text.
+        timeout come back as ``"error"`` with the ``run_agent`` error
+        text.  ``run_agent``'s ``timeout`` (the job's, default
+        :data:`PROMPT_TIMEOUT_SECONDS`) bounds the call only and hands
+        back the still-running sub-task as a job; an unattended run has
+        nobody to collect it later, so this function kills it.
 
     Raises:
         TimeoutError: When the run timed out but the daemon never
@@ -724,8 +726,12 @@ def _run_prompt_job(
     # (``_daemon_endpoint_file``), and importing it at module load would
     # pull the whole dispatch layer into ``kiss-cron --list``.
     from kiss.agents.sorcar.agent_dispatch import (
+        agent_jobs_of,
+        forget_agent_job,
+        kill_agent_job,
         make_run_agent_tool,
-        stop_unconfirmed_error,
+        notice_job_id,
+        unconfirmed_stop_error,
     )
     from kiss.agents.sorcar.sea_settings import script_name
 
@@ -744,8 +750,21 @@ def _run_prompt_job(
             "auto_commit": bool(job.get("auto_commit")),
         }),
     )
-    if reply == stop_unconfirmed_error(script_name(str(PROMPT_SEA_PATH)), timeout):
-        raise TimeoutError(reply)
+    # ``run_agent``'s timeout bounds the call only; an unattended run
+    # has nobody to collect the detached sub-task, so it is stopped.
+    detached = agent_jobs_of(None).get(notice_job_id(reply))
+    if detached is not None:
+        reply = kill_agent_job(detached)
+        forget_agent_job(detached)
+        bound = f"the scheduled task did not finish within {timeout:g}s"
+        unconfirmed = unconfirmed_stop_error(script_name(str(PROMPT_SEA_PATH)))
+        if detached.thread.is_alive() or detached.outcome == unconfirmed:
+            raise TimeoutError(
+                f"Error: {bound}; a stop was requested but the daemon never confirmed "
+                f"it, so the task MAY STILL BE RUNNING (and spending) on the daemon."
+            )
+        if isinstance(detached.outcome, str):  # stopped (a finished one falls through)
+            return "error", f"Error: {bound}; {reply.removeprefix('Error: ')}"
     if reply.startswith("Error:"):
         return "error", reply
     result = yaml.safe_load(reply)

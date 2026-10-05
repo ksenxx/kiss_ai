@@ -44,7 +44,7 @@ import pytest
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
-from kiss.agents.sorcar import cron_agent, daemon_client
+from kiss.agents.sorcar import agent_dispatch, cron_agent, daemon_client
 from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server.task_runner import inject_keyboard_interrupt
@@ -217,7 +217,13 @@ def test_interrupted_wait_reports_the_spend_seen_so_far() -> None:
 def test_stopped_caller_is_still_charged_the_childs_spend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A caller stopped mid-dispatch keeps the stopped child's spend."""
+    """A caller stopped mid-dispatch keeps the stopped child's spend.
+
+    The interrupt cancels the child's job without waiting for the
+    daemon's confirmation (the Stop stays prompt); the job thread sends
+    the stop and, when its connection ends, settles the child's spend
+    into the caller.
+    """
     daemon = _ScriptedDaemon([_usage("$56.4700", 700000, 120)], end="hold")
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
@@ -235,8 +241,18 @@ def test_stopped_caller_is_still_charged_the_childs_spend(
             time.sleep(0.02)
     finally:
         daemon.close()
+    _join_jobs_of(parent)
     assert parent.budget_used == pytest.approx(56.47)
     assert (parent.total_tokens_used, parent.total_steps) == (700000, 120)
+
+
+def _join_jobs_of(parent: SorcarAgent) -> None:
+    """Wait for the cancelled jobs of *parent* to end and drop them."""
+    for job in agent_dispatch.agent_jobs_of(parent).values():
+        assert job.cancel.is_set()
+        job.thread.join(timeout=10)
+        assert not job.thread.is_alive()
+    agent_dispatch.kill_jobs_of(parent)
 
 
 def test_interrupt_before_any_spend_charges_nothing(
@@ -256,7 +272,7 @@ def test_interrupt_before_any_spend_charges_nothing(
     finally:
         daemon.close()
     assert isinstance(exc, KeyboardInterrupt)
-    assert exc.task_result.cost == 0.0  # type: ignore[attr-defined]
+    _join_jobs_of(parent)
     assert (parent.budget_used, parent.total_tokens_used, parent.total_steps) == (0, 0, 0)
 
 

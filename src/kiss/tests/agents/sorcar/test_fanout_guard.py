@@ -29,8 +29,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import yaml
 
-from kiss.agents.sorcar.agent_dispatch import _dispatch
+from kiss.agents.sorcar.agent_dispatch import dispatch_result
 from kiss.agents.sorcar.fanout_guard import is_review_task, parse_tasks_json
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
@@ -38,6 +39,11 @@ from kiss.agents.sorcar.sorcar_agent import (
     run_tasks_parallel,
 )
 from kiss.core.config import DEFAULT_CONFIG
+
+
+def _unfolded(result: str) -> str:
+    """The run_parallel YAML *result* with its line folding undone (one space per break)."""
+    return " ".join(str(yaml.safe_load(result)).split())
 
 UNKNOWN_MODEL = "no-such-model-fanout-guard"
 
@@ -159,7 +165,7 @@ class TestRunParallelToolArguments:
         agent.model_name = UNKNOWN_MODEL
         run_parallel = _run_parallel_tool(agent)
         result = run_parallel('["Review src/x.py for regressions"]')
-        assert "Unknown model name" in result
+        assert "Unknown model name" in _unfolded(result)
         assert not result.startswith("Error:")
 
     def test_review_fanouts_are_not_capped(self) -> None:
@@ -170,7 +176,7 @@ class TestRunParallelToolArguments:
         run_parallel = _run_parallel_tool(agent)
         for _ in range(5):
             result = run_parallel('["Review the diff read-only"]')
-            assert "Unknown model name" in result
+            assert "Unknown model name" in _unfolded(result)
             assert not result.startswith("Error:")
 
     def test_review_share_in_prompt_does_not_clip_children(
@@ -232,12 +238,13 @@ class TestRunAgentDispatch:
     def test_reviewer_may_dispatch_a_review_task(self) -> None:
         parent = SorcarAgent("dispatch-reviewer")
         _mark_reviewer(parent)
-        result = _dispatch(
+        result = dispatch_result(
             name="helper", prompt="Review the diff for regressions",
             agent_path="/nonexistent/agent.py", work_dir="/tmp",
             model_name="", budget=None, timeout=1.0, parent_agent=parent,
         )
         # Without a daemon the dispatch itself fails; what matters is
         # that the failure is the dispatch error, not a spawn refusal.
+        assert isinstance(result, str)
         assert "reviewer sub-agent" not in result
         assert result.startswith("Error: the helper agent task could not run")

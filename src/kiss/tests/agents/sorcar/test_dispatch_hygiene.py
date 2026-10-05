@@ -109,13 +109,15 @@ class TestUnknownAgentHints:
     ) -> None:
         """A generic label means what an empty ``agent`` means: the plain sub-agent.
 
-        ``code-review``, ``general``, ``Agent``, ... resolve to the
+        ``general``, ``Agent``, ``analysis``, ... resolve to the
         bundled ``sorcar_sea.py`` instead of erroring, so the dispatch
         reaches the daemon.  Both endpoint sources are pointed at a
         daemon that does not exist (an absent ``KISS_SORCAR_LOCAL``
         file, no endpoint recorded by an in-process cron scheduler), so
         the reply is the sorcar agent's could-not-run error — the same
         text an empty ``agent`` produces — not an unknown-agent hint.
+        A reviewer name asks for a toolset, not an agent, and is refused
+        with the spelling of that intent (U4).
         """
         from kiss.agents.sorcar import cron_agent
 
@@ -123,11 +125,15 @@ class TestUnknownAgentHints:
         monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
         expected = _run_agent("", "review it", "")
         assert expected.startswith("Error: the sorcar agent task could not run:")
-        for name in ("code-review", "general", "Agent", "sorcar", "analysis", " Reviewer "):
+        for name in ("general", "Agent", "sorcar", "analysis", "LLM"):
             assert resolve_agent(name, "") == (DEFAULT_AGENT_PATH, "sorcar")
             out = _run_agent("", "review it", name)
             assert out == expected
             assert "unknown agent" not in out and "Commands:" not in out
+        for name in ("code-review", " Reviewer "):
+            out = _run_agent("", "review it", name)
+            assert out.startswith(f"Error: {name!r} is not an agent.")
+            assert 'pass tool_profile="review"' in out
         # ``worker`` is a kind, not a generic label: naming it is the usual error.
         for name in ("worker", "subagent", "helper"):
             assert str(resolve_agent(name, "")).startswith(f"Error: unknown agent '{name}'")

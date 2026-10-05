@@ -2587,30 +2587,45 @@ def _dispatch_replay(
     *sea_file*.  The replay is dispatched with ``inherit=False``: a
     faithful replay runs on the SEA's own prompt, in its own chat, with
     *model*, rather than on rsi7d's replacement system prompt, chat
-    and budget share a ``run_agent`` call would hand it.  Returns the
-    ``result`` (the dict ``success``, ``summary``, ``cost``, ``steps``,
-    or the dispatch's error string) and the ``replay_task_id`` (empty
-    when the dispatch failed).
+    and budget share a ``run_agent`` call would hand it.  The replay
+    runs as an agent job of the calling rsi7d task and is stopped when
+    *timeout* expires: a replay tool has no caller to collect a
+    detached job, so here the bound is on the replay itself.  Returns
+    the ``result`` (the dict ``success``, ``summary``, ``cost``,
+    ``steps``, or the dispatch's error string) and the
+    ``replay_task_id`` (empty when the dispatch failed).
     """
     plain = sea == SORCAR
-    result = agent_dispatch.dispatch_result(
-        sea,
-        task,
-        "" if plain else sea_file,
-        work_dir,
-        model,
-        max_budget,
-        timeout,
-        parent_agent=current_agent(),
-        scope_work_dir=str(_work_root()),
-        options=agent_dispatch.RunOptions(
+    owner = current_agent()
+    job = agent_dispatch.start_agent_job(sea, {
+        "name": sea, "prompt": task, "agent_path": "" if plain else sea_file,
+        "work_dir": work_dir, "model_name": model, "budget": max_budget,
+        "timeout": timeout, "parent_agent": owner, "scope_work_dir": str(_work_root()),
+        "options": agent_dispatch.RunOptions(
             use_worktree=False,
             auto_commit=False,
             system_prompt=_sorcar_system_prompt() if plain else "",
         ),
-    )
-    if isinstance(result, str):
-        return {"replay_task_id": "", "result": result}
+    }, owner)
+    try:
+        finished = agent_dispatch.join_agent_job(job, timeout)
+    except BaseException:
+        agent_dispatch.kill_agent_job(job)
+        raise
+    if not finished:
+        agent_dispatch.kill_agent_job(job)
+    agent_dispatch.forget_agent_job(job)
+    result = job.outcome
+    if not isinstance(result, agent_dispatch.TaskResult):
+        # An error string, or ``None`` when the daemon answered neither
+        # the replay nor its stop within the kill grace.
+        return {
+            "replay_task_id": "",
+            "result": result or (
+                f"Error: the {sea} replay did not finish within {timeout:g}s and the "
+                f"daemon did not confirm its stop; it may still be running."
+            ),
+        }
     return {
         "replay_task_id": result.task_id,
         "result": {

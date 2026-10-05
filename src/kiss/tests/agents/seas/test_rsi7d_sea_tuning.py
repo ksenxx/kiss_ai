@@ -611,10 +611,10 @@ def test_improve_and_revert_sea_code_snapshot_and_gate(
     seen: list[str] = []
     real = agent_dispatch.dispatch_result
 
-    def dispatch_and_edit(*args: Any, **kwargs: Any) -> Any:
-        seen.append(args[1])
+    def dispatch_and_edit(**kwargs: Any) -> Any:
+        seen.append(kwargs["prompt"])
         path.write_text(path.read_text() + "\n\ndef extra() -> int:\n    return 1\n")
-        return real(*args, **kwargs)
+        return real(**kwargs)
 
     monkeypatch.setattr(agent_dispatch, "dispatch_result", dispatch_and_edit)
     report = json.loads(sea.improve_sea_code("tunedemo", "add an extra() helper", 2.0, 30.0))

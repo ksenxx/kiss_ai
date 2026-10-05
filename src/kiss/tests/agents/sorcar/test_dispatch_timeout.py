@@ -6,18 +6,21 @@
 
 The ``run_agent`` tool has a ``timeout`` parameter (a number string;
 empty applies the agent script's ``timeout`` setting, else
-``agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS``, 3600 s).  On
-timeout the tool returns an error string and STOPS the
-sub-task (``stop_on_timeout=True``): a channel sub-task must not
-outlive its process-global workspace reservation — released the
-moment the dispatch returns — or it could bind another account's
-credentials when its channel tools load (gpt-5.6-sol review finding).
-``daemon_client.run`` itself keeps the opposite default: on a plain
+``agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS``, 3600 s).  It
+bounds the CALL, not the sub-task: every dispatch runs as an agent job
+on its own thread, and when the bound expires the tool returns the
+job's still-running notice while the sub-task keeps running (no
+``stop`` is sent); ``agent_job(id, "kill")`` is what stops it, through
+the job's cancel event, and the kill blocks until the daemon's terminal
+status confirms the task is dead (bounded by
+``_STOP_CONFIRM_GRACE_SECONDS`` against a wedged daemon, after which
+the text says the task MAY STILL BE RUNNING instead of claiming a
+stop).  ``daemon_client.run`` keeps its own contract: on a plain
 timeout it sends only ``closeTab``, never ``stop`` (the caller chose
-to stop waiting, not to cancel the work), and it still accepts
-``timeout=None`` ("no deadline": the event read wakes every
-``_NO_DEADLINE_WAKE_SECONDS`` and retries, so an injected abort — the
-``KeyboardInterrupt`` of a parent Stop — still gets delivered).
+to stop waiting, not to cancel the work), ``stop_on_timeout`` opts in
+to a stop, and ``timeout=None`` ("no deadline": the event read wakes
+every ``_NO_DEADLINE_WAKE_SECONDS`` and retries, so an injected abort —
+the ``KeyboardInterrupt`` of a parent Stop — still gets delivered).
 
 These tests run real local-WSS daemon stand-ins (served by
 :func:`kiss.tests.local_ws.fake_daemon`) and drive the real client code:
@@ -30,13 +33,9 @@ These tests run real local-WSS daemon stand-ins (served by
   test below is the practical guard for the default wiring, and a
   script-declared ``timeout`` setting is exercised at its real value.
 * A too-small ``timeout`` (explicit, or the shrunk default) yields the
-  "did not finish within" error, with a ``stop`` + ``closeTab``
-  cascade; the raw client sends the ``stop`` only when
-  ``stop_on_timeout`` is passed, and then blocks until the daemon's
-  terminal status confirms the task is dead (bounded by
-  ``_STOP_CONFIRM_GRACE_SECONDS`` against a wedged daemon) — the
-  ``run_agent`` channel dispatch releases its workspace reservation
-  the moment the call returns, so the child must be dead by then.
+  still-running job notice naming the bound and no ``stop``; killing
+  the job sends ``stop`` + ``closeTab`` and charges the stopped task's
+  spend to the caller.
 * Invalid ``timeout`` strings are rejected before any dispatch.
 
 Not covered here, and why: the stop-SEND failure branch (a broken
@@ -90,6 +89,15 @@ def _standalone_daemon_endpoint(monkeypatch: pytest.MonkeyPatch):
     """
     monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
     yield
+    # A detached job a test left running would outlive its daemon stand-in.
+    agent_dispatch.kill_jobs_of(None)
+
+
+def _detached_job(out: str) -> agent_dispatch.AgentJob:
+    """Return the still-running job the tool text *out* names (standalone owner)."""
+    job = agent_dispatch.agent_jobs_of(None).get(agent_dispatch.notice_job_id(out))
+    assert job is not None, out
+    return job
 
 
 async def _send_event(ws: ServerConnection, event: dict[str, Any]) -> bool:
@@ -390,18 +398,17 @@ def test_interrupt_wakes_no_deadline_wait_on_silent_daemon(
         daemon.close()
 
 
-def test_run_agent_tool_times_out_and_stops_the_task(
+def test_run_agent_tool_timeout_detaches_the_task_into_a_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A too-small explicit ``timeout`` yields the error and a stop.
+    """A too-small explicit ``timeout`` hands back a running job, not a stop.
 
     End-to-end through the real tool (path mode): the daemon stand-in
-    never finishes the task, so the tool must give up after the 0.5-s
-    timeout, stop the dispatched task (``stop`` then ``closeTab``),
-    await the stop's terminal-status confirmation, and return the "did
-    not finish within 0.5s" error — a timed-out sub-task must not keep
-    running (and, for channels, must not outlive its workspace
-    reservation).
+    never finishes the task, so after the 0.5-s bound the tool returns
+    the job notice naming the bound and the job id; the sub-task is
+    still running and no ``stop`` was sent.  ``agent_job(id, "kill")``
+    is what stops it: ``stop`` then ``closeTab``, the stop's
+    terminal-status confirmation awaited, and the stop error returned.
     """
     daemon = _StopConfirmingDaemon()
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
@@ -411,25 +418,33 @@ def test_run_agent_tool_times_out_and_stops_the_task(
         out = make_run_agent_tool(str(tmp_path))(
             "never finishes", str(script), timeout="0.5",
         )
-        assert "did not finish within 0.5s" in out
-        assert "was stopped" in out
-        assert daemon.wait_for_command("stop"), (
-            "the timed-out dispatch never stopped its sub-task"
+        assert "is still running after 0.5s as job agent-" in out, out
+        assert "did not finish" not in out and "was stopped" not in out
+        job = _detached_job(out)
+        assert job.thread.is_alive()
+        assert not any(c.get("type") == "stop" for c in daemon.commands), (
+            "the expired bound stopped the sub-task"
         )
+        killed = agent_dispatch.make_agent_job_tool()(job.job_id, "kill")
+        assert "was stopped before it finished" in killed, killed
+        assert not job.thread.is_alive()
+        assert daemon.wait_for_command("stop")
         assert daemon.wait_for_command("closeTab")
+        # The killed job stays readable until its owner's run ends.
+        assert agent_dispatch.make_agent_job_tool()(job.job_id, "tail") == killed
     finally:
         daemon.close()
 
 
-def test_run_agent_tool_timeout_charges_the_stopped_tasks_spend(
+def test_killing_a_detached_job_charges_the_stopped_tasks_spend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stopped-on-timeout sub-task's spend is charged to the caller.
+    """A killed sub-task's spend is charged to the caller.
 
     The daemon's failure result for the stopped task carries what it
     spent before the stop; the dispatch must fold that into the calling
     agent (as it does for a finished sub-task) and say so, instead of
-    dropping the spend with the timeout.
+    dropping the spend with the stop.
     """
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
@@ -446,11 +461,16 @@ def test_run_agent_tool_timeout_charges_the_stopped_tasks_spend(
         out = make_run_agent_tool(str(tmp_path), parent_agent=parent)(
             "never finishes", str(script), timeout="0.5",
         )
+        assert "is still running after 0.5s" in out, out
+        assert parent.budget_used == 0.0
+        job_id = agent_dispatch.notice_job_id(out)
+        assert job_id in agent_dispatch.agent_jobs_of(parent)
+        killed = agent_dispatch.make_agent_job_tool(parent)(job_id, "kill")
     finally:
+        agent_dispatch.kill_jobs_of(parent)
         daemon.close()
-    assert "did not finish within 0.5s" in out
-    assert "was stopped" in out
-    assert "$1.0842 spend is counted" in out
+    assert "was stopped before it finished" in killed
+    assert "$1.0842 spend is counted" in killed
     assert parent.budget_used == pytest.approx(1.0842)
     assert parent.total_tokens_used == 4321
     assert parent.total_steps == 7
@@ -493,11 +513,11 @@ def test_run_stop_on_timeout_error_carries_the_stopped_result() -> None:
 def test_run_agent_tool_reports_unconfirmed_stop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A never-confirmed stop yields the "may still be running" error.
+    """A never-confirmed kill yields the "may still be running" error.
 
     End-to-end through the real tool (path mode) against a silent
-    daemon stand-in: the ``stop`` sent on timeout is never answered,
-    so once the (shrunk) confirmation grace expires the tool must NOT
+    daemon stand-in: the ``stop`` the kill sends is never answered, so
+    once the (shrunk) confirmation grace expires the kill must NOT
     claim the task "was stopped" — it must say the task may still be
     running so the caller does not assume the work was cancelled.
     """
@@ -510,9 +530,11 @@ def test_run_agent_tool_reports_unconfirmed_stop(
         out = make_run_agent_tool(str(tmp_path))(
             "never finishes", str(script), timeout="0.5",
         )
-        assert "did not finish within 0.5s" in out
-        assert "MAY STILL BE RUNNING" in out
-        assert "was stopped" not in out
+        job = _detached_job(out)
+        killed = agent_dispatch.make_agent_job_tool()(job.job_id, "kill")
+        assert killed == agent_dispatch.unconfirmed_stop_error("helper"), killed
+        assert "MAY STILL BE RUNNING" in killed
+        assert "was stopped" not in killed
         assert daemon.wait_for_command("stop")
         assert daemon.wait_for_command("closeTab")
     finally:
@@ -631,7 +653,7 @@ def test_empty_timeout_applies_the_default_constant(
     Waiting out the real one-hour default is out of the question, so
     ``DEFAULT_DISPATCH_TIMEOUT_SECONDS`` (asserted to be 3600 in
     production) is shrunk to 0.3 s and the tool is called WITHOUT a
-    timeout argument against a silent daemon: the timeout error naming
+    timeout argument against a silent daemon: the job notice naming
     0.3 s proves the empty-string path reads the constant.
     """
     assert agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS == 3600.0
@@ -644,8 +666,8 @@ def test_empty_timeout_applies_the_default_constant(
     script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
     try:
         out = make_run_agent_tool(str(tmp_path))("never finishes", str(script))
-        assert "did not finish within 0.3s" in out
-        assert "was stopped" in out
+        assert "is still running after 0.3s as job agent-" in out, out
+        agent_dispatch.kill_agent_job(_detached_job(out))
     finally:
         daemon.close()
 
@@ -656,7 +678,7 @@ def test_empty_timeout_takes_the_script_timeout_setting(
     """An empty ``timeout`` takes ``settings()["timeout"]`` before the default.
 
     The script declares a 0.3-s timeout while the default constant is
-    left at its production value: the timeout error naming 0.3 s proves
+    left at its production value: the job notice naming 0.3 s proves
     the SEA's setting is read.  An explicit argument still wins over it.
     """
     daemon = _StopConfirmingDaemon()
@@ -665,8 +687,8 @@ def test_empty_timeout_takes_the_script_timeout_setting(
     script.write_text("def settings() -> dict:\n    return {'timeout': 0.3}\n")
     try:
         out = make_run_agent_tool(str(tmp_path))("never finishes", str(script))
-        assert "did not finish within 0.3s" in out
-        assert "was stopped" in out
+        assert "is still running after 0.3s as job agent-" in out, out
+        agent_dispatch.kill_agent_job(_detached_job(out))
     finally:
         daemon.close()
     daemon = _StopConfirmingDaemon()
@@ -675,7 +697,8 @@ def test_empty_timeout_takes_the_script_timeout_setting(
         out = make_run_agent_tool(str(tmp_path))(
             "never finishes", str(script), timeout="0.5",
         )
-        assert "did not finish within 0.5s" in out
+        assert "is still running after 0.5s as job agent-" in out, out
+        agent_dispatch.kill_agent_job(_detached_job(out))
     finally:
         daemon.close()
 

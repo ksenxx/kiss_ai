@@ -49,20 +49,19 @@ silently misreporting a possibly terminal ``result`` event.
 """
 
 _STOP_CONFIRM_GRACE_SECONDS = 20.0
-"""Bounded wait for a stopped-on-timeout task's terminal status.
+"""Bounded wait for a stopped task's terminal status.
 
-With ``stop_on_timeout`` a timeout sends the daemon a ``stop`` and
-then KEEPS READING until the task's terminal ``status
-running=false`` confirms it is dead, before the ``TimeoutError`` is
-raised.  Without the confirmation the caller would resume — and, in
-the ``run_agent`` channel dispatch, release the process-global
-workspace reservation — while the child might still be starting up on
-the daemon and could bind a LATER dispatch's workspace when its
-channel tools load.  The daemon's stop path force-interrupts a
-non-cooperating task after ~1 s, so confirmation normally arrives
-quickly; this grace bounds the wait against a wedged daemon, after
-which :class:`StopUnconfirmedTimeoutError` is raised (the stop stays
-best-effort at that point).
+A ``stop_on_timeout`` timeout or a *cancel* sends the daemon a
+``stop`` and then KEEPS READING until the task's terminal ``status
+running=false`` confirms it is dead, before the ``TimeoutError`` or
+:class:`CancelledError` is raised.  Without the confirmation the
+caller would report the task stopped while it might still be running
+on the daemon (a channel sub-task still holding its workspace).  The
+daemon's stop path force-interrupts a non-cooperating task after
+~1 s, so confirmation normally arrives quickly; this grace bounds the
+wait against a wedged daemon, after which
+:class:`StopUnconfirmedTimeoutError` (or a ``CancelledError`` with
+``confirmed=False``) is raised and the stop stays best-effort.
 """
 
 
@@ -134,11 +133,13 @@ class StoppedOnTimeoutError(TimeoutError):
 
 
 _TOOL_CALL_WAKE_SECONDS = 0.5
-"""Socket read wake-up interval while :func:`run` serves a tool call.
+"""Socket read wake-up interval while :func:`run` serves a tool call or a *cancel* event.
 
 The ``run_agent`` tool's panel has a Stop button; the wait polls the
 tool call's interrupt on every wake (``tool_interrupt.raise_if_interrupted``),
-so this bounds how long that button takes to act.
+so this bounds how long that button takes to act.  A ``run_agent`` job
+thread is not a tool call but watches its *cancel* event on every wake,
+so this also bounds how long an ``agent_job`` kill takes to act.
 """
 
 _NO_DEADLINE_WAKE_SECONDS = 10.0
@@ -439,6 +440,7 @@ def run(
     provenance: dict[str, str] | None = None,
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
+    record_timeout: float | None = None,
     endpoint_file: str | Path | None = None,
     cancel: threading.Event | None = None,
     running: threading.Event | None = None,
@@ -751,10 +753,10 @@ def run(
             the stop then staying best-effort) before raising the
             ``TimeoutError``.
             ``True`` is for callers that must not let the task outlive
-            the wait, e.g. the ``run_agent`` channel dispatch, whose
-            process-global workspace reservation is released as soon
-            as the call returns: a surviving sub-task could bind
-            another account's credentials when its channel tools load.
+            the wait (the ``/ask`` side channel, ``commands.py``).  The
+            ``run_agent`` dispatch does not use it: its ``timeout``
+            bounds the call only, and its sub-task is stopped through
+            *cancel* (an ``agent_job`` kill, or the calling run's end).
             When the task finished ON ITS OWN — a SUCCESSFUL terminal
             ``result`` AND the terminal status raced the stop onto the
             wire — the completed :class:`TaskResult` is returned
@@ -768,6 +770,13 @@ def run(
             proves the task is dead, and the grace expiring with just
             the result in hand raises
             :class:`StopUnconfirmedTimeoutError` all the same.
+        record_timeout: A bound to send as the wire field ``timeout``
+            (recorded in the task's ``task_settings`` and checked
+            against a SEA's locked ``timeout``) when this wait itself
+            has none: ``run_agent`` waits here without a deadline on a
+            job thread and bounds the call by joining that thread, so
+            it passes the call's bound through this.  ``None`` sends
+            *timeout* when *stop_on_timeout*, else nothing.
         endpoint_file: Daemon endpoint file override (defaults to
             ``$KISS_SORCAR_LOCAL`` or ``$KISS_HOME/sorcar-local.json``).
         cancel: An event the caller may set from another thread to
@@ -889,7 +898,8 @@ def run(
             "inheritTools": inherit_tools,
             "workspace": workspace,
             "provenance": provenance or {},
-            "timeout": timeout if stop_on_timeout else None,
+            "timeout": (timeout if stop_on_timeout else None) if record_timeout is None
+            else record_timeout,
         }
         try:
             local_endpoint.send(ws, json.dumps(cmd))
@@ -899,11 +909,12 @@ def run(
         stopping = False  # stop sent (timeout or cancel); awaiting confirmation
         cancelled = False  # the stop was requested through *cancel*
         timeout_msg = f"Task did not finish within {timeout} seconds"
-        # Inside a tool call (the run_agent dispatch) the wait wakes
-        # often enough for that call's Stop button to feel immediate.
+        # Inside a tool call, or with a *cancel* event to watch (the
+        # run_agent job thread), the wait wakes often enough for the
+        # call's Stop button or an ``agent_job`` kill to feel immediate.
         wake_seconds = (
             _TOOL_CALL_WAKE_SECONDS
-            if tool_interrupt.current_tool_call() is not None
+            if tool_interrupt.current_tool_call() is not None or cancel is not None
             else _NO_DEADLINE_WAKE_SECONDS
         )
         while True:

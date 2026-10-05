@@ -470,10 +470,7 @@ class TestPreStepHookInstalledByPerformTask:
         assert captured.get("hook") is not None
         assert captured["hook"] == agent._drain_pending_user_messages
         assert captured.get("guard") is not None
-        assert (
-            captured["guard"]
-            == agent._block_finish_when_user_message_pending
-        )
+        assert captured["guard"] == agent._guard_finish
 
     def test_hooks_installed_without_drain_capable_printer(self) -> None:
         """Steering hooks are installed regardless of printer capability.
@@ -488,10 +485,7 @@ class TestPreStepHookInstalledByPerformTask:
         captured = self._run_and_capture(None)
         agent = captured["agent"]
         assert captured.get("hook") == agent._drain_pending_user_messages
-        assert (
-            captured.get("guard")
-            == agent._block_finish_when_user_message_pending
-        )
+        assert captured.get("guard") == agent._guard_finish
 
 
 class TestSteeringMessageWrappedForModel:

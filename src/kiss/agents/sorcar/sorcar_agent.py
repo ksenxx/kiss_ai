@@ -30,6 +30,8 @@ from kiss.agents.sorcar.agent_dispatch import (
     RunOptions,
     fanout_conflict,
     inherit_from_parent,
+    kill_jobs_of,
+    live_agent_jobs,
     options_keyword_hint,
     parse_run_options,
     resolve_agent,
@@ -1565,6 +1567,10 @@ class SorcarAgent(RelentlessAgent):
         # KISS_USE_MEMORY environment variable) enables it; None keeps
         # the run memory-free.  :meth:`_get_tools` registers its tools.
         self._memory_tools: MemoryTools | None = None
+        # Whether this session's one-time ``finish`` rejection for
+        # still-running ``run_agent`` jobs has been used (see
+        # :meth:`_block_finish_with_live_jobs`).
+        self._live_jobs_finish_gate_used = False
         # Per-run memory toggle (:meth:`run`'s *use_memory*), kept on
         # self so the ``run_parallel`` fan-out — which executes DURING
         # the run — forwards the same override to every sub-agent.
@@ -2691,7 +2697,8 @@ class SorcarAgent(RelentlessAgent):
         # the duck-typed ``drain_pending_user_messages`` bridge), and
         # the server UI's printer bridge must be drained when present.
         self.pre_step_hook = self._drain_pending_user_messages
-        self.tool_call_guard = self._block_finish_when_user_message_pending
+        self.tool_call_guard = self._guard_finish
+        self._live_jobs_finish_gate_used = False
         return super().perform_task(all_tools, attachments=attachments)
 
     def _reset(
@@ -3235,6 +3242,22 @@ class SorcarAgent(RelentlessAgent):
                 tool_call_hook=tool_call_hook,
             )
         finally:
+            # No sub-task outlives its caller: a run_agent job the run
+            # neither waited for nor killed is stopped here, before the
+            # run's terminal status goes out.  The cancels are sent
+            # before its bounded join, and a stop's injected interrupt
+            # landing in that join must not skip the cleanup below: it
+            # is held and re-raised after it when the run was otherwise
+            # returning normally (the stop must still be honoured), or
+            # dropped when the run is already unwinding on an exception.
+            unwinding = sys.exc_info()[1] is not None
+            interrupted: BaseException | None = None
+            try:
+                if kill_jobs_of(self):
+                    logger.info("stopped run_agent jobs still running at the end of the task")
+            except BaseException as exc:  # noqa: BLE001 — held, see above
+                logger.warning("interrupted while waiting for cancelled run_agent jobs")
+                interrupted = None if unwinding else exc
             classifier_spend_folded = self._fold_classifier_usage()
             if self.web_use_tool:
                 self.web_use_tool.close()
@@ -3248,6 +3271,8 @@ class SorcarAgent(RelentlessAgent):
                 # cost would omit the classifier.  Emitted after the
                 # cleanup: printing raises the task's stop when it is set.
                 self._emit_usage_totals()
+            if interrupted is not None:
+                raise interrupted
 
     def _drain_pending_user_messages(self, model: Any) -> None:
         """Append any queued follow-up prompts to *model*'s conversation.
@@ -3321,6 +3346,48 @@ class SorcarAgent(RelentlessAgent):
             "you were working. It will be appended to the conversation "
             "at the start of your next step; take it into account "
             "before finishing."
+        )
+
+    def _block_finish_with_live_jobs(self, name: str, args: dict[str, Any]) -> str | None:
+        """Reject ``finish`` once while a ``run_agent`` job is still running.
+
+        A job is a sub-task the model started with ``wait="false"`` or
+        one whose ``run_agent`` call returned at its ``timeout``; its
+        result would be lost and the sub-task killed by :meth:`run`'s
+        cleanup if the task ended now.  The first ``finish`` with live
+        jobs is rejected with their ids so the model can wait for or
+        kill them; a second ``finish`` passes, so a model that means it
+        is never trapped.
+
+        Args:
+            name: The tool name the model is calling.
+            args: The tool call arguments (unused).
+
+        Returns:
+            ``None`` to allow the call, or the one-time rejection.
+        """
+        del args
+        if name != "finish" or self._live_jobs_finish_gate_used:
+            return None
+        live = live_agent_jobs(self)
+        if not live:
+            return None
+        self._live_jobs_finish_gate_used = True
+        now = time.monotonic()
+        jobs = ", ".join(
+            f"{job.job_id} ({job.name}, running {now - job.started:.0f}s)" for job in live
+        )
+        return (
+            f"Error: finish rejected — run_agent jobs are still running: {jobs}. "
+            f"agent_job(id, 'wait') collects a job's result and 'kill' stops it; "
+            f"finishing again kills every job still running."
+        )
+
+    def _guard_finish(self, name: str, args: dict[str, Any]) -> str | None:
+        """The run's tool-call guard: every reason a ``finish`` is rejected, first one wins."""
+        return (
+            self._block_finish_when_user_message_pending(name, args)
+            or self._block_finish_with_live_jobs(name, args)
         )
 
 

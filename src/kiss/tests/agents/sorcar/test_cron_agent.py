@@ -26,6 +26,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -620,8 +621,7 @@ def test_prompt_job_runs_the_cron_prompt_sea(
     assert sent["work_dir"] == str(work_dir)
     assert sent["use_worktree"] is False
     assert sent["auto_commit"] is False
-    assert sent["timeout"] == cron_agent.PROMPT_TIMEOUT_SECONDS
-    assert sent["stop_on_timeout"] is True
+    assert sent["record_timeout"] == cron_agent.PROMPT_TIMEOUT_SECONDS
     # Top-level task: no parent, so no reviewer sub-tree marking.
     assert sent["parent_task_id"] == ""
     cmd: dict[str, object] = {
@@ -944,7 +944,7 @@ def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
     assert cron_agent._run_prompt_job(stored, scratch) == ("ok", "done")
     sent = captured[0]
     assert sent["extension_agent_path"] == str(cron_agent.PROMPT_SEA_PATH)
-    assert sent["timeout"] == 21600.0
+    assert sent["record_timeout"] == 21600.0
     assert sent["work_dir"] == str(project.resolve())
     assert sent["use_worktree"] is True
     assert sent["auto_commit"] is True
@@ -1041,24 +1041,33 @@ def test_unconfirmed_prompt_timeout_names_the_job_work_dir(
     Only the SEA lives in the scratch directory; the possibly still
     running task works in the job's ``work_dir``, so that is the
     directory the error names, with the kept scratch directory beside it.
+    The stand-in daemon wait never finishes and, once the job's 0.5-s
+    ``run_agent`` bound hands the task back and cron kills it, reports
+    the stop as unconfirmed.
     """
     from kiss.agents.sorcar import daemon_client
 
-    def hang(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
-        raise daemon_client.StopUnconfirmedTimeoutError("no terminal status")
+    def hang(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        kwargs["running"].set()
+        kwargs["cancel"].wait()
+        raise daemon_client.CancelledError(
+            "no terminal status",
+            daemon_client.TaskResult(text="", success=False, cost=0.0, tokens=0, steps=0),
+            confirmed=False,
+        )
 
     monkeypatch.setattr(daemon_client, "run", hang)
     project = tmp_path / "project"
     project.mkdir()
     job = _create(cron_job(
         "create", name="slow", prompt="think hard", schedule="every 1d",
-        work_dir=str(project), timeout="2.5",
+        work_dir=str(project), timeout="0.5",
     ))
     _set_job_fields(job["id"], next_run_at=1.0)
     assert tick(2.0) == 1
     stored = load_jobs()[0]
     assert stored["last_status"] == "error"
-    assert "timed out after 2.5s" in stored["last_summary"]
+    assert "timed out after 0.5s" in stored["last_summary"]
     assert f"running in {project.resolve()}" in stored["last_summary"]
     assert "MAY STILL BE RUNNING" in stored["last_summary"]
     kept = [p for p in (tmp_path / "cron" / "runs").iterdir() if p.is_dir()]

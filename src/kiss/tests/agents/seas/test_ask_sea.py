@@ -509,11 +509,11 @@ def _run_dispatch(
     agent_path: str, options: RunOptions, parent_task_id: str,
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> dict[str, Any]:
-    """Drive :func:`_dispatch` and return the captured kwargs."""
+    """Drive :func:`dispatch_result` and return the captured kwargs."""
     _install_daemon_capture(monkeypatch)
     parent = _StubAgent(parent_task_id)
     try:
-        agent_dispatch._dispatch(
+        agent_dispatch.dispatch_result(
             name="ask",
             prompt="why did the last step fail?",
             agent_path=agent_path,

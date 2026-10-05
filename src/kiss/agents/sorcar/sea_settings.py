@@ -150,11 +150,12 @@ SETTING_DOCS: dict[str, str] = {
     "tool_profile": "The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full "
                     "toolset).",
     "docker_image": "Run inside this Docker image (default: the host).",
-    "timeout": "Seconds the run may take: the call's `timeout` argument or option wins, then "
-               "this setting, then the default, which is 3600 for a `run_agent` call (the "
-               "sub-task is stopped when it expires) and no limit of its own for a "
-               "`run_parallel` child (a thread of the calling task, bounded by it); ignored by "
-               "`/<name>`.",
+    "timeout": "Seconds the call blocks for the run: the call's `timeout` argument or option "
+               "wins, then this setting, then the default, which is 3600 for a `run_agent` "
+               "call (when it expires the run keeps going as an `agent_job` and the call "
+               "returns its job id; a job still running when the calling task ends is "
+               "killed) and no limit of its own for a `run_parallel` child (a thread of the "
+               "calling task, bounded by it); ignored by `/<name>`.",
     "locked": "Keys an explicit `run_agent` / `run_parallel` argument or option may not change: "
               "a differing value is an error.",
     "hidden": "`True`: the script is no `/command` and no `run_agent` agent name (loadable by "

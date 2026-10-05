@@ -53,6 +53,7 @@ import logging
 import math
 import re
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -103,56 +104,21 @@ a checkout of this repository.
 """
 
 DEFAULT_DISPATCH_TIMEOUT_SECONDS = 3600.0
-"""Default bound on the wait for a dispatched sub-task's result.
+"""Default bound on how long a ``run_agent`` call blocks for its sub-task.
 
 Used when the ``run_agent`` tool's ``timeout`` argument is empty and
 the SEA's ``settings()`` declares no ``timeout`` (see
 :func:`resolve_timeout`); a per-call value overrides both.  One hour
 rather than minutes: a sub-task that writes a paper or runs a test
-suite legitimately takes that long, and a stopped sub-task loses its
-result, so the default errs towards waiting.  When the wait times out, the tool
-returns an error string and the sub-task is STOPPED
-(:func:`kiss.agents.sorcar.daemon_client.run` is called with
-``stop_on_timeout=True``, which also awaits the stop's
-terminal-status confirmation before returning; if a wedged daemon
-never confirms it within the bounded grace, the error string says the
-task may still be running instead of claiming it was stopped): a
-surviving sub-task would keep spending invisibly.  Work the sub-task
-completed before the stop (side effects) is not reported back to the
-calling task; its spend, carried by the stopped task's final result,
-is charged to the calling task.
+suite legitimately takes that long.  The bound is on the CALL, not on
+the sub-task: every ``run_agent`` dispatch runs as an :class:`AgentJob`
+on its own thread, the call joins that thread for the bound, and when
+the bound expires the call returns the job's still-running notice (see
+:func:`job_notice`) while the sub-task keeps running.  The caller then
+collects or stops it with ``agent_job(id, "wait" | "kill")``; a job it
+never resolves is killed when the calling run ends
+(:func:`kill_jobs_of`), so no sub-task outlives its caller.
 """
-
-
-
-def stop_unconfirmed_error(name: str, timeout: float) -> str:
-    """Return the ``run_agent`` error string for an unconfirmed stop.
-
-    Returned by the tool exactly when the dispatch timed out AND the
-    daemon never confirmed the requested stop
-    (``daemon_client.StopUnconfirmedTimeoutError``), so the sub-task may
-    still be running.  Programmatic callers of the tool
-    (``cron_agent._run_prompt_job``) compare the reply against this
-    exact string — never a substring, which unrelated text such as an
-    endpoint URL or file path in a connection error could contain — to
-    keep the run's
-    scratch directory instead of deleting it under a possibly live task.
-
-    Args:
-        name: The dispatched agent's display name (the script's stem or
-            the channel name).
-        timeout: The wait bound in seconds that expired.
-
-    Returns:
-        The complete error string.
-    """
-    return (
-        f"Error: the {name} agent task did not finish within "
-        f"{timeout:g}s; a stop was requested but the daemon never "
-        f"confirmed it, so the task MAY STILL BE RUNNING (and "
-        f"spending) on the daemon. Check what it already did "
-        f"before retrying with a larger `timeout` argument."
-    )
 
 
 @dataclass(frozen=True)
@@ -909,39 +875,45 @@ def _inherit_from_parent(
     )
 
 
-def _dispatch(
-    name: str,
-    prompt: str,
-    agent_path: str,
-    work_dir: str,
-    model_name: str,
-    budget: float | None,
-    timeout: float,
-    parent_agent: Any = None,
-    scope_work_dir: str = "",
-    options: RunOptions = RunOptions(),
-    inherit: bool = False,
-    settings: dict[str, Any] | None = None,
-    workspace: str = "",
-    cancel: threading.Event | None = None,
-    running: threading.Event | None = None,
-    timeout_explicit: bool = False,
-    alias: str = "",
-) -> str:
-    """Submit a SEA task to the kiss-web daemon and wait for its YAML result.
+def unconfirmed_stop_error(name: str) -> str:
+    """Return the error a killed job records when the daemon never confirmed the stop.
 
-    :func:`dispatch_result` with the same arguments, formatted for the
-    calling model: the sub-task's YAML result (``ran``, ``success`` and
-    ``summary`` keys), or the error message.  *alias* is the registered
-    command name of a SEA reached by path, shown on the ``ran`` line
+    The exact text (never a substring, which unrelated text such as a
+    path in a connection error could contain) lets a programmatic
+    caller that killed the job (``cron_agent._run_prompt_job``) tell a
+    sub-task that may still be running from one that is dead, and keep
+    the run's scratch directory for it.
+
+    Args:
+        name: The dispatched agent's display name.
+
+    Returns:
+        The complete error string.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    return (
+        f"Error: a stop was sent to the {name} agent task but the daemon did not "
+        f"confirm it stopped within {daemon_client._STOP_CONFIRM_GRACE_SECONDS:g}s; "
+        f"it MAY STILL BE RUNNING (and spending) on the daemon."
+    )
+
+
+def notice_job_id(text: str) -> str:
+    """Return the job id a :func:`job_notice` names, or ``""`` for any other tool text."""
+    match = re.match(r"(?:Started|The) .* as job (agent-[0-9a-f]{8})\b", text)
+    return match.group(1) if match else ""
+
+
+def format_dispatch_result(result: TaskResult | str, timeout: float, alias: str = "") -> str:
+    """Format what :func:`dispatch_result` returned for the calling model.
+
+    The sub-task's YAML result (``ran``, ``success`` and ``summary``
+    keys), or the error message as it is.  *timeout* is the call's
+    bound shown on the ``ran`` line; *alias* is the registered command
+    name of a SEA reached by path, shown there too
     (:func:`~kiss.agents.sorcar.run_config.run_config_line`).
     """
-    result = dispatch_result(
-        name, prompt, agent_path, work_dir, model_name, budget, timeout,
-        parent_agent=parent_agent, scope_work_dir=scope_work_dir,
-        options=options, inherit=inherit, settings=settings, workspace=workspace,
-        cancel=cancel, running=running, timeout_explicit=timeout_explicit,
-    )
     if isinstance(result, str):
         return result
     summary = result.text or ("" if result.success else "Task failed")
@@ -982,8 +954,8 @@ def dispatch_result(
     carries the sub-task's persisted ``task_id``) — or a clean error
     string.  It raises only for the inherited-budget case described
     under *inherit*.  Callers that need the sub-task's id
-    (rsi7d's clone replays) use this; :func:`_dispatch` formats the
-    result for a model.
+    (rsi7d's clone replays) use this; :func:`format_dispatch_result`
+    formats the result for a model.
 
     Args:
         name: Display name of the agent for error messages (the
@@ -996,9 +968,12 @@ def dispatch_result(
             default.
         budget: Per-task USD budget override; ``None`` for the daemon
             default.
-        timeout: Maximum seconds to wait for the sub-task's result.
-            On timeout the sub-task is stopped and an error string is
-            returned (see :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`).
+        timeout: The calling ``run_agent`` call's bound in seconds,
+            recorded on the daemon as the run's ``timeout`` (its
+            ``task_settings`` and the lock check).  Not a deadline
+            here: this function waits for the sub-task's result until
+            it arrives or *cancel* is set; the caller bounds the wait
+            by joining the thread it runs this on (:func:`_run_agent`).
         parent_agent: The agent calling ``run_agent``, when there is
             one: the sub-task's cost/tokens/steps are folded into its
             task accounting (see :func:`_attribute_dispatch_usage`),
@@ -1040,9 +1015,10 @@ def dispatch_result(
         workspace: Workspace/account identifier a ``kind: "channel"``
             run holds for its lifetime (the daemon's task runner enters
             it); empty means ``"default"``.  Ignored by other scripts.
-        cancel: An event a background job's ``agent_job(..., "kill")``
-            sets; the wait then stops the sub-task and returns an
-            error string saying so.  ``None`` for a blocking call.
+        cancel: The event that stops the sub-task (:func:`kill_agent_job`
+            sets it); the wait then sends the daemon a ``stop``, awaits
+            its confirmation and returns an error string saying so.
+            ``None`` never stops it.
         timeout_explicit: Whether *timeout* was passed by the call
             (marked explicit in the run's ``provenance``) rather than
             taken from the script or the default.
@@ -1168,36 +1144,27 @@ def dispatch_result(
             # running caller, which ``parent_task_id`` names.
             inherit_tools=inherit,
             provenance=inherited.provenance(explicit),
-            timeout=timeout,
-            stop_on_timeout=True,
+            # No deadline on this wait: the call's bound is enforced by
+            # the caller joining the job thread; the daemon only records
+            # it.  The cancel event is the one way to stop the sub-task.
+            timeout=None,
+            record_timeout=timeout,
             endpoint_file=_daemon_endpoint_file(),
             cancel=cancel,
             running=running,
         )
-    except daemon_client.StopUnconfirmedTimeoutError:
-        return stop_unconfirmed_error(name, timeout)
     except daemon_client.CancelledError as e:
-        _attribute_dispatch_usage(parent_agent, e.result, epoch)
-        if not e.confirmed:
-            return (
-                f"Error: agent_job kill sent a stop to the {name} agent task but the "
-                f"daemon did not confirm it stopped within "
-                f"{daemon_client._STOP_CONFIRM_GRACE_SECONDS:g}s; it may still be running."
-            )
-        return f"Error: the {name} agent task was stopped by agent_job kill."
-    except TimeoutError as e:
         # A confirmed stop carries the stopped task's spend, which still
         # counts towards the caller.
+        _attribute_dispatch_usage(parent_agent, e.result, epoch)
+        if not e.confirmed:
+            return unconfirmed_stop_error(name)
         spend = ""
-        if isinstance(e, daemon_client.StoppedOnTimeoutError):
-            _attribute_dispatch_usage(parent_agent, e.result, epoch)
-            spend = f", though its ${e.result.cost:.4f} spend is counted in this task's cost"
+        if e.result is not None and e.result.cost:
+            spend = f"; its ${e.result.cost:.4f} spend is counted in this task's cost"
         return (
-            f"Error: the {name} agent task did not finish within "
-            f"{timeout:g}s and was stopped; work it completed before "
-            f"the stop (side effects) is not reported here{spend}. "
-            f"Check what it already did before retrying with a larger "
-            f"`timeout` argument."
+            f"Error: the {name} agent task was stopped before it finished; work it "
+            f"completed before the stop (side effects) is not reported here{spend}."
         )
     except Exception as e:
         _attribute_dispatch_usage(parent_agent, getattr(e, "task_result", None), epoch)
@@ -1252,11 +1219,12 @@ def _run_agent(
         max_budget: Per-task USD budget override as a number string;
             empty for half of the calling agent's remaining budget (a
             non-inheriting sub-task: the daemon default).
-        timeout: Maximum seconds to wait for the sub-task's result, as
-            a number string; empty for the script's ``timeout``
-            setting, else :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
-            On timeout the sub-task is stopped and an error string is
-            returned.
+        timeout: Maximum seconds this call blocks for the sub-task's
+            result, as a number string; empty for the script's
+            ``timeout`` setting, else
+            :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.  When it expires
+            the sub-task keeps running as an ``agent_job`` and the
+            call returns the job's notice (see :func:`job_notice`).
         options: JSON object of further run settings (see
             :func:`parse_run_options`).
         parent_agent: The agent calling ``run_agent``, when there is
@@ -1267,7 +1235,8 @@ def _run_agent(
 
     Returns:
         The sub-task's YAML result ("success" and "summary" keys), the
-        job notice (``wait="false"``), or an error message.
+        job notice (``wait="false"``, or the ``timeout`` expired), or
+        an error message.
     """
     if not task.strip():
         return "Error: task must be a non-empty string."
@@ -1328,27 +1297,56 @@ def _run_agent(
         "workspace": run_options.workspace, "timeout_explicit": run_options.timeout is not None,
         "alias": command_alias(agent_path) if is_agent_path(agent.strip()) else "",
     }
-    if blocking:
-        return _dispatch(**kwargs)
-    return start_agent_job(name, kwargs, parent_agent)
+    job = start_agent_job(name, kwargs, parent_agent)
+    try:
+        if not blocking:
+            wait_until_started(job)
+            return job_notice(job, None)
+        finished = join_agent_job(job, seconds)
+    except BaseException:
+        # The call was interrupted (the tool call's Stop button, or the
+        # calling task stopped), whether while the sub-task was starting
+        # or while it ran: the sub-task is cancelled too, as a blocking
+        # call's sub-task always has been.  Not joined here, so the Stop
+        # stays prompt: the job thread stops the sub-task on its own and
+        # the run's end (:func:`kill_jobs_of`) collects what is left.
+        job.cancel.set()
+        raise
+    if finished:
+        forget_agent_job(job)
+        return job.result
+    return job_notice(job, seconds)
 
 
 @dataclass
 class AgentJob:
-    """A ``run_agent(wait="false")`` sub-task running in the background.
+    """A ``run_agent`` sub-task running on its own thread.
+
+    Every dispatch is one: a blocking call joins the thread for its
+    ``timeout`` and takes the result when the thread finishes in time;
+    otherwise (or with ``wait="false"``) the job stays registered and
+    the caller's ``agent_job`` tool waits for, inspects or kills it.
 
     Attributes:
         job_id: The id ``agent_job`` looks the job up by.
         name: The agent's display name.
         owner: The agent whose ``run_agent`` started the job; only that
             agent's ``agent_job`` tool sees it.
-        cancel: Set by ``agent_job(..., "kill")``; the dispatch's read
-            loop stops the sub-task when it sees it.
+        cancel: Set by :func:`kill_agent_job`; the dispatch's read loop
+            stops the sub-task when it sees it.
         running: Set once the sub-task's tab exists on every client
             (its initial ``status running=true``) or the dispatch ended
             without one.
-        thread: The thread running :func:`_dispatch`, already started.
-        result: The tool text the dispatch returned; ``""`` while running.
+        thread: The thread running :func:`dispatch_result`, already
+            started.
+        started: ``time.monotonic()`` when the thread was started.
+        workspace: The channel workspace the sub-task holds while it
+            runs (``kind: "channel"`` SEAs), else ``""``.
+        outcome: What :func:`dispatch_result` returned (the sub-task's
+            :class:`TaskResult`, or an error string); ``None`` while
+            running.
+        result: The tool text for *outcome* (the YAML result or the
+            error); ``""`` while running.
     """
 
     job_id: str
@@ -1357,73 +1355,218 @@ class AgentJob:
     cancel: threading.Event
     running: threading.Event
     thread: threading.Thread
+    started: float = 0.0
+    workspace: str = ""
+    outcome: TaskResult | str | None = None
     result: str = ""
 
 
 _AGENT_JOBS: dict[str, AgentJob] = {}
-"""Every background sub-task started in this process, by job id.
+"""Every unresolved sub-task dispatched in this process, by job id.
 
-Guarded by :data:`_AGENT_JOBS_LOCK`.
+A job leaves the registry when its blocking call takes its result or
+when its owner's run ends (:func:`kill_jobs_of`).  Guarded by
+:data:`_AGENT_JOBS_LOCK`.
 """
 
 _AGENT_JOBS_LOCK = threading.Lock()
 
 
-def start_agent_job(name: str, kwargs: dict[str, Any], owner: Any) -> str:
-    """Start :func:`_dispatch` with *kwargs* in a thread and return the job notice.
+def start_agent_job(name: str, kwargs: dict[str, Any], owner: Any) -> AgentJob:
+    """Start :func:`dispatch_result` with *kwargs* in a thread and register the job.
 
     The job is published only after its thread has started, so every
-    ``agent_job`` action finds a joinable thread, and the notice is
-    returned only once the sub-task's tab is open (bounded by
-    :data:`_JOB_START_GRACE_SECONDS`): the spawn then falls inside the
-    ``run_agent`` call's time window, which is how every surface files
-    a sub-agent tab under the call that started it.
+    ``agent_job`` action finds a joinable thread.  The function does
+    not wait for the sub-task to start: a blocking ``run_agent`` call
+    joins the thread under its one ``timeout`` (startup included) and
+    a ``wait="false"`` call waits for the tab with
+    :func:`wait_until_started`.
 
     Args:
         name: The agent's display name.
-        kwargs: The keyword arguments of :func:`_dispatch`; the job's
-            ``cancel`` event is added.
+        kwargs: The keyword arguments of :func:`dispatch_result`, plus
+            the ``alias`` :func:`format_dispatch_result` shows; the
+            job's ``cancel`` and ``running`` events are added.
         owner: The calling agent (``None`` for standalone use).
 
     Returns:
-        The text the ``run_agent`` tool returns: the job id and how to
-        use ``agent_job`` on it.
+        The registered job.
     """
     job_id = f"agent-{uuid.uuid4().hex[:8]}"
     cancel, running = threading.Event(), threading.Event()
-    job = AgentJob(job_id, name, owner, cancel, running, threading.Thread())
+    job = AgentJob(
+        job_id, name, owner, cancel, running, threading.Thread(),
+        workspace=str(kwargs.get("workspace") or ""),
+    )
     job.thread = threading.Thread(
         target=_finish_agent_job,
         args=(job, {**kwargs, "cancel": cancel, "running": running}),
         name=f"agent-job-{job_id}", daemon=True,
     )
+    job.started = time.monotonic()
     job.thread.start()
     with _AGENT_JOBS_LOCK:
         _AGENT_JOBS[job_id] = job
-    running.wait(_JOB_START_GRACE_SECONDS)
-    return (
-        f"Started the {name} agent task as job {job_id}; its tab is open. "
-        f"agent_job({job_id!r}, 'wait') blocks until it finishes and returns its "
-        f"result, 'tail' reports its status, 'kill' stops it. Wait for or kill "
-        f"it before finishing."
-    )
+    return job
+
+
+def wait_until_started(job: AgentJob) -> None:
+    """Block until *job*'s sub-task has its tab (or the dispatch ended), bounded.
+
+    A ``run_agent(wait="false")`` call returns its notice only after
+    this, bounded by :data:`_JOB_START_GRACE_SECONDS`: the spawn then
+    falls inside the call's time window, which is how every surface
+    files a sub-agent tab under the call that started it.  Polled in
+    slices like :func:`join_agent_job`, so a Stop of the call lands.
+    """
+    from kiss.core import tool_interrupt
+
+    deadline = time.monotonic() + _JOB_START_GRACE_SECONDS
+    while not job.running.is_set() and time.monotonic() < deadline:
+        tool_interrupt.raise_if_interrupted()
+        job.running.wait(_JOB_WAKE_SECONDS)
 
 
 def _finish_agent_job(job: AgentJob, kwargs: dict[str, Any]) -> None:
-    """Thread body of a background job: record the dispatch's text on *job*."""
+    """Thread body of a job: record the dispatch's outcome and text on *job*."""
+    alias = kwargs.pop("alias", "")
     try:
-        job.result = _dispatch(**kwargs)
+        job.outcome = dispatch_result(**kwargs)
+        job.result = format_dispatch_result(job.outcome, kwargs["timeout"], alias)
     except BaseException as exc:  # noqa: BLE001 — the thread must record any failure
         logger.warning("agent job %s failed", job.job_id, exc_info=True)
-        job.result = f"Error: the {job.name} agent task could not run: {safe_message(exc)}"
+        job.outcome = f"Error: the {job.name} agent task could not run: {safe_message(exc)}"
+        job.result = job.outcome
     finally:
         job.running.set()
 
 
+def job_notice(job: AgentJob, waited: float | None) -> str:
+    """Return the ``run_agent`` text for a job that is still running.
+
+    Args:
+        job: The job.
+        waited: The seconds the call blocked before giving up (its
+            ``timeout``), or ``None`` for a ``wait="false"`` call that
+            did not wait.
+
+    Returns:
+        The job id, what it holds, and how to use ``agent_job`` on it.
+    """
+    held = f' (it holds channel workspace "{job.workspace}")' if job.workspace else ""
+    if waited is None:
+        lead = f"Started the {job.name} agent task as job {job.job_id}{held}; its tab is open."
+    else:
+        lead = (
+            f"The {job.name} agent task is still running after {waited:g}s as job "
+            f"{job.job_id}{held}; its tab stays open."
+        )
+    return (
+        f"{lead} agent_job({job.job_id!r}, 'wait') blocks until it finishes and "
+        f"returns its result, 'tail' reports its status, 'kill' stops it. Wait for "
+        f"or kill it before finishing; a job still running when this task ends is "
+        f"killed."
+    )
+
+
+def join_agent_job(job: AgentJob, seconds: float | None) -> bool:
+    """Block on *job*'s thread for at most *seconds* and say whether it finished.
+
+    Joins in short slices rather than one long ``join``: a task's Stop
+    is an asynchronously injected ``KeyboardInterrupt`` that Python
+    delivers only between bytecodes, never inside a blocking C-level
+    wait, and the tool call's own Stop button is a cooperative
+    interrupt (:func:`kiss.core.tool_interrupt.raise_if_interrupted`)
+    that must be polled.  Either propagates out of this function.
+
+    Args:
+        job: The job to wait for.
+        seconds: The bound; ``None`` waits until the job finishes.
+
+    Returns:
+        ``True`` when the job's thread has finished, ``False`` when the
+        bound expired first.
+    """
+    from kiss.core import tool_interrupt
+
+    deadline = None if seconds is None else time.monotonic() + seconds
+    while job.thread.is_alive():
+        tool_interrupt.raise_if_interrupted()
+        left = None if deadline is None else deadline - time.monotonic()
+        if left is not None and left <= 0:
+            return False
+        job.thread.join(_JOB_WAKE_SECONDS if left is None else min(_JOB_WAKE_SECONDS, left))
+    return True
+
+
+def kill_agent_job(job: AgentJob) -> str:
+    """Stop *job*'s sub-task and return the tool text for it.
+
+    Sets the job's cancel event, which the dispatch's read loop turns
+    into a daemon ``stop`` and a bounded wait for its confirmation, and
+    joins the thread for :data:`_JOB_KILL_GRACE_SECONDS`.  A finished
+    job is left as it is.
+
+    Returns:
+        The job's result text (the stop error, or the result it had
+        already produced), or a still-running notice when the daemon
+        did not answer within the grace.
+    """
+    job.cancel.set()
+    job.thread.join(_JOB_KILL_GRACE_SECONDS)
+    if job.thread.is_alive():
+        return f"Job {job.job_id} ({job.name} agent task) is still running."
+    return job.result
+
+
+def forget_agent_job(job: AgentJob) -> None:
+    """Drop *job* from the registry (its result has been taken)."""
+    with _AGENT_JOBS_LOCK:
+        _AGENT_JOBS.pop(job.job_id, None)
+
+
 def agent_jobs_of(owner: Any) -> dict[str, AgentJob]:
-    """Return the background jobs *owner*'s ``run_agent`` started, by job id."""
+    """Return the registered jobs *owner*'s ``run_agent`` started, by job id."""
     with _AGENT_JOBS_LOCK:
         return {job_id: job for job_id, job in _AGENT_JOBS.items() if job.owner is owner}
+
+
+def live_agent_jobs(owner: Any) -> list[AgentJob]:
+    """Return *owner*'s jobs whose sub-task is still running."""
+    return [job for job in agent_jobs_of(owner).values() if job.thread.is_alive()]
+
+
+def kill_jobs_of(owner: Any) -> list[str]:
+    """Stop every running job of *owner* and drop all of its jobs from the registry.
+
+    Called when *owner*'s run ends, so a sub-task the run neither
+    waited for nor killed (a ``wait="false"`` job, a call whose
+    ``timeout`` expired, or one whose call was interrupted) does not
+    outlive it: every cancel goes out at once, each job thread turns
+    it into the daemon's stop, and the sub-agent tab closes through the
+    ordinary ``subagentDone`` flow.  The threads are joined for
+    :data:`_JOB_END_GRACE_SECONDS` in all, long enough for a
+    cooperative stop to confirm and settle the sub-task's spend into
+    this run, short enough that a stopped parent still ends promptly
+    (and before the daemon's stop watchdog injects a second interrupt
+    into its cleanup); a job that takes longer finishes stopping on its
+    own thread.  Finished jobs are dropped without a stop.
+
+    Returns:
+        The ids of the jobs that were still running.
+    """
+    jobs = agent_jobs_of(owner)
+    live = [job for job in jobs.values() if job.thread.is_alive()]
+    # Registry and cancels first: they must survive an interrupt that
+    # lands in the bounded join below.
+    for job in jobs.values():
+        forget_agent_job(job)
+    for job in live:
+        job.cancel.set()
+    deadline = time.monotonic() + _JOB_END_GRACE_SECONDS
+    for job in live:
+        job.thread.join(max(0.0, deadline - time.monotonic()))
+    return [job.job_id for job in live]
 
 
 def make_agent_job_tool(owner: Any = None) -> Callable[..., str]:
@@ -1441,7 +1584,11 @@ def make_agent_job_tool(owner: Any = None) -> Callable[..., str]:
     """
 
     def agent_job(job_id: str, action: str = "tail", timeout_seconds: str = "") -> str:
-        """Wait for, check or kill a sub-task started by ``run_agent(..., wait="false")``.
+        """Wait for, check or kill a sub-task ``run_agent`` left running.
+
+        A job is a ``run_agent(..., wait="false")`` call's sub-task, or
+        one whose call returned at its ``timeout`` while the sub-task
+        kept running.
 
         Args:
             job_id: The id ``run_agent`` returned (``agent-1a2b3c4d``).
@@ -1451,8 +1598,7 @@ def make_agent_job_tool(owner: Any = None) -> Callable[..., str]:
                 ``timeout_seconds``) and returns its result; ``"kill"``
                 stops it.
             timeout_seconds: How long ``"wait"`` blocks at most, as a
-                number string; empty waits for the task's own
-                ``timeout`` to end it.
+                number string; empty waits until the task finishes.
 
         Returns:
             The job's status, or the sub-task's YAML result ("success"
@@ -1468,10 +1614,9 @@ def make_agent_job_tool(owner: Any = None) -> Callable[..., str]:
             seconds = parse_wait_seconds(timeout_seconds)
             if isinstance(seconds, str):
                 return seconds
-            job.thread.join(seconds)
+            join_agent_job(job, seconds)
         elif action == "kill":
-            job.cancel.set()
-            job.thread.join(_JOB_KILL_GRACE_SECONDS)
+            return kill_agent_job(job)
         elif action != "tail":
             return f"Error: action must be tail, wait or kill, got {action!r}."
         if job.thread.is_alive():
@@ -1504,7 +1649,13 @@ def parse_wait_seconds(timeout_seconds: str) -> float | None | str:
 
 
 _JOB_KILL_GRACE_SECONDS = 30.0
-"""How long ``agent_job(..., "kill")`` waits for the stopped sub-task's dispatch to return."""
+"""How long :func:`kill_agent_job` waits for the stopped sub-task's dispatch to return."""
+
+_JOB_WAKE_SECONDS = 0.5
+"""Slice length of :func:`join_agent_job`'s join loop (how fast a Stop is seen)."""
+
+_JOB_END_GRACE_SECONDS = 3.0
+"""How long :func:`kill_jobs_of` waits, in all, for a run's cancelled jobs at its end."""
 
 _JOB_START_GRACE_SECONDS = 30.0
 """How long ``run_agent(wait="false")`` waits for the sub-task's tab before returning its notice."""
@@ -1706,9 +1857,11 @@ def make_run_agent_tool(
         container and worktree / auto-commit / fan-out choices.  A
         channel or cron sub-task inherits none of these and runs in
         the Sorcar home's ``channel_work`` directory.  The call blocks
-        until the task finishes or ``timeout`` expires; a timed-out
-        task is stopped (its side effects are not reported; its spend
-        still counts here).
+        until the task finishes or ``timeout`` expires; at ``timeout``
+        the task keeps running as an ``agent_job`` and the call returns
+        its job id (``agent_job(id, "wait")`` collects the result,
+        ``"kill"`` stops it; a job still running when this task ends is
+        killed).
 
         Args:
             task: The task text, e.g. "Send 'hello' to #sorcar"; the
@@ -1733,9 +1886,10 @@ def make_run_agent_tool(
             max_budget: USD budget as a number string; empty = half of
                 this task's remaining budget (the daemon default for a
                 channel/cron sub-task).
-            timeout: Seconds to wait, as a number string; empty = the
-                SEA's ``timeout`` setting, else 3600.  Check what a
-                timed-out task already did before retrying with more.
+            timeout: Seconds this call blocks, as a number string;
+                empty = the SEA's ``timeout`` setting, else 3600.  When
+                it expires the task is not stopped: the call returns
+                its job id for ``agent_job``.
             options: JSON object of run settings to override, e.g.
                 ``'{"use_web_tools": false}'``; usually empty.  Its
                 keys are the SEA settings vocabulary: ``model``,
@@ -1770,9 +1924,9 @@ def make_run_agent_tool(
             SEA reached by path that is also a command ends with
             ``(also agent="name")``),
             then ``success`` and ``summary``; the job notice
-            (``wait="false"``); or an error
-            message (unknown agent — naming the closest command — a
-            locked key the call contradicts, or a timeout).
+            (``wait="false"``, or ``timeout`` expired with the task
+            still running); or an error message (unknown agent — naming
+            the closest command — or a locked key the call contradicts).
         """
         return _run_agent(
             work_dir, task, agent, model, tool_profile, max_budget,

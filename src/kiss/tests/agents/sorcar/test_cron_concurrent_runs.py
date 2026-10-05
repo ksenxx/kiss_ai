@@ -29,6 +29,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -126,23 +127,28 @@ def test_prompt_job_runs_in_private_work_dir_and_stops_on_timeout(
 ) -> None:
     from kiss.agents.sorcar import daemon_client
 
-    captured: list[dict[str, object]] = []
+    captured: list[dict[str, Any]] = []
     seen_dirs: list[bool] = []
+    stopped = daemon_client.TaskResult(text="", success=False, cost=0.0, tokens=0, steps=0)
 
-    def capture_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        """The first run finishes; the next two never do until cron kills them."""
         captured.append(kwargs)
         seen_dirs.append(Path(str(kwargs["work_dir"])).is_dir())
+        if len(captured) == 1:
+            return daemon_client.TaskResult(
+                text="hello", success=True, cost=0.0, tokens=0, steps=0,
+            )
+        kwargs["running"].set()
+        kwargs["cancel"].wait()
         if len(captured) == 2:
-            raise TimeoutError("late")
-        if len(captured) == 3:
-            raise daemon_client.StopUnconfirmedTimeoutError("no terminal status")
-        return daemon_client.TaskResult(
-            text="hello", success=True, cost=0.0, tokens=0, steps=0,
-        )
+            raise daemon_client.CancelledError("stopped", stopped, confirmed=True)
+        raise daemon_client.CancelledError("no terminal status", stopped, confirmed=False)
 
     monkeypatch.setattr(daemon_client, "run", capture_run)
     job = _create(cron_job(
         "create", name="llm", prompt="say hi", schedule="every 1m", deliver="none",
+        timeout="0.5",
     ))
     _set_job_fields(job["id"], next_run_at=1.0)
     assert tick(2.0) == 1
@@ -151,10 +157,11 @@ def test_prompt_job_runs_in_private_work_dir_and_stops_on_timeout(
     assert work_dir.name.startswith(job["id"] + "-")
     assert seen_dirs == [True]
     assert not work_dir.exists()
-    assert captured[0]["stop_on_timeout"] is True
+    assert captured[0]["timeout"] is None and captured[0]["record_timeout"] == 0.5
     assert _stored(job["id"])["last_summary"] == "hello"
 
-    # A timed-out run is reported as stopped and its directory removed too.
+    # A run that outlives the job's ``timeout`` is handed back to cron
+    # as a job, which kills it: reported as stopped, directory removed.
     _set_job_fields(job["id"], next_run_at=1.0)
     assert tick(3.0) == 1
     stored = _stored(job["id"])

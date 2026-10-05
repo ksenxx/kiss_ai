@@ -81,7 +81,7 @@ import yaml
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import ServerConnection, serve
 
-from kiss.agents.sorcar import cron_agent, daemon_client, local_endpoint
+from kiss.agents.sorcar import agent_dispatch, cron_agent, daemon_client, local_endpoint
 from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
 from kiss.tests.local_ws import make_test_tls
 
@@ -309,12 +309,13 @@ def test_stop_on_timeout_returns_naturally_finished_result() -> None:
 def test_run_agent_tool_returns_result_when_finish_races_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ``run_agent`` tool reports the raced natural finish as success.
+    """A kill that races the sub-task's natural finish reports the finish.
 
     End-to-end through the real tool (path mode, ``KISS_SORCAR_LOCAL``
-    resolution): the caller must get the sub-task's YAML result — its
-    work is done and its spend/summary known — instead of the "did not
-    finish within …s and was stopped" error string.
+    resolution): the 0.3-s bound hands the still-running sub-task back
+    as a job; the caller kills it while it is finishing on its own, and
+    must get the sub-task's YAML result — its work is done and its
+    spend/summary known — instead of a "was stopped" error string.
     """
     daemon = _RacingFinishDaemon(finish_delay=0.6)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
@@ -324,11 +325,16 @@ def test_run_agent_tool_returns_result_when_finish_races_timeout(
         out = make_run_agent_tool(str(tmp_path))(
             "finishes while stop is in flight", str(script), timeout="0.3",
         )
-        assert "did not finish within" not in out
+        assert "is still running after 0.3s as job agent-" in out, out
+        job_id = agent_dispatch.notice_job_id(out)
+        out = agent_dispatch.make_agent_job_tool()(job_id, "kill")
+        assert "was stopped" not in out
         parsed = yaml.safe_load(out)
         assert "timeout=0.3s" in parsed.pop("ran")
         assert parsed == {"success": True, "summary": "finished on my own"}
+        assert daemon.wait_for_command("stop")
     finally:
+        agent_dispatch.kill_jobs_of(None)
         daemon.close()
 
 
@@ -393,13 +399,14 @@ def test_unconfirmed_stop_with_successful_result_still_raises(
 def test_run_agent_tool_reports_unconfirmed_stop_despite_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``run_agent`` must warn "MAY STILL BE RUNNING" without terminal status.
+    """A kill must warn "MAY STILL BE RUNNING" without terminal status.
 
-    End-to-end through the real tool: the daemon wedges after the
-    successful result, before the terminal status, so the dispatch
-    must surface the never-confirmed-stop error string — releasing the
-    workspace with a success report here could hand the workspace to a
-    later dispatch while this task still runs finalization.
+    End-to-end through the real tool: the job is killed after the
+    0.3-s bound, and the daemon wedges after the successful result,
+    before the terminal status, so the kill must surface the
+    unconfirmed-stop error string — releasing the workspace with a
+    success report here could hand the workspace to a later dispatch
+    while this task still runs finalization.
     """
     monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 1.0)
     daemon = _RacingFinishDaemon(finish_delay=0.6, send_terminal_status=False)
@@ -410,10 +417,14 @@ def test_run_agent_tool_reports_unconfirmed_stop_despite_result(
         out = make_run_agent_tool(str(tmp_path))(
             "finishes without terminal status", str(script), timeout="0.3",
         )
+        job_id = agent_dispatch.notice_job_id(out)
+        assert job_id, out
+        out = agent_dispatch.make_agent_job_tool()(job_id, "kill")
+        assert out == agent_dispatch.unconfirmed_stop_error("helper"), out
         assert "MAY STILL BE RUNNING" in out
-        assert "never confirmed" in out
         assert "finished on my own" not in out
     finally:
+        agent_dispatch.kill_jobs_of(None)
         daemon.close()
 
 

@@ -202,17 +202,19 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
 
     # Channel mode: executes in the shared channel_work scratch dir,
     # but the tab is scoped to the caller's project.  Every mode also
-    # forwards the parsed dispatch timeout (the one-hour default when
-    # the tool's ``timeout`` argument is empty and the script's
-    # ``settings()`` name none) and opts in to the stop-on-timeout
-    # cascade — a timed-out channel sub-task must not outlive its
-    # workspace reservation.
+    # records the parsed call bound on the daemon (the one-hour default
+    # when the tool's ``timeout`` argument is empty and the script's
+    # ``settings()`` name none) while the daemon wait itself has no
+    # deadline: the bound is enforced by the call joining its job
+    # thread, and a sub-task the bound hands back is stopped only by
+    # ``agent_job(..., "kill")`` or the end of the calling run.
     captured_dispatch.clear()
     tool("say hi", "ntfy")
     assert captured_dispatch[0]["work_dir"] == str(tmp_path / "channel_work")
     assert captured_dispatch[0]["scope_work_dir"] == str(caller)
-    assert captured_dispatch[0]["timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
-    assert captured_dispatch[0]["stop_on_timeout"] is True
+    assert captured_dispatch[0]["timeout"] is None
+    assert captured_dispatch[0]["record_timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
+    assert "stop_on_timeout" not in captured_dispatch[0]
 
     # Cron mode: the cron module's ``settings()`` name the cron work
     # dir, so the sub-task executes there, scoped to the caller; an
@@ -221,8 +223,7 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     tool("run 'echo hi' every 5 minutes", "cron", timeout="42.5")
     assert captured_dispatch[0]["work_dir"] == cron_agent.cron_work_dir()
     assert captured_dispatch[0]["scope_work_dir"] == str(caller)
-    assert captured_dispatch[0]["timeout"] == 42.5
-    assert captured_dispatch[0]["stop_on_timeout"] is True
+    assert captured_dispatch[0]["record_timeout"] == 42.5
 
     # Path mode: executes in the caller's project (scope == work_dir).
     script = caller / "helper.py"
@@ -231,8 +232,7 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     tool("say hi", str(script))
     assert captured_dispatch[0]["work_dir"] == str(caller)
     assert captured_dispatch[0]["scope_work_dir"] == str(caller)
-    assert captured_dispatch[0]["timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
-    assert captured_dispatch[0]["stop_on_timeout"] is True
+    assert captured_dispatch[0]["record_timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
 
 
 def _daemon_run_command(call: dict[str, Any]) -> dict[str, Any]:

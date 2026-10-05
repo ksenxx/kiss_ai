@@ -199,8 +199,11 @@ def test_the_plain_sub_agent_sea_is_named_sorcar() -> None:
 
 def test_timeout_has_one_sentence_and_one_resolution() -> None:
     doc = SETTING_DOCS["timeout"]
-    assert doc.startswith("Seconds the run may take: the call's `timeout` argument or option wins")
+    assert doc.startswith(
+        "Seconds the call blocks for the run: the call's `timeout` argument or option wins"
+    )
     assert "3600 for a `run_agent` call" in doc
+    assert "keeps going as an `agent_job`" in doc
     assert "no limit of its own for a `run_parallel` child" in doc
     assert "ignored by `/<name>`" in doc
     assert resolve_timeout(None, {}) == 3600.0

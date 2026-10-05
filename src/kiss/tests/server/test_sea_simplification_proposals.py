@@ -607,7 +607,7 @@ def test_run_agent_wait_false_returns_a_job_the_parent_waits_on_or_kills(
     still_running = r"Job agent-[0-9a-f]{8} \(sorcar agent task\) is still running\."
     assert re.search(still_running, parent_steps[4])
     # Step 6 saw the kill's outcome; step 7 the unknown-job error.
-    assert "was stopped by agent_job kill" in parent_steps[5]
+    assert "was stopped before it finished" in parent_steps[5]
     assert "Error: unknown agent job 'agent-00000000'; this task's jobs: agent-" in parent_steps[6]
 
 
