@@ -371,7 +371,7 @@ def run_agent_via_kiss_web(
         max_budget=max_budget,
         model_config=model_config,
         use_web_tools=web_tools,
-        is_parallel=is_parallel,
+        allow_fan_out=is_parallel,
         workspace=agent.workspace,
         provenance=provenance,
         timeout=None,

@@ -695,7 +695,7 @@ class RelentlessAgent(Base):
         self.llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None
-        self.tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None
+        self.tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None
         self.set_printer(printer, verbose=verbose)
 
     @property
@@ -1682,7 +1682,7 @@ class RelentlessAgent(Base):
         llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None,
-        tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None,
     ) -> str:
         """Run the agent with the provided tools.
 
@@ -1712,7 +1712,7 @@ class RelentlessAgent(Base):
                 executor :class:`KISSAgent` (see
                 :meth:`kiss.core.kiss_agent.KISSAgent.run`): called before
                 every tool call with the tool's name and arguments; any
-                verdict other than ``"OK"`` suppresses the call and is
+                returned string (``None`` allows) suppresses the call and is
                 returned to the model as the tool's result.  Defaults to
                 None (no hook).
 

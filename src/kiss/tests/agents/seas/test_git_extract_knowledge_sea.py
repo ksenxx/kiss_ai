@@ -195,7 +195,7 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
         {"role": "user", "content": "x"}
     ]
-    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == "OK"
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) is None
 
 
 def test_slash_command_resolves_to_the_bundled_sea() -> None:

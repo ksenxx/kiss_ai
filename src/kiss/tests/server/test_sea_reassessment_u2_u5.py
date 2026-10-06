@@ -387,15 +387,11 @@ def test_tool_profile_aliases_canonicalise_and_unknown_names_get_a_suggestion() 
         assert resolve_tool_profile(alias) == TOOL_PROFILES[key]
     assert canonical_tool_profile(" read_only + bash ") == "review+bash"
     assert canonical_tool_profile("") == "" and resolve_tool_profile("  ") is None
-    assert parse_run_options('{"tool_profile": "readonly"}').tool_profile == "review"
     assert parse_run_options("", tool_profile="read-only").tool_profile == "review"
-    # Two spellings of one profile do not contradict each other.
-    both = parse_run_options('{"tool_profile": "readonly"}', tool_profile="review")
-    assert both.tool_profile == "review"
-    both = parse_run_options('{"tool_profile": "review"}', tool_profile="read-only")
-    assert both.tool_profile == "review"
-    with pytest.raises(ValueError, match="contradicts the tool_profile argument"):
-        parse_run_options('{"tool_profile": "readonly"}', tool_profile="bash")
+    assert parse_run_options("", tool_profile=" readonly + bash ").tool_profile == "review+bash"
+    # The profile is an argument only; the options key is refused.
+    with pytest.raises(ValueError, match="options key 'tool_profile' is the tool_profile arg"):
+        parse_run_options('{"tool_profile": "readonly"}', tool_profile="review")
     with pytest.raises(ValueError) as info:
         canonical_tool_profile("revew")
     assert str(info.value).endswith("got 'revew'. Did you mean 'review'?")
@@ -485,7 +481,7 @@ def test_stray_keywords_get_the_tools_own_hint(tmp_path: Path) -> None:
     assert lines[-5:] == [
         "use_worktree is a run setting, not an argument; pass it in the `options` JSON "
         "object: options='{\"use_worktree\": false}'.",
-        "model_name was renamed to model; pass options='{\"model\": \"m\"}'.",
+        'model_name was renamed to model; pass model="m".',
         f"append_basic_tools was removed: {REMOVED_SETTINGS['append_basic_tools']}.",
         "use_worktre is neither an argument nor an options key. Did you mean the option "
         "'use_worktree'?",

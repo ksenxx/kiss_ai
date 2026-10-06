@@ -31,7 +31,7 @@ what the previous one returned: ``settings`` starts from ``{}``,
 ``prompt`` from the task text, ``system_prompt`` from the run's
 assembled system prompt, ``tools`` from the run's built-in toolset,
 ``llm_call_hook`` from the messages of the LLM call, and
-``tool_call_hook`` stops at the first verdict other than ``"OK"``.
+``tool_call_hook`` stops at the first refusal (a string; ``None`` allows).
 The chaining is the launcher's job: a method must NOT call
 ``super()`` (the base's method runs anyway), and it must not
 expect to be called in a particular order relative to another.
@@ -131,13 +131,14 @@ class BaseSea:
         """
         return tools
 
-    def tool_call_hook(self, name: str, args: dict[str, Any]) -> str:
-        """Return ``"OK"`` to let the tool call *name*(*args*) run, else the text to refuse it with.
+    def tool_call_hook(self, name: str, args: dict[str, Any]) -> str | None:
+        """Return ``None`` to let the tool call *name*(*args*) run, else the text to refuse it with.
 
         Called before every tool call of the run; a refusal is returned
-        to the model as the tool's result.
+        to the model as the tool's result.  (``"OK"``, the allow
+        spelling of older hooks, still allows.)
         """
-        return "OK"
+        return None
 
     def llm_call_hook(self, new_messages: list[Any]) -> list[Any]:
         """Return the messages to send given the *new_messages* of the next LLM call."""

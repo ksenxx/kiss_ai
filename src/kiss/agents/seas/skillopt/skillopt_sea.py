@@ -726,13 +726,13 @@ class _TrajectoryRecorder:
                 self.trajectory.append(_message_summary(message, self.limit))
         return self.inner_llm_hook(messages) if self.inner_llm_hook is not None else messages
 
-    def tool_call(self, name: str, args: dict[str, Any]) -> str:
+    def tool_call(self, name: str, args: dict[str, Any]) -> str | None:
         """Record a tool call (the ``tool_call_hook``), then defer to the target's hook."""
         rendered = json.dumps(args, ensure_ascii=False, default=str)
         self.trajectory.append(
             {"role": "assistant", "text": f"[call {name}] {rendered}"[: self.limit]}
         )
-        return self.inner_tool_hook(name, args) if self.inner_tool_hook is not None else "OK"
+        return self.inner_tool_hook(name, args) if self.inner_tool_hook is not None else None
 
 
 def run_rollout(

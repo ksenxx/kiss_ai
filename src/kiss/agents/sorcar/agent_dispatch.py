@@ -125,14 +125,15 @@ class RunOptions:
     """Optional per-run overrides of a dispatched sub-task.
 
     The parsed form of the ``run_agent`` / ``run_parallel`` ``options``
-    argument: one field per key of :data:`OPTION_TYPES` — the SEA
+    argument: one field per key of :data:`RUN_OPTION_KEYS` — the SEA
     settings vocabulary (:data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`)
     minus the keys that describe a script — plus ``system_prompt``, the
     replacement base system prompt a programmatic caller may pass (it
     is not an ``options`` key: a SEA's ``system_prompt`` method is the
     user-facing way).  The tool's ``model``, ``tool_profile``,
-    ``max_budget`` and ``timeout`` arguments are shortcuts for the
-    options of the same name (:func:`parse_run_options` merges them).
+    ``max_budget`` and ``timeout`` arguments land in the fields of the
+    same name (:func:`parse_run_options` puts them there; the
+    ``options`` object refuses those keys).
     ``None`` / empty means "not passed".  A value here is explicit, so
     it ranks first in :data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`:
     it wins over the SEA's ``settings()`` unless the SEA locks the key
@@ -161,8 +162,19 @@ class RunOptions:
     system_prompt: str = ""
 
 
+ARGUMENT_OPTIONS = ("model", "tool_profile", "max_budget", "timeout")
+"""The run settings the ``run_agent`` / ``run_parallel`` tools take as arguments.
+
+Each has exactly one place in a call: the argument.  Inside the
+``options`` JSON object the same key is refused with a message naming
+the argument, so a value is never given twice.
+"""
+
 OPTION_TYPES: dict[str, type | tuple[type, ...]] = {
-    **{key: expected for key, expected in SETTING_TYPES.items() if key not in META_SETTINGS},
+    **{
+        key: expected for key, expected in SETTING_TYPES.items()
+        if key not in META_SETTINGS and key not in ARGUMENT_OPTIONS
+    },
     "inherit": bool,
     "workspace": str,
     "add_to_prompt": str,
@@ -174,19 +186,19 @@ The SEA settings vocabulary
 (:data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`) minus the
 keys that describe a script rather than a run
 (:data:`~kiss.agents.sorcar.sea_settings.META_SETTINGS`: ``kind``,
-``extends``, ``locked``, ``hidden``), so the tool and the SEAs share
-one vocabulary: what a SEA may pin in ``settings()``, a caller may
-pass in ``options``.  The tool's ``model``, ``tool_profile``,
-``max_budget`` and ``timeout`` arguments are shortcuts for the options
-of the same name (both may be given when they agree).  Plus four
-call-only keys: ``inherit`` (``false``: the sub-task takes nothing
-from the calling task), ``workspace`` (the account a channel agent's
-run holds), ``add_to_prompt`` (text appended to the task) and
+``extends``, ``locked``, ``hidden``) and minus the four settings the
+tool takes as arguments (:data:`ARGUMENT_OPTIONS`), so the tool and
+the SEAs share one vocabulary: what a SEA may pin in ``settings()``, a
+caller may pass in ``options`` or, for those four, as the argument.
+Plus four call-only keys: ``inherit`` (``false``: the sub-task takes
+nothing from the calling task), ``workspace`` (the account a channel
+agent's run holds), ``add_to_prompt`` (text appended to the task) and
 ``add_to_system_prompt`` (text appended to the system prompt).
 """
 
-ARGUMENT_OPTIONS = ("model", "tool_profile", "max_budget", "timeout")
-"""The options the ``run_agent`` / ``run_parallel`` tools also take as arguments."""
+RUN_OPTION_KEYS = (*ARGUMENT_OPTIONS, *OPTION_TYPES)
+"""Every run setting a call may pass, as an argument or an ``options`` key: the
+:class:`RunOptions` fields except ``system_prompt``."""
 
 OPTION_DOCS: dict[str, str] = {
     "work_dir": "The directory the sub-task works in; a relative path is resolved against "
@@ -304,32 +316,33 @@ def parse_run_options(
     max_budget: str = "",
     timeout: str = "",
 ) -> RunOptions:
-    """Parse the ``options`` argument of ``run_agent`` / ``run_parallel`` and its shortcuts.
+    """Parse the ``options`` argument of ``run_agent`` / ``run_parallel`` and the four
+    settings the tools take as arguments.
 
     Args:
         options: A JSON object string in the settings vocabulary
             (:data:`OPTION_TYPES`), or empty for no overrides.
             Booleans may also be given as the strings ``"true"`` /
             ``"false"``; ``null`` means "not passed".
-        tool_profile: The tool's ``tool_profile`` argument: a shortcut
-            for the option of the same name, which may repeat but not
-            contradict it.  Canonicalised by
+        tool_profile: The tool's ``tool_profile`` argument; empty when
+            not passed.  Canonicalised by
             :func:`kiss.agents.sorcar.sorcar_agent.canonical_tool_profile`
             (``readonly`` becomes ``review``).
-        model: The tool's ``model`` argument, the same way.
+        model: The tool's ``model`` argument.
         max_budget: The tool's ``max_budget`` argument (a positive
-            finite number as text), the same way.
-        timeout: The tool's ``timeout`` argument (seconds as text), the
-            same way.
+            finite number as text).
+        timeout: The tool's ``timeout`` argument (seconds as text).
 
     Returns:
-        The parsed options, the shortcuts merged in.
+        The parsed options with the four arguments in the fields of the
+        same name.
 
     Raises:
         ValueError: When *options* is not a JSON object, names an
-            unknown key, has a value of the wrong type, an option
-            contradicts the argument of the same name, a number is not
-            positive and finite, or the tool profile is unknown.
+            unknown key or one of the four argument settings
+            (:data:`ARGUMENT_OPTIONS`), has a value of the wrong type,
+            a number is not positive and finite, or the tool profile is
+            unknown.
     """
     from kiss.agents.sorcar.sorcar_agent import canonical_tool_profile
 
@@ -345,25 +358,13 @@ def parse_run_options(
             parsed_value = _parse_option(key, value)
             if parsed_value is not None:
                 parsed[key] = parsed_value
-    if parsed.get("tool_profile"):
-        parsed["tool_profile"] = canonical_tool_profile(parsed["tool_profile"])
-    arguments = {
-        "model": model.strip(),
-        "tool_profile": canonical_tool_profile(tool_profile),
-        "max_budget": _parse_number("max_budget", max_budget),
-        "timeout": _parse_number("timeout", timeout),
-    }
-    for key, argument in arguments.items():
-        if argument in (None, ""):
-            continue
-        option = parsed.get(key)
-        if option is not None and option != argument:
-            raise ValueError(
-                f"options[{key!r}] = {option!r} contradicts the {key} argument "
-                f"{argument!r}; pass one of them."
-            )
-        parsed[key] = argument
-    return RunOptions(**parsed)
+    return RunOptions(
+        **parsed,
+        model=model.strip(),
+        tool_profile=canonical_tool_profile(tool_profile),
+        max_budget=_parse_number("max_budget", max_budget),
+        timeout=_parse_number("timeout", timeout),
+    )
 
 
 def options_keyword_hint(unknown: dict[str, Any]) -> str:
@@ -394,7 +395,12 @@ def options_keyword_hint(unknown: dict[str, Any]) -> str:
     for key, value in unknown.items():
         if key in settings:
             continue
-        if key in RENAMED_OPTIONS:
+        if key in RENAMED_OPTIONS and RENAMED_OPTIONS[key] in ARGUMENT_OPTIONS:
+            lines.append(
+                f"{key} was renamed to {RENAMED_OPTIONS[key]}; pass "
+                f"{RENAMED_OPTIONS[key]}={json.dumps(value)}."
+            )
+        elif key in RENAMED_OPTIONS:
             example = json.dumps({RENAMED_OPTIONS[key]: value})
             lines.append(
                 f"{key} was renamed to {RENAMED_OPTIONS[key]}; pass options='{example}'."
@@ -413,10 +419,16 @@ def _parse_option(key: str, value: Any) -> Any:
 
     Raises:
         ValueError: When *key* is unknown (naming the current key for a
-            renamed setting) or *value* has the wrong type.
+            renamed setting), is a setting the tool takes as an argument
+            (naming the argument) or *value* has the wrong type.
     """
     expected = OPTION_TYPES.get(key)
     if expected is None:
+        if key in ARGUMENT_OPTIONS:
+            raise ValueError(
+                f"options key {key!r} is the {key} argument of this tool; "
+                f"pass {key}=... instead of putting it in options."
+            )
         if key in RENAMED_OPTIONS:
             raise ValueError(
                 f"options key {key!r} was renamed to {RENAMED_OPTIONS[key]!r}; "
@@ -433,12 +445,10 @@ def _parse_option(key: str, value: Any) -> Any:
         return None
     if expected is bool:
         return _parse_bool(key, value)
-    if key in ("max_budget", "timeout"):
-        return _parse_number(f"options[{key!r}]", value)
     if isinstance(value, str) and expected is str:
         if not value.strip():
             return None
-        if key in ("chat_id", "work_dir", "workspace", "model", "tool_profile"):
+        if key in ("chat_id", "work_dir", "workspace"):
             return value.strip()
         return value
     if isinstance(value, expected) and not isinstance(value, bool):
@@ -612,7 +622,7 @@ def explicit_values(
         ``{setting key: value}`` for every value passed.
     """
     values: dict[str, Any] = {
-        key: getattr(options, key) for key in OPTION_TYPES
+        key: getattr(options, key) for key in RUN_OPTION_KEYS
         if getattr(options, key, None) not in (None, "")
     }
     if model_name:
@@ -633,7 +643,7 @@ def _filled_keys(asked: Inherited, got: Inherited) -> tuple[str, ...]:
     ]
     pairs.extend(
         (key, getattr(asked.options, key), getattr(got.options, key))
-        for key in OPTION_TYPES if key != "docker_image"
+        for key in RUN_OPTION_KEYS if key != "docker_image"
     )
     pairs.append(("system_prompt", asked.options.system_prompt, got.options.system_prompt))
     return tuple(
@@ -1101,14 +1111,14 @@ def dispatch_result(
             system_prompt=options.system_prompt,
             use_worktree=use_worktree,
             auto_commit=auto_commit,
-            classify_tasks=options.auto_classify,
+            auto_classify=options.auto_classify,
             max_budget=budget,
             model_config=options.model_config,
             use_web_tools=options.use_web_tools,
             use_memory=options.use_memory,
-            is_parallel=True if options.allow_fan_out is None else options.allow_fan_out,
-            append_to_system_prompt=options.add_to_system_prompt,
-            append_to_prompt=options.add_to_prompt,
+            allow_fan_out=True if options.allow_fan_out is None else options.allow_fan_out,
+            add_to_system_prompt=options.add_to_system_prompt,
+            add_to_prompt=options.add_to_prompt,
             tool_profile=options.tool_profile,
             docker_image=inherited.docker_image,
             workspace=workspace,
@@ -1752,7 +1762,7 @@ def resolve_timeout(timeout: float | None, settings: dict[str, Any]) -> float:
     :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
 
     Args:
-        timeout: The call's parsed ``timeout`` argument or option
+        timeout: The call's parsed ``timeout`` argument
             (:attr:`RunOptions.timeout`), ``None`` when not passed.
         settings: The resolved settings of the script the sub-task
             runs.
@@ -1883,9 +1893,9 @@ def make_run_agent_tool(
                 its job id for ``agent_job``.
             options: JSON object of run settings to override, e.g.
                 ``'{"use_web_tools": false}'``; usually empty.  Its
-                keys are the SEA settings vocabulary: ``model``,
-                ``tool_profile``, ``max_budget``, ``timeout`` (the
-                four arguments above are shortcuts for these),
+                keys are the SEA settings vocabulary except ``model``,
+                ``tool_profile``, ``max_budget`` and ``timeout``, which
+                are the arguments above and are refused here:
                 ``work_dir`` (relative to this task's; a SEA's own
                 ``work_dir`` setting is relative to the SEA's folder),
                 ``chat_id``,

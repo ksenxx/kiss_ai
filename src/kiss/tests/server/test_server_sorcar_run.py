@@ -1024,7 +1024,7 @@ class SorcarRunApiTest(unittest.TestCase):
             model_config={"base_url": "http://localhost:9999/v1"},
             use_web_tools=False,
             use_memory=False,
-            is_parallel=True,
+            allow_fan_out=True,
         )
         assert result.success is True
         assert seen["max_budget"] == 2.5
@@ -1080,7 +1080,7 @@ class SorcarRunApiTest(unittest.TestCase):
     def test_classify_tasks_override_forwarded(self) -> None:
         """The per-run ``classify_tasks`` toggle reaches the classifier.
 
-        ``kiss.server.sorcar.run(classify_tasks=...)`` rides the wire
+        ``kiss.server.sorcar.run(auto_classify=...)`` rides the wire
         as ``classifyTasks`` and the task runner must hand it to
         ``classify_task_for_run(enabled=...)`` — the run-side gate of
         the settings panel's "Classify tasks before running" option.
@@ -1117,7 +1117,7 @@ class SorcarRunApiTest(unittest.TestCase):
                     "task with a classification override",
                     work_dir=self.repo,
                     use_worktree=False,
-                    classify_tasks=override,
+                    auto_classify=override,
                     endpoint_file=self.endpoint_file,
                     timeout=60,
                 )

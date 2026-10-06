@@ -97,7 +97,7 @@ def _run(
     server: HTTPServer,
     agent: KISSAgent,
     tools: list[Callable[..., Any]] | None = None,
-    tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
+    tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None,
 ) -> str:
     """Run *agent* against the local server and return its result."""
     return agent.run(
@@ -175,11 +175,11 @@ class TestTextOnlyImplicitFinishIsTerminal:
 class _VetoRecorder:
     """Real ``tool_call_hook`` + ``tool_call_guard`` pair that records call order."""
 
-    def __init__(self, hook_verdicts: list[str]) -> None:
+    def __init__(self, hook_verdicts: list[str | None]) -> None:
         self.calls: list[str] = []
         self._verdicts = iter(hook_verdicts)
 
-    def hook(self, name: str, args: dict[str, Any]) -> str:
+    def hook(self, name: str, args: dict[str, Any]) -> str | None:
         """Record ``hook:<name>`` and answer with the next scripted verdict."""
         del args
         self.calls.append(f"hook:{name}")
@@ -193,13 +193,13 @@ class _VetoRecorder:
 
 
 class TestImplicitFinishHookBeforeGuard:
-    """Review #9: hook first; the guard runs only after an ``"OK"`` verdict."""
+    """Review #9: hook first; the guard runs only after the hook allows (``None``)."""
 
     def test_text_only_net_skips_guard_when_hook_rejects(self) -> None:
         """Turn 2 trips the text-only net: the hook says "not yet" and the
         guard must NOT be consulted.  Turn 3: the hook says OK, then the
         guard runs, and the run ends with the text."""
-        recorder = _VetoRecorder(["not yet", "OK"])
+        recorder = _VetoRecorder(["not yet", None])
         server = _serve(lambda turn, request: _text_response(f"Text {turn}."))
         try:
             agent = KISSAgent("audit-fix-veto-order-text")

@@ -150,7 +150,7 @@ def test_settings_vocabulary_has_no_prompt_or_extends_keys() -> None:
     # The dispatcher's option vocabulary is the run-settings subset of
     # the SEA vocabulary (no script-describing keys) plus its own.
     assert set(agent_dispatch.OPTION_TYPES) == (
-        set(SETTING_TYPES) - {"kind", "locked", "hidden"}
+        set(SETTING_TYPES) - {"kind", "locked", "hidden"} - set(agent_dispatch.ARGUMENT_OPTIONS)
     ) | {"inherit", "workspace", "add_to_prompt", "add_to_system_prompt"}
 
 
@@ -243,14 +243,14 @@ def test_inheriting_by_command_name_and_by_path_chains_both_classes(registry: Pa
         assert tools[1]("x") == "derived x"  # the subclass replaced the base's ``shared``
         assert run.llm_call_hook is not None and run.llm_call_hook([]) == []
         # No layer overrides ``tool_call_hook``: the staged hook is the identity.
-        assert run.tool_call_hook is not None and run.tool_call_hook("x", {}) == "OK"
+        assert run.tool_call_hook is not None and run.tool_call_hook("x", {}) is None
         cmd: dict[str, Any] = {"agentPath": str(derived), "prompt": "do it", "parentTaskId": "T-1"}
         overridden = apply_agent_overrides(cmd)
         assert cmd["prompt"] == "[derived] [base] do it BASE-ADD T-1 DERIVED-ADD"
         assert cmd["systemPromptHook"]("X") == "BASE SYSTEM\n\nBASE PROTOCOL\n\nDERIVED PROTOCOL"
         assert cmd["maxBudget"] == 2.0 and cmd["useWebTools"] is True
         assert [tool.__name__ for tool in cmd["toolsHook"]([])] == ["base_tool", "shared"]
-        assert cmd["llmCallHook"]([]) == [] and cmd["toolCallHook"]("x", {}) == "OK"
+        assert cmd["llmCallHook"]([]) == [] and cmd["toolCallHook"]("x", {}) is None
         # The overridden set lists settings and ``prompt`` only, never the
         # four hooks (they are always staged).
         assert {"prompt", "maxBudget", "useWebTools"} <= overridden
@@ -469,7 +469,7 @@ class Sea(BaseSea):
     assert cmd.pop("systemPromptHook")("S") == "S"
     assert cmd.pop("toolsHook")([print, len]) == [print, len]
     assert cmd.pop("llmCallHook")(messages) == messages
-    assert cmd.pop("toolCallHook")("x", {}) == "OK"
+    assert cmd.pop("toolCallHook")("x", {}) is None
     assert cmd == {"agentPath": str(sea), "prompt": "kept"}
     with pytest.raises(AgentFileError, match="must be a path string"):
         apply_agent_overrides({"agentPath": 7, "prompt": "p"})
@@ -549,8 +549,8 @@ class Sea(BaseSea):
         "'add_to_system_prompt'; use the new name."
     )
     run_agent("t", str(plain), options='{"add_to_system_prompt": "S", "add_to_prompt": "P"}')
-    assert captured[-1]["append_to_system_prompt"] == "S"
-    assert captured[-1]["append_to_prompt"] == "P"
+    assert captured[-1]["add_to_system_prompt"] == "S"
+    assert captured[-1]["add_to_prompt"] == "P"
     # ``workspace`` travels as its own wire field; nothing is held here.
     run_agent("t", "ntfy", options='{"workspace": "acct-2"}')
     assert captured[-1]["workspace"] == "acct-2"
@@ -573,12 +573,12 @@ def test_is_parallel_is_inherited_from_the_calling_agent(
     plain = _write(tmp_path / "plain.py", PLAIN_SEA)
     run_agent = agent_dispatch.make_run_agent_tool(str(tmp_path), parent)
     run_agent("t", str(plain))
-    assert captured[-1]["is_parallel"] is False
+    assert captured[-1]["allow_fan_out"] is False
     run_agent("t", str(plain), options='{"allow_fan_out": true}')
-    assert captured[-1]["is_parallel"] is True
+    assert captured[-1]["allow_fan_out"] is True
     # Without a parent (standalone use) the daemon default — fan-out on — stands.
     agent_dispatch.make_run_agent_tool(str(tmp_path))("t", str(plain))
-    assert captured[-1]["is_parallel"] is True
+    assert captured[-1]["allow_fan_out"] is True
 
 
 # ---------------------------------------------------------------------------

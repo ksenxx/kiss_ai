@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end tests for ``kiss.server.sorcar.run``'s append parameters.
 
-Drive ``kiss.server.sorcar.run(append_to_system_prompt=...,
-append_to_prompt=...)`` against a real daemon with a temporary
+Drive ``kiss.server.sorcar.run(add_to_system_prompt=...,
+add_to_prompt=...)`` against a real daemon with a temporary
 local endpoint, with only the executor LLM stubbed (see
 :class:`kiss.tests.server.test_append_basic_tools.DaemonRunApiHarness`).
 
@@ -65,7 +65,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with a system prompt suffix",
             work_dir=self.repo,
-            append_to_system_prompt=_SYS_MARKER,
+            add_to_system_prompt=_SYS_MARKER,
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -87,7 +87,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with a prompt suffix",
             work_dir=self.repo,
-            append_to_prompt=_PROMPT_MARKER,
+            add_to_prompt=_PROMPT_MARKER,
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -126,7 +126,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "<task>first subtask body</task><task>second subtask body</task>",
             work_dir=self.repo,
-            append_to_prompt=_PROMPT_MARKER,
+            add_to_prompt=_PROMPT_MARKER,
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -155,7 +155,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             "task with custom base and suffix",
             work_dir=self.repo,
             system_prompt=custom_base,
-            append_to_system_prompt=_SYS_MARKER,
+            add_to_system_prompt=_SYS_MARKER,
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,

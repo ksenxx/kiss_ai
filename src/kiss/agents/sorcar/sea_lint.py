@@ -24,6 +24,11 @@ Rules, each a :class:`Finding` code:
     ``settings()`` uses a former key name
     (:data:`~kiss.agents.sorcar.sea_settings.RENAMED_SETTINGS`);
     ``--fix`` rewrites it.
+``ok-verdict``
+    A ``tool_call_hook`` returns the literal ``"OK"`` to allow a call.
+    The contract is ``None`` allows, a string refuses; ``"OK"`` is the
+    allow spelling of older hooks and still allows, but ``"ok"`` or
+    any other text refuses.  ``--fix`` rewrites it to ``None``.
 ``redundant-key``
     A declared key merely repeats the default of the script's ``kind``.
 ``no-description``
@@ -399,6 +404,16 @@ def _lint_source(path: Path, source: str, tree: ast.Module) -> list[Finding]:
                     fixable=True,
                 )
             )
+    for node in _ok_verdicts(tree):
+        findings.append(
+            Finding(
+                path,
+                "ok-verdict",
+                f'line {node.lineno}: tool_call_hook returns "OK" to allow the call; '
+                f"return None (a string refuses)",
+                fixable=True,
+            )
+        )
     for lineno, doc in _docstrings(tree, source):
         stale = sorted(
             name for name in REMOVED_GETTERS
@@ -504,14 +519,52 @@ def _settings_dict_keys(tree: ast.Module) -> list[ast.Constant]:
     return keys
 
 
+def _own_returns(node: ast.AST) -> list[ast.Return]:
+    """Return the ``return`` statements of *node*'s own body, not of nested functions or classes."""
+    scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+    returns: list[ast.Return] = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.Return):
+            returns.append(child)
+        elif not isinstance(child, scopes):
+            returns.extend(_own_returns(child))
+    return returns
+
+
+def _ok_verdicts(tree: ast.Module) -> list[ast.Constant]:
+    """Return every ``"OK"`` literal a ``tool_call_hook`` method of the script returns itself."""
+    return [
+        ret.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "tool_call_hook"
+        for ret in _own_returns(node)
+        if isinstance(ret.value, ast.Constant) and ret.value.value == "OK"
+    ]
+
+
+def _rewrites(tree: ast.Module) -> list[tuple[ast.Constant, str | None]]:
+    """Return the literals ``--fix`` rewrites: a renamed ``settings()`` key with its
+    current name (kept inside the literal's own quotes), an ``"OK"`` verdict of a
+    ``tool_call_hook`` with ``None`` (the whole literal)."""
+    rewrites: list[tuple[ast.Constant, str | None]] = [
+        (key, RENAMED_SETTINGS[key.value])
+        for key in _settings_dict_keys(tree) if key.value in RENAMED_SETTINGS
+    ]
+    rewrites.extend((node, None) for node in _ok_verdicts(tree))
+    return rewrites
+
+
 def fix_sea(path: Path) -> list[str]:
-    """Rewrite the renamed ``settings()`` keys of the script at *path* in place.
+    """Rewrite the fixable findings of the script at *path* in place.
+
+    Renamed ``settings()`` keys get their current name and a
+    ``tool_call_hook``'s ``"OK"`` verdict becomes ``None``.
 
     Args:
         path: The ``*_sea.py`` file.
 
     Returns:
-        One line per rewritten key (empty when nothing changed).
+        One line per rewritten literal (empty when nothing changed).
     """
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
@@ -522,18 +575,19 @@ def fix_sea(path: Path) -> list[str]:
     for line in lines:
         offsets.append(offsets[-1] + len(line))
     edits = [
-        (offsets[k.lineno - 1] + k.col_offset, offsets[k.end_lineno - 1] + k.end_col_offset, k)
-        for k in _settings_dict_keys(tree)
-        if k.value in RENAMED_SETTINGS and k.end_lineno is not None and k.end_col_offset is not None
+        (offsets[k.lineno - 1] + k.col_offset, offsets[k.end_lineno - 1] + k.end_col_offset, k, new)
+        for k, new in _rewrites(tree)
+        if k.end_lineno is not None and k.end_col_offset is not None
     ]
     changed: list[str] = []
-    for start, end, key in sorted(edits, reverse=True):
+    for start, end, key, new in sorted(edits, reverse=True):  # distinct spans: nodes never compared
         old = str(key.value)
-        new = RENAMED_SETTINGS[old]
-        # Replace the name inside the literal, keeping its prefix and quotes.
-        literal = data[start:end].decode("utf-8").replace(old, new, 1)
+        # A renamed key keeps its prefix and quotes; an "OK" verdict becomes None.
+        literal = (
+            "None" if new is None else data[start:end].decode("utf-8").replace(old, new, 1)
+        )
         data = data[:start] + literal.encode("utf-8") + data[end:]
-        changed.append(f"{path}:{key.lineno}: {old!r} -> {new!r}")
+        changed.append(f"{path}:{key.lineno}: {old!r} -> {'None' if new is None else repr(new)}")
     if changed:
         rewritten = data.decode("utf-8")
         ast.parse(rewritten, filename=str(path))  # never save a script that no longer parses

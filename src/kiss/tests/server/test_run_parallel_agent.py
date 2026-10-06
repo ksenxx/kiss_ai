@@ -152,7 +152,7 @@ def test_run_parallel_children_run_as_the_named_agent_script(
             model_config=model.model_config,
             use_worktree=False,
             auto_commit=False,
-            append_to_system_prompt="PARENT-SUFFIX-TEXT",
+            add_to_system_prompt="PARENT-SUFFIX-TEXT",
             endpoint_file=daemon,
             timeout=300,
         )
@@ -249,7 +249,7 @@ def test_run_parallel_children_inherit_the_parent_and_a_broken_child_fails_alone
             extension_agent_path=str(repo / "parent_sea.py"),
             use_worktree=False,
             auto_commit=False,
-            append_to_prompt="PARENT-PROMPT-SUFFIX",
+            add_to_prompt="PARENT-PROMPT-SUFFIX",
             endpoint_file=daemon,
             timeout=300,
         )

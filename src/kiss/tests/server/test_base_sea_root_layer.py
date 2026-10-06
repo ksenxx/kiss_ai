@@ -35,6 +35,7 @@ from kiss.agents.sorcar.sea_commands import (
     SeaScriptError,
     base_prompt,
     base_system_prompt,
+    base_tool_call_hook,
     evaluate_sea,
     sea_layers,
     sea_name,
@@ -73,10 +74,40 @@ def _custom_tools(self: BaseSea, tools: list[Any]) -> list[Any]:
     return tools + [house_tool]
 
 
-def _custom_tool_call_hook(self: BaseSea, name: str, args: dict[str, Any]) -> str:
+def _custom_tool_call_hook(self: BaseSea, name: str, args: dict[str, Any]) -> str | None:
     if name == "task_context" or (name == "Bash" and "rm -rf" in str(args.get("command", ""))):
         return "Blocked by base"
-    return "OK"
+    return None
+
+
+def test_tool_call_hook_fold_allows_on_none_or_legacy_ok_and_stops_at_a_refusal() -> None:
+    """``base_tool_call_hook`` returns the first refusal (a string) of the chain, else ``None``.
+
+    ``None`` and the legacy ``"OK"`` both allow; any other string, even
+    ``"ok"``, is a refusal; a non-string, non-``None`` return is a script error.
+    """
+
+    class Allows(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> str | None:
+            return None
+
+    class LegacyAllows(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> str:
+            return "OK"
+
+    class Refuses(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> str | None:
+            return "ok" if name == "Bash" else None
+
+    class Broken(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Any:
+            return 1
+
+    assert base_tool_call_hook([Allows(), LegacyAllows()], "Bash", {}) is None
+    assert base_tool_call_hook([Allows(), Refuses()], "Bash", {}) == "ok"
+    assert base_tool_call_hook([Refuses(), Allows()], "Read", {}) is None
+    with pytest.raises(SeaScriptError, match=r"tool_call_hook\(\) of agent script .* must return"):
+        base_tool_call_hook([Broken()], "Bash", {})
 
 
 def _custom_llm_call_hook(self: BaseSea, new_messages: list[Any]) -> list[Any]:
@@ -138,7 +169,7 @@ class BaseSeaRootLayerDaemonTest(DaemonRunApiHarness):
             # The hooks look the base's methods up when called, so they
             # are exercised while the customization is still in place.
             assert call["tool_call_hook"]("Bash", {"command": "rm -rf /"}) == "Blocked by base"
-            assert call["tool_call_hook"]("Bash", {"command": "ls"}) == "OK"
+            assert call["tool_call_hook"]("Bash", {"command": "ls"}) is None
             assert call["llm_call_hook"]([1, 2, 3]) == [3, 2, 1]
         finally:
             for name, method in originals.items():
@@ -159,7 +190,7 @@ class BaseSeaRootLayerDaemonTest(DaemonRunApiHarness):
         assert len(executor_calls) == 1, calls
         call = executor_calls[0]
         assert call["llm_call_hook"]([1, 2]) == [1, 2]
-        assert call["tool_call_hook"]("Bash", {"command": "ls"}) == "OK"
+        assert call["tool_call_hook"]("Bash", {"command": "ls"}) is None
         assert "house_tool" not in call["tool_names"]
         assert HOUSE_RULE not in call["system_prompt"]
 
@@ -176,7 +207,7 @@ def test_a_plain_command_runs_the_bare_base_and_names_no_sea() -> None:
     assert cmd["systemPromptHook"]("X") == "X"
     assert cmd["toolsHook"]([house_tool]) == [house_tool]
     assert cmd["llmCallHook"]([1]) == [1]
-    assert cmd["toolCallHook"]("Bash", {}) == "OK"
+    assert cmd["toolCallHook"]("Bash", {}) is None
     # ``defines`` still asks what a SEA adds on top of the base.
     assert sea_commands.defines(layers, "system_prompt") is False
 

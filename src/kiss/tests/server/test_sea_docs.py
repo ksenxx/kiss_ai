@@ -78,9 +78,8 @@ def test_options_table_covers_option_types() -> None:
     assert list(table) == list(OPTION_TYPES)
     assert "channel workspace" in table["workspace"][2]
     assert "never inherits" in table["inherit"][2]
-    # The tool's own arguments are options too; only the script-describing keys are not.
-    assert {"model", "tool_profile", "max_budget", "timeout"} <= set(table)
-    assert table["timeout"][1] == "`int \\| float`"
+    # The tool's own arguments and the script-describing keys are not options.
+    assert not {"model", "tool_profile", "max_budget", "timeout"} & set(table)
     assert not {"kind", "extends", "locked", "hidden"} & set(table)
 
 

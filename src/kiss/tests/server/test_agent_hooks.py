@@ -23,7 +23,7 @@ of an agent script's ``BaseSea`` subclass become the ``llm_call_hook`` /
 (``evaluate_sea`` wraps the ``base_*`` folds over the SEA chain, which
 starts at ``BaseSea``, in a ``functools.partial``); the executor ALWAYS
 gets callables — a hook no SEA overrides is the identity (same
-messages, ``"OK"``); a ``tool_call_hook`` that is not a method stops
+messages, ``None``); a ``tool_call_hook`` that is not a method stops
 the task loudly before any executor session starts; and a non-callable hook
 field arriving over the wire is overwritten by the staged callable.
 """
@@ -101,7 +101,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
                     """
                     marker = MARKER_DIR / "tool_hook_called.txt"
                     marker.write_text(name)
-                    return "OK" if name == "finish" else "blocked by hook"
+                    return None if name == "finish" else "blocked by hook"
             ''',
         )
 
@@ -137,7 +137,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             Path(self.tmpdir) / "llm_hook_called.txt"
         ).read_text() == "1"
 
-        assert tool_hook("finish", {}) == "OK"
+        assert tool_hook("finish", {}) is None
         assert tool_hook("Bash", {"command": "ls"}) == "blocked by hook"
         assert (
             Path(self.tmpdir) / "tool_hook_called.txt"
@@ -153,8 +153,8 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         assert callable(call["tool_call_hook"]), call
         messages = [{"role": "user", "content": "hi"}]
         assert call["llm_call_hook"](messages) == messages
-        assert call["tool_call_hook"]("Bash", {"command": "ls"}) == "OK"
-        assert call["tool_call_hook"]("finish", {}) == "OK"
+        assert call["tool_call_hook"]("Bash", {"command": "ls"}) is None
+        assert call["tool_call_hook"]("finish", {}) is None
 
     def test_no_agent_script_passes_identity_hooks(self) -> None:
         """Without an agent script the executor receives ``BaseSea``'s identity hooks.
@@ -181,7 +181,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         The script overrides ``llm_call_hook`` and leaves
         ``tool_call_hook`` to the do-nothing default of ``BaseSea`` —
         the executor must get a callable LLM hook running the script's
-        method and a tool-call hook answering ``"OK"`` to everything.
+        method and a tool-call hook answering ``None`` to everything.
         """
         agent_path = self._write_py(
             "half_hooks_agent.py",
@@ -216,7 +216,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         assert callable(call["llm_call_hook"]), call
         assert call["llm_call_hook"]([1, 2, 3]) == [3, 2, 1]
         assert callable(call["tool_call_hook"]), call
-        assert call["tool_call_hook"]("Bash", {"command": "ls"}) == "OK"
+        assert call["tool_call_hook"]("Bash", {"command": "ls"}) is None
 
     def test_wrong_typed_hook_getter_fails_task(self) -> None:
         """A ``tool_call_hook`` that is not a method stops the task at staging.

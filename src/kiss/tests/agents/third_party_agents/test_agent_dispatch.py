@@ -361,20 +361,23 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     assert out.startswith("Error: options must be a JSON object, got '{not json': ")
     out = run_agent("say hi", "ntfy", options='{"tools": "x.py"}')
     assert out.startswith(
-        "Error: options has an unknown key 'tools'; known keys: work_dir, model, chat_id, "
+        "Error: options has an unknown key 'tools'; known keys: work_dir, chat_id, "
     )
     out = run_agent("say hi", "ntfy", tool_profile="bogus")
     assert out.startswith("Error: tool_profile must be one of ")
     assert out.endswith("got 'bogus'.")
-    # ``tool_profile`` is both an argument and an options key; the two
-    # may repeat but not contradict each other.
+    # ``tool_profile`` is an argument only; the options key is refused,
+    # whether or not the argument is given too.
     out = run_agent("say hi", "ntfy", tool_profile="review", options='{"tool_profile": "bash"}')
     assert out == (
-        "Error: options['tool_profile'] = 'bash' contradicts the tool_profile argument "
-        "'review'; pass one of them."
+        "Error: options key 'tool_profile' is the tool_profile argument of this tool; "
+        "pass tool_profile=... instead of putting it in options."
     )
     out = run_agent("say hi", "ntfy", options='{"tool_profile": "bogus"}')
-    assert out.startswith("Error: tool_profile must be one of ")
+    assert out == (
+        "Error: options key 'tool_profile' is the tool_profile argument of this tool; "
+        "pass tool_profile=... instead of putting it in options."
+    )
     # Extra tools come only from the agent script's ``tools()``:
     # the tool has no tools-path arguments, and the old per-option
     # keyword arguments (and the ``model_name`` alias) are gone.
@@ -663,7 +666,7 @@ def test_default_agent_is_the_bundled_sorcar_sea(tmp_path: Path, daemon: Recordi
     assert cmd.pop("systemPromptHook")("S") == "S"
     assert cmd.pop("toolsHook")([print, len]) == [print, len]
     assert cmd.pop("llmCallHook")(messages) == messages
-    assert cmd.pop("toolCallHook")("x", {}) == "OK"
+    assert cmd.pop("toolCallHook")("x", {}) is None
     assert cmd == {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
 
     caller = tmp_path / "caller_project"

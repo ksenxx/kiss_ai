@@ -2347,10 +2347,10 @@ class SorcarAgent(RelentlessAgent):
                     string (default) lets Python choose automatically.
                     Set to a lower number to limit concurrency.
                 options: Optional JSON object of run settings, as for
-                    ``run_agent``: ``model``, ``tool_profile``,
-                    ``max_budget``, ``timeout`` (the arguments above
-                    are shortcuts for these), ``work_dir`` (relative to
-                    this task's), ``add_to_system_prompt`` /
+                    ``run_agent`` (``model``, ``tool_profile``,
+                    ``max_budget`` and ``timeout`` are the arguments
+                    above and are refused here): ``work_dir`` (relative
+                    to this task's), ``add_to_system_prompt`` /
                     ``add_to_prompt`` (appended text),
                     ``model_config``, ``docker_image``, and the booleans
                     ``inherit`` (``false``: the children take nothing
@@ -2830,7 +2830,7 @@ class SorcarAgent(RelentlessAgent):
             model_config: The model configuration the run will use.
             enabled: Per-run override of the persisted
                 ``classify_tasks`` setting — the ``classifyTasks`` wire
-                field of the ``run`` command (the *classify_tasks*
+                field of the ``run`` command (the *auto_classify*
                 parameter of :func:`kiss.server.sorcar.run`).  ``True``
                 forces classification on, ``False`` skips it (the run
                 then behaves exactly as it would without a
@@ -2879,7 +2879,7 @@ class SorcarAgent(RelentlessAgent):
                 classifier sees the prompt the run will actually
                 execute, not the raw ``{placeholder}`` template.
             enabled_override: Per-run override of the persisted
-                ``classify_tasks`` setting (see
+                ``classify_tasks`` config key (see
                 :meth:`classify_task_for_run`); ``None`` follows the
                 config.
 
@@ -2989,7 +2989,7 @@ class SorcarAgent(RelentlessAgent):
         llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None,
-        tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None,
         use_memory: bool | None = None,
         tool_profile: str = "",
         live_browser: Any = None,
@@ -3027,7 +3027,7 @@ class SorcarAgent(RelentlessAgent):
                 ALREADY appended to *prompt_template*; it is not added
                 again here.  Recorded as ``_prompt_suffix`` so a ``run_agent``
                 sub-task dispatched during the run inherits it as its
-                own ``append_to_prompt`` (see
+                own ``add_to_prompt`` option (see
                 ``agent_dispatch.inherit_from_parent``).  Defaults to
                 "" (the run has no suffix).  Last in the signature so
                 every earlier argument keeps its position.
@@ -3077,7 +3077,7 @@ class SorcarAgent(RelentlessAgent):
                 :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
                 sub-session this agent runs (see that docstring): called
                 before every tool call with the tool's name and
-                arguments; any verdict other than ``"OK"`` suppresses
+                arguments; a returned string (``None`` allows) suppresses
                 the call and is returned to the model as the tool's
                 result.  Applies to this agent only, not to
                 ``run_parallel`` sub-agents.  Defaults to None (no

@@ -157,7 +157,7 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 | `allow_fan_out` | `bool` | `isParallel` | Let the run call `run_parallel`; default: whether the calling task may fan out itself, else `True`. |
 | `tool_profile` | `str` | `toolProfile` | The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full toolset). |
 | `docker_image` | `str` | `dockerImage` | Run inside this Docker image (default: the host). |
-| `timeout` | `int \| float` | — | Seconds the call blocks for the run: the call's `timeout` argument or option wins, then this setting, then the default, which is 3600 for a `run_agent` call (when it expires the run keeps going as an `agent_job` and the call returns its job id; a job still running when the calling task ends is killed) and no limit of its own for a `run_parallel` child (a thread of the calling task, bounded by it); ignored by `/<name>`. |
+| `timeout` | `int \| float` | — | Seconds the call blocks for the run: the call's `timeout` argument wins, then this setting, then the default, which is 3600 for a `run_agent` call (when it expires the run keeps going as an `agent_job` and the call returns its job id; a job still running when the calling task ends is killed) and no limit of its own for a `run_parallel` child (a thread of the calling task, bounded by it); ignored by `/<name>`. |
 | `locked` | `list` | — | Keys an explicit `run_agent` / `run_parallel` argument or option may not change: a differing value is an error. |
 | `hidden` | `bool` | — | `True`: the script is no `/command` and no `run_agent` agent name (loadable by path and as a base class only). It must be the literal `True` in the class's `settings()` because the command registry reads it from the source without running the script (a computed value is ignored). |
 <!-- /sea-docs -->
@@ -180,19 +180,15 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 | Option | Type | Meaning |
 |---|---|---|
 | `work_dir` | `str` | The directory the sub-task works in; a relative path is resolved against the calling task's directory (a SEA's own `work_dir` setting is relative to the SEA's folder instead). |
-| `model` | `str` | The LLM model, a catalogue name or a model-picker SEA; `""` or `None` keeps the caller's. |
 | `chat_id` | `str` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a `channel` run, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
 | `use_worktree` | `bool` | Run in a git worktree of the project; default: the calling task's effective choice, else the persisted setting (an inherited or default `True` is demoted by the classifier for non-implementation tasks, an explicit `True` is kept). |
 | `auto_commit` | `bool` | Commit the run's changes when it ends; default: the calling task's effective choice, else the persisted setting. |
-| `max_budget` | `int \| float` | USD budget of the run, a finite number; default: the caller's share or the daemon's default. |
 | `model_config` | `dict` | Model configuration dict passed to the LLM (temperature, base URL, ...). |
 | `use_web_tools` | `bool` | Give the run the browser tools (daemon default: on). |
 | `auto_classify` | `bool` | Let the pre-run classifier decide the worktree mode and lite prompt (daemon default: the persisted setting). |
 | `use_memory` | `bool` | Give the run the `memory_*` tools (daemon default: the persisted setting). |
 | `allow_fan_out` | `bool` | Let the run call `run_parallel`; default: whether the calling task may fan out itself, else `True`. |
-| `tool_profile` | `str` | The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full toolset). |
 | `docker_image` | `str` | Run inside this Docker image (default: the host). |
-| `timeout` | `int \| float` | Seconds the call blocks for the run: the call's `timeout` argument or option wins, then this setting, then the default, which is 3600 for a `run_agent` call (when it expires the run keeps going as an `agent_job` and the call returns its job id; a job still running when the calling task ends is killed) and no limit of its own for a `run_parallel` child (a thread of the calling task, bounded by it); ignored by `/<name>`. |
 | `inherit` | `bool` | `false`: the sub-task takes nothing from the calling task (no model, chat, prompt suffixes, tools or container; a `run_parallel` child still gets its budget share); default `true`. A `channel` run never inherits, so `true` is refused there. |
 | `workspace` | `str` | The account a `kind: channel` agent's run holds (its channel workspace); refused for any other kind and by `run_parallel`. |
 | `add_to_prompt` | `str` | Text appended to the task after the SEA's `prompt(task)`. |

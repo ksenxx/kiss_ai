@@ -306,9 +306,9 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         assert "say hello" in run["prompt"]
 
     def test_protocol_is_added_after_the_callers_system_prompt_suffix(self) -> None:
-        """``add_to_system_prompt()`` keeps the caller's ``append_to_system_prompt``."""
+        """The picker's protocol keeps the caller's ``add_to_system_prompt``."""
         run = self._run(
-            "say hello", model=BESTROUTER, append_to_system_prompt="CALLER SUFFIX",
+            "say hello", model=BESTROUTER, add_to_system_prompt="CALLER SUFFIX",
         )
         suffix = run["system_prompt"]
         assert suffix.index("CALLER SUFFIX") < suffix.index(BESTROUTER_MARKER)

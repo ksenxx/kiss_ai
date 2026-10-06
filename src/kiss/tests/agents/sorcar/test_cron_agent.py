@@ -957,7 +957,7 @@ def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
     assert sent["work_dir"] == str(project.resolve())
     assert sent["use_worktree"] is True
     assert sent["auto_commit"] is True
-    assert sent["classify_tasks"] is None  # pinned off by the SEA on the daemon
+    assert sent["auto_classify"] is None  # pinned off by the SEA on the daemon
     assert sent["model"] == "some-model"
 
 

@@ -394,7 +394,7 @@ def classification_enabled(override: bool | None = None) -> bool:
     Args:
         override: Per-run override of the persisted ``classify_tasks``
             setting — the ``classifyTasks`` wire field of the ``run``
-            command (the *classify_tasks* parameter of
+            command (the *auto_classify* parameter of
             :func:`kiss.server.sorcar.run`).  ``None`` (the default)
             means "no override": the config key decides.
 

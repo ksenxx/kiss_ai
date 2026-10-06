@@ -419,8 +419,8 @@ def test_run_agent_and_run_parallel_share_one_argument_order(home: IsolatedKissH
     agent_job = list(inspect.signature(tools["agent_job"]).parameters)
     assert agent_job == ["job_id", "action", "timeout_seconds"]
     assert TOOL_PROFILES["agents"] == {"run_agent", "agent_job", "run_parallel", "number_of_cores"}
-    # ``tool_profile`` is an argument of both and may repeat as an option key.
-    assert "tool_profile" in agent_dispatch.OPTION_TYPES
+    # ``tool_profile`` is an argument of both, so it is no option key.
+    assert "tool_profile" not in agent_dispatch.OPTION_TYPES
     assert "workspace" in agent_dispatch.OPTION_TYPES and "kind" not in agent_dispatch.OPTION_TYPES
 
 
