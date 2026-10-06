@@ -3112,9 +3112,11 @@ class SorcarAgent(RelentlessAgent):
                 (:func:`kiss.agents.sorcar.sea_commands.base_system_prompt`):
                 called once with the assembled system prompt (base or
                 *base_system_prompt*, plus *system_prompt*) and its
-                return value replaces it; what it appended is forwarded
-                to sub-agents as their suffix, a replacement as their
-                base prompt.  ``None`` (default) changes nothing.
+                return value is the run's system prompt, verbatim.  Not
+                forwarded to sub-agents (their own SEA layers apply
+                theirs; they inherit *base_system_prompt* and
+                *system_prompt* as given).  ``None`` (default) changes
+                nothing.
             tools_hook: The SEA's ``tools`` method
                 (:func:`kiss.agents.sorcar.sea_commands.base_tools`):
                 called once by :meth:`perform_task` with the built-in
@@ -3183,17 +3185,14 @@ class SorcarAgent(RelentlessAgent):
                 + (system_prompt if system_prompt else "")
             )
             if system_prompt_hook is not None:
-                hooked = system_prompt_hook(system_instructions)
-                # Sub-agents inherit the SEA's effect the way they inherit
-                # the caller's: an appended text as their suffix, anything
-                # else as their whole base prompt (the suffix it rewrote
-                # or dropped must not come back on a sub-agent).
-                if hooked.startswith(system_instructions):
-                    self._system_prompt_suffix += hooked[len(system_instructions):]
-                else:
-                    self._base_system_prompt = hooked
-                    self._system_prompt_suffix = ""
-                system_instructions = hooked
+                # The SEA's return is the run's system prompt, as its
+                # ``prompt()`` return is the run's prompt.  Neither is
+                # forwarded to sub-agents: they inherit the caller's
+                # *base_system_prompt* and *system_prompt* and their own
+                # SEA layers shape their prompt (``run_tasks_parallel``
+                # and the daemon apply them), so an appended rule is
+                # stated once per run without any deduplication.
+                system_instructions = system_prompt_hook(system_instructions)
             memory_root = _memory_root_for_run(
                 self._append_basic_tools,
                 docker_image,

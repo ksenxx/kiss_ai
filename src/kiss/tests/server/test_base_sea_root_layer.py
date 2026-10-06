@@ -39,7 +39,7 @@ from kiss.agents.sorcar.sea_commands import (
     sea_layers,
     sea_name,
 )
-from kiss.agents.sorcar.sorcar_agent import _sea_run_kwargs
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _sea_run_kwargs
 from kiss.server import sorcar
 from kiss.server.merge_conflict_resolver import run_merge_sea
 from kiss.server.task_update import run_task_update_sea
@@ -205,19 +205,15 @@ def test_customized_base_runs_first_under_a_sea(customized_base: None, tmp_path:
     assert sea_commands.defines(layers, "tools") is False
 
 
-def test_appended_text_is_stated_once_per_task_tree(customized_base: None, tmp_path: Path) -> None:
-    # A sub-agent inherits its parent's suffix, which already carries
-    # what the base appended: the base appends nothing more, while a
-    # layer the parent did not run still adds its own text.
-    inherited = "X" + HOUSE_RULE
-    assert base_system_prompt([BaseSea()], inherited) == inherited
+def test_system_prompt_is_folded_like_prompt(customized_base: None, tmp_path: Path) -> None:
+    # Each layer's return is the next layer's input and the last return
+    # is the run's prompt: no append/replace inference, no deduplication
+    # (a sub-agent re-runs its own layers instead of inheriting the text).
+    assert base_system_prompt([BaseSea()], "X") == "X" + HOUSE_RULE
+    assert base_system_prompt([BaseSea()], "X" + HOUSE_RULE) == "X" + HOUSE_RULE + HOUSE_RULE
     sea = tmp_path / "rule_sea.py"
     sea.write_text(textwrap.dedent(SEA_WITH_RULE))
-    assert base_system_prompt(sea_layers(sea), inherited) == inherited + "\n\nSEA RULE"
-    assert base_system_prompt(sea_layers(sea), inherited + "\n\nSEA RULE") == (
-        inherited + "\n\nSEA RULE"
-    )
-    # A replacement (not an append) is never deduplicated.
+    assert base_system_prompt(sea_layers(sea), "X") == "X" + HOUSE_RULE + "\n\nSEA RULE"
     replacing = tmp_path / "replace_sea.py"
     replacing.write_text(textwrap.dedent("""
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -226,6 +222,7 @@ class Sea(BaseSea):
     def system_prompt(self, system_prompt):
         return "ONLY THIS"
 """))
+    assert base_system_prompt(sea_layers(replacing), "X") == "ONLY THIS"
     assert base_system_prompt(sea_layers(replacing), "ONLY THIS") == "ONLY THIS"
 
 
@@ -333,6 +330,43 @@ def test_merge_resolver_side_channel_goes_through_the_base(
     # base's appended rule is (correctly) gone from this child.
     system = next(m for m in requests[0]["messages"] if m["role"] == "system")
     assert HOUSE_RULE not in str(system["content"])
+
+
+def test_a_fan_out_child_states_the_base_rule_once_by_running_its_own_layers(
+    customized_base: None, tmp_path: Path,
+) -> None:
+    # The parent's hooked prompt is not forwarded: the child's own
+    # ``BaseSea`` layer appends the rule, so it appears exactly once in
+    # both prompts even though the parent's prompt also carries it.
+    parent_class = SorcarAgent.__mro__[1]
+    original_run = parent_class.run  # type: ignore[attr-defined]
+    composed: list[str] = []
+    fanned_out: list[bool] = []
+
+    def stub_run(self_agent: Any, **kwargs: Any) -> str:
+        composed.append(str(kwargs.get("system_prompt")))
+        if not fanned_out:
+            fanned_out.append(True)
+            self_agent._run_tasks_parallel(["child task"])
+        return "success: true\nis_continue: false\nsummary: ok\n"
+
+    parent_class.run = stub_run  # type: ignore[attr-defined]
+    try:
+        parent = ChatSorcarAgent("parent")
+        parent.run(
+            prompt_template="parent task", work_dir=str(tmp_path), web_tools=False,
+            system_prompt="\n\nCALLER SUFFIX",
+            system_prompt_hook=evaluate_sea([BaseSea()], "parent task").system_prompt_hook,
+        )
+    finally:
+        parent_class.run = original_run  # type: ignore[attr-defined]
+    assert len(composed) == 2, composed
+    parent_prompt, child_prompt = composed
+    assert parent_prompt.count(HOUSE_RULE) == 1, parent_prompt
+    assert child_prompt.count(HOUSE_RULE) == 1, child_prompt
+    # The caller-supplied suffix is what the child inherits, once.
+    assert parent_prompt.count("CALLER SUFFIX") == 1
+    assert child_prompt.count("CALLER SUFFIX") == 1
 
 
 def test_run_parallel_children_without_an_agent_go_through_the_base(

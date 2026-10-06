@@ -808,18 +808,15 @@ def base_prompt(seas: list[BaseSea], task: str, task_id: str = "") -> str:
 def base_system_prompt(seas: list[BaseSea], system_prompt: str) -> str:
     """Return *system_prompt* after every ``system_prompt`` method of *seas*, base first.
 
-    A method that appends text the prompt already contains changes
-    nothing: a sub-agent inherits its parent's system-prompt suffix,
-    which already holds what the layers it shares with the parent
-    (:class:`BaseSea` at least) appended, so the text is not repeated
-    down the task tree.
+    Like :func:`base_prompt`: each method receives the text so far and
+    what it returns is the text, whether it appended to it or replaced
+    it.  The run uses the last return verbatim.
+
+    Raises:
+        SeaScriptError: When a ``system_prompt`` method raises or
+            returns anything but a string.
     """
-    for method in _chain(seas, "system_prompt"):
-        result = _check_text(_label(method), _call(method, system_prompt))
-        appended = result[len(system_prompt):] if result.startswith(system_prompt) else ""
-        if not (appended and appended in system_prompt):
-            system_prompt = result
-    return system_prompt
+    return _fold(seas, "system_prompt", system_prompt, _check_text)
 
 
 def base_tools(seas: list[BaseSea], tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:

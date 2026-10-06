@@ -310,7 +310,9 @@ class AgentPathApiTest(unittest.TestCase):
         # client-passed repo.
         assert seen["work_dir"] == repo2
         assert seen["model_name"] == script_model
-        assert seen["_base_system_prompt_attr"] == "scripted system prompt"
+        # The script's ``system_prompt()`` return is this run's prompt; a
+        # sub-agent inherits the caller's base prompt, as with ``prompt()``.
+        assert seen["_base_system_prompt_attr"] == "client system prompt"
         assert str(seen["system_prompt"]).startswith("scripted system prompt")
         assert seen["_auto_commit_attr"] is False
         assert seen["max_budget"] == 1.25

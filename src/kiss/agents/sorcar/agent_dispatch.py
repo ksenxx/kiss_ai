@@ -717,9 +717,11 @@ def inherit_from_parent(
       still classified on its own) and append-only suffix
       (``_system_prompt_suffix``), so a run's extra system
       instructions constrain its whole task tree through ``run_agent``
-      exactly as through ``run_parallel``.  A SEA's
-      ``system_prompt`` method then sees the assembled prompt (base
-      plus suffix) on the daemon and returns the run's.
+      exactly as through ``run_parallel``.  What the caller's own
+      SEA's ``system_prompt`` method returned is not forwarded, as
+      its ``prompt`` method's return is not: the sub-task's SEA's
+      ``system_prompt`` method sees the assembled prompt (base plus
+      suffix) on the daemon and returns the sub-task's.
     - ``add_to_prompt``: the suffix the caller's own task prompt
       was given (``_prompt_suffix``, the ``appendToPrompt`` of its
       run), so the sub-task's prompt ends with the same text.  An
