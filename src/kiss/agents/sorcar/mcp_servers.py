@@ -699,10 +699,13 @@ async def _park_until_stopped(
     stays set, and every later tool call blocks on the dead transport
     until ``CALL_TIMEOUT``.  Pinging while idle turns that into a prompt
     error, which the manager turns into a reconnect.  No ping is sent
-    while a call is in flight: a server whose loop is busy in a long
+    while a call is in flight, and a ping that times out while a call
+    is in flight (one that started after the ping went out) is
+    inconclusive and ignored: a server whose loop is busy in a long
     sync tool handler cannot answer the ping, and failing it would tear
-    the session down under a valid call (a dead server is caught by the
-    call's own ``CALL_TIMEOUT``).
+    the session down under a valid call, stranding that call until
+    ``CALL_TIMEOUT`` (a dead server is caught by the call's own
+    timeout).
 
     Args:
         conn: The connection being maintained.
@@ -720,7 +723,11 @@ async def _park_until_stopped(
         except TimeoutError:
             if conn.in_flight:
                 continue
-            await asyncio.wait_for(session.send_ping(), timeout=health_interval)
+            try:
+                await asyncio.wait_for(session.send_ping(), timeout=health_interval)
+            except TimeoutError:
+                if not conn.in_flight:
+                    raise
 
 
 def describe_exception(exc: BaseException) -> str:

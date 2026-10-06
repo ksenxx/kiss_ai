@@ -376,9 +376,9 @@ class TestBroadcastTransientPrimitive:
 class TestTransientBroadcastNearTeardown:
     """Auto-commit toasts and model-picker updates still reach every
     watching tab when the printer's thread-local ``task_id`` has been
-    cleared near teardown (``cleanup_task`` already ran: ``_task_ui``
-    dropped, subscriber set lingering) — the agent's explicit
-    ``_last_task_id`` is the only remaining link.
+    cleared near teardown (``cleanup_task`` already ran, subscriber set
+    lingering) — the agent's explicit ``_last_task_id`` is the only
+    remaining link.
     """
 
     def setup_method(self) -> None:
@@ -390,14 +390,12 @@ class TestTransientBroadcastNearTeardown:
     def _teardown_printer(self, task_id: str) -> _CapturePrinter:
         """A printer in the near-teardown state for *task_id*."""
         printer = _CapturePrinter()
-        printer.register_task_ui(task_id, "tab-launch", "conn-1")
+        printer.register_task_ui(task_id, "tab-launch")
         printer.subscribe_tab(task_id, "tab-viewer")
         printer._thread_local.task_id = task_id
-        printer.cleanup_task(task_id)  # drops _task_ui, subscribers linger
+        printer.cleanup_task(task_id)  # subscribers linger
         printer._thread_local.task_id = None  # run thread unbound
         assert printer._task_key() == ""
-        with printer._lock:
-            assert task_id not in printer._task_ui
         return printer
 
     def test_autocommit_toasts_after_thread_local_cleared(self) -> None:

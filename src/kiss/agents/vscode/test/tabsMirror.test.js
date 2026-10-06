@@ -63,8 +63,13 @@ function send(win, data) {
 }
 
 function tabEls(win) {
+  // The chat whose group is on screen sits on the main row and on the
+  // group strip under it; list each tab once.
+  const seen = new Set();
   return Array.from(win.document.querySelectorAll('.chat-tab')).filter(el => {
-    return !!el.dataset.tabId;
+    if (!el.dataset.tabId || seen.has(el.dataset.tabId)) return false;
+    seen.add(el.dataset.tabId);
+    return true;
   });
 }
 

@@ -239,11 +239,23 @@ function testTabRestoreKeepsTooltipInSync() {
     'a fresh chat tab must not keep any stale tooltip',
   );
 
-  const tabEls = win.document.querySelectorAll('#tab-list .chat-tab');
-  const parentEl = Array.from(tabEls).find(el => {
-    return !el.classList.contains('subagent-tab');
-  });
-  assert.ok(parentEl, 'parent tab element must exist in the tab bar');
+  // The fresh chat's group is on screen now; the parent chat is reached
+  // through its main-row entry, which lands on the tab last viewed in
+  // its group (the sub-agent), then its own strip entry.
+  const mainEl = win.document.querySelector(
+    `#main-tab-list .chat-tab[data-tab-id="${parentId}"]`,
+  );
+  assert.ok(mainEl, 'parent tab element must exist on the main row');
+  mainEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.strictEqual(
+    txt.textContent,
+    'sub 1',
+    'the main-row entry returns to the sub-agent tab last viewed in its group',
+  );
+  const parentEl = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id="${parentId}"]`,
+  );
+  assert.ok(parentEl, 'parent tab element must exist in the group strip');
   parentEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 
   assert.strictEqual(

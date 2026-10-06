@@ -462,9 +462,11 @@ class TestContentTabMenuBar:
             _open_editor(page, str(path), "lnk-s1")
             _dismiss_toasts(page)
             _menu_btn(page, "Edit").click()
+            # The chat's entry on the group strip; the main-row entry
+            # would return to the tab last viewed, i.e. this editor.
             page.evaluate(
                 "() => document.querySelector("
-                "'.chat-tab:not(.content-tab)').click()",
+                "'#tab-list .chat-tab:not(.content-tab)').click()",
             )
             page.wait_for_selector("#content-tab-area", state="hidden")
             assert page.locator(_DROPDOWN).count() == 0

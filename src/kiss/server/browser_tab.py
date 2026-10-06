@@ -32,7 +32,6 @@ carry ``connId`` and reach only the clients that show the tab):
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -369,7 +368,25 @@ class BrowserTabService:
 
         self._browser = resolve_browser()
         self._profile_dir.mkdir(parents=True, exist_ok=True)
-        self._playwright = await async_playwright().start()
+        playwright = await async_playwright().start()
+        self._playwright = playwright
+        try:
+            context = await self._launch_browser(playwright)
+        except Exception:
+            # The driver (a node process) must not outlive the failed
+            # launch: the next open starts a fresh one.  A shutdown that
+            # ran meanwhile has already taken and stopped it.
+            if self._playwright is playwright:
+                self._playwright = None
+                await playwright.stop()
+            raise
+        await self._mask_headless_user_agent(context)
+        context.on("page", self._on_page)
+        context.on("close", self._on_context_close)
+        return context
+
+    async def _launch_browser(self, playwright: Playwright) -> BrowserContext:
+        """Launch headed on the desktop (or a shared Xvfb), else headless."""
         display = None
         headless = is_headless_environment()
         if headless:
@@ -382,22 +399,20 @@ class BrowserTabService:
             display = virtual_display()
             headless = display is None
         try:
-            context = await self._launch_context(headless, display)
+            return await self._launch_context(playwright, headless, display)
         except Exception:
             if headless:
                 raise
             # A desktop session without a reachable window server (a Mac
             # reached over ssh, for instance): fall back to headless.
-            context = await self._launch_context(True, None)
-        await self._mask_headless_user_agent(context)
-        context.on("page", self._on_page)
-        context.on("close", self._on_context_close)
-        return context
+            return await self._launch_context(playwright, True, None)
 
-    async def _launch_context(self, headless: bool, display: str | None) -> BrowserContext:
-        assert self._playwright is not None and self._browser is not None
+    async def _launch_context(
+        self, playwright: Playwright, headless: bool, display: str | None
+    ) -> BrowserContext:
+        assert self._browser is not None
         width, height = _DEFAULT_VIEWPORT
-        return await self._playwright.chromium.launch_persistent_context(
+        return await playwright.chromium.launch_persistent_context(
             str(self._profile_dir),
             executable_path=self._browser.executable,
             headless=headless,
@@ -589,7 +604,10 @@ class BrowserTabService:
         if rec.flush_handle is not None:
             rec.flush_handle.cancel()
         self._emit({"type": "closeBrowserTab", "tab_id": rec.tab_id})
-        if remaining == 0:
+        # The last tab closes the browser, unless a page is being created
+        # right now (the user closed one tab while opening another): a
+        # teardown under ``new_page()`` would fail that open.
+        if remaining == 0 and self._creating == 0:
             await self._teardown(announce=False)
 
     async def _teardown(self, announce: bool) -> None:
@@ -878,8 +896,3 @@ def _log_future_error(future: Any) -> None:
     exc = future.exception()
     if exc is not None:
         logger.debug("browser tab: background task failed: %s", exc)
-
-
-def decode_frame(event: dict[str, Any]) -> bytes:
-    """Return the JPEG bytes of a ``browserFrame`` event (used by tests and tools)."""
-    return base64.b64decode(event["data"])

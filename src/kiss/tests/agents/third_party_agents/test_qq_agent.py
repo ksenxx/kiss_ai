@@ -17,9 +17,8 @@ from __future__ import annotations
 import json
 import socket
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from http.server import BaseHTTPRequestHandler
+from typing import Any, cast
 
 import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -31,6 +30,7 @@ from kiss.agents.third_party_agents.qq.qq_sea import (
     _config,
     _derive_signing_key,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 
 _SECRET = "kiss-qq-test-secret"
 
@@ -86,23 +86,28 @@ def _raw_post_status(port: int, headers: str, path: str = "/") -> int:
         return int(data.split(b" ")[1])
 
 
-class _QQApiHandler(BaseHTTPRequestHandler):
-    """Emulates the QQ open-platform token and message endpoints."""
+_TOKEN_PATH = "/getAppAccessToken"
 
-    token_hits = 0
-    messages: list[tuple[str, str, dict[str, Any]]] = []
+
+class _QQApiHandler(BaseHTTPRequestHandler):
+    """Emulates the QQ open-platform token and message endpoints.
+
+    Every request is recorded on the :class:`RecordingServer` as
+    ``{"path", "authorization", "body"}``; see :func:`_sent`.
+    """
 
     def do_POST(self) -> None:  # noqa: N802
         """Serve the token endpoint and the v2 message endpoints."""
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length).decode("utf-8"))
-        if self.path == "/getAppAccessToken":
-            type(self).token_hits += 1
+        authorization = self.headers.get("Authorization", "")
+        server = cast(RecordingServer, self.server)
+        server.requests.append({"path": self.path, "authorization": authorization, "body": body})
+        if self.path == _TOKEN_PATH:
             assert body == {"appId": "qq_app", "clientSecret": _SECRET}
             self._json(200, {"access_token": "QQTOKEN", "expires_in": "7200"})
             return
         assert self.headers.get("Authorization") == "QQBot QQTOKEN"
-        type(self).messages.append((self.path, self.headers.get("Authorization", ""), body))
         self._json(200, {"id": "msg1", "timestamp": 1712345678})
 
     def _json(self, status: int, body: dict[str, Any]) -> None:
@@ -117,22 +122,16 @@ class _QQApiHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-class _ApiServer:
-    """Run the emulated QQ API server for the duration of a test."""
+def _token_hits(api: RecordingServer) -> int:
+    """Count the token-endpoint requests the emulated API received."""
+    return sum(r["path"] == _TOKEN_PATH for r in api.requests)
 
-    def __init__(self) -> None:
-        _QQApiHandler.token_hits = 0
-        _QQApiHandler.messages = []
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _QQApiHandler)
-        self.base_url = f"http://127.0.0.1:{self._server.server_port}"
 
-    def __enter__(self) -> _ApiServer:
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        self._server.shutdown()
-        self._server.server_close()
+def _sent(api: RecordingServer) -> list[tuple[str, str, dict[str, Any]]]:
+    """Return ``(path, authorization, body)`` of every message request received."""
+    return [
+        (r["path"], r["authorization"], r["body"]) for r in api.requests if r["path"] != _TOKEN_PATH
+    ]
 
 
 def _authenticated_agent(api_base: str = "", token_url: str = "", port: str = "") -> QQAgent:
@@ -192,15 +191,13 @@ def test_tools_module_function() -> None:
 
 def test_send_messages_with_cached_token() -> None:
     """Group and C2C sends use QQBot auth and share one cached token."""
-    with _ApiServer() as api:
-        agent = _authenticated_agent(
-            api_base=api.base_url, token_url=f"{api.base_url}/getAppAccessToken"
-        )
+    with recording_server(_QQApiHandler) as api:
+        agent = _authenticated_agent(api_base=api.base_url, token_url=api.base_url + _TOKEN_PATH)
         backend = agent._backend
         assert json.loads(backend.send_group_message("G1", "hi group"))["ok"] is True
         assert json.loads(backend.send_c2c_message("U1", "hi user"))["ok"] is True
-        assert _QQApiHandler.token_hits == 1
-        assert _QQApiHandler.messages == [
+        assert _token_hits(api) == 1
+        assert _sent(api) == [
             ("/v2/groups/G1/messages", "QQBot QQTOKEN", {"content": "hi group", "msg_type": 0}),
             ("/v2/users/U1/messages", "QQBot QQTOKEN", {"content": "hi user", "msg_type": 0}),
         ]
@@ -363,15 +360,13 @@ def test_authenticate_rejects_invalid_port() -> None:
 
 def test_send_message_routes_group_vs_c2c() -> None:
     """send_message uses the group endpoint for known group channel ids."""
-    with _ApiServer() as api:
-        agent = _authenticated_agent(
-            api_base=api.base_url, token_url=f"{api.base_url}/getAppAccessToken"
-        )
+    with recording_server(_QQApiHandler) as api:
+        agent = _authenticated_agent(api_base=api.base_url, token_url=api.base_url + _TOKEN_PATH)
         backend = agent._backend
         backend._group_ids.add("G42")
         backend.send_message("G42", "to group")
         backend.send_message("U9", "to user")
-        assert [path for path, _, _ in _QQApiHandler.messages] == [
+        assert [path for path, _, _ in _sent(api)] == [
             "/v2/groups/G42/messages",
             "/v2/users/U9/messages",
         ]

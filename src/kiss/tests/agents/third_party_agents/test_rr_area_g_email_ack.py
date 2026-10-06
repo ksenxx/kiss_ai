@@ -17,10 +17,11 @@ minimal in-test IMAP and SMTP server pair speaking real TLS with a
 self-signed certificate (generated with ``cryptography``).  The
 servers are real socket servers, not mocks of any KISS code.
 
-The runner's ``_launch_task`` is overridden with a real in-test
-implementation (the same pattern as ``LaunchOutcomeRunner`` in
-``test_hermes_runner.py``): launching actual kiss-web daemon tasks is
-out of scope for a redelivery test.
+The runner is the real ``ChannelRunner``: its ``_launch_task`` goes over
+the wire (``run_agent_via_kiss_web`` → ``sorcar.run``) to a
+:class:`RecordingDaemon` that records every ``run`` command and answers
+with a scripted result text, so the prompts asserted below are the ones
+the daemon actually received.
 """
 
 from __future__ import annotations
@@ -31,15 +32,26 @@ import logging
 import socket
 import ssl
 import threading
-from collections.abc import Iterator
-from contextlib import suppress
+import time
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from kiss.agents.third_party_agents import _kiss_web_launcher
 from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 from kiss.agents.third_party_agents.email.email_sea import EmailChannelBackend, _config
+from kiss.agents.third_party_agents.irc import irc_sea
+from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
+
+_REPLY_TEXT = "handled your request"
+# Idle limit on every accepted connection: a peer that connects and then
+# goes silent (mid TLS handshake or mid command) cannot park a handler
+# thread forever.  Far above any in-test exchange, and ``close()`` does
+# not wait it out: it shuts the connections down and joins the handlers.
+_CONNECTION_TIMEOUT = 30.0
 
 _RAW_MAIL = (
     b"From: Alice Example <alice@example.com>\r\n"
@@ -47,7 +59,7 @@ _RAW_MAIL = (
     b"Subject: Need help\r\n"
     b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
     b"Message-ID: <need-help-1@example.com>\r\n"
-    b"Content-Type: text/plain; charset=\"utf-8\"\r\n"
+    b'Content-Type: text/plain; charset="utf-8"\r\n'
     b"\r\n"
     b"Hi bot, please help.\r\n"
 )
@@ -78,9 +90,7 @@ def _make_ssl_context(tmp_path: Path) -> ssl.SSLContext:
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=1))
         .add_extension(
-            x509.SubjectAlternativeName(
-                [x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
-            ),
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
             critical=False,
         )
         .sign(key, hashes.SHA256())
@@ -103,10 +113,16 @@ def _make_ssl_context(tmp_path: Path) -> ssl.SSLContext:
 class _TlsLiteServer:
     """Loopback TLS listener that serves each connection on its own thread.
 
-    Subclasses implement ``_serve(conn)``.  ``close()`` wakes the accept
-    thread with ``shutdown(SHUT_RDWR)`` (closing the fd alone does not
-    interrupt a blocked ``accept()`` on Linux) and joins it, so no test
-    leaves a thread parked on a dead socket.
+    Subclasses implement ``_serve(tls)`` for a handshaken TLS socket.
+    Every accepted connection gets ``_CONNECTION_TIMEOUT`` before it is
+    wrapped, and the wrapped socket plus its handler thread are tracked
+    from the accept loop (the handshake itself runs on the handler, so
+    a silent peer parks only that thread, on a tracked socket).
+    ``close()`` wakes the accept thread with ``shutdown(SHUT_RDWR)``
+    (closing the fd alone does not interrupt a blocked ``accept()`` on
+    Linux), shuts down every accepted connection the same way, and
+    joins the accept thread and every handler with a bound, so no test
+    leaves a thread parked on a dead or silent socket.
     """
 
     def __init__(self, ssl_context: ssl.SSLContext) -> None:
@@ -116,16 +132,25 @@ class _TlsLiteServer:
         self._sock.listen(8)
         self.port = self._sock.getsockname()[1]
         self._stopping = threading.Event()
+        self._handlers: list[tuple[ssl.SSLSocket, threading.Thread]] = []
+        self._handlers_lock = threading.Lock()
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._thread.start()
 
     def close(self) -> None:
-        """Stop accepting connections and join the accept thread."""
+        """Stop accepting, shut down every connection and join all threads."""
         self._stopping.set()
         with suppress(OSError):
             self._sock.shutdown(socket.SHUT_RDWR)
         self._sock.close()
         self._thread.join(timeout=5)
+        with self._handlers_lock:
+            handlers = list(self._handlers)
+        for tls, thread in handlers:
+            with suppress(OSError):
+                tls.shutdown(socket.SHUT_RDWR)
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "connection handler did not stop"
 
     def _accept_loop(self) -> None:
         """Accept and serve connections until closed."""
@@ -134,12 +159,33 @@ class _TlsLiteServer:
                 conn, _ = self._sock.accept()
             except OSError:
                 return
-            threading.Thread(
-                target=self._serve, args=(conn,), daemon=True
-            ).start()
+            try:
+                conn.settimeout(_CONNECTION_TIMEOUT)
+                tls = self._ssl_context.wrap_socket(
+                    conn, server_side=True, do_handshake_on_connect=False
+                )
+            except OSError:
+                # A peer that resets right after connecting must not
+                # take the accept thread down with it.
+                conn.close()
+                continue
+            thread = threading.Thread(target=self._handle, args=(tls,), daemon=True)
+            with self._handlers_lock:
+                self._handlers.append((tls, thread))
+            thread.start()
 
-    def _serve(self, conn: socket.socket) -> None:
-        """Serve one accepted connection (protocol-specific)."""
+    def _handle(self, tls: ssl.SSLSocket) -> None:
+        """Handshake, serve the protocol, and always close the socket."""
+        try:
+            tls.do_handshake()
+            self._serve(tls)
+        except (OSError, ssl.SSLError, ValueError, IndexError):
+            pass
+        finally:
+            tls.close()
+
+    def _serve(self, tls: ssl.SSLSocket) -> None:
+        """Serve one handshaken connection (protocol-specific)."""
         raise NotImplementedError
 
 
@@ -164,61 +210,51 @@ class _ImapLiteServer(_TlsLiteServer):
         """Return 1-based sequence numbers of unread messages."""
         return [i + 1 for i, m in enumerate(self.messages) if not m["seen"]]
 
-    def _serve(self, conn: socket.socket) -> None:
+    def _serve(self, tls: ssl.SSLSocket) -> None:
         """Serve one IMAP connection."""
-        try:
-            tls = self._ssl_context.wrap_socket(conn, server_side=True)
-        except (OSError, ssl.SSLError):
-            conn.close()
-            return
-        try:
-            tls.sendall(b"* OK IMAP4rev1 Service Ready\r\n")
-            fp = tls.makefile("rwb")
-            while True:
-                line = fp.readline()
-                if not line:
-                    return
-                parts = line.decode("utf-8", errors="replace").strip().split(" ", 2)
-                tag = parts[0]
-                cmd = parts[1].upper() if len(parts) > 1 else ""
-                args = parts[2] if len(parts) > 2 else ""
-                if cmd == "CAPABILITY":
-                    fp.write(b"* CAPABILITY IMAP4rev1\r\n")
-                    fp.write(f"{tag} OK CAPABILITY completed\r\n".encode())
-                elif cmd == "LOGIN":
-                    fp.write(f"{tag} OK LOGIN completed\r\n".encode())
-                elif cmd == "SELECT":
-                    fp.write(f"* {len(self.messages)} EXISTS\r\n".encode())
-                    fp.write(b"* FLAGS (\\Seen)\r\n")
-                    fp.write(f"{tag} OK [READ-WRITE] SELECT completed\r\n".encode())
-                elif cmd == "SEARCH":
-                    fp.write(self._search(args))
-                    fp.write(f"{tag} OK SEARCH completed\r\n".encode())
-                elif cmd == "FETCH":
-                    num = int(args.split(" ", 1)[0])
-                    raw = self.messages[num - 1]["raw"]
-                    fp.write(f"* {num} FETCH (BODY[] {{{len(raw)}}}\r\n".encode())
-                    fp.write(raw)
-                    fp.write(b")\r\n")
-                    fp.write(f"{tag} OK FETCH completed\r\n".encode())
-                elif cmd == "STORE":
-                    num_str, rest = args.split(" ", 1)
-                    self.stored_flags.append(rest)
-                    if "\\Seen" in rest:  # pragma: no branch
-                        self.messages[int(num_str) - 1]["seen"] = True
-                    fp.write(f"{tag} OK STORE completed\r\n".encode())
-                elif cmd == "LOGOUT":
-                    fp.write(b"* BYE\r\n")
-                    fp.write(f"{tag} OK LOGOUT completed\r\n".encode())
-                    fp.flush()
-                    return
-                else:
-                    fp.write(f"{tag} OK {cmd} ignored\r\n".encode())
+        tls.sendall(b"* OK IMAP4rev1 Service Ready\r\n")
+        fp = tls.makefile("rwb")
+        while True:
+            line = fp.readline()
+            if not line:
+                return
+            parts = line.decode("utf-8", errors="replace").strip().split(" ", 2)
+            tag = parts[0]
+            cmd = parts[1].upper() if len(parts) > 1 else ""
+            args = parts[2] if len(parts) > 2 else ""
+            if cmd == "CAPABILITY":
+                fp.write(b"* CAPABILITY IMAP4rev1\r\n")
+                fp.write(f"{tag} OK CAPABILITY completed\r\n".encode())
+            elif cmd == "LOGIN":
+                fp.write(f"{tag} OK LOGIN completed\r\n".encode())
+            elif cmd == "SELECT":
+                fp.write(f"* {len(self.messages)} EXISTS\r\n".encode())
+                fp.write(b"* FLAGS (\\Seen)\r\n")
+                fp.write(f"{tag} OK [READ-WRITE] SELECT completed\r\n".encode())
+            elif cmd == "SEARCH":
+                fp.write(self._search(args))
+                fp.write(f"{tag} OK SEARCH completed\r\n".encode())
+            elif cmd == "FETCH":
+                num = int(args.split(" ", 1)[0])
+                raw = self.messages[num - 1]["raw"]
+                fp.write(f"* {num} FETCH (BODY[] {{{len(raw)}}}\r\n".encode())
+                fp.write(raw)
+                fp.write(b")\r\n")
+                fp.write(f"{tag} OK FETCH completed\r\n".encode())
+            elif cmd == "STORE":
+                num_str, rest = args.split(" ", 1)
+                self.stored_flags.append(rest)
+                if "\\Seen" in rest:  # pragma: no branch
+                    self.messages[int(num_str) - 1]["seen"] = True
+                fp.write(f"{tag} OK STORE completed\r\n".encode())
+            elif cmd == "LOGOUT":
+                fp.write(b"* BYE\r\n")
+                fp.write(f"{tag} OK LOGOUT completed\r\n".encode())
                 fp.flush()
-        except (OSError, ssl.SSLError, ValueError, IndexError):
-            pass
-        finally:
-            tls.close()
+                return
+            else:
+                fp.write(f"{tag} OK {cmd} ignored\r\n".encode())
+            fp.flush()
 
     def _search(self, args: str) -> bytes:
         """Answer SEARCH UNSEEN and SEARCH HEADER Message-ID queries."""
@@ -245,113 +281,112 @@ class _SmtpLiteServer(_TlsLiteServer):
         self.deliveries: list[bytes] = []
         super().__init__(ssl_context)
 
-    def _serve(self, conn: socket.socket) -> None:
+    def _serve(self, tls: ssl.SSLSocket) -> None:
         """Serve one SMTP connection."""
-        try:
-            tls = self._ssl_context.wrap_socket(conn, server_side=True)
-        except (OSError, ssl.SSLError):
-            conn.close()
-            return
-        try:
-            fp = tls.makefile("rwb")
-            fp.write(b"220 rr-test SMTP\r\n")
-            fp.flush()
-            while True:
-                line = fp.readline()
-                if not line:
-                    return
-                verb = line.decode("utf-8", errors="replace").strip().upper()
-                if verb.startswith("EHLO") or verb.startswith("HELO"):
-                    fp.write(b"250-rr-test\r\n250 AUTH PLAIN LOGIN\r\n")
-                elif verb.startswith("AUTH"):
-                    fp.write(b"235 2.7.0 accepted\r\n")
-                elif verb.startswith("MAIL") or verb.startswith("RCPT"):
-                    fp.write(b"250 OK\r\n")
-                elif verb.startswith("DATA"):
-                    fp.write(b"354 go ahead\r\n")
-                    fp.flush()
-                    body = b""
-                    while not body.endswith(b"\r\n.\r\n"):
-                        chunk = fp.readline()
-                        if not chunk:
-                            return
-                        body += chunk
-                    self.deliveries.append(body)
-                    fp.write(b"250 OK delivered\r\n")
-                elif verb.startswith("QUIT"):
-                    fp.write(b"221 bye\r\n")
-                    fp.flush()
-                    return
-                else:
-                    fp.write(b"250 OK\r\n")
+        fp = tls.makefile("rwb")
+        fp.write(b"220 rr-test SMTP\r\n")
+        fp.flush()
+        while True:
+            line = fp.readline()
+            if not line:
+                return
+            verb = line.decode("utf-8", errors="replace").strip().upper()
+            if verb.startswith("EHLO") or verb.startswith("HELO"):
+                fp.write(b"250-rr-test\r\n250 AUTH PLAIN LOGIN\r\n")
+            elif verb.startswith("AUTH"):
+                fp.write(b"235 2.7.0 accepted\r\n")
+            elif verb.startswith("MAIL") or verb.startswith("RCPT"):
+                fp.write(b"250 OK\r\n")
+            elif verb.startswith("DATA"):
+                fp.write(b"354 go ahead\r\n")
                 fp.flush()
-        except (OSError, ssl.SSLError):
-            pass
-        finally:
-            tls.close()
+                body = b""
+                while not body.endswith(b"\r\n.\r\n"):
+                    chunk = fp.readline()
+                    if not chunk:
+                        return
+                    body += chunk
+                self.deliveries.append(body)
+                fp.write(b"250 OK delivered\r\n")
+            elif verb.startswith("QUIT"):
+                fp.write(b"221 bye\r\n")
+                fp.flush()
+                return
+            else:
+                fp.write(b"250 OK\r\n")
+            fp.flush()
 
 
-class CountingRunner(ChannelRunner):
-    """Runner whose task launch is a real in-test implementation."""
+@pytest.fixture()
+def daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
+    """A recording daemon every real ``ChannelRunner._launch_task`` reaches.
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.launched_prompts: list[str] = []
+    ``run_agent_via_kiss_web`` resolves its endpoint file from the
+    module-level ``_ENDPOINT_FILE_OVERRIDE`` when the caller passes
+    none, so the runner's launch travels the real wire to this stand-in,
+    which answers every task with ``_REPLY_TEXT``.
+    """
+    stand_in = RecordingDaemon(text=_REPLY_TEXT, chat_id="chat-email")
+    monkeypatch.setattr(_kiss_web_launcher, "_ENDPOINT_FILE_OVERRIDE", str(stand_in.endpoint_file))
+    try:
+        yield stand_in
+    finally:
+        stand_in.close()
 
-    def _launch_task(
-        self, channel_id: str, thread_ts: str, prompt: str, last_reply_ts: str
-    ) -> str:
-        """Record the launch and report a successful task."""
-        self.launched_prompts.append(prompt)
-        return "success: true\nsummary: handled your request\n"
+
+def _launched_prompts(daemon: RecordingDaemon) -> list[str]:
+    """The prompts of the ``run`` commands *daemon* received, in order."""
+    return [str(command["prompt"]) for command in daemon.run_commands]
 
 
 @pytest.fixture()
 def mail_stack(
     tmp_path: Path,
 ) -> Iterator[tuple[EmailChannelBackend, _ImapLiteServer, _SmtpLiteServer]]:
-    """A configured email backend wired to live IMAP/SMTP-lite servers."""
-    context = _make_ssl_context(tmp_path)
-    imap = _ImapLiteServer(context)
-    smtp = _SmtpLiteServer(context)
-    _config.save(
-        {
-            "imap_host": "127.0.0.1",
-            "imap_port": str(imap.port),
-            "smtp_host": "127.0.0.1",
-            "smtp_port": str(smtp.port),
-            "smtp_security": "ssl",
-            "email_address": "bot@example.com",
-            "password": "app-password",
-        }
-    )
-    backend = EmailChannelBackend()
-    try:
-        yield backend, imap, smtp
-    finally:
-        imap.close()
-        smtp.close()
+    """A configured email backend wired to live IMAP/SMTP-lite servers.
+
+    Each server registers its own ``close`` as soon as it exists, so a
+    failure while starting the second one still stops the first.
+    """
+    with ExitStack() as stack:
+        context = _make_ssl_context(tmp_path)
+        imap = _ImapLiteServer(context)
+        stack.callback(imap.close)
+        smtp = _SmtpLiteServer(context)
+        stack.callback(smtp.close)
+        _config.save(
+            {
+                "imap_host": "127.0.0.1",
+                "imap_port": str(imap.port),
+                "smtp_host": "127.0.0.1",
+                "smtp_port": str(smtp.port),
+                "smtp_security": "ssl",
+                "email_address": "bot@example.com",
+                "password": "app-password",
+            }
+        )
+        yield EmailChannelBackend(), imap, smtp
 
 
 class TestEmailRedeliveryStops:
     """The G-RC3 reproduction: one mail, two ticks, exactly one task+reply."""
 
     def test_two_ticks_process_one_mail_once(
-        self, mail_stack: tuple[EmailChannelBackend, _ImapLiteServer, _SmtpLiteServer]
+        self,
+        mail_stack: tuple[EmailChannelBackend, _ImapLiteServer, _SmtpLiteServer],
+        daemon: RecordingDaemon,
     ) -> None:
         """Tick 1 handles, replies, and acks; tick 2 redelivers nothing."""
         backend, imap, smtp = mail_stack
         imap.add_message(_RAW_MAIL, "<need-help-1@example.com>")
-        runner = CountingRunner(
-            backend=backend, channel_name="", agent_name="RR Email Test"
-        )
+        runner = ChannelRunner(backend=backend, channel_name="", agent_name="RR Email Test")
 
         assert runner.run_once() == 1
-        assert len(runner.launched_prompts) == 1
-        assert "please help" in runner.launched_prompts[0]
+        assert len(_launched_prompts(daemon)) == 1
+        assert "please help" in _launched_prompts(daemon)[0]
         assert len(smtp.deliveries) == 1
         reply = smtp.deliveries[0].decode("utf-8", errors="replace")
-        assert "handled your request" in reply
+        assert _REPLY_TEXT in reply
         assert "In-Reply-To: <need-help-1@example.com>" in reply
         # The ack marked the mail read on the server.
         assert imap.unseen() == []
@@ -359,23 +394,23 @@ class TestEmailRedeliveryStops:
 
         # Pre-fix, the still-unread mail was handled again every tick.
         assert runner.run_once() == 0
-        assert len(runner.launched_prompts) == 1
+        assert len(_launched_prompts(daemon)) == 1
         assert len(smtp.deliveries) == 1
 
     def test_new_mail_after_ack_is_still_picked_up(
-        self, mail_stack: tuple[EmailChannelBackend, _ImapLiteServer, _SmtpLiteServer]
+        self,
+        mail_stack: tuple[EmailChannelBackend, _ImapLiteServer, _SmtpLiteServer],
+        daemon: RecordingDaemon,
     ) -> None:
         """Acking one mail must not suppress genuinely new mail."""
         backend, imap, smtp = mail_stack
         imap.add_message(_RAW_MAIL, "<need-help-1@example.com>")
-        runner = CountingRunner(
-            backend=backend, channel_name="", agent_name="RR Email Test"
-        )
+        runner = ChannelRunner(backend=backend, channel_name="", agent_name="RR Email Test")
         assert runner.run_once() == 1
         second = _RAW_MAIL.replace(b"need-help-1", b"need-help-2")
         imap.add_message(second, "<need-help-2@example.com>")
         assert runner.run_once() == 1
-        assert len(runner.launched_prompts) == 2
+        assert len(_launched_prompts(daemon)) == 2
         assert len(smtp.deliveries) == 2
         assert imap.unseen() == []
 
@@ -401,79 +436,76 @@ class TestEmailAckMessage:
         backend, imap, _ = mail_stack
         assert backend.connect() is True
         with caplog.at_level(logging.WARNING):
-            backend.ack_message(
-                "INBOX", {"ts": "1", "thread_ts": "<gone@example.com>"}
-            )
+            backend.ack_message("INBOX", {"ts": "1", "thread_ts": "<gone@example.com>"})
         assert "Could not mark email" in caplog.text
         assert imap.unseen() == []
 
 
-class _NoAckBackend:
-    """Minimal real backend without an ack hook (cursor-based platforms)."""
-
-    _connection_info = "no-ack backend"
-
-    def __init__(self, messages: list[dict[str, Any]]) -> None:
-        self.messages = messages
-        self.sent: list[str] = []
-
-    @property
-    def connection_info(self) -> str:
-        """Connection status string."""
-        return self._connection_info
-
-    def connect(self) -> bool:
-        """Always connected."""
-        return True
-
-    def poll_messages(
-        self, channel_id: str, oldest: str, limit: int = 50
-    ) -> tuple[list[dict[str, Any]], str]:
-        """Serve the configured messages once."""
-        messages, self.messages = self.messages, []
-        return messages, oldest
-
-    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Record the reply."""
-        self.sent.append(text)
-
-    def is_from_bot(self, msg: dict[str, Any]) -> bool:
-        """No bot messages in these tests."""
-        return False
-
-    def strip_bot_mention(self, text: str) -> str:
-        """No mention stripping."""
-        return text
-
-    def disconnect(self) -> None:
-        """Nothing to release."""
+def _wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Poll *predicate* until true or *timeout* elapses."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
 
 
-class _RaisingAckBackend(_NoAckBackend):
-    """Real backend whose ack hook always fails."""
-
-    def ack_message(self, channel_id: str, msg: dict[str, Any]) -> None:
-        """Simulate a platform error during the ack."""
-        raise ConnectionError("ack transport down")
+def _recv_line(conn: socket.socket) -> bytes:
+    """Read one CRLF-terminated line from *conn*."""
+    line = b""
+    while not line.endswith(b"\r\n"):
+        chunk = conn.recv(1)
+        if not chunk:
+            break
+        line += chunk
+    return line
 
 
 class TestRunnerAckDispatch:
-    """ChannelRunner._ack_message branch behavior."""
+    """ChannelRunner._ack_message with a backend that has no ack hook.
 
-    def test_backend_without_hook_is_untouched(self) -> None:
-        """Cursor-based backends need no ack and still process normally."""
-        backend = _NoAckBackend([{"ts": "1", "user": "alice", "text": "hi"}])
-        runner = CountingRunner(backend=backend, channel_name="", agent_name="t")
-        assert runner.run_once() == 1
-        assert len(backend.sent) == 1
+    ``IRCChannelBackend`` is a real cursor-free backend without
+    ``ack_message``; it is driven against a loopback IRC listener.
 
-    def test_ack_failure_is_logged_not_raised(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """An ack that raises never fails the tick (reply already sent)."""
-        backend = _RaisingAckBackend([{"ts": "1", "user": "alice", "text": "hi"}])
-        runner = CountingRunner(backend=backend, channel_name="", agent_name="t")
-        with caplog.at_level(logging.WARNING):
-            assert runner.run_once() == 1
-        assert len(backend.sent) == 1
-        assert "ack_message failed" in caplog.text
+    The runner's other branch — an ``ack_message`` that raises, logged
+    as ``ack_message failed`` — is unreachable without a test double:
+    the only product ``ack_message`` (email) routes every IMAP failure
+    through ``mark_email_read``, which converts any exception into an
+    ``ok:false`` result that ``ack_message`` logs as ``Could not mark
+    email`` (covered by ``test_ack_unknown_message_logs_warning``).
+    """
+
+    def test_backend_without_hook_is_untouched(self, daemon: RecordingDaemon) -> None:
+        """A backend without ``ack_message`` processes and replies normally."""
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            listener.settimeout(5.0)
+            irc_sea._config.save(
+                {"server": "127.0.0.1", "port": str(listener.getsockname()[1]), "nick": "bot"}
+            )
+            backend = irc_sea.IRCChannelBackend()
+            try:
+                # Deliver one PRIVMSG on a first connection; the reader
+                # thread queues it for the next poll.
+                assert backend.connect() is True, backend.connection_info
+                first, _ = listener.accept()
+                with first:
+                    first.settimeout(5.0)
+                    first.sendall(b":alice!a@example.com PRIVMSG #general :hi\r\n")
+                    assert _wait_for(lambda: not backend._message_queue.empty())
+                    runner = ChannelRunner(backend=backend, channel_name="#general", agent_name="t")
+                    # run_once() reconnects, joins, polls the queued message,
+                    # launches the task and replies on the new connection.
+                    assert runner.run_once() == 1
+                assert len(_launched_prompts(daemon)) == 1
+                assert "hi" in _launched_prompts(daemon)[0]
+                second, _ = listener.accept()
+                with second:
+                    second.settimeout(5.0)
+                    lines = [_recv_line(second) for _ in range(4)]
+                assert lines[0] == b"NICK bot\r\n"
+                assert lines[2] == b"JOIN #general\r\n"
+                assert lines[3].startswith(b"PRIVMSG #general :")
+                assert _REPLY_TEXT.encode() in lines[3]
+            finally:
+                backend.disconnect()

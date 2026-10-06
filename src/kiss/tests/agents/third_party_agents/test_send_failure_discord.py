@@ -22,7 +22,7 @@ at via the ``api_base`` constructor argument, following
 from __future__ import annotations
 
 import json
-import threading
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -31,7 +31,7 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 
 class _SendHandler(BaseHTTPRequestHandler):
@@ -66,27 +66,20 @@ class _SendHandler(BaseHTTPRequestHandler):
             self._respond(200, {"id": "M1", "channel_id": path.split("/")[2]})
 
 
+@pytest.fixture(scope="module")
+def send_server() -> Iterator[RecordingServer]:
+    """One Discord-shaped recording server shared by the module's tests."""
+    yield from serve_recording(_SendHandler)
+
+
 class TestDiscordSendMessageFailures:
     """End-to-end tests against a local Discord-shaped HTTP server."""
 
-    server: RecordingServer
-    api_base: str
-
-    @classmethod
-    def setup_class(cls) -> None:
-        cls.server = RecordingServer(("127.0.0.1", 0), _SendHandler)
-        thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        thread.start()
-        cls.api_base = f"http://127.0.0.1:{cls.server.server_address[1]}"
-
-    @classmethod
-    def teardown_class(cls) -> None:
-        cls.server.shutdown()
-        cls.server.server_close()
-
-    def setup_method(self) -> None:
+    @pytest.fixture(autouse=True)
+    def _fresh_backend(self, send_server: RecordingServer) -> None:
+        self.server = send_server
         self.server.requests.clear()
-        self.backend = DiscordChannelBackend(api_base=self.api_base)
+        self.backend = DiscordChannelBackend(api_base=send_server.base_url)
         self.backend._token = "test-token"
 
     def test_send_message_raises_on_http_500(self) -> None:

@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _save_task_result,
 )
+from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 
 def _returned_literal(source: str, function: str) -> Any:
@@ -711,69 +714,110 @@ class Sea(BaseSea):
     assert sea_tuning.patch_settings_literal(inline, "absent", sea_tuning.REMOVE) == inline
 
 
-def test_improve_and_revert_sea_code_snapshot_and_gate(
-    checkout: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``improve_sea_code`` snapshots, dispatches a full-tool Sorcar run and gates the result;
-    ``revert_sea_code`` restores the snapshot.
+class _EditingDaemon(RecordingDaemon):
+    """A daemon stand-in whose "sub-agent" edits *path* when a ``run`` command arrives.
 
-    The dispatch is the real ``agent_dispatch.dispatch_result`` with no
-    daemon running, so it returns its error string and changes nothing;
-    the gate is exercised by editing the file the way a sub-agent would
-    between the snapshot and the check.
+    ``improve_sea_code`` dispatches a Sorcar run through the real
+    ``daemon_client.run``; the stand-in records the command and, in
+    place of the sub-agent, applies :attr:`edit` to *path* before the
+    scripted ``result`` is sent, so the gate sees the file as a
+    sub-agent left it.
     """
-    from kiss.agents.sorcar import agent_dispatch
 
-    path = checkout / "tunedemo" / "tunedemo_sea.py"
-    assert sea.improve_sea_code("slack", "x", 1.0).startswith("Error:")
-    assert sea.revert_sea_code("tunedemo") == (
-        f"Error: no snapshot of tunedemo in {checkout.parents[3] / sea.SNAPSHOT_DIR / 'tunedemo'}"
-        "; nothing to revert"
-    )
-    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(checkout / "no-daemon.json"))
-    seen: list[str] = []
-    real = agent_dispatch.dispatch_result
+    def __init__(self, path: Path) -> None:
+        super().__init__(text="reworked")
+        self.path = path
+        self.edit: Callable[[Path], None] = _add_extra_helper
 
-    def dispatch_and_edit(**kwargs: Any) -> Any:
-        seen.append(kwargs["prompt"])
-        path.write_text(path.read_text() + "\n\ndef extra() -> int:\n    return 1\n")
-        return real(**kwargs)
+    async def _handle(self, ws: Any) -> None:
+        self.edit(self.path)
+        await super()._handle(ws)
 
-    monkeypatch.setattr(agent_dispatch, "dispatch_result", dispatch_and_edit)
-    report = json.loads(sea.improve_sea_code("tunedemo", "add an extra() helper", 2.0, 30.0))
-    assert report["task_id"] == "" and "could not run" in report["result"]
-    assert "add an extra() helper" in seen[0] and str(path) in seen[0]
-    assert "error" not in report and "def extra" in path.read_text()
-    assert report["other_changes"] == []
-    snapshot = Path(report["snapshot"])
-    assert "def extra" not in (snapshot / "tunedemo_sea.py").read_text()
-    assert sea.revert_sea_code("tunedemo") == f"Restored {path.parent} from {snapshot}"
-    assert "def extra" not in path.read_text()
 
-    def dispatch_and_break(*args: Any, **kwargs: Any) -> Any:
-        path.write_text("""
+def _add_extra_helper(path: Path) -> None:
+    """Append a harmless ``extra()`` helper: a change the gate accepts."""
+    path.write_text(path.read_text() + "\n\ndef extra() -> int:\n    return 1\n")
+
+
+def _break_settings(path: Path) -> None:
+    """Replace the SEA with one whose ``settings`` no longer loads: the gate rejects it."""
+    path.write_text("""
 from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'timeout': 'soon'}
 """)
-        return real(*args, **kwargs)
 
-    monkeypatch.setattr(agent_dispatch, "dispatch_result", dispatch_and_break)
-    report = json.loads(sea.improve_sea_code("tunedemo", "break it", 2.0, 30.0))
-    assert report["error"].startswith("the patched SEA no longer loads (")
-    assert report["error"].endswith("; folder restored from the snapshot")
-    assert path.read_text() == DEMO_SEA
 
-    def dispatch_and_delete(*args: Any, **kwargs: Any) -> Any:
-        path.unlink()
-        return real(*args, **kwargs)
+def _delete_script(path: Path) -> None:
+    """Delete the SEA script outright."""
+    path.unlink()
 
-    monkeypatch.setattr(agent_dispatch, "dispatch_result", dispatch_and_delete)
-    report = json.loads(sea.improve_sea_code("tunedemo", "delete it", 2.0, 30.0))
-    assert report["error"] == "the sub-agent deleted the script; folder restored from the snapshot"
-    assert path.read_text() == DEMO_SEA
+
+def test_improve_and_revert_sea_code_snapshot_and_gate(
+    checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``improve_sea_code`` snapshots, dispatches a full-tool Sorcar run and gates the result;
+    ``revert_sea_code`` restores the snapshot.
+
+    The dispatch is the real ``agent_dispatch.dispatch_result`` →
+    ``daemon_client.run`` against a local daemon stand-in whose
+    "sub-agent" edits the file between the snapshot and the gate.
+    """
+    path = checkout / "tunedemo" / "tunedemo_sea.py"
+    assert sea.improve_sea_code("slack", "x", 1.0).startswith("Error:")
+    assert sea.revert_sea_code("tunedemo") == (
+        f"Error: no snapshot of tunedemo in {checkout.parents[3] / sea.SNAPSHOT_DIR / 'tunedemo'}"
+        "; nothing to revert"
+    )
+    # An unreachable daemon (the endpoint file does not exist) is a
+    # reported failure, not an exception: no task id, and the gate still
+    # runs on the untouched file.
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(checkout / "no-daemon.json"))
+    report = json.loads(sea.improve_sea_code("tunedemo", "add an extra() helper", 2.0, 30.0))
+    assert report["task_id"] == "" and "could not run" in report["result"]
+    assert "error" not in report and path.read_text() == DEMO_SEA
+    assert sea.revert_sea_code("tunedemo").startswith("Restored ")
+
+    # The run goes to the checkout the SEA folder is in (``git rev-parse
+    # --show-toplevel``, which looks at parent directories too), so make
+    # the fixture a real repository rooted at its top.
+    root = checkout.parents[3]
+    assert subprocess.run(["git", "init", "-q", str(root)], check=False).returncode == 0
+    daemon = _EditingDaemon(path)
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+    try:
+        report = json.loads(sea.improve_sea_code("tunedemo", "add an extra() helper", 2.0, 30.0))
+        assert report["task_id"] == "task-recorded-1"
+        assert report["result"] == {"success": True, "summary": "reworked", "cost": 0.0, "steps": 0}
+        (command,) = daemon.run_commands
+        assert "add an extra() helper" in command["prompt"] and str(path) in command["prompt"]
+        # A plain Sorcar run (no agent script) in the SEA's git checkout.
+        assert command["agentPath"] == "" and command["workDir"] == str(root.resolve())
+        assert command["useWorktree"] is False and command["autoCommit"] is False
+        assert "error" not in report and "def extra" in path.read_text()
+        assert report["other_changes"] == []
+        snapshot = Path(report["snapshot"])
+        assert "def extra" not in (snapshot / "tunedemo_sea.py").read_text()
+        assert sea.revert_sea_code("tunedemo") == f"Restored {path.parent} from {snapshot}"
+        assert "def extra" not in path.read_text()
+
+        daemon.edit = _break_settings
+        report = json.loads(sea.improve_sea_code("tunedemo", "break it", 2.0, 30.0))
+        assert report["error"].startswith("the patched SEA no longer loads (")
+        assert report["error"].endswith("; folder restored from the snapshot")
+        assert path.read_text() == DEMO_SEA
+
+        daemon.edit = _delete_script
+        report = json.loads(sea.improve_sea_code("tunedemo", "delete it", 2.0, 30.0))
+        assert report["error"] == (
+            "the sub-agent deleted the script; folder restored from the snapshot"
+        )
+        assert path.read_text() == DEMO_SEA
+        assert len(daemon.run_commands) == 3
+    finally:
+        daemon.close()
 
 
 # --- review fixes (gpt-6-astra, 2026-10-05) ----------------------------------------

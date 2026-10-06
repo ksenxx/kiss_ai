@@ -274,7 +274,7 @@ class TestAuthFailureBookkeeping(unittest.TestCase):
     def test_expired_entry_removed_not_kept_as_empty_list(self) -> None:
         stale = time.monotonic() - ws_mod._AUTH_FAIL_WINDOW - 10.0
         self.server._auth_failures["9.9.9.9"] = [stale]
-        self.assertFalse(self.server._is_auth_locked("9.9.9.9"))
+        self.assertEqual(self.server._auth_lock_remaining("9.9.9.9"), 0.0)
         self.assertNotIn(
             "9.9.9.9", self.server._auth_failures,
             "expired IP entry written back as an empty list",
@@ -299,9 +299,9 @@ class TestAuthFailureBookkeeping(unittest.TestCase):
         ip = "7.7.7.7"
         for _ in range(ws_mod._AUTH_FAIL_MAX):
             self.server._record_auth_failure(ip)
-        self.assertTrue(self.server._is_auth_locked(ip))
+        self.assertGreater(self.server._auth_lock_remaining(ip), 0.0)
         self.assertIn(other_ip, self.server._auth_failures)
-        self.assertFalse(self.server._is_auth_locked(other_ip))
+        self.assertEqual(self.server._auth_lock_remaining(other_ip), 0.0)
 
 
 class _BroadcastOnlyPrinter:

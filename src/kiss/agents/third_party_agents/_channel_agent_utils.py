@@ -800,16 +800,12 @@ LAUNCH_KWARG_NAMES = frozenset(
         "model_name",
         "work_dir",
         "max_budget",
-        "use_worktree",
         "model_config",
         "web_tools",
         "is_parallel",
-        "append_to_system_prompt",
-        "append_to_prompt",
-        "timeout",
-        "endpoint_file",
     }
 )
+"""The keyword parameters of ``run_agent_via_kiss_web``."""
 
 
 def filter_launch_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -959,11 +955,8 @@ class BaseChannelAgent:
         Args:
             prompt_template: The task prompt.
             **kwargs: Launcher keyword arguments (``model_name``,
-                ``work_dir``, ``max_budget``,
-                ``use_worktree``, ``model_config``, ``web_tools``,
-                ``is_parallel``,
-                ``append_to_system_prompt``, ``append_to_prompt``,
-                ``timeout``, ``endpoint_file``).
+                ``work_dir``, ``max_budget``, ``model_config``,
+                ``web_tools``, ``is_parallel``).
 
         Returns:
             YAML string with 'success' and 'summary' keys.

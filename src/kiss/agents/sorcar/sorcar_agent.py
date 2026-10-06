@@ -46,13 +46,12 @@ from kiss.agents.sorcar.fanout_guard import (
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent, resolve_work_dir
 from kiss.agents.sorcar.run_config import note_pinned, with_run_config
-from kiss.agents.sorcar.sea_commands import evaluate_sea, model_sea
+from kiss.agents.sorcar.sea_commands import evaluate_sea, model_sea, sea_name
 from kiss.agents.sorcar.sea_settings import (
     PRECEDENCE_RULE,
     SeaError,
     alias_free_profile,
     locked_conflicts,
-    script_name,
 )
 from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.task_classifier import (
@@ -1887,17 +1886,21 @@ class SorcarAgent(RelentlessAgent):
         from kiss.agents.sorcar.sea_commands import SeaScriptError, base_settings, sea_layers
 
         run_options = RunOptions(tool_profile=tool_profile) if options is None else options
-        layers: list[BaseSea] = []
-        settings: dict[str, Any] = {}
+        # A call naming no agent runs the bare ``BaseSea`` — the root
+        # layer of every run, so ``base_sea.py`` shapes these children
+        # as it does every other run.
+        layers: list[BaseSea] = [BaseSea()]
+        name = "base_sea.py"
         if agent.strip():
             resolved = resolve_agent(agent, self.work_dir)
             if isinstance(resolved, str):
                 raise SeaScriptError(resolved.removeprefix("Error: "))
             layers = sea_layers(Path(resolved[0]))
-            settings = base_settings(layers)
-            conflict = fanout_conflict(settings)
-            if conflict:
-                raise SeaScriptError(f"{resolved[1]} {conflict}")
+            name = resolved[1]
+        settings = base_settings(layers)
+        conflict = fanout_conflict(settings)
+        if conflict:
+            raise SeaScriptError(f"{name} {conflict}")
         # sea_settings.PRECEDENCE_RULE: an explicit argument or option
         # wins over the SEA's settings unless the SEA locks the key —
         # then the clash is an error — and the SEA's settings rank
@@ -2919,7 +2922,7 @@ class SorcarAgent(RelentlessAgent):
             )
         return self._task_classification
 
-    def _fold_classifier_usage(self) -> bool:
+    def _fold_classifier_usage(self) -> None:
         """Bank the pre-run classifier's spend into this run's totals.
 
         Runs from :meth:`run`'s ``finally``, AFTER ``super().run`` — the
@@ -2946,11 +2949,8 @@ class SorcarAgent(RelentlessAgent):
         same-key re-append deduplicates on read — exactly once either
         way (round-4 finding 2b: the previous unkeyed append-once
         design lost the spend on a pre-append stop and could not be
-        retried safely).
-
-        Returns:
-            True when non-zero classifier spend was banked, i.e. the
-            run's last usage event no longer shows the task's total.
+        retried safely).  :meth:`run`'s ``finally`` republishes the
+        totals when the ledger moved, so nothing is reported here.
         """
         spend = self._classifier_spend
         if spend is not None:
@@ -2962,7 +2962,6 @@ class SorcarAgent(RelentlessAgent):
             )
             self._classifier_spend = None
         self._reset_task_classification()
-        return spend is not None and bool(spend.budget or spend.tokens)
 
     def run(  # type: ignore[override]
         self,
@@ -3153,8 +3152,14 @@ class SorcarAgent(RelentlessAgent):
         self._system_prompt_suffix = system_prompt if system_prompt else ""
         self.web_use_tool = None
         self._memory_tools = None
+        # The thread's own binding first: a fan-out child has one
+        # whatever its printer (``run_tasks_parallel`` binds it so the
+        # per-child timeout and a parent stop reach its shell), and the
+        # JSON printer's thread-local is a view over the same storage.
         tl = getattr(printer, "_thread_local", None) if printer else None
-        self._stop_event = getattr(tl, "stop_event", None) if tl else None
+        self._stop_event = get_thread_stop_event() or (
+            getattr(tl, "stop_event", None) if tl else None
+        )
         try:
             # Pre-run task classification (idempotent per run:
             # WorktreeSorcarAgent.run may have classified already for
@@ -3524,20 +3529,18 @@ def _sea_run_kwargs(
     run = evaluate_sea(seas, task, _persisted_task_id(parent_agent))
     settings = run.settings
     run_config: dict[str, Any] = {
-        "sea": script_name(str(seas[-1].path)),
+        "sea": sea_name(seas),
         "kind": settings["kind"],
         "pinned": {},
     }
     # ``run()`` only records ``prompt_suffix``: the prompt carries it.
     overrides: dict[str, Any] = {
         "prompt_template": run.prompt + str(defaults.get("prompt_suffix") or ""),
+        "system_prompt_hook": run.system_prompt_hook,
+        "tools_hook": run.tools_hook,
+        "llm_call_hook": run.llm_call_hook,
+        "tool_call_hook": run.tool_call_hook,
     }
-    for kwarg, hook in (
-        ("system_prompt_hook", run.system_prompt_hook), ("tools_hook", run.tools_hook),
-        ("llm_call_hook", run.llm_call_hook), ("tool_call_hook", run.tool_call_hook),
-    ):
-        if hook is not None:
-            overrides[kwarg] = hook
     for key, kwarg in (
         ("model", "model_name"), ("max_budget", "max_budget"),
         ("tool_profile", "tool_profile"), ("docker_image", "docker_image"),
@@ -3562,6 +3565,17 @@ def _sea_run_kwargs(
         overrides["append_basic_tools"] = False
         overrides["inherited_tools"] = []
     return overrides, run_config
+
+
+def _expire_child(timed_out: threading.Event, stop_event: threading.Event) -> None:
+    """Stop one fan-out child whose ``timeout`` elapsed (a ``threading.Timer`` body).
+
+    The flag is set first so the child's ``KeyboardInterrupt`` handler
+    reports the timeout rather than a user stop; *stop_event* is the
+    child's own, not the fan-out's, so its siblings go on.
+    """
+    timed_out.set()
+    stop_event.set()
 
 
 def run_tasks_parallel(
@@ -3869,14 +3883,8 @@ def run_tasks_parallel(
         agent.run_config = {**(run_config or {}), "timeout": timeout}
         timer: threading.Timer | None = None
         timed_out = threading.Event()
-
-        def _expire() -> None:
-            # Flag first, then stop only this child (its own event, not the fan-out's).
-            timed_out.set()
-            sub_stop_event.set()
-
         if timeout is not None:
-            timer = threading.Timer(timeout, _expire)
+            timer = threading.Timer(timeout, _expire_child, args=(timed_out, sub_stop_event))
             timer.daemon = True
             timer.start()
         try:

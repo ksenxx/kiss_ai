@@ -22,20 +22,36 @@ private copies that subclassed either base.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, overload
+from http.server import BaseHTTPRequestHandler
+from typing import Any, cast, overload
+from urllib.parse import parse_qs, urlsplit
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 
 
 class RecordingServer(ThreadedHTTPServer):
-    """HTTP server that records every request it handles."""
+    """HTTP server that records every request it handles.
+
+    Every accepted connection gets a socket timeout, so a client that
+    stalls mid-request cannot keep a handler thread blocked after the
+    server is shut down.
+    """
+
+    connection_timeout = 60.0
 
     def __init__(self, address: tuple[str, int], handler: type) -> None:
         super().__init__(address, handler)
         self.requests: list[dict[str, Any]] = []
+
+    def get_request(self) -> tuple[Any, Any]:
+        """Accept a connection and bound every read/write on it."""
+        conn, addr = super().get_request()
+        conn.settimeout(self.connection_timeout)
+        return conn, addr
 
     @property
     def base_url(self) -> str:
@@ -86,3 +102,49 @@ def serve_recording(
 
 # :func:`serve_recording` as a context manager: ``with recording_server(_Handler) as server:``.
 recording_server = contextmanager(serve_recording)
+
+
+class JsonWebhookServer(RecordingServer):
+    """Recording server answering every POST with one canned JSON body.
+
+    Stands in for group-robot webhook endpoints (WeCom, DingTalk, ...)
+    that accept a JSON POST and reply ``{"errcode": 0, ...}``.  Each
+    request is recorded as ``{"path", "query", "json"}`` (``query`` is
+    ``parse_qs`` of the URL query); a test changes ``response_body``
+    before posting to simulate an API error.
+    """
+
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
+        self.response_body: dict[str, Any] = {"errcode": 0, "errmsg": "ok"}
+
+
+class JsonWebhookHandler(BaseHTTPRequestHandler):
+    """Handler for :class:`JsonWebhookServer`."""
+
+    def do_POST(self) -> None:  # noqa: N802
+        """Record the JSON body and reply with the server's ``response_body``."""
+        server = cast(JsonWebhookServer, self.server)
+        length = int(self.headers.get("Content-Length", 0))
+        split = urlsplit(self.path)
+        server.requests.append(
+            {
+                "path": split.path,
+                "query": parse_qs(split.query),
+                "json": json.loads(self.rfile.read(length).decode("utf-8")),
+            }
+        )
+        payload = json.dumps(server.response_body).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        """Silence request logging."""
+
+
+def serve_json_webhook() -> Iterator[JsonWebhookServer]:
+    """Run a :class:`JsonWebhookServer` for one fixture (``yield from`` it)."""
+    yield from serve_recording(JsonWebhookHandler, JsonWebhookServer)

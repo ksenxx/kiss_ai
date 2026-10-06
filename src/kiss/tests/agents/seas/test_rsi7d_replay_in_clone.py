@@ -63,12 +63,17 @@ class ReplayInCloneTest(DaemonLocalHarness):
     """``replay_in_clone`` dispatches this checkout's SEA into a clone of the task's repo."""
 
     def setUp(self) -> None:
+        # Every start/mutation registers its undo at once: cleanups run
+        # LIFO even when a later step of setUp raises (tearDown does not).
         super().setUp()
-        self._saved_endpoint = cron_agent._daemon_endpoint_file
+        self.addCleanup(super().tearDown)
+        saved_endpoint = cron_agent._daemon_endpoint_file
         # _dispatch goes through this daemon.
         cron_agent._daemon_endpoint_file = str(self.endpoint_file)
+        self.addCleanup(setattr, cron_agent, "_daemon_endpoint_file", saved_endpoint)
         self.requests: list[dict[str, Any]] = []
         self.standin = StandInModelServer(self._respond)
+        self.addCleanup(self.standin.stop)
         vscode_config.CONFIG_PATH.write_text(
             json.dumps({
                 "custom_endpoint": self.standin.url,
@@ -89,14 +94,17 @@ class ReplayInCloneTest(DaemonLocalHarness):
         (seas / "demo").mkdir()
         shutil.copy(Path(sea.__file__), seas / "rsi7d" / "rsi7d_sea.py")
         (seas / "demo" / "demo_sea.py").write_text(_DEMO_SEA, encoding="utf-8")
-        self._saved_cwd = os.getcwd()
+        saved_cwd = os.getcwd()
         os.chdir(self.checkout)
+        self.addCleanup(os.chdir, saved_cwd)
 
     def tearDown(self) -> None:
-        os.chdir(self._saved_cwd)
-        self.standin.stop()
-        cron_agent._daemon_endpoint_file = self._saved_endpoint
-        super().tearDown()
+        """Nothing to do here: setUp registered every undo as a cleanup.
+
+        The cleanups run LIFO (cwd, stand-in server, endpoint file, then
+        the base harness's ``tearDown``, which removes the tmpdir the
+        cwd pointed into), the order the explicit ``tearDown`` had.
+        """
 
     def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
         """First step: write a marker file into the work dir; second step: finish."""

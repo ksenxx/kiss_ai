@@ -100,7 +100,6 @@ const probe = `
   const assets = require(path.join(out, 'userAssets.js'));
   const checker = require(path.join(out, 'UpdateChecker.js'));
   console.log(brand.BRAND.homeDir);
-  console.log(brand.renderBrand('{{PRODUCT_NAME}} keeps ~/{{HOME_DIR}}/history.db {{OTHER}}'));
   console.log(assets.kissHomeDir());
   console.log(assets.sorcarEndpointPath());
   console.log(checker.kissHomeDir ? 'exported' : 'internal');
@@ -108,7 +107,6 @@ const probe = `
 const lines = runNode(probe, {HOME: tmp, KISS_HOME: '', KISS_SORCAR_LOCAL: ''}).split('\n');
 assert.deepStrictEqual(lines, [
   '.s10s',
-  'Seamless Loop keeps ~/.s10s/history.db {{OTHER}}',
   path.join(tmp, '.s10s'),
   path.join(tmp, '.s10s', 'sorcar-local.json'),
   'internal',

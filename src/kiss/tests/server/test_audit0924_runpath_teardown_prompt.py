@@ -24,12 +24,15 @@ Harness (same as ``test_queued_followup_tasks.py``): a real
 ``WorktreeSorcarAgent`` subclass whose ``run`` returns a scripted
 ``finish()`` result, and the first run started through the REAL
 ``_cmd_run`` so ``task_thread`` is installed exactly as in production.
-The re-dispatched second run must not call a model: the scripted first
-run rewrites the shared run command's ``model`` to a name that is not
-in ``get_available_models()``, so the second ``_run_task`` takes the
-runner's own "No model available" early exit after it has registered
-the run (state, ``clear``/``setTaskText`` broadcasts) — no mocks or
-patches anywhere.
+The re-dispatched second run must not call a model: the run command
+names no ``model`` (both runs use the tab's picker), and the scripted
+first run switches the tab's picker (the real ``selectModel`` command)
+to a name that is not in ``get_available_models()``, so the second
+``_run_task`` takes the runner's own "No model available" early exit
+after it has registered the run (state, ``clear``/``setTaskText``
+broadcasts) — no mocks or patches anywhere.  The follow-up is built
+from the command as the user submitted it, so a rewrite of the
+finished run's command would not reach it.
 """
 
 from __future__ import annotations
@@ -81,7 +84,6 @@ class _TeardownAgent(WorktreeSorcarAgent):
         self.prompts: list[str] = []
         self.server: VSCodeServer | None = None
         self.tab: str = ""
-        self.cmd: dict[str, Any] = {}
         self.late_prompt: str = ""
         self.via_run_command: bool = False
         self.stop_first: bool = False
@@ -97,8 +99,10 @@ class _TeardownAgent(WorktreeSorcarAgent):
         with self._task_id_lock:
             self._last_task_id = task_id
         if len(self.prompts) == 1 and self.server is not None:
-            # The re-dispatched run must not reach a model.
-            self.cmd["model"] = _UNKNOWN_MODEL
+            # The re-dispatched run must not reach a model: the user
+            # changes the tab's picker to a model that does not exist
+            # while the first run is still going.
+            self.server._cmd_select_model({"tabId": self.tab, "model": _UNKNOWN_MODEL})
             if self.stop_first:
                 st = agent_state.find_by_tab(self.tab)
                 assert st is not None and st.stop_event is not None
@@ -210,13 +214,13 @@ def _start_run(
         "tabId": tab_id,
         "prompt": prompt,
         "workDir": str(tmp_path),
-        "model": models[0],
         "useWorktree": False,
         "autoCommit": False,
         "classifyTasks": False,
         "taskId": "client-token-first-run",
     }
-    agent.cmd = cmd
+    # No ``model`` on the command: both runs use the tab's picker.
+    server._cmd_select_model({"tabId": tab_id, "model": models[0]})
     server._cmd_run(cmd)
     _wait_idle(tab_id)
     return agent, printer, server
