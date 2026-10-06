@@ -4328,10 +4328,18 @@ body.pdf-preview-body {
 
 /* Row status icons (.status-cross / .status-spinner / .status-tick
    shapes): red cross for a failed task, green spinner while it runs,
-   green tick once it just completed. */
+   green tick once it just completed, and the tab strip's pulsing "?"
+   (.chat-tab-attention) in the spinner's place while the task waits
+   for the user's answer. */
 .sidebar-item-failed { color: var(--status-fail); margin-right: var(--space-2); }
 .sidebar-item-running { color: var(--status-ok); margin-right: var(--space-2); }
 .sidebar-item-completed { color: var(--status-ok); margin-right: var(--space-2); }
+
+.sidebar-item-running.sidebar-item-asking {
+  font-size: var(--fs-md); font-weight: 700; line-height: 1;
+  color: var(--warning);
+  animation: running-pulse 1.5s ease-in-out infinite;
+}
 
 /* The panel is at least two lines tall - the task text and, below it,
    the action strip - so the status icon is centred on the first line of
