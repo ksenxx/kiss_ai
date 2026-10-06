@@ -7,10 +7,10 @@
 Verifies the contract enforced by the
 "third-party agents do not inherit SorcarAgent" cleanup:
 
-1. No channel agent class is a subclass of :class:`SorcarAgent` (nor of
-   :class:`ChatSorcarAgent`) — third-party agents are plain
-   :class:`BaseChannelAgent` carriers whose tasks always execute on the
-   kiss-web daemon through :func:`kiss.server.sorcar.run`.
+1. No channel agent class is a subclass of :class:`SorcarAgent` (and so
+   not of its ``ChatSorcarAgent`` subclass either) — third-party agents
+   are plain :class:`BaseChannelAgent` carriers whose tasks always
+   execute on the kiss-web daemon through :func:`kiss.server.sorcar.run`.
 2. ``channel_main()``'s parser rejects every chat-session CLI flag
    (``-n/--new``, ``-c/--chat-id``, ``-l/--list-chat-id``) — they no
    longer exist anywhere in the project's CLI surface.
@@ -23,12 +23,12 @@ import sys
 
 import pytest
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     channel_main,
 )
+from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
 ALL_CHANNEL_AGENTS = [
     ("A2AAgent", "kiss.agents.third_party_agents.a2a.a2a_sea"),
@@ -91,7 +91,8 @@ def _get_agent_class(class_name: str, module_path: str) -> type:
     ids=[a[0] for a in ALL_CHANNEL_AGENTS],
 )
 def test_channel_agent_does_not_subclass_sorcar_agent(
-    class_name: str, module_path: str,
+    class_name: str,
+    module_path: str,
 ) -> None:
     """No channel agent class inherits from ``SorcarAgent``.
 
@@ -101,33 +102,8 @@ def test_channel_agent_does_not_subclass_sorcar_agent(
     the ``SorcarAgent`` execution machinery.
     """
     cls = _get_agent_class(class_name, module_path)
-    assert not issubclass(cls, SorcarAgent), (
-        f"{class_name} still inherits SorcarAgent"
-    )
+    assert not issubclass(cls, SorcarAgent), f"{class_name} still inherits SorcarAgent"
     assert issubclass(cls, BaseChannelAgent)
-
-
-@pytest.mark.parametrize(
-    "class_name,module_path",
-    ALL_CHANNEL_AGENTS,
-    ids=[a[0] for a in ALL_CHANNEL_AGENTS],
-)
-def test_channel_agent_does_not_subclass_chat_sorcar_agent(
-    class_name: str, module_path: str,
-) -> None:
-    """No channel agent inherits chat-session persistence.
-
-    The third-party agents previously inherited from
-    :class:`ChatSorcarAgent`, which silently added a ``chat_id``,
-    ``new_chat()``, ``resume_chat()`` etc. surface to every channel
-    agent (and to the on-disk ``history.db`` ``task_history`` rows
-    they produced).  After the cleanup they are plain
-    :class:`BaseChannelAgent` carriers and have none of that surface.
-    """
-    cls = _get_agent_class(class_name, module_path)
-    assert not issubclass(cls, ChatSorcarAgent), (
-        f"{class_name} still inherits ChatSorcarAgent"
-    )
 
 
 @pytest.mark.parametrize(
@@ -142,27 +118,21 @@ def test_channel_agent_does_not_subclass_chat_sorcar_agent(
     ],
 )
 def test_channel_main_rejects_chat_session_flag(
-    flag: str, capsys: pytest.CaptureFixture[str],
+    flag: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """``channel_main`` no longer exposes any chat-session CLI flag.
 
     Argparse exits with status 2 on an unrecognized flag (after
     printing a "unrecognized arguments" diagnostic to stderr).  Both
-    are asserted so the contract is locked end-to-end.
+    are asserted so the contract is locked end-to-end.  The parser runs
+    before any agent is built, so the real ``SlackAgent`` class is passed.
     """
-
-    class _FakeAgent(BaseChannelAgent):
-        def _is_authenticated(self) -> bool:
-            return False
-
-        def _get_auth_tools(self) -> list:
-            return []
-
     original_argv = sys.argv[:]
     try:
         sys.argv = ["test-cli", flag, "-t", "noop"]
         with pytest.raises(SystemExit) as exc_info:
-            channel_main(_FakeAgent, "kiss-test")
+            channel_main(SlackAgent, "kiss-slack")
         assert exc_info.value.code == 2
     finally:
         sys.argv = original_argv

@@ -16,14 +16,14 @@ API against that daemon), and asserts:
    live events (``clear`` / ``status running=True`` / ``prompt``)
    stamped with the API launch's tab id — i.e. the agent task can be
    *opened* remotely; and
-2. an ``appendUserMessage`` command sent from the webview lands in the
-   running tab's ``pending_user_messages`` queue and is echoed back as
-   a ``prompt`` event — i.e. the agent can be *interacted with*
-   remotely.
+2. an ``appendUserMessage`` command sent from the webview is echoed
+   back as a ``prompt`` event and is drained by the real agent's
+   pre-step hook into the model conversation as a ``user`` message —
+   i.e. the agent can be *interacted with* remotely.
 
-The LLM-driving ``RelentlessAgent.run`` is stubbed (returns canned
-YAML after the test releases it) so the full server/transport path is
-exercised without paid API calls.
+The run is a real ``SorcarAgent`` run against the streaming stand-in
+model server (:class:`kiss.tests.server.parallel_agent_harness.StandInModelServer`);
+the model answers ``finish`` once the test releases it.
 """
 
 from __future__ import annotations
@@ -31,30 +31,32 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
-import shutil
-import subprocess
-import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
-from typing import Any, cast
+from collections.abc import Callable
+from typing import Any
 
 import yaml
 
 from kiss.agents.sorcar import channel_workspace, local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.agents.third_party_agents._kiss_web_launcher import (
     run_agent_via_kiss_web,
 )
-from kiss.core import vscode_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.server.parallel_agent_harness import (
+    STANDIN_MODEL,
+    IsolatedKissHome,
+    StandInModelServer,
+    finish_response,
+)
 
-STUB_SUMMARY = "remote webview stub done"
+STUB_SUMMARY = "<p>remote webview run done</p>"
+FOLLOW_UP = "follow-up from the webview"
 
 
 class TestRemoteWebviewInteraction(unittest.TestCase):
@@ -68,51 +70,34 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         # Every global mutation registers its restoration with
         # ``addCleanup`` immediately: cleanups run (in LIFO order) even
         # when ``setUp`` itself fails partway, unlike ``tearDown``.
-        self.tmpdir = tempfile.mkdtemp(prefix="kiss-tp-webview-")
-        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
-        self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
-        self.repo = str(Path(self.tmpdir) / "repo")
-        Path(self.repo).mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["git", "init", "-q"], cwd=self.repo,
-            capture_output=True, check=False, timeout=60,
-        )
+        self.home = IsolatedKissHome(prefix="kiss-tp-webview-")
+        self.addCleanup(self.home.cleanup)
+        # Runs before ``home.cleanup``: stops the event writer and
+        # invalidates every thread's cached connection, so the harness
+        # finds no live connection to close raw under another thread.
+        self.addCleanup(_persistence._close_db)
+        self.endpoint_file = str(self.home.tmpdir / "sorcar-local.json")
+        self.repo = str(self.home.repo)
 
-        kiss_dir = Path(self.tmpdir) / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        self._saved_persistence = (
-            _persistence._DB_PATH,
-            _persistence._db_conn,
-            _persistence._KISS_DIR,
-        )
-        _persistence._KISS_DIR = kiss_dir
-        _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
-        self.addCleanup(self._restore_persistence)
-        self._saved_config_override = (
-            vars(vscode_config).get("CONFIG_DIR"),
-            vars(vscode_config).get("CONFIG_PATH"),
-        )
-        vscode_config.CONFIG_DIR = kiss_dir
-        vscode_config.CONFIG_PATH = kiss_dir / "config.json"
-        self.addCleanup(self._restore_vscode_config)
-
-        self.addCleanup(self._join_tasks_and_clear_agents)
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
-            target=self.loop.run_forever, daemon=True,
+            target=self.loop.run_forever,
+            daemon=True,
         )
         self.loop_thread.start()
         self.addCleanup(self._stop_loop)
 
         self.server = RemoteAccessServer(
-            local_endpoint_file=self.endpoint_file, work_dir=self.repo,
+            local_endpoint_file=self.endpoint_file,
+            work_dir=self.repo,
         )
 
         self._viewer_writer: LocalWriter | None = None
         self._reader_task: concurrent.futures.Future[None] | None = None
+        self._received_cv = threading.Condition()
         asyncio.run_coroutine_threadsafe(
-            self.server.start_private_async(), self.loop,
+            self.server.start_private_async(),
+            self.loop,
         ).result(timeout=30)
         self.addCleanup(self._shutdown_server)
         # Launches go to this test's daemon, not the process-global one.
@@ -120,15 +105,29 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         launcher._ENDPOINT_FILE_OVERRIDE = self.endpoint_file
         self.addCleanup(self._restore_endpoint_override)
 
-        self._parent_class = cast(Any, SorcarAgent.__mro__[1])
-        self._original_run = self._parent_class.run
-        self.addCleanup(self._restore_run)
+        self.model_requests: list[dict[str, Any]] = []
+        self.model_seen = threading.Event()
+        self.model_gate = threading.Event()
+        self.model_server = StandInModelServer(self._answer_model_request)
+        self.addCleanup(self.model_server.stop)
+        # Registered last so they run first: release any in-flight model
+        # call, then join the task workers while the daemon, the model
+        # server and the history DB are all still up.
+        self.addCleanup(self._join_tasks)
+        self.addCleanup(self.model_gate.set)
 
     def _restore_endpoint_override(self) -> None:
         launcher._ENDPOINT_FILE_OVERRIDE = self._saved_endpoint_override
 
-    def _restore_run(self) -> None:
-        self._parent_class.run = self._original_run
+    def _answer_model_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Record *request*, hold it until the test opens ``model_gate``, then ``finish``.
+
+        ``model_seen`` tells the test the run is inside a model call.
+        """
+        self.model_requests.append(request)
+        self.model_seen.set()
+        self.model_gate.wait(timeout=60)
+        return finish_response(STUB_SUMMARY)
 
     def _shutdown_server(self) -> None:
         async def _shutdown() -> None:
@@ -143,12 +142,10 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                 ws_server.close()
                 await ws_server.wait_closed()
             local_endpoint.remove_endpoint_if_owned(
-                self.server._local_endpoint_file, self.server._local_token,
+                self.server._local_endpoint_file,
+                self.server._local_token,
             )
-            pending = [
-                t for t in asyncio.all_tasks()
-                if t is not asyncio.current_task()
-            ]
+            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
             for t in pending:
                 t.cancel()
             if pending:
@@ -156,7 +153,8 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
 
         try:
             asyncio.run_coroutine_threadsafe(
-                _shutdown(), self.loop,
+                _shutdown(),
+                self.loop,
             ).result(timeout=5)
         except Exception:
             pass
@@ -166,56 +164,40 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         self.loop_thread.join(timeout=5)
         self.loop.close()
 
-    def _join_tasks_and_clear_agents(self) -> None:
+    def _join_tasks(self) -> None:
         # The daemon answers the launcher before its task thread has
         # finished its bookkeeping on the test's history.db; join those
-        # threads before the DB is closed and the tmpdir removed.
+        # threads before the DB is closed and the tmpdir removed.  The
+        # worker clears ``state.task_thread`` itself as it finishes, so
+        # read the attribute once and keep the reference.
         for state in agent_state.snapshot():
-            if state.task_thread is not None:
-                state.task_thread.join(timeout=30)
-        agent_state.agent_states.clear()
+            thread = state.task_thread
+            if thread is None:
+                continue
+            thread.join(timeout=30)
+            if thread.is_alive():
+                raise AssertionError(
+                    f"task thread of tab {state.tab_id} still alive; not closing its DB"
+                )
 
-    def _restore_persistence(self) -> None:
-        # ``_close_db()`` stops the event writer and invalidates every
-        # thread's cached connection; a raw ``close()`` under another
-        # thread's running ``db.execute`` crashes the process (SIGSEGV).
-        _persistence._close_db()
-        (
-            _persistence._DB_PATH,
-            _persistence._db_conn,
-            _persistence._KISS_DIR,
-        ) = self._saved_persistence
+    def _open_viewer(self) -> list[dict[str, Any]]:
+        """Open a remote-webview local connection and drain its inbox.
 
-    def _restore_vscode_config(self) -> None:
-        saved_dir, saved_path = self._saved_config_override
-        if saved_dir is None:
-            if "CONFIG_DIR" in vars(vscode_config):
-                delattr(vscode_config, "CONFIG_DIR")
-        else:
-            vscode_config.CONFIG_DIR = saved_dir
-        if saved_path is None:
-            if "CONFIG_PATH" in vars(vscode_config):
-                delattr(vscode_config, "CONFIG_PATH")
-        else:
-            vscode_config.CONFIG_PATH = saved_path
+        Every received event is appended under ``_received_cv`` and the
+        condition is notified, so waiters block on it instead of polling.
+        """
 
-    def _open_viewer(self) -> tuple[
-        LocalWriter, list[dict[str, Any]], threading.Event,
-    ]:
-        """Open a remote-webview local connection and drain its inbox."""
-
-        async def _open() -> tuple[
-            LocalReader, LocalWriter,
-        ]:
+        async def _open() -> tuple[LocalReader, LocalWriter]:
             return await open_local_connection(self.server)
 
         reader, writer = asyncio.run_coroutine_threadsafe(
-            _open(), self.loop,
+            _open(),
+            self.loop,
         ).result(timeout=5)
         self._viewer_writer = writer
 
         received: list[dict[str, Any]] = []
-        got = threading.Event()
+        cv = self._received_cv
 
         async def _drain() -> None:
             while True:
@@ -223,28 +205,45 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                 if not line:
                     return
                 try:
-                    received.append(json.loads(line))
+                    event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                got.set()
+                with cv:
+                    received.append(event)
+                    cv.notify_all()
 
         self._reader_task = asyncio.run_coroutine_threadsafe(
-            _drain(), self.loop,
+            _drain(),
+            self.loop,
         )
-        return writer, received, got
+        return received
 
-    def _wait_for_local_client(
-        self, expected_count: int, timeout: float = 5.0,
-    ) -> None:
+    def _wait_until(self, predicate: Callable[[], bool], timeout: float) -> bool:
+        """Block on ``_received_cv`` until *predicate* holds or *timeout* passes."""
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self.server._printer._ws_lock:
-                if len(
-                    self.server._printer._local_clients
-                ) >= expected_count:
-                    return
-            time.sleep(0.02)
-        raise AssertionError("local viewer connection never registered")
+        with self._received_cv:
+            while not predicate():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._received_cv.wait(remaining)
+            return True
+
+    def _sync_viewer(self, received: list[dict[str, Any]], timeout: float = 10.0) -> None:
+        """Round-trip a ``ping`` so every earlier broadcast has reached the viewer.
+
+        The daemon answers ``pong`` from the connection's command loop,
+        which only starts once the peer is registered as a local client,
+        and per-endpoint sends are FIFO (``WebPrinter._locked_send``): a
+        reply cannot overtake a broadcast already scheduled for the same
+        peer.  So the ``pong`` proves both that the viewer is registered
+        and that every event broadcast before the ping was delivered.
+        """
+        before = sum(1 for e in list(received) if e.get("type") == "pong")
+        self._send_from_viewer({"type": "ping"})
+        assert self._wait_until(
+            lambda: sum(1 for e in received if e.get("type") == "pong") > before, timeout
+        ), "the daemon never answered the viewer's ping"
 
     def _send_from_viewer(self, cmd: dict[str, Any]) -> None:
         """Send a JSON command over the viewer's local connection."""
@@ -261,66 +260,45 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
 
     @staticmethod
     def _events_for_tab(
-        received: list[dict[str, Any]], tab_id: str, ev_type: str,
+        received: list[dict[str, Any]],
+        tab_id: str,
+        ev_type: str,
     ) -> list[dict[str, Any]]:
-        return [
-            e for e in list(received)
-            if e.get("type") == ev_type and e.get("tabId") == tab_id
-        ]
+        return [e for e in list(received) if e.get("type") == ev_type and e.get("tabId") == tab_id]
+
+    def _wait_for_events(
+        self,
+        received: list[dict[str, Any]],
+        tab_id: str,
+        ev_type: str,
+        text: str = "",
+        timeout: float = 10.0,
+        running: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the tab's matching *ev_type* events once any arrive.
+
+        An event matches when its ``text`` contains *text* and, when
+        *running* is given, its ``running`` flag equals it.
+        """
+
+        def matching() -> list[dict[str, Any]]:
+            return [
+                e
+                for e in self._events_for_tab(received, tab_id, ev_type)
+                if text in str(e.get("text", ""))
+                and (running is None or e.get("running") is running)
+            ]
+
+        self._wait_until(lambda: bool(matching()), timeout)
+        return matching()
 
     def test_launched_agent_open_and_interact_via_remote_webview(
         self,
     ) -> None:
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
-        release = threading.Event()
-        started = threading.Event()
-        drained_messages: list[str] = []
-
-        def stub_run(self_agent: Any, **kwargs: Any) -> str:
-            started.set()
-            printer = kwargs.get("printer") or getattr(
-                self_agent, "printer", None,
-            )
-            assert printer is not None, "the launched agent has no printer"
-            # Drain through the printer bridge a real agent's pre-step
-            # hook uses.  It CLEARS the queue: a message merely peeked
-            # at would still be pending when this run ends, and the
-            # task runner re-submits undrained prompts as the tab's
-            # next run -- a real-model run on the slack SEA that
-            # outlives the test (seen blocked in ask_user_question on
-            # Windows) and keeps the ``default`` channel workspace held
-            # for every later test in the process.
-            deadline = time.time() + 30
-            while time.time() < deadline and not release.is_set():
-                queued = printer.drain_pending_user_messages()
-                if queued:
-                    drained_messages.extend(queued)
-                    release.set()
-                    break
-                time.sleep(0.05)
-            release.wait(timeout=30)
-            raw: str = yaml.safe_dump(
-                {
-                    "success": True,
-                    "is_continue": False,
-                    "summary": STUB_SUMMARY,
-                },
-                sort_keys=False,
-            )
-            printer.print(
-                raw,
-                type="result",
-                step_count=1,
-                total_tokens=10,
-                cost="$0.0010",
-            )
-            return raw
-
-        self._parent_class.run = stub_run
-
-        _writer, received, _got = self._open_viewer()
-        self._wait_for_local_client(1)
+        received = self._open_viewer()
+        self._sync_viewer(received)
 
         agent = SlackAgent()
         out: dict[str, Any] = {}
@@ -329,114 +307,98 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
             out["result"] = run_agent_via_kiss_web(
                 agent,
                 "remote webview task",
+                model_name=STANDIN_MODEL,
                 work_dir=self.repo,
+                model_config=self.model_server.model_config,
             )
 
         t = threading.Thread(target=launch, daemon=True)
         t.start()
         try:
-            assert started.wait(timeout=30), "agent run never started"
+            assert self.model_seen.wait(timeout=60), "the run never called the model"
 
-            tab_id = ""
-            deadline = time.time() + 10
-            worker: threading.Thread | None = None
-            while time.time() < deadline and not tab_id:
-                for st in agent_state.snapshot():
-                    if st.tab_id.startswith("api-") and st.is_task_active:
-                        tab_id, worker = st.tab_id, st.task_thread
-                        break
-                time.sleep(0.02)
-            assert tab_id, "API launch never appeared in the registry"
-            assert worker is not None, "the API launch has no task thread"
+            # ``_cmd_run`` installs the worker thread in the registry and
+            # broadcasts ``clear`` before it starts the thread, so the
+            # first ``clear`` on an ``api-`` tab names a registered task.
+            def api_clears() -> list[dict[str, Any]]:
+                return [
+                    e
+                    for e in list(received)
+                    if e.get("type") == "clear" and str(e.get("tabId", "")).startswith("api-")
+                ]
 
-            deadline = time.time() + 10
-            while time.time() < deadline:
-                if self._events_for_tab(received, tab_id, "status"):
-                    break
-                time.sleep(0.05)
-            status_events = self._events_for_tab(
-                received, tab_id, "status",
-            )
-            assert any(
-                e.get("running") is True for e in status_events
-            ), "remote webview never saw status running=True for the task"
-            assert self._events_for_tab(received, tab_id, "clear"), (
+            assert self._wait_until(lambda: bool(api_clears()), 10), (
                 "remote webview never saw the task's clear event"
             )
-            prompt_events = self._events_for_tab(
-                received, tab_id, "prompt",
+            tab_id = str(api_clears()[0]["tabId"])
+            states = [st for st in agent_state.snapshot() if st.tab_id == tab_id]
+            assert states, "API launch never appeared in the registry"
+            worker = states[0].task_thread
+            assert worker is not None, "the API launch has no task thread"
+
+            assert self._wait_for_events(received, tab_id, "status", running=True), (
+                "remote webview never saw status running=True for the task"
             )
-            assert any(
-                "remote webview task" in str(e.get("text", ""))
-                for e in prompt_events
+            assert self._wait_for_events(
+                received,
+                tab_id,
+                "prompt",
+                "remote webview task",
             ), "remote webview never saw the task's prompt event"
 
-            self._send_from_viewer({
-                "type": "appendUserMessage",
-                "tabId": tab_id,
-                "prompt": "follow-up from the webview",
-            })
-
-            deadline = time.time() + 10
-            while time.time() < deadline and not drained_messages:
-                time.sleep(0.05)
-            assert drained_messages == ["follow-up from the webview"], (
-                "appendUserMessage from the remote webview never reached "
-                "the running third-party agent's message queue"
+            self._send_from_viewer(
+                {
+                    "type": "appendUserMessage",
+                    "tabId": tab_id,
+                    "prompt": FOLLOW_UP,
+                }
             )
-
-            echoes: list[dict[str, Any]] = []
-            deadline = time.time() + 10
-            while time.time() < deadline:
-                echoes = [
-                    e for e in self._events_for_tab(
-                        received, tab_id, "prompt",
-                    )
-                    if "follow-up from the webview" in str(
-                        e.get("text", ""),
-                    )
-                ]
-                if echoes:
-                    break
-                time.sleep(0.05)
-            assert echoes, (
-                "the webview never received the prompt echo for its "
-                "appendUserMessage"
+            assert self._wait_for_events(received, tab_id, "prompt", FOLLOW_UP), (
+                "the webview never received the prompt echo for its appendUserMessage"
             )
         finally:
-            release.set()
-            t.join(timeout=30)
+            # Release the model: it answers ``finish``; with the follow-up
+            # still queued the agent refuses that finish, and the next
+            # step's pre-step hook drains the message into the
+            # conversation before the model is asked again.
+            self.model_gate.set()
+            t.join(timeout=60)
 
         parsed = yaml.safe_load(out.get("result") or "")
-        assert parsed and parsed.get("success") is True
+        assert parsed and parsed.get("success") is True, out.get("result")
         assert parsed.get("summary") == STUB_SUMMARY
-        ended: list[dict[str, Any]] = []
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            ended = [
-                e for e in self._events_for_tab(received, tab_id, "status")
-                if e.get("running") is False
-            ]
-            if ended:
-                break
-            time.sleep(0.05)
-        assert ended, "remote webview never saw status running=False"
+        agentic = [r for r in self.model_requests if r.get("tools")]
+        assert agentic, "the run sent no agentic model request"
+        user_turns = [
+            str(m.get("content", "")) for m in agentic[-1]["messages"] if m.get("role") == "user"
+        ]
+        assert any(f"User says: {FOLLOW_UP}" in c for c in user_turns), (
+            "the appendUserMessage from the remote webview was never drained "
+            f"into the running agent's conversation: {user_turns}"
+        )
+
+        assert self._wait_for_events(received, tab_id, "status", running=False), (
+            "remote webview never saw status running=False"
+        )
         # The drained follow-up must not come back as a second run on
         # the tab.  The task runner re-submits leftovers as the LAST
         # step of the worker thread's cleanup (after ``running=False``),
-        # so wait for that thread itself; a re-submitted run would then
-        # show as a second ``clear`` event, a fresh task thread and the
-        # slack SEA's ``default`` channel workspace held again.
+        # and a re-submitted run registers its thread and broadcasts its
+        # ``clear`` synchronously inside that step; so once the worker
+        # has been joined, every re-dispatch artefact already exists: a
+        # second ``clear`` event (delivered before the ping barrier's
+        # ``pong``), a fresh task thread in the registry and the slack
+        # SEA's ``default`` channel workspace held again.
         worker.join(timeout=30)
         assert not worker.is_alive(), "the launched run's task thread did not finish"
-        time.sleep(1.0)  # a re-dispatched run would have started by now
+        self._sync_viewer(received)
         assert len(self._events_for_tab(received, tab_id, "clear")) == 1, (
             "an undrained follow-up was re-submitted as a new run"
         )
         assert dict(channel_workspace._ACTIVE_WORKSPACES) == {}
-        assert not any(
-            st.task_thread is not None for st in agent_state.snapshot()
-        ), "a task thread outlived the launched run"
+        assert not any(st.task_thread is not None for st in agent_state.snapshot()), (
+            "a task thread outlived the launched run"
+        )
 
 
 if __name__ == "__main__":

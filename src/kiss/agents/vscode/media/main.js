@@ -4149,8 +4149,6 @@
     tab.ownerBrowseWorkDir = ownerTab ? workDirForTab(ownerTab.id) : '';
     tabs.push(tab);
     renderContentView(tab, ev);
-    // switchToTab refuses hidden tabs, so a foreign-scoped file opens
-    // in the background and waits for its workspace.
     if (mayFocus) switchToTab(tab.id);
     renderTabBar();
   }
@@ -4269,9 +4267,6 @@
           isReport: true,
         },
         mayFocus,
-        // The report belongs to the task's tab: it inherits that
-        // tab's workspace scope, so a hidden tab's report opens
-        // hidden instead of surfacing in an unrelated workspace.
         key,
       );
     });
@@ -4344,9 +4339,6 @@
           closeTab(tabId);
         },
       },
-      // Bulk closes act on VISIBLE tabs only: a hidden tab belongs to
-      // another workspace, and closing it here would close it in the
-      // shared registry — destroying a tab this user cannot even see.
       {
         label: 'Close Others',
         action: function () {
@@ -4928,9 +4920,11 @@
       if (inSnapshot.has(t.id) || removedIds.has(t.id)) return;
       next.push(t);
     });
+    // Only chat tabs and their sub-agent descendants are removed here
+    // (content tabs are never in the registry and carry no
+    // parentTabId), so there is no editor to dispose.
     removedIds.forEach(id => {
       const doomed = byId.get(id);
-      if (doomed && doomed.isContentTab) disposeTabContentView(doomed);
       if (doomed && typeof doomed.askPendingQuestion === 'string')
         dismissAskWaitingNotice(id);
       forgetPendingFileLinks(id);
@@ -15364,7 +15358,6 @@
       if (typeof window.Audio !== 'function') return false;
       const mime = ev.audioMime || 'audio/mpeg';
       player = new window.Audio('data:' + mime + ';base64,' + ev.audioB64);
-      player.muted = !!ev.muted;
       player.onended = done;
       player.onerror = done;
       player.onabort = done;
@@ -17633,8 +17626,6 @@
     // their tabs are not in this panel's `tabs` (getTab above).
     if (EDITOR_TAB_MODE) postToHost({type: 'revealPanel'});
     if (tabId === activeTabId) return;
-    // switchToTab refuses hidden tabs, so a task finishing in another
-    // workspace's tab never yanks this client onto it.
     switchToTab(tabId);
   }
 
@@ -19132,9 +19123,9 @@
   // transcript of their own — a result addressed to one would render
   // into the hidden shared output and be destroyed on the next tab
   // switch.  Commit on behalf of the chat tab the host currently
-  // considers active instead; when there is none ('' -- every visible
-  // chat is gone or belongs to another workspace) there is nothing to
-  // commit for, and the caller must not send.
+  // considers active instead; when there is none ('' -- every chat
+  // tab is gone) there is nothing to commit for, and the caller must
+  // not send.
   // readychat-coverage:start
   function autocommitTargetTabId() {
     const active = getTab(activeTabId);
@@ -19402,8 +19393,7 @@
           if (target !== activeTabId) switchToTab(target);
           const after = getTab(activeTabId);
           if (after && after.isContentTab) {
-            // The owner is gone (or hidden in another workspace):
-            // there is no chat here to export.
+            // The owner is gone: there is no chat here to export.
             addError('Share failed: this tab has no chat to share');
             flashShareBtn(false);
             return;
@@ -22673,12 +22663,6 @@
         // The task text goes to the read-only task panel only.  #task-input
         // holds the user's own draft for the NEXT prompt and is never written.
         const taskText = s.preview || s.title || '';
-        // A chat open in a HIDDEN tab (another workspace's) is treated
-        // like one with no tab at all: the user explicitly asked to
-        // open it in THIS workspace, so a fresh tab resumes it here
-        // and the daemon's one-tab-per-chat displacement (the newest
-        // bind wins — the same designed flow any cross-client history
-        // open uses) retires the old tab everywhere.
         const existingChatTab = getTabByBackendChatId(s.id);
         // Editor-tabs mode: a chat that is not THIS panel's belongs in
         // its own editor tab. The host either reveals the panel already

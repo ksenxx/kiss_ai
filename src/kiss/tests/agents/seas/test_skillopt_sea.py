@@ -46,6 +46,7 @@ from kiss.agents.seas.skillopt.skillopt_sea import (
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.sea_settings import SeaError, resolve_settings
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -53,6 +54,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     text_body,
     tool_call_body,
 )
+from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 _SH_SEA = Path(sh_sea.__file__).resolve()
 _SKILLOPT_SEA = Path(skillopt_sea.__file__).resolve()
@@ -1061,10 +1063,9 @@ def test_run_rollout_sub_task_inherits_the_prompt_suffix(
     (after the SEA's ``prompt(task)`` shaped it) and hands it to
     ``SorcarAgent.run(prompt_suffix=...)``, so the dispatch inherits it
     like a daemon-run task's ``appendToPrompt``; the SEA's own suffix
-    belongs to the prompt body and is not inherited.
+    belongs to the prompt body and is not inherited.  The dispatch is
+    read off a local daemon stand-in reached through ``KISS_SORCAR_LOCAL``.
     """
-    from kiss.agents.sorcar import daemon_client
-
     sea = tmp_path / "suffix_sea.py"
     sea.write_text(
         """
@@ -1079,33 +1080,29 @@ class Sea(BaseSea):
 """,
         encoding="utf-8",
     )
-    dispatched: list[dict[str, Any]] = []
-
-    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
-        dispatched.append({"prompt": prompt, **kwargs})
-        return daemon_client.TaskResult(
-            text="child ok", success=True, cost=0.0, tokens=1, steps=1, chat_id="c",
-        )
-
-    monkeypatch.setattr(daemon_client, "run", capture_run)
-    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
+    daemon = RecordingDaemon(text="child ok", tokens=1, steps=1, chat_id="c")
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     task = EvalTask(id="t", prompt="parent task", expect=["done"])
     bodies = [
         tool_call_body("run_agent", {"task": "child task", "agent": "", "timeout": "30"}, 500),
         finish_body("<p>done</p>", 600),
     ]
-    with serve(bodies) as (url, requests):
-        cfg = _config(tmp_path, sea, tmp_path / "unused.json", url)
-        rollout = run_rollout(
-            SeaTarget(sea), task, cfg, tmp_path / "w1",
-            {"max_steps": 7, "prompt_suffix": "\n\nEVAL-SUFFIX"},
-        )
+    try:
+        with serve(bodies) as (url, requests):
+            cfg = _config(tmp_path, sea, tmp_path / "unused.json", url)
+            rollout = run_rollout(
+                SeaTarget(sea), task, cfg, tmp_path / "w1",
+                {"max_steps": 7, "prompt_suffix": "\n\nEVAL-SUFFIX"},
+            )
+    finally:
+        daemon.close()
     assert rollout.passed, rollout
     user = [m for m in requests[0]["messages"] if m["role"] == "user"]
     assert str(user[0]["content"]).rstrip().endswith("ROLLOUT-SUFFIX\n\nEVAL-SUFFIX")
-    (call,) = dispatched
+    (call,) = daemon.run_commands
     assert call["prompt"] == "child task"
-    assert call["append_to_prompt"] == "\n\nEVAL-SUFFIX"
+    assert call["appendToPrompt"] == "\n\nEVAL-SUFFIX"
+    assert "child ok" in str(requests[1]["messages"][-1]["content"])
 
 
 def test_missing_split_is_an_error(tmp_path: Path) -> None:
@@ -1145,12 +1142,7 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     assert resolve_settings(declared) == effective
     assert skillopt.system_prompt("") == skillopt_sea.SYSTEM_PROMPT
     # The class is the contract: the module keeps no getter of the old shape.
-    for legacy in (
-        "settings", "system_prompt", "add_to_tools", "add_to_system_prompt", "tool_profile",
-        "use_worktree", "auto_commit", "auto_classify", "allow_fan_out", "use_web_tools",
-        "use_memory", "tools", "append_to_system_prompt", "model", "prompt",
-    ):
-        assert not hasattr(skillopt_sea, legacy), legacy
+    assert_no_removed_getters(skillopt_sea)
     assert sea_commands.get_command("skillopt") == _SKILLOPT_SEA
     assert sea_commands.slash_command_task("/skillopt x.py evals.json") == (
         "x.py evals.json", _SKILLOPT_SEA

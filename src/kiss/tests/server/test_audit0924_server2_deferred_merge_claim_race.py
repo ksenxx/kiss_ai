@@ -24,7 +24,7 @@ both trigger threads meet at a ``threading.Barrier`` before delegating
 to the real method.  A thread reaches that barrier only after it has
 snapshotted the deferred tab as a candidate, so both threads snapshot
 BEFORE either claims; the loser must then find the marker cleared by
-the winner and get ``_DEFERRAL_SUPERSEDED``.  (The wall-clock
+the winner and get ``_DEFERRAL_KEPT``.  (The wall-clock
 ``KISS_RACE_DELAY`` hook is not needed: a thread parked at the barrier
 cannot claim, so the other thread's snapshot always still sees the
 marker.)  Real temp git repo, real ``VSCodeServer`` merge flow, real
@@ -38,7 +38,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from kiss.server.merge_flow import _DEFERRAL_SUPERSEDED
+from kiss.server.merge_flow import _DEFERRAL_KEPT
 from kiss.tests.server.test_worktree_deferred_auto_merge import (
     _DeferredMergeBase,
 )
@@ -124,8 +124,8 @@ class TestConcurrentDeferredRetries(_DeferredMergeBase):
             assert call["action"] == "merge" and call["tab_id"] == _WT_TAB
             assert call["kwargs"]["deferred_branch"] == branch, call
         outcomes = [c["result"] for c in calls]
-        superseded = [r for r in outcomes if r is _DEFERRAL_SUPERSEDED]
-        won = [r for r in outcomes if r is not _DEFERRAL_SUPERSEDED]
+        superseded = [r for r in outcomes if r is _DEFERRAL_KEPT]
+        won = [r for r in outcomes if r is not _DEFERRAL_KEPT]
         assert len(superseded) == 1 and len(won) == 1, outcomes
         assert won[0]["success"], won
 

@@ -2629,14 +2629,13 @@ class WebPrinter(JsonPrinter):
         self._local_clients: set[ServerConnection] = set()
         # Local talk bookkeeping.  This printer owns two facts:
         # which local connection addressed which tab id (INTEREST: the
-        # per-connection sets and their shared reference counts) and
+        # per-connection sets, keyed by connection id) and
         # which local connections host a chat webview (``ready`` seen).
         # Whether a tab is SHOWN by a local webview is decided at talk
         # time by the rule installed via ``set_local_tab_visibility``
         # from those facts plus the canonical ones (tab registry, live
         # agent state) — never from a copy of registry state kept
         # here.  See ``shown_local_tabs``.
-        self._local_tab_counts: dict[str, int] = {}
         self._local_tab_sets: dict[str, set[str]] = {}
         self._local_webview_conns: set[str] = set()
         self._local_tab_visibility: Callable[[str, bool, bool], bool] | None = None
@@ -2985,22 +2984,6 @@ class WebPrinter(JsonPrinter):
                         skip.add(endpoint)
             return [w for w in self._local_clients if w not in skip]
 
-    @staticmethod
-    def _increment_count(counts: dict[str, int], key: str) -> None:
-        """Increment *key* in a small connection-count map."""
-        counts[key] = counts.get(key, 0) + 1
-
-    @staticmethod
-    def _decrement_count(counts: dict[str, int], key: str) -> None:
-        """Decrement *key* in a small connection-count map."""
-        count = counts.get(key)
-        if count is None:
-            return
-        if count <= 1:
-            del counts[key]
-        else:
-            counts[key] = count - 1
-
     def set_local_tab_visibility(
         self, decide: Callable[[str, bool, bool], bool],
     ) -> None:
@@ -3064,7 +3047,8 @@ class WebPrinter(JsonPrinter):
             The ids a local webview currently shows.
         """
         with self._ws_lock:
-            interested = {t for t in tab_ids if t in self._local_tab_counts}
+            addressed = set().union(*self._local_tab_sets.values())
+            interested = {t for t in tab_ids if t in addressed}
             webview_attached = bool(self._local_webview_conns)
             decide = self._local_tab_visibility
         if decide is None:
@@ -3096,10 +3080,7 @@ class WebPrinter(JsonPrinter):
         """
         with self._ws_lock:
             self._local_tab_sets[conn_id] = local_tabs
-            if tab_id in local_tabs:
-                return
             local_tabs.add(tab_id)
-            self._increment_count(self._local_tab_counts, tab_id)
 
     def sync_local_tabs(
         self, conn_id: str, tab_ids: set[str], local_tabs: set[str]
@@ -3107,8 +3088,8 @@ class WebPrinter(JsonPrinter):
         """Reconcile *conn_id*'s interest set to exactly *tab_ids*.
 
         The ``ready``-time sync: missing ids are added and stale ones
-        dropped (with matching reference-count updates), so a webview
-        reload bounds the interest a connection accumulated.
+        dropped, so a webview reload bounds the interest a connection
+        accumulated.
 
         Args:
             conn_id: The local connection's id.
@@ -3117,10 +3098,6 @@ class WebPrinter(JsonPrinter):
         """
         with self._ws_lock:
             self._local_tab_sets[conn_id] = local_tabs
-            for tab_id in tab_ids - local_tabs:
-                self._increment_count(self._local_tab_counts, tab_id)
-            for tab_id in local_tabs - tab_ids:
-                self._decrement_count(self._local_tab_counts, tab_id)
             local_tabs.clear()
             local_tabs.update(tab_ids)
 
@@ -3139,24 +3116,17 @@ class WebPrinter(JsonPrinter):
         """
         with self._ws_lock:
             for local_tabs in self._local_tab_sets.values():
-                if tab_id in local_tabs:
-                    local_tabs.discard(tab_id)
-                    self._decrement_count(self._local_tab_counts, tab_id)
+                local_tabs.discard(tab_id)
 
-    def unregister_local_tabs(
-        self, conn_id: str, tab_ids: set[str]
-    ) -> None:
+    def unregister_local_tabs(self, conn_id: str) -> None:
         """Drop a disconnected local connection's local-tab registrations.
 
         Args:
             conn_id: The local connection's id.
-            tab_ids: The connection's remaining local-tab ids.
         """
         with self._ws_lock:
             self._local_webview_conns.discard(conn_id)
             self._local_tab_sets.pop(conn_id, None)
-            for tab_id in tab_ids:
-                self._decrement_count(self._local_tab_counts, tab_id)
 
     def _fanout_talk(self, event: dict[str, Any], targets: list[str]) -> None:
         """Fan out one ``talk`` event with per-device playback arbitration.
@@ -5522,9 +5492,6 @@ def _read_media_file(filepath: Path) -> bytes | None:
     return None
 
 
-_translate_webview_command = sorcar_api.translate_webview_command
-
-
 async def _cancel_task(task: asyncio.Task[None] | None) -> None:
     """Cancel *task* (if any) and wait for it to unwind.
 
@@ -5738,6 +5705,9 @@ class RemoteAccessServer:
         self._update_models_starting = False
         self._update_models_watch_task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
+        # Whether ``_on_sea_commands_changed`` is subscribed to the SEA
+        # slash-command registry (see ``_start_sea_command_watcher``).
+        self._sea_command_subscribed = False
 
     async def _process_request(
         self, connection: ServerConnection, request: Request
@@ -5877,17 +5847,6 @@ class RemoteAccessServer:
             f"No route matches {path[:200]!r}.",
         )
 
-
-    @staticmethod
-    def _passwords_equal(a: str, b: str) -> bool:
-        """Constant-time string compare to defeat timing attacks.
-
-        Alias of :func:`kiss.server.sorcar.passwords_equal` (the
-        server API owns the auth handshake; this staticmethod is kept
-        for existing callers and tests).
-        """
-        return sorcar_api.passwords_equal(a, b)
-
     def _peer_is_loopback(self, connection: Any) -> bool:
         """Return True when *connection*'s raw TCP peer is loopback.
 
@@ -5960,19 +5919,11 @@ class RemoteAccessServer:
             return 0.0
         return max(0.0, _AUTH_LOCKOUT - (now - fails[-1]))
 
-    def _is_auth_locked(self, ip: str) -> bool:
-        """Return True if *ip* is currently rate-limited.
-
-        Thin wrapper over :meth:`_auth_lock_remaining` kept for
-        callers/tests that only need the boolean answer.
-        """
-        return self._auth_lock_remaining(ip) > 0.0
-
     def _record_auth_failure(self, ip: str) -> None:
         """Record a failed authentication attempt from *ip*.
 
         Also sweeps fully-expired entries for EVERY tracked IP:
-        :meth:`_is_auth_locked` only prunes the entry of the IP that
+        :meth:`_auth_lock_remaining` only prunes the entry of the IP that
         reconnects, so on a public tunnel an attacker rotating source
         addresses would otherwise leave one stale entry per distinct
         IP forever.  The sweep bounds the dict to IPs that failed
@@ -6111,11 +6062,7 @@ class RemoteAccessServer:
                         "voice-wake stop on disconnect failed",
                         exc_info=True,
                     )
-                local_tabs = conn_state.get("local_tabs")
-                self._printer.unregister_local_tabs(
-                    conn_state["conn_id"],
-                    local_tabs if isinstance(local_tabs, set) else set(),
-                )
+                self._printer.unregister_local_tabs(conn_state["conn_id"])
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
             self._vscode_server.terminals.viewer_gone(conn_state["conn_id"])
@@ -10459,26 +10406,41 @@ class RemoteAccessServer:
         to every connected client on any registry change (a SEA added
         or removed from a watched folder, or ``SEAS.md`` edited), then
         launches the background poller.  Idempotent per server
-        instance: the ``_sea_command_watcher_started`` guard prevents
-        a second call from stacking duplicate subscribers, so a
-        rebound listener or a test-time re-setup cannot fan a single
-        rescan out twice.
+        instance: the ``_sea_command_subscribed`` guard prevents a
+        second call from stacking duplicate subscribers, so a rebound
+        listener or a test-time re-setup cannot fan a single rescan
+        out twice.
         """
-        if getattr(self, "_sea_command_watcher_started", False):
+        if self._sea_command_subscribed:
             return
-        self._sea_command_watcher_started = True
+        self._sea_command_subscribed = True
         from kiss.agents.sorcar import sea_commands
 
-        def _on_change(commands: list[str]) -> None:
-            self._printer.broadcast(
-                {"type": "seaCommands", "commands": commands},
-            )
-
-        self._sea_command_subscriber: Callable[[list[str]], None] | None = (
-            _on_change
-        )
-        sea_commands.subscribe(_on_change)
+        sea_commands.subscribe(self._on_sea_commands_changed)
         sea_commands.start_registry_watcher()
+
+    def _on_sea_commands_changed(self, commands: list[str]) -> None:
+        """Broadcast the new SEA slash-command list to every client.
+
+        Args:
+            commands: The sorted command names after a registry change.
+        """
+        self._printer.broadcast({"type": "seaCommands", "commands": commands})
+
+    def _stop_sea_command_watcher(self) -> None:
+        """Unsubscribe from the SEA registry and stop its poller.
+
+        Shared by both shutdown paths (the blocking ``start()``
+        cleanup and :meth:`stop_async`) so a fresh server rebound in
+        the same process never inherits a dead subscriber bound to the
+        old printer.  Blocking: the poller join waits up to 5 s.
+        """
+        from kiss.agents.sorcar import sea_commands
+
+        if self._sea_command_subscribed:
+            sea_commands.unsubscribe(self._on_sea_commands_changed)
+            self._sea_command_subscribed = False
+        sea_commands.stop_registry_watcher()
 
     async def _serve_async(self) -> None:
         """Internal async entry point for the server.
@@ -11005,20 +10967,7 @@ class RemoteAccessServer:
             # Terminal-tab shells are hung up (and killed when they
             # ignore it) rather than left to outlive the daemon.
             self._vscode_server.terminals.shutdown()
-            # Also stop the SEA registry watcher on the blocking
-            # start() cleanup path (KeyboardInterrupt / pre-loop
-            # SIGTERM).  The async ``stop_async`` path unhooks it via
-            # its own teardown; this branch mirrors that so a fresh
-            # server rebound in the same process does not inherit a
-            # dead subscriber bound to the old printer.
-            from kiss.agents.sorcar import sea_commands
-
-            cb = getattr(self, "_sea_command_subscriber", None)
-            if cb is not None:
-                sea_commands.unsubscribe(cb)
-                self._sea_command_subscriber = None
-            self._sea_command_watcher_started = False
-            sea_commands.stop_registry_watcher()
+            self._stop_sea_command_watcher()
             file_index.stop()
             if stall_watchdog is not None:
                 stall_watchdog.stop()
@@ -11074,32 +11023,6 @@ class RemoteAccessServer:
                 # (or an endpoint file pointing at one) behind.
                 self._close_partial_setup()
                 raise
-
-    async def _drain_tasks(
-        self, tasks: set[asyncio.Task[None]], timeout: float = 2.0,
-    ) -> None:
-        """Join *tasks*, cancelling any that outlive *timeout*.
-
-        Shutdown helper: waits up to *timeout* seconds for the given
-        asyncio tasks (deferred tab-close
-        tasks) to finish on their own — closed streams already
-        unblock them — then cancels and awaits any stragglers so
-        none can touch server state after shutdown completes.
-
-        Args:
-            tasks: Tasks to join; a snapshot is taken, and the
-                current task (if present) is excluded.
-            timeout: Seconds to wait before cancelling stragglers.
-        """
-        current = asyncio.current_task()
-        pending = {t for t in tasks if t is not current and not t.done()}
-        if not pending:
-            return
-        _done, pending = await asyncio.wait(pending, timeout=timeout)
-        for t in pending:
-            t.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
 
     async def stop_async(self) -> None:
         """Stop the server gracefully.
@@ -11186,14 +11109,7 @@ class RemoteAccessServer:
             # not frozen for the grace period.
             await asyncio.to_thread(self._stop_tunnel)
             _remove_url_file(self._url_file)
-            from kiss.agents.sorcar import sea_commands
-
-            cb = getattr(self, "_sea_command_subscriber", None)
-            if cb is not None:
-                sea_commands.unsubscribe(cb)
-                self._sea_command_subscriber = None
-            self._sea_command_watcher_started = False
-            await asyncio.to_thread(sea_commands.stop_registry_watcher)
+            await asyncio.to_thread(self._stop_sea_command_watcher)
 
 
 def _resolve_tunnel_settings() -> tuple[str | None, str | None]:

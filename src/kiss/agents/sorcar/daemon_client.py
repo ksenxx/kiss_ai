@@ -797,9 +797,10 @@ def run(
             waits for the task or the timeout.
         running: An event set when the task's initial ``status
             running=true`` arrives — the moment its tab exists on every
-            client — or when this wait ends without one.  A background
-            ``run_agent`` job returns its notice only after it, so the
-            spawn lands inside the tool call's time window.
+            client.  Not set by a wait that ends without one: the
+            ``run_agent`` job thread sets it after recording the
+            dispatch's outcome, so a ``wait="false"`` call woken by it
+            either has a tab to report or the finished result.
 
     Returns:
         A :class:`TaskResult` with the result text, success flag, cost
@@ -1113,8 +1114,6 @@ def run(
             )
         raise
     finally:
-        if running is not None:
-            running.set()
         # Nothing to cascade or close when the connect itself failed:
         # there is no task and no tab on the daemon's side.
         if (

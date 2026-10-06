@@ -358,7 +358,7 @@ class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'add_to_prompt': 'x'}
 """)
-    with pytest.raises(SeaScriptError, match=r"settings\(\) has an unknown key 'add_to_prompt'"):
+    with pytest.raises(SeaScriptError, match=r"settings\(\) key 'add_to_prompt' was removed: "):
         sea_settings(old)
     assert "add_to_prompt" not in SETTING_TYPES
     new = _write(

@@ -7,19 +7,19 @@
 Everything runs against the real installed channel modules and the
 real agent-script loader — no mocks or test doubles (``monkeypatch``
 is used only to isolate environment variables, the working directory,
-and the cron module's daemon-endpoint default between tests, and to
-capture the daemon submission that a live dispatch would perform).  Branches
+and the cron module's daemon-endpoint default between tests).  A
+dispatch that must succeed goes over the wire to the ``daemon``
+fixture's stand-in
+(:class:`~kiss.tests.agents.third_party_agents.recording_daemon.RecordingDaemon`),
+which records the ``run`` command the real ``daemon_client.run`` sends; the
+tests assert on that command's wire fields, and apply
+``apply_agent_overrides`` to it exactly as the daemon would.  Branches
 not exercised here, and why they need no doubles-based tests:
 
-- ``run_agent``'s successful dispatch path submits a task to the
-  kiss-web daemon and needs a live LLM endpoint (unavailable and
-  non-deterministic in unit tests); the dispatch plumbing up to the
-  daemon endpoint is covered via the unreachable-daemon path (and, with
-  a real daemon stand-in, in
-  ``kiss.tests.agents.sorcar.test_dispatch_timeout``), and the
-  agent-script contract the daemon applies is covered directly
-  through ``apply_agent_overrides``.
-- ``_package_dir``'s package-absent branches would require
+- the sub-task's execution on the daemon needs a live LLM endpoint
+  (unavailable and non-deterministic in unit tests); the stand-in
+  answers every ``run`` with a scripted success.
+- ``sea_commands._third_party_dir``'s package-absent branch would require
   uninstalling ``kiss.agents.third_party_agents`` from the test
   environment.
 - ``_run_agent``'s no-agent-class guard is unreachable for any
@@ -33,6 +33,9 @@ kiss.agents.sorcar + kiss.server closure) moved to
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +51,7 @@ from kiss.agents.sorcar.agent_file import apply_agent_overrides, channel_workspa
 from kiss.agents.sorcar.sea_commands import load_sea
 from kiss.agents.third_party_agents.auth_status import _agent_class
 from kiss.core.config import kiss_home
+from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 # The standalone tool (no calling-task work directory): relative agent
@@ -75,23 +79,28 @@ def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture()
-def captured_dispatch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Capture every ``daemon_client.run`` call at the daemon-client boundary.
+def daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
+    """A daemon stand-in every dispatch in the test reaches.
 
-    The real dispatch path runs up to that boundary; each call is recorded
-    as ``{"prompt": ..., **kwargs}`` and answered with a successful
-    ``TaskResult`` so the tool returns normally.
+    The dispatcher hands ``cron_agent._daemon_endpoint_file`` to
+    ``daemon_client.run`` as its explicit endpoint file, which takes
+    precedence over the unreachable ``KISS_SORCAR_LOCAL`` set above.
     """
-    from kiss.agents.sorcar import daemon_client
+    stand_in = RecordingDaemon()
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", str(stand_in.endpoint_file))
+    try:
+        yield stand_in
+    finally:
+        stand_in.close()
 
-    captured: list[dict[str, Any]] = []
 
-    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
-        captured.append({"prompt": prompt, **kwargs})
-        return daemon_client.TaskResult(text="ok", success=True, cost=0.0, tokens=0, steps=0)
+def _sent(daemon: RecordingDaemon) -> dict[str, Any]:
+    """Return the latest ``run`` command *daemon* received, as the daemon would apply it.
 
-    monkeypatch.setattr(daemon_client, "run", capture_run)
-    return captured
+    A copy, so a test may hand it to ``apply_agent_overrides`` (which
+    writes the script's overrides into it) without disturbing the record.
+    """
+    return dict(daemon.run_commands[-1])
 
 
 def _write_helper_script(caller: Path) -> Path:
@@ -190,85 +199,55 @@ def test_channel_dispatch_unreachable_daemon_is_a_clean_error(
 
 
 def test_dispatch_pins_tab_scope_to_calling_work_dir(
-    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
+    tmp_path: Path, daemon: RecordingDaemon
 ) -> None:
     """Every dispatch scopes the sub-task's tab to the CALLING work dir.
 
     A ``run_agent`` sub-task runs in a channel/cron/agent scratch
-    directory (``work_dir``) but its tab must show in the calling
-    workspace's tab bar, so the dispatch forwards the calling task's
-    work directory as ``daemon_client.run``'s ``scope_work_dir``.  The
-    real dispatch path is exercised up to the daemon-client boundary;
-    only that boundary call is captured, to read the argument the
-    dispatch computed.
+    directory (``workDir``) but its tab must show in the calling
+    workspace's tab bar, so the dispatch sends the calling task's
+    work directory as the ``run`` command's ``tabScopeWorkDir``.
     """
 
     caller = tmp_path / "caller_project"
-    caller.mkdir()
+    script = _write_helper_script(caller)
     tool = make_run_agent_tool(str(caller))
 
     # Channel mode: executes in the shared channel_work scratch dir,
     # but the tab is scoped to the caller's project.  Every mode also
-    # records the parsed call bound on the daemon (the one-hour default
-    # when the tool's ``timeout`` argument is empty and the script's
-    # ``settings()`` name none) while the daemon wait itself has no
-    # deadline: the bound is enforced by the call joining its job
-    # thread, and a sub-task the bound hands back is stopped only by
-    # ``agent_job(..., "kill")`` or the end of the calling run.
-    captured_dispatch.clear()
+    # records the parsed call bound on the daemon as the wire
+    # ``timeout`` (the one-hour default when the tool's ``timeout``
+    # argument is empty and the script's ``settings()`` name none)
+    # while the daemon wait itself has no deadline: the bound is
+    # enforced by the call joining its job thread, and a sub-task the
+    # bound hands back is stopped only by ``agent_job(..., "kill")``
+    # or the end of the calling run.
     tool("say hi", "ntfy")
-    assert captured_dispatch[0]["work_dir"] == str(tmp_path / "channel_work")
-    assert captured_dispatch[0]["scope_work_dir"] == str(caller)
-    assert captured_dispatch[0]["timeout"] is None
-    assert captured_dispatch[0]["record_timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
-    assert "stop_on_timeout" not in captured_dispatch[0]
+    sent = _sent(daemon)
+    assert sent["workDir"] == str(tmp_path / "channel_work")
+    assert sent["tabScopeWorkDir"] == str(caller)
+    assert sent["timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
 
     # Cron mode: the cron module's ``settings()`` name the cron work
     # dir, so the sub-task executes there, scoped to the caller; an
     # explicit ``timeout`` argument is parsed and forwarded.
-    captured_dispatch.clear()
     tool("run 'echo hi' every 5 minutes", "cron", timeout="42.5")
-    assert captured_dispatch[0]["work_dir"] == cron_agent.cron_work_dir()
-    assert captured_dispatch[0]["scope_work_dir"] == str(caller)
-    assert captured_dispatch[0]["record_timeout"] == 42.5
+    sent = _sent(daemon)
+    assert sent["workDir"] == cron_agent.cron_work_dir()
+    assert sent["tabScopeWorkDir"] == str(caller)
+    assert sent["timeout"] == 42.5
 
-    # Path mode: executes in the caller's project (scope == work_dir).
-    script = caller / "helper.py"
-    script.write_text("""
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': 'm'}
-""")
-    captured_dispatch.clear()
+    # Path mode: executes in the caller's project (scope == workDir).
     tool("say hi", str(script))
-    assert captured_dispatch[0]["work_dir"] == str(caller)
-    assert captured_dispatch[0]["scope_work_dir"] == str(caller)
-    assert captured_dispatch[0]["record_timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
-
-
-def _daemon_run_command(call: dict[str, Any]) -> dict[str, Any]:
-    """Return the daemon-side ``run`` command the captured dispatch *call* becomes.
-
-    Only the wire fields the agent script's ``settings()`` can override
-    are mapped (:data:`kiss.agents.sorcar.agent_file.SETTING_FIELDS`), so a test
-    can apply ``apply_agent_overrides`` to exactly what the dispatcher sent.
-    """
-    return {
-        "agentPath": call["extension_agent_path"],
-        "useWorktree": call["use_worktree"],
-        "autoCommit": call["auto_commit"],
-        "classifyTasks": call["classify_tasks"],
-        "isParallel": call["is_parallel"],
-        "useWebTools": call["use_web_tools"],
-        "useMemory": call["use_memory"],
-        "appendToSystemPrompt": call["append_to_system_prompt"],
-    }
+    sent = _sent(daemon)
+    assert sent["workDir"] == str(caller)
+    assert sent["tabScopeWorkDir"] == str(caller)
+    assert sent["timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
+    assert len(daemon.run_commands) == 3
 
 
 def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
-    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
+    tmp_path: Path, daemon: RecordingDaemon
 ) -> None:
     """Channel and cron sub-tasks run outside the project git lifecycle.
 
@@ -284,25 +263,23 @@ def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
     worktree, auto-commit, classification and fan-out off on the
     daemon (``apply_agent_overrides``), where every script's settings
     win.  A path-mode agent script with the default ``session`` preset
-    keeps the standard lifecycle on the calling project.  The real
-    dispatch path is exercised up to the daemon-client boundary; only
-    that boundary call is captured.
+    keeps the standard lifecycle on the calling project.  The recorded
+    ``run`` command is checked as sent, then after
+    ``apply_agent_overrides`` rewrote it the way the daemon does.
     """
     caller = tmp_path / "caller_project"
-    caller.mkdir()
+    script = _write_helper_script(caller)
     tool = make_run_agent_tool(str(caller))
     isolated = IsolatedKissHome("kiss-dispatch-lifecycle-")
     try:
         # Both persisted settings on (the defaults).
         for agent, task in (("ntfy", "say hi"), ("cron", "run 'echo hi' every 5 minutes")):
-            captured_dispatch.clear()
             tool(task, agent)
-            sent = captured_dispatch[0]
-            assert sent["use_worktree"] is True, agent
-            assert sent["auto_commit"] is True, agent
-            assert sent["classify_tasks"] is None, agent
-            assert sent["is_parallel"] is True, agent
-            cmd = _daemon_run_command(sent)
+            cmd = _sent(daemon)
+            assert cmd["useWorktree"] is True, agent
+            assert cmd["autoCommit"] is True, agent
+            assert cmd["classifyTasks"] is None, agent
+            assert cmd["isParallel"] is True, agent
             overridden = apply_agent_overrides(cmd)
             assert {"useWorktree", "autoCommit", "classifyTasks", "isParallel"} <= overridden
             assert cmd["useWorktree"] is False, agent
@@ -313,42 +290,29 @@ def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
         # Path mode, ``session`` preset: worktree + auto-commit follow
         # the persisted settings; classification follows the daemon's
         # configured default; the script's settings change nothing.
-        script = caller / "helper.py"
-        script.write_text("""
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': 'm'}
-""")
-        captured_dispatch.clear()
         tool("say hi", str(script))
-        sent = captured_dispatch[0]
-        assert sent["use_worktree"] is True
-        assert sent["auto_commit"] is True
-        assert sent["classify_tasks"] is None
-        cmd = _daemon_run_command(sent)
+        cmd = _sent(daemon)
+        assert cmd["useWorktree"] is True
+        assert cmd["autoCommit"] is True
+        assert cmd["classifyTasks"] is None
         assert apply_agent_overrides(cmd) == {"model"}
         assert cmd["useWorktree"] is True and cmd["autoCommit"] is True
 
         # The user turned both settings off in the settings panel: a
         # path-mode sub-agent follows them like a chat-panel task would.
         isolated.write_config(is_worktree=False, auto_commit_mode=False)
-        captured_dispatch.clear()
         tool("say hi", str(script))
-        assert captured_dispatch[0]["use_worktree"] is False
-        assert captured_dispatch[0]["auto_commit"] is False
+        assert _sent(daemon)["useWorktree"] is False
+        assert _sent(daemon)["autoCommit"] is False
 
         # Each setting is read on its own; explicit options still win.
         isolated.write_config(is_worktree=True, auto_commit_mode=False)
-        captured_dispatch.clear()
         tool("say hi", str(script))
-        assert captured_dispatch[0]["use_worktree"] is True
-        assert captured_dispatch[0]["auto_commit"] is False
-        captured_dispatch.clear()
+        assert _sent(daemon)["useWorktree"] is True
+        assert _sent(daemon)["autoCommit"] is False
         tool("say hi", str(script), options='{"auto_commit": true}')
-        assert captured_dispatch[0]["use_worktree"] is True
-        assert captured_dispatch[0]["auto_commit"] is True
+        assert _sent(daemon)["useWorktree"] is True
+        assert _sent(daemon)["autoCommit"] is True
     finally:
         isolated.cleanup()
 
@@ -426,7 +390,7 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
 
 
 def test_channel_and_cron_refuse_options_that_contradict_the_kind(
-    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
+    tmp_path: Path, daemon: RecordingDaemon
 ) -> None:
     """Asking a channel/cron sub-task for a worktree is refused, never silently undone.
 
@@ -444,37 +408,30 @@ def test_channel_and_cron_refuse_options_that_contradict_the_kind(
     )
     for agent in ("ntfy", "cron"):
         for options, clash in cases:
-            captured_dispatch.clear()
             out = run_agent("say hi", agent, options=options)
             assert out == f"Error: {agent}: the script locks {clash}", (agent, options)
-            assert not captured_dispatch
+    assert daemon.run_commands == []
 
-    captured_dispatch.clear()
     out = run_agent("say hi", "ntfy", options='{"use_worktree": "false", "auto_commit": " False "}')
     assert "Error" not in out, out
-    assert captured_dispatch[0]["use_worktree"] is False
-    assert captured_dispatch[0]["auto_commit"] is False
-    cmd = _daemon_run_command(captured_dispatch[0])
+    cmd = _sent(daemon)
+    assert cmd["useWorktree"] is False
+    assert cmd["autoCommit"] is False
     apply_agent_overrides(cmd)
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
 
 
-def test_run_options_are_forwarded_to_daemon(
-    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
-) -> None:
-    """The ``options`` JSON object reaches ``daemon_client.run`` as its keyword options.
+def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDaemon) -> None:
+    """The ``options`` JSON object reaches the daemon as the ``run`` command's fields.
 
     Keys left out forward the option's default (``None`` for the
-    tri-state daemon-decides options, ``True`` for ``is_parallel``,
+    tri-state daemon-decides options, ``True`` for ``isParallel``,
     ``""`` for the text options); explicit values are parsed and
     forwarded verbatim, booleans as JSON booleans or as the words
     ``"true"`` / ``"false"``, ``null`` as "not passed".  No tools path
-    travels: the daemon client's ``run`` has no tools parameter, so
-    the sub-task's extra tools can only come from the agent script's
-    own ``tools()``.  The real dispatch path is
-    exercised up to the daemon-client boundary; only that boundary
-    call is captured.
+    travels: the ``run`` command has no tools field, so the sub-task's
+    extra tools can only come from the agent script's own ``tools()``.
     """
 
     caller = tmp_path / "caller_project"
@@ -483,25 +440,24 @@ def test_run_options_are_forwarded_to_daemon(
 
     # Nothing passed: the daemon's defaults decide.
     tool("say hi", str(script))
-    defaults = captured_dispatch[0]
-    assert defaults["chat_id"] == ""
-    assert defaults["system_prompt"] == ""
+    defaults = _sent(daemon)
+    assert defaults["chatId"] == ""
+    assert defaults["systemPrompt"] == ""
     assert "tools" not in defaults
     assert "toolsFile" not in defaults
-    assert "append_basic_tools" not in defaults
-    assert defaults["model_config"] is None
-    assert defaults["use_web_tools"] is None
-    assert defaults["classify_tasks"] is None
-    assert defaults["use_memory"] is None
-    assert defaults["is_parallel"] is True
-    assert defaults["append_to_system_prompt"] == ""
-    assert defaults["append_to_prompt"] == ""
-    assert defaults["tool_profile"] == ""
-    assert defaults["docker_image"] == ""
+    assert "appendBasicTools" not in defaults
+    assert defaults["modelConfig"] is None
+    assert defaults["useWebTools"] is None
+    assert defaults["classifyTasks"] is None
+    assert defaults["useMemory"] is None
+    assert defaults["isParallel"] is True
+    assert defaults["appendToSystemPrompt"] == ""
+    assert defaults["appendToPrompt"] == ""
+    assert defaults["toolProfile"] == ""
+    assert defaults["dockerImage"] == ""
 
     # Everything passed, in path mode: parsed and forwarded, with the
     # explicit git-lifecycle values replacing the persisted settings.
-    captured_dispatch.clear()
     tool(
         "say hi",
         str(script),
@@ -519,19 +475,19 @@ def test_run_options_are_forwarded_to_daemon(
         }""",
         tool_profile=" review ",
     )
-    sent = captured_dispatch[0]
-    assert sent["chat_id"] == "chat-123"
-    assert sent["system_prompt"] == ""
-    assert sent["model_config"] == {"base_url": "http://localhost:8000/v1"}
-    assert sent["use_worktree"] is False
-    assert sent["auto_commit"] is False
-    assert sent["use_web_tools"] is True
-    assert sent["classify_tasks"] is False
-    assert sent["use_memory"] is True
-    assert sent["is_parallel"] is False
-    assert sent["append_to_system_prompt"] == "Answer in French."
-    assert sent["append_to_prompt"] == "Cite sources."
-    assert sent["tool_profile"] == "review"
+    sent = _sent(daemon)
+    assert sent["chatId"] == "chat-123"
+    assert sent["systemPrompt"] == ""
+    assert sent["modelConfig"] == {"base_url": "http://localhost:8000/v1"}
+    assert sent["useWorktree"] is False
+    assert sent["autoCommit"] is False
+    assert sent["useWebTools"] is True
+    assert sent["classifyTasks"] is False
+    assert sent["useMemory"] is True
+    assert sent["isParallel"] is False
+    assert sent["appendToSystemPrompt"] == "Answer in French."
+    assert sent["appendToPrompt"] == "Cite sources."
+    assert sent["toolProfile"] == "review"
     # ``options['docker_image']`` is accepted by the parser, but
     # ``dispatch_result`` forwards only the calling task's live
     # container (``inherit_from_parent``), so an explicit value is
@@ -540,37 +496,35 @@ def test_run_options_are_forwarded_to_daemon(
 
     # Path mode honours an explicit worktree request too; ``null`` and
     # ``""`` mean "not passed", so the defaults stand.
-    captured_dispatch.clear()
     tool("say hi", str(script), options='{"use_worktree": true, "use_memory": null, '
                                         '"allow_fan_out": "", "chat_id": null}')
-    assert captured_dispatch[0]["use_worktree"] is True
-    assert captured_dispatch[0]["use_memory"] is None
-    assert captured_dispatch[0]["is_parallel"] is True
-    assert captured_dispatch[0]["chat_id"] == ""
+    sent = _sent(daemon)
+    assert sent["useWorktree"] is True
+    assert sent["useMemory"] is None
+    assert sent["isParallel"] is True
+    assert sent["chatId"] == ""
 
     # For cron and the channel agents the ``channel`` kind locks
     # classification off: asking for it is refused, agreeing is forwarded.
-    captured_dispatch.clear()
+    before = len(daemon.run_commands)
     out = tool("run 'echo hi' every 5 minutes", "cron", options='{"auto_classify": true}')
     assert out == "Error: cron: the script locks auto_classify=False (asked for True)"
-    assert not captured_dispatch
+    assert len(daemon.run_commands) == before
     tool("say hi", "ntfy", options='{"auto_classify": "False", "use_memory": false}')
-    assert captured_dispatch[0]["classify_tasks"] is False
-    assert captured_dispatch[0]["use_memory"] is False
+    sent = _sent(daemon)
+    assert sent["classifyTasks"] is False
+    assert sent["useMemory"] is False
 
 
-def test_dispatch_forwards_parent_identity(
-    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
-) -> None:
+def test_dispatch_forwards_parent_identity(tmp_path: Path, daemon: RecordingDaemon) -> None:
     """A dispatch on behalf of a calling task marks it as the parent.
 
-    ``_dispatch`` forwards the calling agent's persisted task id and
-    frontend tab id as ``daemon_client.run``'s ``parent_task_id`` /
-    ``parent_tab_id``, which is what gives the sub-task the
+    ``_dispatch`` sends the calling agent's persisted task id and
+    frontend tab id as the ``run`` command's ``parentTaskId`` /
+    ``parentTabId``, which is what gives the sub-task the
     ``run_parallel`` sub-agent tab semantics (nested tab, nested
     history row, ``subagentDone``) instead of a top-level tab.  The
-    real dispatch path is exercised up to the daemon-client boundary;
-    only that boundary call is captured.  The duck-typed-caller guard
+    duck-typed-caller guard
     (a ``parent_agent`` with a persisted ``last_task_id`` but no
     ``_subagent_parent_tab_id``) stays untested by design: every real
     persisting agent is a ``ChatSorcarAgent``, which always has the
@@ -589,29 +543,26 @@ def test_dispatch_forwards_parent_identity(
     parent._tab_id = "webtab-7"
     tool = make_run_agent_tool(str(caller), parent)
     tool("say hi", str(script))
-    assert captured_dispatch[0]["parent_task_id"] == "a" * 32
-    assert captured_dispatch[0]["parent_tab_id"] == "webtab-7"
+    assert _sent(daemon)["parentTaskId"] == "a" * 32
+    assert _sent(daemon)["parentTabId"] == "webtab-7"
 
     # The same caller identity rides along in channel mode too.
-    captured_dispatch.clear()
     tool("say hi", "ntfy")
-    assert captured_dispatch[0]["parent_task_id"] == "a" * 32
-    assert captured_dispatch[0]["parent_tab_id"] == "webtab-7"
+    assert _sent(daemon)["parentTaskId"] == "a" * 32
+    assert _sent(daemon)["parentTabId"] == "webtab-7"
 
     # A calling agent that has not persisted a row yet (before its
     # first run) dispatches an ordinary top-level task.
     fresh = ChatSorcarAgent("Fresh parent")
     fresh._tab_id = "webtab-8"
-    captured_dispatch.clear()
     make_run_agent_tool(str(caller), fresh)("say hi", str(script))
-    assert captured_dispatch[0]["parent_task_id"] == ""
-    assert captured_dispatch[0]["parent_tab_id"] == ""
+    assert _sent(daemon)["parentTaskId"] == ""
+    assert _sent(daemon)["parentTabId"] == ""
 
     # Standalone use: no calling agent at all.
-    captured_dispatch.clear()
     make_run_agent_tool(str(caller))("say hi", str(script))
-    assert captured_dispatch[0]["parent_task_id"] == ""
-    assert captured_dispatch[0]["parent_tab_id"] == ""
+    assert _sent(daemon)["parentTaskId"] == ""
+    assert _sent(daemon)["parentTabId"] == ""
 
 
 def test_cron_dispatch_unreachable_daemon_is_a_clean_error(
@@ -690,9 +641,7 @@ class Sea(BaseSea):
     assert not (tmp_path / "channel_work").exists()
 
 
-def test_default_agent_is_the_bundled_sorcar_sea(
-    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
-) -> None:
+def test_default_agent_is_the_bundled_sorcar_sea(tmp_path: Path, daemon: RecordingDaemon) -> None:
     """``run_agent(task)`` with no ``agent`` runs ``seas/sorcar/sorcar_sea.py`` in path mode.
 
     The default is the installed file's absolute path (not a path
@@ -715,17 +664,16 @@ def test_default_agent_is_the_bundled_sorcar_sea(
     caller.mkdir()
     tool = make_run_agent_tool(str(caller))
     tool("say hi")
-    assert captured_dispatch[0]["extension_agent_path"] == DEFAULT_AGENT_PATH
-    assert captured_dispatch[0]["work_dir"] == str(caller)
-    assert captured_dispatch[0]["prompt"] == "say hi"
+    sent = _sent(daemon)
+    assert sent["agentPath"] == DEFAULT_AGENT_PATH
+    assert sent["workDir"] == str(caller)
+    assert sent["prompt"] == "say hi"
     # Whitespace counts as "not given", like every other option.
-    captured_dispatch.clear()
     tool("say hi", agent="   ")
-    assert captured_dispatch[0]["extension_agent_path"] == DEFAULT_AGENT_PATH
+    assert _sent(daemon)["agentPath"] == DEFAULT_AGENT_PATH
     # An explicit agent still wins over the default.
-    captured_dispatch.clear()
     tool("say hi", agent="ntfy")
-    assert captured_dispatch[0]["extension_agent_path"].endswith("ntfy_sea.py")
+    assert _sent(daemon)["agentPath"].endswith("ntfy_sea.py")
 
 
 def test_default_agent_unreachable_daemon_is_a_clean_error() -> None:
@@ -844,9 +792,7 @@ class Sea(BaseSea):
     assert out.startswith("Error: the local_agent agent task could not run:")
 
 
-def test_dispatch_forwards_the_workspace_to_the_daemon(
-    captured_dispatch: list[dict[str, Any]],
-) -> None:
+def test_dispatch_forwards_the_workspace_to_the_daemon(daemon: RecordingDaemon) -> None:
     # The dispatcher never touches the process-global workspace: it
     # forwards the ``workspace`` option as a wire field, and the
     # daemon's task runner holds it for the channel run's lifetime
@@ -854,13 +800,12 @@ def test_dispatch_forwards_the_workspace_to_the_daemon(
     import os
 
     run_agent("say hi", "ntfy", options='{"workspace": " my-ws "}')
-    assert captured_dispatch[0]["workspace"] == "my-ws"
-    assert Path(captured_dispatch[0]["extension_agent_path"]).parts[-2:] == ("ntfy", "ntfy_sea.py")
+    sent = _sent(daemon)
+    assert sent["workspace"] == "my-ws"
+    assert Path(sent["agentPath"]).parts[-2:] == ("ntfy", "ntfy_sea.py")
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
-    captured_dispatch.clear()
     run_agent("say hi", "ntfy")
-    assert captured_dispatch[0]["workspace"] == ""
-    assert not hasattr(agent_dispatch, "WORKSPACE_WAIT_TIMEOUT_SECONDS")
+    assert _sent(daemon)["workspace"] == ""
 
 
 def test_dispatch_uses_recorded_daemon_endpoint(
@@ -964,24 +909,41 @@ def test_channel_module_is_a_valid_agent_script() -> None:
 
 
 def test_run_agent_tool_and_sorcar_wiring() -> None:
+    """The dispatch tool is a default Sorcar tool and a soft plugin of the channel package.
+
+    Importing the dispatcher in a fresh interpreter loads no
+    ``kiss.agents.third_party_agents`` module (the channel modules are
+    resolved per dispatch), and a Sorcar agent's default toolset carries
+    ``run_agent`` and its ``agent_job`` companion.  The spend folding
+    into the calling task that the binding enables is checked end to
+    end in ``test_run_agent_inheritance``.  The system prompt the agent
+    runs with (as loaded by the product, both the full and the lite
+    variant) directs it to ``run_agent`` for channel tasks.
+    """
+    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+    from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
+
+    assert "run_agent" in SYSTEM_PROMPT
+    assert "run_agent" in SYSTEM_PROMPT_LITE
     tool = make_run_agent_tool("")
     assert tool.__name__ == "run_agent"
     assert "slack" in (tool.__doc__ or "")
-    # The module lives in the sorcar package and never imports from
-    # kiss.agents.third_party_agents at module scope (soft plugin).
-    source_text = Path(agent_dispatch.__file__).read_text(encoding="utf-8")
     assert Path(agent_dispatch.__file__).parent.parts[-2:] == ("agents", "sorcar")
-    for line in source_text.splitlines():
-        assert not line.startswith("from kiss.agents.third_party_agents")
-        assert not line.startswith("import kiss.agents.third_party_agents")
-    # The default Sorcar toolset registers the tool, bound to the
-    # calling task's work directory AND the calling agent itself, so
-    # each dispatched sub-task's spend is folded into the calling
-    # task's cost accounting.
-    agent_source = Path(agent_dispatch.__file__).parent / "sorcar_agent.py"
-    assert 'tools.append(make_run_agent_tool(self.work_dir or "", self))' in agent_source.read_text(
-        encoding="utf-8"
+    loaded = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, kiss.agents.sorcar.agent_dispatch; "
+            "print(sorted(m for m in sys.modules "
+            "if m.startswith('kiss.agents.third_party_agents')))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
     )
-    # The system prompt directs the agent to dispatch immediately.
-    system_md = Path(agent_dispatch.__file__).parents[2] / "SYSTEM.md"
-    assert "run_agent" in system_md.read_text(encoding="utf-8")
+    assert loaded.stdout.strip() == "[]"
+    agent = SorcarAgent("dispatch-wiring")
+    agent._use_web_tools = False
+    names = {t.__name__ for t in agent._get_tools() if callable(t)}
+    assert {"run_agent", "agent_job"} <= names

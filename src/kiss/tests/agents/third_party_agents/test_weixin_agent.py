@@ -17,11 +17,12 @@ import hashlib
 import json
 import socket
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
+import pytest
 import requests
 
 from kiss.agents.third_party_agents.weixin.weixin_sea import (
@@ -30,6 +31,15 @@ from kiss.agents.third_party_agents.weixin.weixin_sea import (
     WeixinSea,
     _config,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+
+
+@pytest.fixture(autouse=True)
+def _fresh_config() -> Iterator[None]:
+    """Start and end every test with no persisted Weixin config."""
+    _config.clear()
+    yield
+    _config.clear()
 
 
 def _signed_params(ts: str = "1712345678", nonce: str = "n0nce") -> dict[str, str]:
@@ -53,21 +63,33 @@ def _raw_post_status(port: int, headers: str, path: str = "/") -> int:
         return int(data.split(b" ")[1])
 
 
+class _WeixinApi(RecordingServer):
+    """Recording server with the emulated WeChat API's response knobs.
+
+    ``requests`` holds the JSON payloads POSTed to the custom-send endpoint.
+    """
+
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
+        self.token_hits = 0
+        self.send_errcode = 0
+        self.send_http_status = 200
+
+
 class _WeixinApiHandler(BaseHTTPRequestHandler):
     """Emulates the WeChat Official Account HTTP API."""
 
-    token_hits = 0
-    send_hits = 0
-    sent_payloads: list[dict[str, Any]] = []
-    send_errcode = 0
-    send_http_status = 200
+    @property
+    def api(self) -> _WeixinApi:
+        """The owning emulator server."""
+        return cast(_WeixinApi, self.server)
 
     def do_GET(self) -> None:  # noqa: N802
         """Serve the token and user-info endpoints."""
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         if parsed.path == "/cgi-bin/token":
-            type(self).token_hits += 1
+            self.api.token_hits += 1
             assert params.get("grant_type") == ["client_credential"]
             self._json(200, {"access_token": "WXTOKEN", "expires_in": 7200})
         elif parsed.path == "/cgi-bin/user/info":
@@ -84,12 +106,11 @@ class _WeixinApiHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length).decode("utf-8"))
         if parsed.path == "/cgi-bin/message/custom/send":
             assert params.get("access_token") == ["WXTOKEN"]
-            type(self).send_hits += 1
-            type(self).sent_payloads.append(body)
-            if type(self).send_http_status != 200:
-                self._json(type(self).send_http_status, {})
-            elif type(self).send_errcode:
-                self._json(200, {"errcode": type(self).send_errcode, "errmsg": "denied"})
+            self.api.requests.append(body)
+            if self.api.send_http_status != 200:
+                self._json(self.api.send_http_status, {})
+            elif self.api.send_errcode:
+                self._json(200, {"errcode": self.api.send_errcode, "errmsg": "denied"})
             else:
                 self._json(200, {"errcode": 0, "errmsg": "ok"})
         else:
@@ -107,32 +128,16 @@ class _WeixinApiHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-class _ApiServer:
+@pytest.fixture()
+def api() -> Iterator[_WeixinApi]:
     """Run the emulated WeChat API server for the duration of a test."""
-
-    def __init__(self) -> None:
-        _WeixinApiHandler.token_hits = 0
-        _WeixinApiHandler.send_hits = 0
-        _WeixinApiHandler.sent_payloads = []
-        _WeixinApiHandler.send_errcode = 0
-        _WeixinApiHandler.send_http_status = 200
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _WeixinApiHandler)
-        self.base_url = f"http://127.0.0.1:{self._server.server_port}"
-
-    def __enter__(self) -> _ApiServer:
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        self._server.shutdown()
-        self._server.server_close()
+    yield from serve_recording(_WeixinApiHandler, _WeixinApi)
 
 
 def _authenticated_agent(
     api_base: str = "", port: str = "", callback_token: str = "cbtok"
 ) -> WeixinAgent:
     """Authenticate a fresh agent against the given API base."""
-    _config.clear()
     agent = WeixinAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
     result = tools["authenticate_weixin"](
@@ -168,7 +173,6 @@ def _connected_backend(callback_token: str = "cbtok") -> tuple[WeixinChannelBack
 
 def test_unauthenticated_state() -> None:
     """Fresh agent exposes only the auth trio and reports unconfigured."""
-    _config.clear()
     agent = WeixinAgent()
     assert agent.name == "Weixin Agent"
     assert agent._is_authenticated() is False
@@ -180,7 +184,6 @@ def test_unauthenticated_state() -> None:
 
 def test_auth_trio_persistence() -> None:
     """authenticate persists 0600 config; check reports it; clear removes it."""
-    _config.clear()
     agent = _authenticated_agent(api_base="http://127.0.0.1:1/")
     assert _config.path.exists()
     if sys.platform != "win32":
@@ -201,51 +204,41 @@ def test_auth_trio_persistence() -> None:
 
 def test_tools_module_function() -> None:
     """Module-level tools() returns a non-empty tool list."""
-    _config.clear()
     assert len(WeixinSea().tools([])) >= 3
 
 
-def test_send_reuses_cached_token() -> None:
+def test_send_reuses_cached_token(api: _WeixinApi) -> None:
     """Two sends fetch the access token only once (in-memory cache)."""
-    with _ApiServer() as api:
-        agent = _authenticated_agent(api_base=api.base_url)
-        backend = agent._backend
-        assert json.loads(backend.send_text_message("openid1", "hi"))["ok"] is True
-        assert json.loads(backend.send_text_message("openid2", "there"))["ok"] is True
-        assert _WeixinApiHandler.token_hits == 1
-        assert _WeixinApiHandler.send_hits == 2
-        assert _WeixinApiHandler.sent_payloads[0] == {
-            "touser": "openid1",
-            "msgtype": "text",
-            "text": {"content": "hi"},
-        }
-    _config.clear()
+    agent = _authenticated_agent(api_base=api.base_url)
+    backend = agent._backend
+    assert json.loads(backend.send_text_message("openid1", "hi"))["ok"] is True
+    assert json.loads(backend.send_text_message("openid2", "there"))["ok"] is True
+    assert api.token_hits == 1
+    assert len(api.requests) == 2
+    assert api.requests[0] == {
+        "touser": "openid1",
+        "msgtype": "text",
+        "text": {"content": "hi"},
+    }
 
 
-def test_send_message_raises_on_errcode() -> None:
+def test_send_message_raises_on_errcode(api: _WeixinApi) -> None:
     """send_message raises RuntimeError when the API reports an errcode."""
-    with _ApiServer() as api:
-        agent = _authenticated_agent(api_base=api.base_url)
-        _WeixinApiHandler.send_errcode = 45015
-        try:
-            agent._backend.send_message("openid1", "hi")
-            raise AssertionError("send_message should have raised RuntimeError")
-        except RuntimeError as e:
-            assert "45015" in str(e)
-        err = json.loads(agent._backend.send_text_message("openid1", "hi"))
-        assert err["ok"] is False and "45015" in err["error"]
-    _config.clear()
+    agent = _authenticated_agent(api_base=api.base_url)
+    api.send_errcode = 45015
+    with pytest.raises(RuntimeError, match="45015"):
+        agent._backend.send_message("openid1", "hi")
+    err = json.loads(agent._backend.send_text_message("openid1", "hi"))
+    assert err["ok"] is False and "45015" in err["error"]
 
 
-def test_get_user_info() -> None:
+def test_get_user_info(api: _WeixinApi) -> None:
     """get_user_info returns the profile from the user-info endpoint."""
-    with _ApiServer() as api:
-        agent = _authenticated_agent(api_base=api.base_url)
-        result = json.loads(agent._backend.get_user_info("openid9"))
-        assert result["ok"] is True
-        assert result["user"]["openid"] == "openid9"
-        assert result["user"]["nickname"] == "Alice"
-    _config.clear()
+    agent = _authenticated_agent(api_base=api.base_url)
+    result = json.loads(agent._backend.get_user_info("openid9"))
+    assert result["ok"] is True
+    assert result["user"]["openid"] == "openid9"
+    assert result["user"]["nickname"] == "Alice"
 
 
 def test_callback_verification_and_inbound_xml() -> None:
@@ -305,7 +298,6 @@ def test_callback_verification_and_inbound_xml() -> None:
         ]
     finally:
         backend.disconnect()
-        _config.clear()
 
 
 def test_callback_post_requires_signature_when_token_configured() -> None:
@@ -331,7 +323,6 @@ def test_callback_post_requires_signature_when_token_configured() -> None:
         assert messages == []
     finally:
         backend.disconnect()
-        _config.clear()
 
 
 def test_callback_post_without_token_allows_unsigned() -> None:
@@ -348,7 +339,6 @@ def test_callback_post_without_token_allows_unsigned() -> None:
         assert len(messages) == 1 and messages[0]["msg_id"] == "42"
     finally:
         backend.disconnect()
-        _config.clear()
 
 
 def test_callback_post_bad_content_length() -> None:
@@ -367,27 +357,20 @@ def test_callback_post_bad_content_length() -> None:
         assert messages == []
     finally:
         backend.disconnect()
-        _config.clear()
 
 
-def test_send_fails_on_http_error_status() -> None:
+def test_send_fails_on_http_error_status(api: _WeixinApi) -> None:
     """A non-200 HTTP response is a failure even when the body has no errcode."""
-    with _ApiServer() as api:
-        agent = _authenticated_agent(api_base=api.base_url)
-        _WeixinApiHandler.send_http_status = 500
-        err = json.loads(agent._backend.send_text_message("openid1", "hi"))
-        assert err["ok"] is False and "HTTP 500" in err["error"]
-        try:
-            agent._backend.send_message("openid1", "hi")
-            raise AssertionError("send_message should have raised RuntimeError")
-        except RuntimeError as e:
-            assert "HTTP 500" in str(e)
-    _config.clear()
+    agent = _authenticated_agent(api_base=api.base_url)
+    api.send_http_status = 500
+    err = json.loads(agent._backend.send_text_message("openid1", "hi"))
+    assert err["ok"] is False and "HTTP 500" in err["error"]
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        agent._backend.send_message("openid1", "hi")
 
 
 def test_authenticate_rejects_invalid_port() -> None:
     """authenticate_weixin rejects non-numeric and out-of-range ports."""
-    _config.clear()
     agent = WeixinAgent()
     authenticate = {t.__name__: t for t in agent._get_tools()}["authenticate_weixin"]
     for bad_port in ("abc", "0", "-1", "65536", "1.5", "1e3"):
@@ -395,7 +378,6 @@ def test_authenticate_rejects_invalid_port() -> None:
         assert "invalid port" in result.lower(), bad_port
         assert not _config.path.exists()
     assert json.loads(authenticate(appid="wx_app", appsecret="wx_secret", port="18085"))["ok"]
-    _config.clear()
 
 
 def test_poll_messages_filters_by_channel() -> None:
@@ -409,7 +391,6 @@ def test_poll_messages_filters_by_channel() -> None:
 
 def test_connect_unconfigured_fails() -> None:
     """connect() fails cleanly when no config is stored."""
-    _config.clear()
     backend = WeixinChannelBackend()
     assert backend.connect() is False
     assert "no weixin config" in backend.connection_info.lower()

@@ -17,8 +17,8 @@ non-deterministic) in unit tests; the failure path is covered via
 The daemon/agent-script scenarios (pure kiss.agents.sorcar +
 kiss.server closure) moved to ``kiss.tests.server.test_cron_agent``;
 this file keeps the delivery test that imports real
-``kiss.agents.third_party_agents`` channel modules and the
-source/configuration wiring checks.
+``kiss.agents.third_party_agents`` channel modules and the SEA
+contract checks.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import os
 import shlex
 import shutil
 import sys
+from importlib.metadata import entry_points
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,7 @@ from kiss.agents.sorcar.cron_agent import (
     load_jobs,
     tick,
 )
+from kiss.core.base import SYSTEM_PROMPT
 from kiss.tests.agents.sorcar.test_cron_agent import (  # noqa: F401
     _create,
     _isolated_kiss_home,
@@ -62,34 +64,19 @@ def test_delivery_error_notes() -> None:
 
 
 def test_get_tools_and_sorcar_wiring() -> None:
-    assert cron_agent.CronAgentSea().tools([]) == [cron_job, cron_agent.gateway_command]
-    # The module lives in the sorcar package and never imports from
-    # kiss.agents.third_party_agents at module scope.
-    source_text = Path(cron_agent.__file__).read_text(encoding="utf-8")
-    assert Path(cron_agent.__file__).parent.parts[-2:] == ("agents", "sorcar")
-    assert "from kiss.agents.third_party_agents" not in source_text
-    assert "import kiss.agents.third_party_agents" not in source_text
-    # cron_job is NOT a built-in tool of the default Sorcar toolset:
-    # scheduling requests go through run_agent(agent="cron", ...), which
-    # dispatches this module as an agent script.
-    agent_source = Path(cron_agent.__file__).parent / "sorcar_agent.py"
-    agent_text = agent_source.read_text(encoding="utf-8")
-    assert "tools.append(cron_job)" not in agent_text
-    assert "from kiss.agents.sorcar.cron_agent import cron_job" not in agent_text
+    sea = cron_agent.CronAgentSea()
+    assert sea.tools([]) == [cron_job, cron_agent.gateway_command]
     # The dispatch preamble reaches the session through the agent-script
     # contract (the SEA's ``system_prompt`` method), not through a prompt prefix.
-    sea = cron_agent.CronAgentSea()
     assert sea.system_prompt("S") == "S\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
     assert sea.settings({})["kind"] == "channel"
-    # The system prompt directs scheduling requests to run_agent(agent="cron").
-    system_md = Path(cron_agent.__file__).parents[2] / "SYSTEM.md"
-    assert 'run_agent tool with "cron"' in system_md.read_text(encoding="utf-8")
-    # The kiss-cron CLI entry point is wired in pyproject.toml.
-    pyproject = Path(cron_agent.__file__).parents[4] / "pyproject.toml"
-    assert (
-        'kiss-cron = "kiss.agents.sorcar.cron_agent:main"'
-        in pyproject.read_text(encoding="utf-8")
-    )
+    # Sorcar's system prompt, as the product loads it, sends scheduling
+    # requests to this agent.
+    assert 'run_agent tool with "cron"' in SYSTEM_PROMPT
+    # The installed console script runs this module's ``main``.
+    (script,) = entry_points(group="console_scripts", name="kiss-cron")
+    assert script.value == "kiss.agents.sorcar.cron_agent:main"
+    assert script.load() is cron_agent.main
 
 
 _IDLE_SIGNAL_CLI = """#!/usr/bin/env python3

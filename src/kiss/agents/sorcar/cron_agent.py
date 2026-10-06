@@ -758,7 +758,7 @@ def _run_prompt_job(
         forget_agent_job(detached)
         bound = f"the scheduled task did not finish within {timeout:g}s"
         unconfirmed = unconfirmed_stop_error(script_name(str(PROMPT_SEA_PATH)))
-        if detached.thread.is_alive() or detached.outcome == unconfirmed:
+        if not detached.finished or detached.outcome == unconfirmed:
             raise TimeoutError(
                 f"Error: {bound}; a stop was requested but the daemon never confirmed "
                 f"it, so the task MAY STILL BE RUNNING (and spending) on the daemon."
@@ -1232,6 +1232,11 @@ def stop_scheduler_thread(stop_event: threading.Event) -> None:
     _daemon_endpoint_file = None
 
 
+def _dump(data: Any) -> str:
+    """Return *data* as the YAML text the :func:`cron_job` tool answers with."""
+    return str(yaml.safe_dump(data, sort_keys=False))
+
+
 def _job_view(job: dict[str, Any]) -> dict[str, Any]:
     """Return a compact, human-readable view of a job for listings.
 
@@ -1441,9 +1446,6 @@ def cron_job(
         A YAML string describing the result (created job, job list,
         confirmation, or an ``error`` key explaining what went wrong).
     """
-    def _dump(data: Any) -> str:
-        return str(yaml.safe_dump(data, sort_keys=False))
-
     if action in ("create", "ensure"):
         if not name or not schedule:
             return _dump({"error": f"{action} requires name and schedule"})

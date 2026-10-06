@@ -393,6 +393,22 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
             reader, lambda m: m.get("type") == "configData",
         )
         self.assertEqual(backend.work_dir, str(self.dir_a))
+        # The refused root never reaches config.json either: the
+        # persisted directory is still ``dir_a`` (a daemon restart keeps
+        # it, and a VS Code window's ``ifUnset`` seed stays a no-op).
+        self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_a))
+        dir_b = Path(self.tmpdir) / "ws_b"
+        dir_b.mkdir()
+        await self._send(
+            writer,
+            {"type": "setWorkDir", "workDir": str(dir_b), "ifUnset": True},
+        )
+        await self._send(writer, {"type": "getConfig"})
+        await self._drain_until(
+            reader, lambda m: m.get("type") == "configData",
+        )
+        self.assertEqual(backend.work_dir, str(self.dir_a))
+        self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_a))
 
 
 class TestStartupRootFallback(IsolatedAsyncioTestCase):

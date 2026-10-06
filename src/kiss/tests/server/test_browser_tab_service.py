@@ -19,6 +19,7 @@ a Linux CI host; they are exercised only through their shared helpers.
 
 from __future__ import annotations
 
+import base64
 import http.server
 import os
 import shutil
@@ -39,7 +40,6 @@ from kiss.server.browser_tab import (
     BrowserTabService,
     _key_params,
     _mouse_params,
-    decode_frame,
     home_url,
     normalize_url,
 )
@@ -360,7 +360,7 @@ def test_browser_commands_end_to_end(daemon: Any, page_server: str) -> None:
     )
     frame = _wait(lambda: _events(printer, "browserFrame", tab_id=tab_id), "frame")[0]
     assert frame["connId"] == "c1" and (frame["width"], frame["height"]) == (500, 400)
-    assert decode_frame(frame)[:3] == b"\xff\xd8\xff"  # JPEG magic
+    assert base64.b64decode(frame["data"])[:3] == b"\xff\xd8\xff"  # JPEG magic
 
     # Wheel scrolls the real page; pasted text lands in the focused input.
     server._handle_command(

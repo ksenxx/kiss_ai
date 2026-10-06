@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend, _config
+from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 
@@ -118,17 +119,11 @@ class TestDiscordBackendBugs:
         """Clear the recorded requests and build a backend aimed at the server."""
         self.server = discord_server
         self.server.requests.clear()
-        backup = _config.path.read_text() if _config.path.exists() else None
-        _config.save({"bot_token": "test-token"})
-        self.backend = DiscordChannelBackend(api_base=discord_server.base_url)
-        self.backend._token = "test-token"
-        try:
+        with config_backup(_config.path):
+            _config.save({"bot_token": "test-token"})
+            self.backend = DiscordChannelBackend(api_base=discord_server.base_url)
+            self.backend._token = "test-token"
             yield
-        finally:
-            if backup is not None:
-                _config.path.write_text(backup)
-            elif _config.path.exists():
-                _config.path.unlink()
 
     def _paths(self) -> list[str]:
         return [r["path"] for r in self.server.requests]

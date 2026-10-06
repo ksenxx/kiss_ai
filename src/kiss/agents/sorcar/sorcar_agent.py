@@ -2919,7 +2919,7 @@ class SorcarAgent(RelentlessAgent):
             )
         return self._task_classification
 
-    def _fold_classifier_usage(self) -> bool:
+    def _fold_classifier_usage(self) -> None:
         """Bank the pre-run classifier's spend into this run's totals.
 
         Runs from :meth:`run`'s ``finally``, AFTER ``super().run`` — the
@@ -2946,11 +2946,8 @@ class SorcarAgent(RelentlessAgent):
         same-key re-append deduplicates on read — exactly once either
         way (round-4 finding 2b: the previous unkeyed append-once
         design lost the spend on a pre-append stop and could not be
-        retried safely).
-
-        Returns:
-            True when non-zero classifier spend was banked, i.e. the
-            run's last usage event no longer shows the task's total.
+        retried safely).  :meth:`run`'s ``finally`` republishes the
+        totals when the ledger moved, so nothing is reported here.
         """
         spend = self._classifier_spend
         if spend is not None:
@@ -2962,7 +2959,6 @@ class SorcarAgent(RelentlessAgent):
             )
             self._classifier_spend = None
         self._reset_task_classification()
-        return spend is not None and bool(spend.budget or spend.tokens)
 
     def run(  # type: ignore[override]
         self,
@@ -3153,8 +3149,14 @@ class SorcarAgent(RelentlessAgent):
         self._system_prompt_suffix = system_prompt if system_prompt else ""
         self.web_use_tool = None
         self._memory_tools = None
+        # The thread's own binding first: a fan-out child has one
+        # whatever its printer (``run_tasks_parallel`` binds it so the
+        # per-child timeout and a parent stop reach its shell), and the
+        # JSON printer's thread-local is a view over the same storage.
         tl = getattr(printer, "_thread_local", None) if printer else None
-        self._stop_event = getattr(tl, "stop_event", None) if tl else None
+        self._stop_event = get_thread_stop_event() or (
+            getattr(tl, "stop_event", None) if tl else None
+        )
         try:
             # Pre-run task classification (idempotent per run:
             # WorktreeSorcarAgent.run may have classified already for
@@ -3564,6 +3566,17 @@ def _sea_run_kwargs(
     return overrides, run_config
 
 
+def _expire_child(timed_out: threading.Event, stop_event: threading.Event) -> None:
+    """Stop one fan-out child whose ``timeout`` elapsed (a ``threading.Timer`` body).
+
+    The flag is set first so the child's ``KeyboardInterrupt`` handler
+    reports the timeout rather than a user stop; *stop_event* is the
+    child's own, not the fan-out's, so its siblings go on.
+    """
+    timed_out.set()
+    stop_event.set()
+
+
 def run_tasks_parallel(
     tasks: list[str],
     max_workers: int | None = None,
@@ -3869,14 +3882,8 @@ def run_tasks_parallel(
         agent.run_config = {**(run_config or {}), "timeout": timeout}
         timer: threading.Timer | None = None
         timed_out = threading.Event()
-
-        def _expire() -> None:
-            # Flag first, then stop only this child (its own event, not the fan-out's).
-            timed_out.set()
-            sub_stop_event.set()
-
         if timeout is not None:
-            timer = threading.Timer(timeout, _expire)
+            timer = threading.Timer(timeout, _expire_child, args=(timed_out, sub_stop_event))
             timer.daemon = True
             timer.start()
         try:

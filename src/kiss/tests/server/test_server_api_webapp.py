@@ -97,11 +97,6 @@ class TestPasswordsEqual(unittest.TestCase):
         self.assertTrue(passwords_equal("café", "café"))
         self.assertFalse(passwords_equal("café", "cafe"))
 
-    def test_web_server_alias(self) -> None:
-        """``RemoteAccessServer._passwords_equal`` is the API compare."""
-        self.assertTrue(RemoteAccessServer._passwords_equal("x", "x"))
-        self.assertFalse(RemoteAccessServer._passwords_equal("x", "y"))
-
 
 class TestTrajectoryApiMethods(unittest.TestCase):
     """The trajectory HTTP data endpoints' payloads come from the API."""

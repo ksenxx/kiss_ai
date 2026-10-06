@@ -986,9 +986,9 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  // Shutdown first: the panel disposals below (and any the workbench
-  // triggers) must not retire chats from the daemon's registry.
-  panelManager?.markShutdown();
+  // The manager's dispose marks shutdown first: the panel disposals
+  // below (and any the workbench triggers) must not retire chats from
+  // the daemon's registry.
   panelManager?.dispose();
   panelManager = undefined;
   sidebarView?.dispose();

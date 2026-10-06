@@ -266,29 +266,6 @@ class TestH2StdoutDevnull(IsolatedAsyncioTestCase):
         self.assertLess(elapsed, 10, "tunnel start should be fast")
 
 
-
-class TestH3ConstantTimeCompare(unittest.TestCase):
-    """Password comparison must go through :func:`secrets.compare_digest`."""
-
-
-    def test_passwords_equal_returns_true_for_equal_strings(self) -> None:
-        """The helper returns True for equal passwords."""
-        self.assertTrue(RemoteAccessServer._passwords_equal("hunter2", "hunter2"))
-
-    def test_passwords_equal_returns_false_for_different_strings(self) -> None:
-        """The helper returns False for different passwords."""
-        self.assertFalse(RemoteAccessServer._passwords_equal("hunter2", "hunter3"))
-
-    def test_passwords_equal_returns_false_for_different_lengths(self) -> None:
-        """Strings of different lengths are not equal (handled internally)."""
-        self.assertFalse(RemoteAccessServer._passwords_equal("a", "abcdef"))
-
-    def test_passwords_equal_handles_unicode(self) -> None:
-        """Unicode passwords compare correctly via UTF-8 encoding."""
-        self.assertTrue(RemoteAccessServer._passwords_equal("café", "café"))
-        self.assertFalse(RemoteAccessServer._passwords_equal("café", "cafe"))
-
-
 class TestH3CompareDigestActuallyCalled(IsolatedAsyncioTestCase):
     """Behavioural check: monkey-patch compare_digest and confirm it's invoked."""
 
@@ -439,20 +416,20 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
         self.assertNotIn("9.9.9.9", self.server._auth_failures)
 
     async def test_is_auth_locked_thresholds(self) -> None:
-        """_is_auth_locked enforces _AUTH_FAIL_MAX within window."""
+        """_auth_lock_remaining enforces _AUTH_FAIL_MAX within window."""
         ip = "10.0.0.1"
         for _ in range(ws_mod._AUTH_FAIL_MAX - 1):
             self.server._record_auth_failure(ip)
-        self.assertFalse(self.server._is_auth_locked(ip))
+        self.assertEqual(self.server._auth_lock_remaining(ip), 0.0)
         self.server._record_auth_failure(ip)
-        self.assertTrue(self.server._is_auth_locked(ip))
+        self.assertGreater(self.server._auth_lock_remaining(ip), 0.0)
 
     async def test_is_auth_locked_window_expiry(self) -> None:
         """Old failures outside the window do not contribute to the lock."""
         ip = "10.0.0.2"
         ancient = time.monotonic() - (ws_mod._AUTH_FAIL_WINDOW + 10)
         self.server._auth_failures[ip] = [ancient] * (ws_mod._AUTH_FAIL_MAX + 5)
-        self.assertFalse(self.server._is_auth_locked(ip))
+        self.assertEqual(self.server._auth_lock_remaining(ip), 0.0)
         self.assertNotIn(ip, self.server._auth_failures)
 
 

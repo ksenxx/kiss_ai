@@ -141,9 +141,12 @@ def test_settings_vocabulary_has_no_prompt_or_extends_keys() -> None:
     assert "Python inheritance" in REMOVED_SETTINGS["extends"]
     with pytest.raises(SettingsError, match="key 'extends' was removed"):
         resolve_settings({"extends": "x"})
-    for key in ("prompt", "system_prompt", "add_to_prompt"):
+    for key in ("prompt", "system_prompt"):
         with pytest.raises(SettingsError, match=f"unknown key {key!r}"):
             resolve_settings({key: "x"})
+    # The prompt suffixes are options, not settings: refused with the method to use.
+    with pytest.raises(SettingsError, match="key 'add_to_prompt' was removed: .*prompt\\(task\\)"):
+        resolve_settings({"add_to_prompt": "x"})
     # The dispatcher's option vocabulary is the run-settings subset of
     # the SEA vocabulary (no script-describing keys) plus its own.
     assert set(agent_dispatch.OPTION_TYPES) == (

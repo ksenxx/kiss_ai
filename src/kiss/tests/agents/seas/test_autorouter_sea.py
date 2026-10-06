@@ -556,20 +556,23 @@ def test_concurrent_first_picks_schedule_a_single_job(
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
     sea_commands._reset_for_tests()
     assert sea_commands.model_sea("autorouter") == _SEA_PATH
-    barrier = threading.Barrier(8)
+    barrier = threading.Barrier(8, timeout=30)
 
     def pick(work_dir: str) -> None:
         barrier.wait()
         sea_commands.run_picked_hook("autorouter", work_dir)
 
     threads = [
-        threading.Thread(target=pick, args=(str(_CHECKOUT) if i % 2 else str(tmp_path),))
+        threading.Thread(
+            target=pick, args=(str(_CHECKOUT) if i % 2 else str(tmp_path),), daemon=True
+        )
         for i in range(8)
     ]
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join()
+        thread.join(timeout=60)
+    assert not any(thread.is_alive() for thread in threads), "a picked-hook thread hung"
     assert len(load_jobs()) == 1, load_jobs()
 
 

@@ -21,6 +21,7 @@ import base64
 import json
 import os
 import threading
+from collections import defaultdict
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +36,7 @@ from kiss.agents.third_party_agents import _composio_google as cg
 from kiss.tests.conftest import IS_WINDOWS
 
 _API = "/api/v3.1"
+_KEY = "test-project-key"  # the project API key the ``composio`` fixture configures
 
 
 class _Request:
@@ -55,7 +57,7 @@ class _ComposioHandler(BaseHTTPRequestHandler):
         body = json.loads(raw) if raw else None
         server = cast(_FakeComposio, self.server)
         server.requests.append(_Request(self.command, parts.path, parse_qs(parts.query), body))
-        status, reply = server.route(self.command, parts.path)
+        status, reply = server.route(self.command, parts.path, self.headers.get("x-api-key", ""))
         if isinstance(reply, bytes):
             payload, ctype = reply, "application/octet-stream"
         else:
@@ -87,12 +89,23 @@ class _FakeComposio(ThreadingHTTPServer):
         self.next_account = "ca_new"
         self.proxy_reply: dict[str, Any] = {"status": 200, "data": {"ok": True}, "headers": {}}
         self.download: tuple[int, bytes] = (200, b"%PDF-1.7 bytes")
+        # Per API key, set once that caller has polled a connected-account
+        # status: the ``finish_connect`` using the key has read its
+        # ``pending_id`` by then.  Concurrent callers are told apart by
+        # the key ``_client()`` reads from COMPOSIO_API_KEY when they start.
+        self.status_polled: defaultdict[str, threading.Event] = defaultdict(threading.Event)
+        # Per API key, an Event a status GET waits for before it is
+        # answered (a 503 if the wait expires): lets a test hold one
+        # caller's poll until another caller has finished.
+        # ``status_held[key]`` is set once such a poll is waiting.
+        self.status_holds: dict[str, threading.Event] = {}
+        self.status_held: defaultdict[str, threading.Event] = defaultdict(threading.Event)
 
     @property
     def base(self) -> str:
         return f"http://127.0.0.1:{self.server_address[1]}"
 
-    def route(self, method: str, path: str) -> tuple[int, Any]:
+    def route(self, method: str, path: str, api_key: str) -> tuple[int, Any]:
         if path == f"{_API}/auth_configs" and method == "GET":
             return 200, {"items": self.auth_configs, "total_pages": 1, "current_page": 1}
         if path == f"{_API}/auth_configs" and method == "POST":
@@ -116,8 +129,15 @@ class _FakeComposio(ThreadingHTTPServer):
             if method == "DELETE":
                 del self.accounts[account]
                 return 200, {"success": True}
+            hold = self.status_holds.get(api_key)
+            if hold is not None:
+                self.status_held[api_key].set()
+                if not hold.wait(timeout=15.0):
+                    # An expired hold is a test failure, never a normal answer.
+                    return 503, {"error": {"message": "status poll hold expired", "status": 503}}
             statuses = self.accounts[account]
             status = statuses.pop(0) if len(statuses) > 1 else statuses[0]
+            self.status_polled[api_key].set()
             return 200, {"id": account, "status": status}
         if path == f"{_API}/tools/execute/proxy":
             return 200, self.proxy_reply
@@ -135,7 +155,7 @@ def composio(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     monkeypatch.setenv("COMPOSIO_BASE_URL", server.base)
-    monkeypatch.setenv("COMPOSIO_API_KEY", "test-project-key")
+    monkeypatch.setenv("COMPOSIO_API_KEY", _KEY)
     # A developer's shell may pin auth configs for any service
     # (KISS_COMPOSIO_AUTH_CONFIG_GOOGLE_CALENDAR=ac_...); every override
     # must go so the tests exercise the list/create path.
@@ -359,13 +379,15 @@ def test_finish_connect_unknown_account_error(composio: _FakeComposio) -> None:
 def test_finish_connect_keeps_waiting_through_inactive(composio: _FakeComposio) -> None:
     """INACTIVE is not terminal: the wait continues until the account activates."""
     assert cg.start_connect("gmail", "Gmail")["ok"]
-    # The fake replies with one status per poll: INACTIVE first, then ACTIVE.
-    composio.accounts["ca_new"] = ["INACTIVE", "ACTIVE"]
+    # One status per poll.  finish_connect's own GET, then the SDK's
+    # ``from_id`` GET, then the SDK wait loop's first GET all see
+    # INACTIVE, so the loop keeps waiting (one 1 s sleep) until the
+    # fourth poll answers ACTIVE.
+    composio.accounts["ca_new"] = ["INACTIVE", "INACTIVE", "INACTIVE", "ACTIVE"]
     answer = cg.finish_connect("gmail", "Gmail")
     assert answer == {"ok": True, "message": "Gmail connected through Composio."}
     assert _state("gmail") == {"connected_account_id": "ca_new"}
-    # The status was polled more than once before it turned ACTIVE.
-    assert composio.paths("GET").count(f"{_API}/connected_accounts/ca_new") >= 2
+    assert composio.paths("GET").count(f"{_API}/connected_accounts/ca_new") == 4
 
 
 def test_start_connect_twice_deletes_the_superseded_pending_account(
@@ -400,19 +422,22 @@ def test_finish_connect_superseded_while_waiting_does_not_record_the_old_account
     assert cg.start_connect("gmail", "Gmail")["ok"]  # A = ca_new
     composio.accounts["ca_new"] = ["INACTIVE"]
     composio.undeletable.add("ca_new")
+    started_b: dict[str, Any] = {}
 
     def start_b_then_activate_a() -> None:
+        # Inject only once finish_connect(A) has polled A, i.e. holds A as pending.
+        started_b["polled"] = composio.status_polled[_KEY].wait(timeout=10.0)
         composio.next_account = "ca_b"
-        assert cg.start_connect("gmail", "Gmail")["ok"]
+        started_b.update(cg.start_connect("gmail", "Gmail"))
         composio.accounts["ca_new"] = ["ACTIVE"]
 
-    timer = threading.Timer(1.5, start_b_then_activate_a)
-    timer.start()
+    injector = threading.Thread(target=start_b_then_activate_a)
+    injector.start()
     try:
         answer = cg.finish_connect("gmail", "Gmail")
     finally:
-        timer.cancel()
-        timer.join()
+        injector.join(timeout=15.0)
+    assert started_b["polled"] and started_b["ok"]
     assert answer == {
         "ok": False,
         "error": "a newer Gmail sign-in was started; finish that one instead",
@@ -428,33 +453,60 @@ def test_finish_connect_superseded_while_waiting_does_not_record_the_old_account
     assert _state("gmail") == {"connected_account_id": "ca_b"}
 
 
-def test_overlapping_finish_calls_keep_the_recorded_account(composio: _FakeComposio) -> None:
+def test_overlapping_finish_calls_keep_the_recorded_account(
+    composio: _FakeComposio, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A finish that loses the race to another finish must not delete the account.
 
-    Both calls wait on the same pending account A.  The second one sees
-    A ACTIVE first and records it; the first one, re-reading the state
-    afterwards, finds A already connected (not superseded) and answers
-    ok without deleting anything.
+    Both calls hold the same pending account A.  The first one's status
+    poll is held by the fake while the second one waits for A, sees it
+    ACTIVE and records it; the first one's poll then answers ACTIVE and,
+    re-reading the state, it finds A already connected (not superseded)
+    and answers ok without deleting or rewriting anything.
     """
     assert cg.start_connect("gmail", "Gmail")["ok"]  # A = ca_new
     composio.accounts["ca_new"] = ["INACTIVE"]
+    state_file = cg.service_dir("gmail") / "composio.json"
+    first: dict[str, Any] = {}
     second: dict[str, Any] = {}
 
-    def activate_and_finish() -> None:
-        composio.accounts["ca_new"] = ["ACTIVE"]
-        second.update(cg.finish_connect("gmail", "Gmail"))
+    def finish_into(result: dict[str, Any]) -> None:
+        result.update(cg.finish_connect("gmail", "Gmail"))
 
-    timer = threading.Timer(1.5, activate_and_finish)
-    timer.start()
+    # The hold is installed before the first finish starts, so its very
+    # first status poll (sent after it read A as pending, before any SDK
+    # wait deadline exists) is the one held.  The second finish uses its
+    # own API key so the fake can tell its polls apart.
+    release_first = threading.Event()
+    composio.status_holds[_KEY] = release_first
+    finishers = [
+        threading.Thread(target=finish_into, args=(first,)),
+        threading.Thread(target=finish_into, args=(second,)),
+    ]
     try:
-        first = cg.finish_connect("gmail", "Gmail")
+        finishers[0].start()
+        assert composio.status_held[_KEY].wait(timeout=10.0)
+        monkeypatch.setenv("COMPOSIO_API_KEY", "second-key")
+        finishers[1].start()
+        assert composio.status_polled["second-key"].wait(timeout=10.0)
+        composio.accounts["ca_new"] = ["ACTIVE"]
+        finishers[1].join(timeout=15.0)
+        assert not finishers[1].is_alive()
+        assert second == {"ok": True, "message": "Gmail connected through Composio."}
+        recorded = state_file.stat()
+        assert _state("gmail") == {"connected_account_id": "ca_new"}
     finally:
-        timer.cancel()
-        timer.join()
-    assert second == {"ok": True, "message": "Gmail connected through Composio."}
+        release_first.set()
+        for finisher in finishers:
+            if finisher.ident is not None:
+                finisher.join(timeout=15.0)
     assert first == {"ok": True, "message": "Gmail connected through Composio."}
     assert composio.paths("DELETE") == []
     assert _state("gmail") == {"connected_account_id": "ca_new"}
+    # The first finish took the "already recorded" path: the state file
+    # (rewritten by an atomic rename on the ordinary path) is untouched.
+    after = state_file.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (recorded.st_ino, recorded.st_mtime_ns)
 
 
 # ---------------------------------------------------------------------------

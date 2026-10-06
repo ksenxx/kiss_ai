@@ -7,7 +7,7 @@
 * D1 (F1): ``_handle_ready`` must skip non-dict ``restoredTabs``
   elements instead of raising ``AttributeError`` and tearing down the
   whole authenticated WebSocket connection.
-* D3 (F5): ``_translate_webview_command`` no longer rewrites
+* D3 (F5): ``translate_webview_command`` no longer rewrites
   ``userActionDone`` (the branch was dead — no client ever sends it;
   ``media/main.js`` posts ``userAnswer`` directly), so the command
   passes through unchanged with all dispatch stamps intact.
@@ -26,10 +26,10 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 
 import kiss.agents.sorcar.persistence as th
+from kiss.server.sorcar import translate_webview_command
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
-    _translate_webview_command,
 )
 
 
@@ -141,7 +141,7 @@ class TestTranslateUserActionDone(TestCase):
 
     def test_user_action_done_passes_through_unchanged(self) -> None:
         """No client sends ``userActionDone`` (``media/main.js`` posts
-        ``userAnswer`` directly), so ``_translate_webview_command`` no
+        ``userAnswer`` directly), so ``translate_webview_command`` no
         longer rewrites it — the command passes through unchanged."""
         cmd = {
             "type": "userActionDone",
@@ -149,5 +149,5 @@ class TestTranslateUserActionDone(TestCase):
             "connId": "conn-9",
             "workDir": "/some/work/dir",
         }
-        out = _translate_webview_command(dict(cmd))
+        out = translate_webview_command(dict(cmd))
         self.assertEqual(out, cmd)

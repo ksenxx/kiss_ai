@@ -33,6 +33,7 @@ from websockets.asyncio.client import connect
 
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.server.sorcar import translate_webview_command
 from kiss.server.web_server import (
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,
     _URL_FILE,
@@ -50,7 +51,6 @@ from kiss.server.web_server import (
     _read_version,
     _remove_url_file,
     _save_url_file,
-    _translate_webview_command,
 )
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._blocking_start import close_leaked_listeners
@@ -251,13 +251,13 @@ class TestTranslateWebviewCommand(unittest.TestCase):
 
     def test_user_action_done_passes_through(self) -> None:
         """userActionDone has no producer; it is no longer rewritten."""
-        result = _translate_webview_command({"type": "userActionDone"})
+        result = translate_webview_command({"type": "userActionDone"})
         self.assertEqual(result["type"], "userActionDone")
         self.assertNotIn("answer", result)
 
     def test_resume_session_id_becomes_chat_id(self) -> None:
         """resumeSession 'id' field is renamed to 'chatId'."""
-        result = _translate_webview_command(
+        result = translate_webview_command(
             {
                 "type": "resumeSession",
                 "id": 42,
@@ -272,7 +272,7 @@ class TestTranslateWebviewCommand(unittest.TestCase):
     def test_resume_session_with_chat_id_unchanged(self) -> None:
         """resumeSession with chatId already set is not modified."""
         cmd = {"type": "resumeSession", "chatId": 42, "tabId": "t1"}
-        result = _translate_webview_command(cmd)
+        result = translate_webview_command(cmd)
         self.assertEqual(result["chatId"], 42)
 
     def test_passthrough_commands_unchanged(self) -> None:
@@ -284,7 +284,7 @@ class TestTranslateWebviewCommand(unittest.TestCase):
             {"type": "newChat", "tabId": "t1"},
             {"type": "getHistory", "query": "test"},
         ]:
-            result = _translate_webview_command(cmd)
+            result = translate_webview_command(cmd)
             self.assertEqual(result, cmd)
 
 
@@ -837,12 +837,16 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
+            # The reply shares the socket with unrelated broadcasts
+            # (``models``, and ``update_available`` once the PyPI check
+            # has cached a version), so read until the reply arrives.
             received_types: set[str] = set()
-            for _ in range(2):
-                raw = await asyncio.wait_for(ws.recv(), timeout=5)
-                ev = json.loads(raw)
-                received_types.add(ev["type"])
-            self.assertIn("configData", received_types)
+            deadline = asyncio.get_running_loop().time() + 10
+            while "configData" not in received_types:
+                remaining = deadline - asyncio.get_running_loop().time()
+                self.assertGreater(remaining, 0, f"no configData among {received_types}")
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                received_types.add(json.loads(raw)["type"])
 
     async def test_ws_stop_no_error(self) -> None:
         """stop command with no running task is reported, not an error.

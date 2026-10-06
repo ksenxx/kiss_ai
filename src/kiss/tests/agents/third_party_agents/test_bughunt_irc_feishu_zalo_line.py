@@ -49,6 +49,8 @@ class _FakeIRCServer:
         self.port = self._listener.getsockname()[1]
         self.received: list[str] = []
         self._conn: socket.socket | None = None
+        self._lock = threading.Lock()  # guards _conn against close()
+        self._stopping = threading.Event()
         self._connected = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
@@ -58,29 +60,35 @@ class _FakeIRCServer:
             conn, _ = self._listener.accept()
         except OSError:
             return
-        self._conn = conn
-        conn.settimeout(0.5)
+        conn.settimeout(0.5)  # before publishing: close() may close conn right after
+        with self._lock:
+            # close() may have run between accept() and here: it then saw
+            # no connection to close, so this one must not be served.
+            if self._stopping.is_set():
+                conn.close()
+                return
+            self._conn = conn
         buf = b""
         first = True
-        while True:
-            try:
-                data = conn.recv(4096)
-            except TimeoutError:
-                continue
-            except OSError:
-                break
-            if not data:
-                break
-            if first:
-                first = False
-                if data[:1] == b"\x16":
-                    conn.close()
-                    return
-                self._connected.set()
-            buf += data
-            while b"\r\n" in buf:
-                line, buf = buf.split(b"\r\n", 1)
-                self.received.append(line.decode("utf-8", errors="replace"))
+        with conn:  # closed on every exit, including the EOF of close()'s wake-up connection
+            while not self._stopping.is_set():
+                try:
+                    data = conn.recv(4096)
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                if not data:
+                    break
+                if first:
+                    first = False
+                    if data[:1] == b"\x16":
+                        return
+                    self._connected.set()
+                buf += data
+                while b"\r\n" in buf:
+                    line, buf = buf.split(b"\r\n", 1)
+                    self.received.append(line.decode("utf-8", errors="replace"))
 
     def send_line(self, line: str) -> None:
         assert self._connected.wait(timeout=5.0), "client never connected"
@@ -96,9 +104,23 @@ class _FakeIRCServer:
         return False
 
     def close(self) -> None:
-        if self._conn is not None:
+        with self._lock:
+            self._stopping.set()
+            conn = self._conn
+        if conn is not None:
+            # Wakes the recv loop (OSError, or its next 0.5 s timeout
+            # followed by the _stopping check).
             try:
-                self._conn.close()
+                conn.close()
+            except OSError:
+                pass
+        elif self._thread.is_alive():
+            # Closing a listening socket does not wake accept(); a
+            # throw-away connection does.  The server thread accepts it
+            # (or a client accepted before _stopping was set) and, seeing
+            # _stopping, closes it and returns.
+            try:
+                socket.create_connection(("127.0.0.1", self.port), timeout=1.0).close()
             except OSError:
                 pass
         try:
@@ -106,6 +128,7 @@ class _FakeIRCServer:
         except OSError:
             pass
         self._thread.join(timeout=5.0)
+        assert not self._thread.is_alive(), "fake IRC server thread did not exit"
 
 
 class TestIRCBugs:

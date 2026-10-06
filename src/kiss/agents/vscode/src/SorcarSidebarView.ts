@@ -2064,10 +2064,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    */
   public async openSettingsUI(): Promise<void> {
     await this.focusChatInput();
+    await this._waitForWebviewReady();
+    this._sendToWebview({type: 'openSettings'});
+  }
+
+  /**
+   * Wait (at most 3 s) for a freshly created webview to report `ready`,
+   * so a message posted next is not dropped by a still-loading page.
+   * Returns at once without a webview.
+   */
+  private async _waitForWebviewReady(): Promise<void> {
     for (let i = 0; i < 15 && this._view && !this._webviewReady; i++) {
       await new Promise(r => setTimeout(r, 200));
     }
-    this._sendToWebview({type: 'openSettings'});
   }
 
   /**
@@ -2081,9 +2090,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    */
   public async gitCommit(): Promise<void> {
     await this.focusChatInput();
-    for (let i = 0; i < 15 && this._view && !this._webviewReady; i++) {
-      await new Promise(r => setTimeout(r, 200));
-    }
+    await this._waitForWebviewReady();
     this._sendToWebview({type: 'gitCommit'});
   }
 
@@ -2116,9 +2123,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     title?: string;
   }): Promise<void> {
     await this.focusChatInput();
-    for (let i = 0; i < 15 && this._view && !this._webviewReady; i++) {
-      await new Promise(r => setTimeout(r, 200));
-    }
+    await this._waitForWebviewReady();
     // The reveal above can outlive the routing decision that chose
     // this surface: editor-tabs mode flipped ON mid-wait hides this
     // view (its `when` clause), and posting now would resume the chat
@@ -2257,9 +2262,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._sizeReportResolver = undefined;
     return new Promise(resolve => {
       let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const finish = (v: {inner: number; screen: number} | undefined) => {
         if (done) return;
         done = true;
+        // The safety-net timer must not outlive a prompt report: the
+        // widening loop measures up to 31 times, and each leaked timer
+        // kept the extension host alive for another 1.5 s.
+        clearTimeout(timer);
         if (this._sizeReportResolver === inner) {
           this._sizeReportResolver = undefined;
         }
@@ -2268,7 +2278,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       const inner = (s: {inner: number; screen: number}) => finish(s);
       this._sizeReportResolver = inner;
       this._sendToWebview({type: 'measureSize'});
-      setTimeout(() => finish(undefined), timeoutMs);
+      if (!done) timer = setTimeout(() => finish(undefined), timeoutMs);
     });
   }
 

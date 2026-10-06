@@ -77,7 +77,11 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
 )
 from kiss.core import tool_interrupt
 from kiss.core.models.model import Attachment
-from kiss.core.models.model_info import get_available_models, get_default_model
+from kiss.core.models.model_info import (
+    get_available_models,
+    get_default_model,
+    is_known_model,
+)
 from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -313,7 +317,7 @@ def build_task_extra_payload(
     }
 
 
-def _picker_sea(seas: list[BaseSea], picker: Path) -> BaseSea:
+def _loaded_picker_sea(seas: list[BaseSea], picker: Path) -> BaseSea:
     """Return the loaded model-picker SEA among *seas* (the one loaded from *picker*)."""
     return next(sea for sea in seas if sea.path == picker)
 
@@ -326,7 +330,7 @@ def _picker_model(seas: list[BaseSea], picker: Path) -> str:
     blanks ``model`` back to ``""`` ("the tab's pick", which is the
     picker entry itself).
     """
-    settings = base_settings([_picker_sea(seas, picker)])
+    settings = base_settings([_loaded_picker_sea(seas, picker)])
     return str(settings.get("model") or get_default_model())
 
 
@@ -913,7 +917,7 @@ class _TaskRunnerMixin:
             # starts.  The already-executed namespace is reused.
             run_picked_hook(
                 picked[0], str(cmd.get("workDir") or self.work_dir),
-                sea=_picker_sea(layers, picked[1]),
+                sea=_loaded_picker_sea(layers, picked[1]),
             )
         return overridden
 
@@ -934,6 +938,13 @@ class _TaskRunnerMixin:
         tab_id = cmd.get("tabId", "")
         start_ms = int(time.time() * 1000)
         cmd["_start_ms"] = start_ms
+        # The command as submitted: ``_apply_sea`` rewrites ``cmd`` in
+        # place (a ``/xxx text`` slash command becomes a run of the SEA
+        # ``xxx`` with ``agentPath`` set, a picker model becomes a real
+        # one, the scripts pin their settings), and the leftover-prompt
+        # re-dispatch at the end must restart from what the USER sent,
+        # not from the SEA run this turned into.
+        submitted_cmd = dict(cmd)
         state: AgentState | None = None
         client_task_id = ""
         try:
@@ -1261,7 +1272,7 @@ class _TaskRunnerMixin:
                 except BaseException:  # pragma: no cover — merge error handler
                     logger.debug("Deferred worktree merge error", exc_info=True)
             if redispatch:
-                self._redispatch_leftover_prompts(cmd, leftover)
+                self._redispatch_leftover_prompts(submitted_cmd, leftover)
 
     def _redispatch_leftover_prompts(
         self, cmd: dict[str, Any], leftover: list[str],
@@ -1272,15 +1283,18 @@ class _TaskRunnerMixin:
         tab's thread slot is free, so :meth:`_cmd_run` takes its
         fresh-run branch — exactly what would have happened had the
         user typed the prompt one second later.  The follow-up inherits
-        the finished run's settings (work dir, model, worktree and
-        auto-commit choices) but not its client stamp: the run token
-        (``taskId``) belongs to the submission that has just ended,
-        and the routing key (``_state_key``) to the state that has just
-        been torn down.  Multiple leftovers become one prompt, joined
-        by blank lines, in the order they were typed.
+        the finished run's settings as the user submitted them (work
+        dir, model, worktree and auto-commit choices) — not what its
+        SEA pipeline made of them (a ``/xxx`` command's ``agentPath``,
+        a script's pinned fields) — and not its client stamp: the run
+        token (``taskId``) belongs to the submission that has just
+        ended, and the routing key (``_state_key``) to the state that
+        has just been torn down.  Multiple leftovers become one
+        prompt, joined by blank lines, in the order they were typed.
 
         Args:
-            cmd: The finished run's ``run`` command.
+            cmd: The finished run's ``run`` command as submitted
+                (``_run_task``'s pre-SEA snapshot).
             leftover: The undrained prompts, oldest first.
         """
         followup = {
@@ -1538,7 +1552,6 @@ class _TaskRunnerMixin:
         chat_id: str,
         *,
         source_tab_id: str,
-        conn_id: str,
         start_ms: int,
         client_task_id: str = "",
         is_subagent: bool = False,
@@ -1548,10 +1561,9 @@ class _TaskRunnerMixin:
         Invoked from ``ChatSorcarAgent.run`` via the
         ``_on_task_id_allocated`` hook as soon as the run's
         ``task_history`` row id exists; the printer bridge has already
-        re-keyed the agent state to *task_id*.  Adds the launching tab
-        id and connection id to the printer (which also subscribes the
-        tab to the task's event stream) and then subscribes every idle
-        viewer of the chat — unless the run is another task's
+        re-keyed the agent state to *task_id*.  Subscribes the
+        launching tab to the task's event stream on the printer and
+        then subscribes every idle viewer of the chat — unless the run is another task's
         sub-agent (*is_subagent*): a path-mode ``run_agent`` child
         runs on its PARENT's chat by default, and its stream belongs
         in the nested sub-agent tab the ``new_tab`` broadcast opens,
@@ -1564,14 +1576,13 @@ class _TaskRunnerMixin:
             task_id: The freshly allocated ``task_history`` row id.
             chat_id: The chat id the task runs on.
             source_tab_id: The UI tab the task was launched from.
-            conn_id: The launching client connection id.
             start_ms: The task's start timestamp (ms since epoch).
             client_task_id: The client-stamped ``taskId`` of the run
                 command (echoed on viewer ``status`` events).
             is_subagent: Whether the run was submitted with a
                 ``parentTaskId`` (a ``run_agent`` child).
         """
-        self.printer.register_task_ui(task_id, source_tab_id, conn_id)
+        self.printer.register_task_ui(task_id, source_tab_id)
         if is_subagent:
             return
         self._subscribe_chat_viewers(
@@ -1720,8 +1731,36 @@ class _TaskRunnerMixin:
                 )
                 return
 
+        from kiss.core.models.model_info import custom_model_config
+        from kiss.core.vscode_config import build_model_config, load_config
+
+        # The run's model configuration, resolved ONCE for the
+        # classifier and the run: the client-sent ``modelConfig``,
+        # else a settings-panel custom model's (a ~/.kiss/MY_MODELS.json
+        # entry carrying an endpoint) OWN endpoint / key / headers,
+        # else the global config's.  The classifier must call the same
+        # endpoint as the run — a custom-endpoint model routed by name
+        # to the default provider fails or stalls there.
+        _vcfg = load_config()
+        _raw_model_config = cmd.get("modelConfig")
+        _agent_model_config = (
+            _raw_model_config if isinstance(_raw_model_config, dict) else None
+        )
+        _model_config = custom_model_config(model) or build_model_config(_vcfg)
+        # A run whose effective configuration names an endpoint never
+        # needs a vendor key: ``model_info.model`` builds the
+        # OpenAI-compatible adapter for that ``base_url`` whatever the
+        # name, so a settings-panel custom model (listed in the picker
+        # by ``_get_models``) is admitted under any name the catalog or
+        # ``MY_MODELS.json`` can price.
+        _effective_config = (
+            _agent_model_config if _agent_model_config is not None else _model_config
+        )
+        _endpoint_run = bool(
+            _effective_config and _effective_config.get("base_url") and is_known_model(model)
+        )
         available = get_available_models()
-        if not available or (model and model not in available):
+        if not _endpoint_run and (not available or (model and model not in available)):
             no_model_msg = "No model available.  Set at least one API key in the environment."
             self.printer.broadcast(
                 {
@@ -1777,9 +1816,6 @@ class _TaskRunnerMixin:
         # changes; the persisted ``is_worktree`` setting is never
         # written.  A disabled or failed classification leaves
         # ``use_worktree`` exactly as the client requested.
-        from kiss.core.vscode_config import build_model_config, load_config
-
-        _raw_mc_early = cmd.get("modelConfig")
         # Per-run classification toggle: the ``classifyTasks`` wire
         # field (``classify_tasks`` on ``kiss.server.sorcar.run``).
         # Absent or malformed means "no override" — the persisted
@@ -1794,11 +1830,6 @@ class _TaskRunnerMixin:
         # (:mod:`kiss.agents.sorcar.worktree_pool`), so a checkout never
         # competes with the launch it would run beside.
         _classify_task_text = prompt + append_to_prompt
-        _classify_model_config = (
-            _raw_mc_early
-            if isinstance(_raw_mc_early, dict)
-            else build_model_config(load_config())
-        )
         repo = GitWorktreeOps.discover_repo(Path(work_dir))
         if classification_enabled(_classify_enabled):
             # The classifier is a blocking model round trip (seconds);
@@ -1808,7 +1839,11 @@ class _TaskRunnerMixin:
         _classify_verdict = agent.classify_task_for_run(
             model_name=model,
             task=_classify_task_text,
-            model_config=_classify_model_config,
+            model_config=(
+                _agent_model_config
+                if _agent_model_config is not None
+                else _model_config
+            ),
             enabled=_classify_enabled,
         )
         # The verdict only ever DEMOTES a default; a ``use_worktree`` the
@@ -2004,27 +2039,11 @@ class _TaskRunnerMixin:
                 # agent run, ``state.last_user_prompt``, and the
                 # per-subtask persistence all consistent.
                 subtasks = [t + append_to_prompt for t in subtasks]
-            # ``build_model_config`` / ``load_config`` are already
-            # bound: the classification prologue above imports them
-            # unconditionally on every path into this try.
-            _vcfg = load_config()
             # ``load_config()`` fills every key from ``DEFAULTS``, so a
             # literal fallback here would be unreachable code that can
             # only drift away from the one authoritative default.
             _cfg_budget = float(_vcfg["max_budget"])
             _cfg_web = _vcfg.get("use_web_browser", True)
-            _model_config = build_model_config(_vcfg)
-            # A settings-panel custom model (a ~/.kiss/MY_MODELS.json
-            # entry carrying an endpoint) runs against ITS OWN
-            # endpoint / key / headers: the per-model config wins over
-            # the global custom-endpoint fallback above, or the run
-            # would silently target whatever endpoint the global
-            # config last held.
-            from kiss.core.models.model_info import custom_model_config
-
-            _my_model_config = custom_model_config(model)
-            if _my_model_config is not None:
-                _model_config = _my_model_config
             _agent_budget = coerce_budget_override(cmd.get("maxBudget"))
             _raw_web = cmd.get("useWebTools")
             _agent_web = _raw_web if isinstance(_raw_web, bool) else None
@@ -2065,12 +2084,6 @@ class _TaskRunnerMixin:
             # file tools execute in; absent or malformed means the host.
             _raw_docker = cmd.get("dockerImage")
             _docker_image = _raw_docker if isinstance(_raw_docker, str) else ""
-            _raw_model_config = cmd.get("modelConfig")
-            _agent_model_config = (
-                _raw_model_config
-                if isinstance(_raw_model_config, dict)
-                else None
-            )
             # Agent-script hooks (``llm_call_hook`` /
             # ``tool_call_hook``), staged onto the command dict by
             # ``apply_agent_overrides``.  Guarded with ``callable``:
@@ -2090,7 +2103,6 @@ class _TaskRunnerMixin:
             on_task_id_allocated = partial(
                 self._on_run_task_id_allocated,
                 source_tab_id=tab_id,
-                conn_id=state.conn_id,
                 start_ms=start_ms,
                 client_task_id=_client_task_id_of(cmd),
                 is_subagent=bool(parent_task_id),
