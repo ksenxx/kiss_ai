@@ -74,9 +74,18 @@ function testSidebarWebview() {
   assert.strictEqual(msgs.length, 1);
   assert.strictEqual(msgs[0].enabled, true);
 
-  // Sidebar mode keeps its internal tab bar and the footer's new-chat
-  // and settings controls (the latter inside the "..." menu).
-  assert.strictEqual(win.document.getElementById('tab-bar').style.display, '');
+  // Sidebar mode keeps its own main tab row (the group strip under it
+  // only appears once a chat has sub-agents or opened files) and the
+  // footer's new-chat and settings controls (the latter inside the
+  // "..." menu).
+  assert.strictEqual(
+    win.document.getElementById('main-tab-bar').style.display,
+    '',
+  );
+  assert.strictEqual(
+    win.document.getElementById('tab-bar').style.display,
+    'none',
+  );
   assert.ok(win.document.getElementById('new-chat-btn'));
   assert.ok(win.document.getElementById('settings-btn'));
 

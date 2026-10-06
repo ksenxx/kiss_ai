@@ -45,14 +45,16 @@
 // `ask` reports the ask_user_question state as the user sees it: whether
 // the composer of the ACTIVE tab is the answer box (body.ask-answering),
 // the text of that tab's pending question panel, and the ids of the
-// background tabs flagged "Waiting for your answer" (.chat-tab-attention).
+// background tabs waiting for an answer (drawn as the "?" mark on their
+// strip entry, or on their chat's main-row entry while that group is off
+// screen).
 // `answer` types into the composer and presses Send — the same path a
 // user's answer takes — and reports whether the composer was the answer
 // box at that moment.
 //
-// `tabs` describes the rendered tab bar (#tab-list, the user-visible
-// truth) joined with the webview's own tab records (parent, task id,
-// running/done flags) taken from the state it persists via setState.
+// `tabs` describes every open tab: the webview's own tab records
+// (_testApi.openTabs) joined with what the rendered tab rows show of
+// each (title, spinner, done tick).
 
 const fs = require('fs');
 const path = require('path');
@@ -295,9 +297,7 @@ function reconnectSurface(cmd, surface) {
 // many frames this surface received in total.
 function describeBrowser(surface, tabId) {
   const {win} = surface.view;
-  const strip = win.document.querySelector(
-    `#tab-list [data-tab-id="${tabId}"]`,
-  );
+  const strip = tabEl(win.document, tabId);
   const holder = win.document.querySelector(
     `#content-tab-area .browser-tab-view[data-tab-id="${tabId}"]`,
   );
@@ -330,23 +330,75 @@ function shownBrowserScreen(surface) {
   return shown ? shown.querySelector('.browser-screen') : null;
 }
 
-// The rendered tab bar is the user-visible truth: one entry per
-// `#tab-list [data-tab-id]` element.  A sub-agent tab's id is
+// The tab rows show the main row (#main-tab-list: the chats and
+// ownerless tabs) and the group strip (#tab-list: the chat on screen
+// with its sub-agents and files); in editor-tabs mode the strip is the
+// only row.  A background chat's sub-agents and files are open but not
+// rendered, so the webview's own tab records (_testApi.openTabs) are the
+// list of open tabs and the rows supply what the user sees of each.
+function allTabEls(doc) {
+  const seen = new Set();
+  return Array.from(
+    doc.querySelectorAll(
+      '#main-tab-list [data-tab-id], #tab-list [data-tab-id]',
+    ),
+  ).filter(el => {
+    if (seen.has(el.dataset.tabId)) return false;
+    seen.add(el.dataset.tabId);
+    return true;
+  });
+}
+
+function renderedTabEl(doc, tabId) {
+  return (
+    doc.querySelector(`#tab-list [data-tab-id="${tabId}"]`) ||
+    doc.querySelector(`#main-tab-list [data-tab-id="${tabId}"]`)
+  );
+}
+
+// The element of tab `tabId` on whichever row shows it (the strip's
+// when it is on both, so `.active` reads the real active tab).  A tab of
+// a background group is reached the way the user reaches it: its chat's
+// main-row entry brings the group on screen first.
+function tabEl(doc, tabId) {
+  const el = renderedTabEl(doc, tabId);
+  if (el) return el;
+  const win = doc.defaultView;
+  const record = (win._testApi ? win._testApi.openTabs() : []).find(
+    t => t.id === tabId,
+  );
+  if (!record || record.rootId === tabId) return null;
+  const root = doc.querySelector(
+    `#main-tab-list [data-tab-id="${record.rootId}"]`,
+  );
+  if (!root) return null;
+  root.click();
+  return renderedTabEl(doc, tabId);
+}
+
+// One entry per open tab.  A sub-agent tab's id is
 // `${parentTabId}__sub_${taskId}` (main.js subagentTabIdFor), so the
 // driver derives parent and task from the id.
 function describeTabs(surface) {
   const {win} = surface.view;
-  const els = Array.from(
-    win.document.querySelectorAll('#tab-list [data-tab-id]'),
-  );
-  return els.map(el => {
-    const indicator = el.querySelector('.subagent-indicator');
+  const doc = win.document;
+  return win._testApi.openTabs().map(t => {
+    const el = renderedTabEl(doc, t.id);
+    const indicator = el && el.querySelector('.subagent-indicator');
     return {
-      id: el.dataset.tabId,
-      title: (el.querySelector('.chat-tab-label') || {}).textContent || '',
-      isSubagentTab: el.classList.contains('subagent-tab'),
-      subagentDone: !!(indicator && indicator.classList.contains('done')),
-      running: !!el.querySelector('.status-spinner'),
+      id: t.id,
+      title: el
+        ? (el.querySelector('.chat-tab-label') || {}).textContent || ''
+        : t.title,
+      isSubagentTab: t.isSubagentTab,
+      subagentDone: el
+        ? !!(indicator && indicator.classList.contains('done'))
+        : t.isSubagentTab && t.isDone,
+      running: el
+        ? !!el.querySelector('.status-spinner')
+        : t.isSubagentTab
+          ? !t.isDone
+          : t.isRunning,
     };
   });
 }
@@ -359,9 +411,14 @@ function describeAsk(surface) {
     activeTabId: active ? active.dataset.tabId : '',
     answering: doc.body.classList.contains('ask-answering'),
     question: panel ? panel.textContent : '',
-    attention: Array.from(
-      doc.querySelectorAll('#tab-list [data-tab-id] .chat-tab-attention'),
-    ).map(el => el.closest('[data-tab-id]').dataset.tabId),
+    // The tabs waiting for an answer other than the one on screen: the
+    // mark is drawn on the asking tab's strip entry, or on its chat's
+    // main-row entry while that group is off screen, so the webview's
+    // records name the asking tabs themselves.
+    attention: doc.defaultView._testApi
+      .openTabs()
+      .filter(t => t.askPending && !(active && active.dataset.tabId === t.id))
+      .map(t => t.id),
   };
 }
 
@@ -401,9 +458,8 @@ function handle(cmd) {
       out({op: 'submitted', name: cmd.name});
       break;
     case 'closeTab': {
-      const el = doc.querySelector(
-        `#tab-list [data-tab-id="${cmd.tabId}"] .chat-tab-close`,
-      );
+      const tab = tabEl(doc, cmd.tabId);
+      const el = tab && tab.querySelector('.chat-tab-close');
       if (el) el.click();
       out({op: 'tabClosed', name: cmd.name, found: !!el});
       break;
@@ -412,7 +468,7 @@ function handle(cmd) {
       out({op: 'events', name: cmd.name, events: surface.events});
       break;
     case 'activateTab': {
-      const el = doc.querySelector(`#tab-list [data-tab-id="${cmd.tabId}"]`);
+      const el = tabEl(doc, cmd.tabId);
       if (el) el.click();
       out({op: 'tabActivated', name: cmd.name, found: !!el});
       break;

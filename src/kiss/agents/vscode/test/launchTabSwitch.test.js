@@ -86,17 +86,21 @@ function activeTabId(win) {
 }
 
 function tabIds(win) {
-  return Array.from(win.document.querySelectorAll('.chat-tab'))
+  // The chat whose group is on screen sits on the main row and on the
+  // group strip under it; count each tab once.
+  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
     .map(el => el.getAttribute('data-tab-id'))
     .filter(id => !!id);
+  return ids.filter((id, i) => ids.indexOf(id) === i);
 }
 
 // A real click in the tab bar: it carries the pointerdown a user's finger
 // would, which is what ends a launch.
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
+  const sel = `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`;
+  const el =
+    win.document.querySelector('#tab-list ' + sel) ||
+    win.document.querySelector('#main-tab-list ' + sel);
   assert.ok(el, `tab ${tabId} must exist in the tab bar`);
   el.dispatchEvent(new win.MouseEvent('pointerdown', {bubbles: true}));
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));

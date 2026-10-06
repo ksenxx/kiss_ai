@@ -66,9 +66,12 @@ function send(win, data) {
 }
 
 function tabIds(win) {
-  return Array.from(
+  // The chat whose group is on screen sits on the main row and on the
+  // group strip under it; count each tab once.
+  const ids = Array.from(
     win.document.querySelectorAll('.chat-tab[data-tab-id]'),
   ).map(el => el.getAttribute('data-tab-id'));
+  return ids.filter((id, i) => ids.indexOf(id) === i);
 }
 
 function clickTab(win, tabId) {

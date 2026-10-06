@@ -80,14 +80,18 @@ function entry(tabId, title, workDir) {
   };
 }
 
+// The tab's entry on the group strip when its group is on screen, else
+// its main-row entry.
 function tabEl(win, tabId) {
-  return win.document.querySelector(
-    '.chat-tab[data-tab-id="' + tabId + '"]',
+  const sel = '.chat-tab[data-tab-id="' + tabId + '"]';
+  return (
+    win.document.querySelector('#tab-list ' + sel) ||
+    win.document.querySelector('#main-tab-list ' + sel)
   );
 }
 
 function activeTabId(win) {
-  const el = win.document.querySelector('.chat-tab.active');
+  const el = win.document.querySelector('#tab-list .chat-tab.active');
   return el ? el.dataset.tabId : null;
 }
 

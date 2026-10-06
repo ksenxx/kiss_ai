@@ -506,9 +506,12 @@ function submitPrompt(win, posted, text) {
 
 /** The tab ids the tab bar currently shows. */
 function shownTabIds(win) {
-  return Array.from(win.document.querySelectorAll('.chat-tab')).map(
+  // The chat whose group is on screen sits on the main row and on the
+  // group strip under it; count each tab once.
+  const ids = Array.from(win.document.querySelectorAll('.chat-tab')).map(
     el => el.dataset.tabId,
   );
+  return ids.filter((id, i) => ids.indexOf(id) === i);
 }
 
 /** Pick *dir* through the VS Code host round trip (panel -> host -> panel). */

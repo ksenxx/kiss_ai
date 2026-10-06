@@ -723,10 +723,15 @@
     }
     // While a file/webview tab is on screen the composer is hidden by
     // CSS (body.content-tab-open) and cannot take focus, so the active
-    // tab's strip entry is the visible fallback.
+    // tab's entry on a visible row is the fallback: the group strip
+    // when it is shown, else its main-row entry (a top-level file).
     const composerHidden = document.body.classList.contains('content-tab-open');
+    const tabBar = document.getElementById('tab-bar');
+    const stripShown = tabBar && tabBar.style.display !== 'none';
     const fallback = composerHidden
-      ? document.querySelector('#tab-list .chat-tab.active')
+      ? document.querySelector(
+          (stripShown ? '#tab-list' : '#main-tab-list') + ' .chat-tab.active',
+        )
       : document.getElementById('task-input');
     if (fallback) fallback.focus();
   }
@@ -1183,6 +1188,10 @@
       // the conversation that started it.
       isSubagentTab: false,
       parentTabId: null,
+      // On a top-level tab: the tab of its group (itself, a sub-agent,
+      // an opened file) the user viewed last; its main-row entry brings
+      // that tab back (see groupTargetId).
+      groupActiveId: null,
       isDone: false,
       lastTaskFailed: false,
       hasRunTask: false,
@@ -1809,8 +1818,10 @@
   // '×' controls keep tabindex=0 (they are separate buttons, not tabs,
   // and this keeps them directly Tab-reachable -- the simplest correct
   // option under the pattern).
+  // The arrow keys move within the row the focused tab is in (the main
+  // row or the group strip), never across rows.
   function moveTabFocus(fromEl, key) {
-    const tabList = document.getElementById('tab-list');
+    const tabList = fromEl.parentElement;
     if (!tabList) return;
     const els = Array.from(tabList.querySelectorAll('[role="tab"]'));
     if (els.length === 0) return;
@@ -1833,14 +1844,105 @@
   let lastNotifiedPanelTitle = '';
   let lastNotifiedPanelState = null;
 
+  // ---- Tab groups ---------------------------------------------------
+  //
+  // Every surface shows its tabs on two rows, the way editor-tabs mode
+  // does with VS Code's editor tabs above the webview's own strip.  The
+  // MAIN row (#main-tab-list) holds one entry per top-level tab: each
+  // chat tab, plus any tab nobody owns (the daemon's browser tab).  The
+  // GROUP strip (#tab-list) under it holds the tabs of the group on
+  // screen: the chat itself, the sub-agents it spawned and the files,
+  // reports and terminals its task opened, in tab order.  The strip
+  // appears only when that group has more than one tab.  The main row
+  // highlights the group on screen and takes the user back to the tab
+  // they last viewed in a group.  In editor-tabs mode VS Code's editor
+  // tabs are the main row (one WebviewPanel per chat), the panel holds
+  // exactly one group, and #main-tab-bar stays hidden.
+
+  /** The tab *tab* hangs off: a sub-agent's parent chat, a file's owning
+   *  chat (or file); null for a top-level tab or a broken link. */
+  function tabOwner(tab) {
+    const upId = tab.isSubagentTab
+      ? tab.parentTabId
+      : tab.isContentTab
+        ? tab.ownerTabId
+        : '';
+    const up = upId ? getTab(upId) : null;
+    return up && up !== tab ? up : null;
+  }
+
+  /** The top-level tab of *tab*'s group (itself when it owns nothing up). */
+  function rootTabOf(tab) {
+    let t = tab;
+    const seen = new Set();
+    while (t && !seen.has(t.id)) {
+      seen.add(t.id);
+      const up = tabOwner(t);
+      if (!up) break;
+      t = up;
+    }
+    return t;
+  }
+
+  /** The tabs of *root*'s group, in tab order, *root* included. In
+   *  editor-tabs mode the panel is one group, so every tab belongs. */
+  function groupMembers(root) {
+    if (EDITOR_TAB_MODE) return tabs.slice();
+    return tabs.filter(t => rootTabOf(t) === root);
+  }
+
+  /** The tab a click on *root*'s main-row entry activates: the group's
+   *  last viewed tab while it is still in the group, else the root. */
+  function groupTargetId(root) {
+    const last = root.groupActiveId ? getTab(root.groupActiveId) : null;
+    return last && rootTabOf(last) === root ? last.id : root.id;
+  }
+
+  // The group last scrolled into view on the main row (see
+  // lastScrolledTabId for the same discipline on the strip).
+  let lastScrolledRootId = null;
+
   function renderTabBar() {
     const tabList = document.getElementById('tab-list');
     const tabBar = document.getElementById('tab-bar');
     if (!tabList || !tabBar) return;
 
+    const active = getTab(activeTabId);
+    const roots = tabs.filter(t => rootTabOf(t) === t);
+    const activeRoot = active ? rootTabOf(active) : null;
+    if (activeRoot) activeRoot.groupActiveId = activeTabId;
+    // The group the strip shows: the active tab's, or the first group
+    // when nothing is active yet.
+    const shownRoot = activeRoot || roots[0] || null;
+    const members = shownRoot ? groupMembers(shownRoot) : [];
+
     // Checked on <body> inline — not via EDITOR_TAB_MODE — so the
     // function stays self-contained.
-    if (document.body.classList.contains('editor-tab-mode')) {
+    const editorTabMode = document.body.classList.contains('editor-tab-mode');
+    const mainBar = document.getElementById('main-tab-bar');
+    const mainList = document.getElementById('main-tab-list');
+    if (mainBar) mainBar.style.display = editorTabMode ? 'none' : '';
+    if (mainList && !editorTabMode) {
+      mainList.setAttribute('role', 'tablist');
+      mainList.setAttribute('aria-label', 'Chat tabs');
+      mainList.innerHTML = '';
+      const rovingRoot = shownRoot || null;
+      roots.forEach(root => {
+        const el = buildTabElement(root, {
+          main: true,
+          selected: root === shownRoot,
+          focusStop: root === rovingRoot,
+        });
+        mainList.appendChild(el);
+      });
+      const activeEl = mainList.querySelector('.chat-tab.active');
+      const shownRootId = shownRoot ? shownRoot.id : null;
+      if (activeEl && shownRootId !== lastScrolledRootId)
+        activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
+      lastScrolledRootId = shownRootId;
+    }
+
+    if (editorTabMode) {
       // The EDITOR TAB is this chat's tab: mirror the root chat tab's
       // label (the static task panel's text while the root is on
       // screen, see tabLabel) onto it through the host.
@@ -1873,14 +1975,14 @@
           });
         }
       }
-      // The internal bar only appears when there is something beyond
-      // the root chat to switch to (a run_parallel fan-out's sub-agent
-      // tabs); a single conversation needs no second tab strip under
-      // the editor's own.
-      tabBar.style.display = tabs.length > 1 ? '' : 'none';
-    } else {
-      tabBar.style.display = '';
     }
+
+    // The strip only appears when there is something beyond the chat
+    // itself to switch to (a run_parallel fan-out's sub-agent tabs, a
+    // file the task opened); a single conversation needs no second tab
+    // strip under the main row (or, in editor-tabs mode, under the
+    // editor's own tabs).
+    tabBar.style.display = members.length > 1 ? '' : 'none';
 
     // Chat tabs are proper a11y tabs: keyboard users reach them with
     // Tab, screen readers announce "<title>, tab, selected", and
@@ -1894,155 +1996,177 @@
     // tabs (see moveTabFocus) and Enter/Space activate.  If the active
     // tab is somehow not in the list, the first tab is the stop so the
     // tablist never becomes keyboard-unreachable.
-    const rovingStopId = tabs.some(t => t.id === activeTabId)
+    const rovingStopId = members.some(t => t.id === activeTabId)
       ? activeTabId
-      : tabs.length > 0
-        ? tabs[0].id
+      : members.length > 0
+        ? members[0].id
         : null;
-    tabs.forEach(tab => {
-      const el = document.createElement('div');
-      el.className =
-        'chat-tab' +
-        (tab.id === activeTabId ? ' active' : '') +
-        (tab.isSubagentTab ? ' subagent-tab' : '') +
-        (tab.isContentTab ? ' content-tab' : '') +
-        (tab.isContentTab && tab.contentDirty ? ' content-dirty' : '');
-      el.dataset.tabId = tab.id;
-      el.setAttribute('role', 'tab');
-      el.setAttribute('tabindex', tab.id === rovingStopId ? '0' : '-1');
-      el.setAttribute(
-        'aria-selected',
-        tab.id === activeTabId ? 'true' : 'false',
+    members.forEach(tab => {
+      tabList.appendChild(
+        buildTabElement(tab, {
+          main: false,
+          selected: tab.id === activeTabId,
+          focusStop: tab.id === rovingStopId,
+        }),
       );
-      const label = tabLabel(tab);
-      el.setAttribute('aria-label', label);
-      // All chat tabs swap the one shared chat surface (#output), so a
-      // single shared tabpanel is the correct association.
-      el.setAttribute('aria-controls', 'output');
-
-      if (tab.isContentTab) {
-        const fileIcon = document.createElement('span');
-        fileIcon.className = 'content-tab-icon';
-        fileIcon.textContent = tab.isBrowserTab
-          ? '\uD83C\uDF10'
-          : tab.isTerminalTab
-            ? '>_'
-            : '\uD83D\uDCC4';
-        if (tab.isTerminalTab) fileIcon.classList.add('terminal-tab-icon');
-        fileIcon.title = tab.contentPath || '';
-        el.appendChild(fileIcon);
-      } else if (tab.isSubagentTab) {
-        // Spinner while the sub-agent runs, green tick once it is done.
-        const subIndicator = document.createElement('span');
-        subIndicator.className = tab.isDone
-          ? 'subagent-indicator done status-tick'
-          : 'subagent-indicator status-spinner';
-        subIndicator.title = tab.isDone ? 'Done' : 'Running';
-        el.appendChild(subIndicator);
-      } else {
-        if (tab.isRunning) {
-          const spinner = document.createElement('span');
-          spinner.className = 'chat-tab-spinner status-spinner';
-          el.appendChild(spinner);
-        } else if (tab.hasRunTask) {
-          // Green tick after a successful task, red cross after a
-          // failed one.
-          const icon = document.createElement('span');
-          icon.className = tab.lastTaskFailed
-            ? 'chat-tab-status chat-tab-fail status-cross'
-            : 'chat-tab-status chat-tab-ok status-tick';
-          el.appendChild(icon);
-        }
-      }
-
-      if (tab.askPendingQuestion !== null && tab.id !== activeTabId) {
-        const attention = document.createElement('span');
-        attention.className = 'chat-tab-attention';
-        attention.textContent = '?';
-        attention.title = 'Waiting for your answer';
-        el.appendChild(attention);
-      }
-
-      const labelEl = document.createElement('span');
-      labelEl.className = 'chat-tab-label';
-      labelEl.textContent = label;
-      el.appendChild(labelEl);
-
-      // Unsaved edits in a content tab's editor show as VS Code's
-      // filled dot next to the name, so the user sees what a close
-      // would throw away before the confirmation asks.
-      if (tab.isContentTab && tab.contentDirty) {
-        const dirty = document.createElement('span');
-        dirty.className = 'chat-tab-dirty';
-        dirty.textContent = '\u25CF';
-        dirty.title = 'Unsaved changes';
-        el.appendChild(dirty);
-      }
-
-      const closeBtn = document.createElement('span');
-      closeBtn.className = 'chat-tab-close';
-      closeBtn.textContent = '\u00d7';
-      closeBtn.setAttribute('role', 'button');
-      closeBtn.setAttribute('tabindex', '0');
-      closeBtn.setAttribute(
-        'aria-label',
-        tab.isContentTab && tab.contentDirty
-          ? 'Close tab (unsaved changes)'
-          : 'Close tab',
-      );
-      closeBtn.addEventListener('click', e => {
-        e.stopPropagation();
-        closeTab(tab.id);
-      });
-      closeBtn.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          e.stopPropagation();
-          closeTab(tab.id);
-        }
-      });
-      el.appendChild(closeBtn);
-
-      el.addEventListener('click', () => {
-        switchToTab(tab.id);
-      });
-      el.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          switchToTab(tab.id);
-        } else if (
-          e.key === 'ArrowLeft' ||
-          e.key === 'ArrowRight' ||
-          e.key === 'Home' ||
-          e.key === 'End'
-        ) {
-          e.preventDefault();
-          moveTabFocus(el, e.key);
-        } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
-          // The keyboard's context-menu gesture opens the same menu the
-          // right click does, under the tab.
-          e.preventDefault();
-          e.stopPropagation();
-          const r = el.getBoundingClientRect();
-          showTabContextMenu(r.left, r.bottom, tab.id, el);
-        }
-      });
-      el.addEventListener('contextmenu', e => {
-        e.preventDefault();
-        e.stopPropagation();
-        showTabContextMenu(e.clientX, e.clientY, tab.id, el);
-      });
-      tabList.appendChild(el);
     });
 
     // The "+" (new chat), settings and theme controls used to live in
     // this bar; they are now in the input footer (#new-chat-btn and the
     // "..." overflow menu), so the bar carries only the tabs.
 
-    const activeEl = tabList.querySelector('.chat-tab.active');
+    // A hidden strip (a lone tab in the group) has nothing to scroll.
+    const activeEl =
+      members.length > 1 ? tabList.querySelector('.chat-tab.active') : null;
     if (activeEl && activeTabId !== lastScrolledTabId)
       activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
     lastScrolledTabId = activeTabId;
+  }
+
+  /**
+   * Build one tab element for the main row (opts.main) or the group
+   * strip.  opts.selected marks it the highlighted tab of its row,
+   * opts.focusStop makes it the row's roving Tab stop.  A main-row entry
+   * stands for its whole group: it activates the tab last viewed in the
+   * group and shows the group's pending question.
+   */
+  function buildTabElement(tab, opts) {
+    const targetId = opts.main ? groupTargetId(tab) : tab.id;
+    const members = opts.main ? groupMembers(tab) : [tab];
+    const needsAnswer = members.some(
+      t => t.askPendingQuestion !== null && t.id !== activeTabId,
+    );
+    const el = document.createElement('div');
+    el.className =
+      'chat-tab' +
+      (opts.selected ? ' active' : '') +
+      (tab.isSubagentTab ? ' subagent-tab' : '') +
+      (tab.isContentTab ? ' content-tab' : '') +
+      (tab.isContentTab && tab.contentDirty ? ' content-dirty' : '') +
+      (opts.main ? ' main-tab' : '');
+    el.dataset.tabId = tab.id;
+    el.setAttribute('role', 'tab');
+    el.setAttribute('tabindex', opts.focusStop ? '0' : '-1');
+    el.setAttribute('aria-selected', opts.selected ? 'true' : 'false');
+    const label = tabLabel(tab);
+    el.setAttribute('aria-label', label);
+    // All chat tabs swap the one shared chat surface (#output), so a
+    // single shared tabpanel is the correct association.
+    el.setAttribute('aria-controls', 'output');
+
+    if (tab.isContentTab) {
+      const fileIcon = document.createElement('span');
+      fileIcon.className = 'content-tab-icon';
+      fileIcon.textContent = tab.isBrowserTab
+        ? '\uD83C\uDF10'
+        : tab.isTerminalTab
+          ? '>_'
+          : '\uD83D\uDCC4';
+      if (tab.isTerminalTab) fileIcon.classList.add('terminal-tab-icon');
+      fileIcon.title = tab.contentPath || '';
+      el.appendChild(fileIcon);
+    } else if (tab.isSubagentTab) {
+      // Spinner while the sub-agent runs, green tick once it is done.
+      const subIndicator = document.createElement('span');
+      subIndicator.className = tab.isDone
+        ? 'subagent-indicator done status-tick'
+        : 'subagent-indicator status-spinner';
+      subIndicator.title = tab.isDone ? 'Done' : 'Running';
+      el.appendChild(subIndicator);
+    } else {
+      if (tab.isRunning) {
+        const spinner = document.createElement('span');
+        spinner.className = 'chat-tab-spinner status-spinner';
+        el.appendChild(spinner);
+      } else if (tab.hasRunTask) {
+        // Green tick after a successful task, red cross after a
+        // failed one.
+        const icon = document.createElement('span');
+        icon.className = tab.lastTaskFailed
+          ? 'chat-tab-status chat-tab-fail status-cross'
+          : 'chat-tab-status chat-tab-ok status-tick';
+        el.appendChild(icon);
+      }
+    }
+
+    if (needsAnswer) {
+      const attention = document.createElement('span');
+      attention.className = 'chat-tab-attention';
+      attention.textContent = '?';
+      attention.title = 'Waiting for your answer';
+      el.appendChild(attention);
+    }
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'chat-tab-label';
+    labelEl.textContent = label;
+    el.appendChild(labelEl);
+
+    // Unsaved edits in a content tab's editor show as VS Code's
+    // filled dot next to the name, so the user sees what a close
+    // would throw away before the confirmation asks.
+    if (tab.isContentTab && tab.contentDirty) {
+      const dirty = document.createElement('span');
+      dirty.className = 'chat-tab-dirty';
+      dirty.textContent = '\u25CF';
+      dirty.title = 'Unsaved changes';
+      el.appendChild(dirty);
+    }
+
+    const closeBtn = document.createElement('span');
+    closeBtn.className = 'chat-tab-close';
+    closeBtn.textContent = '\u00d7';
+    closeBtn.setAttribute('role', 'button');
+    closeBtn.setAttribute('tabindex', '0');
+    closeBtn.setAttribute(
+      'aria-label',
+      tab.isContentTab && tab.contentDirty
+        ? 'Close tab (unsaved changes)'
+        : 'Close tab',
+    );
+    closeBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      closeTab(tab.id);
+    });
+    closeBtn.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeTab(tab.id);
+      }
+    });
+    el.appendChild(closeBtn);
+
+    el.addEventListener('click', () => {
+      switchToTab(targetId);
+    });
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        switchToTab(targetId);
+      } else if (
+        e.key === 'ArrowLeft' ||
+        e.key === 'ArrowRight' ||
+        e.key === 'Home' ||
+        e.key === 'End'
+      ) {
+        e.preventDefault();
+        moveTabFocus(el, e.key);
+      } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+        // The keyboard's context-menu gesture opens the same menu the
+        // right click does, under the tab.
+        e.preventDefault();
+        e.stopPropagation();
+        const r = el.getBoundingClientRect();
+        showTabContextMenu(r.left, r.bottom, tab.id, el);
+      }
+    });
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      showTabContextMenu(e.clientX, e.clientY, tab.id, el);
+    });
+    return el;
   }
 
   function switchToTab(tabId) {
@@ -2143,6 +2267,20 @@
     }
     const activeWasClosed = toClose.has(activeTabId);
     const closed = tabs[origIdx];
+    // A file a closing sub-agent opened stays with the chat: it moves up
+    // to the nearest surviving ancestor, so it keeps its place in that
+    // chat's group on the tab strip (a closed root's files turn into
+    // top-level tabs; see rootTabOf).
+    const heirs = new Map();
+    for (const id of toClose) {
+      let up = (getTab(id) || {}).parentTabId;
+      while (up && toClose.has(up)) up = (getTab(up) || {}).parentTabId;
+      heirs.set(id, up || null);
+    }
+    for (const t of tabs) {
+      if (t.isContentTab && heirs.get(t.ownerTabId))
+        t.ownerTabId = heirs.get(t.ownerTabId);
+    }
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
       if (i >= 0) {
@@ -2592,6 +2730,13 @@
     // Closing a terminal tab hangs its shell up, as closing a terminal
     // window does.
     if (tab.isTerminalTab) api.terminalClose({tab_id: tabId});
+    // A file opened from this one (the Explorer names the tab on screen
+    // as the owner) stays in the same group: it moves up to this tab's
+    // own owner (see rootTabOf).
+    for (const t of tabs) {
+      if (t.isContentTab && t.ownerTabId === tabId)
+        t.ownerTabId = tab.ownerTabId;
+    }
     tabs.splice(idx, 1);
     disposeTabContentView(tab);
     if (activeTabId === tabId) {
@@ -12716,6 +12861,13 @@
     const oldId = tab.id;
     const panel = _rpTabPanel.get(oldId) || null;
     tab.id = newTabId;
+    // Its nested sub-agents, the files it opened and any group bookmark
+    // follow the rename, so they stay in the chat's group (rootTabOf).
+    for (const t of tabs) {
+      if (t.parentTabId === oldId) t.parentTabId = newTabId;
+      if (t.ownerTabId === oldId) t.ownerTabId = newTabId;
+      if (t.groupActiveId === oldId) t.groupActiveId = newTabId;
+    }
     if (panel) {
       _rpTabPanel.delete(oldId);
       _rpTabPanel.set(newTabId, panel);
@@ -24668,6 +24820,22 @@
         spans: _pendingFileLinkSpans.size,
         checks: _pendingPathChecks.size,
       };
+    },
+    // Every open tab, in tab order, with what the multi-surface test
+    // driver (test/multiSurfaceBridge.js) compares across surfaces.  The
+    // tab rows alone will not do: the group strip only shows the group
+    // on screen, so a background chat's sub-agents are not rendered.
+    openTabs: function () {
+      return tabs.map(t => ({
+        id: t.id,
+        title: tabLabel(t),
+        rootId: rootTabOf(t).id,
+        isSubagentTab: !!t.isSubagentTab,
+        isContentTab: !!t.isContentTab,
+        isDone: !!t.isDone,
+        isRunning: !!t.isRunning,
+        askPending: t.askPendingQuestion !== null,
+      }));
     },
   };
 

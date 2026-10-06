@@ -83,16 +83,23 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// The tab's entry on the group strip when its group is on screen, else
+// its main-row entry.
 function tabEl(win, tabId) {
-  return win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  const sel = `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`;
+  return (
+    win.document.querySelector('#tab-list ' + sel) ||
+    win.document.querySelector('#main-tab-list ' + sel)
   );
 }
 
 function tabIds(win) {
-  return Array.from(
+  // The chat whose group is on screen sits on the main row and on the
+  // group strip under it; count each tab once.
+  const ids = Array.from(
     win.document.querySelectorAll('.chat-tab[data-tab-id]'),
   ).map(el => el.getAttribute('data-tab-id'));
+  return ids.filter((id, i) => ids.indexOf(id) === i);
 }
 
 function click(win, el, what) {
@@ -450,7 +457,14 @@ function testTheHostNeverNamesADeadTabDuringAMixedSession() {
   clickTab(win, first);
   alive();
   assertHostIsUpToDate(win, 'mixed session: back on the first tab');
-  clickTab(win, content);
+  // The file belongs to the second chat's group and was that group's
+  // last viewed tab, so the chat's main-row entry brings the file back.
+  clickTab(win, second);
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    content,
+    'the main-row entry returns to the tab last viewed in its group',
+  );
   alive();
   assertHostKeepsChatTab(win, first, 'mixed session: viewing the file');
   clickTab(win, second);

@@ -118,9 +118,13 @@ function send(win, data) {
 }
 
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
+  const el =
+    win.document.querySelector(
+      '#tab-list ' + `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+    ) ||
+    win.document.querySelector(
+      '#main-tab-list ' + `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+    );
   assert.ok(el, `tab ${tabId} must exist in the tab bar`);
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
