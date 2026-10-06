@@ -10,6 +10,7 @@ import os
 import random
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -123,7 +124,12 @@ def kiss_home() -> Path:
     return Path(env) if env else Path.home() / HOME_DIR
 
 
-def adopt_legacy_file(path: Path, legacy_name: str, suffixes: tuple[str, ...] = ("",)) -> None:
+def adopt_legacy_file(
+    path: Path,
+    legacy_name: str,
+    suffixes: tuple[str, ...] = ("",),
+    stale: Callable[[Path], bool] | None = None,
+) -> None:
     """Give a file created under its former name its current name.
 
     When *path* does not exist but ``path.parent / legacy_name`` does, the
@@ -140,27 +146,68 @@ def adopt_legacy_file(path: Path, legacy_name: str, suffixes: tuple[str, ...] = 
     Windows: SQLite there names the WAL after the path it was given, so
     a link would have the two versions write two WALs over one database
     file; the old version is restarted anyway, so nothing is left behind.
-    Concurrent adopters serialise on a lock file next to *path*, and the
-    one that arrives second finds nothing left to do.
+    Concurrent adopters serialise on a lock file next to *path* (taken
+    whenever a file under the legacy name exists, the symlink included),
+    and the one that arrives second finds nothing left to do.
+
+    A name that comes back into use can find its new location already
+    taken by a file an even older version left there.  When both names
+    exist as distinct files and ``stale(path)`` says the file at *path*
+    is such a leftover, that file (and its sidecars) is moved out of the
+    way to ``<path>.stale-<UTC time>`` -- kept, never deleted -- before
+    the legacy file is renamed over its name.  Without *stale*, or when
+    it answers ``False``, two distinct files are left as they are.
 
     Args:
         path: The file's current location.
         legacy_name: Its former file name, in the same directory.
         suffixes: Suffixes appended to both names for every file to
             rename; ``""`` is the file itself.
+        stale: Tells whether an existing file at *path* is a leftover of
+            a version older than the one that wrote the legacy file.
     """
     legacy = path.with_name(legacy_name)
-    if path.exists() or not legacy.exists():
+    if not legacy.exists():
         return
+    # Everything else is decided under the lock: a file another adopter
+    # is moving aside right now looks unreadable, and reading that as
+    # "nothing to do" would open (and create) *path* while it is absent.
     with exclusive_file_lock(path.with_name(path.name + ".rename.lock")):
-        if path.exists() or not legacy.exists():
+        if not _adoption_pending(path, legacy, stale):
             return
+        if path.exists():
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            set_aside = path.with_name(f"{path.name}.stale-{stamp}")
+            for suffix in suffixes:
+                source = path.with_name(path.name + suffix)
+                if source.exists():
+                    os.replace(source, set_aside.with_name(set_aside.name + suffix))
         for suffix in suffixes:
             source = legacy.with_name(legacy.name + suffix)
             if source.exists():
                 os.replace(source, path.with_name(path.name + suffix))
         if os.name != "nt":
             os.symlink(path.name, legacy)
+
+
+def _adoption_pending(path: Path, legacy: Path, stale: Callable[[Path], bool] | None) -> bool:
+    """Tell whether :func:`adopt_legacy_file` has a rename left to do.
+
+    True when only the legacy file exists, or when both exist as
+    distinct files (neither a link to the other) and *stale* judges the
+    one at *path* to be the leftover of an older version.
+    """
+    if not legacy.exists():
+        return False
+    if not path.exists():
+        return True
+    if stale is None:
+        return False
+    try:
+        same = path.samefile(legacy)
+    except OSError:  # pragma: no cover — one of the two vanished meanwhile
+        return False
+    return not same and stale(path)
 
 
 def agents_md_path() -> Path:

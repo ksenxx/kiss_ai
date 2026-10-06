@@ -41,6 +41,7 @@ from kiss.agents.sorcar.chat_summary import upsert_chat_summary
 from kiss.agents.sorcar.task_metadata import classify_task_tags
 from kiss.core.config import adopt_legacy_file, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.scripts.legacy_task_db import is_pre_2026_04_db
 
 logger = logging.getLogger(__name__)
 
@@ -1324,8 +1325,10 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             timestamp REAL NOT NULL DEFAULT 0
         );
     """)
-    _apply_index_ddl(conn)
+    # Columns first: an index over a column this version added to an
+    # existing table can only be created once the column is there.
     _add_missing_columns(conn)
+    _apply_index_ddl(conn)
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -1364,11 +1367,13 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
 def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
     """Port a pre-UUID task_history DB to the new schema in-place.
 
-    Detects the old schema (``task_history.id`` is ``INTEGER`` and the
-    ``extra`` column exists), creates new-shaped tables under temporary
-    names, assigns each row a fresh ``uuid.uuid4().hex``, copies row
-    data into the typed columns, remaps every ``events.task_id`` to the
-    new UUID, then atomically replaces the old tables.
+    Detects the old schema (``task_history.id`` is ``INTEGER``), creates
+    new-shaped tables under temporary names, assigns each row a fresh
+    ``uuid.uuid4().hex``, copies row data into the typed columns, remaps
+    every ``events.task_id`` to the new UUID, then atomically replaces
+    the old tables.  The JSON ``extra`` column holds the per-row
+    metadata; a database from before 2026-04-13 has no such column,
+    and its rows migrate with the metadata defaults.
 
     Returns ``True`` when migration was performed, ``False`` when the
     DB already has the new schema or no ``task_history`` table yet.
@@ -1380,8 +1385,6 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
     if not cols:
         return False
     if cols.get("id") == "TEXT":
-        return False
-    if "extra" not in cols:
         return False
 
     def _sx(v: object) -> str:
@@ -1413,14 +1416,11 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
                 "PRAGMA table_info(task_history)"
             ).fetchall()
         }
-        if (
-            not cols_locked
-            or cols_locked.get("id") == "TEXT"
-            or "extra" not in cols_locked
-        ):
+        if not cols_locked or cols_locked.get("id") == "TEXT":
             conn.execute("ROLLBACK")
             conn.execute("PRAGMA foreign_keys=ON")
             return False
+        extra_column = "extra" if "extra" in cols_locked else "''"
         conn.execute("DROP TABLE IF EXISTS task_history__new")
         conn.execute("DROP TABLE IF EXISTS events__new")
         conn.execute(
@@ -1458,7 +1458,7 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
         )
         rows = conn.execute(
             "SELECT id, timestamp, task, has_events, result, chat_id, "
-            "extra FROM task_history ORDER BY id ASC"
+            f"{extra_column} FROM task_history ORDER BY id ASC"
         ).fetchall()
         id_map: dict[int, str] = {int(r[0]): uuid.uuid4().hex for r in rows}
         dropped_unknown_keys = 0
@@ -1714,6 +1714,16 @@ _LEGACY_DB_NAME = "sorcar.db"  # the database's name before version 2026.10.2
 def _adopt_legacy_db_name(current_path: str) -> None:
     """Rename a ``sorcar.db`` left by a pre-2026.10.2 install to *current_path*.
 
+    The database was ALSO called ``history.db`` from March 2026 until
+    2026-04-24, when it became ``sorcar.db`` and the old file was left
+    where it was.  An install from those weeks has both names when it
+    upgrades, and the leftover under the new name is not the database:
+    its schema cannot even be opened (``no such column:
+    parent_task_id``), while every task since lives in ``sorcar.db``.
+    :func:`kiss.scripts.legacy_task_db.is_pre_2026_04_db` recognises
+    the leftover by its schema and :func:`adopt_legacy_file` sets it
+    aside (as ``history.db.stale-<UTC time>``) before the rename.
+
     The journals named after the database (:func:`_failed_events_path`,
     :func:`_final_results_path`) are adopted on their own, so that they
     follow even when the database itself was renamed by the deploy
@@ -1721,7 +1731,7 @@ def _adopt_legacy_db_name(current_path: str) -> None:
     know about the database and its ``-wal``/``-shm`` sidecars.
     """
     db_file = Path(current_path)
-    adopt_legacy_file(db_file, _LEGACY_DB_NAME, ("-wal", "-shm", ""))
+    adopt_legacy_file(db_file, _LEGACY_DB_NAME, ("-wal", "-shm", ""), stale=is_pre_2026_04_db)
     for journal in (".failed_events.jsonl", ".final_results.jsonl"):
         adopt_legacy_file(db_file.with_name(db_file.name + journal), _LEGACY_DB_NAME + journal)
 
