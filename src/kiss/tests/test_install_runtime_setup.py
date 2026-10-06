@@ -880,14 +880,67 @@ def test_start_falls_back_to_a_detached_process_without_systemd(sandbox: Sandbox
     assert (sandbox.home / ".kiss" / ".kiss-web.fingerprint").exists()
 
 
+def _launchctl_stub(
+    sandbox: Sandbox, *, bootstrap_refusals: int = 0, drain_probes: int | None = 0
+) -> Path:
+    """A ``launchctl`` with launchd's bookkeeping: a registration file that
+    ``bootstrap`` / ``load -w`` create and ``bootout`` removes — only after
+    *drain_probes* further ``print`` calls, the way launchd keeps the label
+    registered while the old process exits (``None``: it never goes) —
+    and that ``print`` reports.  The first *bootstrap_refusals* bootstraps
+    fail the way launchd refuses one right after a removal; a successful
+    one starts the stand-in daemon (``RunAtLoad``).  ``kickstart -k`` on a
+    registration restarts it."""
+    reg = sandbox.root / "launchd.registered"
+    refusals = sandbox.root / "launchd.refusals"
+    refusals.write_text(str(bootstrap_refusals), encoding="utf-8")
+    drain = "never" if drain_probes is None else str(drain_probes)
+    start = (
+        f"(cd {str(sandbox.workdir)!r} && exec nohup "
+        f"{str(sandbox.home)!r}/.vscode/extensions/ksenxx.kiss-sorcar-{VERSION}/kiss_project"
+        "/.venv/bin/kiss-web > /dev/null 2>&1 < /dev/null) &"
+    )
+    return sandbox.stub(
+        "launchctl",
+        f"""
+        reg={str(reg)!r}
+        case "$1" in
+            print)
+                [ -f "$reg" ] || exit 113
+                state=$(cat "$reg")
+                case "$state" in
+                    registered|never) exit 0 ;;
+                    0) rm -f "$reg"; exit 113 ;;
+                    *) echo $((state - 1)) > "$reg"; exit 0 ;;
+                esac ;;
+            bootout)
+                [ -f "$reg" ] || {{ echo "Boot-out failed: 113" >&2; exit 113; }}
+                echo {drain} > "$reg"
+                exit 0 ;;
+            bootstrap)
+                if [ -f "$reg" ]; then
+                    echo "Bootstrap failed: 37: Operation already in progress" >&2; exit 37
+                fi
+                left=$(cat {str(refusals)!r})
+                if [ "$left" -gt 0 ]; then
+                    echo $((left - 1)) > {str(refusals)!r}
+                    echo "Bootstrap failed: 5: Input/output error" >&2; exit 5
+                fi
+                echo registered > "$reg"; {start} ;;
+            load) echo registered > "$reg"; {start} ;;
+            kickstart)
+                [ -f "$reg" ] || {{ echo "Could not find service" >&2; exit 113; }}
+                [ "$2" = -k ] && {{ {start} }} ;;
+        esac
+        exit 0
+        """,
+    )
+
+
 def test_start_registers_the_launch_agent_on_macos(sandbox: Sandbox) -> None:
     project = sandbox.project(".vscode/extensions")
     sandbox.uname("Darwin", "arm64")
-    sandbox.stub(
-        "launchctl",
-        f'case "$1" in kickstart) (cd {str(sandbox.workdir)!r} && exec nohup '
-        f"{str(project)!r}/.venv/bin/kiss-web > /dev/null 2>&1 < /dev/null) & ;; esac\nexit 0\n",
-    )
+    _launchctl_stub(sandbox)
     custom = sandbox.home / "custom-home"
     res = sandbox.run(
         f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"', env={"KISS_HOME": str(custom)}
@@ -895,6 +948,7 @@ def test_start_registers_the_launch_agent_on_macos(sandbox: Sandbox) -> None:
     assert res.returncode == 0, res.stderr
     assert "Restarting the kiss-web LaunchAgent" in res.stdout
     assert "kiss-web is up" in res.stdout
+    assert "WARNING" not in res.stdout
     plist = (sandbox.home / "Library/LaunchAgents/com.kiss.web-server.plist").read_text(
         encoding="utf-8"
     )
@@ -906,29 +960,171 @@ def test_start_registers_the_launch_agent_on_macos(sandbox: Sandbox) -> None:
         in plist
     )
     uid = os.getuid()
+    service = f"gui/{uid}/com.kiss.web-server"
+    # No registration yet: bootout fails, nothing to drain, one bootstrap.
     assert sandbox.logged_calls() == [
-        f"launchctl bootout gui/{uid}/com.kiss.web-server",
+        f"launchctl bootout {service}",
+        f"launchctl print {service}",
+        f"launchctl enable {service}",
         f"launchctl bootstrap gui/{uid} {sandbox.home}/Library/LaunchAgents/"
         "com.kiss.web-server.plist",
-        f"launchctl kickstart -k gui/{uid}/com.kiss.web-server",
+        f"launchctl print {service}",
+        f"launchctl kickstart {service}",
     ]
     assert (custom / ".kiss-web.fingerprint").exists()
+
+
+def test_start_macos_waits_for_the_old_daemon_before_bootstrapping(sandbox: Sandbox) -> None:
+    """``launchctl bootout`` returns while the old daemon is still exiting
+    and the label stays registered until it is gone; a bootstrap in that
+    window is refused and a kickstart after it finds no service — the
+    daemon was booted out and never came back ("WARNING: launchctl
+    kickstart failed", then the full start timeout).  The block waits for
+    launchd to drop the registration first."""
+    project = sandbox.project(".vscode/extensions")
+    sandbox.uname("Darwin", "arm64")
+    _launchctl_stub(sandbox, drain_probes=2)
+    (sandbox.root / "launchd.registered").write_text("registered", encoding="utf-8")
+    res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
+    assert res.returncode == 0, res.stderr
+    assert "Waiting for the old kiss-web to exit..." in res.stdout
+    assert "kiss-web is up" in res.stdout
+    assert "WARNING" not in res.stdout
+    calls = sandbox.logged_calls()
+    uid = os.getuid()
+    service = f"gui/{uid}/com.kiss.web-server"
+    bootstrap = next(i for i, c in enumerate(calls) if c.startswith("launchctl bootstrap "))
+    # Polled the registration until it was gone (present, present, gone),
+    # then registered the new plist.
+    assert calls[:bootstrap] == [
+        f"launchctl bootout {service}",
+        f"launchctl print {service}",
+        f"launchctl print {service}",
+        f"launchctl print {service}",
+        f"launchctl enable {service}",
+    ]
+    assert calls[-1] == f"launchctl kickstart {service}"
+    assert "kickstart -k" not in res.stdout
+
+
+def test_start_macos_retries_a_refused_bootstrap(sandbox: Sandbox) -> None:
+    project = sandbox.project(".vscode/extensions")
+    sandbox.uname("Darwin", "arm64")
+    _launchctl_stub(sandbox, bootstrap_refusals=2)
+    res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
+    assert res.returncode == 0, res.stderr
+    assert "kiss-web is up" in res.stdout
+    assert "WARNING" not in res.stdout
+    bootstraps = [c for c in sandbox.logged_calls() if c.startswith("launchctl bootstrap ")]
+    assert len(bootstraps) == 3
+    assert not [c for c in sandbox.logged_calls() if c.startswith("launchctl load ")]
+
+
+def test_start_macos_falls_back_to_load_when_every_bootstrap_is_refused(sandbox: Sandbox) -> None:
+    project = sandbox.project(".vscode/extensions")
+    sandbox.uname("Darwin", "arm64")
+    _launchctl_stub(sandbox, bootstrap_refusals=99)
+    res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"')
+    assert res.returncode == 0, res.stderr
+    assert "kiss-web is up" in res.stdout
+    calls = sandbox.logged_calls()
+    assert len([c for c in calls if c.startswith("launchctl bootstrap ")]) == 4
+    assert (
+        f"launchctl load -w {sandbox.home}/Library/LaunchAgents/com.kiss.web-server.plist" in calls
+    )
+    assert calls[-1] == f"launchctl kickstart gui/{os.getuid()}/com.kiss.web-server"
+
+
+def test_start_macos_kickstarts_in_place_when_the_old_daemon_never_exits(
+    sandbox: Sandbox,
+) -> None:
+    """Fail closed like the extension: a registration launchd will not drop
+    is restarted (``kickstart -k``) rather than left booted out."""
+    project = sandbox.project(".vscode/extensions")
+    sandbox.uname("Darwin", "arm64")
+    _launchctl_stub(sandbox, drain_probes=None)
+    (sandbox.root / "launchd.registered").write_text("registered", encoding="utf-8")
+    res = sandbox.run(
+        f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"',
+        env={"KISS_WEB_DRAIN_TIMEOUT": "2"},
+    )
+    assert res.returncode == 0, res.stderr
+    assert (
+        "WARNING: the old kiss-web has not exited after 2s; restarting it in place." in res.stdout
+    )
+    assert "kiss-web is up" in res.stdout
+    calls = sandbox.logged_calls()
+    assert calls[-1] == f"launchctl kickstart -k gui/{os.getuid()}/com.kiss.web-server"
+    assert not [c for c in calls if c.startswith("launchctl bootstrap ")]
 
 
 def test_start_macos_without_kiss_home_omits_the_env_entry(sandbox: Sandbox) -> None:
     project = sandbox.project(".vscode/extensions")
     sandbox.uname("Darwin", "arm64")
-    sandbox.stub("launchctl", '[ "$1" = kickstart ] && exit 1\nexit 0\n')
+    sandbox.stub(
+        "launchctl", '[ "$1" = kickstart ] && exit 1\n[ "$1" = print ] && exit 1\nexit 0\n'
+    )
     res = sandbox.run(
         f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"',
         env={"KISS_WEB_START_TIMEOUT": "2"},
     )
-    assert "WARNING: launchctl kickstart failed" in res.stdout
+    assert "WARNING: launchctl could not register" in res.stdout
     plist = (sandbox.home / "Library/LaunchAgents/com.kiss.web-server.plist").read_text(
         encoding="utf-8"
     )
     assert "KISS_HOME" not in plist
     assert "<string>/opt/homebrew/bin:" in plist
+
+
+def test_start_macos_reports_a_failed_kickstart(sandbox: Sandbox) -> None:
+    project = sandbox.project(".vscode/extensions")
+    sandbox.uname("Darwin", "arm64")
+    # Registered after the bootstrap, but kickstart refuses.
+    sandbox.stub(
+        "launchctl",
+        'case "$1" in print) [ -f "$HOME/reg" ]; exit $? ;; bootstrap) touch "$HOME/reg" ;; '
+        "kickstart) exit 1 ;; esac\nexit 0\n",
+    )
+    res = sandbox.run(
+        f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"',
+        env={"KISS_WEB_START_TIMEOUT": "2"},
+    )
+    assert "WARNING: launchctl kickstart failed" in res.stdout
+    assert "did not come up" in res.stdout
+    calls = sandbox.logged_calls()
+    assert [c for c in calls if c.startswith("launchctl bootstrap ")]
+    assert calls[-1] == f"launchctl kickstart gui/{os.getuid()}/com.kiss.web-server"
+
+
+@pytest.mark.parametrize("interactive", ["1", "0"])
+def test_start_macos_warns_when_kiss_web_hosts_the_shell(
+    sandbox: Sandbox, interactive: str
+) -> None:
+    """launchd keeps no record of which service forked a shell, so on macOS
+    the parent chain is walked; a kiss-web ancestor and a human at the
+    terminal get the closing-terminal notice."""
+    project = sandbox.project(".vscode/extensions")
+    sandbox.uname("Darwin", "arm64")
+    _launchctl_stub(sandbox)
+    # A ``ps`` that reports kiss-web two hops up from any pid asked about.
+    sandbox.stub(
+        "ps",
+        'case "$4" in 4242) [ "$2" = command= ] && echo "/x/.venv/bin/kiss-web" || echo 1 ;; '
+        '*) [ "$2" = command= ] && echo bash || echo 4242 ;; esac\n',
+        log=False,
+    )
+    log = sandbox.home / "install.log"
+    res = sandbox.run(
+        f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"',
+        env={"_KISS_INTERACTIVE": interactive, "LOG_FILE": str(log)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "kiss-web is up" in res.stdout
+    notice = (
+        "   kiss-web hosts this terminal, so it closes with the daemon;\n"
+        f"   the install carries on and its remaining output is in {log}.\n"
+    )
+    assert (notice in res.stdout) is (interactive == "1")
 
 
 def test_start_reports_a_daemon_that_never_comes_up(sandbox: Sandbox) -> None:

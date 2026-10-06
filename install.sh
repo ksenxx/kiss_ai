@@ -1562,6 +1562,79 @@ stop_stray_kiss_web() {
     done
 }
 
+kiss_web_hosts_this_shell() {
+    # True when the kiss-web daemon is an ancestor of this script: the
+    # webapp's Terminal tab, a task's shell tool, the Update button.  On
+    # Linux the cgroup escape at the top already named the host service;
+    # elsewhere (macOS) the parent chain is walked, as launchd keeps no
+    # such record.  Restarting the daemon closes that terminal.
+    [ "${_KISS_HOST_SERVICE:-}" = "kiss-web.service" ] && return 0
+    [ "$(uname -s)" = "Darwin" ] || return 1
+    local pid=$$ hops=0
+    while [ "$pid" -gt 1 ] 2>/dev/null && [ "$hops" -lt 32 ]; do
+        case "$(ps -o command= -p "$pid" 2>/dev/null)" in
+            *kiss-web*|*kiss.server*) return 0 ;;
+        esac
+        pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+        [ -n "$pid" ] || return 1
+        hops=$((hops + 1))
+    done
+    return 1
+}
+
+restart_kiss_web_launch_agent() {
+    # Boot service $1 (gui/<uid>/<label>) out of launchd, register plist
+    # $3 in domain $2 afresh and start it — the same sequence the
+    # extension's macLaunchd.js runs.  ``launchctl bootout`` only asks
+    # the daemon to exit and returns at once; until the old process is
+    # gone the label stays registered, so an immediate ``bootstrap`` is
+    # refused ("Bootstrap failed: 5: Input/output error") and the
+    # ``kickstart`` after it finds no service.  Done naively, the daemon
+    # ended up booted out and never re-registered, and the caller's
+    # start wait ran its full ${KISS_WEB_START_TIMEOUT}s for a kiss-web
+    # nobody had started — what looked like a hang after
+    # "WARNING: launchctl kickstart failed".
+    local service="$1" domain="$2" plist="$3" waited=0 attempt
+    launchctl bootout "$service" 2>/dev/null || true
+    # Wait for launchd to drop the registration (the old daemon exited).
+    if launchctl print "$service" &>/dev/null; then
+        echo "   Waiting for the old kiss-web to exit..."
+        while launchctl print "$service" &>/dev/null; do
+            if [ "$waited" -ge "${KISS_WEB_DRAIN_TIMEOUT:-30}" ]; then
+                # Fail closed, as the extension does: keep the
+                # registration launchd still holds (the plist it read,
+                # not the one just written) and restart its process.
+                echo "   WARNING: the old kiss-web has not exited after ${waited}s; restarting it in place."
+                stop_stray_kiss_web
+                launchctl kickstart -k "$service" || echo "   WARNING: launchctl kickstart failed"
+                return 0
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+    fi
+    stop_stray_kiss_web
+    # ``launchctl disable`` / ``unload -w`` from an earlier life would make
+    # every bootstrap fail with "Service is disabled".
+    launchctl enable "$service" 2>/dev/null || true
+    # launchd can refuse the first bootstrap right after a removal.
+    for attempt in 1 2 3 4; do
+        launchctl bootstrap "$domain" "$plist" 2>/dev/null && break
+        if [ "$attempt" -lt 4 ]; then sleep 1; fi
+    done
+    if ! launchctl print "$service" &>/dev/null; then
+        # The legacy loader registers (and re-enables) the plist too.
+        launchctl load -w "$plist" 2>/dev/null || true
+        if ! launchctl print "$service" &>/dev/null; then
+            echo "   WARNING: launchctl could not register $plist; run 'launchctl bootstrap $domain $plist' by hand."
+            return 0
+        fi
+    fi
+    # RunAtLoad already started the service with the bootstrap; this
+    # starts it if that did not happen and is a no-op when it is running.
+    launchctl kickstart "$service" || echo "   WARNING: launchctl kickstart failed"
+}
+
 xml_escape() {
     # sed rather than ${s//&/&amp;}: bash 5.2 reads an unquoted & in a
     # replacement as the matched text.
@@ -1713,17 +1786,18 @@ restart_kiss_web_locked() {
         uid="$(id -u)"
         write_kiss_web_plist "$plist" "$kiss_web" "$workdir" "$home"
         echo "   Restarting the kiss-web LaunchAgent..."
-        launchctl bootout "gui/$uid/com.kiss.web-server" 2>/dev/null || true
-        stop_stray_kiss_web
-        launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null || true
-        launchctl kickstart -k "gui/$uid/com.kiss.web-server" || echo "   WARNING: launchctl kickstart failed"
+        if [ "${_KISS_INTERACTIVE:-}" = 1 ] && kiss_web_hosts_this_shell; then
+            echo "   kiss-web hosts this terminal, so it closes with the daemon;"
+            echo "   the install carries on and its remaining output is in $LOG_FILE."
+        fi
+        restart_kiss_web_launch_agent "gui/$uid/com.kiss.web-server" "gui/$uid" "$plist"
     elif [ "$(uname -s)" = "Linux" ] && systemctl --user show-environment &>/dev/null; then
         write_kiss_web_unit "$HOME/.config/systemd/user/kiss-web.service" "$kiss_web" "$workdir" "$home"
         echo "   Restarting the kiss-web systemd user service..."
         # A shell kiss-web hosts (the webapp's Terminal tab) dies with the
         # daemon; this script survives it (see kiss-service-cgroup-escape)
         # and ``handle_hup`` sends the rest of its output to the log.
-        if [ "${_KISS_HOST_SERVICE:-}" = "kiss-web.service" ] && [ "${_KISS_INTERACTIVE:-}" = 1 ]; then
+        if [ "${_KISS_INTERACTIVE:-}" = 1 ] && kiss_web_hosts_this_shell; then
             echo "   kiss-web hosts this terminal, so it closes with the daemon;"
             echo "   the install carries on and its remaining output is in $LOG_FILE."
         fi
