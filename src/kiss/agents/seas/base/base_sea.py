@@ -53,10 +53,9 @@ customizes every such run at once — append a house rule in
 ``tool_call_hook``, pin a setting in ``settings`` (subject to
 :data:`kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`: a value the
 caller passed explicitly ranks above it).  The daemon
-imports this module once, so restart it after editing.  Text that
-``system_prompt`` appends is added once per task tree: a sub-agent
-inherits its parent's suffix, and the launcher does not append what
-the prompt already contains.
+imports this module once, so restart it after editing.  A rule
+``system_prompt`` appends is stated once per run: a sub-agent's prompt
+is built by its own layers, not copied from its parent's.
 """
 
 from __future__ import annotations
@@ -113,9 +112,10 @@ class BaseSea:
         """Return the run's system prompt given the assembled *system_prompt*.
 
         Return *system_prompt* with text appended to add rules, or a
-        different string to replace the whole prompt.  Called once per
-        run, after the launcher has assembled the base prompt and the
-        caller's additions.
+        different string to replace the whole prompt; the returned
+        string is the run's system prompt, as ``prompt``'s is the
+        run's prompt.  Called once per run, after the launcher has
+        assembled the base prompt and the caller's additions.
         """
         return system_prompt
 

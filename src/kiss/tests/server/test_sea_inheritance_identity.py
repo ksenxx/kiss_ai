@@ -14,8 +14,9 @@
   entry.
 * ``check_sea`` never runs ``on_picked_as_model`` (picking has side
   effects) but still rejects one of the wrong shape.
-* A ``system_prompt`` method that rewrites the assembled prompt leaves
-  sub-agents with the rewritten prompt only, not the suffix it rewrote.
+* A ``system_prompt`` method's return is the run's system prompt as
+  given, appended to or rewritten alike, and is not forwarded to
+  sub-agents: they inherit the caller-supplied base prompt and suffix.
 """
 
 from __future__ import annotations
@@ -184,9 +185,10 @@ class RouterSea(BaseSea):
         check_sea(sea)
 
 
-def test_a_rewritten_system_prompt_does_not_bring_the_suffix_back_on_subagents(
+def test_system_prompt_hook_result_is_the_run_prompt_and_is_not_forwarded(
     tmp_path: Path,
 ) -> None:
+    """The hook's return is used as given; children inherit only the caller's base and suffix."""
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original_run = parent_class.run
     composed: list[str] = []
@@ -201,29 +203,27 @@ def test_a_rewritten_system_prompt_does_not_bring_the_suffix_back_on_subagents(
     def append(system_prompt: str) -> str:
         return system_prompt + "APPENDED"
 
+    def replace(system_prompt: str) -> str:
+        return "ONLY THIS"
+
     parent_class.run = stub_run
     try:
-        agent = SorcarAgent("parent")
-        agent.run(
-            prompt_template="t", work_dir=str(tmp_path), base_system_prompt="BASE",
-            system_prompt="SUFFIX", system_prompt_hook=rewrite, web_tools=False,
-        )
-        # (The daemon appends its own operational notes after the hook.)
-        assert composed[-1].startswith("BASEREWRITTEN")
-        assert "SUFFIX" not in composed[-1]
-        options = inherit_from_parent(agent, "m", None, RunOptions()).options
-        assert options.system_prompt == "BASEREWRITTEN"
-        assert options.add_to_system_prompt == ""
-        # An appending method is inherited as a suffix, on top of the caller's.
-        agent = SorcarAgent("parent")
-        agent.run(
-            prompt_template="t", work_dir=str(tmp_path), base_system_prompt="BASE",
-            system_prompt="SUFFIX", system_prompt_hook=append, web_tools=False,
-        )
-        assert composed[-1].startswith("BASESUFFIXAPPENDED")
-        options = inherit_from_parent(agent, "m", None, RunOptions()).options
-        assert options.system_prompt == "BASE"
-        assert options.add_to_system_prompt == "SUFFIXAPPENDED"
+        for hook, expected in ((rewrite, "BASEREWRITTEN"), (append, "BASESUFFIXAPPENDED"),
+                               (replace, "ONLY THIS")):
+            agent = SorcarAgent("parent")
+            agent.run(
+                prompt_template="t", work_dir=str(tmp_path), base_system_prompt="BASE",
+                system_prompt="SUFFIX", system_prompt_hook=hook, web_tools=False,
+            )
+            # (The daemon appends its own operational notes after the hook.)
+            assert composed[-1].startswith(expected), (hook.__name__, composed[-1])
+            if hook is not append:
+                assert "SUFFIX" not in composed[-1]
+            # Appended, rewritten or replaced: the caller's own base prompt and
+            # suffix are what a sub-agent inherits, as with ``prompt()``.
+            options = inherit_from_parent(agent, "m", None, RunOptions()).options
+            assert options.system_prompt == "BASE", hook.__name__
+            assert options.add_to_system_prompt == "SUFFIX", hook.__name__
     finally:
         parent_class.run = original_run
 

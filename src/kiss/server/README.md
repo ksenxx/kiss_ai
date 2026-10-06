@@ -369,11 +369,14 @@ run when the subclass's receives the dict.  Per method:
   called.
 
 `BaseSea` heads every chain, so its methods run first on every run
-(identities until you edit them).  A `system_prompt` method that
-appends text the prompt already contains changes nothing: a sub-agent
-inherits its parent's system-prompt suffix, which already holds what
-the layers it shares with the parent appended, so a rule is stated
-once per task tree.
+(identities until you edit them).  `system_prompt` is folded exactly
+like `prompt`: each class receives the text so far and what it returns
+is the text, whether it appended to it or replaced it; the run uses
+the last return verbatim.  Neither method's return reaches a
+sub-agent: a `run_agent` / `run_parallel` child inherits only the
+caller-supplied `system_prompt` and `add_to_system_prompt` options and
+its own layers build its prompt, so a rule a layer appends is stated
+once per run without any deduplication.
 
 ### Customizing every run
 
@@ -650,11 +653,11 @@ A model-routing SEA's `system_prompt()` carries its *model routing
 protocol*: it appends the protocol to the system prompt it receives
 (the base prompt plus the caller's `appendToSystemPrompt` text, or the
 channel preamble), separated by a blank line.  Because it returns the
-received text plus a suffix, the caller's own additions survive and
-the daemon forwards the appended part to the run's sub-agents like any
-system-prompt suffix (a `system_prompt()` that returns something else
-replaces the prompt, and the sub-agents get the replacement as their
-base prompt).  `register_as_model()` is a registry flag,
+received text plus a suffix, the caller's own additions survive.  The
+result is this run's prompt only: a sub-agent gets the protocol when
+its own layers include the picker (a run submitted from the picker's
+tab with no model of its own), not by inheritance.
+`register_as_model()` is a registry flag,
 not a run parameter: `kiss.agents.sorcar.sea_commands.model_seas()`
 lists every registered SEA whose `register_as_model()` returns `True`,
 the daemon offers them in the model picker (vendor `Router`, once at

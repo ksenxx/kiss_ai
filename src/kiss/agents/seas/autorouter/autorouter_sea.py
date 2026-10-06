@@ -396,10 +396,10 @@ class AutorouterSea(BaseSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Configure a routed session: the orchestrator model, no fan-out, no browser, no memory.
 
-        ``allow_fan_out`` is off because ``run_parallel`` forwards the parent's
-        system-prompt additions to every worker, which would turn each routed
-        unit into another router without the routing tools; ``run_agent`` is
-        the dispatch primitive (one unit per call).  Classification is off so
+        ``allow_fan_out`` is off because routing is one unit per
+        ``run_agent`` call, each on the model the router picked; a
+        ``run_parallel`` fan-out would run every worker on the router's
+        own model without a routing decision.  Classification is off so
         the router always sees the full protocol.
         """
         return settings | {
