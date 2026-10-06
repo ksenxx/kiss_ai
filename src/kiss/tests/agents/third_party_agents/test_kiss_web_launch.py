@@ -248,14 +248,13 @@ class _ApiLaunchBase(unittest.TestCase):
         tokens: int = 42,
         cost: float = 0.0420,
         steps: int = 4,
-        block: threading.Event | None = None,
         raise_exc: BaseException | None = None,
         on_run: Any = None,
     ) -> None:
         """Install the LLM-boundary stub on ``RelentlessAgent.run``.
 
-        The stub records its ``self``/kwargs, optionally blocks, raises
-        or invokes *on_run* (whose return value, if a string, replaces
+        The stub records its ``self``/kwargs, optionally raises or
+        invokes *on_run* (whose return value, if a string, replaces
         the summary), then emits the terminal ``result`` event exactly
         like ``RelentlessAgent.run`` does on a real completion.
         """
@@ -267,8 +266,6 @@ class _ApiLaunchBase(unittest.TestCase):
                 "kwargs": kwargs,
                 "thread": threading.current_thread(),
             })
-            if block is not None:
-                block.wait(timeout=30)
             if raise_exc is not None:
                 raise raise_exc
             text = summary
@@ -311,7 +308,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
             agent,
             "hello slack task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         assert self.stub_calls, "the daemon never ran the task"
         call = self.stub_calls[0]
@@ -344,7 +340,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
             SlackAgent(),
             "auth prompt task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         kwargs = self.stub_calls[0]["kwargs"]
         prompt = str(kwargs.get("prompt_template", ""))
@@ -382,7 +377,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
             agent,
             "use the tools",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         assert yaml.safe_load(result)["summary"] == "module tools loaded ok"
 
@@ -467,7 +461,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
             KissWebChatAgent("Note Launch", sea_path=str(agent_py)),
             "note task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         assert yaml.safe_load(result)["summary"] == "recorded:from daemon"
         assert notes.read_text().splitlines() == ["from daemon"], (
@@ -492,7 +485,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
             SlackAgent(workspace="teamspace"),
             "ws task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         assert seen == ["teamspace"], (
             "the daemon-side tools() must see the launch workspace"
@@ -523,7 +515,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
                 SlackAgent(workspace=workspace),
                 f"task-{key}",
                 work_dir=self.repo,
-                endpoint_file=self.endpoint_file,
             )
 
         thread_a = threading.Thread(target=launch, args=("A", "wsA"), daemon=True)
@@ -573,7 +564,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
             SlackAgent(),
             "no backend",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         assert self.stub_calls
 
@@ -586,7 +576,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
             agent,
             "task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
             max_budget=1.25,
             model_config={"base_url": "http://localhost:9999/v1"},
             web_tools=False,
@@ -637,50 +626,54 @@ class Sea(BaseSea):
             KissWebChatAgent("Restricted", sea_path=str(agent_py)),
             "task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         call = self.stub_calls[0]
         assert getattr(call["agent"], "_append_basic_tools", None) is False
         assert [t.__name__ for t in _sea_tools(call["agent"])] == ["only_tool"]
 
-    def test_append_to_prompts_forwarded(self) -> None:
-        """Both append suffixes reach the daemon-built agent's run.
+    def test_retired_launch_kwargs_are_dropped(self) -> None:
+        """``run()`` ignores the kwargs the launcher no longer takes.
 
-        The launcher (and the ``LAUNCH_KWARG_NAMES`` filter) must
-        forward ``append_to_system_prompt`` / ``append_to_prompt`` to
-        ``sorcar.run`` — a dropped kwarg would silently run the channel
-        task without the caller's extra instructions.  The stub sits on
-        ``RelentlessAgent.run``, so its ``system_prompt`` kwarg is the
-        fully assembled system instructions (base + suffix) and its
-        ``prompt_template`` the executed prompt (task + channel
-        guidance + suffix).
+        ``append_to_system_prompt`` / ``append_to_prompt``,
+        ``use_worktree``, ``timeout`` and ``endpoint_file`` left the
+        launcher's surface (extra text comes from the SEA's
+        ``system_prompt()`` / ``prompt()`` methods, the worktree mode
+        from its ``channel`` kind).  A caller still passing them gets a
+        normal run with none of their effects, not a ``TypeError``.
         """
+        import inspect
+
         from kiss.agents.third_party_agents._channel_agent_utils import (
+            LAUNCH_KWARG_NAMES,
             filter_launch_kwargs,
         )
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
-        assert filter_launch_kwargs(
-            {
-                "append_to_system_prompt": "S",
-                "append_to_prompt": "P",
-                "_skip_persistence": True,
-            }
-        ) == {"append_to_system_prompt": "S", "append_to_prompt": "P"}
+        retired = {
+            "append_to_system_prompt": "\nLAUNCHER-SYS-SUFFIX-2210",
+            "append_to_prompt": "\nLAUNCHER-PROMPT-SUFFIX-2210",
+            "use_worktree": False,
+            "timeout": 0.5,
+            "endpoint_file": "/nonexistent/sorcar-local.json",
+        }
+        keyword_only = {
+            name for name, p in inspect.signature(run_agent_via_kiss_web).parameters.items()
+            if p.kind is inspect.Parameter.KEYWORD_ONLY
+        }
+        assert keyword_only == LAUNCH_KWARG_NAMES, (
+            "the filter and the launcher signature must name the same kwargs"
+        )
+        assert not retired.keys() & keyword_only
+        assert filter_launch_kwargs({**retired, "max_budget": 2.0}) == {
+            "max_budget": 2.0
+        }
         self._install_stub()
-        run_agent_via_kiss_web(
-            SlackAgent(),
-            "task",
-            work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
-            append_to_system_prompt="\nLAUNCHER-SYS-SUFFIX-2210",
-            append_to_prompt="\nLAUNCHER-PROMPT-SUFFIX-2210",
-        )
+        agent = SlackAgent()
+        result = agent.run(prompt_template="task", work_dir=self.repo, **retired)
+        assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
         kwargs = self.stub_calls[0]["kwargs"]
-        assert "LAUNCHER-SYS-SUFFIX-2210" in str(
-            kwargs.get("system_prompt", "")
-        )
-        assert "LAUNCHER-PROMPT-SUFFIX-2210" in str(
+        assert "LAUNCHER-SYS-SUFFIX-2210" not in str(kwargs.get("system_prompt", ""))
+        assert "LAUNCHER-PROMPT-SUFFIX-2210" not in str(
             kwargs.get("prompt_template", "")
         )
 
@@ -692,7 +685,6 @@ class Sea(BaseSea):
             SlackAgent(),
             "task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
             max_budget=0.0,
         )
         assert self.stub_calls[0]["kwargs"].get("max_budget") == 0.0
@@ -705,7 +697,6 @@ class Sea(BaseSea):
             SlackAgent(),
             "task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         call = self.stub_calls[0]
         budget = call["kwargs"].get("max_budget")
@@ -725,7 +716,6 @@ class Sea(BaseSea):
             "task",
             model_name="gpt-5.5",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         assert self.stub_calls[0]["kwargs"].get("model_name") == "gpt-5.5"
 
@@ -738,7 +728,6 @@ class Sea(BaseSea):
             agent,
             "stats task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         assert agent.total_tokens_used == 1234
         assert abs(agent.budget_used - 0.4567) < 1e-9
@@ -753,7 +742,6 @@ class Sea(BaseSea):
             agent,
             "task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         parsed = yaml.safe_load(result)
         assert parsed["success"] is False
@@ -769,7 +757,6 @@ class Sea(BaseSea):
             agent,
             "task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         parsed = yaml.safe_load(result)
         assert parsed["success"] is False
@@ -784,32 +771,10 @@ class Sea(BaseSea):
             agent,
             "   ",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         parsed = yaml.safe_load(result)
         assert parsed["success"] is False
         assert "empty" in str(parsed["summary"]).lower()
-
-    def test_timeout_returns_empty_result(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
-        release = threading.Event()
-        self._install_stub(block=release)
-        try:
-            result = run_agent_via_kiss_web(
-                SlackAgent(),
-                "task",
-                work_dir=self.repo,
-                endpoint_file=self.endpoint_file,
-                timeout=0.5,
-            )
-            assert result == "", "timed-out launch must return empty result"
-        finally:
-            release.set()
-            deadline = 30.0
-            for state in agent_state.snapshot():
-                if state.task_thread is not None:
-                    state.task_thread.join(timeout=deadline)
 
     def test_invalid_sea_path_raises_before_connecting(self) -> None:
         self._install_stub()
@@ -821,7 +786,6 @@ class Sea(BaseSea):
                 ),
                 "task",
                 work_dir=self.repo,
-                endpoint_file=self.endpoint_file,
             )
         assert not self.stub_calls, "no task may start for a bad agent script"
 
@@ -907,31 +871,6 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
         )
         assert agent.last_run_result == result
 
-    def test_direct_run_with_use_worktree_false_records_result(self) -> None:
-        self._install_stub(summary="direct wt ok")
-        agent = KissWebChatAgent("Direct No-WT")
-        result = agent.run(
-            prompt_template="direct task",
-            work_dir=self.repo,
-            use_worktree=False,
-        )
-        assert yaml.safe_load(result)["summary"] == "direct wt ok"
-        assert agent.last_run_result == result
-
-    def test_direct_run_with_use_worktree_false_records_failure(self) -> None:
-        self._install_stub(raise_exc=RuntimeError("wt-boom"))
-        agent = KissWebChatAgent("Direct No-WT")
-        result = agent.run(
-            prompt_template="direct task",
-            work_dir=self.repo,
-            use_worktree=False,
-        )
-        parsed = yaml.safe_load(result)
-        assert parsed["success"] is False
-        assert str(parsed["summary"]).strip(), (
-            "a crashed task must not produce an empty summary"
-        )
-        assert agent.last_run_result == result
 
 
 class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
@@ -959,7 +898,6 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         result = agent.run(
             prompt_template="direct slack",
             work_dir=self.repo,
-            use_worktree=True,
             _skip_persistence=True,
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
@@ -1027,7 +965,6 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
             agent,
             "carrier task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
         assert agent.last_run_result == result
@@ -1044,7 +981,6 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
             agent,
             "first task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         first_chat = agent.chat_id
         assert first_chat
@@ -1062,7 +998,6 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
             resumed,
             "second task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         assert resumed.chat_id == first_chat, "existing chat id must be kept"
         assert "first task" in prompts[0], (
@@ -1077,7 +1012,6 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
             agent,
             "wt task",
             work_dir=self.repo,
-            endpoint_file=self.endpoint_file,
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
         assert agent.last_run_result == result

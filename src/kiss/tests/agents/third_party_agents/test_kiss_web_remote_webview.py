@@ -45,6 +45,7 @@ import yaml
 from kiss.agents.sorcar import channel_workspace, local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.agents.third_party_agents._kiss_web_launcher import (
     run_agent_via_kiss_web,
 )
@@ -114,10 +115,17 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
             self.server.start_private_async(), self.loop,
         ).result(timeout=30)
         self.addCleanup(self._shutdown_server)
+        # Launches go to this test's daemon, not the process-global one.
+        self._saved_endpoint_override = launcher._ENDPOINT_FILE_OVERRIDE
+        launcher._ENDPOINT_FILE_OVERRIDE = self.endpoint_file
+        self.addCleanup(self._restore_endpoint_override)
 
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
         self.addCleanup(self._restore_run)
+
+    def _restore_endpoint_override(self) -> None:
+        launcher._ENDPOINT_FILE_OVERRIDE = self._saved_endpoint_override
 
     def _restore_run(self) -> None:
         self._parent_class.run = self._original_run
@@ -322,7 +330,6 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                 agent,
                 "remote webview task",
                 work_dir=self.repo,
-                endpoint_file=self.endpoint_file,
             )
 
         t = threading.Thread(target=launch, daemon=True)
