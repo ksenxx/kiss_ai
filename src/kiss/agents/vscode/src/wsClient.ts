@@ -61,7 +61,6 @@ export class WsClient extends EventEmitter {
   private _socket: net.Socket | null = null;
   private _state: WsReadyState = 'connecting';
   private _buf: Buffer = Buffer.alloc(0);
-  private _handshakeDone = false;
   private _key = '';
   private _fragments: Buffer[] = [];
   private _fragmentBytes = 0;
@@ -87,8 +86,7 @@ export class WsClient extends EventEmitter {
 
   /** Open the TCP/TLS connection and start the WebSocket handshake. */
   connect(): void {
-    // Once closed, `_handshakeDone` is left set: a second connect would
-    // skip the HTTP handshake and parse the response as frames.
+    // Single-use: once closed the instance stays closed.
     if (this._socket || this._state !== 'connecting') return;
     const secure = this._url.protocol === 'wss:';
     if (!secure && this._url.protocol !== 'ws:') {
@@ -172,7 +170,7 @@ export class WsClient extends EventEmitter {
 
   private _onData(data: Buffer): void {
     this._buf = this._buf.length ? Buffer.concat([this._buf, data]) : data;
-    if (!this._handshakeDone) {
+    if (this._state === 'connecting') {
       const end = this._buf.indexOf('\r\n\r\n');
       if (end < 0) {
         if (this._buf.length > 64 * 1024) {
@@ -183,7 +181,6 @@ export class WsClient extends EventEmitter {
       const head = this._buf.subarray(0, end).toString('latin1');
       this._buf = this._buf.subarray(end + 4);
       if (!this._acceptHandshake(head)) return;
-      this._handshakeDone = true;
       this._state = 'open';
       if (this._connectTimer) {
         clearTimeout(this._connectTimer);

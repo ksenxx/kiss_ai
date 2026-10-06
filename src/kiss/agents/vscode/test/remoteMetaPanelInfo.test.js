@@ -922,7 +922,7 @@ async function main() {
         content: '<h1>report</h1>',
       });
       const contentTab = win.document.querySelector(
-        `.chat-tab.active[data-tab-id]`,
+        `#tab-list .chat-tab.active[data-tab-id]`,
       );
       assert.ok(contentTab, 'the content tab is the visible tab');
       assert.notStrictEqual(contentTab.getAttribute('data-tab-id'), TAB1);
@@ -940,11 +940,12 @@ async function main() {
       reply(win, poll, {sig: 'chat:2', content: '<p>chat tab, updated</p>'});
       assert.ok(content.textContent.includes('chat tab, updated'));
 
-      // Back to the chat tab: same target, nothing is cleared.
+      // Back to the chat tab (its group-strip entry): same target,
+      // nothing is cleared.
       click(
         win,
         win.document.querySelector(
-          `.chat-tab[data-tab-id=${JSON.stringify(TAB1)}]`,
+          `#tab-list .chat-tab[data-tab-id=${JSON.stringify(TAB1)}]`,
         ),
       );
       assert.ok(content.textContent.includes('chat tab, updated'));

@@ -88,6 +88,14 @@ def browser():
         b.close()
 
 
+# Number of open tabs.  The chat whose group is on screen sits on the
+# main row and on the group strip under it, so ids are counted once.
+_OPEN_TAB_COUNT_JS = (
+    "new Set(Array.from(document.querySelectorAll('.chat-tab[data-tab-id]'))"
+    ".map(e => e.dataset.tabId)).size"
+)
+
+
 def _open_page(browser, harness, width: int = 1400):
     """Open the remote page in desktop mode and record sent WS frames.
 
@@ -281,14 +289,14 @@ def test_explorer_file_click_opens_a_content_tab(browser, harness):
     try:
         page.click("#activity-explorer")
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
-        tabs_before = page.locator(".chat-tab").count()
+        tabs_before = page.evaluate(_OPEN_TAB_COUNT_JS)
         _explorer_row(page, "feature.txt").click()
         page.wait_for_function(
-            f"document.querySelectorAll('.chat-tab').length === {tabs_before + 1}",
+            f"{_OPEN_TAB_COUNT_JS} === {tabs_before + 1}",
             timeout=15000,
         )
         titles = page.eval_on_selector_all(
-            ".chat-tab", "els => els.map(e => e.textContent)",
+            "#tab-list .chat-tab", "els => els.map(e => e.textContent)",
         )
         assert any("feature.txt" in t for t in titles)
         opened = _sent(frames, "openFile")
@@ -421,10 +429,10 @@ def test_commit_click_lists_modified_files_and_opens_them(browser, harness):
         # Clicking a listed file opens the file's diff (parent vs
         # commit) in a diff-editor tab, as VS Code does; the working
         # file itself is not opened.
-        tabs_before = page.locator(".chat-tab").count()
+        tabs_before = page.evaluate(_OPEN_TAB_COUNT_JS)
         files.nth(1).click()
         page.wait_for_function(
-            f"document.querySelectorAll('.chat-tab').length === {tabs_before + 1}",
+            f"{_OPEN_TAB_COUNT_JS} === {tabs_before + 1}",
             timeout=15000,
         )
         opened = _sent(frames, "openFile")
@@ -629,7 +637,7 @@ def test_keyboard_model_roving_tabindex_and_arrows(browser, harness):
         n_open = len(_sent(frames, "openFile"))
         page.keyboard.press("Enter")
         page.wait_for_function(
-            "document.querySelectorAll('.chat-tab').length >= 2", timeout=15000,
+            f"{_OPEN_TAB_COUNT_JS} >= 2", timeout=15000,
         )
         assert len(_sent(frames, "openFile")) == n_open + 1
         # Source Control rows: one tab stop as well.
@@ -653,17 +661,18 @@ def test_orphaned_content_tab_keeps_browsing_its_folder(browser, harness):
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         _explorer_row(page, "README.md").click()
         page.wait_for_function(
-            "document.querySelectorAll('.chat-tab').length === 2", timeout=15000,
+            f"{_OPEN_TAB_COUNT_JS} === 2", timeout=15000,
         )
-        # Close the chat tab (the first strip) while the content tab shows.
+        # Close the chat tab (its group-strip entry) while the content
+        # tab shows.
         page.evaluate(
             """() => {
-              const chat = document.querySelector('.chat-tab:not(.active)');
+              const chat = document.querySelector('#tab-list .chat-tab:not(.active)');
               chat.querySelector('.chat-tab-close').click();
             }"""
         )
         page.wait_for_function(
-            "document.querySelectorAll('.chat-tab').length === 1", timeout=15000,
+            f"{_OPEN_TAB_COUNT_JS} === 1", timeout=15000,
         )
         page.wait_for_timeout(300)
         assert page.locator(".explorer-row[aria-level='1']").inner_text().strip() == "repo"

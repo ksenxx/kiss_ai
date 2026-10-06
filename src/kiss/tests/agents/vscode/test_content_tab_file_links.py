@@ -40,6 +40,19 @@ from kiss.tests.server.test_content_tab_file_links import (
     harness,  # noqa: F401  (module fixture used by param name)
 )
 
+# The tab bar has two rows: the main row (one entry per chat) and the
+# group strip under it (the chat on screen plus its sub-agents and the
+# files it opened).  The chat therefore appears on BOTH rows, so open
+# tabs are counted by unique id ...
+_OPEN_TAB_COUNT_JS = (
+    "new Set(Array.from(document.querySelectorAll('.chat-tab[data-tab-id]'))"
+    ".map(e => e.dataset.tabId)).size"
+)
+# ... and "back to the chat" clicks the chat's entry on the GROUP
+# STRIP: the main-row entry returns to the tab last viewed in the
+# group, which would be the content tab itself.
+_CHAT_TAB_LABEL = "#tab-list .chat-tab:not(.content-tab) .chat-tab-label"
+
 
 @pytest.fixture(scope="module")
 def browser():
@@ -106,16 +119,13 @@ class TestContentTabFileLinks:
         context, page, sent = _open_page(browser, harness)
         try:
             page.fill("#task-input", "my precious draft")
-            real_tabs = page.locator(
-                ".chat-tab:not(.chat-tab-add):not(.chat-tab-settings)",
-            )
-            n_tabs_before = real_tabs.count()
+            n_tabs_before = page.evaluate(_OPEN_TAB_COUNT_JS)
             _inject_file_link(
                 page, str(harness.work_dir / "sample.py"), "lnk-code",
             )
             page.click("#lnk-code")
             page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
-            n_tabs_after = real_tabs.count()
+            n_tabs_after = page.evaluate(_OPEN_TAB_COUNT_JS)
             assert n_tabs_after == n_tabs_before + 1
             label = page.locator(".chat-tab.content-tab .chat-tab-label")
             assert label.inner_text() == "sample.py"
@@ -154,7 +164,7 @@ class TestContentTabFileLinks:
                 "#content-tab-area .content-code-fallback",
             ).count() > 0
             assert monaco_used or fallback_used
-            page.click(".chat-tab:not(.content-tab) .chat-tab-label")
+            page.click(_CHAT_TAB_LABEL)
             page.wait_for_selector("#task-input", state="visible")
             assert page.input_value("#task-input") == "my precious draft"
             assert page.locator("#output").is_visible()
@@ -432,7 +442,7 @@ class TestContentTabFileLinks:
             page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
             # Hide the content tab immediately — the editor then loads
             # (or already loaded) behind a display:none surface.
-            page.click(".chat-tab:not(.content-tab) .chat-tab-label")
+            page.click(_CHAT_TAB_LABEL)
             page.wait_for_selector("#task-input", state="visible")
             page.wait_for_timeout(2000)
             page.click(".chat-tab.content-tab .chat-tab-label")
@@ -453,7 +463,7 @@ class TestContentTabFileLinks:
             )
             page.click("#lnk-dup")
             page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
-            page.click(".chat-tab:not(.content-tab) .chat-tab-label")
+            page.click(_CHAT_TAB_LABEL)
             page.wait_for_selector("#lnk-dup", state="visible")
             page.click("#lnk-dup")
             page.wait_for_selector(

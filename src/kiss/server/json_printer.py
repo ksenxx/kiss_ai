@@ -546,15 +546,6 @@ class JsonPrinter(Printer):
         # those up; bridge-created runs (sub-agents) are unregistered
         # before they stop recording and are never kept.
         self._retired_recordings: dict[str, list[dict[str, Any]]] = {}
-        # task id → (tab_id, conn_id) of the UI tab the task was
-        # launched from; set via register_task_ui when a task runs in
-        # a UI tab.  Deliberately TASK-SCOPED: cleanup_task drops the
-        # entry the moment a task ends, which is precisely why
-        # _transient_targets resolves post-task broadcasts from the
-        # (longer-lived) subscriber set instead.  That lifetime
-        # difference is a load-bearing part of the printer's routing
-        # contract.  Read under self._lock.
-        self._task_ui: dict[str, tuple[str, str]] = {}
         self._subscribers: dict[str, set[str]] = {}
         self._subscriber_expiry: dict[str, float] = {}
         # Tabs whose picker currently shows a running agent's model
@@ -688,31 +679,21 @@ class JsonPrinter(Printer):
                 self.broadcast_model_pick(catch_up, "agent", tab_id)
         return recording
 
-    def register_task_ui(
-        self,
-        task_id: Any,
-        tab_id: str,
-        conn_id: str = "",
-    ) -> None:
-        """Attach the UI tab (and its connection) running *task_id*.
+    def register_task_ui(self, task_id: Any, tab_id: str) -> None:
+        """Attach the UI tab running *task_id*: the launcher's subscription.
 
-        Called by the server when a task is launched from a UI tab:
-        the tab id and the connection id of the launching client are
-        recorded on the printer so the task's event stream is fanned
-        out to that tab (via :meth:`subscribe_tab`) and the owning
-        connection stays identifiable for the task's whole life.
+        Called by the server when a task is launched from a UI tab, so
+        the task's event stream is fanned out to that tab (via
+        :meth:`subscribe_tab`).  Viewer tabs of the same chat are
+        subscribed separately by the server; the launching tab is the
+        one whose subscription must exist before the first event.
 
         Args:
             task_id: The task identifier.
             tab_id: The frontend tab id the task runs in.
-            conn_id: The id of the client connection that launched the
-                task (``""`` for direct callers / tests).
         """
-        key = self._coerce_task_id(task_id)
-        if not key or not tab_id:
+        if not self._coerce_task_id(task_id) or not tab_id:
             return
-        with self._lock:
-            self._task_ui[key] = (tab_id, conn_id)
         self.subscribe_tab(task_id, tab_id)
 
     def agent_task_allocated(
@@ -913,8 +894,7 @@ class JsonPrinter(Printer):
         been cleared.  The watching tabs come from the subscriber
         registry, which :meth:`cleanup_task` keeps alive for a few
         minutes after the task ends precisely so post-task broadcasts
-        still reach their tabs (``_task_ui`` by contrast is dropped
-        at teardown, so it is deliberately not consulted here).
+        still reach their tabs.
 
         All tabs are treated uniformly — the tab a task was launched
         from is subscribed like any viewer (see
@@ -1141,18 +1121,18 @@ class JsonPrinter(Printer):
     ) -> tuple[dict[str, Any], str] | None:
         """Return the copy of a ``tabId``-stamped event kept under its task.
 
-        Only the :data:`TAB_STAMPED_TASK_EVENT_TYPES` that also carry a
-        ``taskId`` are kept; every other tabId-stamped event is a
-        transient targeted broadcast.  Encodes the persisted JSON here
-        so callers can do it before taking :attr:`delivery_lock`.
+        Only the :data:`TAB_STAMPED_TASK_EVENT_TYPES` (all of them
+        persisted display events) that also carry a ``taskId`` are
+        kept; every other tabId-stamped event is a transient targeted
+        broadcast.  Encodes the persisted JSON here so callers can do
+        it before taking :attr:`delivery_lock`.
 
         Args:
             event: The tabId-stamped event (not mutated).
 
         Returns:
-            ``(record, encoded)``: the tabId-stripped copy and its JSON
-            (``""`` when it is not a persisted display event), or
-            ``None`` for a transient targeted broadcast.
+            ``(record, encoded)``: the tabId-stripped copy and its
+            JSON, or ``None`` for a transient targeted broadcast.
         """
         if (
             event.get("type") not in TAB_STAMPED_TASK_EVENT_TYPES
@@ -1160,11 +1140,7 @@ class JsonPrinter(Printer):
         ):
             return None
         record = {k: v for k, v in event.items() if k != "tabId"}
-        encoded = (
-            json.dumps(record)
-            if record.get("type") in _DISPLAY_EVENT_TYPES else ""
-        )
-        return record, encoded
+        return record, json.dumps(record)
 
     def _keep_tab_stamped_task_event(
         self, record: dict[str, Any], encoded: str,
@@ -1173,8 +1149,7 @@ class JsonPrinter(Printer):
 
         *record* and *encoded* come from :meth:`_tab_stamped_task_record`.
         The record is appended to that task's in-memory recording and
-        (when *encoded* is set) queued for persistence
-        under the event's OWN ``taskId`` — the emitters of these events
+        queued for persistence under the event's OWN ``taskId`` — the emitters of these events
         (``commands._echo_injected_prompt``,
         ``commands._broadcast_ask_answer``,
         ``task_runner._broadcast_failure_result``) always stamp the
@@ -1186,12 +1161,11 @@ class JsonPrinter(Printer):
 
         Args:
             record: The tabId-stripped event.
-            encoded: Its JSON, or ``""`` when it is not persisted.
+            encoded: Its JSON.
         """
         with self._lock:
             self._record_event(record)
-        if encoded:
-            _queue_chat_event(encoded, task_id=str(record["taskId"]))
+        _queue_chat_event(encoded, task_id=str(record["taskId"]))
 
     def _persistence_task_id(self, event: dict[str, Any]) -> str:
         """Return the ``task_history`` id a display event is filed under.
@@ -1455,11 +1429,6 @@ class JsonPrinter(Printer):
             while len(self._closed_tasks) > _CLOSED_TASK_MEMORY:
                 self._closed_tasks.pop(next(iter(self._closed_tasks)))
                 self._closed_tasks_evicted = True
-            # The launching-tab entry dies WITH the task (unlike the
-            # subscriber set, which lingers below to serve post-task
-            # broadcasts): _transient_targets must never route through
-            # a tab whose task already ended.
-            self._task_ui.pop(key, None)
             if key in self._subscribers:
                 if subscriber_linger_seconds <= 0:
                     self._subscribers.pop(key, None)

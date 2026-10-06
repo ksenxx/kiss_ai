@@ -235,8 +235,8 @@ async function main() {
       assert.ok(btn, 'the toggle exists in the tab bar');
       assert.strictEqual(
         btn.parentElement.id,
-        'tab-bar',
-        'the toggle rides the tab bar, not the composer footer',
+        'main-tab-bar',
+        'the toggle rides the main tab row, not the composer footer',
       );
       assert.strictEqual(btn.getAttribute('aria-expanded'), 'false');
       assert.ok(!drawerOpen(win));

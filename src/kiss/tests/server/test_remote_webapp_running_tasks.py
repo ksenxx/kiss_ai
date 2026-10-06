@@ -96,12 +96,7 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
 
         import kiss.agents.sorcar.persistence as _persistence
 
-        if _persistence._db_conn is not None:
-            try:
-                _persistence._db_conn.close()
-            except Exception:
-                pass
-            _persistence._db_conn = None
+        _persistence._close_db()
         (
             _persistence._DB_PATH,
             _persistence._db_conn,

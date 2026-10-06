@@ -28,13 +28,17 @@ pytestmark = posix_only("runs the brand_home_dir_name function of install.sh und
 
 _REPO = Path(__file__).resolve().parents[3]
 _INSTALL = _REPO / "install.sh"
-_FUNCTION = re.compile(r"^brand_home_dir_name\(\) \{\n.*?^\}\n", re.M | re.S)
+# ``brand_home_dir_name`` reads the key through ``brand_field``, defined
+# right above it; both are extracted verbatim.
+_FUNCTION = re.compile(
+    r"^brand_field\(\) \{\n.*?^\}\nbrand_home_dir_name\(\) \{\n.*?^\}\n", re.M | re.S
+)
 
 
 def _home_dir_name(project_dir: Path, kiss_home: str | None = None) -> tuple[str, str]:
     """Return ``(brand_home_dir_name, KISS_HOME_DIR)`` as install.sh computes them."""
     match = _FUNCTION.search(_INSTALL.read_text(encoding="utf-8"))
-    assert match, "brand_home_dir_name() not found in install.sh"
+    assert match, "brand_field() + brand_home_dir_name() not found in install.sh"
     script = (
         f"PROJECT_DIR={str(project_dir)!r}\nHOME=/home/u\n"
         + (f"KISS_HOME={kiss_home!r}\n" if kiss_home is not None else "unset KISS_HOME\n")

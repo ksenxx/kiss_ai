@@ -346,7 +346,6 @@ def prewarm(
             and GitWorktreeOps.reset_worktree_to(wt_dir, "HEAD")
         )
         with _pool_lock:
-            _building.pop(key, None)
             if populated and generation == _generation and _active_discards == 0:
                 _spares[key] = (branch, wt_dir)
                 return True

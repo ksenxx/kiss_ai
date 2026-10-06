@@ -30,7 +30,6 @@ from openai import APITimeoutError
 from openai.resources.responses import Responses
 from openai.types.responses import response_create_params
 
-from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     FRAMEWORK_ONLY_CONFIG_KEYS,
@@ -44,14 +43,17 @@ from kiss.core.models.model import (
     accepted_request_params,
 )
 from kiss.core.models.openai_compatible_model import (
-    _CONNECT_TIMEOUT,
     OPENAI_INPUT_AUDIO_FORMATS,
     OPENAI_INPUT_IMAGE_MIME_TYPES,
     OpenAICompatibleBase,
     OpenAICompatibleModel,
     _extract_deepseek_reasoning,
 )
-from kiss.core.models.stream_abort import stall_error, stop_aware_events, stop_error
+from kiss.core.models.stream_abort import (
+    CONNECT_TIMEOUT,
+    stop_aware_events,
+    stop_or_stall_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -183,18 +185,16 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if self.token_callback is not None:
             kwargs["stream"] = True
             # Bounds the wait for the response headers, which the watchdog
-            # inside ``_consume_stream`` cannot see (see ``_CONNECT_TIMEOUT``
-            # in ``openai_compatible_model``); both clocks raise the same
+            # inside ``_consume_stream`` cannot see (see
+            # ``stream_abort.CONNECT_TIMEOUT``); both clocks raise the same
             # retryable stall error.
             kwargs["timeout"] = httpx.Timeout(
-                self._stream_stall_timeout, connect=_CONNECT_TIMEOUT
+                self._stream_stall_timeout, connect=CONNECT_TIMEOUT
             )
             try:
                 return self._consume_stream(self.client.responses.create(**kwargs))
             except (httpx.TimeoutException, APITimeoutError) as err:
-                if stop_signal.stop_requested():
-                    raise stop_error() from err
-                raise stall_error(self._stream_stall_timeout) from err
+                raise stop_or_stall_error(self._stream_stall_timeout) from err
         response = self.client.responses.create(**kwargs)
         self._raise_for_failed_response(response)
         content, tool_calls = self._parse_non_streaming(response)
@@ -1326,7 +1326,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         reasoning_part_buffers: dict[tuple[int, int], str] = {}
         response: Any = None
         saw_completed = False
-        in_reasoning = False
         item_output_indexes: dict[str, int] = {}
         self._last_stream_item_indexes = item_output_indexes
         self._last_stream_message_output_index = None
@@ -1350,9 +1349,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 "response.output_text.delta",
                 "response.refusal.delta",
             ):
-                if in_reasoning:
-                    in_reasoning = False
-                    self._invoke_thinking_callback(False)
+                self._close_thinking_if_open()
                 output_index = self._stream_output_index(event, 0)
                 content_index = int(getattr(event, "content_index", 0) or 0)
                 text_delta_seen.add((output_index, content_index))
@@ -1365,9 +1362,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 "response.reasoning_text.delta",
                 "response.reasoning_summary_text.delta",
             ):
-                if not in_reasoning:
-                    in_reasoning = True
-                    self._invoke_thinking_callback(True)
+                self._open_thinking_if_closed()
                 output_index = self._stream_output_index(event, 0)
                 inner_index = self._reasoning_inner_index(event)
                 key = (output_index, inner_index)
@@ -1387,9 +1382,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 final_reasoning = str(getattr(event, "text", "") or "")
                 old_reasoning = reasoning_part_buffers.get(key, "")
                 if key not in reasoning_delta_seen and final_reasoning:
-                    if not in_reasoning:
-                        in_reasoning = True
-                        self._invoke_thinking_callback(True)
+                    self._open_thinking_if_closed()
                     self._invoke_token_callback(final_reasoning)
                 elif (
                     key in reasoning_delta_seen
@@ -1397,26 +1390,15 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 ):
                     suffix = final_reasoning[len(old_reasoning):]
                     if suffix:
-                        opened_here = False
-                        if not in_reasoning:
-                            in_reasoning = True
-                            opened_here = True
-                            self._invoke_thinking_callback(True)
+                        self._open_thinking_if_closed()
                         self._invoke_token_callback(suffix)
-                        if opened_here:
-                            in_reasoning = False
-                            self._invoke_thinking_callback(False)
                 reasoning_part_buffers[key] = final_reasoning
-                if in_reasoning:
-                    in_reasoning = False
-                    self._invoke_thinking_callback(False)
+                self._close_thinking_if_open()
             elif etype in (
                 "response.output_text.done",
                 "response.refusal.done",
             ):
-                if in_reasoning:
-                    in_reasoning = False
-                    self._invoke_thinking_callback(False)
+                self._close_thinking_if_open()
                 output_index = self._stream_output_index(event, 0)
                 content_index = int(getattr(event, "content_index", 0) or 0)
                 if etype == "response.output_text.done":
@@ -1433,9 +1415,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     content += emitted
                     self._invoke_token_callback(emitted)
             elif etype == "response.content_part.done":
-                if in_reasoning:
-                    in_reasoning = False
-                    self._invoke_thinking_callback(False)
+                self._close_thinking_if_open()
                 output_index = self._stream_output_index(event, 0)
                 content_index = int(getattr(event, "content_index", 0) or 0)
                 part = getattr(event, "part", None)
@@ -1457,9 +1437,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         content += emitted
                         self._invoke_token_callback(emitted)
             elif etype == "response.output_item.added":
-                if in_reasoning:
-                    in_reasoning = False
-                    self._invoke_thinking_callback(False)
+                self._close_thinking_if_open()
                 item = getattr(event, "item", None)
                 if item is not None and getattr(item, "type", "") == "message":
                     output_index = self._stream_output_index(event, 0)
@@ -1545,9 +1523,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         slot["item_id"] = item_id
                         item_to_idx[item_id] = idx
             elif etype == "response.function_call_arguments.delta":
-                if in_reasoning:
-                    in_reasoning = False
-                    self._invoke_thinking_callback(False)
+                self._close_thinking_if_open()
                 slot, idx = self._slot_for_argument_event(
                     event, tool_calls, item_to_idx, args_from_delta, args_from_added
                 )
@@ -1563,9 +1539,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 if arg_delta:
                     args_from_delta.add(idx)
             elif etype == "response.function_call_arguments.done":
-                if in_reasoning:
-                    in_reasoning = False
-                    self._invoke_thinking_callback(False)
+                self._close_thinking_if_open()
                 slot, _idx = self._slot_for_argument_event(
                     event, tool_calls, item_to_idx, args_from_delta, args_from_added
                 )
@@ -1578,9 +1552,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             ):
                 item = getattr(event, "item", None)
                 if item is not None and getattr(item, "type", "") == "function_call":
-                    if in_reasoning:
-                        in_reasoning = False
-                        self._invoke_thinking_callback(False)
+                    self._close_thinking_if_open()
                     item_id = str(getattr(item, "id", "") or "")
                     has_real_index = (
                         getattr(event, "output_index", None) is not None
@@ -1637,9 +1609,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         slot["item_id"] = item_id
                         item_to_idx[item_id] = idx
                 elif item is not None and getattr(item, "type", "") == "message":
-                    if in_reasoning:
-                        in_reasoning = False
-                        self._invoke_thinking_callback(False)
+                    self._close_thinking_if_open()
                     output_index = self._stream_output_index(event, 0)
                     parts = getattr(item, "content", None) or []
                     for content_index, part in enumerate(parts):
@@ -1661,9 +1631,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             content += emitted
                             self._invoke_token_callback(emitted)
             elif etype in ("response.failed", "error"):
-                if in_reasoning:
-                    in_reasoning = False
-                    self._invoke_thinking_callback(False)
+                self._close_thinking_if_open()
                 resp = getattr(event, "response", None)
                 err = getattr(resp, "error", None) if resp is not None else None
                 if err is None:
@@ -1680,9 +1648,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     + (f": {message}" if message else "")
                 )
             elif etype == "response.incomplete":
-                if in_reasoning:
-                    in_reasoning = False
-                    self._invoke_thinking_callback(False)
+                self._close_thinking_if_open()
                 resp = getattr(event, "response", None)
                 details = (
                     getattr(resp, "incomplete_details", None)
@@ -1713,8 +1679,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 # user sees with flaky provider connections.
                 break
 
-        if in_reasoning:
-            self._invoke_thinking_callback(False)
+        self._close_thinking_if_open()
         if not saw_completed:
             raise KISSError(
                 "Responses API stream ended without a terminal "

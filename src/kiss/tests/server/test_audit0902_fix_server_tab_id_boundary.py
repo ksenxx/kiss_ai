@@ -236,12 +236,17 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             self.assertEqual([t["tabId"] for t in tabs["tabs"]], [CANON_TAB])
             printer = self.server._printer
             with printer._ws_lock:
-                local_tabs = dict(printer._local_tab_counts)
-            # ONE interest entry for the opened tab, keyed by the
-            # canonical id (the padded spelling never reaches the
-            # bookkeeping), and the talk fan-out counts the tab as
-            # shown by the attached local webview.
-            self.assertEqual(local_tabs, {"placeholder": 1, CANON_TAB: 1})
+                local_tabs = {
+                    conn: set(tabs)
+                    for conn, tabs in printer._local_tab_sets.items()
+                }
+            # ONE connection's interest set holds the opened tab,
+            # keyed by the canonical id (the padded spelling never
+            # reaches the bookkeeping), and the talk fan-out counts
+            # the tab as shown by the attached local webview.
+            self.assertEqual(
+                list(local_tabs.values()), [{"placeholder", CANON_TAB}],
+            )
             self.assertEqual(
                 printer.shown_local_tabs([CANON_TAB]), {CANON_TAB},
             )
@@ -257,8 +262,8 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             # removes the tab from the registry: the fan-out no longer
             # counts it as shown.
             with printer._ws_lock:
-                local_tabs = dict(printer._local_tab_counts)
-            self.assertEqual(local_tabs, {"placeholder": 1})
+                interest = [set(t) for t in printer._local_tab_sets.values()]
+            self.assertEqual(interest, [{"placeholder"}])
             self.assertEqual(printer.shown_local_tabs([CANON_TAB]), set())
         finally:
             writer.close()

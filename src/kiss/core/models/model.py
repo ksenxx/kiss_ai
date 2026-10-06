@@ -817,6 +817,15 @@ class Model(ABC):
         if self._thinking_open:
             self._invoke_thinking_callback(False)
 
+    def _open_thinking_if_closed(self) -> None:
+        """Open a thinking block unless one is already open.
+
+        The streaming loops call this on every reasoning delta, so a
+        run of deltas produces exactly one ``thinking_callback(True)``.
+        """
+        if not self._thinking_open:
+            self._invoke_thinking_callback(True)
+
     def reset_conversation(self) -> None:
         """Reset conversation state for reuse across sub-sessions.
 

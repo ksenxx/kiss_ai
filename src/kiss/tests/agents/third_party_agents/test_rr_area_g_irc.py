@@ -209,11 +209,14 @@ class TestDisconnectGuard:
     ) -> None:
         """A normal disconnect still joins and clears the reader thread."""
         backend = _connected_backend(server)
-        conn = server.accept()
-        _read_lines(conn, "USER ")
-        reader = backend._reader_thread
-        assert reader is not None
-        backend.disconnect()
-        assert backend._reader_thread is None
-        assert not reader.is_alive()
-        conn.close()
+        try:
+            conn = server.accept()
+            _read_lines(conn, "USER ")
+            reader = backend._reader_thread
+            assert reader is not None
+            backend.disconnect()
+            assert backend._reader_thread is None
+            assert not reader.is_alive()
+            conn.close()
+        finally:
+            backend.disconnect()

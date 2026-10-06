@@ -69,10 +69,14 @@ def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
-def _run_helper(endpoint_file: Path, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
+def _run_helper(
+    endpoint_file: Path, timeout: float = 5.0, strict: bool = False
+) -> subprocess.CompletedProcess[str]:
     """Run the helper script with ``KISS_SORCAR_LOCAL`` overridden."""
     env = os.environ.copy()
     env["KISS_SORCAR_LOCAL"] = str(endpoint_file)
+    if strict:
+        env["KISS_ACTIVE_TASKS_STRICT"] = "1"
     # Windows reports a refused loopback connect only after ~2 s.
     env["KISS_ACTIVE_TASKS_TIMEOUT"] = "5.0" if sys.platform == "win32" else "2.0"
     return subprocess.run(
@@ -234,6 +238,26 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             )
             self.assertIn("predates", result.stderr)
             self.assertIn("activeTasksQuery", result.stderr)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    async def test_old_daemon_exits_one_in_strict_mode(self) -> None:
+        """``KISS_ACTIVE_TASKS_STRICT=1``: an OLD daemon's answer is "unknown".
+
+        install.sh's runtime setup restarts a daemon it did not build and
+        follows the extension's ``unsupported-query`` policy: a daemon
+        that cannot report its tasks is not proven idle.
+        """
+        scratch = Path(tempfile.mkdtemp())
+        handler = _one_shot_handler(
+            [b'{"type":"error","text":"Unknown command: activeTasksQuery"}\n'],
+        )
+        try:
+            async with fake_daemon(scratch, handler) as endpoint_file:
+                result = await asyncio.to_thread(_run_helper, endpoint_file, 5.0, True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("predates", result.stderr)
+            self.assertIn("Refusing to kill", result.stderr)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 

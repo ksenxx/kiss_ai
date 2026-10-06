@@ -661,28 +661,48 @@ def _start_relic_daemon() -> tuple[threading.Thread, threading.Event]:
     return relic, stopped
 
 
+def _stop_listener(thread: threading.Thread) -> None:
+    """Make a fake listener still blocked in ``accept()`` exit and join it.
+
+    Closing a listening socket from another thread does not wake
+    ``accept()``; a throw-away connection does.  The listener's loop then
+    sees it has been stopped (or fails to read a frame) and unlinks its
+    socket path, so a test that fails half-way leaves nothing behind.
+    """
+    if thread.is_alive():
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
+                wake.connect(str(socket_path()))
+        except OSError:
+            pass
+    thread.join(timeout=10.0)
+
+
+def _assert_relic_replaced(muse_client: Any) -> None:
+    """Start a relic, let ensure_daemon replace it and check the new daemon answers."""
+    relic, stopped = _start_relic_daemon()
+    try:
+        assert muse_client._daemon_protocol() == 1
+        muse_client.ensure_daemon()
+        relic.join(timeout=10.0)
+        assert stopped.is_set()
+        assert muse_client._checked({"op": "status"})["protocol"] == PROTOCOL_VERSION
+    finally:
+        stopped.set()
+        _stop_listener(relic)
+
+
 def test_stale_pre_upgrade_daemon_is_replaced(muse_env: Path) -> None:
     """ensure_daemon stops a protocol-1 relic and spawns the current daemon."""
     from kiss.agents.third_party_agents.muse_auth import client as muse_client
 
-    relic, stopped = _start_relic_daemon()
-    assert muse_client._daemon_protocol() == 1
-
-    muse_client.ensure_daemon()
-    relic.join(timeout=10.0)
-    assert stopped.is_set()
-    status = muse_client._checked({"op": "status"})
-    assert status["protocol"] == PROTOCOL_VERSION
+    _assert_relic_replaced(muse_client)
 
     # A relic that REPLACES the verified daemon (new socket inode) is
     # caught without any cache reset: the socket identity changed, so
     # the handshake reruns and replaces the relic again.
     teardown_muse_env()
-    relic2, stopped2 = _start_relic_daemon()
-    muse_client.ensure_daemon()
-    relic2.join(timeout=10.0)
-    assert stopped2.is_set()
-    assert muse_client._checked({"op": "status"})["protocol"] == PROTOCOL_VERSION
+    _assert_relic_replaced(muse_client)
 
 
 def test_daemon_protocol_of_garbage_listeners(muse_env: Path) -> None:
@@ -699,13 +719,18 @@ def test_daemon_protocol_of_garbage_listeners(muse_env: Path) -> None:
     replies = [{"ok": False, "error": "boom"}, {"ok": True, "protocol": "nope"}]
 
     def serve_garbage() -> None:
-        for reply in replies:
-            conn, _ = server.accept()
-            with conn:
-                recv_frame(conn)
-                send_frame(conn, reply)
-        server.close()
-        path.unlink(missing_ok=True)
+        try:
+            for reply in replies:
+                conn, _ = server.accept()
+                with conn:
+                    try:
+                        recv_frame(conn)
+                    except Exception:
+                        return  # woken by _stop_listener after a failed assert
+                    send_frame(conn, reply)
+        finally:
+            server.close()
+            path.unlink(missing_ok=True)
 
     thread = threading.Thread(target=serve_garbage, daemon=True)
     thread.start()
@@ -713,7 +738,7 @@ def test_daemon_protocol_of_garbage_listeners(muse_env: Path) -> None:
         assert muse_client._daemon_protocol() == 0  # error reply
         assert muse_client._daemon_protocol() == 0  # non-integer protocol
     finally:
-        thread.join(timeout=10.0)
+        _stop_listener(thread)
     assert muse_client._daemon_protocol() is None  # nothing listening
 
 

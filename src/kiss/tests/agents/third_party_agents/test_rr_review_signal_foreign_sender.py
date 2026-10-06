@@ -14,9 +14,10 @@ These tests drive the REAL ``ChannelRunner.run_once`` tick (connect →
 poll → allow-list → handle → reply) against a REAL executable
 ``signal-cli`` stand-in program whose ``receive`` is genuinely destructive
 (it truncates its spool file) and whose ``send`` records every
-recipient.  Only ``_launch_task`` — the daemon/LLM boundary, per the
-suite convention in ``test_hermes_runner.py`` — is overridden with a
-recorder so no LLM runs.
+recipient.  The runner is the real ``ChannelRunner``: its
+``_launch_task`` travels the real wire (``run_agent_via_kiss_web`` →
+``sorcar.run``) to a :class:`RecordingDaemon` that records every ``run``
+command and answers with a scripted result, so no LLM runs.
 """
 
 from __future__ import annotations
@@ -28,14 +29,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from kiss.agents.third_party_agents import _kiss_web_launcher
 from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelRunner,
     load_channel_state,
+    save_channel_state,
 )
 from kiss.agents.third_party_agents.signal.signal_sea import (
     SignalChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 from kiss.tests.conftest import install_cli_script
 
 # A Python program (not a shell script) so the same stand-in runs on
@@ -72,22 +76,6 @@ def _envelope(sender: str, ts: int, text: str) -> str:
     )
 
 
-class RecordingLaunchRunner(ChannelRunner):
-    """ChannelRunner whose daemon launch is a recorder (no LLM)."""
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.launches: list[tuple[str, str]] = []
-
-    def _launch_task(
-        self, channel_id: str, thread_ts: str, prompt: str, last_reply_ts: str
-    ) -> str:
-        """Record the launch instead of contacting the kiss-web daemon."""
-        self.launches.append((channel_id, prompt))
-        self._store_thread_state(thread_ts, "chat-1", last_reply_ts)
-        return "success: true\nsummary: handled"
-
-
 class TestSignalRunnerForeignSender(unittest.TestCase):
     """The real runner tick must neither act on nor reply about foreign mail."""
 
@@ -118,10 +106,22 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         _config.save({"phone_number": "+1BOT"})
         self._backend = SignalChannelBackend()
         self._backend._phone_number = "+1BOT"
+        # The daemon stand-in the runner's real ``_launch_task`` reaches:
+        # ``run_agent_via_kiss_web`` resolves its endpoint file from the
+        # module-level ``_ENDPOINT_FILE_OVERRIDE`` when none is passed.
+        self._daemon = RecordingDaemon(text="handled", chat_id="chat-1")
+        self.addCleanup(self._daemon.close)
+        saved_override = _kiss_web_launcher._ENDPOINT_FILE_OVERRIDE
+        self.addCleanup(setattr, _kiss_web_launcher, "_ENDPOINT_FILE_OVERRIDE", saved_override)
+        _kiss_web_launcher._ENDPOINT_FILE_OVERRIDE = str(self._daemon.endpoint_file)
 
-    def _make_runner(self) -> RecordingLaunchRunner:
+    def _launched_prompts(self) -> list[str]:
+        """Prompts of the ``run`` commands the daemon received, in order."""
+        return [str(command["prompt"]) for command in self._daemon.run_commands]
+
+    def _make_runner(self) -> ChannelRunner:
         """Build a runner monitoring contact +1AAA with persistent state."""
-        return RecordingLaunchRunner(
+        return ChannelRunner(
             backend=self._backend,
             channel_name="+1AAA",
             agent_name="Signal Background Agent",
@@ -147,7 +147,7 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         runner = self._make_runner()
         processed = runner.run_once()
         self.assertEqual(processed, 0)
-        self.assertEqual(runner.launches, [])
+        self.assertEqual(self._launched_prompts(), [])
         self.assertEqual(self._sent_recipients(), [])
         # The destructively consumed envelope is parked, not lost.
         self.assertEqual(self._spool.read_text(encoding="utf-8"), "")
@@ -159,7 +159,7 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         # A later tick with an empty spool still does not act on it.
         processed = runner.run_once()
         self.assertEqual(processed, 0)
-        self.assertEqual(runner.launches, [])
+        self.assertEqual(self._launched_prompts(), [])
         self.assertEqual(self._sent_recipients(), [])
         state = load_channel_state(self._state_path)
         self.assertEqual(len(state["pending_envelopes"]), 1)
@@ -172,10 +172,12 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         runner = self._make_runner()
         processed = runner.run_once()
         self.assertEqual(processed, 1)
-        self.assertEqual(len(runner.launches), 1)
-        self.assertEqual(runner.launches[0][0], "+1AAA")
-        self.assertIn("hello bot", runner.launches[0][1])
+        self.assertEqual(len(self._launched_prompts()), 1)
+        self.assertIn("hello bot", self._launched_prompts()[0])
         self.assertEqual(self._sent_recipients(), ["+1AAA"])
+        # The real launch stored the daemon's chat id for the thread.
+        state = load_channel_state(self._state_path)
+        self.assertEqual([t["chat_id"] for t in state["threads"].values()], ["chat-1"])
 
     def test_mixed_senders_only_configured_contact_is_served(self) -> None:
         """Foreign mail in the same tick is parked; only +1AAA is answered."""
@@ -189,8 +191,9 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         runner = self._make_runner()
         processed = runner.run_once()
         self.assertEqual(processed, 1)
-        self.assertEqual([c for c, _ in runner.launches], ["+1AAA"])
-        self.assertNotIn("eve says hi", runner.launches[0][1])
+        self.assertEqual(len(self._launched_prompts()), 1)
+        self.assertIn("real question", self._launched_prompts()[0])
+        self.assertNotIn("eve says hi", self._launched_prompts()[0])
         self.assertEqual(self._sent_recipients(), ["+1AAA"])
         state = load_channel_state(self._state_path)
         self.assertEqual(
@@ -204,15 +207,11 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
         state["pending_envelopes"] = [
             {"ts": "400", "user": "+1AAA", "text": "parked question"}
         ]
-        from kiss.agents.third_party_agents._channel_agent_utils import (
-            save_channel_state,
-        )
-
         save_channel_state(self._state_path, state)
         runner = self._make_runner()
         processed = runner.run_once()
         self.assertEqual(processed, 1)
-        self.assertIn("parked question", runner.launches[0][1])
+        self.assertIn("parked question", self._launched_prompts()[0])
         self.assertEqual(self._sent_recipients(), ["+1AAA"])
         state = load_channel_state(self._state_path)
         self.assertEqual(state["pending_envelopes"], [])

@@ -318,10 +318,12 @@ class TestMarkdownHtmlEditSource:
             )
             _type_at_end(page, " EDIT")
             page.wait_for_selector(_DIRTY_TAB, timeout=10000)
-            # Back to the chat, then a NEW :5 link to the dirty file:
-            # the tab comes forward in source mode, jumped to line 5,
-            # with the unsaved edit intact.
-            page.click(".chat-tab:not(.content-tab) .chat-tab-label")
+            # Back to the chat (its entry on the group strip; the main
+            # row's entry would return to the file last viewed), then a
+            # NEW :5 link to the dirty file: the tab comes forward in
+            # source mode, jumped to line 5, with the unsaved edit
+            # intact.
+            page.click("#tab-list .chat-tab:not(.content-tab) .chat-tab-label")
             page.wait_for_selector("#task-input", state="visible")
             _inject_file_link(page, str(path) + ":5", "lnk-ln2")
             page.click("#lnk-ln2")

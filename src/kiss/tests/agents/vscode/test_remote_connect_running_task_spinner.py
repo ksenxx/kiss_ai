@@ -230,7 +230,10 @@ def test_remote_client_opened_mid_run_gets_status_replay_and_spinner(
         page = context.new_page()
         page.goto(harness.base_url + "/")
         page.wait_for_selector("#task-input", state="visible", timeout=30000)
-        tab_selector = f'.chat-tab[data-tab-id="{tab}"]'
+        # The chat's header is its entry on the main tab row; the group
+        # strip under it (hidden for a chat without sub-agent or file
+        # tabs) repeats the active chat, so the probe names the row.
+        tab_selector = f'#main-tab-list .chat-tab[data-tab-id="{tab}"]'
         page.wait_for_selector(f"{tab_selector} .chat-tab-spinner", timeout=15000)
         assert page.locator(tab_selector).count() == 1
         assert page.locator(f"{tab_selector} .chat-tab-spinner").is_visible()

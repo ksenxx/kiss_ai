@@ -137,11 +137,12 @@ class Sea(BaseSea):
         return tools + [greet]
 '''
         )
-        # ``tools()`` ADDS to the built-in toolset: only the ``toolsHook``
-        # callable is staged; the caller's tool profile is left alone (no
+        # ``tools()`` ADDS to the built-in toolset through the staged
+        # ``toolsHook`` callable (hooks are always staged, so they are not
+        # listed as overrides); the caller's tool profile is left alone (no
         # ``toolProfile`` override, no legacy ``appendBasicTools`` field).
         cmd: dict[str, Any] = {"agentPath": path}
-        self.assertEqual(apply_agent_overrides(cmd), {"toolsHook"})
+        self.assertEqual(apply_agent_overrides(cmd), set())
         staged = cmd["toolsHook"]([])
         self.assertEqual([t.__name__ for t in staged], ["greet"])
         self.assertEqual(staged[0](name="bob"), "hi bob")
@@ -150,7 +151,7 @@ class Sea(BaseSea):
         self.assertNotIn("appendBasicTools", cmd)
         self.assertNotIn("toolsFile", cmd)
 
-    def test_script_without_tools_method_stages_no_hook(self) -> None:
+    def test_script_without_tools_method_stages_identity_hook(self) -> None:
         path = self._write(
             "from kiss.agents.seas.base.base_sea import BaseSea\n"
             "\n"
@@ -163,7 +164,10 @@ class Sea(BaseSea):
         )
         cmd: dict[str, Any] = {"agentPath": path}
         self.assertEqual(apply_agent_overrides(cmd), set())
-        self.assertNotIn("toolsHook", cmd)
+        # No ``tools()`` method: the staged hook hands the toolset back
+        # unchanged (the module-level ``greet`` is not picked up).
+        self.assertEqual(cmd["toolsHook"]([]), [])
+        self.assertEqual([t.__name__ for t in cmd["toolsHook"]([print])], ["print"])
         self.assertNotIn("tools", cmd)
         self.assertNotIn("appendBasicTools", cmd)
         self.assertEqual(_load_tools(path), [])

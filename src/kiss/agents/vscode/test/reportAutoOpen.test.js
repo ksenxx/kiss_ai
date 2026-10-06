@@ -120,10 +120,19 @@ function finishTask(win, extra) {
   send(win, Object.assign({type: 'task_done', success: true}, extra || {}));
 }
 
+// Content tabs on either row: a file sits on the group strip of the
+// chat that opened it, or on the main row once that chat is gone.
 function contentTabs(win) {
+  const seen = new Set();
   return Array.from(
-    win.document.querySelectorAll('#tab-list .chat-tab.content-tab'),
-  );
+    win.document.querySelectorAll(
+      '#main-tab-list .chat-tab.content-tab, #tab-list .chat-tab.content-tab',
+    ),
+  ).filter(el => {
+    if (seen.has(el.dataset.tabId)) return false;
+    seen.add(el.dataset.tabId);
+    return true;
+  });
 }
 
 function reportFrames(win) {
@@ -473,7 +482,9 @@ function testCloseTabDiscardsQueuedReport() {
   writeReport(win, 'reports/closed.md', '# never shown', {tabId: firstTabId});
   // ...then the user closes that tab.
   const closeBtn = win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id="' + firstTabId + '"] .chat-tab-close',
+    '#main-tab-list .chat-tab[data-tab-id="' +
+      firstTabId +
+      '"] .chat-tab-close',
   );
   assert.ok(closeBtn, 'expected a close button on the first chat tab');
   closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));

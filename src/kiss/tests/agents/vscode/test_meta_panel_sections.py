@@ -1017,8 +1017,9 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         assert "getSpendReport" in posted
 
         # Clicking an app that is not connected submits a connect task
-        # in a NEW tab.
-        tabs_before = page.locator("#tab-list .chat-tab").count()
+        # in a NEW tab.  A new chat is a root tab: it lands on the main
+        # row (#main-tab-list), not in the active chat's group strip.
+        tabs_before = page.locator("#main-tab-list .chat-tab").count()
         # The shim keeps retrying the websocket and reports the daemon
         # down again after every failed attempt (sendMessage then holds
         # the prompt back), so the "connected" report and the click run
@@ -1035,7 +1036,7 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         assert submit is not None
         assert submit["prompt"].startswith('Connect my Slack app: authenticate the "slack"')
         assert 'run_agent with agent "slack"' in submit["prompt"]
-        assert page.locator("#tab-list .chat-tab").count() == tabs_before + 1
+        assert page.locator("#main-tab-list .chat-tab").count() == tabs_before + 1
     finally:
         page.close()
 

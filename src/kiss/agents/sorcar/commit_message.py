@@ -128,54 +128,56 @@ def generate_commit_message_from_diff(
         The cleaned commit-message string, or ``"kiss: auto-commit agent work"``
         on failure.
     """
-    fallback = "kiss: auto-commit agent work"
-    if not diff_text:
-        msg = (
-            _append_user_prompt(fallback, user_prompt)
-            if user_prompt
-            else fallback
-        )
-        return _append_task_result(msg, task_result) if task_result else msg
+    msg = "kiss: auto-commit agent work"
+    if diff_text:
+        msg = _commit_message_from_llm(diff_text, user_prompt, msg)
+    if user_prompt:
+        msg = _append_user_prompt(msg, user_prompt)
+    if task_result:
+        msg = _append_task_result(msg, task_result)
+    return msg
+
+
+def _commit_message_from_llm(diff_text: str, user_prompt: str | None, fallback: str) -> str:
+    """Ask the fast model for a commit message describing *diff_text*.
+
+    Args:
+        diff_text: The non-empty diff to describe.
+        user_prompt: The task prompt behind the diff, when known; the
+            model is told to phrase the subject after its intent.
+        fallback: Returned when no model is available or the call fails.
+    """
     if user_prompt:
         context = f"User task prompt:\n{user_prompt}\n\nDiff:\n{diff_text}"
-        template = (
-            "Generate a concise git commit message for these "
-            "changes. The user's task prompt is provided for "
-            "context — use it to phrase the subject line in "
-            "terms of the user's INTENT, not just the mechanical "
-            "diff. Use conventional commit format with a clear "
-            "subject line (type: description) and optionally a "
-            "body with bullet points for multiple changes. Do "
-            "NOT quote or repeat the user prompt — it will be "
-            "appended separately. Return ONLY the commit message "
-            "text, no quotes or markdown fences.\n\n{context}"
+        intent = (
+            "The user's task prompt is provided for context — use it to "
+            "phrase the subject line in terms of the user's INTENT, not "
+            "just the mechanical diff. "
         )
+        no_quote = "Do NOT quote or repeat the user prompt — it will be appended separately. "
     else:
         context = f"Diff:\n{diff_text}"
-        template = (
-            "Generate a concise git commit message for these "
-            "changes. Use conventional commit format with a "
-            "clear subject line (type: description) and "
-            "optionally a body with bullet points for multiple "
-            "changes. Return ONLY the commit message text, no "
-            "quotes or markdown fences.\n\n{context}"
-        )
+        intent = no_quote = ""
+    template = (
+        f"Generate a concise git commit message for these changes. {intent}"
+        "Use conventional commit format with a clear subject line "
+        "(type: description) and optionally a body with bullet points for "
+        f"multiple changes. {no_quote}Return ONLY the commit message text, "
+        "no quotes or markdown fences.\n\n{context}"
+    )
     try:
         model = get_fast_model()
     except Exception:
         logger.debug("Commit message model selection failed", exc_info=True)
-        msg = fallback
-    else:
-        msg = _run_oneshot_llm(
-            agent_name="Commit Message Generator",
-            prompt_template=template,
-            arguments={"context": context},
-            model=model,
-            fallback=fallback,
-            failure_log="Commit message generation failed",
-        )
-    msg = _append_user_prompt(msg, user_prompt) if user_prompt else msg
-    return _append_task_result(msg, task_result) if task_result else msg
+        return fallback
+    return _run_oneshot_llm(
+        agent_name="Commit Message Generator",
+        prompt_template=template,
+        arguments={"context": context},
+        model=model,
+        fallback=fallback,
+        failure_log="Commit message generation failed",
+    )
 
 
 def _append_user_prompt(message: str, user_prompt: str) -> str:

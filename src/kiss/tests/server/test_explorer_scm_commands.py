@@ -245,8 +245,7 @@ class ExplorerHarness:
             self.loop.call_soon_threadsafe(self.loop.stop)
             self._thread.join(timeout=30)
             self.loop.close()
-            if th._db_conn is not None:
-                th._db_conn.close()
+            th._close_db()
             th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
             vc.CONFIG_DIR, vc.CONFIG_PATH = self._saved_cfg
             shutil.rmtree(self.tmpdir, ignore_errors=True)

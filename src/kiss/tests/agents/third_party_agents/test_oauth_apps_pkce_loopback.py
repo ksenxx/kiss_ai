@@ -455,13 +455,18 @@ def test_pkce_half_open_connection_does_not_pin_the_port(
     half_open = socket.create_connection(("127.0.0.1", port), timeout=10)
     try:
         half_open.sendall(b"GET /callback HTTP/1.1\r\n")
-        time.sleep(0.5)  # the redirect server has accepted the connection by now
+        # The handler's socket timeout closes the half-open connection
+        # (bounded by this socket's 10 s timeout) and the serving thread
+        # goes back to answering requests on the port it still owns.
+        assert half_open.recv(1) == b""
+        assert session._server_thread.is_alive()
+        assert LoopbackPkceSession._port_owner is session
+        assert requests.get(f"http://127.0.0.1:{port}/nope", timeout=10).status_code == 404
         started = time.monotonic()
         session.cancel()  # joins the serving thread
         assert time.monotonic() - started < 10
         assert not session._server_thread.is_alive()
         assert LoopbackPkceSession._port_owner is None
-        assert half_open.recv(1) == b""  # the server closed the half-open connection
         assert _can_bind(port)
 
         other = f"{service}_b"
@@ -481,16 +486,22 @@ def test_pkce_half_open_connection_does_not_pin_the_port(
         half_open.close()
 
 
-def test_pkce_concurrent_constructors_leave_one_port_owner(token_server: _TokenServer) -> None:
-    port = _free_port()
-    provider = PkceProvider(f"{token_server.base}/authorize", f"{token_server.base}/token")
-    redirect_uri = f"http://localhost:{port}/callback"
-    sessions: list[LoopbackPkceSession] = []
+def test_pkce_concurrent_constructors_leave_one_port_owner(
+    token_server: _TokenServer, service: str
+) -> None:
+    # The port comes from a session that already owns it (``_start`` retries
+    # a probed port another process grabbed first); the racing constructors
+    # below take it over from that owner, so no bare probe-then-bind remains.
+    seed = _start(service, token_server)
+    port = _port(seed)
+    provider = seed.provider
+    redirect_uri = seed.redirect_uri
+    sessions: list[LoopbackPkceSession] = [seed]
     errors: list[BaseException] = []
     lock = threading.Lock()
 
     def construct(name: str, go: threading.Event) -> None:
-        go.wait()
+        go.wait(30)
         try:
             session = LoopbackPkceSession(name, provider, "cid", redirect_uri, {})
         except BaseException as e:  # noqa: BLE001 - every failure is a test failure

@@ -356,6 +356,8 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
             # The ask SEA's ``none`` tool profile: its ``tools()`` and
             # ``finish`` are the whole tool set, no built-in tools.
             tools_hook=ask.tools_hook,
+            llm_call_hook=ask.llm_call_hook,
+            tool_call_hook=ask.tool_call_hook,
             append_basic_tools=False,
             tool_profile=ask_settings["tool_profile"],
             is_parallel=ask_settings["allow_fan_out"],

@@ -72,26 +72,6 @@ export const BRAND: Brand = loadBrand();
 export const PRODUCT_NAME = BRAND.productName;
 export const SHORT_NAME = BRAND.shortName;
 
-const PLACEHOLDERS: Record<string, keyof Brand> = {
-  PRODUCT_NAME: 'productName',
-  SHORT_NAME: 'shortName',
-  TAGLINE: 'tagline',
-  HOME_DIR: 'homeDir',
-};
-
-/**
- * Fill the `{{PRODUCT_NAME}}`, `{{SHORT_NAME}}`, `{{TAGLINE}}` and
- * `{{HOME_DIR}}` placeholders in `text` (the twin of
- * `kiss.core.brand.render_brand`, used on TIPS.md).  Other `{{...}}`
- * tokens are left untouched.
- */
-export function renderBrand(text: string, brand: Brand = BRAND): string {
-  return text.replace(
-    /\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|HOME_DIR)\}\}/g,
-    (_m, key: string) => brand[PLACEHOLDERS[key]],
-  );
-}
-
 /**
  * Extension-relative path of the icon `media/<name>` as the installed
  * extension ships it.

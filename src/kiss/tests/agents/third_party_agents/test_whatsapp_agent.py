@@ -696,20 +696,18 @@ class TestAgentAndAuthTools:
         )
         assert result["ok"] is False and "bridge_port" in result["error"]
 
-    def test_authenticate_without_go_reports_install_steps(self, tmp_path: Path) -> None:
+    def test_authenticate_without_go_reports_install_steps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Pre-cloned repo (main.go present) but no binary and no `go` on
         # an emptied PATH: the tool must explain how to install Go.
         bridge = tmp_path / "whatsapp-bridge"
         bridge.mkdir(parents=True)
         (bridge / "main.go").write_text("package main")
-        old_path = os.environ["PATH"]
-        os.environ["PATH"] = str(tmp_path / "no-tools")
-        try:
-            result = json.loads(
-                _auth_tools(WhatsAppAgent())["authenticate_whatsapp"](repo_dir=str(tmp_path))
-            )
-        finally:
-            os.environ["PATH"] = old_path
+        monkeypatch.setenv("PATH", str(tmp_path / "no-tools"))
+        result = json.loads(
+            _auth_tools(WhatsAppAgent())["authenticate_whatsapp"](repo_dir=str(tmp_path))
+        )
         assert result["ok"] is False
         assert "go.dev" in result["error"]
 

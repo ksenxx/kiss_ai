@@ -796,7 +796,9 @@ def test_agent_script_getters(tmp_path: Path) -> None:
         "appendToSystemPrompt": "CALLER",
     }
     overridden = apply_agent_overrides(cmd)
-    assert {"systemPromptHook", "toolsHook", "appendToSystemPrompt"} <= overridden
+    # The hooks are always staged, so only settings fields are reported.
+    assert {"appendToSystemPrompt", "workDir", "useWorktree", "autoCommit"} <= overridden
+    assert not {"systemPromptHook", "toolsHook", "prompt"} & overridden
     assert cmd["prompt"] == "schedule it"
     assert cmd["workDir"] == work_dir
     assert cmd["useWorktree"] is False

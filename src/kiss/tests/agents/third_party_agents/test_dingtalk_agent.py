@@ -18,21 +18,22 @@ import hmac
 import json
 import socket
 import sys
-import threading
 import time
-from http.server import BaseHTTPRequestHandler
+from collections.abc import Iterator
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import requests
 
 import kiss.agents.third_party_agents.dingtalk.dingtalk_sea as dingtalk_mod
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents.dingtalk.dingtalk_sea import (
     DingTalkAgent,
     DingTalkChannelBackend,
     DingtalkSea,
+)
+from kiss.tests.agents.third_party_agents.recording_http import (
+    JsonWebhookServer,
+    serve_json_webhook,
 )
 
 _AUTH_TRIO = {"check_dingtalk_auth", "authenticate_dingtalk", "clear_dingtalk_auth"}
@@ -68,58 +69,14 @@ def _dingtalk_sign(key: str, timestamp_ms: str) -> str:
     return base64.b64encode(digest).decode("utf-8")
 
 
-class _WebhookReceiver:
-    """Real local HTTP server standing in for DingTalk's webhook endpoint.
-
-    Records every request's path/query/body and answers with a
-    configurable JSON body (``errcode: 0`` by default).
-    """
-
-    def __init__(self) -> None:
-        self.requests: list[dict[str, Any]] = []
-        self.response_body: dict[str, Any] = {"errcode": 0, "errmsg": "ok"}
-        receiver = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length)
-                split = urlsplit(self.path)
-                receiver.requests.append(
-                    {
-                        "path": split.path,
-                        "query": parse_qs(split.query),
-                        "json": json.loads(body.decode("utf-8")),
-                    }
-                )
-                payload = json.dumps(receiver.response_body).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def log_message(self, *args: Any) -> None:  # type: ignore[override]
-                pass
-
-        self.server = ThreadedHTTPServer(("127.0.0.1", 0), Handler)
-        self.port = self.server.server_address[1]
-        self.url = f"http://127.0.0.1:{self.port}/robot/send?access_token=testtoken"
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-
-    def stop(self) -> None:
-        """Shut the receiver down."""
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5.0)
-
-
 @pytest.fixture()
-def receiver() -> Any:
+def receiver() -> Iterator[JsonWebhookServer]:
     """A running local webhook receiver, stopped after the test."""
-    rec = _WebhookReceiver()
-    yield rec
-    rec.stop()
+    yield from serve_json_webhook()
+
+
+def _webhook_url(receiver: JsonWebhookServer) -> str:
+    return receiver.base_url + "/robot/send?access_token=testtoken"
 
 
 @pytest.fixture(autouse=True)
@@ -209,11 +166,11 @@ def test_tools_module_function() -> None:
     assert len(DingtalkSea().tools([])) >= 3
 
 
-def test_post_message_shape_and_signed_query(receiver: _WebhookReceiver) -> None:
+def test_post_message_shape_and_signed_query(receiver: JsonWebhookServer) -> None:
     """post_message sends the DingTalk text payload with a valid HMAC signature."""
     agent = DingTalkAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
-    tools["authenticate_dingtalk"](receiver.url, secret="SECret123")
+    tools["authenticate_dingtalk"](_webhook_url(receiver), secret="SECret123")
 
     before_ms = int(time.time() * 1000)
     raw = agent._backend.post_message("hello 团队", at_mobiles="123, 456", at_all=True)
@@ -233,11 +190,11 @@ def test_post_message_shape_and_signed_query(receiver: _WebhookReceiver) -> None
     assert req["query"]["sign"][0] == _dingtalk_sign("SECret123", timestamp)
 
 
-def test_post_markdown_shape(receiver: _WebhookReceiver) -> None:
+def test_post_markdown_shape(receiver: JsonWebhookServer) -> None:
     """post_markdown sends the DingTalk markdown payload."""
     agent = DingTalkAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
-    tools["authenticate_dingtalk"](receiver.url, secret="s2")
+    tools["authenticate_dingtalk"](_webhook_url(receiver), secret="s2")
 
     assert json.loads(agent._backend.post_markdown("Title", "# body"))["ok"] is True
     req = receiver.requests[-1]
@@ -245,11 +202,11 @@ def test_post_markdown_shape(receiver: _WebhookReceiver) -> None:
     assert req["query"]["sign"][0] == _dingtalk_sign("s2", req["query"]["timestamp"][0])
 
 
-def test_send_message_unsigned_without_secret(receiver: _WebhookReceiver) -> None:
+def test_send_message_unsigned_without_secret(receiver: JsonWebhookServer) -> None:
     """Without a secret, send_message posts to the raw webhook URL."""
     agent = DingTalkAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
-    tools["authenticate_dingtalk"](receiver.url)
+    tools["authenticate_dingtalk"](_webhook_url(receiver))
 
     agent._backend.send_message("ignored-channel", "plain text")
     req = receiver.requests[-1]
@@ -258,11 +215,11 @@ def test_send_message_unsigned_without_secret(receiver: _WebhookReceiver) -> Non
     assert "sign" not in req["query"]
 
 
-def test_errcode_nonzero_raises_and_tools_report(receiver: _WebhookReceiver) -> None:
+def test_errcode_nonzero_raises_and_tools_report(receiver: JsonWebhookServer) -> None:
     """A non-zero errcode raises from send_message and yields ok:false tools."""
     agent = DingTalkAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
-    tools["authenticate_dingtalk"](receiver.url)
+    tools["authenticate_dingtalk"](_webhook_url(receiver))
     receiver.response_body = {"errcode": 310000, "errmsg": "sign not match"}
 
     with pytest.raises(RuntimeError, match="310000"):

@@ -1099,9 +1099,13 @@ async function testTabRestoreLandsAtEnd(remote) {
 
   userScroll(win, O, 40);
   geoO.sh += 500;
-  const tabEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="sub-tab-1"]',
-  );
+  const tabEl =
+    win.document.querySelector(
+      '#tab-list ' + '.chat-tab[data-tab-id="sub-tab-1"]',
+    ) ||
+    win.document.querySelector(
+      '#main-tab-list ' + '.chat-tab[data-tab-id="sub-tab-1"]',
+    );
   assert.ok(tabEl, 'the sub-agent tab must appear in the tab bar');
   tabEl.click();
   assert.ok(
@@ -1398,18 +1402,26 @@ async function testSubpanelLockSurvivesTabSwitch(remote) {
     description: 'background worker',
     task_id: 6,
   });
-  const subTabEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="sub-tab-lock"]',
-  );
+  const subTabEl =
+    win.document.querySelector(
+      '#tab-list ' + '.chat-tab[data-tab-id="sub-tab-lock"]',
+    ) ||
+    win.document.querySelector(
+      '#main-tab-list ' + '.chat-tab[data-tab-id="sub-tab-lock"]',
+    );
   assert.ok(subTabEl, 'the sub-agent tab must appear in the tab bar');
   subTabEl.click();
   // Real browsers destroy the scroller of a detached element, silently
   // resetting its scroll offset to 0 (no scroll event fires). jsdom
   // keeps the property, so the reset is simulated here.
   bp.scrollTop = 0;
-  const parentTabEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="' + parentId + '"]',
-  );
+  const parentTabEl =
+    win.document.querySelector(
+      '#tab-list ' + '.chat-tab[data-tab-id="' + parentId + '"]',
+    ) ||
+    win.document.querySelector(
+      '#main-tab-list ' + '.chat-tab[data-tab-id="' + parentId + '"]',
+    );
   assert.ok(parentTabEl, 'the parent tab must stay in the tab bar');
   parentTabEl.click();
 

@@ -63,9 +63,10 @@ function statusOf(win) {
 }
 
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id="${tabId}"]`,
-  );
+  const sel = `.chat-tab[data-tab-id="${tabId}"]`;
+  const el =
+    win.document.querySelector('#tab-list ' + sel) ||
+    win.document.querySelector('#main-tab-list ' + sel);
   assert.ok(el, `no tab with id "${tabId}" in the tab bar`);
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
@@ -177,7 +178,7 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   });
   send(win, {type: 'status', running: false, tabId: 'bg-tab'});
 
-  const activeEl = win.document.querySelector('.chat-tab.active');
+  const activeEl = win.document.querySelector('#tab-list .chat-tab.active');
   assert.strictEqual(
     activeEl && activeEl.getAttribute('data-tab-id'),
     'bg-tab',

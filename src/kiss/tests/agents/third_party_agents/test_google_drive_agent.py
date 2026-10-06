@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for the Google Drive channel agent.
 
-Runs a REAL local HTTP server (stdlib ``ThreadedHTTPServer``) emulating
+Runs a REAL local HTTP server (``recording_http.RecordingServer``) emulating
 the Google Drive v3 REST API, reached through a real local Composio API
 emulator (``composio_test_utils``) whose proxy injects the bearer token
 — no mocks or patches.  The Drive server asserts the
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
@@ -29,10 +28,6 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import kiss.agents.third_party_agents.gdrive.gdrive_sea as gdrive_mod
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents.gdrive.gdrive_sea import (
     _SERVICE,
     GoogleDriveAgent,
@@ -44,6 +39,7 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     reset_state,
     start_fake_composio,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _TOKEN = TOKEN
 
@@ -129,7 +125,7 @@ class _DriveRequestHandler(BaseHTTPRequestHandler):
                 body = json.loads(raw.decode("utf-8"))
             except ValueError:
                 body = raw
-        cast(_DriveServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": self.path,
@@ -157,9 +153,7 @@ class _DriveRequestHandler(BaseHTTPRequestHandler):
             if query.get("q") == ["name = 'none'"]:
                 self._reply_json(200, {"files": []})
             else:
-                self._reply_json(
-                    200, {"files": list(_FILES.values()), "nextPageToken": "tok-next"}
-                )
+                self._reply_json(200, {"files": list(_FILES.values()), "nextPageToken": "tok-next"})
         elif self.command == "GET" and path.endswith("/export"):
             file_id = path.split("/")[-2]
             mime = query.get("mimeType", [""])[0]
@@ -204,14 +198,6 @@ class _DriveRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _DriveServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records every request it receives."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _DriveRequestHandler)
-        self.requests: list[dict[str, Any]] = []
-
-
 @pytest.fixture(autouse=True)
 def _fresh_state():
     """Start and end every test with no recorded google_drive connection."""
@@ -228,29 +214,21 @@ def composio(monkeypatch):
 
 @pytest.fixture()
 def drive_server():
-    """Start the emulated Drive server on a free port; yield (base_url, server)."""
-    server = _DriveServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        yield base_url, server
-    finally:
-        stop_http_server(server, thread)
+    """Start the emulated Drive server on a free port."""
+    yield from serve_recording(_DriveRequestHandler)
 
 
 @pytest.fixture()
 def backend(drive_server, composio):
     """A connected backend pointed at the emulated Drive server."""
-    base_url, server = drive_server
     connect(composio, _SERVICE)
     b = GoogleDriveChannelBackend()
-    b._base_url = base_url
-    b._upload_base_url = base_url + "/upload"
-    return b, server
+    b._base_url = drive_server.base_url
+    b._upload_base_url = drive_server.base_url + "/upload"
+    return b, drive_server
 
 
-def _last(server: _DriveServer) -> dict[str, Any]:
+def _last(server: RecordingServer) -> dict[str, Any]:
     return server.requests[-1]
 
 
@@ -505,6 +483,7 @@ def test_upload_file_size_limit_and_missing_file(backend, tmp_path) -> None:
     assert json.loads(b.gdrive_upload_file(str(exact), folder_id="../x"))["ok"] is False
     b._upload_base_url = b._base_url + "/files/boom"
     assert json.loads(b.gdrive_upload_file(str(exact)))["ok"] is False
+
 
 def test_create_folder(backend) -> None:
     """gdrive_create_folder posts the folder MIME type and parent."""

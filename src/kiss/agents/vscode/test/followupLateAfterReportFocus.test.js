@@ -69,12 +69,23 @@ function send(win, data) {
 
 function tabEl(win, tabId) {
   return win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
   );
 }
 
+// Reaches a tab the way the user does: a tab whose group is off screen
+// comes back through its chat's main-row entry (which lands on the tab
+// last viewed in that group), then the group strip picks the tab.
 function clickTab(win, tabId) {
-  const el = tabEl(win, tabId);
+  let el = tabEl(win, tabId);
+  if (!el) {
+    const main = win.document.querySelector(
+      `#main-tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+    );
+    assert.ok(main, `tab ${tabId} must exist in the tab bar`);
+    main.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+    el = tabEl(win, tabId);
+  }
   assert.ok(el, `tab ${tabId} must exist in the tab bar`);
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }

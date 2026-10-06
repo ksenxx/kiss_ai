@@ -113,9 +113,12 @@ function entry(tabId, title) {
 }
 
 function tabIds(win) {
-  return Array.from(win.document.querySelectorAll('.chat-tab'))
+  // The chat whose group is on screen sits on the main row and on the
+  // group strip under it; count each tab once.
+  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
     .map(el => el.dataset.tabId)
     .filter(Boolean);
+  return ids.filter((id, i) => ids.indexOf(id) === i);
 }
 
 // --- F1 ---------------------------------------------------------------------

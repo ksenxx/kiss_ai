@@ -1294,7 +1294,6 @@ def test_authenticate_rejects_malformed_ports(muse_env: Path) -> None:
     # Firecrawl rejects the bad port BEFORE writing any plaintext key or
     # clearing a prior vault entry (no destructive partial migration).
     from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import _config as firecrawl_config
-    from kiss.agents.third_party_agents.muse_auth.client import store_credentials
 
     store_credentials("firecrawl", {"kind": "bearer", "token": "fc-old"}, [])
     fc_tools = auth_tools(FirecrawlAgent())
@@ -1450,7 +1449,6 @@ def test_valid_http_url_rejects_userinfo_and_accepts_ipv4_mapped(muse_env: Path)
 def test_firecrawl_is_origin_bound(muse_env: Path) -> None:
     """A self-hosted Firecrawl key is never authorized for the cloud API."""
     from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import _extra_hosts
-    from kiss.agents.third_party_agents.muse_auth._common import builtin_hosts
     from kiss.agents.third_party_agents.muse_auth.daemon import MuseAuthDaemon
 
     # No built-in host: the credential is bound only to its one origin.

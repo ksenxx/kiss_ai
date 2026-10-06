@@ -671,10 +671,14 @@ class TestPendingMessagesClearedOnTaskFinish:
         def fake_run(**_kwargs: Any) -> None:
             st.pending_user_messages.append("queued during task")
             st.pending_user_messages.append("also queued")
-            # The re-dispatched follow-up inherits this command; an
-            # unknown model makes it exit at the runner's model check
-            # instead of calling a model (or this stub again).
-            cmd["model"] = "kiss-clear-after-run-no-such-model"
+            # The re-dispatched follow-up is built from the command as
+            # submitted (no ``model``: the tab's picker decides), so
+            # switch the tab's picker to an unknown model: the follow-up
+            # exits at the runner's model check instead of calling a
+            # model (or this stub again).
+            server._cmd_select_model(
+                {"tabId": tab_id, "model": "kiss-clear-after-run-no-such-model"},
+            )
 
         agent.run = fake_run  # type: ignore[method-assign, assignment]
 

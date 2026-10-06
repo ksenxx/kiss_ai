@@ -36,11 +36,15 @@ from kiss.core.models.model import (
     strip_system_cache_break,
     transcribe_audio,
 )
-from kiss.core.models.stream_abort import StreamAbortWatchdog, stall_error, stop_error
+from kiss.core.models.stream_abort import (
+    CONNECT_TIMEOUT,
+    stall_error,
+    stop_aware_events,
+    stop_error,
+)
 
 logger = logging.getLogger(__name__)
 
-_CONNECT_TIMEOUT = 10.0
 _MAX_RETRIES = 1
 
 _WORKSPACE_ID_REQUIRED_MARKER = "anthropic-workspace-id is required"
@@ -533,7 +537,7 @@ class AnthropicModel(Model):
             )
             self.client = Anthropic(
                 api_key=self.api_key,
-                timeout=httpx2.Timeout(self._stream_stall_timeout, connect=_CONNECT_TIMEOUT),
+                timeout=httpx2.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT),
                 max_retries=_MAX_RETRIES,
                 default_headers=default_headers,
             )
@@ -882,8 +886,9 @@ class AnthropicModel(Model):
           its message is often empty) or ``anthropic.APITimeoutError``
           when the response headers never arrive (SDK retries
           ``_MAX_RETRIES`` times first);
-        * **event level** — :class:`StreamAbortWatchdog` closes the
-          response when no SSE event is yielded in time, catching wedged
+        * **event level** — the watchdog inside
+          :func:`~kiss.core.models.stream_abort.stop_aware_events` aborts
+          the response when no SSE event is yielded in time, catching wedged
           requests that keep the connection alive with ``ping`` events
           (which the SDK filters out before yielding).
 
@@ -924,19 +929,23 @@ class AnthropicModel(Model):
         Returns:
             The raw Anthropic response message.
         """
-        watchdog: StreamAbortWatchdog | None = None
         in_thinking = False
         try:
             with self.client.messages.stream(**kwargs) as stream:
-                watchdog = StreamAbortWatchdog(
+                # `events` is closed in `finally` like the other
+                # transports: a token callback can raise out of the loop
+                # body, and an abandoned generator would keep its watchdog
+                # thread armed until the traceback is released.
+                # `get_final_message()` only drains the already-exhausted
+                # iterator and returns the in-memory snapshot, so it is
+                # safe after the wrapper has closed the response.
+                events = stop_aware_events(
                     stream,
                     stall_timeout=self._stream_stall_timeout,
-                    stop_event=stop_signal.get_thread_stop_event(),
                     name="anthropic-stream-abort-watchdog",
                 )
                 try:
-                    for event in stream:
-                        watchdog.beat()
+                    for event in events:
                         # The SDK accumulates message_start / message_delta
                         # usage here; kept for take_partial_usage_response
                         # if the stream fails before message_stop.
@@ -953,8 +962,8 @@ class AnthropicModel(Model):
                             if delta_type == "thinking_delta":
                                 text = getattr(delta, "thinking", "")
                                 if text:
-                                    if in_thinking and not self._thinking_open:
-                                        self._invoke_thinking_callback(True)
+                                    if in_thinking:
+                                        self._open_thinking_if_closed()
                                     self._invoke_token_callback(text)
                             elif delta_type == "text_delta":
                                 self._invoke_token_callback(getattr(delta, "text", ""))
@@ -962,41 +971,22 @@ class AnthropicModel(Model):
                             if in_thinking:
                                 in_thinking = False
                                 self._close_thinking_if_open()
-                    # Disarm the watchdog BEFORE reading its flags and
-                    # collecting the final message: stop() waits out an
-                    # abort already claimed, so afterwards the flags are
-                    # final and no late abort can shut down a socket that
-                    # get_final_message() is still using — or one httpx
-                    # has already returned to its pool.  Checking the
-                    # flags first instead would silently swallow a stop
-                    # or stall claimed between the last event and here.
-                    #
-                    # An aborted socket ends the iterator at EOF instead
-                    # of raising, so the abort has to be reported here
-                    # too — otherwise get_final_message() would surface
-                    # it as a confusing "incomplete message" error.
-                    watchdog.stop()
-                    if watchdog.stopped:
-                        raise stop_error()
-                    if watchdog.stalled:
-                        raise self._stall_error()
-                    self._rejected_response = None
-                    return stream.get_final_message()
                 finally:
-                    # Idempotent second stop for the exception paths.
-                    watchdog.stop()
-        except (httpx2.TimeoutException, APITimeoutError) as exc:
-            if self._stream_was_stopped(watchdog):
+                    events.close()
+                self._rejected_response = None
+                return stream.get_final_message()
+        except (httpx2.TimeoutException, APITimeoutError, TimeoutError) as exc:
+            # The byte-level clock (httpx2 / the SDK, which is the only
+            # clock BEFORE the headers arrive) or the event-level one
+            # (`stop_aware_events`' stall error).  A stop pressed while
+            # the request was still silent has no watchdog to report it
+            # and must not be retried as a stall.
+            if stop_signal.stop_requested():
                 raise stop_error() from exc
             raise self._stall_error() from exc
-        except TimeoutError:
-            # Already the stall error raised after the loop above.
-            raise
         except Exception as exc:
-            if self._stream_was_stopped(watchdog):
+            if stop_signal.stop_requested():
                 raise stop_error() from exc
-            if watchdog is not None and watchdog.stalled:
-                raise self._stall_error() from exc
             if _WORKSPACE_ID_REQUIRED_MARKER in str(exc):
                 # The API's own message names the missing header but not
                 # where KISS reads it from; replace it with an actionable
@@ -1008,38 +998,15 @@ class AnthropicModel(Model):
                 raise KISSError(_WORKSPACE_ID_HINT.format(error=exc)) from exc
             raise
 
-    @staticmethod
-    def _stream_was_stopped(watchdog: StreamAbortWatchdog | None) -> bool:
-        """Return whether the user stopped the task during this request.
-
-        The watchdog reports a stop it acted on, but it only exists once
-        the response headers have arrived: a request that is silent
-        BEFORE that (the SDK's own connect/read timeout territory) fails
-        with ``watchdog is None``, and reporting that as a retryable
-        stall would make the agentic loop re-ask the model on behalf of
-        a task the user already stopped.  Asking the thread's stop
-        signal directly covers both windows.
-
-        Args:
-            watchdog: The stall watchdog for this request, or ``None``
-                when the stream never opened.
-
-        Returns:
-            ``True`` when the request must unwind as a user stop.
-        """
-        if watchdog is not None and watchdog.stopped:
-            return True
-        return stop_signal.stop_requested()
-
     def _stall_error(self) -> TimeoutError:
         """Build the retryable stall error.
 
         The message itself comes from
         :func:`~kiss.core.models.stream_abort.stall_error`, so this
-        transport's hand-run watchdog loop reports a stall in exactly the
-        words the wrapped transports do; only the offending model is
-        added, because a stall is usually diagnosed from a log line that
-        does not say which model was being asked.
+        transport reports a stall in exactly the words the others do;
+        only the offending model is added, because a stall is usually
+        diagnosed from a log line that does not say which model was
+        being asked.
 
         Returns:
             The ``TimeoutError`` for the caller to raise.

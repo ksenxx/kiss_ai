@@ -477,8 +477,9 @@ class _CommandsMixin:
         broadcasts ``workDirChanged`` so every connected client
         re-scopes its Explorer, history and "Working directory" panel.
         Mirrors the value onto the printer either way.  Takes
-        ``_state_lock`` itself; the lock is re-entrant, so callers
-        already holding it may call this directly.
+        ``_work_dir_lock`` and then ``_state_lock`` itself, so it must
+        not be called while holding ``_state_lock`` (the reverse order
+        would deadlock against a concurrent adoption).
 
         Refuses a filesystem root (``/``, ``C:\\`` — see
         :func:`kiss.core.utils.is_root_dir`): adopting one (from a
@@ -2163,7 +2164,11 @@ class _CommandsMixin:
         """
         action = cmd.get("action", "")
         tab_id = cmd.get("tabId", "")
-        work_dir = cmd.get("workDir", "")
+        # Resolved once, so the discard and the deferred-merge trigger
+        # below act on the same repository (``_handle_main_tree_action``
+        # falls back to ``self.work_dir`` for an empty ``workDir``, and
+        # the trigger must not resolve "" to the daemon's cwd instead).
+        work_dir = cmd.get("workDir", "") or self.work_dir
         try:
             result = self._handle_main_tree_action(action, work_dir)
         except Exception as e:
@@ -2196,8 +2201,7 @@ class _CommandsMixin:
         )
 
         cfg = load_config()
-        if self.work_dir:
-            cfg["work_dir"] = self.work_dir
+        cfg["work_dir"] = self.work_dir
         # Only directories that still exist, most recently opened first
         # (the raw stored list may hold deleted or malformed entries).
         cfg["recent_work_dirs"] = recent_work_dirs()
@@ -2250,6 +2254,12 @@ class _CommandsMixin:
         if not isinstance(cfg, dict):
             cfg = {}
         cfg = sanitize_config(cfg)
+        # ``work_dir`` is adopted (and persisted) by ``_apply_new_work_dir``
+        # alone, below: saving it here first would put a directory it
+        # refuses (a filesystem root) on disk, where it would shadow the
+        # previously persisted directory on the next daemon start and
+        # make a VS Code window's ``ifUnset`` seed a no-op.
+        new_work_dir = cfg.pop("work_dir", "")
         with _CommandsMixin._save_config_lock:
             prev_password = load_config().get("remote_password", "")
             if not cfg.get("remote_password") and prev_password:
@@ -2281,7 +2291,6 @@ class _CommandsMixin:
 
         # Outside ``_save_config_lock``: ``_apply_new_work_dir`` takes
         # that (non-reentrant) lock itself to persist the directory.
-        new_work_dir = cfg.get("work_dir", "")
         if new_work_dir:
             self._apply_new_work_dir(new_work_dir)
 
@@ -2291,8 +2300,7 @@ class _CommandsMixin:
         new_cfg = load_config()
         # Same effective directory as ``getConfig``: a save that carries
         # no ``work_dir`` must not report the startup fallback as "".
-        if self.work_dir:
-            new_cfg["work_dir"] = self.work_dir
+        new_cfg["work_dir"] = self.work_dir
         event: dict[str, Any] = {"type": "configData", "config": new_cfg}
         if conn_id:
             event["connId"] = conn_id

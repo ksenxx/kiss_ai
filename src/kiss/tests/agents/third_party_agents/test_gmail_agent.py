@@ -32,8 +32,8 @@ from kiss.agents.third_party_agents.gmail.gmail_sea import (
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
     connect,
+    fake_composio,
     reset_state,
-    start_fake_composio,
 )
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 
@@ -217,11 +217,10 @@ def gmail_server(monkeypatch):
         to gmail.googleapis.com rerouted to the local endpoint) and the
         local Gmail server.
     """
-    with recording_server(_GmailHandler) as server:
-        for composio in start_fake_composio(monkeypatch):
-            composio.upstream_overrides["https://gmail.googleapis.com"] = server.base_url
-            connect(composio, _SERVICE)
-            yield composio, server
+    with recording_server(_GmailHandler) as server, fake_composio(monkeypatch) as composio:
+        composio.upstream_overrides["https://gmail.googleapis.com"] = server.base_url
+        connect(composio, _SERVICE)
+        yield composio, server
 
 
 def _make_error_backend(composio) -> GmailChannelBackend:

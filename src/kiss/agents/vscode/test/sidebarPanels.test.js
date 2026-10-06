@@ -802,7 +802,7 @@ async function main() {
       inp.dispatchEvent(new win.Event('input', {bubbles: true}));
       el(win, 'meta-panel').classList.add('open');
       send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
-      const tabsBefore = win.document.querySelectorAll('#tab-list .chat-tab').length;
+      const tabsBefore = win.document.querySelectorAll('#main-tab-list .chat-tab').length;
       posted.length = 0;
       win.document.querySelector('.app-row[data-app="slack"] button').click();
       const submit = posted.find(m => m.type === 'submit');
@@ -818,7 +818,7 @@ async function main() {
       assert.match(submit.prompt, /Never retry a failed sign-in in a loop/);
       assert.match(submit.prompt, /solve or bypass a CAPTCHA/);
       assert.strictEqual(
-        win.document.querySelectorAll('#tab-list .chat-tab').length,
+        win.document.querySelectorAll('#main-tab-list .chat-tab').length,
         tabsBefore + 1,
       );
       assert.ok(!el(win, 'meta-panel').classList.contains('open'), 'drawer closed');

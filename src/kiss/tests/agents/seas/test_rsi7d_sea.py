@@ -258,10 +258,13 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert sea_commands.sea_settings(_SEA_PATH) == resolve_settings(declared)
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "all")
     assert run.prompt == "all" and run.settings == resolve_settings(declared)
-    assert run.system_prompt_hook is not None and run.tools_hook is not None
     assert run.system_prompt_hook("DEFAULT PROMPT") == rsi7d.system_prompt("")
     assert [t.__name__ for t in run.tools_hook([])] == names
-    assert run.llm_call_hook is None and run.tool_call_hook is None
+    # The SEA overrides neither call hook: the staged ones are identities.
+    assert run.llm_call_hook([{"role": "user", "content": "x"}]) == [
+        {"role": "user", "content": "x"}
+    ]
+    assert run.tool_call_hook("Bash", {"command": "ls"}) == "OK"
 
 
 def test_sea_name_of_handles_paths_channels_and_plain_subagents() -> None:

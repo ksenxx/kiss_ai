@@ -31,8 +31,8 @@ from kiss.agents.third_party_agents.googlechat.googlechat_sea import (
 )
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
+    fake_composio,
     reset_state,
-    start_fake_composio,
 )
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 from kiss.tests.conftest import IS_WINDOWS
@@ -80,10 +80,9 @@ def chat(monkeypatch):
         ``(composio, chat_server)``, with chat.googleapis.com rerouted
         to the local Chat server.
     """
-    with recording_server(_ChatHandler) as server:
-        for composio in start_fake_composio(monkeypatch):
-            composio.upstream_overrides["https://chat.googleapis.com"] = server.base_url
-            yield composio, server
+    with recording_server(_ChatHandler) as server, fake_composio(monkeypatch) as composio:
+        composio.upstream_overrides["https://chat.googleapis.com"] = server.base_url
+        yield composio, server
 
 
 def _write_service_account_key(path: Path) -> None:

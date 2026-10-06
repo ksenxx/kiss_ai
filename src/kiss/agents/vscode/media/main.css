@@ -419,6 +419,12 @@ body {
 #status-text { color: var(--dim); }
 
 
+/* Two tab rows (renderTabBar): #main-tab-bar lists the chats (and the
+   ownerless daemon browser tab); #tab-bar, the group strip under it,
+   lists the chat on screen with its sub-agents and the files its task
+   opened, and only appears when that group has more than one tab.  In
+   editor-tabs mode VS Code's editor tabs stand in for the main row. */
+#main-tab-bar,
 #tab-bar {
   display: flex;
   align-items: center;
@@ -428,6 +434,20 @@ body {
   overflow: hidden;
 }
 
+/* The strip reads as the main row's sub-row: slightly shorter tabs on
+   the chat background, indented under the chat tab they belong to. */
+#tab-bar {
+  background: var(--bg);
+  padding-left: var(--space-3);
+}
+
+#tab-bar .chat-tab {
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+  font-size: var(--fs-sm);
+}
+
+#main-tab-list,
 #tab-list {
   display: flex;
   flex: 1;

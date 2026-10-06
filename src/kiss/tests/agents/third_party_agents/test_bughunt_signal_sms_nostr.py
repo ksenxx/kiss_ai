@@ -37,6 +37,7 @@ from pathlib import Path
 from kiss.agents.third_party_agents.signal.signal_sea import _config as _signal_config
 from kiss.agents.third_party_agents.sms.sms_sea import _config as _sms_config
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 from kiss.tests.conftest import install_cli_script
 
 # A Python program (not a shell script) so the same stand-in runs on
@@ -205,9 +206,8 @@ class TestSMSBackend(unittest.TestCase):
         the finite transport timeout stays as defense in depth.
         """
         import importlib
-        import json as json_module
-        import threading
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
+        from typing import cast
         from urllib.parse import urlsplit, urlunsplit
 
         from kiss.agents.third_party_agents.sms.sms_sea import SMSChannelBackend
@@ -215,13 +215,11 @@ class TestSMSBackend(unittest.TestCase):
         twilio_rest = importlib.import_module("twilio.rest")
         twilio_http = importlib.import_module("twilio.http.http_client")
 
-        hits: list[str] = []
-
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
                 """Answer every request with Twilio's 20003 auth error."""
-                hits.append(self.path)
-                body = json_module.dumps(
+                cast(RecordingServer, self.server).requests.append({"path": self.path})
+                body = json.dumps(
                     {
                         "code": 20003,
                         "detail": "Your AccountSid or AuthToken was incorrect.",
@@ -239,12 +237,10 @@ class TestSMSBackend(unittest.TestCase):
             def log_message(self, format: str, *args: object) -> None:  # noqa: A002
                 """Silence request logging."""
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        local_netloc = f"127.0.0.1:{server.server_port}"
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-
         class LocalTwilioHttpClient(twilio_http.TwilioHttpClient):  # type: ignore[misc, name-defined]
             """Real Twilio transport re-hosted onto the local emulator."""
+
+            local_netloc = ""
 
             def request(  # noqa: PLR0913
                 self,
@@ -259,7 +255,9 @@ class TestSMSBackend(unittest.TestCase):
             ):
                 """Swap the URL's host for the emulator and really send."""
                 parts = urlsplit(url)
-                local = urlunsplit(("http", local_netloc, parts.path, parts.query, parts.fragment))
+                local = urlunsplit(
+                    ("http", self.local_netloc, parts.path, parts.query, parts.fragment)
+                )
                 return super().request(
                     method,
                     local,
@@ -271,7 +269,8 @@ class TestSMSBackend(unittest.TestCase):
                     allow_redirects=allow_redirects,
                 )
 
-        try:
+        with recording_server(Handler) as server:
+            LocalTwilioHttpClient.local_netloc = f"127.0.0.1:{server.server_address[1]}"
             backend = SMSChannelBackend()
             backend._client = twilio_rest.Client(
                 "AC" + "0" * 32,
@@ -283,12 +282,9 @@ class TestSMSBackend(unittest.TestCase):
             self.assertEqual(messages, [])
             self.assertEqual(cursor, "123.0")
             # The SDK really hit the local Twilio-shaped endpoint.
-            self.assertTrue(hits, "the emulator never received the request")
-            self.assertIn("/2010-04-01/Accounts/AC", hits[0])
-            self.assertIn("/Messages.json", hits[0])
-        finally:
-            server.shutdown()
-            server.server_close()
+            self.assertTrue(server.requests, "the emulator never received the request")
+            self.assertIn("/2010-04-01/Accounts/AC", server.requests[0]["path"])
+            self.assertIn("/Messages.json", server.requests[0]["path"])
 
 
 class TestNostrBackend(unittest.TestCase):

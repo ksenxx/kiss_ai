@@ -20,6 +20,7 @@ import base64
 import json
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 
@@ -39,9 +40,6 @@ class FakeComposioServer(ThreadedHTTPServer):
         auth_configs: Existing auth configs (``id``/``created_at``).
         accounts: Connected-account ID -> status.
         deleted: Connected-account IDs deleted through the API.
-        requests_log: ``(method, path, json_body)`` of every API call.
-        proxied: Every request the proxy forwarded (method, url, headers, body).
-        link_status: Status new connected accounts start in.
         token: Bearer token the proxy injects upstream.
         downloads: Binary proxy answers, served at ``/download/<index>``.
         upstream_overrides: Origin -> replacement origin applied to proxied
@@ -54,9 +52,6 @@ class FakeComposioServer(ThreadedHTTPServer):
         self.auth_configs: list[dict[str, str]] = []
         self.accounts: dict[str, str] = {}
         self.deleted: list[str] = []
-        self.requests_log: list[tuple[str, str, Any]] = []
-        self.proxied: list[dict[str, Any]] = []
-        self.link_status = "INITIATED"
         self.token = TOKEN
         self.downloads: list[tuple[str, bytes]] = []
         self.upstream_overrides: dict[str, str] = {}
@@ -105,7 +100,6 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        server.requests_log.append((self.command, self.path, body))
         if self.headers.get("x-api-key") != API_KEY:
             self._reply(401, {"error": {"message": "invalid api key"}})
             return
@@ -123,7 +117,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply(200, {"items": [], "current_page": 1, "total_items": 0, "total_pages": 1})
         elif path == "/api/v3.1/connected_accounts/link" and self.command == "POST":
             account = server.next_id("ca")
-            server.accounts[account] = server.link_status
+            server.accounts[account] = "INITIATED"
             self._reply(201, {"connected_account_id": account, "link_token": "lt",
                               "redirect_url": f"https://connect.composio.dev/link/{account}",
                               "expires_at": "2099-01-01T00:00:00Z"})
@@ -171,9 +165,6 @@ class _Handler(BaseHTTPRequestHandler):
             # Like Composio: the base64 body is sent raw with its content type.
             data = base64.b64decode(binary["base64"])
             headers["Content-Type"] = binary.get("content_type") or "application/octet-stream"
-        server.proxied.append({"method": body["method"], "url": endpoint,
-                               "params": params, "headers": headers, "body": payload,
-                               "binary_body": binary})
         try:
             upstream = requests.request(
                 body["method"], endpoint, params=params, headers=headers, data=data, timeout=30,
@@ -205,6 +196,10 @@ def start_fake_composio(monkeypatch: Any) -> Iterator[FakeComposioServer]:
     """Run a :class:`FakeComposioServer` and point the Composio SDK at it.
 
     Use from a pytest fixture: ``yield from start_fake_composio(monkeypatch)``.
+    A fixture that does more work around the server (connecting a service,
+    building a backend) must use :func:`fake_composio` instead: a ``for``
+    loop over this generator leaves shutdown to garbage collection when
+    the loop body raises before the fixture's own ``yield``.
 
     Args:
         monkeypatch: pytest's ``monkeypatch`` fixture (sets env vars).
@@ -221,6 +216,10 @@ def start_fake_composio(monkeypatch: Any) -> Iterator[FakeComposioServer]:
         yield server
     finally:
         stop_http_server(server, thread)
+
+
+# :func:`start_fake_composio` as a context manager: ``with fake_composio(monkeypatch) as c:``.
+fake_composio = contextmanager(start_fake_composio)
 
 
 def reset_state(service: str) -> None:

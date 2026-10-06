@@ -12,8 +12,12 @@ stopped, and whether the tab is the one on screen or a background one.
 
 Three surfaces draw that header from the same ``media/main.js``:
 
-* the VS Code sidebar webview's internal tab strip
-  (``.chat-tab-spinner.status-spinner`` in ``renderTabBar``);
+* the VS Code sidebar webview's main tab row ``#main-tab-list``, one
+  entry per chat (``.chat-tab-spinner.status-spinner`` built by
+  ``buildTabElement`` for ``renderTabBar``); the group strip
+  ``#tab-list`` under it repeats the chat on screen but is hidden
+  while its group has no sub-agent or file tabs, so the header a user
+  sees for a lone chat is the main-row entry;
 * the remote webapp, which is the same page booted with
   ``<body class="remote-chat">`` and ``remote-codex.css`` restyling the
   tabs as pills -- the spinner must survive that cascade;
@@ -72,10 +76,10 @@ def _browser():
 _HEADER_PROBE = """
 (tabId) => {
   const tab = document.querySelector(
-    '.chat-tab[data-tab-id=' + JSON.stringify(tabId) + ']');
+    '#main-tab-list .chat-tab[data-tab-id=' + JSON.stringify(tabId) + ']');
   if (!tab) return {error: 'no tab ' + tabId};
   const spinner = tab.querySelector('.chat-tab-spinner');
-  const bar = document.getElementById('tab-bar');
+  const bar = document.getElementById('main-tab-bar');
   const out = {
     bodyClass: document.body.className,
     tabVisible: tab.offsetWidth > 0 && tab.offsetHeight > 0,
@@ -194,7 +198,7 @@ def _check_end(page, tab_id: str, task_id: str, how: str) -> None:
 def _switch_to(page, tab_id: str) -> None:
     page.evaluate(
         "(id) => document.querySelector("
-        "'.chat-tab[data-tab-id=' + JSON.stringify(id) + ']').click()",
+        "'#main-tab-list .chat-tab[data-tab-id=' + JSON.stringify(id) + ']').click()",
         tab_id,
     )
     assert _active_tab_id(page) == tab_id

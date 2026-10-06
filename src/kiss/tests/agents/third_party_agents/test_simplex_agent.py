@@ -227,52 +227,53 @@ def test_end_to_end_over_real_websocket(simplex_server: str) -> None:
     backend = agent._backend
 
     assert backend.connect() is True
-    assert simplex_server in backend.connection_info
+    try:
+        assert simplex_server in backend.connection_info
 
-    # Send via the LLM tool to a known contact.
-    sent = json.loads(tools["send_simplex_message"](contact="alice", text="hi alice"))
-    assert sent == {"ok": True}
+        # Send via the LLM tool to a known contact.
+        sent = json.loads(tools["send_simplex_message"](contact="alice", text="hi alice"))
+        assert sent == {"ok": True}
 
-    # List contacts through the real /contacts round-trip.
-    contacts = json.loads(tools["list_simplex_contacts"]())
-    assert contacts["ok"] is True
-    assert contacts["contacts"] == ["alice", "bob"]
+        # List contacts through the real /contacts round-trip.
+        contacts = json.loads(tools["list_simplex_contacts"]())
+        assert contacts["ok"] is True
+        assert contacts["contacts"] == ["alice", "bob"]
 
-    # The unsolicited newChatItems event pushed on connect was queued while
-    # waiting for command responses; poll drains the normalized messages.
-    messages, cursor = backend.poll_messages("", "0", limit=10)
-    assert cursor == "0"
-    assert [m["text"] for m in messages] == ["hello bot", "hi from group"]
+        # The unsolicited newChatItems event pushed on connect was queued while
+        # waiting for command responses; poll drains the normalized messages.
+        messages, cursor = backend.poll_messages("", "0", limit=10)
+        assert cursor == "0"
+        assert [m["text"] for m in messages] == ["hello bot", "hi from group"]
 
-    direct = messages[0]
-    assert direct["user"] == "alice"
-    assert direct["username"] == "alice"
-    assert direct["channel_id"] == "alice"
-    assert direct["thread_ts"] == "42"
-    assert direct["ts"] == "2026-01-02T03:04:05Z"
-    assert backend.is_from_bot(direct) is False
+        direct = messages[0]
+        assert direct["user"] == "alice"
+        assert direct["username"] == "alice"
+        assert direct["channel_id"] == "alice"
+        assert direct["thread_ts"] == "42"
+        assert direct["ts"] == "2026-01-02T03:04:05Z"
+        assert backend.is_from_bot(direct) is False
 
-    group = messages[1]
-    assert group["user"] == "bob"
-    assert group["channel_id"] == "team"
-    assert group["thread_ts"] == "43"
+        group = messages[1]
+        assert group["user"] == "bob"
+        assert group["channel_id"] == "team"
+        assert group["thread_ts"] == "43"
 
-    # Sent-direction items are never queued, and is_from_bot flags them.
-    assert backend.is_from_bot({"direction": "directSnd"}) is True
-    assert backend.is_from_bot({"direction": "groupSnd"}) is True
+        # Sent-direction items are never queued, and is_from_bot flags them.
+        assert backend.is_from_bot({"direction": "directSnd"}) is True
+        assert backend.is_from_bot({"direction": "groupSnd"}) is True
 
-    # chatCmdError: send_message raises, the tool reports ok False.
-    with pytest.raises(RuntimeError, match="chatCmdError"):
-        backend.send_message("nosuch", "boo")
-    failed = json.loads(tools["send_simplex_message"](contact="nosuch", text="boo"))
-    assert failed["ok"] is False
-    assert "chatCmdError" in failed["error"]
+        # chatCmdError: send_message raises, the tool reports ok False.
+        with pytest.raises(RuntimeError, match="chatCmdError"):
+            backend.send_message("nosuch", "boo")
+        failed = json.loads(tools["send_simplex_message"](contact="nosuch", text="boo"))
+        assert failed["ok"] is False
+        assert "chatCmdError" in failed["error"]
 
-    # /address reports the address exists; falls back to /show_address.
-    address = json.loads(tools["get_simplex_address"]())
-    assert address == {"ok": True, "address": "simplex:/contact#existing-address"}
-
-    backend.disconnect()
+        # /address reports the address exists; falls back to /show_address.
+        address = json.loads(tools["get_simplex_address"]())
+        assert address == {"ok": True, "address": "simplex:/contact#existing-address"}
+    finally:
+        backend.disconnect()
     assert backend._ws is None
 
 
@@ -282,18 +283,19 @@ def test_poll_filters_by_channel(simplex_server: str) -> None:
     _authenticate(agent, simplex_server)
     backend = agent._backend
     assert backend.connect() is True
-
-    # The server handler pushes newChatItems asynchronously after the WS
-    # handshake, so retry the poll until the push has been queued.
-    messages: list[dict[str, str]] = []
-    deadline = time.time() + 10.0
-    while time.time() < deadline and not messages:
-        messages, _ = backend.poll_messages("team", "0", limit=10)
-    assert [m["text"] for m in messages] == ["hi from group"]
-    # The non-matching direct message was discarded; the queue is empty now.
-    again, _ = backend.poll_messages("", "0", limit=10)
-    assert again == []
-    backend.disconnect()
+    try:
+        # The server handler pushes newChatItems asynchronously after the WS
+        # handshake, so retry the poll until the push has been queued.
+        messages: list[dict[str, str]] = []
+        deadline = time.time() + 10.0
+        while time.time() < deadline and not messages:
+            messages, _ = backend.poll_messages("team", "0", limit=10)
+        assert [m["text"] for m in messages] == ["hi from group"]
+        # The non-matching direct message was discarded; the queue is empty now.
+        again, _ = backend.poll_messages("", "0", limit=10)
+        assert again == []
+    finally:
+        backend.disconnect()
 
 
 def test_tool_errors_when_unreachable() -> None:

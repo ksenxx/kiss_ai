@@ -82,14 +82,29 @@ function snapshotEntry(tabId, title, chatId) {
 }
 
 function tabBarIds(win) {
-  return Array.from(win.document.querySelectorAll('.chat-tab'))
+  // The chat whose group is on screen sits on the main row and on the
+  // group strip under it; count each tab once.
+  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
     .filter(el => !!el.dataset.tabId)
     .map(el => el.dataset.tabId);
+  return ids.filter((id, i) => ids.indexOf(id) === i);
 }
 
 function activeTabId(win) {
-  const el = win.document.querySelector('.chat-tab.active');
+  // The strip's active entry is the tab on screen (the main row only
+  // highlights the group it belongs to).
+  const el = win.document.querySelector('#tab-list .chat-tab.active');
   return el ? el.dataset.tabId : null;
+}
+
+// A tab's entry on the row that lists it: the main row for a chat, the
+// group strip for a sub-agent or file of the chat on screen.
+function tabEl(win, tabId) {
+  const sel = `.chat-tab[data-tab-id="${tabId}"]`;
+  return (
+    win.document.querySelector('#main-tab-list ' + sel) ||
+    win.document.querySelector('#tab-list ' + sel)
+  );
 }
 
 // Focus the control first (a real keyboard user can only send keys to
@@ -128,9 +143,10 @@ function assertFocusable(el, what) {
   return role;
 }
 
+// The chat tabs on the main row, the row the keyboard tests drive.
 function tabEls(win) {
   return Array.from(
-    win.document.querySelectorAll('#tab-list [role="tab"]'),
+    win.document.querySelectorAll('#main-tab-list [role="tab"]'),
   );
 }
 
@@ -255,8 +271,8 @@ function testChatTabIsKeyboardActivatable() {
     ],
   });
 
-  const t1 = win.document.querySelector('.chat-tab[data-tab-id="t1"]');
-  const t2 = win.document.querySelector('.chat-tab[data-tab-id="t2"]');
+  const t1 = tabEl(win, 't1');
+  const t2 = tabEl(win, 't2');
   assert.ok(t1 && t2, 'both tabs must render');
 
   assert.strictEqual(t2.getAttribute('role'), 'tab');
@@ -273,7 +289,7 @@ function testChatTabIsKeyboardActivatable() {
   assert.strictEqual(activeTabId(win), 't2', 'click must activate (baseline)');
 
   // Arrow to the other tab, then Enter activates like the click did.
-  let active = win.document.querySelector('.chat-tab.active');
+  let active = win.document.querySelector('#main-tab-list .chat-tab.active');
   pressKey(win, active, 'ArrowLeft');
   const focused = win.document.activeElement;
   assert.strictEqual(
@@ -289,7 +305,7 @@ function testChatTabIsKeyboardActivatable() {
   );
 
   // Space activates too, and must suppress the default page scroll.
-  active = win.document.querySelector('.chat-tab.active');
+  active = win.document.querySelector('#main-tab-list .chat-tab.active');
   pressKey(win, active, 'ArrowRight');
   const spaceEv = pressKey(win, win.document.activeElement, ' ');
   assert.strictEqual(
@@ -317,7 +333,7 @@ function testRovingTabindexFollowsActiveTab() {
       snapshotEntry('t3', 'third tab', 'chat-C'),
     ],
   });
-  win.document.querySelector('.chat-tab[data-tab-id="t1"]').click();
+  tabEl(win, 't1').click();
 
   const stops = () =>
     tabEls(win).map(
@@ -329,7 +345,7 @@ function testRovingTabindexFollowsActiveTab() {
     'only the active tab may be a Tab stop (roving tabindex)',
   );
 
-  win.document.querySelector('.chat-tab[data-tab-id="t3"]').click();
+  tabEl(win, 't3').click();
   assert.deepStrictEqual(
     stops(),
     ['t1:-1', 't2:-1', 't3:0'],
@@ -359,14 +375,14 @@ function testArrowKeysMoveFocusBetweenTabs() {
       snapshotEntry('t3', 'third tab', 'chat-C'),
     ],
   });
-  win.document.querySelector('.chat-tab[data-tab-id="t2"]').click();
+  tabEl(win, 't2').click();
 
   const focusedTab = () => {
     const el = win.document.activeElement;
     return el && el.dataset ? el.dataset.tabId || null : null;
   };
 
-  let el = win.document.querySelector('.chat-tab[data-tab-id="t2"]');
+  let el = tabEl(win, 't2');
   let ev = pressKey(win, el, 'ArrowRight');
   assert.strictEqual(focusedTab(), 't3', 'ArrowRight must focus the next tab');
   assert.ok(ev.defaultPrevented, 'ArrowRight must preventDefault');
@@ -423,12 +439,10 @@ function testCloseControlIsAccessibleAndDoesNotSwitchTabs() {
     ],
   });
 
-  win.document.querySelector('.chat-tab[data-tab-id="t3"]').click();
+  tabEl(win, 't3').click();
   assert.strictEqual(activeTabId(win), 't3');
 
-  const close1 = win.document.querySelector(
-    '.chat-tab[data-tab-id="t1"] .chat-tab-close',
-  );
+  const close1 = tabEl(win, 't1').querySelector('.chat-tab-close');
   assert.ok(close1, 'close control missing');
   const role = assertFocusable(close1, 'the tab close control');
   assert.strictEqual(role, 'button', 'close control must be a button');
@@ -453,9 +467,7 @@ function testCloseControlIsAccessibleAndDoesNotSwitchTabs() {
   );
 
   // Space works too, and must suppress the default page scroll.
-  const close2 = win.document.querySelector(
-    '.chat-tab[data-tab-id="t2"] .chat-tab-close',
-  );
+  const close2 = tabEl(win, 't2').querySelector('.chat-tab-close');
   const spaceEv = pressKey(win, close2, ' ');
   assert.deepStrictEqual(
     tabBarIds(win),
@@ -482,7 +494,7 @@ function testTabListExposesTabSemantics() {
       snapshotEntry('t2', 'second tab', 'chat-B'),
     ],
   });
-  win.document.querySelector('.chat-tab[data-tab-id="t1"]').click();
+  tabEl(win, 't1').click();
 
   const tabList = win.document.getElementById('tab-list');
   assert.strictEqual(
@@ -490,8 +502,8 @@ function testTabListExposesTabSemantics() {
     'tablist',
     'the tab container must be a tablist',
   );
-  const t1 = win.document.querySelector('.chat-tab[data-tab-id="t1"]');
-  const t2 = win.document.querySelector('.chat-tab[data-tab-id="t2"]');
+  const t1 = tabEl(win, 't1');
+  const t2 = tabEl(win, 't2');
   assert.strictEqual(t1.getAttribute('role'), 'tab');
   assert.strictEqual(t2.getAttribute('role'), 'tab');
   assert.strictEqual(t1.getAttribute('aria-selected'), 'true');
@@ -499,9 +511,7 @@ function testTabListExposesTabSemantics() {
 
   t2.click();
   assert.strictEqual(
-    win.document
-      .querySelector('.chat-tab[data-tab-id="t2"]')
-      .getAttribute('aria-selected'),
+    tabEl(win, 't2').getAttribute('aria-selected'),
     'true',
     'aria-selected must follow the active tab',
   );
@@ -533,14 +543,14 @@ function testRenamedTabKeepsAccessibleNameInSync() {
     type: 'tabs_state',
     tabs: [snapshotEntry('t1', 'new chat', 'chat-A')],
   });
-  let t1 = win.document.querySelector('.chat-tab[data-tab-id="t1"]');
+  let t1 = tabEl(win, 't1');
   assert.strictEqual(t1.getAttribute('aria-label'), 'new chat');
 
   send(win, {
     type: 'tabs_state',
     tabs: [snapshotEntry('t1', 'fix the login bug', 'chat-A')],
   });
-  t1 = win.document.querySelector('.chat-tab[data-tab-id="t1"]');
+  t1 = tabEl(win, 't1');
   assert.strictEqual(
     t1.querySelector('.chat-tab-label').textContent,
     'fix the login bug',
@@ -562,7 +572,7 @@ function testSubagentTabsGetTabSemantics() {
     type: 'tabs_state',
     tabs: [snapshotEntry('parent', 'parent chat', 'chat-A')],
   });
-  win.document.querySelector('.chat-tab[data-tab-id="parent"]').click();
+  tabEl(win, 'parent').click();
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-1',
@@ -573,7 +583,7 @@ function testSubagentTabsGetTabSemantics() {
     isSubagentTab: true,
   });
 
-  const sub = win.document.querySelector('.chat-tab[data-tab-id="sub-1"]');
+  const sub = tabEl(win, 'sub-1');
   assert.ok(sub, 'sub-agent tab must render in the tab bar');
   assert.ok(
     sub.classList.contains('subagent-tab'),
@@ -600,10 +610,11 @@ function testSubagentTabsGetTabSemantics() {
     'a background sub-agent tab must participate in the roving tabindex',
   );
 
-  // Arrow navigation reaches it, Enter activates it.
+  // Arrow navigation along the group strip reaches it from the parent
+  // chat's strip entry, Enter activates it.
   pressKey(
     win,
-    win.document.querySelector('.chat-tab[data-tab-id="parent"]'),
+    win.document.querySelector('#tab-list .chat-tab[data-tab-id="parent"]'),
     'ArrowRight',
   );
   assert.strictEqual(

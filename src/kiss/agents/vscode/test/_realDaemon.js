@@ -28,23 +28,34 @@ const DAEMON_PY = path.join(__dirname, '_real_daemon.py');
  * @param {string} workDir The daemon's configured work dir.
  * @param {NodeJS.ProcessEnv} env Environment with HOME / KISS_HOME set to
  *   the test's temp home.
+ * @param {number} [startTimeoutMs=120000] How long to wait for READY
+ *   before killing the child and rejecting.
  * @returns {Promise<{broadcast(event: object): void, stop(): Promise<void>}>}
  *   `broadcast` has the daemon emit *event* to its clients as a running
  *   task would; `stop` closes stdin and waits for the daemon to exit.
  */
-function startRealDaemon(uv, workDir, env) {
+function startRealDaemon(uv, workDir, env, startTimeoutMs = 120000) {
+  // `uv run` keeps python as a child, so killing uv alone would leave
+  // python holding our stdout pipe.  On POSIX the child leads its own
+  // process group (detached) so killTree can SIGKILL uv and python at
+  // once.
+  const posix = process.platform !== 'win32';
   const child = spawn(uv, ['run', 'python', DAEMON_PY, workDir], {
     cwd: KISS_PROJECT,
     env,
     stdio: ['pipe', 'pipe', 'inherit'],
+    detached: posix,
   });
   const exited = new Promise(resolve => child.on('exit', resolve));
   return new Promise((resolve, reject) => {
     let out = '';
-    const timer = setTimeout(
-      () => reject(new Error('real daemon did not start in time')),
-      120000,
-    );
+    // Kill before rejecting: no caller ever receives this daemon, so
+    // nobody else can stop it, and a live child's stdio pipes would
+    // keep the test process (and `npm test`) alive forever.
+    const timer = setTimeout(() => {
+      killTree(child, posix);
+      reject(new Error('real daemon did not start in time'));
+    }, startTimeoutMs);
     child.stdout.on('data', chunk => {
       out += chunk.toString();
       if (out.includes('READY')) {
@@ -56,7 +67,7 @@ function startRealDaemon(uv, workDir, env) {
           },
           async stop() {
             child.stdin.end();
-            const killer = setTimeout(() => child.kill('SIGKILL'), 15000);
+            const killer = setTimeout(() => killTree(child, posix), 15000);
             await exited;
             clearTimeout(killer);
           },
@@ -68,6 +79,24 @@ function startRealDaemon(uv, workDir, env) {
       reject(new Error(`real daemon exited early with code ${code}`));
     });
   });
+}
+
+/**
+ * SIGKILL *child* and, on POSIX, every process in its process group.
+ *
+ * @param {import('child_process').ChildProcess} child The spawned daemon.
+ * @param {boolean} posix Whether the child leads its own process group.
+ */
+function killTree(child, posix) {
+  if (posix) {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+      return;
+    } catch {
+      // The group is already gone; fall through to the plain kill.
+    }
+  }
+  child.kill('SIGKILL');
 }
 
 module.exports = {startRealDaemon};

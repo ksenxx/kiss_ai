@@ -25,14 +25,17 @@ from pathlib import Path
 def config_backup(path: Path) -> Iterator[None]:
     """Remove *path* while the block runs, then restore its original state.
 
-    The original contents are held in memory; on exit the file is written
-    back (creating parent directories) or, if it did not exist before,
-    removed again so nothing the test saved leaks into the user's config.
+    The original contents and file mode are held in memory; on exit the
+    file is written back with that mode (creating parent directories) or,
+    if it did not exist before, removed again so nothing the test saved
+    leaks into the user's config.
 
     Args:
         path: The ``ChannelConfig.path`` of the channel under test.
     """
-    original = path.read_text() if path.exists() else None
+    exists = path.exists()
+    original = path.read_text() if exists else None
+    mode = path.stat().st_mode & 0o777 if exists else 0
     path.unlink(missing_ok=True)
     try:
         yield
@@ -40,5 +43,6 @@ def config_backup(path: Path) -> Iterator[None]:
         if original is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(original)
+            path.chmod(mode)
         else:
             path.unlink(missing_ok=True)

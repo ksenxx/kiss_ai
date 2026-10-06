@@ -613,9 +613,13 @@ function testTranscriptWipeClosesSubagentTabs(mode) {
 function testReplayWhileViewingSubagentKeepsWholeTranscript(mode) {
   const st = bootParallelRun(mode, 2);
 
-  const subTabEl = st.win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${st.subTabIds[0]}"]`,
-  );
+  const subTabEl =
+    st.win.document.querySelector(
+      `#tab-list .chat-tab[data-tab-id="${st.subTabIds[0]}"]`,
+    ) ||
+    st.win.document.querySelector(
+      `#main-tab-list .chat-tab[data-tab-id="${st.subTabIds[0]}"]`,
+    );
   assert.ok(subTabEl, 'the sub-agent tab must be in the tab bar');
   subTabEl.dispatchEvent(new st.win.MouseEvent('click', {bubbles: true}));
   if (st.drain) st.drain();
@@ -715,9 +719,13 @@ function testFailedReplayDoesNotStrandLaterCloses(mode) {
   }
   if (st.drain) st.drain();
 
-  const parentTabEl = st.win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${st.parentId}"]`,
-  );
+  const parentTabEl =
+    st.win.document.querySelector(
+      `#tab-list .chat-tab[data-tab-id="${st.parentId}"]`,
+    ) ||
+    st.win.document.querySelector(
+      `#main-tab-list .chat-tab[data-tab-id="${st.parentId}"]`,
+    );
   assert.ok(parentTabEl, 'the parent chat must still be in the tab bar');
   parentTabEl.dispatchEvent(new st.win.MouseEvent('click', {bubbles: true}));
   if (st.drain) st.drain();
