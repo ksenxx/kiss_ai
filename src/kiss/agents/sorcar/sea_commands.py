@@ -97,6 +97,7 @@ from kiss.agents.sorcar.sea_settings import (
     script_name,
 )
 from kiss.core.config import kiss_home
+from kiss.core.kiss_agent import hook_refusal
 
 logger = logging.getLogger("kiss.sea_commands")
 
@@ -824,13 +825,20 @@ def base_tools(seas: list[BaseSea], tools: list[Callable[..., Any]]) -> list[Cal
     return _fold(seas, "tools", list(tools), _check_tools)
 
 
-def base_tool_call_hook(seas: list[BaseSea], name: str, args: dict[str, Any]) -> str:
-    """Return the first ``tool_call_hook`` verdict of *seas* other than ``"OK"``, else ``"OK"``."""
+def base_tool_call_hook(seas: list[BaseSea], name: str, args: dict[str, Any]) -> str | None:
+    """Return the first refusal a ``tool_call_hook`` of *seas* gives, else ``None`` (allowed).
+
+    A hook allows the call by returning ``None`` and refuses it by
+    returning the text the model sees instead (``"OK"``, the allow
+    spelling of older hooks, still allows; see
+    :func:`kiss.core.kiss_agent.hook_refusal`).
+    """
     for method in _chain(seas, "tool_call_hook"):
-        verdict = _check_text(_label(method), _call(method, name, args))
-        if verdict != "OK":
-            return verdict
-    return "OK"
+        verdict = _call(method, name, args)
+        refusal = hook_refusal(None if verdict is None else _check_text(_label(method), verdict))
+        if refusal is not None:
+            return refusal
+    return None
 
 
 def base_llm_call_hook(seas: list[BaseSea], new_messages: list[Any]) -> list[Any]:
@@ -860,7 +868,7 @@ class SeaRun:
     system_prompt_hook: Callable[[str], str]
     tools_hook: Callable[[list[Any]], list[Any]]
     llm_call_hook: Callable[[list[Any]], list[Any]]
-    tool_call_hook: Callable[[str, dict[str, Any]], str]
+    tool_call_hook: Callable[[str, dict[str, Any]], str | None]
 
 
 def evaluate_sea(seas: list[BaseSea], task: str, task_id: str = "") -> SeaRun:

@@ -440,7 +440,7 @@ class ContainerHarness:
         except Exception:  # transient daemon hiccup: do not end the trial on it
             return True
 
-    def on_tool_call(self, name: str, args: dict[str, Any]) -> str:
+    def on_tool_call(self, name: str, args: dict[str, Any]) -> str | None:
         """Log a tool call; answer tools that need a human without running them.
 
         Args:
@@ -448,9 +448,9 @@ class ContainerHarness:
             args: Tool arguments.
 
         Returns:
-            ``"OK"`` to let the call run, or the text the model sees instead.
+            ``None`` to let the call run, or the text the model sees instead.
         """
-        verdict = UNATTENDED_TOOL_VERDICTS.get(name, "OK")
+        verdict = UNATTENDED_TOOL_VERDICTS.get(name)
         try:
             if name in ("Bash", "run_commands_parallel"):
                 verdict = self.shell_verdict(args)
@@ -460,7 +460,7 @@ class ContainerHarness:
             self._log({"event": "hook_error", "turn": self.turns, "hook": name,
                        "error": repr(error)})
         self._log({"event": "tool_call", "turn": self.turns, "tool": name,
-                   "args": _jsonable(args), "blocked": verdict != "OK"})
+                   "args": _jsonable(args), "blocked": verdict is not None})
         if name in ("Edit", "Write") and isinstance(args.get("file_path"), str):
             self.last_edit_turn = self.turns
             path = posixpath.normpath(posixpath.join(self.workdir, args["file_path"]))
@@ -473,7 +473,7 @@ class ContainerHarness:
                 except Exception as error:
                     self._log({"event": "hook_error", "turn": self.turns, "hook": name,
                                "error": repr(error)})
-        if name in ("Bash", "run_commands_parallel") and verdict == "OK":
+        if name in ("Bash", "run_commands_parallel") and verdict is None:
             try:
                 self.before_shell(args)
             except Exception as error:
@@ -611,7 +611,7 @@ class ContainerHarness:
             return None
         return completed.stdout.decode("utf-8", errors="replace")
 
-    def finish_verdict(self, args: dict[str, Any]) -> str:
+    def finish_verdict(self, args: dict[str, Any]) -> str | None:
         """Answer the first successful ``finish`` with :data:`FINISH_GATE_VERDICT`.
 
         ``success`` may arrive as a bool or as the string ``"true"`` (some
@@ -624,19 +624,19 @@ class ContainerHarness:
             args: Arguments of the ``finish`` call (empty for an implicit finish).
 
         Returns:
-            ``"OK"`` or the gate verdict.
+            ``None`` (the call may run) or the gate verdict.
         """
         if not args:
             if self.implicit_finish_vetoed:
-                return "OK"
+                return None
             self.implicit_finish_vetoed = True
             return FINISH_GATE_VERDICT
         if str(args.get("success")).lower() != "true":
-            return "OK"
+            return None
         self.gate_answered = True
         return FINISH_GATE_VERDICT
 
-    def shell_verdict(self, args: dict[str, Any]) -> str:
+    def shell_verdict(self, args: dict[str, Any]) -> str | None:
         """Block commands that would end the trial; lift the timeout of installs and builds.
 
         The timeout is raised in place (``args`` is the dict the tool is
@@ -649,7 +649,7 @@ class ContainerHarness:
             args: Arguments of a ``Bash`` or ``run_commands_parallel`` call.
 
         Returns:
-            ``"OK"``, or :data:`DESTRUCTIVE_VERDICT` for a blocked command.
+            ``None`` (the call may run), or :data:`DESTRUCTIVE_VERDICT` for a blocked command.
         """
         if isinstance(args.get("command"), str):
             commands, default_timeout = [args["command"]], 30.0
@@ -662,7 +662,7 @@ class ContainerHarness:
                         else [args["commands"]])
             default_timeout = 1800.0
         else:
-            return "OK"
+            return None
         if any(self.destructive.search(c) for c in commands):
             return DESTRUCTIVE_VERDICT
         if any(INSTALL_COMMANDS.search(c) for c in commands):
@@ -672,7 +672,7 @@ class ContainerHarness:
                 current = default_timeout
             if current < INSTALL_TIMEOUT_SECONDS:
                 args["timeout_seconds"] = INSTALL_TIMEOUT_SECONDS
-        return "OK"
+        return None
 
     def landed_edits(self) -> list[tuple[str, str, str]]:
         """``(path, before, after)`` of the edits since the last model call that changed their file.
@@ -922,7 +922,7 @@ class TrialSea(BaseSea):
     def llm_call_hook(self, new_messages: list) -> list:
         return _harness.on_llm_call(new_messages)
 
-    def tool_call_hook(self, name: str, args: dict) -> str:
+    def tool_call_hook(self, name: str, args: dict) -> str | None:
         return _harness.on_tool_call(name, args)
 '''
 

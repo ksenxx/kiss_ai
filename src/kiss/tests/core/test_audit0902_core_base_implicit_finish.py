@@ -109,7 +109,7 @@ def _run(
     server: HTTPServer,
     agent: KISSAgent,
     tools: list[Callable[..., Any]] | None = None,
-    tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
+    tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None,
 ) -> str:
     """Run *agent* against the local server and return its result."""
     return agent.run(
@@ -215,13 +215,13 @@ class TestTextOnlyImplicitFinishHonoursGuard:
             server.shutdown()
 
     def test_tool_call_hook_can_veto_text_only_finish(self) -> None:
-        """A ``tool_call_hook`` returning anything but ``"OK"`` for ``finish``
-        suppresses the text-only implicit finish.  Once it returns ``"OK"``
+        """A ``tool_call_hook`` returning a string for ``finish``
+        suppresses the text-only implicit finish.  Once it allows (``None``)
         the run ends with the text."""
-        verdicts = iter(["not yet, keep going", "OK"])
+        verdicts = iter(["not yet, keep going", None])
         hook_calls: list[tuple[str, dict[str, Any]]] = []
 
-        def hook(name: str, args: dict[str, Any]) -> str:
+        def hook(name: str, args: dict[str, Any]) -> str | None:
             hook_calls.append((name, args))
             return next(verdicts)
 

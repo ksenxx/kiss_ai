@@ -109,7 +109,7 @@ def test_loader_stages_the_protocol_as_a_system_prompt_hook() -> None:
     assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
         {"role": "user", "content": "x"}
     ]
-    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == "OK"
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) is None
     cmd = {"agentPath": str(_SEA_PATH)}
     apply_agent_overrides(cmd)
     assert cmd["systemPromptHook"]("BASE") == "BASE\n\n" + write_sea.SYSTEM_PROMPT

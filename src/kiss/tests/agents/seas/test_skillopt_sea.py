@@ -289,7 +289,7 @@ def greet(name: str) -> str:
     assert kwargs["web_tools"] is True
     assert kwargs["llm_call_hook"](["m"]) == ["m", "seen"]
     assert kwargs["tool_call_hook"]("Bash", {}) == "refused"
-    assert kwargs["tool_call_hook"]("Read", {}) == "OK"
+    assert kwargs["tool_call_hook"]("Read", {}) is None
     assert [t.__name__ for t in kwargs["tools_hook"]([greet_stub])] == ["greet_stub", "greet"]
     assert kwargs["prompt"]("any task") == "fixed prompt suffix"
     assert "add_to_prompt" not in kwargs and "tools" not in kwargs
@@ -356,7 +356,7 @@ def append_to_system_prompt():
     ]
     assert only["system_prompt_hook"]("x") == "q"
     assert only["tools_hook"]([greet_stub]) == [greet_stub] and only["prompt"]("t") == "t"
-    assert only["llm_call_hook"]([1]) == [1] and only["tool_call_hook"]("Bash", {}) == "OK"
+    assert only["llm_call_hook"]([1]) == [1] and only["tool_call_hook"]("Bash", {}) is None
 
 
 def greet_stub(name: str) -> str:
@@ -1174,7 +1174,7 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
         {"role": "user", "content": "x"}
     ]
-    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == "OK"
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) is None
     assert cmd["_runConfig"]["sea"] == "skillopt" and cmd["_runConfig"]["kind"] == "worker"
     assert skillopt_sea.status(str(tmp_path / "none")) == f"no state.json under {tmp_path / 'none'}"
     # The tool wrapper with a zero cost cap runs no round and needs no model.

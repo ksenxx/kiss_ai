@@ -224,7 +224,7 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
             model_config=model.model_config,
             use_worktree=False,
             auto_commit=False,
-            append_to_prompt=parent_suffix,
+            add_to_prompt=parent_suffix,
             endpoint_file=daemon,
             timeout=300,
         )

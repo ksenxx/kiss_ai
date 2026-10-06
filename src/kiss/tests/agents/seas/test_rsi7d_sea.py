@@ -264,7 +264,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert run.llm_call_hook([{"role": "user", "content": "x"}]) == [
         {"role": "user", "content": "x"}
     ]
-    assert run.tool_call_hook("Bash", {"command": "ls"}) == "OK"
+    assert run.tool_call_hook("Bash", {"command": "ls"}) is None
 
 
 def test_sea_name_of_handles_paths_channels_and_plain_subagents() -> None:

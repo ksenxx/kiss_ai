@@ -428,11 +428,11 @@ def run(
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     use_web_tools: bool | None = None,
-    classify_tasks: bool | None = None,
+    auto_classify: bool | None = None,
     use_memory: bool | None = None,
-    is_parallel: bool = True,
-    append_to_system_prompt: str = "",
-    append_to_prompt: str = "",
+    allow_fan_out: bool = True,
+    add_to_system_prompt: str = "",
+    add_to_prompt: str = "",
     tool_profile: str = "",
     docker_image: str = "",
     inherit_tools: bool = False,
@@ -539,7 +539,7 @@ def run(
                         ...
                     def tools(self, tools: list) -> list: ...    # toolset -> the run's toolset
                     def llm_call_hook(self, new_messages: list) -> list: ...
-                    def tool_call_hook(self, name: str, args: dict) -> str: ...
+                    def tool_call_hook(self, name: str, args: dict) -> str | None: ...
                     def register_as_model(self) -> bool: ...     # model-picker entry
                     def on_picked_as_model(self, work_dir: str) -> str: ...
 
@@ -552,9 +552,8 @@ def run(
             not settings) laid over it: ``work_dir``,
             ``model``, ``chat_id``, ``use_worktree``, ``auto_commit``,
             ``max_budget`` (finite), ``model_config``,
-            ``use_web_tools``, ``auto_classify`` (this function's
-            ``classify_tasks``), ``use_memory``, ``allow_fan_out``
-            (``is_parallel``), ``tool_profile``, ``docker_image``; plus
+            ``use_web_tools``, ``auto_classify``, ``use_memory``,
+            ``allow_fan_out``, ``tool_profile``, ``docker_image``; plus
             two dispatcher keys: ``timeout`` (seconds a ``run_agent``
             call waits for this SEA's sub-task) and ``locked`` (keys an
             explicit caller argument may not change).  ``prompt(task)``
@@ -572,7 +571,7 @@ def run(
 
             ``system_prompt(system_prompt)`` receives the run's
             assembled system prompt (the base prompt plus
-            *append_to_system_prompt*) and returns the run's: the same
+            *add_to_system_prompt*) and returns the run's: the same
             text with additions, or a replacement.  ``tools(tools)``
             receives the built-in toolset and returns the run's: a list
             of tool callables (never a file path); with
@@ -594,9 +593,10 @@ def run(
             ``llm_call_hook(new_messages)`` is called before every LLM
             call and its return value replaces the new messages about
             to be sent, and ``tool_call_hook(name, args)`` is called
-            before every tool call — the tool executes only when the
-            hook returns ``"OK"``; any other returned string is given
-            to the model as the tool's result instead.  The hooks apply
+            before every tool call — the tool executes when the hook
+            returns ``None`` (or ``"OK"``, the allow spelling of older
+            hooks); any other returned string is given to the model as
+            the tool's result instead.  The hooks apply
             to the task's own agent, not to sub-agents it spawns via
             ``run_parallel``.
 
@@ -642,7 +642,7 @@ def run(
             ``None`` uses the daemon's configured default (the
             settings panel's "Use web tools" checkbox, persisted as
             ``use_web_browser``).
-        classify_tasks: Per-task override of pre-run task
+        auto_classify: Per-task override of pre-run task
             classification (``kiss.agents.sorcar.task_classifier``),
             which runs one lightweight model call before the task — a
             typed question to a decisions model when an OpenRouter key
@@ -676,9 +676,9 @@ def run(
             run-to-completion CLI model (``cc/*``, ``codex/*``), or a
             caller-supplied ``model_config["system_instruction"]``
             stays memory-free even with ``True``.
-        is_parallel: Whether the agent may spawn parallel sub-agents.
-            Defaults to True.
-        append_to_system_prompt: Extra text appended to the run's
+        allow_fan_out: Whether the agent may spawn parallel sub-agents
+            (the ``run_parallel`` tool).  Defaults to True.
+        add_to_system_prompt: Extra text appended to the run's
             system prompt when the agent is executed — after the
             default ``SYSTEM.md`` prompt (or the *system_prompt*
             replacement) and before the daemon's per-run operational
@@ -686,7 +686,7 @@ def run(
             suffix on their own system prompts, like a *system_prompt*
             replacement, so the extra instructions constrain the whole
             task tree.  Empty (default) appends nothing.
-        append_to_prompt: Extra text appended to the executed task
+        add_to_prompt: Extra text appended to the executed task
             prompt.  A multi-``<task>`` *prompt* runs the agent once
             per subtask, and the text is appended to EACH subtask's
             prompt.  The appended text is part of the prompt the agent
@@ -898,11 +898,11 @@ def run(
             "maxBudget": max_budget,
             "modelConfig": model_config,
             "useWebTools": use_web_tools,
-            "classifyTasks": classify_tasks,
+            "classifyTasks": auto_classify,
             "useMemory": use_memory,
-            "isParallel": is_parallel,
-            "appendToSystemPrompt": append_to_system_prompt,
-            "appendToPrompt": append_to_prompt,
+            "isParallel": allow_fan_out,
+            "appendToSystemPrompt": add_to_system_prompt,
+            "appendToPrompt": add_to_prompt,
             "toolProfile": tool_profile,
             "dockerImage": docker_image,
             "inheritTools": inherit_tools,

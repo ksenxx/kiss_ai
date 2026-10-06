@@ -129,6 +129,43 @@ def test_fix_keeps_prefixes_quotes_and_locks_and_skips_nested_dicts(tmp_path: Pa
     }
 
 
+def test_ok_verdict_is_fixable_and_fix_rewrites_it_to_none(tmp_path: Path) -> None:
+    """A ``tool_call_hook`` allowing with the literal ``"OK"`` is flagged and rewritten.
+
+    Only returns inside ``tool_call_hook`` count: an ``"OK"`` returned
+    by another method, or compared rather than returned, is no finding.
+    """
+    path = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + (
+            """
+    def tool_call_hook(self, name, args):
+        def status():
+            return "OK"
+        if name == "Bash" or status() != "OK":
+            return "Blocked"
+        if name == "Read":
+            return 'OK'
+        return "OK"
+
+    def status(self):
+        return "OK"
+"""
+        ),
+    )
+    findings = lint_all([path])
+    assert codes(findings) == ["ok-verdict", "ok-verdict"]
+    assert all(f.fixable for f in findings)
+    assert 'returns "OK" to allow the call; return None' in findings[0].message
+    assert fix_sea(path) == [f"{path}:14: 'OK' -> None", f"{path}:15: 'OK' -> None"]
+    text = path.read_text(encoding="utf-8")
+    assert "            return None\n        return None\n" in text
+    # The nested helper's return, the comparison and ``status()`` are untouched.
+    assert text.count('"OK"') == 3 and "'OK'" not in text
+    assert lint_all([path]) == [] and fix_sea(path) == []
+
+
 def test_broken_covers_getter_contract_errors(tmp_path: Path) -> None:
     """``broken`` runs the daemon's load path, so a getter of the wrong type is a finding."""
     bad_description = write_sea(tmp_path, """

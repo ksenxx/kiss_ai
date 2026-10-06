@@ -367,7 +367,7 @@ def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
     assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
         {"role": "user", "content": "x"}
     ]
-    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == "OK"
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) is None
     # The question opens the prompt; ``prompt()`` appends the task framing.
     assert cmd["prompt"].startswith("why did the run fail?\n\n")
 

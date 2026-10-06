@@ -297,7 +297,7 @@ class AgentPathApiTest(unittest.TestCase):
             model_config={"base_url": "http://client:1/v1"},
             use_web_tools=True,
             use_memory=True,
-            is_parallel=True,
+            allow_fan_out=True,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )

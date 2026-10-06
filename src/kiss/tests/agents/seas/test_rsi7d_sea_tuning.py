@@ -377,7 +377,7 @@ def test_sea_source_and_patch_sea_code_through_the_gate(checkout: Path) -> None:
         """Refuse rm -rf."""
         if name == 'Bash' and 'rm -rf' in str(args):
             return 'refused'
-        return 'OK'
+        return None
 
     def tools(self, tools):
         """Extra tools."""
@@ -394,7 +394,7 @@ def shout(text: str) -> str:
     assert sorted(t.__name__ for t in sea_commands.base_tools(seas, [])) == ["count_words", "shout"]
     patched = seas[-1]
     assert patched.tool_call_hook("Bash", {"command": "rm -rf /"}) == "refused"
-    assert patched.tool_call_hook("Bash", {"command": "ls"}) == "OK"
+    assert patched.tool_call_hook("Bash", {"command": "ls"}) is None
 
     # Appending with an empty ``old`` adds at the end of the file.
     assert sea.patch_sea_code("tunedemo", "", "\nEXTRA = 1\n").startswith("Patched")

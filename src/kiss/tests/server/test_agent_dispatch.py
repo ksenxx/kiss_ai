@@ -341,7 +341,7 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
     assert cmd.pop("systemPromptHook")("BASE") == "BASE"
     assert cmd.pop("toolsHook")([_hello]) == [_hello]
     assert cmd.pop("llmCallHook")([1, 2]) == [1, 2]
-    assert cmd.pop("toolCallHook")("Bash", {"command": "ls"}) == "OK"
+    assert cmd.pop("toolCallHook")("Bash", {"command": "ls"}) is None
     assert cmd == {
         "agentPath": str(script),
         "model": "kept-model",

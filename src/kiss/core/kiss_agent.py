@@ -132,6 +132,23 @@ def _call_args(function_call: dict[str, Any]) -> dict[str, Any]:
     return raw_args if isinstance(raw_args, dict) else {}
 
 
+def hook_refusal(verdict: str | None) -> str | None:
+    """Return the refusal text of a ``tool_call_hook`` verdict, or ``None`` when it allows.
+
+    The hook contract: ``None`` lets the tool call run; a string
+    refuses it and is the text the model receives as the tool's
+    result.  ``"OK"``, the allow spelling of older hooks, is still
+    accepted so an existing hook keeps working.
+
+    Args:
+        verdict: What a ``tool_call_hook`` returned.
+
+    Returns:
+        ``None`` when the call may run, else the refusal text.
+    """
+    return None if verdict is None or verdict == "OK" else verdict
+
+
 def unknown_argument_hint(
     sig: inspect.Signature | None, args: dict[str, Any], tool: Any = None,
 ) -> str:
@@ -262,7 +279,7 @@ class KISSAgent(Base):
         self.llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None
-        self.tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None
+        self.tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None
         self.context_tokens_used = 0
         self.last_cache_read_tokens = 0
         self.last_call_usage: dict[str, int | float] | None = None
@@ -411,7 +428,7 @@ class KISSAgent(Base):
         llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None,
-        tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -462,15 +479,16 @@ class KISSAgent(Base):
                 Default is None (no hook).
             tool_call_hook (Callable | None): Optional hook called before every
                 tool call with the tool's name and its arguments dict. If it
-                returns the string ``"OK"``, the tool executes as usual; any
-                other returned string suppresses the tool execution and is
-                returned to the model as the tool's result instead. The hook
-                runs before (and its rejection takes precedence over) the
-                framework's :attr:`tool_call_guard`; an ``"OK"`` verdict does
-                not override a guard block. An implicit finish (text-only
-                turns) also consults the hook (with ``("finish", {})``) and
-                is suppressed unless the hook returns ``"OK"``. Default is
-                None (no hook).
+                returns ``None``, the tool executes as usual; a returned
+                string suppresses the tool execution and is returned to the
+                model as the tool's result instead (``"OK"``, the allow
+                spelling of older hooks, is still accepted; see
+                :func:`hook_refusal`). The hook runs before (and its
+                rejection takes precedence over) the framework's
+                :attr:`tool_call_guard`; allowing does not override a guard
+                block. An implicit finish (text-only turns) also consults the
+                hook (with ``("finish", {})``) and is suppressed when the hook
+                refuses. Default is None (no hook).
 
         Returns:
             str: The result of the agent's task.
@@ -933,13 +951,11 @@ class KISSAgent(Base):
                 self.tool_calls_made += 1
             blocked: str | None = None
             # The hook is called before EVERY tool call (its contract), so it
-            # runs first; a non-"OK" verdict is the result the model sees.
-            # An "OK" verdict means "no objection", not "must execute": the
-            # framework's tool_call_guard may still block the call.
+            # runs first; a refusal is the result the model sees.  Allowing
+            # means "no objection", not "must execute": the framework's
+            # tool_call_guard may still block the call.
             if self.tool_call_hook is not None:
-                hook_verdict = self.tool_call_hook(fc["name"], _call_args(fc))
-                if hook_verdict != "OK":
-                    blocked = hook_verdict
+                blocked = hook_refusal(self.tool_call_hook(fc["name"], _call_args(fc)))
             if blocked is None and self.tool_call_guard is not None:
                 blocked = self.tool_call_guard(fc["name"], _call_args(fc))
             if blocked is None and is_long_running_call(fc["name"], _call_args(fc)):
@@ -1084,15 +1100,18 @@ class KISSAgent(Base):
         ``finish`` call would: the
         framework's :attr:`tool_call_guard` (Sorcar blocks ``finish``
         while a user follow-up is queued, so finishing anyway would drop
-        the follow-up) and the caller's :attr:`tool_call_hook` (anything
-        but ``"OK"`` suppresses the finish).  Both are consulted with
+        the follow-up) and the caller's :attr:`tool_call_hook` (a
+        refusal suppresses the finish).  Both are consulted with
         ``("finish", {})`` in the order a real call uses: the hook runs
         first and, when it rejects, the guard is not consulted at all.
 
         Returns:
             bool: ``True`` when neither the hook nor the guard objects.
         """
-        if self.tool_call_hook is not None and self.tool_call_hook("finish", {}) != "OK":
+        if (
+            self.tool_call_hook is not None
+            and hook_refusal(self.tool_call_hook("finish", {})) is not None
+        ):
             return False
         return self.tool_call_guard is None or self.tool_call_guard("finish", {}) is None
 

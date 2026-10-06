@@ -240,15 +240,13 @@ def test_tool_schema_carries_whole_argument_descriptions() -> None:
 # --- S8: options -------------------------------------------------------------------
 
 
-def test_tool_profile_is_an_argument_and_an_option_that_must_agree() -> None:
+def test_tool_profile_is_an_argument_only() -> None:
     assert parse_run_options("", "review").tool_profile == "review"
-    assert parse_run_options('{"tool_profile": "shell"}', "").tool_profile == "shell"
-    assert parse_run_options('{"tool_profile": " shell "}', "shell").tool_profile == "shell"
-    with pytest.raises(ValueError, match="contradicts the tool_profile argument 'review'"):
+    with pytest.raises(ValueError, match="options key 'tool_profile' is the tool_profile arg"):
         parse_run_options('{"tool_profile": "shell"}', "review")
     with pytest.raises(ValueError, match="tool_profile must be one of"):
-        parse_run_options('{"tool_profile": "bogus"}', "")
-    assert "tool_profile" in agent_dispatch.OPTION_TYPES
+        parse_run_options("", "bogus")
+    assert "tool_profile" not in agent_dispatch.OPTION_TYPES
     assert "run_agent` only" not in agent_dispatch.OPTION_DOCS["inherit"]
 
 

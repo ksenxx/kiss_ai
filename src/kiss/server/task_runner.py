@@ -1814,7 +1814,7 @@ class _TaskRunnerMixin:
         # written.  A disabled or failed classification leaves
         # ``use_worktree`` exactly as the client requested.
         # Per-run classification toggle: the ``classifyTasks`` wire
-        # field (``classify_tasks`` on ``kiss.server.sorcar.run``).
+        # field (``auto_classify`` on ``kiss.server.sorcar.run``).
         # Absent or malformed means "no override" — the persisted
         # "Classify tasks before running" setting decides, exactly
         # like ``useWebTools`` falls back to "Use web tools".

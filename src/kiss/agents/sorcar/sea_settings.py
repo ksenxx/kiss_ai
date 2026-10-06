@@ -146,7 +146,7 @@ SETTING_DOCS: dict[str, str] = {
     "tool_profile": "The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full "
                     "toolset).",
     "docker_image": "Run inside this Docker image (default: the host).",
-    "timeout": "Seconds the call blocks for the run: the call's `timeout` argument or option "
+    "timeout": "Seconds the call blocks for the run: the call's `timeout` argument "
                "wins, then this setting, then the default, which is 3600 for a `run_agent` "
                "call (when it expires the run keeps going as an `agent_job` and the call "
                "returns its job id; a job still running when the calling task ends is "
@@ -189,11 +189,13 @@ wire field ``isParallel``); ``auto_classify`` whether the daemon's
 classifier decides the run's worktree mode (``classifyTasks``);
 ``kind`` is the one axis that used to be split into ``preset``
 (``session`` / ``worker`` / ``channel``) and ``kind`` (``agent`` /
-``channel``); ``model_name`` is the ``run()`` parameter callers keep
-reaching for in place of the settings key ``model``.  The old names
-are refused — in a script's ``settings()`` and in a ``run_agent`` /
-``run_parallel`` ``options`` object alike — with a message naming the
-new one; ``sea lint --fix`` rewrites them in a script.
+``channel``); ``model_name`` is the ``SorcarAgent.run`` parameter
+callers keep reaching for in place of the settings key ``model``.  The
+old names are refused — in a script's ``settings()`` and in a
+``run_agent`` / ``run_parallel`` ``options`` object alike — with a
+message naming the new one; ``sea lint --fix`` rewrites them in a
+script.  :func:`kiss.server.sorcar.run` takes the current names as its
+keywords, so a key spelled the settings way is right everywhere.
 """
 
 RENAMED_OPTIONS = {
@@ -205,10 +207,12 @@ RENAMED_OPTIONS = {
 
 :data:`RENAMED_SETTINGS` plus the two prompt suffixes, which are
 options only — ``append_to_prompt`` and ``append_to_system_prompt``
-are the ``run()`` parameter spellings of the options ``add_to_prompt``
-and ``add_to_system_prompt``.  In a script's ``settings()`` those keys
-are refused as removed (:data:`REMOVED_SETTINGS`): a SEA shapes the
-prompts in its ``prompt`` and ``system_prompt`` methods instead.
+were the former ``run()`` keywords of the options ``add_to_prompt``
+and ``add_to_system_prompt`` (the wire fields are still
+``appendToPrompt`` and ``appendToSystemPrompt``).  In a script's
+``settings()`` those keys are refused as removed
+(:data:`REMOVED_SETTINGS`): a SEA shapes the prompts in its ``prompt``
+and ``system_prompt`` methods instead.
 """
 
 PROFILE_ALIASES = {"readonly": "review", "read_only": "review", "read-only": "review"}
@@ -217,7 +221,7 @@ PROFILE_ALIASES = {"readonly": "review", "read_only": "review", "read-only": "re
 ``review`` is the read-only profile and callers keep asking for it by
 that property.  Every way a profile name arrives — a script's
 ``tool_profile`` setting (:func:`resolve_settings`), a ``run_agent`` /
-``run_parallel`` argument or option, a ``run()`` parameter
+``run_parallel`` argument, a ``run()`` parameter
 (:func:`kiss.agents.sorcar.sorcar_agent.canonical_tool_profile`) —
 replaces the alias with the key first, so locks, the ``pinned`` record
 and the ``ran:`` line compare and show keys only.
@@ -326,7 +330,10 @@ def wire_field(key: str) -> str:
     the wire protocol's earlier vocabulary: ``add_to_prompt`` ->
     ``appendToPrompt``, ``add_to_system_prompt`` ->
     ``appendToSystemPrompt``, ``allow_fan_out`` -> ``isParallel`` and
-    ``auto_classify`` -> ``classifyTasks``.
+    ``auto_classify`` -> ``classifyTasks``.  This table is the only
+    place the wire spelling exists on the client side: settings keys,
+    ``options`` keys and ``run()`` keywords all use the snake_case
+    name.
     """
     aliases = {
         "add_to_prompt": "appendToPrompt",
