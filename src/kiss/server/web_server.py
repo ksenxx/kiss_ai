@@ -6446,7 +6446,11 @@ class RemoteAccessServer:
 
         Runs in the executor so file I/O and process spawn never block
         the event loop.  ``start_new_session=True`` keeps the updater
-        alive when ``install.sh`` restarts this very daemon.
+        out of the daemon's process group when ``install.sh`` restarts
+        this very daemon; under systemd that is not enough (a stop
+        signals the whole control group), so the script's own
+        ``kiss-service-cgroup-escape`` block moves it into a transient
+        scope first.
         ``--non-interactive`` / ``KISS_NONINTERACTIVE=1`` make the
         script answer its ``[Y/n]`` questions with their
         defaults (it would anyway, having no terminal to ask on), and

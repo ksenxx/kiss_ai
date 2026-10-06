@@ -80,7 +80,7 @@ def test_install_sh_uses_exec_tee_not_pipeline_subshell() -> None:
     """
     src = _read_install_sh()
     exec_pattern = (
-        r"exec\s*>\s*>\(\s*trap\s+''\s+INT\s+TERM\s*;\s*"
+        r"exec\s*>\s*>\(\s*trap\s+''\s+INT\s+TERM(\s+HUP)?\s*;\s*"
         r'exec\s+tee\s+-a\s+"?\$LOG_FILE"?\s+9>&-\s*\)\s*2>&1'
     )
     assert re.search(exec_pattern, src), (

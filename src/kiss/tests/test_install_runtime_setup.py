@@ -807,6 +807,46 @@ def test_start_registers_and_starts_the_systemd_user_service(sandbox: Sandbox) -
     assert not (kiss_home / ".kiss-web.restart-stamp").exists()
 
 
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"_KISS_HOST_SERVICE": "kiss-web.service", "_KISS_INTERACTIVE": "1"}, True),
+        ({"_KISS_HOST_SERVICE": "kiss-web.service", "_KISS_INTERACTIVE": "0"}, False),
+        ({"_KISS_INTERACTIVE": "1"}, False),
+    ],
+)
+def test_start_warns_when_kiss_web_hosts_the_terminal(
+    sandbox: Sandbox, env: dict[str, str], expected: bool
+) -> None:
+    """The webapp's Terminal tab is a shell kiss-web forks, so the restart
+    hangs it up: a script that left the daemon's cgroup (see the
+    ``kiss-service-cgroup-escape`` block) and talks to a human says so
+    before stopping the daemon.  The Update button (non-interactive)
+    and a plain terminal get no such notice."""
+    project = sandbox.project(".vscode/extensions")
+    sandbox.uname("Linux")
+    sandbox.stub("systemctl", _SYSTEMD_STUB)
+    sandbox.stub("loginctl", "")
+    log = sandbox.home / "install.log"
+    res = sandbox.run(
+        f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"',
+        env={**env, "LOG_FILE": str(log)},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "kiss-web is up" in res.stdout
+    notice = (
+        "   kiss-web hosts this terminal, so it closes with the daemon;\n"
+        f"   the install carries on and its remaining output is in {log}.\n"
+    )
+    assert (notice in res.stdout) is expected
+    calls = sandbox.logged_calls()
+    assert calls.index("systemctl --user stop kiss-web.service") < calls.index(
+        "systemctl --user start kiss-web.service"
+    )
+    if expected:
+        assert res.stdout.index(notice) < res.stdout.index("kiss-web is up")
+
+
 def test_start_propagates_kiss_home_to_the_service(sandbox: Sandbox) -> None:
     project = sandbox.project(".vscode/extensions")
     sandbox.uname("Linux")

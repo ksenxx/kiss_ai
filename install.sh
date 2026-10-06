@@ -125,6 +125,70 @@
 # ---------------------------------------------------------------------------
 #
 # ---------------------------------------------------------------------------
+# Leaving the kiss-web service's control group (Linux with systemd)
+# ---------------------------------------------------------------------------
+# The remote webapp's Terminal tab is a shell the kiss-web daemon forks
+# (src/kiss/server/terminal_tab.py); so are the daemon's Update button
+# and a Sorcar task's shell tool.  On Linux the daemon is the systemd
+# user service ``kiss-web.service``, and a service's children stay in
+# its control group however they detach: ``setsid`` (the perl re-exec
+# below) changes the session, never the cgroup.  ``systemctl --user stop
+# kiss-web.service`` — which the runtime setup at the end of this script
+# runs to bring up the rebuilt daemon — SIGTERMs *every* process of that
+# group (systemd's ``KillMode=control-group``), so the script killed
+# itself: "Terminated" twice, then ``handle_interrupt`` reading the
+# second signal as a confirmed abort.
+#
+# ``systemd-run --user --scope`` moves a process into a transient scope
+# unit of its own: systemd-run registers the scope for its own pid and
+# ``exec``s the payload in place, so the pid, the controlling terminal,
+# stdio and every open fd stay as they are — the same trick
+# web_server.py uses to keep cloudflared alive across a restart.
+# ``_KISS_HOST_SERVICE`` names the service the script escaped from; the
+# re-exec'd copy sees it and does not loop, and the runtime setup uses
+# it to warn that the terminal closes with the daemon.  Any failure (no
+# systemd, no user manager) falls through to the previous behaviour.
+#
+# scripts/install.sh, the curl bootstrap that holds the update lock and
+# waits for this script, carries the identical block (a test keeps the
+# two the same): were it left behind in the group, the stop below would
+# hang until systemd gave up on it and SIGKILLed it, dropping the lock
+# mid-install.  Piped in by ``curl ... | bash`` it has no ``$0`` file
+# to re-run, hence the ``bash -s`` branch.
+# BEGIN: kiss-service-cgroup-escape  (tests extract this block verbatim)
+systemd_service_cgroup() {
+    # Print the ``*.service`` unit owning this process's control group
+    # per cgroup file $1 (default /proc/self/cgroup), or nothing.  Only
+    # the last path component counts, and ``user@UID.service`` never
+    # (every user process sits under it; a cgroup v1 controller line can
+    # end there); a transient scope ends in ``.scope``.
+    sed -n '\|/user@[^/]*\.service$|d; s|.*/\([^/]*\.service\)$|\1|p' \
+        "${1:-/proc/self/cgroup}" 2>/dev/null | head -n 1
+}
+if [ -z "${_KISS_HOST_SERVICE:-}" ] && command -v systemd-run >/dev/null 2>&1 \
+    && { [ -f "$0" ] || [ ! -t 0 ]; }; then
+    _kiss_host_service="$(systemd_service_cgroup)"
+    if [ -n "$_kiss_host_service" ] \
+        && systemd-run --user --scope --quiet --collect -- true 2>/dev/null; then
+        export _KISS_HOST_SERVICE="$_kiss_host_service"
+        if [ -f "$0" ]; then
+            exec systemd-run --user --scope --quiet --collect \
+                --description="install.sh (moved out of $_kiss_host_service)" \
+                -- bash "$0" "$@"
+        fi
+        # The script is stdin (``curl ... | bash``).  Bash reads a pipe
+        # one byte at a time and seeks a file back to where it stopped
+        # before running any command, so everything after this block is
+        # still unread there: the new bash carries on right after it.
+        exec systemd-run --user --scope --quiet --collect \
+            --description="install.sh (moved out of $_kiss_host_service)" \
+            -- bash -s "$@"
+    fi
+    unset _kiss_host_service
+fi
+# END: kiss-service-cgroup-escape
+#
+# ---------------------------------------------------------------------------
 # Interactive mode (the default at a terminal)
 # ---------------------------------------------------------------------------
 # A human running ``./install.sh`` (or the ``curl ... | bash`` one-liner,
@@ -1656,9 +1720,19 @@ restart_kiss_web_locked() {
     elif [ "$(uname -s)" = "Linux" ] && systemctl --user show-environment &>/dev/null; then
         write_kiss_web_unit "$HOME/.config/systemd/user/kiss-web.service" "$kiss_web" "$workdir" "$home"
         echo "   Restarting the kiss-web systemd user service..."
+        # A shell kiss-web hosts (the webapp's Terminal tab) dies with the
+        # daemon; this script survives it (see kiss-service-cgroup-escape)
+        # and ``handle_hup`` sends the rest of its output to the log.
+        if [ "${_KISS_HOST_SERVICE:-}" = "kiss-web.service" ] && [ "${_KISS_INTERACTIVE:-}" = 1 ]; then
+            echo "   kiss-web hosts this terminal, so it closes with the daemon;"
+            echo "   the install carries on and its remaining output is in $LOG_FILE."
+        fi
         systemctl --user daemon-reload || true
         systemctl --user enable kiss-web.service &>/dev/null || true
-        systemctl --user stop kiss-web.service 2>/dev/null || true
+        # The dying daemon hangs up its terminal, whose shell forwards the
+        # SIGHUP to this script's whole process group; ignoring it in the
+        # stop client keeps the stop blocking until the old daemon is gone.
+        (trap '' HUP; exec systemctl --user stop kiss-web.service 2>/dev/null) || true
         stop_stray_kiss_web
         systemctl --user start kiss-web.service || echo "   WARNING: systemctl start failed"
         loginctl enable-linger "$(id -un)" 2>/dev/null || true
@@ -1712,11 +1786,16 @@ restart_kiss_web_locked() {
 # dead pipe — SIGPIPE, script killed with rc=141 and an empty log,
 # defeating the trap fix above.  Ignored dispositions survive exec, so
 # tee inherits SIG_IGN and keeps draining until bash exits and closes
-# the pipe.  ``9>&-`` keeps the update-lock fd out of tee: tee outlives
+# the pipe.  HUP is ignored for the same reason: when the terminal goes
+# away (kiss-web restarting under a Terminal tab it hosts, VS Code
+# closing a pane) the shell forwards SIGHUP to the whole group, and tee
+# must keep the log fed while ``handle_hup`` reroutes the script's own
+# output; its writes to the hung-up terminal fail with EIO, which tee
+# reports once and ignores.  ``9>&-`` keeps the update-lock fd out of tee: tee outlives
 # this shell by the few milliseconds it takes to see EOF and exit, and
 # it closes its stdout first (coreutils ``close_stdout``), so a caller
 # that saw our output end would otherwise find the lock still held.
-exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
+exec > >(trap '' INT TERM HUP; exec tee -a "$LOG_FILE" 9>&-) 2>&1
 
 {
     echo "=== KISS Sorcar Source Install ==="
