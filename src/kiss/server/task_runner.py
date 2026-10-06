@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar.agent_file import (
-    DAEMON_SIDE_FIELDS,
     NO_TOOLS_PROFILE,
     RUN_CONFIG_FIELD,
     AgentFileError,
@@ -840,11 +839,12 @@ class _TaskRunnerMixin:
         command becomes a run of the SEA ``xxx`` on ``text`` (the raw
         prompt kept on ``displayPrompt``); the tab's model-picker SEA, if
         any, becomes the outermost layer (:meth:`_picker_sea`); the
-        layers are executed once (:func:`load_layers`); a channel
+        layers are executed once (:func:`load_layers`; the bare
+        :class:`~kiss.agents.seas.base.base_sea.BaseSea` when the run
+        names no SEA, so ``base_sea.py`` shapes every run); a channel
         agent's workspace is entered on this thread (released by
         ``_run_task``'s outer ``finally``); the layers are applied
-        (:func:`apply_agent_overrides`); client-sent values of the
-        daemon-side fields are dropped; a picker entry a layer's
+        (:func:`apply_agent_overrides`); a picker entry a layer's
         ``model`` setting names is resolved to a real model; and the
         picker's ``on_picked_as_model`` hook runs with the effective
         work directory.
@@ -888,13 +888,10 @@ class _TaskRunnerMixin:
                 f"channel task is still using a different workspace; retry "
                 f"when it finishes."
             )
+        # Writes every daemon-side field (tool callables, hooks), so
+        # whatever a client sent in them is overwritten rather than read
+        # as input.
         overridden |= apply_agent_overrides(cmd, layers)
-        # Daemon-side fields (tool callables, hooks) never travel the
-        # wire: whatever a client sent in them is dropped rather than
-        # read as input.
-        for field in DAEMON_SIDE_FIELDS:
-            if field not in overridden:
-                cmd.pop(field, None)
         # A layer's ``model`` setting may name a picker entry — the
         # tab's own ("" or its name: keep the picker's model) or another
         # one, which is executed once here and resolved the same way.

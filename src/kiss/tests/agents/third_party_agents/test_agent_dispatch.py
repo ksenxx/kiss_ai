@@ -654,10 +654,16 @@ def test_default_agent_is_the_bundled_sorcar_sea(tmp_path: Path, daemon: Recordi
     default = Path(DEFAULT_AGENT_PATH)
     assert default.is_absolute() and default.is_file()
     assert default.parts[-4:] == ("agents", "seas", "sorcar", "sorcar_sea.py")
-    # The dummy SEA defines no getters: a plain Sorcar session.
-    cmd = {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
+    # The dummy SEA defines no getters: a plain Sorcar session whose four
+    # staged hooks are all identities.
+    cmd: dict[str, Any] = {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
     assert apply_agent_overrides(cmd) == set()
     assert cmd.pop("_runConfig") == {"sea": "sorcar", "kind": "session", "pinned": {}}
+    messages = [{"role": "user", "content": "hi"}]
+    assert cmd.pop("systemPromptHook")("S") == "S"
+    assert cmd.pop("toolsHook")([print, len]) == [print, len]
+    assert cmd.pop("llmCallHook")(messages) == messages
+    assert cmd.pop("toolCallHook")("x", {}) == "OK"
     assert cmd == {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
 
     caller = tmp_path / "caller_project"
@@ -885,8 +891,9 @@ def test_channel_module_is_a_valid_agent_script() -> None:
 
     cmd: dict[str, Any] = {"agentPath": ntfy_sea.__file__, "appendToSystemPrompt": "Caller suffix."}
     overridden = apply_agent_overrides(cmd)
+    # Only the settings fields are reported; the hooks are always staged.
     assert overridden == {
-        "toolsHook", "systemPromptHook", "useWorktree", "autoCommit", "classifyTasks",
+        "useWorktree", "autoCommit", "classifyTasks",
         "isParallel", "useWebTools", "useMemory", "appendToSystemPrompt", "workDir",
     }
     assert cmd["workDir"] == str(kiss_home() / "channel_work")

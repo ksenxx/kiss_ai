@@ -130,10 +130,9 @@ def test_agent_file_loader_stages_the_sea_tools() -> None:
         "appendToSystemPrompt": "CALLER TEXT",
     }
     overridden = apply_agent_overrides(cmd)
+    # The hooks are written on every run, so the set lists the settings only.
     assert overridden == {
-        "systemPromptHook",
         "model",
-        "toolsHook",
         "isParallel",
         "classifyTasks",
         "useWebTools",

@@ -127,7 +127,9 @@ def test_sea_target_reads_splices_and_validates_the_prompt_constant(tmp_path: Pa
     assert kwargs["is_parallel"] is False
     assert kwargs["web_tools"] is False
     assert kwargs["use_memory"] is False
-    assert "tools_hook" not in kwargs and "prompt" not in kwargs
+    # The folds the SEA does not override are ``BaseSea``'s identities.
+    assert kwargs["tools_hook"]([greet_stub]) == [greet_stub]
+    assert kwargs["prompt"]("run it") == "run it"
     original_lines = _SH_SEA.read_text(encoding="utf-8").splitlines()
     candidate_lines = candidate.path.read_text(encoding="utf-8").splitlines()
     start = original_lines.index("SYSTEM_PROMPT = (")
@@ -347,7 +349,14 @@ def append_to_system_prompt():
         encoding="utf-8",
     )
     only = SeaTarget(legacy).rollout_kwargs()
-    assert list(only) == ["system_prompt_hook"] and only["system_prompt_hook"]("x") == "q"
+    # The module-level getters are not SEA methods: no setting is mapped
+    # and every fold but ``system_prompt`` is ``BaseSea``'s identity.
+    assert sorted(only) == [
+        "llm_call_hook", "prompt", "system_prompt_hook", "tool_call_hook", "tools_hook",
+    ]
+    assert only["system_prompt_hook"]("x") == "q"
+    assert only["tools_hook"]([greet_stub]) == [greet_stub] and only["prompt"]("t") == "t"
+    assert only["llm_call_hook"]([1]) == [1] and only["tool_call_hook"]("Bash", {}) == "OK"
 
 
 def greet_stub(name: str) -> str:
@@ -1149,8 +1158,9 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     )
     assert sea_commands.sea_settings(_SKILLOPT_SEA) == effective
     cmd: dict[str, Any] = {"agentPath": str(_SKILLOPT_SEA), "prompt": "x.py evals.json"}
+    # The hooks are written on every run, so the set lists the settings only.
     assert apply_agent_overrides(cmd) == {
-        "systemPromptHook", "toolsHook", "toolProfile", "useWorktree", "autoCommit",
+        "toolProfile", "useWorktree", "autoCommit",
         "classifyTasks", "isParallel", "useWebTools", "useMemory",
     }
     assert cmd["autoCommit"] is False and cmd["useWorktree"] is False
@@ -1160,6 +1170,11 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     assert [t.__name__ for t in cmd["toolsHook"]([greet_stub])] == [
         "greet_stub", "optimize", "status",
     ]
+    # The SEA overrides neither call hook: the staged ones are identities.
+    assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
+        {"role": "user", "content": "x"}
+    ]
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == "OK"
     assert cmd["_runConfig"]["sea"] == "skillopt" and cmd["_runConfig"]["kind"] == "worker"
     assert skillopt_sea.status(str(tmp_path / "none")) == f"no state.json under {tmp_path / 'none'}"
     # The tool wrapper with a zero cost cap runs no round and needs no model.

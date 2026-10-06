@@ -116,7 +116,8 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
     run = sea_commands.evaluate_sea([ShSea()], command)
     settings = run.settings
     assert run.prompt == command
-    assert run.tools_hook is None and run.system_prompt_hook is not None
+    # ``tools`` is not overridden: the staged tools hook is the identity.
+    assert run.tools_hook([print]) == [print]
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("sh-sea-test")
         result = agent.run(

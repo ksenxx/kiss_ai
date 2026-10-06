@@ -453,9 +453,8 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     run = sea_commands.evaluate_sea([loaded], "label", "task-1")
     assert run.prompt == "p"
     assert run.settings == resolved
-    assert run.tools_hook is None
-    assert run.system_prompt_hook is not None and run.llm_call_hook is not None
-    assert run.tool_call_hook is not None
+    # ``tools`` is not overridden: the staged tools hook is the identity.
+    assert run.tools_hook([print]) == [print]
     assert run.system_prompt_hook("ASSEMBLED") == harness.system_prompt()
     assert run.tool_call_hook("ask_user_question", {"question": "?"}) != "OK"
     assert run.tool_call_hook("Bash", {"command": "ls"}) == "OK"

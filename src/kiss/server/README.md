@@ -13,7 +13,13 @@ assembled system prompt and toolset and return the ones to use, and
 `tool_call_hook(name, args)` / `llm_call_hook(new_messages)` are
 called around every tool and LLM call.  Every method has an identity
 default on `BaseSea`, so a SEA defines only what it changes.  A SEA
-builds on another by Python inheritance.  Everything the file defines
+builds on another by Python inheritance.  `BaseSea` is also the root
+layer of every run made from the chat: a plain prompt runs the bare
+`BaseSea`, a `/xxx` command or a picker tab runs its SEA on top of it,
+and `run_agent` / `run_parallel` children go through it too — so
+editing `src/kiss/agents/seas/base/base_sea.py` (and restarting the
+daemon, which imports it once) customizes every such run at once (see
+[Customizing every run](#customizing-every-run)).  Everything the file defines
 executes **in the daemon process** and is re-executed from source on
 every run (no `__pycache__` is written) by the one loader
 `kiss.agents.sorcar.sea_settings.execute_python_file`.
@@ -361,6 +367,43 @@ run when the subclass's receives the dict.  Per method:
 - `description()`, `register_as_model()`, `on_picked_as_model(work_dir)`:
   ordinary Python inheritance; the most derived definition is the one
   called.
+
+`BaseSea` heads every chain, so its methods run first on every run
+(identities until you edit them).  A `system_prompt` method that
+appends text the prompt already contains changes nothing: a sub-agent
+inherits its parent's system-prompt suffix, which already holds what
+the layers it shares with the parent appended, so a rule is stated
+once per task tree.
+
+### Customizing every run
+
+Every run made from the chat — a plain prompt, a `/xxx` command, a run
+on a model-picker tab, a `run_agent` or `run_parallel` child — goes
+through `src/kiss/agents/seas/base/base_sea.py` as its first layer.  To
+change what all of them do, edit that file's methods and restart the
+daemon (the file is imported once, unlike SEA files, which are
+re-executed on every run):
+
+```python
+class BaseSea:
+    def settings(self, settings):
+        return settings | {"use_memory": True}   # subject to sea_settings.PRECEDENCE_RULE
+
+    def system_prompt(self, system_prompt):
+        return system_prompt + "\n\nAnswer in British English."
+
+    def tools(self, tools):
+        return tools + [my_house_tool]
+
+    def tool_call_hook(self, name, args):
+        if name == "Bash" and "rm -rf" in str(args.get("command", "")):
+            return "Blocked: destructive command"
+        return "OK"
+```
+
+A plain run still names no SEA (`run_agent`'s `ran:` line and the task
+settings say `sub-agent`); `/xxx check` lists the methods a SEA adds on
+top of `BaseSea`, not the base's own.
 
 A model-picker SEA chosen on the tab (`bestrouter`, `autorouter`) is
 applied before the SEA of every run submitted from that tab

@@ -340,12 +340,14 @@ def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
     (which replaces the assembled prompt) and ``tools`` on the
     daemon-side ``toolsHook`` (which appends ``task_context``).  No
     ``systemPrompt`` / ``appendToSystemPrompt`` / ``tools`` field is
-    written any more.
+    written any more.  The four hook fields are written on every run
+    (identities where the SEA overrides nothing), so the returned set
+    lists only the settings and the rewritten ``prompt``.
     """
     cmd: dict[str, Any] = {"agentPath": _ASK_PATH, "prompt": "why did the run fail?"}
     overridden = apply_agent_overrides(cmd)
     assert overridden == {
-        "systemPromptHook", "prompt", "toolProfile", "toolsHook",
+        "prompt", "toolProfile",
         "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
     }
     assert cmd["systemPromptHook"]("ASSEMBLED PROMPT") == _EXPECTED_SYSTEM_PROMPT
@@ -359,8 +361,13 @@ def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
     assert [tool.__name__ for tool in cmd["toolsHook"]([])] == ["task_context"]
     assert all(callable(tool) for tool in cmd["toolsHook"]([]))
     for field in ("systemPrompt", "appendToSystemPrompt", "tools", "appendBasicTools",
-                  "toolsFile", "llmCallHook", "toolCallHook"):
+                  "toolsFile"):
         assert field not in cmd, field
+    # The SEA overrides neither call hook: the staged ones are identities.
+    assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
+        {"role": "user", "content": "x"}
+    ]
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == "OK"
     # The question opens the prompt; ``prompt()`` appends the task framing.
     assert cmd["prompt"].startswith("why did the run fail?\n\n")
 
@@ -433,11 +440,13 @@ def test_apply_agent_overrides_keeps_the_callers_suffixes_and_stages_the_hook() 
 def test_apply_agent_overrides_leaves_a_callers_placeholder_alone_without_prompt_method(
     tmp_path: Path,
 ) -> None:
-    """The substitution is a property of ``prompt()``'s result, not of the wire fields.
+    """The substitution is a property of what a ``prompt()`` method writes.
 
-    A SEA whose class defines no ``prompt`` leaves the task text and the
-    caller's ``appendToPrompt`` untouched: a literal ``{task_id}`` in
-    the caller's own text reaches the run unchanged.
+    A SEA whose class defines no ``prompt`` runs the task text through
+    the identity ``prompt()`` of :class:`BaseSea` only, which leaves
+    it untouched: a literal ``{task_id}`` in the caller's own text
+    reaches the run unchanged, and so does the caller's
+    ``appendToPrompt`` (a wire field, not a ``prompt()`` result).
     """
     other = tmp_path / "other_sea.py"
     other.write_text(_EMPTY_SEA, encoding="utf-8")

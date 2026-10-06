@@ -379,7 +379,9 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["max_budget"] == 3.5
         assert seen["_is_parallel_attr"] is True
         assert seen["tools"] == []
-        assert seen["_tools_hook_attr"] is None
+        # No ``tools()`` method: the staged tools hook is the identity.
+        assert callable(seen["_tools_hook_attr"])
+        assert seen["_tools_hook_attr"]([print, len]) == [print, len]
 
     def test_tools_method_keeps_basic_tools(self) -> None:
         """A ``tools()`` SEA adds its tools and keeps the basic toolset.

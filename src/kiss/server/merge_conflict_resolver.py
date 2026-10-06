@@ -103,6 +103,9 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
                 if model_name == parent_agent.model_name else None
             ),
             system_prompt_hook=merge.system_prompt_hook,
+            tools_hook=merge.tools_hook,
+            llm_call_hook=merge.llm_call_hook,
+            tool_call_hook=merge.tool_call_hook,
             web_tools=merge_settings["use_web_tools"],
             use_memory=merge_settings["use_memory"],
         )

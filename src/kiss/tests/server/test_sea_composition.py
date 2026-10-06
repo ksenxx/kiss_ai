@@ -242,14 +242,19 @@ def test_inheriting_by_command_name_and_by_path_chains_both_classes(registry: Pa
         assert [tool.__name__ for tool in tools] == ["base_tool", "shared"]
         assert tools[1]("x") == "derived x"  # the subclass replaced the base's ``shared``
         assert run.llm_call_hook is not None and run.llm_call_hook([]) == []
-        assert run.tool_call_hook is None
+        # No layer overrides ``tool_call_hook``: the staged hook is the identity.
+        assert run.tool_call_hook is not None and run.tool_call_hook("x", {}) == "OK"
         cmd: dict[str, Any] = {"agentPath": str(derived), "prompt": "do it", "parentTaskId": "T-1"}
         overridden = apply_agent_overrides(cmd)
         assert cmd["prompt"] == "[derived] [base] do it BASE-ADD T-1 DERIVED-ADD"
         assert cmd["systemPromptHook"]("X") == "BASE SYSTEM\n\nBASE PROTOCOL\n\nDERIVED PROTOCOL"
         assert cmd["maxBudget"] == 2.0 and cmd["useWebTools"] is True
-        assert cmd["llmCallHook"] is not None and "toolCallHook" not in cmd
-        assert {"prompt", "systemPromptHook", "toolsHook", "llmCallHook"} <= overridden
+        assert [tool.__name__ for tool in cmd["toolsHook"]([])] == ["base_tool", "shared"]
+        assert cmd["llmCallHook"]([]) == [] and cmd["toolCallHook"]("x", {}) == "OK"
+        # The overridden set lists settings and ``prompt`` only, never the
+        # four hooks (they are always staged).
+        assert {"prompt", "maxBudget", "useWebTools"} <= overridden
+        assert not {"systemPromptHook", "toolsHook", "llmCallHook", "toolCallHook"} & overridden
 
 
 def test_inheritance_errors_name_the_script(registry: Path) -> None:
@@ -453,10 +458,18 @@ class Sea(BaseSea):
         evaluate_sea(sea_layers(sea), "t")
     sea = _write(tmp_path / "noprompt_sea.py", PLAIN_SEA)
     run = evaluate_sea(sea_layers(sea), "kept")
-    assert run.prompt == "kept" and run.tools_hook is None
+    # No ``prompt()``/``tools()``: the task is kept and the tools hook is the identity.
+    assert run.prompt == "kept" and run.tools_hook is not None
+    assert run.tools_hook([print, len]) == [print, len]
     cmd: dict[str, Any] = {"agentPath": str(sea), "prompt": "kept"}
     assert apply_agent_overrides(cmd) == set()
     assert cmd.pop("_runConfig") == {"sea": "noprompt", "kind": "session", "pinned": {}}
+    # The four hooks are always staged; here they are all identities.
+    messages = [{"role": "user", "content": "hi"}]
+    assert cmd.pop("systemPromptHook")("S") == "S"
+    assert cmd.pop("toolsHook")([print, len]) == [print, len]
+    assert cmd.pop("llmCallHook")(messages) == messages
+    assert cmd.pop("toolCallHook")("x", {}) == "OK"
     assert cmd == {"agentPath": str(sea), "prompt": "kept"}
     with pytest.raises(AgentFileError, match="must be a path string"):
         apply_agent_overrides({"agentPath": 7, "prompt": "p"})

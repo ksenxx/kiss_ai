@@ -377,7 +377,6 @@ class SeaTarget(Target):
             base_settings,
             base_tool_call_hook,
             base_tools,
-            defines,
         )
 
         seas = _sea_layers(self.path)
@@ -387,17 +386,16 @@ class SeaTarget(Target):
                 raise ValueError(f"{self.path.name}: system_prompt() returned nothing")
         except SeaError as exc:
             raise ValueError(str(exc)) from exc
+        # Every chain starts at ``BaseSea``, so each fold applies (an
+        # identity unless ``base_sea.py`` or the SEA changes something);
+        # ``prompt`` needs the task, so it stays a callable for the rollout.
         kwargs: dict[str, Any] = {
             "system_prompt_hook": functools.partial(base_system_prompt, seas),
+            "prompt": functools.partial(base_prompt, seas),
+            "tools_hook": functools.partial(base_tools, seas),
+            "llm_call_hook": functools.partial(base_llm_call_hook, seas),
+            "tool_call_hook": functools.partial(base_tool_call_hook, seas),
         }
-        for key, name, fold in (
-            ("prompt", "prompt", base_prompt),  # needs the task: a callable for the rollout
-            ("tools_hook", "tools", base_tools),
-            ("llm_call_hook", "llm_call_hook", base_llm_call_hook),
-            ("tool_call_hook", "tool_call_hook", base_tool_call_hook),
-        ):
-            if defines(seas, name):
-                kwargs[key] = functools.partial(fold, seas)
         for setting, key in (
             ("tool_profile", "tool_profile"),
             ("allow_fan_out", "is_parallel"),

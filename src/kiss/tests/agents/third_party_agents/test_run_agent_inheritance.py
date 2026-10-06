@@ -202,8 +202,10 @@ class Sea(BaseSea):
         assert cmd["systemPrompt"] == PARENT_BASE_PROMPT
         assert cmd["appendToSystemPrompt"] == PARENT_SUFFIX
         assert cmd["appendToPrompt"] == PARENT_PROMPT_SUFFIX
-        # The daemon applies the script to the command exactly as sent.
-        assert apply_agent_overrides(cmd) == {"systemPromptHook", "prompt"}
+        # The daemon applies the script to the command exactly as sent;
+        # ``prompt()`` changed the task so ``prompt`` is reported, the
+        # system-prompt hook is staged but never listed.
+        assert apply_agent_overrides(cmd) == {"prompt"}
         assert cmd["systemPrompt"] == PARENT_BASE_PROMPT
         assert cmd["appendToSystemPrompt"] == PARENT_SUFFIX
         # The run assembles ``systemPrompt + appendToSystemPrompt`` and

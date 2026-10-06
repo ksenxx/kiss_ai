@@ -20,11 +20,12 @@ real without any model API calls.
 Contract under test: the ``llm_call_hook`` / ``tool_call_hook`` methods
 of an agent script's ``BaseSea`` subclass become the ``llm_call_hook`` /
 ``tool_call_hook`` callables the underlying :class:`KISSAgent` receives
-(``evaluate_sea`` wraps each in a ``functools.partial`` that runs the
-script's method); a hook the script does not override reaches the
-executor as ``None``; a ``tool_call_hook`` that is not a method stops
-the task loudly; and a non-callable hook field arriving over the wire
-is ignored.
+(``evaluate_sea`` wraps the ``base_*`` folds over the SEA chain, which
+starts at ``BaseSea``, in a ``functools.partial``); the executor ALWAYS
+gets callables — a hook no SEA overrides is the identity (same
+messages, ``"OK"``); a ``tool_call_hook`` that is not a method stops
+the task loudly before any executor session starts; and a non-callable hook
+field arriving over the wire is overwritten by the staged callable.
 """
 
 from __future__ import annotations
@@ -142,8 +143,26 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             Path(self.tmpdir) / "tool_hook_called.txt"
         ).read_text() == "Bash"
 
-    def test_no_agent_script_passes_none_hooks(self) -> None:
-        """Without an agent script the executor receives no hooks."""
+    def _assert_identity_hooks(self, call: dict[str, Any]) -> None:
+        """Assert the executor call carries the bare ``BaseSea`` identity hooks.
+
+        Args:
+            call: The recorded executor ``KISSAgent.run`` call.
+        """
+        assert callable(call["llm_call_hook"]), call
+        assert callable(call["tool_call_hook"]), call
+        messages = [{"role": "user", "content": "hi"}]
+        assert call["llm_call_hook"](messages) == messages
+        assert call["tool_call_hook"]("Bash", {"command": "ls"}) == "OK"
+        assert call["tool_call_hook"]("finish", {}) == "OK"
+
+    def test_no_agent_script_passes_identity_hooks(self) -> None:
+        """Without an agent script the executor receives ``BaseSea``'s identity hooks.
+
+        Every run goes through ``base_sea.py``: the hooks are always
+        callables, and with nothing overriding them they leave the
+        messages alone and allow every tool call.
+        """
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
         result = sorcar.run(
@@ -154,17 +173,15 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is True
-        call = self._executor_call(calls)
-        assert call["llm_call_hook"] is None
-        assert call["tool_call_hook"] is None
+        self._assert_identity_hooks(self._executor_call(calls))
 
-    def test_hook_getter_returning_none_passes_none(self) -> None:
-        """A SEA that overrides only one hook installs no other hook.
+    def test_hook_not_overridden_is_the_identity(self) -> None:
+        """A SEA that overrides only one hook gets the identity for the other.
 
         The script overrides ``llm_call_hook`` and leaves
         ``tool_call_hook`` to the do-nothing default of ``BaseSea`` —
-        the executor must get a callable LLM hook and a ``None``
-        tool-call hook.
+        the executor must get a callable LLM hook running the script's
+        method and a tool-call hook answering ``"OK"`` to everything.
         """
         agent_path = self._write_py(
             "half_hooks_agent.py",
@@ -187,7 +204,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
         result = sorcar.run(
-            "task with a None tool hook",
+            "task with a default tool hook",
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
@@ -198,10 +215,17 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         call = self._executor_call(calls)
         assert callable(call["llm_call_hook"]), call
         assert call["llm_call_hook"]([1, 2, 3]) == [3, 2, 1]
-        assert call["tool_call_hook"] is None
+        assert callable(call["tool_call_hook"]), call
+        assert call["tool_call_hook"]("Bash", {"command": "ls"}) == "OK"
 
     def test_wrong_typed_hook_getter_fails_task(self) -> None:
-        """A ``tool_call_hook`` that is not a method stops the task."""
+        """A ``tool_call_hook`` that is not a method stops the task at staging.
+
+        ``evaluate_sea`` walks every hook's chain before the run
+        starts, so the ``must be a method`` diagnostic (naming the
+        method and the script) fails the task before any executor
+        session exists.
+        """
         agent_path = self._write_py(
             "bad_hook_agent.py",
             '''
@@ -225,18 +249,19 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        assert "tool_call_hook" in result.text
-        assert "must be a method, got int" in result.text
+        assert "tool_call_hook of agent script '" in result.text, result.text
+        assert "bad_hook_agent.py' must be a method, got int" in result.text, result.text
         assert calls == [], "no executor session may start for a broken script"
 
-    def test_wire_non_callable_hook_fields_ignored(self) -> None:
-        """Hook fields sent as JSON values over the wire mean "no hook".
+    def test_wire_non_callable_hook_fields_overwritten(self) -> None:
+        """Hook fields sent as JSON values over the wire are replaced by the staged hooks.
 
         The hook command fields are daemon-internal (a callable cannot
         be JSON-serialized), but ``validate_command`` lets unknown
         extra fields through — a buggy or malicious client can send
-        them as plain JSON values.  The task must run normally with no
-        hooks instead of crashing the executor.
+        them as plain JSON values.  ``apply_agent_overrides`` writes
+        the ``BaseSea`` identity hooks over them, so the task runs
+        normally with callable hooks instead of crashing the executor.
         """
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
@@ -246,7 +271,8 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             events_out=events,
         )
         call = self._executor_call(calls)
-        assert call["llm_call_hook"] is None
-        assert call["tool_call_hook"] is None
+        assert call["llm_call_hook"] != "evil-string"
+        assert call["tool_call_hook"] != 123
+        self._assert_identity_hooks(call)
         results = [e for e in events if e.get("type") == "result"]
         assert results and results[-1].get("success") is True, events

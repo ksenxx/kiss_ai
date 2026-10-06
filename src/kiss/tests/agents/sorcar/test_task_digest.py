@@ -489,7 +489,10 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
     assert settings["kind"] == "worker"
     assert run.prompt.endswith(ask_sea.ADD_TO_PROMPT.format(task_id=task_id))
     assert run.system_prompt_hook is not None and run.tools_hook is not None
-    assert run.llm_call_hook is None and run.tool_call_hook is None
+    # ``/ask`` overrides neither LLM-call nor tool-call hook: both are identities.
+    messages = [{"role": "user", "content": "hi"}]
+    assert run.llm_call_hook is not None and run.llm_call_hook(messages) == messages
+    assert run.tool_call_hook is not None and run.tool_call_hook("x", {}) == "OK"
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("ask-sea-test")
         result = agent.run(

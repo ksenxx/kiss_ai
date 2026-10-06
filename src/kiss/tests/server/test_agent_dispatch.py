@@ -42,14 +42,16 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
     # has (no tool profile is staged, so the daemon keeps the basics),
     # and whose ``system_prompt()`` appends the cron preamble to the
     # assembled system prompt while the channel preamble goes to the
-    # ``appendToSystemPrompt`` suffix.
+    # ``appendToSystemPrompt`` suffix.  The hook callables are written
+    # on every run (``BaseSea`` roots the chain), so only the settings
+    # wire fields are reported as overridden.
     sea = cron_agent.CronAgentSea()
     assert sea.settings({}) == {"kind": "channel", "work_dir": cron_agent.cron_work_dir()}
     assert sea.system_prompt("BASE") == "BASE\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
     cmd: dict[str, Any] = {"agentPath": cron_agent.__file__, "appendToSystemPrompt": "CALLER"}
     overridden = apply_agent_overrides(cmd)
     assert overridden == {
-        "toolsHook", "systemPromptHook", "appendToSystemPrompt", "workDir",
+        "appendToSystemPrompt", "workDir",
         "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
     }
     # The workspace a channel run holds is decided from the settings
@@ -119,7 +121,8 @@ def test_tools_with_none_profile_stages_hook_without_basic_tools(
     # the daemon-side ``toolsHook`` callable and the ``none`` tool
     # profile is staged over the caller's, which the daemon turns into
     # ``append_basic_tools = False``.  Nothing names the script's path,
-    # no ``tools`` list and no ``appendBasicTools`` field is written.
+    # no ``tools`` list and no ``appendBasicTools`` field is written;
+    # the hook (written on every run) is not among the reported fields.
     script = tmp_path / "self_tools_agent.py"
     script.write_text(_HELLO_TOOL + """
 
@@ -131,7 +134,7 @@ class Sea(BaseSea):
         return tools + [_hello]
 """)
     cmd: dict[str, Any] = {"agentPath": str(script), "toolProfile": "full"}
-    assert apply_agent_overrides(cmd) == {"toolsHook", "toolProfile"}
+    assert apply_agent_overrides(cmd) == {"toolProfile"}
     staged = cmd["toolsHook"]([])
     assert [t.__name__ for t in staged] == ["_hello"]
     assert staged[0]() == "hello"
@@ -145,7 +148,7 @@ def test_agent_script_tools_hook_extends_the_tools_it_is_given(
     tmp_path: Path,
 ) -> None:
     # ``tools()`` alone -> same staging, but ADDED to the built-in
-    # toolset: only ``toolsHook`` is overridden, the caller's tool
+    # toolset: no settings field is overridden, the caller's tool
     # profile stands, and the hook keeps the tools the daemon hands it
     # ahead of the SEA's own.
     script = tmp_path / "add_tools_agent.py"
@@ -156,7 +159,7 @@ class Sea(BaseSea):
         return tools + [_hello]
 """)
     cmd: dict[str, Any] = {"agentPath": str(script), "toolProfile": "review"}
-    assert apply_agent_overrides(cmd) == {"toolsHook"}
+    assert apply_agent_overrides(cmd) == set()
     assert [t.__name__ for t in cmd["toolsHook"]([print])] == ["print", "_hello"]
     assert cmd["toolProfile"] == "review"
     assert "tools" not in cmd
@@ -181,7 +184,7 @@ class Sea(BaseSea):
     cmd: dict[str, Any] = {
         "agentPath": str(script), "toolsHook": "/client/tools.py", "appendBasicTools": False,
     }
-    assert apply_agent_overrides(cmd) == {"toolsHook"}
+    assert apply_agent_overrides(cmd) == set()
     assert [t.__name__ for t in cmd["toolsHook"]([])] == ["_hello"]
     assert cmd["appendBasicTools"] is False
     assert "toolProfile" not in cmd
@@ -202,7 +205,7 @@ class Sea(BaseSea):
         return 42
 """)
     cmd: dict[str, Any] = {"agentPath": str(script)}
-    assert apply_agent_overrides(cmd) == {"toolsHook"}
+    assert apply_agent_overrides(cmd) == set()
     with pytest.raises(
         SeaScriptError,
         match=(
@@ -236,7 +239,7 @@ def test_agent_script_tools_rejects_paths_tuples_and_non_callables(
             f"class Sea(BaseSea):\n    def tools(self, tools):\n{body}"
         )
         cmd: dict[str, Any] = {"agentPath": str(script), "appendBasicTools": True}
-        assert apply_agent_overrides(cmd) == {"toolsHook"}
+        assert apply_agent_overrides(cmd) == set()
         with pytest.raises(SeaScriptError, match=message):
             cmd["toolsHook"]([])
         assert "tools" not in cmd
@@ -329,10 +332,16 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
         "appendToSystemPrompt": "CALLER",
     }
     assert apply_agent_overrides(cmd) == set()
-    # The only write is the provenance record of a script that replaced nothing.
+    # The only writes are the provenance record of a script that
+    # replaced nothing and the four hook callables every run gets,
+    # all of them ``BaseSea``'s identities here.
     assert cmd.pop("_runConfig") == {
         "sea": "old_contract_agent", "kind": "session", "pinned": {},
     }
+    assert cmd.pop("systemPromptHook")("BASE") == "BASE"
+    assert cmd.pop("toolsHook")([_hello]) == [_hello]
+    assert cmd.pop("llmCallHook")([1, 2]) == [1, 2]
+    assert cmd.pop("toolCallHook")("Bash", {"command": "ls"}) == "OK"
     assert cmd == {
         "agentPath": str(script),
         "model": "kept-model",
