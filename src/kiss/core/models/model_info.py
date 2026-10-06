@@ -1789,11 +1789,11 @@ def get_fast_model() -> str:
     """
     return _model_for_first_configured_provider(
         {
-            "ANTHROPIC_API_KEY": "claude-sonnet-5",
-            "OPENAI_API_KEY": "gpt-4o",
+            "ANTHROPIC_API_KEY": "claude-sonnet-5-5",
+            "OPENAI_API_KEY": "gpt-6.1-luna",
             "GEMINI_API_KEY": "gemini-2.0-flash",
-            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-haiku-4.5",
-            "TOGETHER_API_KEY": "deepseek-ai/DeepSeek-R1-0528",
+            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-sonnet-5.5",
+            "TOGETHER_API_KEY": "deepseek-ai/DeepSeek-V4.1-Flash",
             "cc": "cc/haiku",
             "codex": "codex/default",
         }
@@ -1811,7 +1811,7 @@ def get_default_model() -> str:
             "ANTHROPIC_API_KEY": "claude-opus-5-5-medium",
             "OPENAI_API_KEY": "gpt-6.1-sol-medium",
             "GEMINI_API_KEY": "gemini-3.8-flash",
-            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-5-5",
+            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-5.5",
             "TOGETHER_API_KEY": "moonshotai/Kimi-K3",
             "cc": "cc/opus",
             "codex": "codex/default",
