@@ -147,7 +147,7 @@ class TestLockoutDoesNotBlockLocalToken(_ServerBase):
         vc.save_config({"remote_password": "s3cret"})
         for i in range(_AUTH_FAIL_MAX):
             await self._password_attempt(f"wrong-{i}")
-        self.assertTrue(server._is_auth_locked("127.0.0.1"))
+        self.assertGreater(server._auth_lock_remaining("127.0.0.1"), 0.0)
         # A browser from the locked IP is still told it is locked ...
         self.assertEqual((await self._password_attempt("s3cret")).get("type"), "auth_locked")
         # ... but the extension / Python client with the token gets in.

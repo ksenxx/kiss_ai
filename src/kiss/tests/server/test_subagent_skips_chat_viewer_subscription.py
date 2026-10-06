@@ -65,7 +65,7 @@ class TestSubagentSkipsChatViewerSubscription(unittest.TestCase):
     def test_subagent_allocation_registers_only_its_own_tab(self) -> None:
         """The child's tab is wired; the idle viewer of the parent's chat is untouched."""
         self.server._on_run_task_id_allocated(
-            "child-task", CHAT_ID, source_tab_id=CHILD_TAB, conn_id="",
+            "child-task", CHAT_ID, source_tab_id=CHILD_TAB,
             start_ms=123, is_subagent=True,
         )
         assert CHILD_TAB in self._subscribers("child-task")
@@ -75,7 +75,7 @@ class TestSubagentSkipsChatViewerSubscription(unittest.TestCase):
     def test_ordinary_allocation_still_subscribes_the_viewer(self) -> None:
         """Positive control: a top-level task on the chat keeps the viewer invariant."""
         self.server._on_run_task_id_allocated(
-            "top-task", CHAT_ID, source_tab_id="launcher-tab", conn_id="", start_ms=123,
+            "top-task", CHAT_ID, source_tab_id="launcher-tab", start_ms=123,
         )
         assert VIEWER_TAB in self._subscribers("top-task")
         types = [e.get("type") for e in self._viewer_events()]

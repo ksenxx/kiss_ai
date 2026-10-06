@@ -71,9 +71,13 @@ def _configured_backend(token: str = "") -> tuple[A2AChannelBackend, int]:
     assert json.loads(result)["ok"] is True
     backend = a2a_mod._make_backend()
     assert backend.connect() is True
-    assert backend._server is not None
-    port = int(backend._server.server_address[1])
-    assert port != 0
+    try:
+        assert backend._server is not None
+        port = int(backend._server.server_address[1])
+        assert port != 0
+    except BaseException:
+        backend.disconnect()  # the caller's try/finally does not own it yet
+        raise
     backend._port = str(port)
     return backend, port
 
@@ -177,11 +181,11 @@ def test_tools_module_function() -> None:
 def test_inbound_outbound_end_to_end(refusing_port: int) -> None:
     """Full lifecycle over real HTTP: card, auth, send, poll, reply, get."""
     backend, port = _configured_backend(token="sekret")
-    # Discover the peer through its own advertised card url — the url
-    # must carry the really-bound port, and it is what every following
-    # request uses.
-    base = _discovered_base(port)
     try:
+        # Discover the peer through its own advertised card url — the url
+        # must carry the really-bound port, and it is what every following
+        # request uses.
+        base = _discovered_base(port)
         # Agent card is served on both well-known paths.
         for path in ("/.well-known/agent-card.json", "/.well-known/agent.json"):
             card = requests.get(base + path, timeout=10).json()

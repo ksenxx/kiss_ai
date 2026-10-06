@@ -1732,9 +1732,17 @@ def _adopt_legacy_journal_snapshots(conn: sqlite3.Connection, current_path: str)
     A ``.consumed-*`` snapshot (:func:`_claim_journal_snapshots`) left
     by a replay that crashed or was refused is only discovered under
     the active database's name.  Its basename is also its exactly-once
-    marker in ``replayed_journals``, so the marker is re-keyed in the
-    same step and a snapshot whose rows were committed before the
-    crash is still never inserted twice.
+    marker in ``replayed_journals``, so the marker is re-keyed too and
+    a snapshot whose rows were committed before the crash is still
+    never inserted twice.
+
+    The marker is copied to the new name BEFORE the rename and the old
+    one deleted after it.  This runs outside :func:`_journal_file_lock`
+    (the replayer holds that lock while it calls :func:`_get_db`), so a
+    replay in another thread may claim the renamed snapshot the instant
+    it appears; it must find the marker already there, or it would
+    insert the committed rows a second time.  A copy left behind by a
+    failed rename is a stale row, which is harmless.
     """
     legacy_prefix = _failed_events_path(_LEGACY_DB_NAME) + _JOURNAL_CONSUMED_SUFFIX
     directory = os.path.dirname(current_path) or "."
@@ -1745,15 +1753,17 @@ def _adopt_legacy_journal_snapshots(conn: sqlite3.Connection, current_path: str)
         return
     for name in names:
         new_name = new_base + name[len(_failed_events_path(_LEGACY_DB_NAME)):]
+        conn.execute(
+            "INSERT OR IGNORE INTO replayed_journals (snapshot, timestamp) "
+            "SELECT ?, timestamp FROM replayed_journals WHERE snapshot = ?",
+            (new_name, name),
+        )
         try:
             os.replace(os.path.join(directory, name), os.path.join(directory, new_name))
         except OSError:  # pragma: no cover — another process adopted it first
             continue
-        conn.execute(
-            "UPDATE OR IGNORE replayed_journals SET snapshot = ? WHERE snapshot = ?",
-            (new_name, name),
-        )
-        conn.commit()
+        _race_delay()
+        conn.execute("DELETE FROM replayed_journals WHERE snapshot = ?", (name,))
 
 
 def _open_db_connection(current_path: str) -> sqlite3.Connection:

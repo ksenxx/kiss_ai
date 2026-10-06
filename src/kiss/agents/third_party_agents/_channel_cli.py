@@ -235,7 +235,10 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "prompt_template": task_description,
         "model_name": model_name,
         "max_budget": max_budget,
-        "model_config": model_config,
+        # ``None`` = not given: the daemon takes any dict (even ``{}``)
+        # as an explicit override of the endpoint registered for the
+        # model (MY_MODELS.json) and of the settings-panel endpoint.
+        "model_config": model_config or None,
         "work_dir": work_dir,
         # ``None`` = not given: only ``--no-web`` is an explicit choice, so
         # the default cannot clash with the channel kind's locked

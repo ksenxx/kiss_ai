@@ -353,8 +353,11 @@ def test_a_new_shell_does_not_inherit_older_pty_masters(service: Any, tmp_path: 
     svc, printer = service
     svc.open("tab-m", "conn-1", str(tmp_path), 80, 24)
     svc.open("tab-n", "conn-1", str(tmp_path), 80, 24)
-    svc.input("tab-n", "conn-1", "echo masters=$(ls -l /proc/$$/fd | grep -c ptmx)\n")
-    printer.wait_for(lambda: "masters=" in printer.output("tab-n").split("echo", 1)[-1])
+    # The ``masters=`` marker is built from a shell variable so the echoed
+    # command line never contains it literally; only the command's output
+    # does, so the wait cannot be satisfied by the echo alone.
+    svc.input("tab-n", "conn-1", "k=masters; echo $k=$(ls -l /proc/$$/fd | grep -c ptmx)\n")
+    printer.wait_for(lambda: "masters=" in printer.output("tab-n"))
     assert "masters=0" in printer.output("tab-n")
 
 

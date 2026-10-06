@@ -19,10 +19,7 @@ round-trips must succeed byte-for-byte.
 
 from pathlib import Path
 
-from kiss.tests.agents.sorcar.test_utf8_encoding import (  # noqa: F401
-    NON_ASCII,
-    NON_ASCII_JSON,
-)
+from kiss.tests.agents.sorcar.test_utf8_encoding import NON_ASCII, NON_ASCII_JSON
 from kiss.tests.core.test_utf8_encoding import _run_in_c_locale
 
 

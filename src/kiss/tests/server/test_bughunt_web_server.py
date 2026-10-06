@@ -20,10 +20,10 @@ every page load / reconnect therefore reports the daemon-global
 work_dir instead of the instance's pinned folder, violating the
 per-window/per-instance work_dir invariant.
 
-Bug 2 — ``_is_auth_locked`` grows ``_auth_failures`` without bound.
+Bug 2 — ``_auth_lock_remaining`` grows ``_auth_failures`` without bound.
 
-``_authenticate_ws`` calls ``_is_auth_locked(ip)`` for every incoming
-connection, and ``_is_auth_locked`` unconditionally writes the pruned
+``_authenticate_ws`` calls ``_auth_lock_remaining(ip)`` for every incoming
+connection, and ``_auth_lock_remaining`` unconditionally writes the pruned
 failure list back with ``self._auth_failures[ip] = fails`` — creating
 a permanent empty-list entry for every source IP that ever connects,
 even ones that always authenticate successfully.  Entries whose
@@ -211,7 +211,7 @@ class AuthFailureRegistryGrowthTest(_ServerTestBase):
     async def test_successful_auth_leaves_no_failure_entry(self) -> None:
         """Repeated successful logins must not grow ``_auth_failures``.
 
-        Every connection attempt routes through ``_is_auth_locked``,
+        Every connection attempt routes through ``_auth_lock_remaining``,
         which must not permanently register source IPs that have no
         live failures — otherwise the registry grows monotonically
         for the daemon's lifetime (one entry per distinct client IP,
@@ -240,7 +240,7 @@ class AuthFailureRegistryGrowthTest(_ServerTestBase):
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         self.assertEqual(resp["type"], "auth_locked")
         await ws.close()
-        self.assertTrue(self.server._is_auth_locked("127.0.0.1"))
+        self.assertGreater(self.server._auth_lock_remaining("127.0.0.1"), 0.0)
 
         ws = await connect(self.url, ssl=self.ctx)
         self._sockets.append(ws)

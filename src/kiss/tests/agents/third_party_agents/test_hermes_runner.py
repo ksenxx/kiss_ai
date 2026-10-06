@@ -14,8 +14,10 @@ typing-indicator hook, thread-continuation selection,
 continuation-failure cursor retention with follow-up retry, and
 ``updated_at``-based thread pruning with rotation — all with real
 in-test backend classes and real state files (no mocks or patches).
-Paths that would launch a daemon task (and hence a real LLM) are
-exercised through the factored helpers instead.
+Paths that launch a daemon task go over the real wire
+(``ChannelRunner._launch_task`` → ``run_agent_via_kiss_web`` →
+``sorcar.run``) to a :class:`RecordingDaemon` stand-in, or to a missing
+endpoint file when the test needs the launch to fail; no LLM runs.
 """
 
 from __future__ import annotations
@@ -26,11 +28,13 @@ import stat
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from kiss.agents.third_party_agents import _kiss_web_launcher
 from kiss.agents.third_party_agents._channel_agent_utils import (
     ChannelConfig,
     ChannelRunner,
@@ -53,6 +57,7 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import main as telegra
 from kiss.core import config as config_module
 from kiss.core.file_lock import lock_exclusive
 from kiss.core.models.model_info import get_default_model
+from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 from kiss.tests.conftest import IS_WINDOWS
 
 
@@ -167,31 +172,39 @@ class RaisingTypingBackend(RecordingBackend):
         raise ConnectionError("typing not supported right now")
 
 
-class LaunchOutcomeRunner(ChannelRunner):
-    """Runner whose task launch is a real in-test implementation.
+_CONTINUATION_TEXT = "continuation done"
 
-    Mirrors the ``_launch_task`` contract without a daemon: a
-    configured error raises before any thread state is stored, and a
-    success stores the thread state and returns a YAML task result —
-    exactly what the real launcher does.
+
+@pytest.fixture()
+def launch_daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
+    """A recording daemon the real ``ChannelRunner._launch_task`` reaches.
+
+    ``run_agent_via_kiss_web`` resolves its endpoint file from the
+    module-level ``_ENDPOINT_FILE_OVERRIDE`` when none is passed; every
+    task launched here is answered with ``_CONTINUATION_TEXT`` on chat
+    ``chat-cont``.
     """
+    stand_in = RecordingDaemon(text=_CONTINUATION_TEXT, chat_id="chat-cont")
+    _point_launcher_at(monkeypatch, stand_in.endpoint_file)
+    try:
+        yield stand_in
+    finally:
+        stand_in.close()
 
-    def __init__(
-        self, *args: Any, launch_error: Exception | None = None, **kwargs: Any
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        self.launch_error = launch_error
-        self.launched_prompts: list[str] = []
 
-    def _launch_task(
-        self, channel_id: str, thread_ts: str, prompt: str, last_reply_ts: str
-    ) -> str:
-        """Record the launch; raise the configured error or succeed."""
-        self.launched_prompts.append(prompt)
-        if self.launch_error is not None:
-            raise self.launch_error
-        self._store_thread_state(thread_ts, "chat-cont", last_reply_ts)
-        return "success: true\nsummary: continuation done\n"
+def _point_launcher_at(monkeypatch: pytest.MonkeyPatch, endpoint_file: Path) -> None:
+    """Make every launch read the daemon endpoint from *endpoint_file*.
+
+    A path that does not exist makes the real launch fail with the
+    product's own ``ConnectionError`` (``Cannot connect to the sorcar
+    daemon: no endpoint file at ...``) before any thread state is stored.
+    """
+    monkeypatch.setattr(_kiss_web_launcher, "_ENDPOINT_FILE_OVERRIDE", str(endpoint_file))
+
+
+def _launched_prompts(daemon: RecordingDaemon) -> list[str]:
+    """Prompts of the ``run`` commands *daemon* received, in order."""
+    return [str(command["prompt"]) for command in daemon.run_commands]
 
 
 def _make_runner(
@@ -1098,20 +1111,9 @@ class TestContinuationFailureCursor:
         }
         save_channel_state(state_path, state)
 
-    @staticmethod
-    def _make_launch_runner(
-        backend: Any, state_path: Path, launch_error: Exception | None = None
-    ) -> LaunchOutcomeRunner:
-        """Build a LaunchOutcomeRunner wired to *backend* with test defaults."""
-        return LaunchOutcomeRunner(
-            backend=backend,
-            channel_name="",
-            agent_name="Hermes Test Agent",
-            state_path=state_path,
-            launch_error=launch_error,
-        )
-
-    def test_failed_launch_keeps_cursor_and_last_reply_ts(self, tmp_path: Path) -> None:
+    def test_failed_launch_keeps_cursor_and_last_reply_ts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A raising continuation launch keeps the old cursor and marker."""
         state_path = tmp_path / "s.json"
         self._seed_state(state_path, "100.0", "101.0")
@@ -1121,20 +1123,23 @@ class TestContinuationFailureCursor:
                 "100.0": [{"user": "alice", "text": "follow up", "ts": "105.0"}]
             },
         )
-        runner = self._make_launch_runner(
-            backend, state_path, launch_error=ConnectionError("daemon down")
-        )
+        _point_launcher_at(monkeypatch, tmp_path / "no-daemon.json")
+        runner = _make_runner(backend, state_path)
         assert runner.run_once() == 0
-        assert runner.launched_prompts, "the continuation launch must be attempted"
+        assert any(
+            "Error processing your message" in text and "no endpoint file" in text
+            for _, text, _ in backend.sent
+        ), "the continuation launch must be attempted and fail at the daemon"
         state = load_channel_state(state_path)
         assert state["cursor"] == "42", "a failed continuation must keep the old cursor"
         assert state["threads"]["100.0"]["last_reply_ts"] == "101.0", (
             "last_reply_ts must not advance on a failed launch"
         )
         assert state["failures"] == 0, "launch failures are not transport failures"
-        assert any("Error processing your message" in text for _, text, _ in backend.sent)
 
-    def test_retried_followup_selected_despite_error_reply(self, tmp_path: Path) -> None:
+    def test_retried_followup_selected_despite_error_reply(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_daemon: RecordingDaemon
+    ) -> None:
         """The next tick retries the follow-up even with the bot error reply posted."""
         state_path = tmp_path / "s.json"
         self._seed_state(state_path, "100.0", "101.0")
@@ -1144,12 +1149,10 @@ class TestContinuationFailureCursor:
                 "100.0": [{"user": "alice", "text": "follow up", "ts": "105.0"}]
             },
         )
-        assert (
-            self._make_launch_runner(
-                failing, state_path, launch_error=ConnectionError("daemon down")
-            ).run_once()
-            == 0
-        )
+        _point_launcher_at(monkeypatch, tmp_path / "no-daemon.json")
+        assert _make_runner(failing, state_path).run_once() == 0
+        assert launch_daemon.run_commands == []
+        _point_launcher_at(monkeypatch, launch_daemon.endpoint_file)
         retry_backend = ThreadBackend(
             cursor="99",
             thread_replies={
@@ -1164,16 +1167,18 @@ class TestContinuationFailureCursor:
                 ]
             },
         )
-        runner = self._make_launch_runner(retry_backend, state_path)
+        runner = _make_runner(retry_backend, state_path)
         assert runner.run_once() == 1
-        assert any("follow up" in p for p in runner.launched_prompts), (
+        assert any("follow up" in p for p in _launched_prompts(launch_daemon)), (
             "the bot error reply must not suppress the retried follow-up"
         )
         state = load_channel_state(state_path)
         assert state["cursor"] == "99"
         assert state["threads"]["100.0"]["last_reply_ts"] == "105.0"
 
-    def test_successful_continuation_advances_cursor(self, tmp_path: Path) -> None:
+    def test_successful_continuation_advances_cursor(
+        self, tmp_path: Path, launch_daemon: RecordingDaemon
+    ) -> None:
         """A fully successful continuation tick commits the new cursor."""
         state_path = tmp_path / "s.json"
         self._seed_state(state_path, "100.0", "101.0")
@@ -1183,12 +1188,16 @@ class TestContinuationFailureCursor:
                 "100.0": [{"user": "alice", "text": "follow up", "ts": "105.0"}]
             },
         )
-        runner = self._make_launch_runner(backend, state_path)
+        runner = _make_runner(backend, state_path)
         assert runner.run_once() == 1
+        # The continuation resumed the seeded chat on the wire and the
+        # thread now carries the chat id the daemon reported.
+        assert launch_daemon.run_commands[-1]["chatId"] == "c1"
         state = load_channel_state(state_path)
         assert state["cursor"] == "99"
         assert state["threads"]["100.0"]["last_reply_ts"] == "105.0"
-        assert any("continuation done" in text for _, text, _ in backend.sent)
+        assert state["threads"]["100.0"]["chat_id"] == "chat-cont"
+        assert any(_CONTINUATION_TEXT in text for _, text, _ in backend.sent)
 
     def test_thread_poll_failure_keeps_cursor_without_breaker(
         self, tmp_path: Path
@@ -1196,9 +1205,7 @@ class TestContinuationFailureCursor:
         """A thread-poll failure keeps the cursor and skips the breaker."""
         state_path = tmp_path / "s.json"
         self._seed_state(state_path, "100.0", "101.0")
-        runner = self._make_launch_runner(
-            ThreadPollFailBackend(cursor="99"), state_path
-        )
+        runner = _make_runner(ThreadPollFailBackend(cursor="99"), state_path)
         assert runner.run_once() == 0
         state = load_channel_state(state_path)
         assert state["cursor"] == "42", "a failed thread poll must keep the old cursor"

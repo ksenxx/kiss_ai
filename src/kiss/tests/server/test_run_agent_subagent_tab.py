@@ -154,8 +154,7 @@ class DaemonLocalHarness(unittest.TestCase):
         self.loop_thread.join(timeout=5)
         self.loop.close()
 
-        if _persistence._db_conn is not None:
-            _persistence._db_conn.close()
+        _persistence._close_db()
         (
             _persistence._DB_PATH,
             _persistence._db_conn,

@@ -47,7 +47,6 @@ the standard endpoint resolution and need a reachable daemon.
 
 import dataclasses
 import difflib
-import importlib.util
 import json
 import logging
 import math
@@ -68,12 +67,12 @@ from kiss.agents.sorcar.run_config import (
     PROVENANCE_INHERITED,
     run_config_line,
 )
-from kiss.agents.sorcar.sea_commands import sea_script_in
+from kiss.agents.sorcar.sea_commands import _third_party_dir, sea_script_in
 from kiss.agents.sorcar.sea_settings import (
     META_SETTINGS,
     PRECEDENCE_RULE,
     REMOVED_SETTINGS,
-    RENAMED_SETTINGS,
+    RENAMED_OPTIONS,
     SETTING_TYPES,
     declared_literal,
     declares_hidden,
@@ -395,10 +394,10 @@ def options_keyword_hint(unknown: dict[str, Any]) -> str:
     for key, value in unknown.items():
         if key in settings:
             continue
-        if key in RENAMED_SETTINGS:
-            example = json.dumps({RENAMED_SETTINGS[key]: value})
+        if key in RENAMED_OPTIONS:
+            example = json.dumps({RENAMED_OPTIONS[key]: value})
             lines.append(
-                f"{key} was renamed to {RENAMED_SETTINGS[key]}; pass options='{example}'."
+                f"{key} was renamed to {RENAMED_OPTIONS[key]}; pass options='{example}'."
             )
         elif key in REMOVED_SETTINGS:
             lines.append(f"{key} was removed: {REMOVED_SETTINGS[key]}.")
@@ -418,9 +417,9 @@ def _parse_option(key: str, value: Any) -> Any:
     """
     expected = OPTION_TYPES.get(key)
     if expected is None:
-        if key in RENAMED_SETTINGS:
+        if key in RENAMED_OPTIONS:
             raise ValueError(
-                f"options key {key!r} was renamed to {RENAMED_SETTINGS[key]!r}; "
+                f"options key {key!r} was renamed to {RENAMED_OPTIONS[key]!r}; "
                 f"use the new name."
             )
         if key in REMOVED_SETTINGS:
@@ -450,24 +449,6 @@ def _parse_option(key: str, value: Any) -> Any:
     )
 
 
-def _package_dir() -> Path | None:
-    """Return the directory of the third-party agents package.
-
-    Located through the import system without importing the package's
-    (heavy, optional) modules.
-
-    Returns:
-        The package directory, or ``None`` when the package is absent.
-    """
-    try:
-        spec = importlib.util.find_spec("kiss.agents.third_party_agents")
-    except (ImportError, ValueError):
-        return None
-    if spec is None or not spec.submodule_search_locations:
-        return None
-    return Path(next(iter(spec.submodule_search_locations)))
-
-
 def available_channels() -> list[str]:
     """Return the names of the installed third-party channel agents.
 
@@ -483,7 +464,7 @@ def available_channels() -> list[str]:
         Sorted channel names, e.g. ``["discord", ..., "slack", ...]``;
         empty when the package is absent.
     """
-    package_dir = _package_dir()
+    package_dir = _third_party_dir()
     if package_dir is None:
         return []
     return sorted(
@@ -608,8 +589,8 @@ class Inherited:
         """Return the ``provenance`` wire field of a run: ``{setting key: explicit | inherited}``.
 
         Args:
-            explicit: The setting keys the call passed itself
-                (:func:`explicit_keys`).
+            explicit: The setting keys the call passed itself (the keys
+                of :func:`explicit_values`).
         """
         marks = dict.fromkeys(self.fields, PROVENANCE_INHERITED)
         marks.update(dict.fromkeys(explicit, PROVENANCE_EXPLICIT))
@@ -639,14 +620,6 @@ def explicit_values(
     if budget is not None:
         values["max_budget"] = budget
     return values
-
-
-def explicit_keys(model_name: str, budget: float | None, options: RunOptions) -> list[str]:
-    """Return the setting keys a ``run_agent`` / ``run_parallel`` call passed explicitly.
-
-    See :func:`explicit_values`.
-    """
-    return list(explicit_values(model_name, budget, options))
 
 
 def _filled_keys(asked: Inherited, got: Inherited) -> tuple[str, ...]:
@@ -1064,7 +1037,7 @@ def dispatch_result(
     # effective worktree/auto-commit), the way a ``run_parallel`` child
     # inherits them.  Channel dispatches and explicit programmatic
     # callers skip this.
-    explicit = explicit_keys(model_name, budget, options)
+    explicit = list(explicit_values(model_name, budget, options))
     if timeout_explicit:
         explicit.append("timeout")
     inherited = inherit_from_parent(
@@ -1299,8 +1272,14 @@ def _run_agent(
     try:
         if not blocking:
             wait_until_started(job)
-            return job_notice(job, None)
-        finished = join_agent_job(job, seconds)
+            if not job.finished:
+                return job_notice(job, None)
+            # The dispatch already failed (no daemon, a refused run):
+            # there is no tab and nothing to wait for, so the error is
+            # the answer, as for a blocking call.
+            finished = True
+        else:
+            finished = join_agent_job(job, seconds)
     except BaseException:
         # The call was interrupted (the tool call's Stop button, or the
         # calling task stopped), whether while the sub-task was starting
@@ -1333,8 +1312,8 @@ class AgentJob:
         cancel: Set by :func:`kill_agent_job`; the dispatch's read loop
             stops the sub-task when it sees it.
         running: Set once the sub-task's tab exists on every client
-            (its initial ``status running=true``) or the dispatch ended
-            without one.
+            (its initial ``status running=true``) or, after ``result``
+            is recorded, when the dispatch ended without one.
         thread: The thread running :func:`dispatch_result`, already
             started.
         started: ``time.monotonic()`` when the thread was started.
@@ -1357,6 +1336,18 @@ class AgentJob:
     workspace: str = ""
     outcome: TaskResult | str | None = None
     result: str = ""
+
+    @property
+    def finished(self) -> bool:
+        """Whether the dispatch has recorded its result.
+
+        The result is written before the thread's own ``running.set()``
+        and before the thread exits, so this — not the thread's
+        liveness — is what ``run_agent`` and ``agent_job`` report on: a
+        caller woken by the event without a tab finds the result, and
+        one that polls never sees a finished job as still running.
+        """
+        return bool(self.result)
 
 
 _AGENT_JOBS: dict[str, AgentJob] = {}
@@ -1512,7 +1503,7 @@ def kill_agent_job(job: AgentJob) -> str:
     """
     job.cancel.set()
     job.thread.join(_JOB_KILL_GRACE_SECONDS)
-    if job.thread.is_alive():
+    if not job.finished:
         return f"Job {job.job_id} ({job.name} agent task) is still running."
     return job.result
 
@@ -1617,7 +1608,7 @@ def make_agent_job_tool(owner: Any = None) -> Callable[..., str]:
             return kill_agent_job(job)
         elif action != "tail":
             return f"Error: action must be tail, wait or kill, got {action!r}."
-        if job.thread.is_alive():
+        if not job.finished:
             return f"Job {job_id} ({job.name} agent task) is still running."
         return job.result
 

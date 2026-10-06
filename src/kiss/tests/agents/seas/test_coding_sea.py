@@ -78,8 +78,6 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
             live.remove(force=True)
     if live is not None:
         # the container is gone: the next model call ends the trial
-        from kiss.core.kiss_error import BudgetExceededError
-
         with pytest.raises(BudgetExceededError):
             harness.on_llm_call([])
     assert harness.on_tool_call("Bash", {"command": "ls"}) == "OK"
@@ -455,9 +453,8 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     run = sea_commands.evaluate_sea([loaded], "label", "task-1")
     assert run.prompt == "p"
     assert run.settings == resolved
-    assert run.tools_hook is None
-    assert run.system_prompt_hook is not None and run.llm_call_hook is not None
-    assert run.tool_call_hook is not None
+    # ``tools`` is not overridden: the staged tools hook is the identity.
+    assert run.tools_hook([print]) == [print]
     assert run.system_prompt_hook("ASSEMBLED") == harness.system_prompt()
     assert run.tool_call_hook("ask_user_question", {"question": "?"}) != "OK"
     assert run.tool_call_hook("Bash", {"command": "ls"}) == "OK"
@@ -662,8 +659,6 @@ def test_shell_notes_off_without_container_or_workdir(tmp_path: Path) -> None:
         assert harness.on_tool_call("Bash", {"command": "nohup sleep 5 &"}) == "OK"
         result = {"role": "tool", "content": "ran"}
         # the liveness check is what ends the trial; the notes must not raise first
-        from kiss.core.kiss_error import BudgetExceededError
-
         if daemon_up:
             with pytest.raises(BudgetExceededError):
                 harness.on_llm_call([result])

@@ -1062,7 +1062,10 @@ def test_stopped_run_still_cleans_up_before_the_fold_event(
 def test_zero_classifier_spend_emits_no_extra_event(env: IsolatedKissHome) -> None:
     agent = SorcarAgent("clf-fold-zero")
     agent._classifier_spend = _ClassifierSpend("classifier:z", 0.0, 0, 0)
-    assert agent._fold_classifier_usage() is False
+    agent._fold_classifier_usage()
+    assert agent._classifier_spend is None
+    assert agent.usage_snapshot() == (0.0, 0, 0)
+    assert agent._usage_events() == []
 
 
 # ---------------------------------------------------------------------------

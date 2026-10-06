@@ -267,7 +267,8 @@ _UI_STATE_JS = r"""
 
 _ACTIVE_TAB_ID_JS = "window._testApi.getActiveTabId()"
 
-# Ids of the chat tabs in the tab bar.
+# Ids of the open tabs: the chats on the main row plus the group strip
+# of the chat on screen (which repeats that chat's id).
 _CHAT_TAB_IDS_JS = (
     "Array.from(document.querySelectorAll('.chat-tab[data-tab-id]'))"
     ".map(t => t.getAttribute('data-tab-id'))"

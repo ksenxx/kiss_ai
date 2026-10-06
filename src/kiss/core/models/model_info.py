@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from kiss.core import config as config_module
 from kiss.core.brand import HOME_DIR
@@ -1074,7 +1075,13 @@ def _decisions_model(
 
     config = dict(model_config or {})
     base_url = config.pop("base_url", OPENROUTER_DECISIONS_BASE_URL)
-    api_key = config.pop("api_key", "") or config_module.DEFAULT_CONFIG.OPENROUTER_API_KEY
+    # A key-less override of the endpoint gets the key of THAT host
+    # (or the placeholder), never the OpenRouter key by default.
+    api_key = config.pop("api_key", "") or (
+        config_module.DEFAULT_CONFIG.OPENROUTER_API_KEY
+        if base_url == OPENROUTER_DECISIONS_BASE_URL
+        else _endpoint_api_key(base_url)
+    )
     return DecisionsModel(
         model_name=model_name,
         base_url=base_url,
@@ -1388,6 +1395,18 @@ def _strip_provider_prefix(model_name: str) -> str:
     return model_name
 
 
+def is_known_model(model_name: str) -> bool:
+    """Whether *model_name* has catalog or ``MY_MODELS.json`` metadata (pricing, context).
+
+    Args:
+        model_name: Name of the model (with or without provider prefix).
+
+    Returns:
+        True when :func:`calculate_cost` can price the model.
+    """
+    return _lookup_model_info(model_name) is not None
+
+
 def _lookup_model_info(model_name: str) -> ModelInfo | None:
     """Return the catalog entry for *model_name*, or ``None`` when unknown.
 
@@ -1396,13 +1415,31 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     name is tried as given, then in its harbor-stripped form (see
     :func:`_strip_provider_prefix`), so callers may pass either.
 
+    A name outside the loaded catalog is looked up in ``MY_MODELS.json``
+    as it is NOW: the catalog is built once at import, so a settings-panel
+    custom model saved later would otherwise be unknown to the running
+    daemon (no pricing, no context length) until a restart.  Bundled
+    entries are never shadowed this way; a registry edit of a bundled
+    name takes effect on the next start, as before.
+
     Args:
         model_name: Name of the model (with or without provider prefix).
 
     Returns:
         The matching :class:`ModelInfo`, or ``None``.
     """
-    return MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    if info is not None:
+        return info
+    entry = _read_my_models().get(model_name) or _read_my_models().get(
+        _strip_provider_prefix(model_name)
+    )
+    if entry is None:
+        return None
+    try:
+        return _build_model_info_entry(entry)
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def model_runs_task_to_completion(model_name: str) -> bool:
@@ -1476,6 +1513,38 @@ def _registered_provider_for_exact_base_url(
     return None
 
 
+KEYLESS_ENDPOINT_TOKEN = "no-key"
+"""Bearer token sent to a ``base_url`` override when no API key is configured.
+
+The OpenAI SDK refuses an empty key at client construction (``Missing
+credentials``), while key-less local servers (ollama, vLLM, llama.cpp)
+accept and ignore any bearer value.
+"""
+
+
+def _endpoint_api_key(base_url: str) -> str:
+    """Return the bearer token for a ``base_url`` override that names no ``api_key``.
+
+    A registered vendor's own host (the URL's parsed hostname, never a
+    path segment or look-alike host) gets that vendor's configured key.
+    Every other endpoint (a local server, a gateway) gets
+    :data:`KEYLESS_ENDPOINT_TOKEN`: a secret is only ever sent to the
+    host it was configured for, never guessed from a model name.
+
+    Args:
+        base_url: The ``model_config["base_url"]`` override.
+
+    Returns:
+        A non-empty bearer token.
+    """
+    hostname = urlsplit(base_url).hostname or ""
+    for vendor in OPENAI_COMPATIBLE_PROVIDERS:
+        if hostname == vendor.host:
+            key = getattr(config_module.DEFAULT_CONFIG, vendor.api_key_name, "")
+            return str(key) or KEYLESS_ENDPOINT_TOKEN
+    return KEYLESS_ENDPOINT_TOKEN
+
+
 def model(
     model_name: str,
     model_config: dict[str, Any] | None = None,
@@ -1492,7 +1561,7 @@ def model(
         model_config: Optional dictionary of model configuration parameters.
             If it contains "base_url", routing is bypassed and an
             OpenAI-compatible adapter is built with that base_url and
-            optional "api_key".
+            optional "api_key" (absent: see :func:`_endpoint_api_key`).
             "use_responses_api" selects the transport for OpenAI-compatible
             models: True builds the v2 Responses-API adapter
             (OpenAICompatibleModel2), False forces the Chat Completions v1
@@ -1526,7 +1595,7 @@ def model(
         return _decisions_model(model_name, model_config, token_callback, thinking_callback)
     if model_config and "base_url" in model_config:
         base_url = model_config["base_url"]
-        api_key = model_config.get("api_key", "")
+        api_key = model_config.get("api_key") or _endpoint_api_key(base_url)
         filtered = {k: v for k, v in model_config.items() if k not in ("base_url", "api_key")}
         # An explicit config flag always decides the transport.  The
         # catalog's live-verified flag applies only when the override IS

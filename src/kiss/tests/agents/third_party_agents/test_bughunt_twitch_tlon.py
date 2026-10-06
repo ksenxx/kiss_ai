@@ -19,22 +19,24 @@ Bugs covered:
 from __future__ import annotations
 
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler
+from typing import Any, cast
+
+import pytest
 
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
 from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchChannelBackend
+from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
     """Handler that records requests and returns service-shaped JSON."""
 
-    requests_seen: list[dict[str, Any]] = []
-
     def _record(self, body: bytes) -> None:
-        self.requests_seen.append(
+        cast(RecordingServer, self.server).requests.append(
             {"method": self.command, "path": self.path, "body": body.decode() if body else ""}
         )
 
@@ -94,36 +96,31 @@ class _RecordingHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-def _start_server() -> tuple[ThreadingHTTPServer, str]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _RecordingHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, f"http://127.0.0.1:{server.server_address[1]}"
+@pytest.fixture()
+def server() -> Iterator[RecordingServer]:
+    """A recording server emulating both Twitch Helix and Urbit Eyre."""
+    with recording_server(_RecordingHandler) as srv:
+        yield srv
 
 
-def _paths(method: str | None = None) -> list[str]:
-    seen = _RecordingHandler.requests_seen
-    return [r["path"] for r in seen if method is None or r["method"] == method]
+def _paths(server: RecordingServer, method: str | None = None) -> list[str]:
+    return [r["path"] for r in server.requests if method is None or r["method"] == method]
 
 
 class TestTwitchBackendBugs:
     """Twitch Helix endpoint corruption, missing sender_id, silent HTTP errors."""
 
-    def setup_method(self) -> None:
-        _RecordingHandler.requests_seen = []
-        self._server, base = _start_server()
-        self.backend = TwitchChannelBackend(helix_base=base)
+    @pytest.fixture(autouse=True)
+    def _backend(self, server: RecordingServer) -> None:
+        self.server = server
+        self.backend = TwitchChannelBackend(helix_base=server.base_url)
         self.backend._client_id = "cid"
         self.backend._access_token = "tok"
-
-    def teardown_method(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
 
     def test_get_channel_info_hits_channels_endpoint(self) -> None:
         """get_channel_info must call GET /channels?broadcaster_id=..."""
         result = json.loads(self.backend.get_channel_info("123"))
-        paths = _paths("GET")
+        paths = _paths(self.server, "GET")
         assert any(p.startswith("/channels?") and "broadcaster_id=123" in p for p in paths), (
             f"expected GET /channels?broadcaster_id=123, saw {paths}"
         )
@@ -134,7 +131,7 @@ class TestTwitchBackendBugs:
     def test_search_hits_search_channels_endpoint(self) -> None:
         """Channel search must call GET /search/channels."""
         result = json.loads(self.backend.search_third_party_agents("streamer"))
-        paths = _paths("GET")
+        paths = _paths(self.server, "GET")
         assert any(p.startswith("/search/channels?") for p in paths), (
             f"expected GET /search/channels, saw {paths}"
         )
@@ -146,10 +143,10 @@ class TestTwitchBackendBugs:
         self.backend.send_message("bcast1", "hello there")
         posts = [
             r
-            for r in _RecordingHandler.requests_seen
+            for r in self.server.requests
             if r["method"] == "POST" and r["path"].startswith("/chat/messages")
         ]
-        assert posts, f"no POST /chat/messages seen: {_RecordingHandler.requests_seen}"
+        assert posts, f"no POST /chat/messages seen: {self.server.requests}"
         body = json.loads(posts[-1]["body"])
         assert body["broadcaster_id"] == "bcast1"
         assert body["message"] == "hello there"
@@ -158,7 +155,7 @@ class TestTwitchBackendBugs:
     def test_send_chat_message_still_includes_sender_id(self) -> None:
         """Explicit send_chat_message keeps passing sender_id through."""
         result = json.loads(self.backend.send_chat_message("bcast1", "sender9", "hi"))
-        body = json.loads(_RecordingHandler.requests_seen[-1]["body"])
+        body = json.loads(self.server.requests[-1]["body"])
         assert body["sender_id"] == "sender9"
         assert result["ok"] is True
 
@@ -171,35 +168,20 @@ class TestTwitchBackendBugs:
 class TestTlonBackendBugs:
     """Tlon gall agent name/scry path corruption and ship_url persistence."""
 
-    def setup_method(self) -> None:
-        _RecordingHandler.requests_seen = []
-        self._server, self.base = _start_server()
-        self._backup = None
-        if _tlon_config.path.exists():
-            self._backup = _tlon_config.path.read_text()
-        try:
+    @pytest.fixture(autouse=True)
+    def _connected_backend(self, server: RecordingServer) -> Iterator[None]:
+        self.server = server
+        self.base = server.base_url
+        with config_backup(_tlon_config.path):
             _tlon_config.save({"ship_url": self.base, "code": "lidlut-tabwed", "ship": "~zod"})
             self.backend = TlonChannelBackend()
             assert self.backend.connect() is True
-        except BaseException:
-            # pytest skips teardown_method when setup_method raises; restore
-            # the config (and stop the server) ourselves so nothing leaks.
-            self.teardown_method()
-            raise
-
-    def teardown_method(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        if self._backup is not None:
-            _tlon_config.path.parent.mkdir(parents=True, exist_ok=True)
-            _tlon_config.path.write_text(self._backup)
-        elif _tlon_config.path.exists():
-            _tlon_config.path.unlink()
+            yield
 
     def test_list_channels_scries_channels_agent(self) -> None:
         """Group channel listing must scry the 'channels' gall agent."""
         result = json.loads(self.backend.list_third_party_agents("~zod/my-group"))
-        scries = [p for p in _paths("GET") if p.startswith("/~/scry/")]
+        scries = [p for p in _paths(self.server, "GET") if p.startswith("/~/scry/")]
         assert any(p.startswith("/~/scry/channels/channels/~zod/my-group/light") for p in scries), (
             f"expected scry of channels agent at /channels/..., saw {scries}"
         )
@@ -209,7 +191,7 @@ class TestTlonBackendBugs:
     def test_get_messages_scries_channels_agent(self) -> None:
         """Message fetch must scry the 'channels' gall agent."""
         result = json.loads(self.backend.get_messages("~zod/my-group", "chat", count=5))
-        scries = [p for p in _paths("GET") if p.startswith("/~/scry/")]
+        scries = [p for p in _paths(self.server, "GET") if p.startswith("/~/scry/")]
         expected = "/~/scry/channels/channel/~zod/my-group/chat/posts/"
         assert any(p.startswith(expected) for p in scries), f"expected channels scry, saw {scries}"
         assert not any("third_party_agents" in p for p in scries), scries
@@ -220,10 +202,10 @@ class TestTlonBackendBugs:
         result = json.loads(self.backend.post_message("~zod/my-group", "chat", "hello"))
         pokes = [
             r
-            for r in _RecordingHandler.requests_seen
+            for r in self.server.requests
             if r["method"] in ("POST", "PUT") and r["path"].startswith("/~/channel")
         ]
-        assert pokes, f"no poke request seen: {_RecordingHandler.requests_seen}"
+        assert pokes, f"no poke request seen: {self.server.requests}"
         body = json.loads(pokes[-1]["body"])
         poke_obj = body[0] if isinstance(body, list) else body
         assert poke_obj["app"] == "channels", f"poked wrong gall agent: {poke_obj}"

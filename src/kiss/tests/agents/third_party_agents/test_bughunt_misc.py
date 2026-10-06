@@ -17,18 +17,16 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
+from typing import cast
 from urllib.parse import parse_qs, urlparse
 
 from kiss.agents.third_party_agents.phone.phone_sea import _config as _phone_config
-
-_PHONE_CONFIG = _phone_config.path
-_PHONE_CONFIG_BACKUP = _PHONE_CONFIG.with_suffix(".json.bughunt-bak")
+from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 
 
 class TestGoveeImportSafe(unittest.TestCase):
@@ -53,10 +51,7 @@ class TestGoveeImportSafe(unittest.TestCase):
     def test_main_without_api_key_still_errors(self) -> None:
         """Running the CLI with a command but no key must still exit with the error."""
         env = {k: v for k, v in os.environ.items() if k != "GOVEE_API_KEY"}
-        code = (
-            "from kiss.agents.third_party_agents import govee; "
-            "govee.main(['govee.py', 'list'])"
-        )
+        code = "from kiss.agents.third_party_agents import govee; govee.main(['govee.py', 'list'])"
         result = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True,
@@ -111,9 +106,11 @@ class TestIMessageAppleScriptEscaping(unittest.TestCase):
 
 
 class _PhoneApiHandler(BaseHTTPRequestHandler):
-    """Real HTTP handler emulating the phone companion REST app."""
+    """Real HTTP handler emulating the phone companion REST app.
 
-    sms_requests: list[dict[str, list[str]]] = []
+    Each ``/api/sms/messages`` query string is recorded into the owning
+    :class:`RecordingServer`'s ``requests``.
+    """
 
     def do_GET(self) -> None:  # noqa: N802
         """Serve /api/device/info and /api/sms/messages with canned JSON."""
@@ -121,7 +118,9 @@ class _PhoneApiHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/device/info":
             body = json.dumps({"device_name": "testphone"})
         elif parsed.path == "/api/sms/messages":
-            type(self).sms_requests.append(parse_qs(parsed.query, keep_blank_values=True))
+            cast(RecordingServer, self.server).requests.append(
+                parse_qs(parsed.query, keep_blank_values=True)
+            )
             body = json.dumps(
                 {
                     "messages": [
@@ -148,28 +147,10 @@ class TestPhoneControlPollCursor(unittest.TestCase):
 
     def setUp(self) -> None:
         """Start a real local HTTP server and point the phone config at it."""
-        _PhoneApiHandler.sms_requests = []
-        self._server = HTTPServer(("127.0.0.1", 0), _PhoneApiHandler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
-        self._had_config = _PHONE_CONFIG.exists()
-        if self._had_config:
-            shutil.copy2(_PHONE_CONFIG, _PHONE_CONFIG_BACKUP)
-        _PHONE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        self._server = self.enterContext(recording_server(_PhoneApiHandler))
+        self.enterContext(config_backup(_phone_config.path))
         port = self._server.server_address[1]
-        _PHONE_CONFIG.write_text(
-            json.dumps({"device_ip": "127.0.0.1", "device_port": str(port)})
-        )
-
-    def tearDown(self) -> None:
-        """Stop the server and restore the original phone config."""
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join(timeout=5)
-        if self._had_config:
-            shutil.move(_PHONE_CONFIG_BACKUP, _PHONE_CONFIG)
-        else:
-            _PHONE_CONFIG.unlink(missing_ok=True)
+        _phone_config.save({"device_ip": "127.0.0.1", "device_port": str(port)})
 
     def test_second_poll_sends_advanced_cursor(self) -> None:
         """After a poll returns messages, a later poll with oldest='' must reuse the cursor."""
@@ -183,12 +164,12 @@ class TestPhoneControlPollCursor(unittest.TestCase):
         messages, new_oldest = backend.poll_messages("+15550001", "")
         self.assertEqual(len(messages), 2)
         self.assertEqual(new_oldest, "222")
-        self.assertEqual(_PhoneApiHandler.sms_requests[0].get("since", [""])[0], "")
+        self.assertEqual(self._server.requests[0].get("since", [""])[0], "")
 
         messages2, _ = backend.poll_messages("+15550001", "")
         self.assertEqual(len(messages2), 2)
         self.assertEqual(
-            _PhoneApiHandler.sms_requests[1].get("since", [""])[0],
+            self._server.requests[1].get("since", [""])[0],
             "222",
             "second poll with oldest='' must fall back to the stored _last_msg_id cursor",
         )

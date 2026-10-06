@@ -316,7 +316,12 @@ _MOBILE_LAYOUT_JS = """
   const rect = panel.getBoundingClientRect();
   const btn = document.getElementById('meta-drawer-btn');
   const btnRect = btn.getBoundingClientRect();
-  const tabBar = document.getElementById('tab-bar').getBoundingClientRect();
+  // The toggle rides the main tab row (#main-tab-bar, one entry per
+  // chat, always shown on the remote page); the group strip #tab-bar
+  // under it is hidden while the chat has no sub-agent or file tabs.
+  const tabBar = document
+    .getElementById('main-tab-bar')
+    .getBoundingClientRect();
   const inputArea = document
     .getElementById('input-area')
     .getBoundingClientRect();
@@ -366,7 +371,7 @@ def test_mobile_hides_status_bar_and_parks_the_drawer_offscreen(
 ) -> None:
     """Below the 900px breakpoint the status bar STAYS hidden (the
     drawer carries its values) and the panel waits off-screen right,
-    inert, behind a toggle that lives in the tab-bar row — above the
+    inert, behind a toggle that lives in the main tab row — above the
     chat transcript and clear of the composer's button row — so it
     never shrinks the chat area."""
     page = _open_mobile_page(browser, remote_url)

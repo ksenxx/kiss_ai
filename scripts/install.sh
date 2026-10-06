@@ -3,6 +3,45 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
+# Leave the kiss-web daemon's systemd control group before anything
+# else, so that the ``systemctl --user stop kiss-web.service`` the root
+# install.sh runs at its end does not kill this bootstrap: the daemon's
+# own Terminal tab, Update button and task shells all run in that group.
+# The block is the root install.sh's, byte for byte (a test checks); the
+# full explanation is there.  It sits before ``set -e``: when the script
+# is piped in, the re-exec'd bash resumes right after the block.
+# BEGIN: kiss-service-cgroup-escape  (tests extract this block verbatim)
+systemd_service_cgroup() {
+    # Print the ``*.service`` unit owning this process's control group
+    # per cgroup file $1 (default /proc/self/cgroup), or nothing.  Only
+    # the last path component counts, and ``user@UID.service`` never
+    # (every user process sits under it; a cgroup v1 controller line can
+    # end there); a transient scope ends in ``.scope``.
+    sed -n '\|/user@[^/]*\.service$|d; s|.*/\([^/]*\.service\)$|\1|p' \
+        "${1:-/proc/self/cgroup}" 2>/dev/null | head -n 1
+}
+if [ -z "${_KISS_HOST_SERVICE:-}" ] && command -v systemd-run >/dev/null 2>&1 \
+    && { [ -f "$0" ] || [ ! -t 0 ]; }; then
+    _kiss_host_service="$(systemd_service_cgroup)"
+    if [ -n "$_kiss_host_service" ] \
+        && systemd-run --user --scope --quiet --collect -- true 2>/dev/null; then
+        export _KISS_HOST_SERVICE="$_kiss_host_service"
+        if [ -f "$0" ]; then
+            exec systemd-run --user --scope --quiet --collect \
+                --description="install.sh (moved out of $_kiss_host_service)" \
+                -- bash "$0" "$@"
+        fi
+        # The script is stdin (``curl ... | bash``).  Bash reads a pipe
+        # one byte at a time and seeks a file back to where it stopped
+        # before running any command, so everything after this block is
+        # still unread there: the new bash carries on right after it.
+        exec systemd-run --user --scope --quiet --collect \
+            --description="install.sh (moved out of $_kiss_host_service)" \
+            -- bash -s "$@"
+    fi
+    unset _kiss_host_service
+fi
+# END: kiss-service-cgroup-escape
 set -e
 
 # Capture the user's shell PWD *before* any ``cd`` so VS Code can later open

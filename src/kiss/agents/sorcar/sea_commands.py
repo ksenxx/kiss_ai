@@ -94,6 +94,7 @@ from kiss.agents.sorcar.sea_settings import (
     execute_python_file,
     resolve_settings,
     safe_message,
+    script_name,
 )
 from kiss.core.config import kiss_home
 
@@ -615,13 +616,18 @@ def sea_layers(sea_path: Path, base: Path | None = None) -> list[BaseSea]:
     return seas
 
 
-def _chain(seas: list[BaseSea], name: str) -> list[Callable[..., Any]]:
-    """Return the bound *name* methods of *seas*, each SEA's classes base first, defaults left out.
+def _chain(
+    seas: list[BaseSea], name: str, include_base: bool = True
+) -> list[Callable[..., Any]]:
+    """Return the bound *name* methods of *seas*, each SEA's classes base first.
 
     The launcher's chaining (``base_prompt`` etc.): every class of a
     SEA's inheritance chain that defines *name* itself contributes,
     base class first, so a SEA's method runs on top of its base's
-    without calling ``super()``.
+    without calling ``super()``.  :class:`BaseSea` itself is the root
+    of every chain, so its method runs first on every run and editing
+    ``base_sea.py`` customizes every run; *include_base* ``False``
+    leaves it out (:func:`defines`, which asks what a SEA adds).
     """
     methods = []
     seen: set[tuple[str, str]] = set()
@@ -633,10 +639,24 @@ def _chain(seas: list[BaseSea], name: str) -> list[Callable[..., Any]]:
             # one module when imported and another when its file is
             # executed by ``load_sea``.
             key = (str(_file_of(cls) or cls.__module__), cls.__qualname__)
-            if cls is not BaseSea and name in vars(cls) and key not in seen:
+            if cls is BaseSea and not include_base:
+                continue
+            if name in vars(cls) and key not in seen:
                 seen.add(key)
                 methods.append(_bound(sea, cls, name))
     return methods
+
+
+def sea_name(seas: list[BaseSea]) -> str:
+    """Return the display name of the SEA a run of *seas* is reported under.
+
+    The outermost SEA's :func:`~kiss.agents.sorcar.sea_settings.script_name`;
+    ``""`` for a run of the bare :class:`BaseSea` (a plain run names no
+    SEA even though it goes through ``base_sea.py``).
+    """
+    if type(seas[-1]) is BaseSea:
+        return ""
+    return script_name(str(seas[-1].path))
 
 
 def _file_of(obj: Any) -> Path | None:
@@ -666,8 +686,13 @@ def _method(sea: BaseSea, name: str) -> Callable[..., Any]:
 
 
 def defines(seas: list[BaseSea], name: str) -> bool:
-    """Return whether any class of *seas* defines the method *name* (so it is worth applying)."""
-    return bool(_chain(seas, name))
+    """Return whether a class of *seas* other than :class:`BaseSea` defines the method *name*.
+
+    What ``/xxx check`` and the linter report as the SEA's own
+    contribution; the launcher applies the chain whether or not a SEA
+    adds to the base's method.
+    """
+    return bool(_chain(seas, name, include_base=False))
 
 
 def _label(method: Callable[..., Any]) -> str:
@@ -762,22 +787,39 @@ def base_prompt(seas: list[BaseSea], task: str, task_id: str = "") -> str:
     """Return *task* after every ``prompt`` method of *seas*, base first.
 
     ``{task_id}`` in a method's result is replaced by *task_id* (the
-    calling task's id, or ``""`` when there is none).
+    calling task's id, or ``""`` when there is none); a method that
+    returns the text unchanged (the stock :class:`BaseSea`) leaves a
+    literal ``{task_id}`` of the caller's own text alone.
 
     Raises:
         SeaScriptError: When a ``prompt`` method raises or returns
             anything but a non-empty string.
     """
     for method in _chain(seas, "prompt"):
-        task = _check_text(_label(method), _call(method, task)).replace("{task_id}", task_id)
+        result = _check_text(_label(method), _call(method, task))
+        if result == task:
+            continue  # an identity (the stock ``BaseSea``) leaves the text, placeholders included
+        task = result.replace("{task_id}", task_id)
         if not task.strip():
             raise SeaScriptError(f"{_label(method)} must return a non-empty string")
     return task
 
 
 def base_system_prompt(seas: list[BaseSea], system_prompt: str) -> str:
-    """Return *system_prompt* after every ``system_prompt`` method of *seas*, base first."""
-    return _fold(seas, "system_prompt", system_prompt, _check_text)
+    """Return *system_prompt* after every ``system_prompt`` method of *seas*, base first.
+
+    A method that appends text the prompt already contains changes
+    nothing: a sub-agent inherits its parent's system-prompt suffix,
+    which already holds what the layers it shares with the parent
+    (:class:`BaseSea` at least) appended, so the text is not repeated
+    down the task tree.
+    """
+    for method in _chain(seas, "system_prompt"):
+        result = _check_text(_label(method), _call(method, system_prompt))
+        appended = result[len(system_prompt):] if result.startswith(system_prompt) else ""
+        if not (appended and appended in system_prompt):
+            system_prompt = result
+    return system_prompt
 
 
 def base_tools(seas: list[BaseSea], tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:
@@ -808,52 +850,54 @@ class SeaRun:
         prompt: The task text after every ``prompt`` method,
             ``{task_id}`` replaced by the calling task's id.
         system_prompt_hook: ``system_prompt -> system_prompt``
-            (:func:`base_system_prompt`), or ``None`` when no SEA
-            defines the method.
-        tools_hook: ``tools -> tools`` (:func:`base_tools`), or ``None``.
+            (:func:`base_system_prompt`).
+        tools_hook: ``tools -> tools`` (:func:`base_tools`).
         llm_call_hook: ``new_messages -> messages``
-            (:func:`base_llm_call_hook`), or ``None``.
+            (:func:`base_llm_call_hook`).
         tool_call_hook: ``(name, args) -> verdict``
-            (:func:`base_tool_call_hook`), or ``None``.
+            (:func:`base_tool_call_hook`).
     """
 
     settings: dict[str, Any]
     prompt: str
-    system_prompt_hook: Callable[[str], str] | None = None
-    tools_hook: Callable[[list[Any]], list[Any]] | None = None
-    llm_call_hook: Callable[[list[Any]], list[Any]] | None = None
-    tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None
+    system_prompt_hook: Callable[[str], str]
+    tools_hook: Callable[[list[Any]], list[Any]]
+    llm_call_hook: Callable[[list[Any]], list[Any]]
+    tool_call_hook: Callable[[str, dict[str, Any]], str]
 
 
 def evaluate_sea(seas: list[BaseSea], task: str, task_id: str = "") -> SeaRun:
     """Return the configuration of a run of *seas* on *task*.
 
     The settings and the prompt are computed now; the system prompt,
-    tools and the two hooks are returned as callables (``None`` when no
-    class of *seas* defines the method) for the run to apply where it
-    assembles its system prompt, builds its toolset, and makes its LLM
-    and tool calls.
+    tools and the two hooks are returned as callables for the run to
+    apply where it assembles its system prompt, builds its toolset, and
+    makes its LLM and tool calls.  Every chain starts at
+    :class:`BaseSea`, so the callables are always present (identities
+    unless ``base_sea.py`` or a SEA changes something).
 
     Args:
-        seas: The loaded SEAs (:func:`sea_layers`).
+        seas: The loaded SEAs (:func:`sea_layers`), or ``[BaseSea()]``
+            for a run that names no SEA.
         task: The task text the run was submitted with.
         task_id: The calling task's id, substituted for ``{task_id}``
             in the prompt (empty when there is none).
 
     Raises:
         SeaScriptError: When a ``settings`` or ``prompt`` method raises
-            or returns a value of the wrong type.
+            or returns a value of the wrong type, or a hook attribute is
+            not a method.
     """
-    run = SeaRun(base_settings(seas), base_prompt(seas, task, task_id))
-    if defines(seas, "system_prompt"):
-        run.system_prompt_hook = functools.partial(base_system_prompt, seas)
-    if defines(seas, "tools"):
-        run.tools_hook = functools.partial(base_tools, seas)
-    if defines(seas, "llm_call_hook"):
-        run.llm_call_hook = functools.partial(base_llm_call_hook, seas)
-    if defines(seas, "tool_call_hook"):
-        run.tool_call_hook = functools.partial(base_tool_call_hook, seas)
-    return run
+    for name in ("system_prompt", "tools", "llm_call_hook", "tool_call_hook"):
+        _chain(seas, name)  # a non-method attribute fails now, not at the hook's first call
+    return SeaRun(
+        base_settings(seas),
+        base_prompt(seas, task, task_id),
+        functools.partial(base_system_prompt, seas),
+        functools.partial(base_tools, seas),
+        functools.partial(base_llm_call_hook, seas),
+        functools.partial(base_tool_call_hook, seas),
+    )
 
 
 def _check_text(label: str, value: Any) -> str:

@@ -97,11 +97,19 @@ def test_loader_stages_the_protocol_as_a_system_prompt_hook() -> None:
     hook receives the assembled prompt (default + suffix) and appends.
     """
     cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER"}
-    assert apply_agent_overrides(cmd) == {"systemPromptHook"}
+    # The SEA pins no setting and has no ``prompt``: nothing is reported as
+    # overridden (the four hooks are written on every run, not listed).
+    assert apply_agent_overrides(cmd) == set()
     assert cmd["appendToSystemPrompt"] == "CALLER"
     hook = cmd["systemPromptHook"]
     assert hook("BASE\n\nCALLER") == "BASE\n\nCALLER\n\n" + write_sea.SYSTEM_PROMPT
-    assert "prompt" not in cmd and "toolsHook" not in cmd
+    assert "prompt" not in cmd
+    # ``tools`` is not overridden: the staged tools hook is the identity.
+    assert cmd["toolsHook"]([print]) == [print]
+    assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
+        {"role": "user", "content": "x"}
+    ]
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == "OK"
     cmd = {"agentPath": str(_SEA_PATH)}
     apply_agent_overrides(cmd)
     assert cmd["systemPromptHook"]("BASE") == "BASE\n\n" + write_sea.SYSTEM_PROMPT

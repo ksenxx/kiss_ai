@@ -262,7 +262,7 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path)
     path = _fresh_agents_md
     standing = "- Always preserve this standing instruction"
     remember_sea.remember_instruction(standing)
-    start = Barrier(2)
+    start = Barrier(2, timeout=30)
     done = Event()
 
     def write() -> None:
@@ -281,10 +281,13 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path)
             snapshots.append(read_bytes_waiting_for_writer(path).decode("utf-8", errors="replace"))
         return snapshots
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    pool = ThreadPoolExecutor(max_workers=2)
+    try:  # a stuck worker fails the test in bounded time instead of hanging ``with``'s shutdown
         writer = pool.submit(write)
-        snapshots = pool.submit(read).result()
-        writer.result()
+        snapshots = pool.submit(read).result(timeout=120)
+        writer.result(timeout=120)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     assert len(snapshots) > 100, len(snapshots)
     bad = [s for s in snapshots if standing not in s]
     assert bad == [], f"{len(bad)} partial snapshots, e.g. {bad[0]!r}"
@@ -294,14 +297,17 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path)
 def test_concurrent_remembers_all_land(_fresh_agents_md: Path) -> None:
     """Sixteen simultaneous adds each keep their line: the update is serialized."""
     path = _fresh_agents_md
-    start = Barrier(16)
+    start = Barrier(16, timeout=30)
 
     def add(i: int) -> str:
         start.wait()
         return agents_md.add_instruction(f"Concurrent rule {i}")
 
-    with ThreadPoolExecutor(max_workers=16) as pool:
-        replies = list(pool.map(add, range(16)))
+    pool = ThreadPoolExecutor(max_workers=16)
+    try:
+        replies = list(pool.map(add, range(16), timeout=120))
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     assert all(r.startswith("Remembered in ") for r in replies), replies
     assert sorted(agents_md.read_instructions()) == sorted(
         f"Concurrent rule {i}" for i in range(16)

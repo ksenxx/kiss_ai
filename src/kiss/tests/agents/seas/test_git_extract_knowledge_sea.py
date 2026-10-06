@@ -174,10 +174,11 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     for page in ("overview", "domain-glossary", "architecture", "history", "faq"):
         assert f"`{page}`" in prompt
     # The real loader accepts the file and stages ``tools`` / ``system_prompt``
-    # as the daemon-side hooks and the settings on their wire fields.
+    # as the daemon-side hooks (written on every run, so not listed in the
+    # returned set) and the settings on their wire fields.
     cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH), "workDir": str(tmp_path)}
     assert apply_agent_overrides(cmd) == {
-        "systemPromptHook", "toolsHook", "toolProfile", "isParallel", "useWorktree",
+        "toolProfile", "isParallel", "useWorktree",
         "autoCommit", "classifyTasks", "useWebTools", "useMemory",
     }
     assert [tool.__name__ for tool in cmd["toolsHook"]([])] == names
@@ -190,6 +191,11 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     assert cmd["classifyTasks"] is False and cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
     assert cmd["systemPromptHook"]("ASSEMBLED") == prompt
+    # The SEA overrides neither call hook: the staged ones are identities.
+    assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
+        {"role": "user", "content": "x"}
+    ]
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == "OK"
 
 
 def test_slash_command_resolves_to_the_bundled_sea() -> None:

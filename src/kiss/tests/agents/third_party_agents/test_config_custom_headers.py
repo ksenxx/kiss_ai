@@ -58,4 +58,6 @@ class TestCLIHeadersFlow(unittest.TestCase):
             file=None,
         )
         kwargs = _build_run_kwargs(args)
-        assert "extra_headers" not in kwargs.get("model_config", {})
+        # Nothing given: no override at all, so the daemon keeps the
+        # endpoint registered for the model.
+        assert kwargs["model_config"] is None

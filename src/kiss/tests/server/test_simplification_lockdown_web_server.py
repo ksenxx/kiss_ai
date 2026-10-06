@@ -20,7 +20,7 @@ coverage gaps) cannot silently change it:
   (``notificationAction``, ``sizeReport``) on a live server connection,
   contrasted with the ``Unknown command`` error broadcast for genuinely
   unknown commands.
-* ``_translate_webview_command``: pass-through of normal commands and
+* ``translate_webview_command``: pass-through of normal commands and
   the legacy ``resumeSession`` ``id`` -> ``chatId`` rename.
 * ``_version_tuple`` / ``_compare_versions`` ordering semantics (guards
   the planned collapse into a single ``_is_newer`` helper).
@@ -44,6 +44,7 @@ import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
+from kiss.server.sorcar import translate_webview_command
 from kiss.server.web_server import (
     RemoteAccessServer,
     _compare_versions,
@@ -52,7 +53,6 @@ from kiss.server.web_server import (
     _read_url_from_file,
     _remove_url_file,
     _save_url_file,
-    _translate_webview_command,
     _version_tuple,
 )
 from kiss.tests.local_ws import open_local_connection
@@ -259,19 +259,19 @@ class TestVscodeOnlyCommandsDropped(_ServerTestBase):
 
 
 class TestWebviewCommandTranslation(unittest.TestCase):
-    """Lock down ``_translate_webview_command`` translations."""
+    """Lock down ``translate_webview_command`` translations."""
 
     def test_normal_command_passes_through_unchanged(self) -> None:
         """A regular webview command is returned unchanged."""
         cmd = {"type": "userAnswer", "answer": "yes", "tabId": "t1"}
         self.assertEqual(
-            _translate_webview_command(dict(cmd)),
+            translate_webview_command(dict(cmd)),
             cmd,
         )
 
     def test_resume_session_id_renamed_to_chat_id(self) -> None:
         """Legacy ``resumeSession`` ``id`` is renamed to ``chatId``."""
-        out = _translate_webview_command(
+        out = translate_webview_command(
             {"type": "resumeSession", "id": "abc123", "tabId": "t2"},
         )
         self.assertEqual(
@@ -283,7 +283,7 @@ class TestWebviewCommandTranslation(unittest.TestCase):
     def test_resume_session_with_chat_id_untouched(self) -> None:
         """``resumeSession`` already carrying ``chatId`` is not modified."""
         cmd = {"type": "resumeSession", "id": "old", "chatId": "new"}
-        self.assertEqual(_translate_webview_command(dict(cmd)), cmd)
+        self.assertEqual(translate_webview_command(dict(cmd)), cmd)
 
 
 class TestVersionComparison(unittest.TestCase):

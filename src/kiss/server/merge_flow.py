@@ -316,11 +316,7 @@ def _capture_untracked(work_dir: str) -> set[str]:
         Set of untracked file paths relative to work_dir.
     """
     result = _git("ls-files", "--others", "--exclude-standard", cwd=work_dir)
-    return {
-        _unquote_git_path(line)
-        for line in result.stdout.split("\n")
-        if line
-    }
+    return set(_unquoted_name_lines(result.stdout))
 
 
 def _is_valid_baseline(git_dir: str, sha: str) -> bool:
@@ -375,13 +371,33 @@ class _PendingOutcome(enum.Enum):
     """Another owner holds the worktree; the caller must not touch it."""
 
 
-#: Result of a deferred-merge retry whose deferral another claimant
-#: already took (see ``_handle_worktree_action``'s ``deferred_branch``).
-#: Compared by identity; never broadcast.
-_DEFERRAL_SUPERSEDED: dict[str, Any] = {
+#: Result of a deferred-merge retry that never took the worktree:
+#: another claimant took its deferral, or a guard refused it before
+#: ownership, so the deferral stands and there is nothing to report
+#: (see ``_handle_worktree_action``'s ``deferred_branch``).  Compared by
+#: identity; never broadcast.
+_DEFERRAL_KEPT: dict[str, Any] = {
     "success": False,
-    "message": "The deferred merge was taken over by another action.",
+    "message": "The deferred merge was not run by this retry.",
 }
+
+
+def _refused(deferred_branch: str | None, result: dict[str, Any]) -> dict[str, Any]:
+    """Return a worktree action's refusal before ownership.
+
+    A deferred-merge retry (*deferred_branch* set) refused before it
+    owns the worktree has nothing to report — its deferral stands —
+    so it gets :data:`_DEFERRAL_KEPT`; every other caller gets
+    *result*, the refusal to show the user.
+
+    Args:
+        deferred_branch: The ``deferred_branch`` of the action.
+        result: The refusal (``success`` false, ``message``).
+
+    Returns:
+        *result* or :data:`_DEFERRAL_KEPT`.
+    """
+    return _DEFERRAL_KEPT if deferred_branch is not None else result
 
 
 class _MergeFlowMixin:
@@ -672,8 +688,7 @@ class _MergeFlowMixin:
                     user_prompt = None
                     task_result = None
                 else:
-                    with self._state_lock:
-                        prompt_state = agent_state.find_by_tab(tab_id)
+                    prompt_state = agent_state.find_by_tab(tab_id)
                     user_prompt = (
                         prompt_state.last_user_prompt if prompt_state else ""
                     ) or None
@@ -705,8 +720,7 @@ class _MergeFlowMixin:
                     commit_message=msg, manual=manual, work_dir=requested_dir,
                 )
                 if tab_id and not manual:
-                    with self._state_lock:
-                        task_id = _state_task_key(agent_state.find_by_tab(tab_id))
+                    task_id = _state_task_key(agent_state.find_by_tab(tab_id))
                     if task_id is not None:
                         _append_chat_event(done_event, task_id=task_id)
             else:
@@ -801,6 +815,10 @@ class _MergeFlowMixin:
         paths: set[str] = set(extra_paths or ())
         paths |= self.printer.pop_changed_paths(task_id)
         try:
+            # Looked up at call time (not a module-level import) so a
+            # persistence failure injected by rebinding the module
+            # attribute is seen here, as test_autocommit_changed_repos
+            # does to prove the commit survives a failed DB read.
             from kiss.agents.sorcar.persistence import (
                 _changed_paths_of_tasks,
                 _descendant_task_ids,
@@ -982,8 +1000,7 @@ class _MergeFlowMixin:
                 "message": f"Committing changes in {repo.name}…",
                 "tabId": tab_id,
             })
-            with self._state_lock:
-                prompt_state = agent_state.find_by_tab(tab_id)
+            prompt_state = agent_state.find_by_tab(tab_id)
             user_prompt = (
                 prompt_state.last_user_prompt if prompt_state else ""
             ) or None
@@ -1234,8 +1251,7 @@ class _MergeFlowMixin:
                 branch if no files changed.  Post-task callers should
                 pass False to preserve the branch for manual action.
         """
-        with self._state_lock:
-            state = agent_state.find_by_tab(tab_id)
+        state = agent_state.find_by_tab(tab_id)
         if state is None or not state.use_worktree:
             return
         wt_agent = state.agent
@@ -1757,19 +1773,19 @@ class _MergeFlowMixin:
                 "merge", state.tab_id, resolve_conflicts=auto_commit,
                 deferred_branch=branch,
             )
-            with self._state_lock:
-                # ``_handle_worktree_action`` clears the marker only
-                # once it owns the worktree; a marker still set means a
-                # guard refused before anything ran (the tab started a
-                # new task, or the main tree got busy again) and the
-                # deferral simply stands until the next trigger.  A
-                # marker cleared by SOMEONE ELSE between the snapshot
-                # above and this call's own claim (a concurrent trigger,
-                # the user's Merge click) is reported as superseded: the
-                # winner reports its own outcome, and this call's refusal
-                # must not reach the tab as a failed merge.
-                still_deferred = state.wt_merge_deferred_branch is not None
-            if still_deferred or result is _DEFERRAL_SUPERSEDED:
+            # ``_DEFERRAL_KEPT``: this retry never took the worktree — a
+            # guard refused before anything ran (the tab started a new
+            # task, the main tree got busy again) and the deferral
+            # stands until the next trigger, or someone else (a
+            # concurrent trigger, the user's Merge click) cleared the
+            # marker between the snapshot above and this call's claim
+            # and reports its own outcome.  Decided by the action
+            # itself, not by re-reading the marker here: a Merge click
+            # refused and re-deferred after this retry released its
+            # claim sets the marker again, and the outcome of the merge
+            # this retry DID run (a conflict that keeps the branch) must
+            # still reach the tab.
+            if result is _DEFERRAL_KEPT:
                 continue
             self.printer.broadcast(
                 {"type": "worktree_result", "tabId": state.tab_id, **result}
@@ -1824,9 +1840,10 @@ class _MergeFlowMixin:
                 the branch the deferral was recorded for.  When the
                 tab's ``wt_merge_deferred_branch`` no longer equals it
                 by the time this call takes ``_state_lock``, another
-                claimant took the worktree since the retry's snapshot
-                and :data:`_DEFERRAL_SUPERSEDED` is returned without
-                touching anything.
+                claimant took the worktree since the retry's snapshot;
+                then, as for every guard refusal before ownership,
+                :data:`_DEFERRAL_KEPT` is returned without touching
+                anything.
 
         Returns:
             Dict with ``success`` bool and ``message`` string.
@@ -1846,18 +1863,18 @@ class _MergeFlowMixin:
                 state is None
                 or state.wt_merge_deferred_branch != deferred_branch
             ):
-                return _DEFERRAL_SUPERSEDED
+                return _DEFERRAL_KEPT
             if state is None or not state.use_worktree:
-                return {
+                return _refused(deferred_branch, {
                     "success": False,
                     "message": "Worktree mode is not enabled",
-                }
+                })
             wt_agent = state.agent
             if wt_agent is None or not wt_agent._wt_pending:
-                return {
+                return _refused(deferred_branch, {
                     "success": False,
                     "message": "No pending worktree changes to act on",
-                }
+                })
             wt = wt_agent
             verb = {
                 "merge": "merging",
@@ -1865,20 +1882,20 @@ class _MergeFlowMixin:
                 "nothing": "detaching",
             }.get(action)
             if verb is None:
-                return {
+                return _refused(deferred_branch, {
                     "success": False,
                     "message": f"Unknown action: {action}",
-                }
+                })
             repo_root = wt._repo_root
             if repo_root is None:
-                return {
+                return _refused(deferred_branch, {
                     "success": False,
                     "message": "No pending worktree changes to act on",
-                }
+                })
             if not internal:
                 busy = self._check_worktree_busy(state, verb, repo_root, wt._wt_dir)
                 if busy:
-                    return busy
+                    return _refused(deferred_branch, busy)
             elif wt._wt_dir is not None and self._any_non_wt_running(
                 wt._wt_dir,
             ):
@@ -1890,14 +1907,14 @@ class _MergeFlowMixin:
                 # NOT apply here (gpt-5.6-sol review finding: the
                 # internal auto-discard used to remove an occupied
                 # worktree).
-                return {
+                return _refused(deferred_branch, {
                     "success": False,
                     "message": (
                         "Another tab is running a task inside this "
                         "task's worktree. Wait for it to finish "
                         f"before {verb}."
                     ),
-                }
+                })
             elif action == "merge" and self._main_tree_blocks_merge(repo_root):
                 # internal=True only bypasses this tab's OWN
                 # is_task_active/is_merging flags (the post-task
@@ -1916,7 +1933,7 @@ class _MergeFlowMixin:
                 # (nothing ever retries).  The refused MERGE is
                 # retried by ``_merge_deferred_worktrees`` once the
                 # other task's changes are committed.
-                return {
+                return _refused(deferred_branch, {
                     "success": False,
                     "message": (
                         "Another tab is running a task on the main "
@@ -1924,7 +1941,7 @@ class _MergeFlowMixin:
                         f"tracked files. Wait for it to finish before "
                         f"{verb}. " + self._defer_worktree_merge(state)
                     ),
-                }
+                })
             # From here on this call owns the worktree's fate, so a
             # merge deferred to "once the main tree is committed" is
             # no longer outstanding.

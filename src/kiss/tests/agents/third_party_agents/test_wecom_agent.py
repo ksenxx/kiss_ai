@@ -13,68 +13,33 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
 import kiss.agents.third_party_agents.wecom.wecom_sea as wecom_mod
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents.wecom.wecom_sea import (
     WeComAgent,
     WeComChannelBackend,
     WecomSea,
 )
+from kiss.tests.agents.third_party_agents.recording_http import (
+    JsonWebhookServer,
+    serve_json_webhook,
+)
 
 _AUTH_TRIO = {"check_wecom_auth", "authenticate_wecom", "clear_wecom_auth"}
 
 
-class _WebhookReceiver:
-    """Real local HTTP server standing in for WeCom's webhook endpoint.
-
-    Records every request body and answers with a configurable JSON
-    body (``errcode: 0`` by default).
-    """
-
-    def __init__(self) -> None:
-        self.requests: list[dict[str, Any]] = []
-        self.response_body: dict[str, Any] = {"errcode": 0, "errmsg": "ok"}
-        receiver = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length)
-                receiver.requests.append({"path": self.path, "json": json.loads(body)})
-                payload = json.dumps(receiver.response_body).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def log_message(self, *args: Any) -> None:  # type: ignore[override]
-                pass
-
-        self.server = ThreadedHTTPServer(("127.0.0.1", 0), Handler)
-        self.port = self.server.server_address[1]
-        self.url = f"http://127.0.0.1:{self.port}/cgi-bin/webhook/send?key=testkey"
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-
-    def stop(self) -> None:
-        """Shut the receiver down."""
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5.0)
-
-
 @pytest.fixture()
-def receiver() -> Any:
+def receiver() -> Iterator[JsonWebhookServer]:
     """A running local webhook receiver, stopped after the test."""
-    rec = _WebhookReceiver()
-    yield rec
-    rec.stop()
+    yield from serve_json_webhook()
+
+
+def _webhook_url(receiver: JsonWebhookServer) -> str:
+    return receiver.base_url + "/cgi-bin/webhook/send?key=testkey"
 
 
 @pytest.fixture(autouse=True)
@@ -144,11 +109,11 @@ def test_tools_module_function() -> None:
     assert len(WecomSea().tools([])) >= 3
 
 
-def test_post_message_shape(receiver: _WebhookReceiver) -> None:
+def test_post_message_shape(receiver: JsonWebhookServer) -> None:
     """post_message sends the WeCom text payload with mentions."""
     agent = WeComAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
-    tools["authenticate_wecom"](receiver.url)
+    tools["authenticate_wecom"](_webhook_url(receiver))
 
     result = json.loads(agent._backend.post_message("hello 团队", mentioned_list="alice, @all"))
     assert result["ok"] is True
@@ -158,11 +123,11 @@ def test_post_message_shape(receiver: _WebhookReceiver) -> None:
     }
 
 
-def test_post_markdown_shape(receiver: _WebhookReceiver) -> None:
+def test_post_markdown_shape(receiver: JsonWebhookServer) -> None:
     """post_markdown sends the WeCom markdown payload."""
     agent = WeComAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
-    tools["authenticate_wecom"](receiver.url)
+    tools["authenticate_wecom"](_webhook_url(receiver))
 
     assert json.loads(agent._backend.post_markdown("# heading\n> quote"))["ok"] is True
     assert receiver.requests[-1]["json"] == {
@@ -171,21 +136,21 @@ def test_post_markdown_shape(receiver: _WebhookReceiver) -> None:
     }
 
 
-def test_send_message_posts_text(receiver: _WebhookReceiver) -> None:
+def test_send_message_posts_text(receiver: JsonWebhookServer) -> None:
     """send_message posts a plain text payload, ignoring channel/thread."""
     agent = WeComAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
-    tools["authenticate_wecom"](receiver.url)
+    tools["authenticate_wecom"](_webhook_url(receiver))
 
     agent._backend.send_message("ignored-channel", "plain text", thread_ts="ignored")
     assert receiver.requests[-1]["json"] == {"msgtype": "text", "text": {"content": "plain text"}}
 
 
-def test_errcode_nonzero_raises_and_tools_report(receiver: _WebhookReceiver) -> None:
+def test_errcode_nonzero_raises_and_tools_report(receiver: JsonWebhookServer) -> None:
     """A non-zero errcode raises from send_message and yields ok:false tools."""
     agent = WeComAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
-    tools["authenticate_wecom"](receiver.url)
+    tools["authenticate_wecom"](_webhook_url(receiver))
     receiver.response_body = {"errcode": 93000, "errmsg": "invalid webhook url"}
 
     with pytest.raises(RuntimeError, match="93000"):

@@ -1567,16 +1567,23 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         # (which frees that document) leaves the second one drawing.
         second = harness.work_dir / "report2.pdf"
         second.write_bytes((harness.work_dir / "report.pdf").read_bytes())
-        page.evaluate("document.querySelector('.chat-tab:not(.content-tab)').click()")
+        # Back to the chat through its GROUP-STRIP entry: the main-row
+        # entry stands for the whole group and would return to the tab
+        # last viewed there (the picture), not to the chat.
+        page.evaluate(
+            "document.querySelector('#tab-list .chat-tab:not(.content-tab)').click()"
+        )
         page.wait_for_selector("#output", state="visible", timeout=15000)
         _inject_file_link(page, str(second), "lnk-pdf2")
         page.click("#lnk-pdf2")
         _wait_tab_count(page, tabs_before + 3)
         _wait_pdf_rendered(page)
-        page.locator(".chat-tab", has_text="report.pdf").first.click()
-        page.locator(".chat-tab.active .chat-tab-close").click()
+        # The chat's main-row entry is highlighted too, so the active
+        # content tab (and its close button) is the strip's.
+        page.locator("#tab-list .chat-tab", has_text="report.pdf").first.click()
+        page.locator("#tab-list .chat-tab.active .chat-tab-close").click()
         _wait_tab_count(page, tabs_before + 2)
-        page.locator(".chat-tab", has_text="report2.pdf").first.click()
+        page.locator("#tab-list .chat-tab", has_text="report2.pdf").first.click()
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
         page.click(_PDF_VIEWER + " .pdf-zoom-in")
         page.wait_for_function(
@@ -1584,7 +1591,7 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
             timeout=15000,
         )
         # Closing a PDF tab removes its viewer.
-        page.locator(".chat-tab.active .chat-tab-close").click()
+        page.locator("#tab-list .chat-tab.active .chat-tab-close").click()
         _wait_tab_count(page, tabs_before + 1)
         assert page.locator(".pdf-viewer").count() == 0
     finally:
@@ -2085,11 +2092,15 @@ def test_pdf_keyboard_shortcuts_move_pages_and_zoom(browser, harness, worktree):
         page.keyboard.press("PageDown")
         _assert_pdf_page_at_top(page, 2)
         page_two = _pdf_scroll_top(page)
-        page.evaluate("document.querySelector('.chat-tab:not(.content-tab)').click()")
+        # The chat's GROUP-STRIP entry shows the chat; its main-row entry
+        # would return to the group's last viewed tab, the viewer itself.
+        page.evaluate(
+            "document.querySelector('#tab-list .chat-tab:not(.content-tab)').click()"
+        )
         page.wait_for_selector("#output", state="visible", timeout=15000)
         page.evaluate("document.activeElement.blur()")
         page.keyboard.press("PageDown")
-        page.locator(".chat-tab", has_text="pages8.pdf").first.click()
+        page.locator("#tab-list .chat-tab", has_text="pages8.pdf").first.click()
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
         assert _pdf_scroll_top(page) == page_two
         _assert_pdf_page_at_top(page, 2)
@@ -2097,7 +2108,9 @@ def test_pdf_keyboard_shortcuts_move_pages_and_zoom(browser, harness, worktree):
         page.keyboard.press("PageDown")
         _assert_pdf_page_at_top(page, 3)
         # Closing the tab takes the listener with it: the key is nobody's.
-        page.locator(".chat-tab.active .chat-tab-close").click()
+        # (The chat's main-row entry is highlighted as well, so the
+        # active tab's close button is the strip's.)
+        page.locator("#tab-list .chat-tab.active .chat-tab-close").click()
         page.wait_for_function(
             "() => document.querySelectorAll('.pdf-viewer').length === 0", timeout=15000
         )

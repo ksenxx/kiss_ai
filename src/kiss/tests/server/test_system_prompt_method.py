@@ -7,9 +7,12 @@
 The method receives the assembled system prompt and returns the one the
 run uses; :func:`apply_agent_overrides`, the daemon-side loader, stages
 it as the ``systemPromptHook`` callable the daemon applies once the
-prompt is assembled.  The caller's ``appendToSystemPrompt`` and the
-``channel`` kind's preamble stay on the ``appendToSystemPrompt`` field,
-which the hook never touches.
+prompt is assembled.  The hook is written on EVERY run (``BaseSea`` is
+the root of the chain; it is the identity when nothing overrides the
+method), so it is never reported among the overridden fields.  The
+caller's ``appendToSystemPrompt`` and the ``channel`` kind's preamble
+stay on the ``appendToSystemPrompt`` field, which the hook never
+touches.
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ def test_method_is_staged_as_the_hook_and_receives_the_assembled_prompt(
     """``system_prompt()`` becomes ``systemPromptHook``; nothing is evaluated at staging."""
     script = _script(tmp_path, _PROTOCOL_SEA)
     cmd: dict[str, Any] = {"agentPath": script}
-    assert apply_agent_overrides(cmd) == {"systemPromptHook"}
+    assert apply_agent_overrides(cmd) == set()
     assert "appendToSystemPrompt" not in cmd
     assert "systemPrompt" not in cmd
     assert cmd["systemPromptHook"]("BASE") == "BASE\n\nPROTOCOL"
@@ -54,7 +57,7 @@ def test_callers_suffix_stays_on_its_field(tmp_path: Path) -> None:
     """The caller's ``appendToSystemPrompt`` survives untouched next to the hook."""
     script = _script(tmp_path, _PROTOCOL_SEA)
     cmd: dict[str, Any] = {"agentPath": script, "appendToSystemPrompt": "CALLER"}
-    assert apply_agent_overrides(cmd) == {"systemPromptHook"}
+    assert apply_agent_overrides(cmd) == set()
     assert cmd["appendToSystemPrompt"] == "CALLER"
     assert cmd["systemPromptHook"]("BASE\n\nCALLER") == "BASE\n\nCALLER\n\nPROTOCOL"
 
@@ -83,7 +86,8 @@ class Sea(BaseSea):
     )
     cmd: dict[str, Any] = {"agentPath": script, "appendToSystemPrompt": "CALLER"}
     overridden = apply_agent_overrides(cmd)
-    assert {"systemPromptHook", "appendToSystemPrompt"} <= overridden
+    assert "appendToSystemPrompt" in overridden
+    assert "systemPromptHook" not in overridden
     assert cmd["appendToSystemPrompt"] == (
         "CALLER\n\n" + CHANNEL_PREAMBLE.format(name="adder")
     )
@@ -133,7 +137,7 @@ class Sea(BaseSea):
 """,
     )
     cmd: dict[str, Any] = {"agentPath": script, "appendToSystemPrompt": "CALLER"}
-    assert apply_agent_overrides(cmd) == {"systemPromptHook"}
+    assert apply_agent_overrides(cmd) == set()
     assert cmd["appendToSystemPrompt"] == "CALLER"
     with pytest.raises(
         SeaScriptError,

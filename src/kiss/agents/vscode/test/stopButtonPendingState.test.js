@@ -79,8 +79,10 @@ function click(win, el) {
 }
 
 function clickTab(win, tabId) {
+  // The chat tabs live on the main row; the strip under it lists the
+  // group of the chat on screen.
   const el = Array.from(
-    win.document.querySelectorAll('#tab-list .chat-tab'),
+    win.document.querySelectorAll('#main-tab-list .chat-tab'),
   ).find(e => e.dataset.tabId === tabId);
   assert.ok(el, 'tab ' + tabId + ' must be in the tab bar');
   click(win, el);

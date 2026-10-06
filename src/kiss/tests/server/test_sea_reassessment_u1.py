@@ -362,8 +362,10 @@ def test_wait_false_keeps_its_notice_and_the_daemon_wait_has_no_deadline(
     calls: list[dict[str, Any]] = []
 
     def fake_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        # A daemon whose task ends before any ``status running=true``:
+        # the stand-in leaves ``running`` to the job thread, which sets
+        # it after recording the result.
         calls.append({"prompt": prompt, **kwargs})
-        kwargs["running"].set()
         return daemon_client.TaskResult(text="done", success=True, cost=0.0, tokens=1, steps=1)
 
     monkeypatch.setattr(daemon_client, "run", fake_run)
@@ -377,25 +379,24 @@ class Sea(BaseSea):
         return settings | {'timeout': 45}
 """)
     out = make_run_agent_tool(str(tmp_path))("say hi", str(script), wait="false")
-    assert re.match(
-        r"Started the helper agent task as job agent-[0-9a-f]{8}; its tab is open\. "
-        r"agent_job\('agent-[0-9a-f]{8}', 'wait'\) blocks until it finishes", out,
-    ), out
-    assert "Wait for or kill it before finishing; a job still running when this task ends" in out
+    # The stand-in finishes the task without a tab, so the woken call
+    # finds the result recorded and answers with it (no job is left for
+    # ``agent_job``); a task still running gets the "Started ..." notice
+    # instead (``test_audit1005_agent_job_finished``).
+    collected = yaml.safe_load(out)
+    assert collected["success"] is True and collected["summary"] == "done"
+    assert "timeout=45s" in collected["ran"]
+    assert agent_dispatch.notice_job_id(out) == ""
+    assert agent_dispatch.agent_jobs_of(None) == {}
     (call,) = calls
     assert call["timeout"] is None
     assert call["record_timeout"] == 45.0
     assert "stop_on_timeout" not in call
     assert isinstance(call["cancel"], threading.Event)
-    job_id = agent_dispatch.notice_job_id(out)
-    collected = yaml.safe_load(make_agent_job_tool()(job_id, "wait"))
-    assert collected["success"] is True and collected["summary"] == "done"
-    assert "timeout=45s" in collected["ran"]
-    # A blocking call that finishes in time leaves nothing registered.
+    # A blocking call that finishes in time leaves nothing registered either.
     out = make_run_agent_tool(str(tmp_path))("say hi again", str(script))
     assert yaml.safe_load(out)["summary"] == "done"
-    assert list(agent_dispatch.agent_jobs_of(None)) == [job_id]
-    assert agent_dispatch.notice_job_id(out) == ""
+    assert agent_dispatch.agent_jobs_of(None) == {}
     assert agent_dispatch.notice_job_id("Error: no such agent") == ""
 
 

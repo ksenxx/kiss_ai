@@ -209,7 +209,7 @@ class TestScopedReplayResubscribeGap(TabMirroringBase):
             printer.agent_task_allocated(agent, persisted_id, chat_id)
             vs._on_run_task_id_allocated(
                 str(persisted_id), chat_id,
-                source_tab_id="tab-t", conn_id="", start_ms=0,
+                source_tab_id="tab-t", start_ms=0,
             )
 
         def emit() -> None:

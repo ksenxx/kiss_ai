@@ -26,9 +26,11 @@ real daemon-side loader and the real dispatch code:
    string when absent) and stage the ``system_prompt`` and ``tools``
    methods as the daemon-side ``systemPromptHook`` / ``toolsHook``.
 4. The dispatch layer ``_dispatch`` MUST thread the calling task's
-   ``last_task_id`` to the daemon as ``parent_task_id`` and pass the
+   ``last_task_id`` to the daemon as ``parentTaskId`` and pass the
    caller's ``append_to_prompt`` through verbatim: the substitution is
    the daemon's job now, so no dispatch-side rewrite touches the text.
+   The ``run`` command is read off a local daemon stand-in
+   (``RecordingDaemon``) the real ``daemon_client.run`` connects to.
 """
 
 from __future__ import annotations
@@ -42,13 +44,15 @@ import pytest
 
 from kiss.agents.seas.ask import ask_sea
 from kiss.agents.seas.ask.ask_sea import AskSea
-from kiss.agents.sorcar import agent_dispatch, sea_commands
+from kiss.agents.sorcar import agent_dispatch, daemon_client, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
 from kiss.agents.sorcar.agent_file import apply_agent_overrides
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.brand import BRAND, render_brand
 from kiss.core.config import kiss_home
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 # The placeholder the daemon substitutes with the calling task's id.
 _PLACEHOLDER = "{task_id}"
@@ -336,12 +340,14 @@ def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
     (which replaces the assembled prompt) and ``tools`` on the
     daemon-side ``toolsHook`` (which appends ``task_context``).  No
     ``systemPrompt`` / ``appendToSystemPrompt`` / ``tools`` field is
-    written any more.
+    written any more.  The four hook fields are written on every run
+    (identities where the SEA overrides nothing), so the returned set
+    lists only the settings and the rewritten ``prompt``.
     """
     cmd: dict[str, Any] = {"agentPath": _ASK_PATH, "prompt": "why did the run fail?"}
     overridden = apply_agent_overrides(cmd)
     assert overridden == {
-        "systemPromptHook", "prompt", "toolProfile", "toolsHook",
+        "prompt", "toolProfile",
         "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
     }
     assert cmd["systemPromptHook"]("ASSEMBLED PROMPT") == _EXPECTED_SYSTEM_PROMPT
@@ -355,8 +361,13 @@ def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
     assert [tool.__name__ for tool in cmd["toolsHook"]([])] == ["task_context"]
     assert all(callable(tool) for tool in cmd["toolsHook"]([]))
     for field in ("systemPrompt", "appendToSystemPrompt", "tools", "appendBasicTools",
-                  "toolsFile", "llmCallHook", "toolCallHook"):
+                  "toolsFile"):
         assert field not in cmd, field
+    # The SEA overrides neither call hook: the staged ones are identities.
+    assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
+        {"role": "user", "content": "x"}
+    ]
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == "OK"
     # The question opens the prompt; ``prompt()`` appends the task framing.
     assert cmd["prompt"].startswith("why did the run fail?\n\n")
 
@@ -429,11 +440,13 @@ def test_apply_agent_overrides_keeps_the_callers_suffixes_and_stages_the_hook() 
 def test_apply_agent_overrides_leaves_a_callers_placeholder_alone_without_prompt_method(
     tmp_path: Path,
 ) -> None:
-    """The substitution is a property of ``prompt()``'s result, not of the wire fields.
+    """The substitution is a property of what a ``prompt()`` method writes.
 
-    A SEA whose class defines no ``prompt`` leaves the task text and the
-    caller's ``appendToPrompt`` untouched: a literal ``{task_id}`` in
-    the caller's own text reaches the run unchanged.
+    A SEA whose class defines no ``prompt`` runs the task text through
+    the identity ``prompt()`` of :class:`BaseSea` only, which leaves
+    it untouched: a literal ``{task_id}`` in the caller's own text
+    reaches the run unchanged, and so does the caller's
+    ``appendToPrompt`` (a wire field, not a ``prompt()`` result).
     """
     other = tmp_path / "other_sea.py"
     other.write_text(_EMPTY_SEA, encoding="utf-8")
@@ -476,7 +489,7 @@ class Sea(BaseSea):
 
 
 def test_add_to_prompt_is_not_a_setting(tmp_path: Path) -> None:
-    """A script declaring ``add_to_prompt`` in ``settings()`` MUST fail as an unknown key."""
+    """A script declaring ``add_to_prompt`` in ``settings()`` MUST be refused (it is an option)."""
     script = tmp_path / "old_sea.py"
     script.write_text(
         """
@@ -488,7 +501,7 @@ class Sea(BaseSea):
 """,
         encoding="utf-8",
     )
-    with pytest.raises(sea_commands.SeaError, match=r"has an unknown key 'add_to_prompt'"):
+    with pytest.raises(sea_commands.SeaError, match=r"key 'add_to_prompt' was removed: .*prompt"):
         sea_commands.sea_settings(script)
 
 
@@ -497,54 +510,31 @@ class Sea(BaseSea):
 # ---------------------------------------------------------------------------
 
 
-class _StubAgent:
-    """Minimal stand-in for a ChatSorcarAgent with a persisted task id.
+def _parent_with_task_id(task_id: str) -> ChatSorcarAgent:
+    """A ``ChatSorcarAgent`` carrying the persisted row id a real ``run`` leaves behind.
 
-    :func:`_persisted_task_id` reads ``last_task_id``; nothing else on
-    the agent is touched before ``daemon_client.run`` fires.  A
-    stopper exception on ``daemon_client.run`` lets the test capture
-    the outbound arguments without running the daemon.
+    ``_last_task_id`` is the per-run attribute ``run`` assigns (and
+    ``last_task_id`` reads under the agent's lock); setting it directly
+    keeps the dispatch tests independent of a model endpoint.
     """
-
-    def __init__(self, task_id: str) -> None:
-        self.last_task_id = task_id
-
-
-class _DispatchCaptured(BaseException):
-    """Raised from the daemon stub to stop dispatch and carry kwargs.
-
-    Inherits :class:`BaseException` (not :class:`Exception`) so it is
-    NOT caught by the generic ``except Exception`` in
-    :func:`dispatch_result` that turns any daemon failure into an
-    "Error:" string — the test needs the exception to propagate up so
-    it can read the captured kwargs.
-    """
-
-    def __init__(self, kwargs: dict[str, Any]) -> None:
-        super().__init__("captured")
-        self.kwargs = kwargs
-
-
-def _install_daemon_capture(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace ``daemon_client.run`` with a capture that raises."""
-    from kiss.agents.sorcar import daemon_client
-
-    def _fake_run(prompt: str, **kwargs: Any) -> str:
-        kwargs["prompt"] = prompt
-        raise _DispatchCaptured(kwargs)
-
-    monkeypatch.setattr(daemon_client, "run", _fake_run)
+    parent = ChatSorcarAgent("ask-parent")
+    parent._last_task_id = task_id
+    return parent
 
 
 def _run_dispatch(
     agent_path: str, options: RunOptions, parent_task_id: str,
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> dict[str, Any]:
-    """Drive :func:`dispatch_result` and return the captured kwargs."""
-    _install_daemon_capture(monkeypatch)
-    parent = _StubAgent(parent_task_id)
+    """Drive :func:`dispatch_result` through the real ``daemon_client.run``.
+
+    The daemon is a local stand-in reached through ``KISS_SORCAR_LOCAL``;
+    the ``run`` command it received is returned.
+    """
+    daemon = RecordingDaemon()
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     try:
-        agent_dispatch.dispatch_result(
+        result = agent_dispatch.dispatch_result(
             name="ask",
             prompt="why did the last step fail?",
             agent_path=agent_path,
@@ -552,20 +542,23 @@ def _run_dispatch(
             model_name="",
             budget=None,
             timeout=1.0,
-            parent_agent=parent,
+            parent_agent=_parent_with_task_id(parent_task_id),
             scope_work_dir="",
             options=options,
             settings=sea_commands.sea_settings(Path(agent_path)),
         )
-    except _DispatchCaptured as captured:
-        return captured.kwargs
-    raise AssertionError("daemon_client.run was not invoked")
+    finally:
+        daemon.close()
+    assert isinstance(result, daemon_client.TaskResult), result
+    assert result.text == "ok"
+    (command,) = daemon.run_commands
+    return command
 
 
 def test_dispatch_threads_the_parent_task_id_and_passes_the_text_through(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """``_dispatch`` MUST send the caller's id as ``parent_task_id`` and not rewrite text.
+    """``_dispatch`` MUST send the caller's id as ``parentTaskId`` and not rewrite text.
 
     The daemon substitutes ``{task_id}`` from that ``parentTaskId``
     (section 3), so the dispatcher no longer touches
@@ -579,28 +572,28 @@ def test_dispatch_threads_the_parent_task_id_and_passes_the_text_through(
             add_to_prompt=text,
             add_to_system_prompt="caller system text",
         )
-        captured = _run_dispatch(
+        command = _run_dispatch(
             _ASK_PATH, options, parent_task_id="task-abc-123",
             monkeypatch=monkeypatch, tmp_path=tmp_path,
         )
-        assert captured["append_to_prompt"] == text
-        assert captured["append_to_system_prompt"] == "caller system text"
-        assert captured["parent_task_id"] == "task-abc-123"
-        assert captured["extension_agent_path"] == _ASK_PATH
-        assert captured["prompt"] == "why did the last step fail?"
+        assert command["appendToPrompt"] == text
+        assert command["appendToSystemPrompt"] == "caller system text"
+        assert command["parentTaskId"] == "task-abc-123"
+        assert command["agentPath"] == _ASK_PATH
+        assert command["prompt"] == "why did the last step fail?"
 
 
 def test_dispatch_with_an_empty_parent_task_id_sends_an_empty_parent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """A caller without a persisted row MUST dispatch a top-level task (empty parent)."""
-    captured = _run_dispatch(
+    command = _run_dispatch(
         _ASK_PATH, RunOptions(), parent_task_id="",
         monkeypatch=monkeypatch, tmp_path=tmp_path,
     )
-    assert captured["parent_task_id"] == ""
-    assert captured["parent_tab_id"] == ""
-    assert captured["append_to_prompt"] == ""
+    assert command["parentTaskId"] == ""
+    assert command["parentTabId"] == ""
+    assert command["appendToPrompt"] == ""
 
 
 def test_ask_sea_is_not_advertised_as_a_channel() -> None:

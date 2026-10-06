@@ -113,6 +113,86 @@ def test_model_base_url_override_bypasses_routing() -> None:
     assert m.model_config == {"extra": 1}
 
 
+def test_model_base_url_override_without_api_key_never_builds_keyless_client() -> None:
+    """A base_url override that names no api_key resolves a non-empty key.
+
+    The OpenAI SDK rejects ``api_key=""`` at construction.  A registered
+    vendor's own host gets exactly that vendor's key; every other
+    endpoint gets the fixed placeholder key-less local servers ignore,
+    so a secret is never sent to a host it was not configured for.
+    """
+    from kiss.core import config as config_module
+    from kiss.core.models.model_info import KEYLESS_ENDPOINT_TOKEN
+    from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+    def endpoint_key(name: str, config: dict[str, Any]) -> str:
+        m = model(name, model_config=config)
+        assert isinstance(m, OpenAICompatibleModel)
+        return m.api_key
+
+    keys = config_module.DEFAULT_CONFIG
+    names = ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ZAI_API_KEY")
+    saved = {name: getattr(keys, name) for name in names}
+    gateway = "http://my-gateway.local/v1"
+    openrouter = "https://openrouter.ai/api/v1"
+    try:
+        for name in names:
+            setattr(keys, name, f"{name.lower()}-value")
+        # The vendor's own host gets that vendor's key, whatever the model name.
+        assert endpoint_key("gpt-4o-mini", {"base_url": openrouter}) == "openrouter_api_key-value"
+        # Only the parsed hostname counts: a vendor host in the path, a
+        # look-alike host or an unknown gateway never receives a secret,
+        # not even the key of the vendor the model name routes to.
+        for url in ("http://127.0.0.1:1/openrouter.ai/v1", "https://openrouter.ai.evil.example/v1"):
+            assert endpoint_key("gpt-4o-mini", {"base_url": url}) == KEYLESS_ENDPOINT_TOKEN, url
+        assert endpoint_key("glm-4.5", {"base_url": gateway}) == KEYLESS_ENDPOINT_TOKEN
+        # An explicit key is always used verbatim.
+        assert endpoint_key("glm-4.5", {"base_url": gateway, "api_key": "k"}) == "k"
+        # A vendor host whose own key is missing never gets another vendor's.
+        keys.OPENROUTER_API_KEY = ""
+        assert endpoint_key("gpt-4o-mini", {"base_url": openrouter}) == KEYLESS_ENDPOINT_TOKEN
+        m = model("claude-test-model", model_config={"base_url": gateway})
+        assert isinstance(m, OpenAICompatibleModel)
+        assert m.api_key == KEYLESS_ENDPOINT_TOKEN
+        m.initialize("hi")  # the SDK accepts the placeholder where "" raised
+        assert m.client is not None
+    finally:
+        for name, value in saved.items():
+            setattr(keys, name, value)
+
+
+def test_decisions_model_endpoint_override_never_inherits_the_openrouter_key() -> None:
+    """A key-less ``base_url`` override of a decisions model follows the hostname rule.
+
+    The default endpoint keeps the OpenRouter key; any other endpoint
+    gets the placeholder, and an explicit key is used verbatim.
+    """
+    from kiss.core import config as config_module
+    from kiss.core.models.decisions_model import OPENROUTER_DECISIONS_BASE_URL, DecisionsModel
+    from kiss.core.models.model_info import KEYLESS_ENDPOINT_TOKEN
+
+    keys = config_module.DEFAULT_CONFIG
+    saved = keys.OPENROUTER_API_KEY
+    name = "openrouter/~typesafe/jev-latest"
+    try:
+        keys.OPENROUTER_API_KEY = "openrouter-secret"
+        cases = {
+            None: "openrouter-secret",
+            OPENROUTER_DECISIONS_BASE_URL: "openrouter-secret",
+            "http://127.0.0.1:1/decisions": KEYLESS_ENDPOINT_TOKEN,
+        }
+        for base_url, expected in cases.items():
+            config = {} if base_url is None else {"base_url": base_url}
+            m = model(name, model_config=config)
+            assert isinstance(m, DecisionsModel)
+            assert m.api_key == expected, base_url
+        m = model(name, model_config={"base_url": "http://127.0.0.1:1/decisions", "api_key": "k"})
+        assert isinstance(m, DecisionsModel)
+        assert m.api_key == "k"
+    finally:
+        keys.OPENROUTER_API_KEY = saved
+
+
 def test_strip_provider_prefix() -> None:
     """Harbor-style provider prefixes are stripped only for redundant routes."""
     assert _strip_provider_prefix("openai/gpt-5.4") == "gpt-5.4"

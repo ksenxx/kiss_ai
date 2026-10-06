@@ -181,8 +181,6 @@ RENAMED_SETTINGS = {
     "classify_tasks": "auto_classify",
     "preset": "kind",
     "model_name": "model",
-    "append_to_prompt": "add_to_prompt",
-    "append_to_system_prompt": "add_to_system_prompt",
 }
 """Former settings keys and their current names.
 
@@ -191,14 +189,26 @@ wire field ``isParallel``); ``auto_classify`` whether the daemon's
 classifier decides the run's worktree mode (``classifyTasks``);
 ``kind`` is the one axis that used to be split into ``preset``
 (``session`` / ``worker`` / ``channel``) and ``kind`` (``agent`` /
-``channel``); ``model_name``, ``append_to_prompt`` and
-``append_to_system_prompt`` are the ``run()`` parameter and wire
-spellings callers keep reaching for in place of the settings keys
-``model``, ``add_to_prompt`` and ``add_to_system_prompt``.  The old
-names are refused — in a script's ``settings()`` and in a
-``run_agent`` / ``run_parallel`` ``options`` object alike — with a
-message naming the new one; ``sea lint --fix`` rewrites them in a
-script.
+``channel``); ``model_name`` is the ``run()`` parameter callers keep
+reaching for in place of the settings key ``model``.  The old names
+are refused — in a script's ``settings()`` and in a ``run_agent`` /
+``run_parallel`` ``options`` object alike — with a message naming the
+new one; ``sea lint --fix`` rewrites them in a script.
+"""
+
+RENAMED_OPTIONS = {
+    **RENAMED_SETTINGS,
+    "append_to_prompt": "add_to_prompt",
+    "append_to_system_prompt": "add_to_system_prompt",
+}
+"""Former ``options`` keys of ``run_agent`` / ``run_parallel`` and their current names.
+
+:data:`RENAMED_SETTINGS` plus the two prompt suffixes, which are
+options only — ``append_to_prompt`` and ``append_to_system_prompt``
+are the ``run()`` parameter spellings of the options ``add_to_prompt``
+and ``add_to_system_prompt``.  In a script's ``settings()`` those keys
+are refused as removed (:data:`REMOVED_SETTINGS`): a SEA shapes the
+prompts in its ``prompt`` and ``system_prompt`` methods instead.
 """
 
 PROFILE_ALIASES = {"readonly": "review", "read_only": "review", "read-only": "review"}
@@ -226,9 +236,22 @@ def alias_free_profile(name: str) -> str:
     return "+".join(PROFILE_ALIASES.get(p.strip(), p.strip()) for p in name.split("+"))
 
 
+_PROMPT_SUFFIX_REMOVED = (
+    "a SEA shapes the task text in its `prompt(task)` method; `add_to_prompt` is a "
+    "`run_agent` option, not a setting"
+)
+_SYSTEM_PROMPT_SUFFIX_REMOVED = (
+    "a SEA shapes the system prompt in its `system_prompt(system_prompt)` method; "
+    "`add_to_system_prompt` is a `run_agent` option, not a setting"
+)
+
 REMOVED_SETTINGS = {
     "inherit": "a `channel` run never inherits from the calling task and every other kind "
                "always does; the caller's `inherit` option opts out of inheriting",
+    "append_to_prompt": _PROMPT_SUFFIX_REMOVED,
+    "add_to_prompt": _PROMPT_SUFFIX_REMOVED,
+    "append_to_system_prompt": _SYSTEM_PROMPT_SUFFIX_REMOVED,
+    "add_to_system_prompt": _SYSTEM_PROMPT_SUFFIX_REMOVED,
     "append_basic_tools": "the built-in toolset is chosen by `tool_profile` (`none` gives a "
                           "run no built-in tools)",
     "extends": "a SEA extends another by Python inheritance: derive the SEA class from the "

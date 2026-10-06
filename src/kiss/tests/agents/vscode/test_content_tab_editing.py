@@ -279,8 +279,10 @@ class TestContentTabEditing:
             _open_editor(page, str(path), "lnk-e5")
             _type_at_end(page, "kept = True")
             page.wait_for_selector(_DIRTY_TAB, timeout=10000)
-            # Back to the chat, then click the link again.
-            page.click(".chat-tab:not(.content-tab) .chat-tab-label")
+            # Back to the chat (its entry on the group strip; the main
+            # row's entry would return to the file last viewed), then
+            # click the link again.
+            page.click("#tab-list .chat-tab:not(.content-tab) .chat-tab-label")
             page.wait_for_selector("#task-input", state="visible")
             page.click("#lnk-e5")
             page.wait_for_selector("#content-tab-area", state="visible")

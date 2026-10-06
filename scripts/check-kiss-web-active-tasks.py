@@ -45,6 +45,11 @@ Environment
   (default ``2.0``; ``5.0`` on Windows, where a refused loopback
   connect is only reported after ~2 s of SYN retransmits and would
   otherwise be mistaken for a timeout, i.e. a live daemon).
+* ``KISS_ACTIVE_TASKS_STRICT`` — when set to ``1``, a daemon that does
+  not understand ``activeTasksQuery`` exits ``1`` instead of ``0``: it
+  may well be running tasks, it just cannot say.  This is the
+  ``unsupported-query`` policy of ``daemonHealth.js``; install.sh's
+  runtime setup uses it because it restarts a daemon it did not build.
 """
 
 from __future__ import annotations
@@ -100,12 +105,13 @@ def _read_endpoint(endpoint_file: Path) -> tuple[str, str, str | None] | None:
 
 
 def _probe_active_tasks(
-    endpoint_file: Path, timeout: float,
+    endpoint_file: Path, timeout: float, strict: bool = False,
 ) -> tuple[int, str]:
     """Probe the kiss-web daemon for active tasks.
 
     Returns a ``(exit_code, message)`` tuple.  ``exit_code`` follows
-    the module docstring's contract (0 safe, 1 unsafe).  ``message``
+    the module docstring's contract (0 safe, 1 unsafe; with *strict*
+    a daemon that cannot answer the query is unsafe too).  ``message``
     is a single human-readable line written to stderr by ``main``.
 
     The reader is a loop rather than a single ``recv`` because the
@@ -161,6 +167,13 @@ def _probe_active_tasks(
                     msg = candidate
                     break
                 if kind == "old-daemon":
+                    if strict:
+                        return 1, (
+                            f"kiss-web daemon at {url} predates the "
+                            "activeTasksQuery handler; its tasks are "
+                            "unknown.  Refusing to kill — set "
+                            "KISS_FORCE_RESTART=1 to override."
+                        )
                     return 0, (
                         f"kiss-web daemon at {url} predates the "
                         "activeTasksQuery handler (responded 'Unknown "
@@ -215,7 +228,8 @@ def main(argv: list[str] | None = None) -> int:
         ))
     except ValueError:
         timeout = DEFAULT_TIMEOUT
-    exit_code, message = _probe_active_tasks(endpoint_file, timeout)
+    strict = os.environ.get("KISS_ACTIVE_TASKS_STRICT") == "1"
+    exit_code, message = _probe_active_tasks(endpoint_file, timeout, strict)
     print(message, file=sys.stderr)
     return exit_code
 

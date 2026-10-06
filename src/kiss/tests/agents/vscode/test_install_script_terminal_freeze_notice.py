@@ -13,14 +13,14 @@ Covered contracts
    progress (``~/.kiss/install.log``).
 2. The install must still complete (marker written, completion banner
    logged) when the terminal dies mid-step.
-3. ``install.sh`` must NEVER touch the kiss-web daemon: no kill, no
-   ``~/.kiss/sorcar-local.json`` (local endpoint file) removal, no
-   ``launchctl kickstart`` /
-   ``systemctl restart``.  Restarting kiss-web is owned entirely by the
-   VS Code extension's DependencyInstaller (``restartKissWebDaemon``,
-   fingerprint mismatch after the reload), which also defers while tasks
-   are in flight — so running ``install.sh`` can never clobber an
-   in-flight agent run.
+3. Without an installed copy of the extension to run it from (this
+   sandbox has none), ``install.sh`` must NOT touch the kiss-web daemon:
+   no kill, no ``~/.kiss/sorcar-local.json`` (local endpoint file)
+   removal, no ``launchctl kickstart`` / ``systemctl restart``.  The
+   daemon restart that step [5/5] performs once a bundled runtime exists
+   (``start_kiss_web_daemon``), and its refusal to restart a daemon with
+   tasks in flight, are covered by
+   ``kiss.tests.test_install_runtime_setup``.
 
 What these tests do
 ===================
@@ -69,9 +69,25 @@ _END_MARKER = "# END: kiss-step-5-5-terminal-freeze"
 
 _COMPLETE_LINE = "=== Source bootstrap complete ==="
 _CODE_STUB_DONE = "Extension 'kiss-sorcar.vsix' was successfully installed."
-_LAST_BLOCK_LINE = "remote access auth, and kiss-web."
+_LAST_BLOCK_LINE = "or in the web app's settings."
 
 _NOTICE_SNIPPET = "NOT stuck"
+
+_RUNTIME_BEGIN_MARKER = "# BEGIN: kiss-runtime-setup"
+_RUNTIME_END_MARKER = "# END: kiss-runtime-setup"
+
+
+def _extract_runtime_block() -> str:
+    """Return the verbatim runtime-setup block (the functions step [5/5] calls)."""
+    src = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert _RUNTIME_BEGIN_MARKER in src, (
+        f"install.sh missing '{_RUNTIME_BEGIN_MARKER}'; the runtime-setup "
+        "functions must be bracketed by BEGIN/END markers for verbatim extraction."
+    )
+    begin_idx = src.index(_RUNTIME_BEGIN_MARKER)
+    end_idx = src.index(_RUNTIME_END_MARKER, begin_idx)
+    begin_eol = src.index("\n", begin_idx) + 1
+    return src[begin_eol:end_idx]
 
 
 def _extract_step_5_5_block() -> str:
@@ -244,6 +260,8 @@ def _build_sandbox(
             """
         )
         + _extract_guard_function()
+        + "\n"
+        + _extract_runtime_block()
         + "\n{\n"
         + block
         + textwrap.dedent(
@@ -420,13 +438,14 @@ def test_install_completes_when_terminal_dies_mid_step_5_5(
 
 
 def test_step_5_5_never_touches_kiss_web(tmp_path: Path) -> None:
-    """``install.sh`` must not stop, restart, or otherwise touch kiss-web.
+    """Without a bundled runtime, ``install.sh`` must leave kiss-web alone.
 
     Even with a supervisor config whose binary exists and is executable
     (i.e. a restart WOULD succeed right now), the block must leave the
-    running daemon, its local endpoint file, and the supervisors alone.
-    Restarting kiss-web is owned by the extension's DependencyInstaller
-    (``restartKissWebDaemon``) during extension installation/activation.
+    running daemon, its local endpoint file, and the supervisors alone
+    when no installed copy of the extension provides a kiss-web to
+    restart from; the old daemon keeps serving until the extension's
+    DependencyInstaller (``restartKissWebDaemon``) takes over.
     """
     harness, log = _build_sandbox(tmp_path)
     proc, master = _spawn_on_pty(harness)

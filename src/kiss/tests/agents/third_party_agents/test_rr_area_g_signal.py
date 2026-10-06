@@ -44,18 +44,20 @@ class TestSendSignalMessage(unittest.TestCase):
     """send_signal_message delegates to send_message and reports JSON."""
 
     def setUp(self) -> None:
-        """Install a real executable signal-cli stub on PATH."""
-        self._tmpdir = tempfile.mkdtemp(prefix="rr-area-g-signal-")
-        install_cli_script(Path(self._tmpdir) / "signal-cli", _FAKE_SIGNAL_CLI)
-        self._old_path = os.environ["PATH"]
-        os.environ["PATH"] = self._tmpdir + os.pathsep + self._old_path
+        """Install a real executable signal-cli stub on PATH.
+
+        Each mutation registers its undo at once, so a failure later in
+        ``setUp`` (where ``tearDown`` does not run) still restores PATH
+        and removes the stub directory.
+        """
+        tmpdir = tempfile.mkdtemp(prefix="rr-area-g-signal-")
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        install_cli_script(Path(tmpdir) / "signal-cli", _FAKE_SIGNAL_CLI)
+        old_path = os.environ["PATH"]
+        self.addCleanup(os.environ.__setitem__, "PATH", old_path)
+        os.environ["PATH"] = tmpdir + os.pathsep + old_path
         self._backend = SignalChannelBackend()
         self._backend._phone_number = "+1BOT"
-
-    def tearDown(self) -> None:
-        """Restore PATH and remove the stub."""
-        os.environ["PATH"] = self._old_path
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_success_returns_ok(self) -> None:
         """A successful CLI send yields {"ok": true}."""

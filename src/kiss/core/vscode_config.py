@@ -981,23 +981,44 @@ def load_api_keys_readonly() -> None:
     :func:`_parse_env_assignment` rules and the in-memory
     ``DEFAULT_CONFIG`` is refreshed, but the filesystem-writing steps
     (the legacy-RC migration and the systemd-mirror retirement) are
-    skipped.  A store that cannot even be read is silently treated as
-    empty, matching :func:`load_api_keys`.
+    skipped.  A store that cannot even be read is treated as empty,
+    exactly as in :func:`load_api_keys` (same importer).
     """
     with _config_lock:
+        _import_api_keys_store()
+
+
+def _import_api_keys_store() -> None:
+    """Import every assignment of the canonical key store into ``os.environ``.
+
+    The one importer behind :func:`load_api_keys` and
+    :func:`load_api_keys_readonly`: the store is parsed with
+    :func:`_parse_env_assignment`, each value lands in ``os.environ``
+    and :func:`_refresh_config` syncs ``DEFAULT_CONFIG``.  A missing
+    store is empty; one that cannot be read is logged and treated as
+    empty too, so a bad store never stops a daemon or CLI start.  The
+    caller holds :data:`_config_lock`.
+    """
+    env_path = api_keys_env_path()
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    except OSError:
+        logger.warning("Failed to read %s", env_path, exc_info=True)
+        text = ""
+    for line in text.splitlines():
+        parsed = _parse_env_assignment(line)
+        if parsed is None:
+            continue
         try:
-            text = api_keys_env_path().read_text(encoding="utf-8")
-        except OSError:
-            return
-        for line in text.splitlines():
-            parsed = _parse_env_assignment(line)
-            if parsed is None:
-                continue
-            try:
-                os.environ[parsed[0]] = parsed[1]
-            except ValueError:
-                continue
-        _refresh_config()
+            os.environ[parsed[0]] = parsed[1]
+        except ValueError:
+            # A hand-edited (or historically poisoned) line whose value
+            # embeds a NUL: os.environ refuses it.  One junk line must
+            # not abort daemon startup and drop every following key.
+            logger.warning("Skipping unusable %s line for %s", env_path.name, parsed[0])
+    _refresh_config()
 
 
 def load_api_keys() -> None:
@@ -1036,27 +1057,7 @@ def load_api_keys() -> None:
     _migrate_legacy_rc_keys()
     _remove_systemd_mirror()
     with _config_lock:
-        env_path = api_keys_env_path()
-        try:
-            text = env_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            text = ""
-        except OSError:
-            logger.warning("Failed to read %s", env_path, exc_info=True)
-            text = ""
-        for line in text.splitlines():
-            parsed = _parse_env_assignment(line)
-            if parsed is None:
-                continue
-            try:
-                os.environ[parsed[0]] = parsed[1]
-            except ValueError:
-                # A hand-edited (or historically poisoned) line whose value
-                # embeds a NUL: os.environ refuses it.  One junk line must
-                # not abort daemon startup and drop every following key.
-                logger.warning("Skipping unusable %s line for %s",
-                               env_path.name, parsed[0])
-        _refresh_config()
+        _import_api_keys_store()
 
 
 _MIGRATION_TIMEOUT_S = 5.0

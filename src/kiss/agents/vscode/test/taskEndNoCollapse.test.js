@@ -247,15 +247,23 @@ function testTabSwitchAfterFinishKeepsPanels() {
     m => m.type === 'resumeSession' && m.taskId === 'other-task',
   );
   const otherId = resume.tabId;
-  const otherTabEl = win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id="' + otherId + '"]',
-  );
+  const otherTabEl =
+    win.document.querySelector(
+      '#tab-list .chat-tab[data-tab-id="' + otherId + '"]',
+    ) ||
+    win.document.querySelector(
+      '#main-tab-list .chat-tab[data-tab-id="' + otherId + '"]',
+    );
   if (otherTabEl) {
     otherTabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   }
-  const finishedTabEl = win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id="' + tabId + '"]',
-  );
+  const finishedTabEl =
+    win.document.querySelector(
+      '#tab-list .chat-tab[data-tab-id="' + tabId + '"]',
+    ) ||
+    win.document.querySelector(
+      '#main-tab-list .chat-tab[data-tab-id="' + tabId + '"]',
+    );
   assert.ok(finishedTabEl, 'the finished tab is still listed');
   finishedTabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 
@@ -392,9 +400,13 @@ function testUnstampableTerminalEventsAreNoOps() {
   // The stop names a background tab with no streamed fragment; its
   // focusFinishedTab switch is undone by clicking home again.
   send(win, {type: 'task_stopped', tabId: resume.tabId});
-  const homeTabEl = win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id="' + tabId + '"]',
-  );
+  const homeTabEl =
+    win.document.querySelector(
+      '#tab-list .chat-tab[data-tab-id="' + tabId + '"]',
+    ) ||
+    win.document.querySelector(
+      '#main-tab-list .chat-tab[data-tab-id="' + tabId + '"]',
+    );
   assert.ok(homeTabEl, 'the original tab is still listed');
   homeTabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 

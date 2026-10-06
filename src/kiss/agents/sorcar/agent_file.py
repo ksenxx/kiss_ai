@@ -53,9 +53,9 @@ from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT, sea_pinned
 from kiss.agents.sorcar.sea_commands import (
     SeaScriptError,
     base_settings,
-    defines,
     evaluate_sea,
     sea_layers,
+    sea_name,
 )
 from kiss.agents.sorcar.sea_settings import (
     DISPATCHER_SETTINGS,
@@ -141,7 +141,10 @@ def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[BaseSea]:
 
     Args:
         cmd: The ``run`` command dict.  An absent, ``None`` or empty
-            ``agentPath`` means "no SEA": an empty list.
+            ``agentPath`` means "no SEA": the run is one of the bare
+            :class:`BaseSea` (``base_sea.py``), the root layer every
+            run goes through, so editing that file customizes every
+            run made from the chat.
         base: A SEA to lay under the file's (the tab's model-picker
             SEA), or ``None``.  With no ``agentPath`` the base alone is
             the run's SEA.
@@ -157,7 +160,7 @@ def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[BaseSea]:
     raw_path = cmd.get("agentPath")
     if raw_path is None or (isinstance(raw_path, str) and raw_path == ""):
         if base is None:
-            return []
+            return [BaseSea()]
         raw_path = str(base)
     if not isinstance(raw_path, str):
         raise AgentFileError(
@@ -182,21 +185,24 @@ def apply_agent_overrides(
     (:data:`SETTING_FIELDS`); ``prompt`` when a ``prompt`` method
     rewrote the task; ``appendToSystemPrompt`` extended with
     :data:`CHANNEL_PREAMBLE` (``kind: "channel"``); the daemon-side
-    fields :data:`DAEMON_SIDE_FIELDS` for the methods some class
-    defines.  The writes are atomic: they happen only after everything
-    has succeeded, so a broken SEA leaves the command untouched.
+    fields :data:`DAEMON_SIDE_FIELDS`, always (every chain starts at
+    :class:`BaseSea`, whose methods are identities unless
+    ``base_sea.py`` is customized).  The writes are atomic: they happen
+    only after everything has succeeded, so a broken SEA leaves the
+    command untouched.
 
     Args:
         cmd: The ``run`` command dict; mutated in place.
         seas: The already-loaded SEAs (:func:`load_layers`), so a run
             executes its files once; ``None`` loads them from the
-            command's ``agentPath``.  An empty list (no SEA) leaves the
-            command untouched.
+            command's ``agentPath``.  An empty list leaves the command
+            untouched.
 
     Returns:
-        The set of command-field names that were overridden (empty when
-        the command carries no SEA), so the caller can tell an actual
-        SEA override apart from a client-sent value.
+        The set of setting and prompt wire fields that were overridden
+        (empty when the SEAs pin nothing; the daemon-side hook fields,
+        written on every run, are not listed), so the caller can tell
+        an actual SEA override apart from a client-sent value.
 
     Raises:
         AgentFileError: When the ``agentPath`` field is not a string,
@@ -210,12 +216,11 @@ def apply_agent_overrides(
     if not seas:
         return set()
     raw_prompt = cmd.get("prompt")
+    task = raw_prompt if isinstance(raw_prompt, str) else ""
     parent_task_id = cmd.get("parentTaskId")
     try:
         run = evaluate_sea(
-            seas,
-            raw_prompt if isinstance(raw_prompt, str) else "",
-            parent_task_id if isinstance(parent_task_id, str) else "",
+            seas, task, parent_task_id if isinstance(parent_task_id, str) else "",
         )
     except SeaScriptError as exc:
         logger.warning("SEA %s rejected: %s", seas[-1].path, exc)
@@ -260,7 +265,7 @@ def apply_agent_overrides(
         # script-pinned (the task runner's ``_worktreeDecided`` mark).
         if field in staged and asked is not None and asked != "" and asked != staged[field]:
             del staged[field]
-    if defines(seas, "prompt"):
+    if run.prompt != task:
         staged["prompt"] = run.prompt
     if run.settings["kind"] == "channel":
         suffix = cmd.get("appendToSystemPrompt")
@@ -268,30 +273,28 @@ def apply_agent_overrides(
         staged["appendToSystemPrompt"] = (
             f"{suffix}\n\n{preamble}" if isinstance(suffix, str) and suffix else preamble
         )
-    for field, hook in (
-        ("systemPromptHook", run.system_prompt_hook), ("toolsHook", run.tools_hook),
-        ("llmCallHook", run.llm_call_hook), ("toolCallHook", run.tool_call_hook),
-    ):
-        if hook is not None:
-            staged[field] = hook
+    overridden = set(staged)
+    staged["systemPromptHook"] = run.system_prompt_hook
+    staged["toolsHook"] = run.tools_hook
+    staged["llmCallHook"] = run.llm_call_hook
+    staged["toolCallHook"] = run.tool_call_hook
     # The provenance record the task runner folds into the run's
     # ``task_settings`` event (see :mod:`kiss.agents.sorcar.run_config`):
     # computed from the command BEFORE the writes, so it names the
     # inherited or persisted values the SEA pinned to its own (explicit
     # values were removed from ``staged`` above and never appear here).
     cmd[RUN_CONFIG_FIELD] = {
-        "sea": script_name(str(seas[-1].path)),
+        "sea": sea_name(seas),
         "kind": run.settings["kind"],
         "pinned": sea_pinned(cmd, staged, SETTING_FIELDS),
     }
     cmd.update(staged)
-    return set(staged)
+    return overridden
 
 
 RUN_CONFIG_FIELD = "_runConfig"
 """The daemon-side ``run`` command field :func:`apply_agent_overrides` leaves its provenance
 record in.
 
-``{"sea": <SEA name>, "kind": <kind>, "pinned": {key: [before, pinned]}}``;
-absent when the command carries no SEA.
+``{"sea": <SEA name, "" for a plain run>, "kind": <kind>, "pinned": {key: [before, pinned]}}``.
 """
