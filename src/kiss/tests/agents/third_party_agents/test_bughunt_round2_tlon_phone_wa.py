@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from http.server import BaseHTTPRequestHandler
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import pytest
@@ -33,16 +33,14 @@ from kiss.agents.third_party_agents.phone.phone_sea import _config as _phone_con
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
-from kiss.tests.agents.third_party_agents.recording_http import recording_server
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
     """Handler that records requests and returns service-shaped JSON."""
 
-    requests_seen: list[dict[str, Any]] = []
-
     def _record(self, body: bytes) -> None:
-        self.requests_seen.append(
+        cast(RecordingServer, self.server).requests.append(
             {"method": self.command, "path": self.path, "body": body.decode() if body else ""}
         )
 
@@ -59,7 +57,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def do_GET(self) -> None:  # noqa: N802
-        """Serve phone REST and Graph API GET endpoints."""
+        """Serve the phone REST GET endpoints."""
         self._record(b"")
         parsed = urlparse(self.path)
         if parsed.path == "/api/device/info":
@@ -75,7 +73,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
                 },
             )
         else:
-            self._respond_json(200, {"verified_name": "Test Biz", "display_phone_number": "+1555"})
+            self._respond_json(404, {"error": "Not Found"})
 
     def do_POST(self) -> None:  # noqa: N802
         """Serve Eyre login and legacy poke endpoints."""
@@ -99,8 +97,8 @@ class _RecordingHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-def _channel_requests() -> list[dict[str, Any]]:
-    return [r for r in _RecordingHandler.requests_seen if r["path"].startswith("/~/channel")]
+def _channel_requests(server: RecordingServer) -> list[dict[str, Any]]:
+    return [r for r in server.requests if r["path"].startswith("/~/channel")]
 
 
 class TestTlonPokeProtocol:
@@ -109,12 +107,11 @@ class TestTlonPokeProtocol:
     @pytest.fixture(autouse=True)
     def _connected(self):
         """Recording ship server, isolated config with a ship, connected backend."""
-        _RecordingHandler.requests_seen = []
         with config_backup(_tlon_config.path):
             with recording_server(_RecordingHandler) as server:
-                self.base = server.base_url
+                self.server = server
                 _tlon_config.save(
-                    {"ship_url": self.base, "code": "lidlut-tabwed", "ship": "~sampel-palnet"}
+                    {"ship_url": server.base_url, "code": "lidlut-tabwed", "ship": "~sampel-palnet"}
                 )
                 self.backend = TlonChannelBackend()
                 assert self.backend.connect() is True
@@ -124,8 +121,8 @@ class TestTlonPokeProtocol:
         """poke must PUT a one-element JSON array to /~/channel/{uid}."""
         result = json.loads(self.backend.poke("channels", "channel-action", '{"a": 1}'))
         assert result["ok"] is True
-        pokes = _channel_requests()
-        assert pokes, f"no /~/channel request seen: {_RecordingHandler.requests_seen}"
+        pokes = _channel_requests(self.server)
+        assert pokes, f"no /~/channel request seen: {self.server.requests}"
         req = pokes[-1]
         assert req["method"] == "PUT", f"poke must use PUT, saw {req['method']}"
         assert req["path"].startswith("/~/channel/"), req["path"]
@@ -145,7 +142,7 @@ class TestTlonPokeProtocol:
         """Consecutive pokes must carry strictly increasing message ids."""
         self.backend.poke("channels", "channel-action", '{"a": 1}')
         self.backend.poke("channels", "channel-action", '{"a": 2}')
-        pokes = _channel_requests()
+        pokes = _channel_requests(self.server)
         assert len(pokes) == 2, pokes
         id1 = json.loads(pokes[0]["body"])[0]["id"]
         id2 = json.loads(pokes[1]["body"])[0]["id"]
@@ -158,8 +155,8 @@ class TestTlonPokeProtocol:
         """post_message memo author must be the configured ship, not '~'."""
         result = json.loads(self.backend.post_message("~zod/my-group", "chat", "hello"))
         assert result["ok"] is True
-        pokes = _channel_requests()
-        assert pokes, f"no poke request seen: {_RecordingHandler.requests_seen}"
+        pokes = _channel_requests(self.server)
+        assert pokes, f"no poke request seen: {self.server.requests}"
         body = json.loads(pokes[-1]["body"])
         action = body[0] if isinstance(body, list) else body
         memo = action["json"]["channel-action"]["post"]["action"]["add"]["memo"]
@@ -172,11 +169,10 @@ class TestTlonPokeWithoutShip:
     @pytest.fixture(autouse=True)
     def _connected(self):
         """Recording ship server, isolated legacy config (no ship), connected backend."""
-        _RecordingHandler.requests_seen = []
         with config_backup(_tlon_config.path):
             with recording_server(_RecordingHandler) as server:
-                self.base = server.base_url
-                _tlon_config.save({"ship_url": self.base, "code": "lidlut-tabwed"})
+                self.server = server
+                _tlon_config.save({"ship_url": server.base_url, "code": "lidlut-tabwed"})
                 self.backend = TlonChannelBackend()
                 assert self.backend.connect() is True, "config without 'ship' must still load"
                 yield
@@ -185,7 +181,7 @@ class TestTlonPokeWithoutShip:
         """poke without a configured ship must raise instead of sending junk."""
         with pytest.raises(RuntimeError):
             self.backend.poke("channels", "channel-action", '{"a": 1}')
-        assert not _channel_requests(), "no Eyre request must be sent without a ship"
+        assert not _channel_requests(self.server), "no Eyre request must be sent without a ship"
 
 
 class TestPhoneControlSenderFilter:
@@ -194,7 +190,6 @@ class TestPhoneControlSenderFilter:
     @pytest.fixture(autouse=True)
     def _connected(self):
         """Recording device server, isolated phone config, connected backend."""
-        _RecordingHandler.requests_seen = []
         with config_backup(_phone_config.path):
             with recording_server(_RecordingHandler) as server:
                 port = server.server_address[1]

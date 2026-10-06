@@ -42,6 +42,21 @@ BestrouterSea``) or load it by command name or path with
 :func:`kiss.agents.sorcar.sea_commands.sea_class`, and derive from it.
 A class may define further helper methods; only the ones below are
 part of the contract.
+
+:class:`BaseSea` is itself the root layer of EVERY run made from the
+chat (webapp or VS Code extension): a plain prompt runs the bare
+``BaseSea``, a ``/xxx`` command or a model-picker tab runs its SEA on
+top of it, and the sub-agents of ``run_agent`` / ``run_parallel`` go
+through it the same way.  So editing the methods of this file
+customizes every such run at once — append a house rule in
+``system_prompt``, add a tool in ``tools``, refuse a tool call in
+``tool_call_hook``, pin a setting in ``settings`` (subject to
+:data:`kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`: a value the
+caller passed explicitly ranks above it).  The daemon
+imports this module once, so restart it after editing.  Text that
+``system_prompt`` appends is added once per task tree: a sub-agent
+inherits its parent's suffix, and the launcher does not append what
+the prompt already contains.
 """
 
 from __future__ import annotations
@@ -53,7 +68,7 @@ from typing import Any
 
 
 class BaseSea:
-    """The contract of a SEA; every method is optional and returns its input unchanged."""
+    """The SEA contract and the root layer of every run; each method returns its input unchanged."""
 
     path: Path | None = None
     """The file the SEA was loaded from (the launcher sets it; else the class's module file)."""

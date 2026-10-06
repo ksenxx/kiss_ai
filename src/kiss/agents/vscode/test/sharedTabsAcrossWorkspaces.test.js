@@ -69,13 +69,18 @@ function setWorkspace(win, dir) {
 }
 
 function tabBarIds(win) {
-  return Array.from(win.document.querySelectorAll('.chat-tab'))
+  // The chat whose group is on screen sits on the main row and on the
+  // group strip under it; count each tab once.
+  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
     .filter(el => !!el.dataset.tabId)
     .map(el => el.dataset.tabId);
+  return ids.filter((id, i) => ids.indexOf(id) === i);
 }
 
 function activeTabId(win) {
-  const el = win.document.querySelector('.chat-tab.active');
+  // The strip's active entry is the tab on screen (the main row only
+  // highlights the group it belongs to).
+  const el = win.document.querySelector('#tab-list .chat-tab.active');
   return el ? el.dataset.tabId : null;
 }
 
@@ -199,8 +204,9 @@ function testHistoryClickOnAnotherWorkspaceChatActivatesItsTab() {
 
 function testFileFromAnotherWorkspaceTabOpensAsBackgroundContentTab() {
   // A file/report produced by a tab that runs in another folder opens
-  // like any other background tab's file: its content tab gets a strip
-  // here and waits without pulling the user off the tab they read.
+  // like any other background tab's file: its content tab joins that
+  // tab's group (shown on the group strip once the user is on that
+  // chat) and waits without pulling the user off the tab they read.
   const {win} = makeWebview();
   setWorkspace(win, '/ws/a');
   send(win, {
@@ -214,11 +220,23 @@ function testFileFromAnotherWorkspaceTabOpensAsBackgroundContentTab() {
     name: 'report.html',
     content: '<p>report</p>',
   });
-  assert.strictEqual(tabBarIds(win).length, 3, 'the content tab gets a strip');
   assert.strictEqual(activeTabId(win), 'a1', 'a background file never steals focus');
-  clickEl(win, win.document.querySelectorAll('.chat-tab[data-tab-id]')[2]);
+  assert.deepStrictEqual(
+    tabBarIds(win),
+    ['a1', 'b1'],
+    "the other chat's file stays in that chat's group, off the strip of this one",
+  );
+  clickEl(win, win.document.querySelector('.chat-tab[data-tab-id="b1"]'));
+  const strip = Array.from(win.document.querySelectorAll('#tab-list .chat-tab'));
+  assert.strictEqual(strip.length, 2, "the content tab gets a strip in its owner's group");
+  assert.strictEqual(strip[0].dataset.tabId, 'b1');
+  assert.ok(strip[1].classList.contains('content-tab'));
+  assert.strictEqual(tabBarIds(win).length, 3, 'three tabs are open in all');
+  clickEl(win, win.document.querySelectorAll('#tab-list .chat-tab')[1]);
   assert.strictEqual(
-    win.document.querySelector('.chat-tab.active').textContent.includes('report.html'),
+    win.document
+      .querySelector('#tab-list .chat-tab.active')
+      .textContent.includes('report.html'),
     true,
     'the content tab is a first-class tab the user can activate',
   );

@@ -186,7 +186,9 @@ function reply(win, poll, fields) {
 }
 
 function chatTabs(win) {
-  return Array.from(win.document.querySelectorAll('#tab-list .chat-tab'));
+  // The chat tabs on the main row (the strip under it only lists the
+  // group of the chat on screen).
+  return Array.from(win.document.querySelectorAll('#main-tab-list .chat-tab'));
 }
 
 function activeTabLabel(win) {

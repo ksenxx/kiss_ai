@@ -57,7 +57,13 @@ function send(win, data) {
 }
 
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(`.chat-tab[data-tab-id="${tabId}"]`);
+  const el =
+    win.document.querySelector(
+      '#tab-list ' + `.chat-tab[data-tab-id="${tabId}"]`,
+    ) ||
+    win.document.querySelector(
+      '#main-tab-list ' + `.chat-tab[data-tab-id="${tabId}"]`,
+    );
   assert.ok(el, 'tab strip for ' + tabId);
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
@@ -325,7 +331,9 @@ async function testBrowserTabIsNoEditorContext() {
     focus: true,
   });
   assert.strictEqual(contentTabId(win), 'browser-1', 'the browser tab opened');
-  const browserStrip = win.document.querySelector('.chat-tab[data-tab-id="browser-1"]');
+  const browserStrip =
+    win.document.querySelector('#tab-list .chat-tab[data-tab-id="browser-1"]') ||
+    win.document.querySelector('#main-tab-list .chat-tab[data-tab-id="browser-1"]');
   assert.ok(browserStrip.classList.contains('active'), 'and was focused');
   clickTab(win, 'a1');
   assert.strictEqual(

@@ -152,7 +152,6 @@ def adopt_legacy_file(path: Path, legacy_name: str, suffixes: tuple[str, ...] = 
     legacy = path.with_name(legacy_name)
     if path.exists() or not legacy.exists():
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
     with exclusive_file_lock(path.with_name(path.name + ".rename.lock")):
         if path.exists() or not legacy.exists():
             return

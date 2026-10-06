@@ -13,14 +13,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from http.server import BaseHTTPRequestHandler
+from typing import Any, cast
 
 import pytest
 
 from kiss.agents.third_party_agents.mattermost.mattermost_sea import MattermostChannelBackend
 from kiss.agents.third_party_agents.mattermost.mattermost_sea import _config as _mm_config
 from kiss.agents.third_party_agents.msteams.msteams_sea import MSTeamsChannelBackend
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _GRAPH_MESSAGE = {
     "id": "MSG1",
@@ -44,14 +45,16 @@ class _GraphHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         """Serve a recorded GET with a Graph list payload."""
-        self.server.requests.append(("GET", self.path))  # type: ignore[attr-defined]
+        cast(RecordingServer, self.server).requests.append({"method": "GET", "path": self.path})
         self._respond({"value": [dict(_GRAPH_MESSAGE)]})
 
     def do_POST(self) -> None:
         """Serve a recorded POST with a Graph create payload."""
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode() if length else ""
-        self.server.requests.append(("POST", self.path, body))  # type: ignore[attr-defined]
+        cast(RecordingServer, self.server).requests.append(
+            {"method": "POST", "path": self.path, "body": body}
+        )
         self._respond({"id": "NEW1"})
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -61,28 +64,18 @@ class _GraphHandler(BaseHTTPRequestHandler):
 @pytest.fixture()
 def graph_server():
     """Start a recording HTTP server that mimics Microsoft Graph."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _GraphHandler)
-    server.requests = []  # type: ignore[attr-defined]
-    import threading
-
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=5)
+    yield from serve_recording(_GraphHandler)
 
 
-def _make_backend(server: ThreadingHTTPServer) -> MSTeamsChannelBackend:
+def _make_backend(server: RecordingServer) -> MSTeamsChannelBackend:
     """Create an MS Teams backend pointed at the local Graph server."""
-    port = server.server_address[1]
-    backend = MSTeamsChannelBackend(graph_base=f"http://127.0.0.1:{port}")
+    backend = MSTeamsChannelBackend(graph_base=server.base_url)
     backend._access_token = "test-token"
     return backend
 
 
-def _paths(server: ThreadingHTTPServer) -> list[str]:
-    return [req[1] for req in server.requests]  # type: ignore[attr-defined]
+def _paths(server: RecordingServer) -> list[str]:
+    return [req["path"] for req in server.requests]
 
 
 def test_msteams_poll_uses_channels_url_and_message_ids(graph_server) -> None:
@@ -160,9 +153,7 @@ def test_mattermost_connect_returns_false_on_malformed_port() -> None:
     raised ``ValueError`` instead of returning ``False``.  ``connect()``
     must swallow the error and record a helpful ``_connection_info``.
     """
-    _mm_config.save(
-        {"url": "127.0.0.1", "token": "tok", "port": "not-a-number", "scheme": "http"}
-    )
+    _mm_config.save({"url": "127.0.0.1", "token": "tok", "port": "not-a-number", "scheme": "http"})
     try:
         backend = MattermostChannelBackend()
         assert backend.connect() is False

@@ -134,17 +134,28 @@ body.remote-chat {
   color: var(--fg);
 }
 
-/* The tab strip: VS Code's editor-group header colours — a darker
-   band, dim inactive tabs, the active tab in the editor background
-   with the accent line on its top edge. */
+/* The two tab rows: VS Code's editor-group header colours — a darker
+   band, dim inactive pills, the active pill in the editor background
+   with the accent line on its top edge.  The main row lists the chats;
+   the group strip under it (the chat on screen, its sub-agents, the
+   files its task opened) sits on the editor background with smaller
+   pills, so it reads as the main row's sub-row. */
+body.remote-chat #main-tab-bar,
 body.remote-chat #tab-bar {
   background: var(--tabs-bg);
   border-bottom: 1px solid var(--border);
   padding: var(--space-2) var(--space-2-5) var(--space-1);
 }
 
+body.remote-chat #tab-bar {
+  background: var(--bg);
+  padding: var(--space-1) var(--space-2-5) var(--space-1) var(--space-5);
+}
+
+body.remote-chat #main-tab-list,
 body.remote-chat #tab-list { gap: var(--space-1-5); }
 
+body.remote-chat #main-tab-bar .chat-tab,
 body.remote-chat #tab-bar .chat-tab {
   border: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
@@ -155,11 +166,18 @@ body.remote-chat #tab-bar .chat-tab {
   transition: background var(--dur-base), color var(--dur-base);
 }
 
+body.remote-chat #tab-bar .chat-tab {
+  padding: var(--space-0-5) var(--space-2-5);
+  font-size: var(--fs-sm);
+}
+
+body.remote-chat #main-tab-bar .chat-tab:hover,
 body.remote-chat #tab-bar .chat-tab:hover {
   background: var(--hover);
   color: var(--fg);
 }
 
+body.remote-chat #main-tab-bar .chat-tab.active,
 body.remote-chat #tab-bar .chat-tab.active {
   background: var(--bg);
   border-color: var(--border-input);
@@ -167,6 +185,9 @@ body.remote-chat #tab-bar .chat-tab.active {
   color: var(--fg-strong);
 }
 
+body.remote-chat #tab-bar .chat-tab.active { background: var(--bg2); }
+
+body.remote-chat #main-tab-bar .chat-tab-close,
 body.remote-chat #tab-bar .chat-tab-close { border-radius: var(--radius-pill); }
 
 /* The top status bar goes on the whole remote page: the task-info

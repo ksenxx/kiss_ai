@@ -21,7 +21,7 @@ audio-player child process (``KISS_SORCAR_PLAY_CMD``) — no mocks:
    whenever any local webview showed the tab.
 2. After a webview reload, ``ready`` announces only the placeholder
    tab; canonical background tabs adopted from the ``tabs_state``
-   snapshot never re-registered in ``_local_tab_counts``, so a
+   snapshot never re-registered as local interest, so a
    talk for a background tab skipped daemon-native playback entirely
    (the webview cannot autoplay → silence).  ``ready`` on a local
    connection now marks the connection as an attached chat webview,
@@ -29,8 +29,8 @@ audio-player child process (``KISS_SORCAR_PLAY_CMD``) — no mocks:
 3. The local-tab bookkeeping used to be ADD-ONLY per connection:
    closing a canonical tab removed it from every client UI (via the
    ``tabs_state`` broadcast) but never pruned it from any live local
-   connection's ``local_tabs`` set or from ``_local_tab_counts``
-   (decremented only on client disconnect).  A still-running task's
+   connection's ``local_tabs`` interest set (dropped only on
+   client disconnect).  A still-running task's
    talk for the closed tab then triggered daemon-native playback even
    though NO local webview showed the tab, and a repeated ``ready``
    could not self-heal.  The fan-out now decides "shown" at talk time
@@ -215,6 +215,21 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
             )
             await asyncio.sleep(0.01)
         return reader, writer
+
+    async def _wait_for_local_interest(self, tab_id: str, *, present: bool) -> None:
+        """Wait (bounded) until some local connection's interest set has/lacks *tab_id*."""
+        printer = self.server._printer
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while True:
+            with printer._ws_lock:
+                interested = tab_id in set().union(*printer._local_tab_sets.values())
+            if interested == present:
+                return
+            self.assertLess(
+                asyncio.get_event_loop().time(), deadline,
+                f"local interest in {tab_id!r} never became {present}",
+            )
+            await asyncio.sleep(0.01)
 
     async def _collect_local_talks(
         self,
@@ -475,10 +490,10 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
             .encode("utf-8")
         )
         await local_writer.drain()
-        await asyncio.sleep(0.2)
-        printer = self.server._printer
-        with printer._ws_lock:
-            self.assertIn(stale_tab, printer._local_tab_counts)
+        # The connection handles its commands in order and the first
+        # ``ready`` of a fresh daemon pays the cold SEA-registry scan
+        # (``getModels``), so wait for the interest instead of sleeping.
+        await self._wait_for_local_interest(stale_tab, present=True)
 
         # Shrink the registry WITHOUT the server close path: nothing
         # server-side marks or prunes the tab.
@@ -496,9 +511,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
             ).encode("utf-8")
         )
         await local_writer.drain()
-        await asyncio.sleep(0.3)
-        with printer._ws_lock:
-            self.assertNotIn(stale_tab, printer._local_tab_counts)
+        await self._wait_for_local_interest(stale_tab, present=False)
 
         self.server._printer.subscribe_tab(self.task_id, stale_tab)
         self.server._printer.broadcast(

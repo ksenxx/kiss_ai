@@ -18,7 +18,6 @@ from openai.resources.chat.completions import Completions
 if TYPE_CHECKING:  # pragma: no cover – import cycle avoided at runtime
     from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
-from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     FRAMEWORK_ONLY_CONFIG_KEYS,
@@ -33,7 +32,11 @@ from kiss.core.models.model import (
     accepted_request_params,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import stall_error, stop_aware_events, stop_error
+from kiss.core.models.stream_abort import (
+    CONNECT_TIMEOUT,
+    stop_aware_events,
+    stop_or_stall_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +58,10 @@ _CHAT_REQUEST_PARAMS = accepted_request_params(Completions.create)
 _MAX_RETRIES = 1
 
 # Streaming requests get a per-request ``httpx.Timeout`` instead of the
-# client's scalar 1800 s: the scalar also bounds the wait for the response
-# headers, and ``stop_aware_events`` is armed only once ``create(stream=True)``
-# has returned them, so a gateway that accepted the TCP connection but never
-# answered parked the agent in ``recv()`` for 30 minutes per attempt, deaf
-# to Stop.  Headers that take longer than the stall timeout are, by the
-# watchdog's own policy, a stall.  Non-streaming calls keep the scalar: a
-# long reasoning turn with no token callback legitimately sends nothing for
-# minutes.  Same bound as ``anthropic_model`` and ``gemini_model``.
-_CONNECT_TIMEOUT = 10.0
+# client's scalar 1800 s, so the wait for the response headers is bounded
+# by the stall timeout too (see ``stream_abort.CONNECT_TIMEOUT``).
+# Non-streaming calls keep the scalar: a long reasoning turn with no token
+# callback legitimately sends nothing for minutes.
 
 
 def _provider_model_name(model_name: str) -> str:
@@ -1205,7 +1203,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         thread inside C code (``reports/stop_button_delay_2026-08-05.html``).
         Before the headers arrive no watchdog exists yet, so the request
         carries a per-request ``httpx.Timeout`` of the same stall timeout
-        (``_CONNECT_TIMEOUT`` to connect); either clock firing is reported
+        (``CONNECT_TIMEOUT`` to connect); either clock firing is reported
         as the same retryable stall error.
 
         Args:
@@ -1221,7 +1219,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
         kwargs["timeout"] = httpx.Timeout(
-            self._stream_stall_timeout, connect=_CONNECT_TIMEOUT
+            self._stream_stall_timeout, connect=CONNECT_TIMEOUT
         )
         content = ""
         tool_calls_accum: dict[int, dict[str, str]] = {}
@@ -1277,8 +1275,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                     if delta:
                         reasoning = _delta_reasoning_text(delta)
                         if reasoning:
-                            if not self._thinking_open:
-                                self._invoke_thinking_callback(True)
+                            self._open_thinking_if_closed()
                             self._invoke_token_callback(reasoning)
                         if delta.content:
                             self._close_thinking_if_open()
@@ -1295,9 +1292,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             # headers were still pending has no watchdog to act on it, so
             # ask the thread's stop signal before calling this a stall:
             # a stall is retried, a stop must not be.
-            if stop_signal.stop_requested():
-                raise stop_error() from err
-            raise stall_error(self._stream_stall_timeout) from err
+            raise stop_or_stall_error(self._stream_stall_timeout) from err
         except (httpx.HTTPError, APIConnectionError) as err:
             # A transport failure AFTER ``finish_reason`` arrived lost only
             # the stream's tail (the usage chunk / ``[DONE]``); the answer

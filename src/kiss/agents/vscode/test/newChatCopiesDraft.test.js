@@ -219,7 +219,7 @@ function testSidebarCreateNewTabCopiesDraft() {
   // The originating tab kept its own copy.
   win._testApi.endLaunch();
   const firstStrip = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${firstTab}"]`,
+    `#main-tab-list .chat-tab[data-tab-id="${firstTab}"]`,
   );
   assert.ok(firstStrip, 'the first tab is still in the tab bar');
   firstStrip.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));

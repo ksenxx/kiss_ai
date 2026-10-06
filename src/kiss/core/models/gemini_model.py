@@ -27,11 +27,10 @@ from kiss.core.models.model import (
     merge_system_texts,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import stall_error, stop_aware_events
+from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error, stop_aware_events
 
 logger = logging.getLogger(__name__)
 
-_CONNECT_TIMEOUT = 10.0
 
 # The request parameters Gemini accepts, taken from the SDK's own config
 # model.  ``GenerateContentConfig`` forbids unknown fields, so this is the
@@ -66,7 +65,7 @@ class _ResponseTrackingHttpxClient(httpx.Client):
                 httpx raises ``ReadTimeout``.
         """
         super().__init__(follow_redirects=True)
-        self._timeout = httpx.Timeout(stall_timeout, connect=_CONNECT_TIMEOUT)
+        self._timeout = httpx.Timeout(stall_timeout, connect=CONNECT_TIMEOUT)
         self.last_response: httpx.Response | None = None
 
     def build_request(self, *args: Any, **kwargs: Any) -> httpx.Request:

@@ -204,9 +204,10 @@ class TerminalService:
         """
         if not isinstance(data, str) or not data:
             return
-        session = self._owned(tab_id, conn_id)
-        if session is not None:
-            session.writes.put(data.encode("utf-8", errors="surrogateescape"))
+        with self._lock:
+            session = self._owned(tab_id, conn_id)
+            if session is not None:
+                session.writes.put(data.encode("utf-8", errors="surrogateescape"))
 
     def resize(self, tab_id: str, conn_id: str, cols: Any, rows: Any) -> None:
         """Set the pty window size (the shell gets ``SIGWINCH``).
@@ -217,9 +218,13 @@ class TerminalService:
             cols: New width in cells.
             rows: New height in cells.
         """
-        session = self._owned(tab_id, conn_id)
-        if session is not None:
-            self._set_winsize(session, _clamp_dim(cols, 80), _clamp_dim(rows, 24))
+        # Under the lock: the reader deregisters a finished session under
+        # it BEFORE the write loop closes the master, so the ioctl can
+        # never land on a descriptor number the kernel has since reused.
+        with self._lock:
+            session = self._owned(tab_id, conn_id)
+            if session is not None:
+                self._set_winsize(session, _clamp_dim(cols, 80), _clamp_dim(rows, 24))
 
     def close(self, tab_id: str, conn_id: str = "") -> None:
         """Hang the shell of *tab_id* up (the tab was closed).
@@ -286,11 +291,11 @@ class TerminalService:
     # ------------------------------------------------------------------
 
     def _owned(self, tab_id: str, conn_id: str) -> _Session | None:
-        with self._lock:
-            session = self._sessions.get(tab_id)
-            if session is None or session.conn_id != conn_id:
-                return None
-            return session
+        """Return the session of *tab_id* if *conn_id* owns it (caller holds the lock)."""
+        session = self._sessions.get(tab_id)
+        if session is None or session.conn_id != conn_id:
+            return None
+        return session
 
     def _spawn(
         self, tab_id: str, conn_id: str, work_dir: str, cols: int, rows: int,

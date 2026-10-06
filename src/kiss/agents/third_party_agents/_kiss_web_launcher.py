@@ -32,7 +32,6 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
-import logging
 import shutil
 import tempfile
 import threading
@@ -46,16 +45,17 @@ from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
 if TYPE_CHECKING:
     from kiss.server.web_server import RemoteAccessServer
 
-logger = logging.getLogger(__name__)
-
-_NO_TIMEOUT_SECONDS = 10 * 365 * 24 * 3600.0
-
 _API_SERVER: RemoteAccessServer | None = None
 _API_SERVER_ENDPOINT: str = ""
 _API_SERVER_THREAD: threading.Thread | None = None
 _API_SERVER_LOCK = threading.Lock()
 
 _ENDPOINT_FILE_OVERRIDE: str | None = None
+"""Endpoint file every launch uses instead of the process-global daemon.
+
+Set by tests that run their own daemon; ``None`` (the default) selects
+:func:`_ensure_api_server`.
+"""
 
 
 def _ensure_api_server() -> str:
@@ -271,14 +271,9 @@ def run_agent_via_kiss_web(
     model_name: str = "",
     work_dir: str = "",
     max_budget: float | None = None,
-    use_worktree: bool = True,
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
     is_parallel: bool = True,
-    append_to_system_prompt: str = "",
-    append_to_prompt: str = "",
-    timeout: float | None = None,
-    endpoint_file: str | None = None,
 ) -> str:
     """Launch *agent*'s task through :func:`kiss.server.sorcar.run`.
 
@@ -290,7 +285,16 @@ def run_agent_via_kiss_web(
     make the run a ``channel``-kind session with the channel's
     guidance in its system prompt), and submits the task to the in-process kiss-web daemon over its
     Unix-domain socket.  Blocks until the daemon reports the task
-    finished (or *timeout* elapses) and returns the task's YAML result.
+    finished and returns the task's YAML result.
+
+    The keyword surface is exactly what the channel CLI and the
+    channel runner pass; everything else about the run (worktree,
+    auto-commit, browser, memory, work directory, extra prompt text)
+    comes from the channel SEA's ``settings()`` / ``system_prompt()``
+    / ``prompt()`` methods, which the ``channel`` kind locks.  The
+    daemon is the process-global in-process one
+    (:func:`_ensure_api_server`) unless a test has pointed the module
+    at another endpoint file.
 
     ``agent.workspace`` is sent as the run's ``workspace``; the daemon
     holds it while the task runs (a launch whose workspace differs from
@@ -316,27 +320,14 @@ def run_agent_via_kiss_web(
         work_dir: Working directory for the run.
         max_budget: Per-task budget override in USD; ``None`` uses the
             kiss-web config default.
-        use_worktree: Run the task in an isolated git worktree.
         model_config: Per-task model configuration override (custom
             endpoint / headers).
         web_tools: Per-task browser-tool enablement override. ``None``
             uses the kiss-web config default.
         is_parallel: Whether the agent may spawn parallel sub-agents.
-        append_to_system_prompt: Extra text appended to the run's
-            system prompt when the daemon executes the agent (see
-            :func:`kiss.server.sorcar.run`).
-        append_to_prompt: Extra text appended to the executed task
-            prompt (see :func:`kiss.server.sorcar.run`).
-        timeout: Max seconds to wait for the task; ``None`` waits
-            indefinitely.  On timeout the task keeps running in the
-            daemon and ``""`` is returned.
-        endpoint_file: Daemon endpoint file override.  ``None`` uses
-            the process-global in-process daemon
-            (:func:`_ensure_api_server`).
 
     Returns:
-        YAML string with 'success' and 'summary' keys, or ``""`` when
-        the task did not finish within *timeout*.
+        YAML string with 'success' and 'summary' keys.
 
     Raises:
         ValueError: When ``agent.sea_path`` is not the path of an
@@ -358,7 +349,7 @@ def run_agent_via_kiss_web(
     # methods) are built inside the daemon: it imports the agent's
     # module as the run's SEA and runs its tools() method;
     # the daemon-built agent supplies the standard tools itself.
-    endpoint = endpoint_file or _ENDPOINT_FILE_OVERRIDE or _ensure_api_server()
+    endpoint = _ENDPOINT_FILE_OVERRIDE or _ensure_api_server()
     # The workspace travels on the wire; the daemon holds it (and
     # publishes it to ``KISS_CHANNEL_WORKSPACE``) for the run's lifetime,
     # exactly as it does for ``/slack ...`` and ``run_agent("slack")``.
@@ -371,33 +362,21 @@ def run_agent_via_kiss_web(
         "model_config": model_config, "use_web_tools": web_tools,
     }
     provenance = {key: "explicit" for key, value in given.items() if value not in (None, "")}
-    try:
-        result = sorcar.run(
-            prompt,
-            work_dir=work_dir,
-            model=model_name,
-            chat_id=chat_id,
-            extension_agent_path=agent.sea_path,
-            use_worktree=use_worktree,
-            max_budget=max_budget,
-            model_config=model_config,
-            use_web_tools=web_tools,
-            is_parallel=is_parallel,
-            append_to_system_prompt=append_to_system_prompt,
-            append_to_prompt=append_to_prompt,
-            workspace=agent.workspace,
-            provenance=provenance,
-            timeout=timeout if timeout is not None else _NO_TIMEOUT_SECONDS,
-            endpoint_file=endpoint,
-        )
-    except TimeoutError:
-        logger.warning(
-            "kiss-web API launch timed out after %.1fs; the task "
-            "keeps running in the daemon",
-            timeout or 0.0,
-        )
-        return ""
-
+    result = sorcar.run(
+        prompt,
+        work_dir=work_dir,
+        model=model_name,
+        chat_id=chat_id,
+        extension_agent_path=agent.sea_path,
+        max_budget=max_budget,
+        model_config=model_config,
+        use_web_tools=web_tools,
+        is_parallel=is_parallel,
+        workspace=agent.workspace,
+        provenance=provenance,
+        timeout=None,
+        endpoint_file=endpoint,
+    )
     summary = result.text or ("" if result.success else "Task failed")
     result_yaml = str(yaml.safe_dump(
         {"success": result.success, "summary": summary},

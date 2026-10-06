@@ -184,12 +184,12 @@
       else pending.push(line);
     }
 
+    // Refit the terminal to its surface; the onResize handler below
+    // forwards a changed size to the pty.  fit() is a no-op until xterm
+    // has measured a cell size, and Terminal.resize() ignores an
+    // unchanged grid, so nothing is sent unless the grid really changed.
     function sendSize() {
-      if (!term || !fit) return;
-      const dims = fit.proposeDimensions();
-      if (!dims || !dims.cols || !dims.rows) return;
-      if (dims.cols === term.cols && dims.rows === term.rows) return;
-      fit.fit();
+      if (fit) fit.fit();
     }
 
     function openShell() {

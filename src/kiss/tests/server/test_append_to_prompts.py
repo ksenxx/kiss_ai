@@ -237,7 +237,8 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         )
         assert result.success is False
         assert (
-            f"agent script {agent_path!r}: settings() has an unknown key 'add_to_prompt'"
+            f"agent script {agent_path!r}: settings() key 'add_to_prompt' was removed: "
+            "a SEA shapes the task text in its `prompt(task)` method"
         ) in result.text, result.text
         assert calls == [], "no executor session may start for a broken script"
 

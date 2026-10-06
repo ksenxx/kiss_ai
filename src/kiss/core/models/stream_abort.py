@@ -27,9 +27,21 @@ import time
 from collections.abc import Callable, Generator
 from typing import Any
 
+from kiss.core import stop_signal
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_STREAM_STALL_TIMEOUT = 180.0
+
+# Connect deadline of the per-request ``httpx.Timeout(stall, connect=...)``
+# every transport puts on its streaming requests.  The watchdog below is
+# armed only once the response headers have arrived, so before that the
+# SDK's own clock is the only one: with a scalar client timeout (1800 s
+# on the OpenAI clients) a gateway that accepted the TCP connection and
+# never answered parked the agent in ``recv()`` for 30 minutes per
+# attempt, deaf to Stop.  Headers that take longer than the stall
+# timeout are, by the watchdog's own policy, a stall.
+CONNECT_TIMEOUT = 10.0
 
 
 class StreamAbortWatchdog:
@@ -262,10 +274,9 @@ def stop_error() -> KeyboardInterrupt:
 def stall_error(stall_timeout: float | None) -> TimeoutError:
     """Build the retryable error for a stream the watchdog aborted as stalled.
 
-    Public so an adapter that runs its own :class:`StreamAbortWatchdog`
-    loop instead of :func:`stop_aware_events`
-    (``AnthropicModel._create_message``) raises the same error for the
-    same condition; the wording lives here once.
+    Public so a transport whose byte-level clock fired first (an httpx
+    read timeout, which the SDK may report with an empty message) raises
+    the same error for the same condition; the wording lives here once.
 
     Args:
         stall_timeout: The tolerated silence, for the message.
@@ -281,6 +292,27 @@ def stall_error(stall_timeout: float | None) -> TimeoutError:
         f"(model_config 'stream_stall_timeout'). The request was aborted "
         f"instead of hanging; it will be retried."
     )
+
+
+def stop_or_stall_error(stall_timeout: float | None) -> BaseException:
+    """Classify a timeout raised BEFORE the response headers arrived.
+
+    No watchdog exists yet in that window, so a Stop pressed while the
+    request was still silent has to be read from the thread's stop
+    signal by hand: reporting it as the retryable stall error would make
+    the agentic loop re-ask the model on behalf of a task the user
+    already stopped.
+
+    Args:
+        stall_timeout: The tolerated silence, for the stall message.
+
+    Returns:
+        :func:`stop_error` when the user stopped the task, else
+        :func:`stall_error`.
+    """
+    if stop_signal.stop_requested():
+        return stop_error()
+    return stall_error(stall_timeout)
 
 
 def _close_stream(stream: Any) -> None:
@@ -338,8 +370,6 @@ def stop_aware_events(
             the stop above, and raised in preference to returning the
             partial text the abandoned loop body accumulated.
     """
-    from kiss.core import stop_signal
-
     stop_event = stop_signal.get_thread_stop_event()
     watchdog = StreamAbortWatchdog(
         stream,
@@ -353,6 +383,12 @@ def stop_aware_events(
             yield event
     except Exception:
         # The abort may surface as a transport error rather than as EOF.
+        # Disarm BEFORE reading the flags, as the post-loop path below
+        # does via `finally`: stop() waits out an abort already claimed,
+        # so afterwards the flags are final.  Read first, a stall (or
+        # stop) claimed between the transport failure and this point
+        # would let the raw transport error escape unclassified.
+        watchdog.stop()
         if _stop_requested(watchdog, stop_event):
             if on_abort is not None:
                 on_abort()
