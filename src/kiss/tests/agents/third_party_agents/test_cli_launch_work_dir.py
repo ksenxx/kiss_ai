@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.third_party_agents import _kiss_web_launcher
 from kiss.agents.third_party_agents._channel_cli import (
     _build_arg_parser,
     _build_run_kwargs,
@@ -41,14 +42,15 @@ def _wire_work_dir(run_kwargs: dict[str, Any]) -> str:
     ``workDir`` the daemon received on the wire.
     """
     daemon = RecordingDaemon()
+    saved_override = _kiss_web_launcher._ENDPOINT_FILE_OVERRIDE
+    _kiss_web_launcher._ENDPOINT_FILE_OVERRIDE = str(daemon.endpoint_file)
     try:
         prompt = run_kwargs.pop("prompt_template")
-        run_agent_via_kiss_web(
-            KissWebChatAgent("probe"), prompt, **run_kwargs, endpoint_file=str(daemon.endpoint_file)
-        )
+        run_agent_via_kiss_web(KissWebChatAgent("probe"), prompt, **run_kwargs)
         assert len(daemon.run_commands) == 1
         return str(daemon.run_commands[0]["workDir"])
     finally:
+        _kiss_web_launcher._ENDPOINT_FILE_OVERRIDE = saved_override
         daemon.close()
 
 

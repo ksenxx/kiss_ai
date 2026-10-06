@@ -471,12 +471,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             CONFIG_PATH.unlink()
 
         import kiss.agents.sorcar.persistence as _persistence
-        if _persistence._db_conn is not None:
-            try:
-                _persistence._db_conn.close()
-            except Exception:
-                pass
-            _persistence._db_conn = None
+        _persistence._close_db()
         (
             _persistence._DB_PATH,
             _persistence._db_conn,
@@ -580,8 +575,12 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 )
             )
             await ws.send(json.dumps({"type": "getModels"}))
+            # The server may interleave unsolicited broadcasts (e.g.
+            # ``update_available`` once the PyPI check finishes) before
+            # the ``models`` reply; skip them.
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(resp["type"], "models")
+            while resp["type"] != "models":
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["selected"], "gemini-2.5-pro")
 
     async def test_ws_ready_command(self) -> None:

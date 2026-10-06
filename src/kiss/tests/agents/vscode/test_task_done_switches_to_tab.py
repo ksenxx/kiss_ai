@@ -54,6 +54,15 @@ _API_JS = _MEDIA_DIR / "api.js"
 _JS = _MEDIA_DIR / "main.js"
 _HTML = _MEDIA_DIR / "chat.html"
 
+# The tab bar has two rows: ``#main-tab-list`` holds one entry per chat
+# and ``#tab-list`` (the group strip) holds the on-screen chat plus its
+# sub-agents / files.  The active chat is rendered on BOTH rows, so the
+# number of open tabs is the number of distinct ``data-tab-id`` values.
+_OPEN_TAB_COUNT_JS = (
+    "new Set(Array.from(document.querySelectorAll("
+    "'.chat-tab[data-tab-id]')).map(e => e.dataset.tabId)).size"
+)
+
 
 def _build_test_page() -> str:
     """Return a self-contained HTML page that loads the real CSS+JS.
@@ -168,12 +177,7 @@ def _open_page(_browser, width: int = 800, height: int = 900):
     iife_err = page.evaluate("() => window.__iifeError")
     if iife_err:
         pytest.fail(f"main.js IIFE setup raised: {iife_err}")
-    page.wait_for_function(
-        "document.querySelectorAll("
-        "'#tab-list .chat-tab[data-tab-id]'"
-        ").length >= 1",
-        timeout=5000,
-    )
+    page.wait_for_function(f"{_OPEN_TAB_COUNT_JS} >= 1", timeout=5000)
     return context, page
 
 
@@ -186,12 +190,9 @@ def _open_agent_tab(page) -> str:
     """
     before = _active_tab_id(page)
     page.evaluate("() => window._testApi.createNewTab()")
-    page.wait_for_function(
-        "document.querySelectorAll("
-        "'#tab-list .chat-tab[data-tab-id]'"
-        ").length === 2",
-        timeout=5000,
-    )
+    # A second chat is a new top-level tab: it is rendered on the main
+    # row, not in the group strip of the first chat.
+    page.wait_for_function(f"{_OPEN_TAB_COUNT_JS} === 2", timeout=5000)
     after = _active_tab_id(page)
     assert after != before
     assert _active_dom_tab_id(page) == after
@@ -203,12 +204,21 @@ def _click_tab(page, tab_id: str) -> None:
 
     A real click: main.js records it as the user's own interaction,
     so a later task end must leave them where they are.
+
+    The tab is clicked on the row where it is rendered: a chat that is
+    not on screen exists only on the main row (``#main-tab-list``); a
+    member of the on-screen group is in the strip (``#tab-list``).
     """
     page.evaluate(
         """(id) => {
-            const el = document.querySelector(
-                `#tab-list .chat-tab[data-tab-id="${id}"]`
-            );
+            const el =
+                document.querySelector(
+                    `#tab-list .chat-tab[data-tab-id="${id}"]`
+                ) ||
+                document.querySelector(
+                    `#main-tab-list .chat-tab[data-tab-id="${id}"]`
+                );
+            if (!el) throw new Error('tab not rendered on either row: ' + id);
             el.click();
         }""",
         tab_id,
@@ -275,17 +285,31 @@ def _active_tab_id(page) -> str:
 
 
 def _active_dom_tab_id(page) -> str | None:
-    """Return the ``data-tab-id`` of the ``.chat-tab.active`` DOM node."""
+    """Return the ``data-tab-id`` of the ``.chat-tab.active`` DOM node.
+
+    The on-screen tab is the ``.active`` entry of the group strip
+    (``#tab-list``, rendered even while hidden for a lone chat); the
+    main row's ``.active`` entry marks that tab's group, so it must
+    name the same chat (the tabs here are all top-level chats).
+    """
     result = page.evaluate(
         "() => {"
-        " const el = document.querySelector("
+        " const strip = document.querySelector("
         "'#tab-list .chat-tab.active[data-tab-id]'"
         ");"
-        " return el ? el.dataset.tabId : null;"
+        " const main = document.querySelector("
+        "'#main-tab-list .chat-tab.active[data-tab-id]'"
+        ");"
+        " return {strip: strip ? strip.dataset.tabId : null,"
+        "         main: main ? main.dataset.tabId : null};"
         "}"
     )
-    assert result is None or isinstance(result, str)
-    return result
+    assert result["main"] == result["strip"], (
+        "main row highlights a different group than the strip's "
+        f"active tab: {result!r}"
+    )
+    assert result["strip"] is None or isinstance(result["strip"], str)
+    return result["strip"]
 
 
 def test_task_done_switches_to_target_tab(_browser) -> None:
