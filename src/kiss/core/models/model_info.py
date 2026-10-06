@@ -1808,10 +1808,10 @@ def get_default_model() -> str:
     """
     return _model_for_first_configured_provider(
         {
-            "ANTHROPIC_API_KEY": "claude-opus-4-7",
-            "OPENAI_API_KEY": "gpt-5.6-sol-medium",
-            "GEMINI_API_KEY": "gemini-3.6-flash",
-            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-4.7",
+            "ANTHROPIC_API_KEY": "claude-opus-5-5-medium",
+            "OPENAI_API_KEY": "gpt-6.1-sol-medium",
+            "GEMINI_API_KEY": "gemini-3.8-flash",
+            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-5-5",
             "TOGETHER_API_KEY": "moonshotai/Kimi-K3",
             "cc": "cc/opus",
             "codex": "codex/default",
