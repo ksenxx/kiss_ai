@@ -2283,11 +2283,7 @@
     }
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
-      if (i >= 0) {
-        if (typeof tabs[i].askPendingQuestion === 'string')
-          dismissAskWaitingNotice(id);
-        tabs.splice(i, 1);
-      }
+      if (i >= 0) tabs.splice(i, 1);
       forgetPendingFileLinks(id);
       // report-coverage:start
       discardReadyReports(id);
@@ -5069,9 +5065,6 @@
     // (content tabs are never in the registry and carry no
     // parentTabId), so there is no editor to dispose.
     removedIds.forEach(id => {
-      const doomed = byId.get(id);
-      if (doomed && typeof doomed.askPendingQuestion === 'string')
-        dismissAskWaitingNotice(id);
       forgetPendingFileLinks(id);
       // report-coverage:start
       discardReadyReports(id);
@@ -13163,20 +13156,27 @@
   // imagepanel-coverage:end
 
   /**
-   * True for the panel of a `/ask` answer (an `ask_answer` event).
+   * True for a panel that is a conversation between the user and the
+   * agent: a `/ask` answer (an `ask_answer` event) or an
+   * ask_user_question "Question" panel, which holds the user's answer
+   * too once the tool returns.
    *
-   * The answer is something the user asked for while the task ran, so
-   * no automatic pass ever folds or hides it: not the streaming sweep
-   * (collapseOlderPanels), not a replay or share export
-   * (collapseAllExceptResult), not the finished-task digest
-   * (applyChevronState), and a `summary` tool call leaves it out of
-   * the panels it adopts. Only the user folds it, by its header.
+   * These are what the user said or asked for while the task ran, so no
+   * automatic pass ever folds or hides them, on any surface the tab is
+   * loaded on: not the streaming sweep (collapseOlderPanels), not a
+   * replay or share export (collapseAllExceptResult), not the
+   * finished-task digest (applyChevronState), and a `summary` tool call
+   * leaves them out of the panels it adopts. Only the user folds them,
+   * by their header.
    *
    * @param {Element} panel A `.collapsible` panel.
-   * @returns {boolean} Whether *panel* is an answer panel.
+   * @returns {boolean} Whether *panel* is an answer or question panel.
    */
   function answerPanelStaysOpen(panel) {
-    return panel.classList.contains('ask-answer');
+    return (
+      panel.classList.contains('ask-answer') ||
+      panel.classList.contains('tc-question')
+    );
   }
 
   function collapseAllExceptResult(container, ownerTabId) {
@@ -13274,11 +13274,10 @@
       if (p.classList.contains('collapsed')) continue;
       if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
         continue;
-      // A `/ask` answer the user is reading while the task keeps
-      // streaming: the next event must not fold it away.
+      // A `/ask` answer the user is reading, or a question and its
+      // answer, while the task keeps streaming: the next event must not
+      // fold it away.
       if (answerPanelStaysOpen(p)) continue;
-      // A question the user has not answered yet must stay readable.
-      if (p.classList.contains('tc-question-pending')) continue;
       if (panelShowsImage(p)) continue;
       if (p.classList.contains('tc-run-parallel'))
         rpAdoptOpenSubagents(p, tabId);
@@ -16421,7 +16420,6 @@
         }
         syncAskComposer();
         renderTabBar();
-        showAskWaitingNotice(askTab);
         if (!knownQuestion) focusAskingTab(askTab);
         break;
       }
@@ -17724,43 +17722,13 @@
 
   // A new question brings its tab forward on every surface: the internal
   // strip switches to it and, in VS Code, the host reveals the sidebar
-  // view or editor panel (raising a native notice when the webview was
-  // hidden). Unlike focusFinishedTab this ignores
-  // userInteractedSinceSubmit: the agent is blocked until the user
-  // answers, so the question is where they need to be.
+  // view or editor panel. The Question panel itself is the only notice:
+  // no toast and no native notification. Unlike focusFinishedTab this
+  // ignores userInteractedSinceSubmit: the agent is blocked until the
+  // user answers, so the question is where they need to be.
   function focusAskingTab(tab) {
     if (tab.id !== activeTabId) switchToTab(tab.id);
-    if (VSCODE_CHAT_HOST) {
-      postToHost({
-        type: 'askWaiting',
-        tabId: tab.id,
-        question: tab.askPendingQuestion || '',
-      });
-    }
-  }
-
-  function askWaitingNoticeId(tabId) {
-    return 'ask:' + tabId;
-  }
-
-  // Sticky toast saying the agent is blocked on the user, with a button
-  // back to the question. The user clears it with its X; it also goes
-  // when the question is answered, its task ends or its tab closes
-  // (dismissAskWaitingNotice).
-  function showAskWaitingNotice(tab) {
-    showNotification({
-      id: askWaitingNoticeId(tab.id),
-      severity: 'info',
-      sticky: true,
-      title: 'Waiting for your answer',
-      message: tab.askPendingQuestion || '',
-      actions: [{label: 'Show question', onClick: () => switchToTab(tab.id)}],
-    });
-  }
-
-  function dismissAskWaitingNotice(tabId) {
-    removeNotification(askWaitingNoticeId(tabId), undefined, false);
-    if (VSCODE_CHAT_HOST) postToHost({type: 'askWaitingDone', tabId: tabId});
+    if (VSCODE_CHAT_HOST) postToHost({type: 'revealForQuestion'});
   }
 
   function focusFinishedTab(tabId) {
@@ -21176,8 +21144,6 @@
   // the parked prompt comes back. An answer still being typed is kept
   // too, above it, so nothing the user wrote is lost.
   function retireAskForTab(tab) {
-    if (typeof tab.askPendingQuestion === 'string')
-      dismissAskWaitingNotice(tab.id);
     tab.askPendingQuestion = null;
     const panel = lastQuestionPanel(tab);
     if (panel) setQuestionPanelPending(panel, false);
@@ -22651,7 +22617,17 @@
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
 
-      if (s.is_running) {
+      if (s.is_running && s.awaiting_answer) {
+        // The task is blocked on an ask_user_question: a "?" takes the
+        // spinner's place until the user answers (the daemon nudges a
+        // repaint with tasks_updated when the question opens and closes).
+        const askingMark = document.createElement('span');
+        askingMark.className = 'sidebar-item-running sidebar-item-asking';
+        askingMark.textContent = '?';
+        askingMark.dataset.tooltip = 'Waiting for your answer';
+        askingMark.setAttribute('aria-label', 'Waiting for your answer');
+        div.appendChild(askingMark);
+      } else if (s.is_running) {
         const runningDot = document.createElement('span');
         runningDot.className = 'sidebar-item-running status-spinner';
         runningDot.dataset.tooltip = 'Task running';

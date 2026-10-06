@@ -6,9 +6,8 @@
 // Audit J (2026-10-05) of media/main.js, end-to-end under jsdom.
 //
 // 1. A `tabs_state` snapshot that drops a chat tab (another surface closed
-//    it) removes that tab and its sub-agent descendants, dismisses the
-//    "Waiting for your answer" notice of a removed tab, and leaves every
-//    content tab (a file opened from that chat) untouched: content tabs
+//    it) removes that tab and its sub-agent descendants, retires the
+//    pending question of a removed tab, and leaves every content tab (a file opened from that chat) untouched: content tabs
 //    are per-surface editors, never in the registry, and have no
 //    `parentTabId`, so reconcileTabs has no editor to dispose.
 // 2. `talk` playback: a muted event is dropped before it reaches the
@@ -82,12 +81,6 @@ function clickTab(win, tabId) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-function notice(win, id) {
-  return win.document.querySelector(
-    `.kiss-notification[data-notification-id=${JSON.stringify(id)}]`,
-  );
-}
-
 // One event-loop turn: lets the theme MutationObserver callbacks a class
 // change queued run while the document still exists, so win.close() tears
 // down a quiet window.
@@ -134,9 +127,15 @@ async function testRegistryRemovalKeepsContentTabs() {
   const fileView = win.document.querySelector('.content-tab-view');
   assert.ok(fileView, 'the file tab rendered its view');
 
-  // T2 is waiting for an answer: its sticky notice is up.
+  // T2 is waiting for an answer: the question switches to it and the
+  // composer answers it, with no toast.
   send(win, {type: 'askUser', tabId: T2, question: 'Which one?'});
-  assert.ok(notice(win, 'ask:' + T2), 'the ask notice shows for T2');
+  assert.ok(win.document.body.classList.contains('ask-answering'));
+  assert.strictEqual(
+    win.document.querySelectorAll('.kiss-notification').length,
+    0,
+    'a question raises no toast',
+  );
 
   // Another surface closed T1 and T2: the snapshot lists neither.
   sent.length = 0;
@@ -151,10 +150,9 @@ async function testRegistryRemovalKeepsContentTabs() {
     true,
     'the file view was not disposed',
   );
-  assert.strictEqual(
-    notice(win, 'ask:' + T2),
-    null,
-    'the removed tab took its ask notice away',
+  assert.ok(
+    !win.document.body.classList.contains('ask-answering'),
+    'the removed tab took its pending question away',
   );
   // A removal mirrored from the registry is never echoed as a close.
   assert.ok(

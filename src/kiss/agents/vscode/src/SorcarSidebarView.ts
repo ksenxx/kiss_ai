@@ -446,9 +446,6 @@ function realDirectory(p: string): string {
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _view?: ChatWebviewHost;
   private _panelHooks?: PanelHooks;
-  // Resolvers of the native "waiting for your answer" progress
-  // notifications, by webview tab id (see _onAskWaiting).
-  private readonly _askWaiting = new Map<string, () => void>();
   // The notification poster this controller installed, if any, so
   // teardown clears only its own installation (see
   // clearWebviewNotificationPoster).
@@ -1215,9 +1212,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           // audit0903-coverage:end
         }
         this._resolveAllWorktreeActions();
-        // No webview means no askWaitingDone will ever arrive: close the
-        // native waiting notices rather than leave them stale.
-        this._resolveAllAskWaiting();
       }),
     );
 
@@ -1725,12 +1719,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._panelHooks?.onEvent({kind: 'reveal'});
         break;
 
-      case 'askWaiting':
-        this._onAskWaiting(message.tabId, message.question);
-        break;
-
-      case 'askWaitingDone':
-        this._resolveAskWaiting(message.tabId);
+      case 'revealForQuestion':
+        this._revealForQuestion();
         break;
 
       case 'openChatPanel':
@@ -2152,46 +2142,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * An ask_user_question reached tab `tabId` of this webview: bring the
+   * An ask_user_question reached a tab of this webview: bring the
    * surface forward (the sidebar view, or the editor panel even while a
-   * text editor is active) without taking keyboard focus. When the
-   * webview was hidden the user was not looking at the chat, so a native
-   * progress notification also says the agent is waiting; it stays until
-   * the user cancels it or the question is retired (`askWaitingDone`).
-   * The webview's own sticky toast covers the visible case.
+   * text editor is active) without taking keyboard focus. The Question
+   * panel in the webview is the whole notice: no native notification.
    */
-  private _onAskWaiting(tabId: string, question: string): void {
-    const wasVisible = this._view?.visible ?? false;
+  private _revealForQuestion(): void {
     if (this._panelHooks)
       this._panelHooks.onEvent({kind: 'reveal', force: true});
     else this._view?.show();
-    if (wasVisible) return;
-    this._resolveAskWaiting(tabId);
-    void vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: `${PRODUCT_NAME} is waiting for your answer: ${question}`,
-        cancellable: true,
-      },
-      (_progress, token) =>
-        new Promise<void>(resolve => {
-          this._askWaiting.set(tabId, resolve);
-          token.onCancellationRequested(() => this._resolveAskWaiting(tabId));
-        }),
-    );
-  }
-
-  private _resolveAllAskWaiting(): void {
-    for (const tabId of Array.from(this._askWaiting.keys())) {
-      this._resolveAskWaiting(tabId);
-    }
-  }
-
-  private _resolveAskWaiting(tabId: string): void {
-    const resolve = this._askWaiting.get(tabId);
-    if (!resolve) return;
-    this._askWaiting.delete(tabId);
-    resolve();
   }
 
   public async focusChatInput(): Promise<void> {
@@ -2566,7 +2525,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     for (const sub of this._viewSubs) sub.dispose();
     this._viewSubs = [];
     this._view = undefined;
-    this._resolveAllAskWaiting();
     if (this._installedPoster) {
       clearWebviewNotificationPoster(this._installedPoster);
       this._installedPoster = undefined;

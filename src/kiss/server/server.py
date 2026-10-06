@@ -1201,9 +1201,11 @@ class VSCodeServer(
         Looks up *task_id* in the agent-state registry and overwrites
         the ``tokens``, ``cost``, and ``steps`` fields in *session*
         with current values from the running agent, including the
-        in-progress executor's ``step_count``.  Acquires
-        ``_state_lock`` internally (re-entrant, so safe to call with
-        it already held).
+        in-progress executor's ``step_count``, and sets
+        ``awaiting_answer`` when the task is blocked on an
+        ``ask_user_question`` (the History panel then shows a ``?``
+        instead of the running spinner).  Acquires ``_state_lock``
+        internally (re-entrant, so safe to call with it already held).
 
         The usage triple is read through ONE
         :func:`_subtask_metrics` call (``usage_snapshot()`` on a
@@ -1219,8 +1221,11 @@ class VSCodeServer(
         """
         with self._state_lock:
             state = agent_state.get(task_id)
-            agent = state.agent if state is not None else None
-            if state is None or agent is None:
+            if state is None:
+                return
+            session["awaiting_answer"] = bool(state.pending_ask_question)
+            agent = state.agent
+            if agent is None:
                 return
             tokens, cost, steps = _subtask_metrics(agent)
             session["tokens"] = tokens
@@ -1278,6 +1283,7 @@ class VSCodeServer(
                 "has_events": has_events,
                 "failed": _is_failed_result(result) and not is_running,
                 "is_running": is_running,
+                "awaiting_answer": False,
                 "tokens": 0,
                 "cost": 0.0,
                 "steps": 0,

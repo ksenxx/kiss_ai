@@ -3494,6 +3494,16 @@ class _TaskRunnerMixin:
         concurrent replay can never re-show an answered question); the
         ``finally`` below also clears it when the wait aborts (task
         stopped) without an answer.
+
+        The History panel marks a task waiting on a question with a
+        ``?`` in place of its spinner (``awaiting_answer`` in
+        ``_get_history``), so a ``tasks_updated`` is broadcast when the
+        question opens and again when the wait ends, for every surface
+        to repaint its rows.  The explicit empty ``tabId`` keeps it on
+        the printer's verbatim all-clients path: this runs on the agent
+        thread, where an unstamped event is routed to the task's tab
+        subscribers only (none, once the user closed the task's tabs)
+        and a History panel with no tab on the task would miss it.
         """
         state = self._resolve_task_state()
         q = state.user_answer_queue if state is not None else None
@@ -3520,8 +3530,10 @@ class _TaskRunnerMixin:
                         "question": question,
                     }
                 )
+            self.printer.broadcast({"type": "tasks_updated", "tabId": ""})
             return self._await_user_response(q)
         finally:
             if state is not None:
                 with self._state_lock:
                     state.pending_ask_question = ""
+            self.printer.broadcast({"type": "tasks_updated", "tabId": ""})

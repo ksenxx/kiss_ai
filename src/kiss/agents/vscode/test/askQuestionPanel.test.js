@@ -634,7 +634,7 @@ test('the send button answers too', () => {
   assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 1);
 });
 
-test('a pending question is never folded by the streaming collapse pass', () => {
+test('a question is never folded by the streaming collapse pass, answered or not', () => {
   const {win, tab} = makeWebview(true);
   function bash(callId) {
     send(win, {
@@ -663,10 +663,25 @@ test('a pending question is never folded by the streaming collapse pass', () => 
     !question.classList.contains('collapsed'),
     'the unanswered question stays open',
   );
-  // Answered: the next events fold it like any other panel.
+  // Answered: the question stays open while the stream goes on (the
+  // user's side of the conversation is never folded away; see
+  // askQuestionNeverCollapsed.test.js for the answer and the replays).
   send(win, {type: 'askUserDone', tabId: tab});
   bash(5);
-  assert.ok(question.classList.contains('collapsed'));
+  bash(6);
+  bash(7);
+  assert.ok(
+    !question.classList.contains('collapsed'),
+    'the answered question stays open too',
+  );
+  assert.ok(
+    !question.classList.contains('tc-question-pending'),
+    'and is no longer marked pending',
+  );
+  assert.ok(
+    win.document.querySelectorAll('#output .ev.tc')[2].classList.contains('collapsed'),
+    'while plain panels around it still fold',
+  );
 });
 
 test('answers stay out of the prompt history, and history recall is off while answering', () => {
