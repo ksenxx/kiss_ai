@@ -5,12 +5,15 @@
 # add your name here
 # Install KISS Sorcar from source.
 #
-# This script's job is intentionally small: bootstrap only the tools needed to
-# build and install the VS Code extension from a cloned checkout, then launch
-# VS Code (the desktop app, and VS Code in the browser via ``code serve-web``)
-# and open the webapp.  Runtime setup is owned by the extension's DependencyInstaller so
-# users get the same installation path whether they run this script or install
-# the VSIX directly.
+# Bootstrap the tools needed to build and install the VS Code extension from
+# a cloned checkout, finish the runtime setup the extension would otherwise
+# do on its first activation (bundled Python environment, ``sorcar`` CLI,
+# Playwright, cloudflared, the kiss-web daemon — see "Runtime setup without
+# VS Code" below), then launch VS Code (the desktop app, and VS Code in the
+# browser via ``code serve-web``) and open the webapp.  The extension's
+# DependencyInstaller re-checks all of it on activation, so installing the
+# VSIX directly takes the same path, just later; it also owns the
+# interactive parts (API keys, the remote-access password).
 #
 # Usage: ./install.sh [--non-interactive]
 #
@@ -322,20 +325,28 @@ LOG_FILE="$LOG_DIR/install.log"
 # extension's kissHomeDir() (src/kissHome.js), so the installer writes its
 # marker, progress file and MODEL_INFO.json where the installed product
 # reads them.  Anything but a single path component falls back to .kiss.
-brand_home_dir_name() {
-    local file name
+brand_field() {
+    # Print string field $1 of the checkout's brand.json (the .brand/
+    # overlay first), or nothing when neither file defines it.
+    local file
     for file in "$PROJECT_DIR/.brand/brand.json" \
                 "$PROJECT_DIR/src/kiss/agents/vscode/media/brand.json"; do
         [ -f "$file" ] || continue
-        name="$(tr -d '\n\r' < "$file" | sed -n 's/.*"home_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-        break
+        tr -d '\n\r' < "$file" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+        return 0
     done
+}
+brand_home_dir_name() {
+    local name
+    name="$(brand_field home_dir)"
     case "$name" in
         ""|.|..|*/*|*\\*) echo ".kiss" ;;
         *) echo "$name" ;;
     esac
 }
 BRAND_HOME_DIR_NAME="$(brand_home_dir_name)"
+BRAND_PRODUCT_NAME="$(brand_field product_name)"
+BRAND_PRODUCT_NAME="${BRAND_PRODUCT_NAME:-KISS Sorcar}"
 # The extension's state directory (kissHomeDir() in userAssets.ts honours
 # $KISS_HOME).  The update marker and the progress file below must land
 # here, not in a hard-coded $HOME/.kiss, or a custom-KISS_HOME install
@@ -470,7 +481,11 @@ report_step() {
     { printf '%s\n%s\n' "$$" "$1" > "$PROGRESS_FILE.tmp" \
         && mv -f "$PROGRESS_FILE.tmp" "$PROGRESS_FILE"; } 2>/dev/null || true
 }
-trap 'rm -f "$PROGRESS_FILE" "$PROGRESS_FILE.tmp"' EXIT
+# KISS_WEB_RESTART_LOCK_HELD names the kiss-web restart lock this script
+# holds, if any (acquire_kiss_web_restart_lock below); released here so an
+# aborted run does not leave the extension locked out of restarting.
+KISS_WEB_RESTART_LOCK_HELD=""
+trap 'rm -f "$PROGRESS_FILE" "$PROGRESS_FILE.tmp"; [ -z "$KISS_WEB_RESTART_LOCK_HELD" ] || release_kiss_web_restart_lock "$KISS_WEB_RESTART_LOCK_HELD"' EXIT
 
 # Run "$@" while printing a heartbeat every HEARTBEAT_INTERVAL seconds so
 # the user can tell the install is still working.  Without this the npm ci
@@ -1193,6 +1208,482 @@ EOF
     echo "   Restored the checkout's own brand files (the built VSIX keeps the overlay)."
 }
 
+# ---------------------------------------------------------------------------
+# Runtime setup without VS Code
+# ---------------------------------------------------------------------------
+# The VS Code extension's DependencyInstaller performs the same steps on
+# its first activation and stays the owner of the interactive ones (API
+# keys, the remote-access password).  Doing the non-interactive part here
+# means an install with no VS Code window attached (a headless server, a
+# Docker build, a white-label post-install hook that needs the runtime)
+# still ends with the bundled Python environment, the ``sorcar`` CLI and
+# a running kiss-web daemon; the extension's first activation then finds
+# a matching fingerprint and takes its fast path.  Every step is
+# best-effort: a failure is reported and the install completes, since
+# the extension retries on activation.
+#
+# The daemon is restarted under the extension's own rules: never while
+# the running daemon reports tasks in flight, and not at all when it is
+# healthy and already runs this exact runtime (that keeps its public
+# tunnel URL).
+# BEGIN: kiss-runtime-setup  (tests extract this block verbatim)
+# kiss-web always listens on 8787; the override exists for the tests.
+KISS_WEB_PORT="${KISS_WEB_PORT:-8787}"
+
+installed_kiss_projects() {
+    # Print the kiss_project directory of every installed copy of
+    # extension version $1, the copy the ``code`` CLI installs into first
+    # (desktop / code-server) and the VS Code Server copy last.
+    local version="$1" root dir
+    [ -n "$version" ] || return 0
+    for root in "$HOME/.vscode/extensions" \
+                "$HOME/.vscode-insiders/extensions" \
+                "$HOME/.vscode-oss/extensions" \
+                "$HOME/.local/share/code-server/extensions" \
+                "$HOME/.vscode-server/extensions" \
+                "$HOME/.vscode-server-insiders/extensions"; do
+        dir="$root/ksenxx.kiss-sorcar-$version/kiss_project"
+        [ -f "$dir/pyproject.toml" ] && echo "$dir"
+    done
+    return 0
+}
+
+ensure_uv() {
+    # Print the path of uv, installing it into ~/.local/bin when missing.
+    local candidate
+    for candidate in "$(command -v uv 2>/dev/null || true)" \
+                     "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "   Installing uv (https://astral.sh/uv)..." >&2
+    curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh >&2 || return 1
+    [ -x "$HOME/.local/bin/uv" ] || return 1
+    echo "$HOME/.local/bin/uv"
+}
+
+add_local_bin_to_shell_rc() {
+    # Put ~/.local/bin (uv, sorcar, cloudflared) on PATH in the login
+    # shell's rc file, once; same file choice and line as the extension.
+    local rc line
+    case "${SHELL:-}" in
+        */zsh|*/zsh-5) rc="$HOME/.zshrc" ;;
+        */fish) rc="$HOME/.config/fish/config.fish" ;;
+        *) rc="$HOME/.bashrc" ;;
+    esac
+    if [ "$rc" = "$HOME/.config/fish/config.fish" ]; then
+        line='fish_add_path "$HOME/.local/bin"'
+        grep -Eqs 'fish_add_path.*(\$HOME|~)/\.local/bin' "$rc" && return 0
+    else
+        line='export PATH="$HOME/.local/bin:$PATH"'
+        grep -Eqs 'PATH.*(\$HOME|~)/\.local/bin' "$rc" && return 0
+    fi
+    if [ -s "$rc" ] && [ -n "$(tail -c1 "$rc")" ]; then
+        line=$'\n'"$line"
+    fi
+    if mkdir -p "$(dirname "$rc")" && echo "$line" >> "$rc"; then
+        echo "   Added ~/.local/bin to PATH in $rc"
+    else
+        echo "   WARNING: could not add ~/.local/bin to PATH in $rc"
+    fi
+}
+
+install_cloudflared() {
+    # cloudflared serves the public tunnel URL of the web app.  Best
+    # effort: Homebrew on macOS, else the latest GitHub release.
+    local arch bin_dir="$HOME/.local/bin" url
+    command -v cloudflared &>/dev/null && return 0
+    [ -x "$bin_dir/cloudflared" ] && return 0
+    case "$(uname -m)" in
+        x86_64|amd64) arch=amd64 ;;
+        arm64|aarch64) arch=arm64 ;;
+        *) echo "   cloudflared: unsupported architecture $(uname -m); skipped"; return 0 ;;
+    esac
+    echo "   Installing cloudflared..."
+    mkdir -p "$bin_dir"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        if command -v brew &>/dev/null && brew install cloudflared; then
+            return 0
+        fi
+        url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-$arch.tgz"
+        curl -fsSL "$url" | tar xzf - -C "$bin_dir" || echo "   WARNING: cloudflared download failed; the web app will have no public URL"
+    else
+        url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch"
+        curl -fsSL -o "$bin_dir/cloudflared" "$url" \
+            || { rm -f "$bin_dir/cloudflared"; echo "   WARNING: cloudflared download failed; the web app will have no public URL"; }
+    fi
+    [ -f "$bin_dir/cloudflared" ] && chmod 755 "$bin_dir/cloudflared"
+    return 0
+}
+
+setup_bundled_runtime() {
+    # Build the Python environment of every installed copy of extension
+    # version $1, then the ``sorcar`` CLI (bound to the first copy),
+    # Playwright's Chromium and cloudflared.
+    # Leaves the first copy in KISS_PRIMARY_PROJECT for the daemon start.
+    local version="$1" uv project primary="" bin_dir="$HOME/.local/bin"
+    local projects
+    KISS_PRIMARY_PROJECT=""
+    projects="$(installed_kiss_projects "$version")"
+    if [ -z "$projects" ]; then
+        echo "   No installed copy of the extension found; the extension sets up its runtime on first activation."
+        return 0
+    fi
+    if ! uv="$(ensure_uv)"; then
+        echo "   WARNING: uv is not available; the extension installs it on first activation."
+        return 0
+    fi
+    while IFS= read -r project; do
+        echo "   Installing Python dependencies in $project..."
+        if (cd "$project" && "$uv" sync); then
+            [ -n "$primary" ] || primary="$project"
+        else
+            echo "   WARNING: uv sync failed in $project; the extension retries on activation."
+        fi
+    done <<< "$projects"
+    [ -n "$primary" ] || return 0
+    KISS_PRIMARY_PROJECT="$primary"
+
+    # The CLI wrapper, byte for byte what the extension writes.
+    if mkdir -p "$bin_dir" && printf '%s\n' '#!/bin/bash' \
+            "# Installed by ${BRAND_PRODUCT_NAME:-KISS Sorcar} VS Code extension" \
+            'export KISS_WORKDIR="$PWD"' \
+            "exec \"$uv\" run --directory \"$primary\" sorcar \"\$@\"" > "$bin_dir/sorcar.tmp" \
+            && chmod 755 "$bin_dir/sorcar.tmp" && mv -f "$bin_dir/sorcar.tmp" "$bin_dir/sorcar"; then
+        echo "   Installed the sorcar CLI at $bin_dir/sorcar"
+    else
+        echo "   WARNING: could not install the sorcar CLI at $bin_dir/sorcar; the extension retries on activation."
+    fi
+    add_local_bin_to_shell_rc
+
+    echo "   Installing Playwright Chromium..."
+    if ! (cd "$primary" && "$uv" run python -m playwright install chromium); then
+        echo "   WARNING: Playwright Chromium install failed; the extension retries on activation."
+    elif [ "$(uname -s)" = "Linux" ]; then
+        # Chromium's system libraries need root (install-deps calls sudo
+        # itself); only try when that cannot stall on a password prompt.
+        if [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null; then
+            (cd "$primary" && "$uv" run python -m playwright install-deps chromium) \
+                || echo "   WARNING: Chromium system libraries not installed (playwright install-deps failed)."
+        else
+            echo "   Chromium system libraries: run 'sudo $primary/.venv/bin/python -m playwright install-deps chromium' if the browser fails to start."
+        fi
+    fi
+    install_cloudflared
+}
+
+kiss_web_port_open() {
+    (exec 3<>"/dev/tcp/127.0.0.1/$KISS_WEB_PORT") 2>/dev/null
+}
+
+kiss_web_fingerprint() {
+    # Same digest as computeKissWebFingerprint in DependencyInstaller.ts:
+    # the kiss-web launcher bytes, the work dir, and the newest mtime of
+    # the bundled sources.  Matching it lets the extension skip its own
+    # restart on first activation.
+    "$1/.venv/bin/python" - "$1" "$2" <<'EOF'
+import hashlib, os, sys
+project, workdir = sys.argv[1], sys.argv[2]
+digest = hashlib.sha256()
+with open(os.path.join(project, ".venv", "bin", "kiss-web"), "rb") as f:
+    digest.update(f.read())
+digest.update(workdir.encode())
+latest = 0
+
+
+def walk(directory):
+    global latest
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name in ("__pycache__", "tests"):
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            walk(entry.path)
+        elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".py"):
+            try:
+                latest = max(latest, entry.stat().st_mtime_ns)
+            except OSError:
+                pass
+
+
+walk(os.path.join(project, "src", "kiss"))
+digest.update(str(latest).encode())
+print(digest.hexdigest())
+EOF
+}
+
+kiss_web_is_idle() {
+    # True when no daemon reachable through any of the endpoint files $@
+    # reports tasks in flight (scripts/check-kiss-web-active-tasks.py:
+    # exit 0 = absent, refused or idle; 1 = busy, unknown, or a daemon
+    # too old to answer).
+    local python="$1" endpoint
+    shift
+    for endpoint in "$@"; do
+        KISS_SORCAR_LOCAL="$endpoint" KISS_ACTIVE_TASKS_STRICT=1 \
+            "$python" "$PROJECT_DIR/scripts/check-kiss-web-active-tasks.py" || return 1
+    done
+}
+
+previous_kiss_web_homes() {
+    # State directories of the daemon the existing service runs: the
+    # KISS_HOME its unit/plist sets, and its runtime's own default home.
+    # A busy daemon left by an earlier install under another home must
+    # still be asked before it is replaced.
+    local unit="$HOME/.config/systemd/user/kiss-web.service"
+    local plist="$HOME/Library/LaunchAgents/com.kiss.web-server.plist" bin python
+    [ -f "$unit" ] && sed -n 's/^Environment=KISS_HOME=//p' "$unit" | unit_unescape
+    [ -f "$plist" ] && sed -n '/<key>KISS_HOME<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$plist" | xml_unescape
+    # The first word of ExecStart is the launcher (older units pass
+    # ``--workdir``); its sibling python knows the runtime's own home.
+    for bin in "$([ -f "$unit" ] && sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$unit" | unit_unescape)" \
+               "$([ -f "$plist" ] && sed -n '/<key>ProgramArguments<\/key>/{n;n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$plist" | xml_unescape)"; do
+        python="${bin%/*}/python"
+        [ -n "$bin" ] && [ -x "$python" ] \
+            && env -u KISS_HOME "$python" -c 'from kiss.core.config import kiss_home; print(kiss_home())' 2>/dev/null
+    done
+    return 0
+}
+
+acquire_kiss_web_restart_lock() {
+    # Take the extension's restart lock $1 ({"pid":…,"token":…}, created
+    # exclusively) so a VS Code window and this script never restart the
+    # daemon at the same time; a lock whose owner is dead is broken.
+    # Same patience as the extension: a lock without a readable owner is
+    # left alone for 2 minutes (the extension creates the file before it
+    # writes its identity), a live owner for 10 minutes.
+    local owner
+    if ( set -o noclobber; echo "{\"pid\":$$,\"token\":\"install-$$\"}" > "$1" ) 2>/dev/null; then
+        KISS_WEB_RESTART_LOCK_HELD="$1"
+        return 0
+    fi
+    owner="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1" 2>/dev/null)"
+    if [ -z "$owner" ]; then
+        [ -n "$(find "$1" -mmin +2 2>/dev/null)" ] || return 1
+    elif kill -0 "$owner" 2>/dev/null; then
+        [ -n "$(find "$1" -mmin +10 2>/dev/null)" ] || return 1
+    fi
+    rm -f "$1"
+    ( set -o noclobber; echo "{\"pid\":$$,\"token\":\"install-$$\"}" > "$1" ) 2>/dev/null || return 1
+    KISS_WEB_RESTART_LOCK_HELD="$1"
+}
+
+release_kiss_web_restart_lock() {
+    # Remove lock $1 if this script holds it (also run from the EXIT trap,
+    # so an interrupted restart never leaves the extension locked out).
+    grep -qs "\"token\":\"install-$$\"" "$1" && rm -f "$1"
+    KISS_WEB_RESTART_LOCK_HELD=""
+    return 0
+}
+
+stop_stray_kiss_web() {
+    # A kiss-web outside the service (an old direct spawn) would keep the
+    # port and make the new daemon crash-loop.  Best effort: needs lsof
+    # or fuser, and only touches processes that are kiss-web.
+    local pid pids=""
+    if command -v lsof &>/dev/null; then
+        pids="$(lsof -t -iTCP:"$KISS_WEB_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+    elif command -v fuser &>/dev/null; then
+        pids="$(fuser "$KISS_WEB_PORT/tcp" 2>/dev/null || true)"
+    fi
+    for pid in $pids; do
+        case "$(ps -o command= -p "$pid" 2>/dev/null)" in
+            *kiss-web*|*kiss.server*) kill "$pid" 2>/dev/null || true ;;
+        esac
+    done
+}
+
+xml_escape() {
+    # sed rather than ${s//&/&amp;}: bash 5.2 reads an unquoted & in a
+    # replacement as the matched text.
+    printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'"'"'/\&apos;/g'
+}
+
+unit_escape() {
+    # The trailing "x" survives $(…)'s newline stripping and is removed.
+    local s
+    s="$(printf '%sx' "$1" | sed 's/\\/\\\\/g; s/%/%%/g')"
+    s="${s%x}"
+    printf '%s' "${s//$'\n'/\\n}"
+}
+
+unit_unescape() {
+    sed 's/%%/%/g; s/\\\\/\\/g'
+}
+
+xml_unescape() {
+    sed 's/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&apos;/'"'"'/g; s/&amp;/\&/g'
+}
+
+write_kiss_web_plist() {
+    # Write LaunchAgent $1 running kiss-web $2 in work dir $3 with logs
+    # under $4; same content as the extension writes.  The daemon resolves
+    # its state dir from $KISS_HOME, so a KISS_HOME set for this install
+    # must reach the service too.
+    local plist="$1" kiss_web="$2" workdir="$3" home="$4" kiss_home_entry=""
+    if [ -n "${KISS_HOME:-}" ]; then
+        kiss_home_entry=$'\n        <key>KISS_HOME</key>\n        <string>'"$(xml_escape "$KISS_HOME")"'</string>'
+    fi
+    mkdir -p "$(dirname "$plist")"
+    cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kiss.web-server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$(xml_escape "$kiss_web")</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>$(xml_escape "$workdir")</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>$(xml_escape "$home")/kiss-web-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>$(xml_escape "$home")/kiss-web-stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$(xml_escape "/opt/homebrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")</string>$kiss_home_entry
+    </dict>
+</dict>
+</plist>
+EOF
+}
+
+write_kiss_web_unit() {
+    # Write systemd user unit $1 running kiss-web $2 in work dir $3 with
+    # logs under $4; same content as the extension writes.
+    local unit="$1" kiss_web="$2" workdir="$3" home="$4" kiss_home_line=""
+    if [ -n "${KISS_HOME:-}" ]; then
+        kiss_home_line="Environment=KISS_HOME=$(unit_escape "$KISS_HOME")"$'\n'
+    fi
+    mkdir -p "$(dirname "$unit")"
+    cat > "$unit" <<EOF
+[Unit]
+Description=${BRAND_PRODUCT_NAME:-KISS Sorcar} Remote Web Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$(unit_escape "$kiss_web")
+WorkingDirectory=$(unit_escape "$workdir")
+Restart=always
+RestartSec=5
+Environment=PATH=$(unit_escape "$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin")
+${kiss_home_line}StandardOutput=append:$(unit_escape "$home")/kiss-web-stdout.log
+StandardError=append:$(unit_escape "$home")/kiss-web-stderr.log
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+start_kiss_web_daemon() {
+    # Register kiss-web from kiss_project $1 as the user's service
+    # (launchd on macOS, systemd on Linux, a detached process elsewhere)
+    # serving work dir $2, and (re)start it when that is safe.
+    local project="$1" workdir="$2" kiss_web="$1/.venv/bin/kiss-web"
+    local python="$1/.venv/bin/python" home lock
+    if [ ! -x "$kiss_web" ]; then
+        echo "   kiss-web not built in $project; the extension starts the daemon on first activation."
+        return 0
+    fi
+    home="$("$python" -c 'from kiss.core.config import kiss_home; print(kiss_home())')" || return 0
+    mkdir -p "$home"
+    lock="$home/.kiss-web.restart.lock"
+    if ! acquire_kiss_web_restart_lock "$lock"; then
+        echo "   A VS Code window is restarting kiss-web; leaving it to that."
+        return 0
+    fi
+    restart_kiss_web_locked "$project" "$workdir" "$home"
+    release_kiss_web_restart_lock "$lock"
+}
+
+restart_kiss_web_locked() {
+    # The decision and restart of start_kiss_web_daemon, under the lock:
+    # kiss_project $1, work dir $2, state dir $3.
+    local project="$1" workdir="$2" home="$3" kiss_web="$1/.venv/bin/kiss-web"
+    local python="$1/.venv/bin/python" endpoint fingerprint stamp waited=0 old
+    endpoint="$home/sorcar-local.json"
+    fingerprint="$(kiss_web_fingerprint "$project" "$workdir")" || return 0
+    if [ "$(cat "$home/.kiss-web.fingerprint" 2>/dev/null)" = "$fingerprint" ] \
+        && [ -f "$endpoint" ] && kiss_web_port_open; then
+        echo "   kiss-web already serves this runtime; leaving it running."
+        return 0
+    fi
+    # A brand switch or another KISS_HOME moves the state directory, so
+    # the daemon owning the port may be reachable only through an old
+    # one: probe every candidate before stopping anything.
+    local candidates=("$endpoint" "$HOME/.kiss/sorcar-local.json" \
+                      "${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}/sorcar-local.json")
+    while IFS= read -r old; do
+        [ -n "$old" ] && candidates+=("$old/sorcar-local.json")
+    done < <(previous_kiss_web_homes)
+    if ! kiss_web_is_idle "$python" "${candidates[@]}"; then
+        echo "   kiss-web has tasks in flight; restart deferred (the extension restarts it, or re-run this script once they finish)."
+        return 0
+    fi
+    # "Up" below means the new daemon rewrote its endpoint file after this
+    # stamp; the pause keeps that comparison valid on a bash whose ``-nt``
+    # has whole-second resolution (macOS).
+    stamp="$home/.kiss-web.restart-stamp"
+    : > "$stamp"
+    sleep 1
+    if [ "$(uname -s)" = "Darwin" ]; then
+        local uid plist="$HOME/Library/LaunchAgents/com.kiss.web-server.plist"
+        uid="$(id -u)"
+        write_kiss_web_plist "$plist" "$kiss_web" "$workdir" "$home"
+        echo "   Restarting the kiss-web LaunchAgent..."
+        launchctl bootout "gui/$uid/com.kiss.web-server" 2>/dev/null || true
+        stop_stray_kiss_web
+        launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null || true
+        launchctl kickstart -k "gui/$uid/com.kiss.web-server" || echo "   WARNING: launchctl kickstart failed"
+    elif [ "$(uname -s)" = "Linux" ] && systemctl --user show-environment &>/dev/null; then
+        write_kiss_web_unit "$HOME/.config/systemd/user/kiss-web.service" "$kiss_web" "$workdir" "$home"
+        echo "   Restarting the kiss-web systemd user service..."
+        systemctl --user daemon-reload || true
+        systemctl --user enable kiss-web.service &>/dev/null || true
+        systemctl --user stop kiss-web.service 2>/dev/null || true
+        stop_stray_kiss_web
+        systemctl --user start kiss-web.service || echo "   WARNING: systemctl start failed"
+        loginctl enable-linger "$(id -un)" 2>/dev/null || true
+    else
+        echo "   Starting kiss-web as a detached background process..."
+        stop_stray_kiss_web
+        # ``exec`` so no shell lingers holding this script's output open;
+        # ``9>&-`` keeps the update lock out of the daemon.
+        (cd "$workdir" && exec nohup "$kiss_web" >> "$home/kiss-web-stdout.log" 2>> "$home/kiss-web-stderr.log" < /dev/null 9>&-) &
+    fi
+    while [ "$waited" -lt "${KISS_WEB_START_TIMEOUT:-90}" ]; do
+        if [ "$endpoint" -nt "$stamp" ] && kiss_web_port_open; then
+            echo "$fingerprint" > "$home/.kiss-web.fingerprint"
+            rm -f "$stamp" "$home/.kiss-web.restart-pending"
+            echo "   kiss-web is up (${waited}s): http://localhost:$KISS_WEB_PORT"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    rm -f "$stamp"
+    echo "   WARNING: kiss-web did not come up within ${waited}s; see $home/kiss-web-stderr.log"
+}
+# END: kiss-runtime-setup
+
 # Tee stdout+stderr to the install log AND the terminal.  We use ``exec``
 # process substitution rather than wrapping the install body in
 # ``{ ... } 2>&1 | tee "$LOG_FILE"`` because the latter forks a subshell
@@ -1269,7 +1760,7 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
         INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         echo "   uv $INSTALLED_UV ready"
     else
-        echo "   uv not found — will be installed by the VS Code extension"
+        echo "   uv not found — will be installed with the bundled runtime in step [5/5]"
     fi
     echo ""
 
@@ -1378,10 +1869,10 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     echo "   Built $VSIX"
     echo ""
 
-    # The ``sorcar`` CLI itself is installed into ~/.local/bin by the VS Code
-    # extension (``installCliScript`` in DependencyInstaller.ts).  Install the
-    # companion repo-root scripts the same way so they too can be run from
-    # anywhere.
+    # The ``sorcar`` CLI itself is installed into ~/.local/bin once the
+    # bundled runtime is built (setup_bundled_runtime, step [5/5]).  Install
+    # the companion repo-root scripts the same way so they too can be run
+    # from anywhere.
     report_step "Installing rsorcar and sorcar-docker launchers..."
     install_repo_script_launcher rsorcar
     install_repo_script_launcher sorcar-docker
@@ -1449,16 +1940,12 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
         exit 1
     fi
 
-    # The kiss-web daemon is deliberately NOT touched by this script — no
-    # kill, no socket cleanup, no launchctl/systemctl restart.  Restarting
-    # kiss-web is owned entirely by the VS Code extension: after the
-    # ``.extension-updated`` marker written below triggers the window
-    # reload, the extension's DependencyInstaller rebuilds the bundled
-    # Python environment (``uv sync``) and restarts the daemon itself
-    # (``restartKissWebDaemon`` — the fingerprint of the freshly installed
-    # extension never matches ``~/.kiss/.kiss-web.fingerprint``), deferring
-    # while tasks are in flight (``daemonHasActiveTasks``).  Until that
-    # restart the old daemon keeps serving, so running this script never
+    # The kiss-web daemon is restarted only at the very end of this step
+    # (start_kiss_web_daemon), under the extension's own rules: never
+    # while the running daemon reports tasks in flight, in which case the
+    # old daemon keeps serving and the extension's DependencyInstaller
+    # restarts it later (``restartKissWebDaemon``, fingerprint mismatch
+    # after the window reload).  Running this script therefore never
     # clobbers in-flight agent runs.
 
     # MODEL_INFO.json IS copied into the user's kiss home directory:
@@ -1507,6 +1994,18 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     KISS_HOME_DIR="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}"
     mkdir -p "$KISS_HOME_DIR"
 
+    # Finish the runtime setup the extension would otherwise do on its
+    # first activation (see "Runtime setup without VS Code" above).  The
+    # Python environment is built before the hooks so a hook that needs
+    # it finds it; the daemon is (re)started after them, below, so it
+    # serves the extension as the hooks left it.
+    EXT_VERSION="$(node -p 'require(process.argv[1]).version' \
+        "$PROJECT_DIR/src/kiss/agents/vscode/package.json" 2>/dev/null || true)"
+    # ``|| …`` keeps ``set -e`` out of the function: every failure inside
+    # is reported and the install goes on.
+    setup_bundled_runtime "$EXT_VERSION" \
+        || echo "   WARNING: the runtime setup did not complete; the extension retries on activation."
+
     # Post-install hooks: every executable in $KISS_HOME_DIR/post-install.d/
     # runs now, with the new extension directory on disk and before the
     # reload marker below, so a layer that patches the installed extension
@@ -1540,13 +2039,20 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     rm -f "$KISS_HOME_DIR/install_dir" "$HOME/.kiss/install_dir"
     echo ""
 
+    # The daemon serves the directory this script was run from — the same
+    # one VS Code opens below, and so the extension's own work dir.
+    if [ -n "${KISS_PRIMARY_PROJECT:-}" ]; then
+        start_kiss_web_daemon "$KISS_PRIMARY_PROJECT" "$USER_PWD" \
+            || echo "   WARNING: kiss-web was not restarted; the extension restarts it on activation."
+    fi
+    echo ""
+
     echo "=== Source bootstrap complete ==="
     echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo "Project: $PROJECT_DIR"
     echo ""
-    echo "KISS Sorcar runtime setup will finish inside VS Code."
-    echo "The extension will install/check uv, Python dependencies, Playwright,"
-    echo "cloudflared, shell PATH entries, API keys, remote access auth, and kiss-web."
+    echo "API keys and the remote-access password are set in VS Code (the extension"
+    echo "asks on first activation) or in the web app's settings."
     # END: kiss-step-5-5-terminal-freeze
 }
 
