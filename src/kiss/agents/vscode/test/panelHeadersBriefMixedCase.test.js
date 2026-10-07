@@ -144,27 +144,39 @@ function testThoughtsNeverCollapsedWhileStreaming() {
   console.log('  ok - Thoughts panels stay open while the task streams');
 }
 
-function testThoughtsNeverCollapsedBySummary() {
+function testSummaryFoldsThoughtsToo() {
+  // The one automatic fold a Thoughts panel takes part in: a summary
+  // tool call adopts the Thoughts panels of the steps it recounts
+  // along with their tool panels (a steering Message, an answer or a
+  // Question still stay out in front of it).
   const win = makeWebview();
   startTask(win, 'Summarize around the thoughts');
   for (let i = 1; i <= 3; i++) sendStep(win, i);
+  send(win, {type: 'prompt', text: 'steer', steer: true});
   send(win, {type: 'tool_call', name: 'summary', description: 'three steps'});
-  assertThoughtsVisible(win, 'summary');
   const summary = output(win).querySelector('.tc-summary');
   assert.ok(summary.classList.contains('collapsed'), 'the summary panel folds');
   const adopted = Array.from(summary.querySelector('.summary-sub').children);
-  assert.ok(
-    adopted.length >= 3 && adopted.every(el => el.classList.contains('tc-bash')),
+  const adoptedThoughts = adopted.filter(el => el.classList.contains('llm-panel'));
+  assert.strictEqual(adoptedThoughts.length, 3, 'the summary adopts the three Thoughts panels');
+  assert.strictEqual(
+    adopted.filter(el => el.classList.contains('tc-bash')).length,
+    3,
     'the summary adopts the tool panels: ' + adopted.map(e => e.className).join(','),
   );
   const top = topLevel(win);
   assert.strictEqual(top[top.length - 1], summary, 'the summary is the newest panel');
+  assert.strictEqual(
+    top.filter(p => p.classList.contains('llm-panel')).length,
+    0,
+    'no Thoughts panel of the recounted steps stays top-level',
+  );
   assert.ok(
-    top.filter(p => p.classList.contains('llm-panel')).length >= 3,
-    'the Thoughts panels stay top-level, in front of the summary',
+    top.some(p => p.classList.contains('user-msg')),
+    'the steering Message panel stays top-level, in front of the summary',
   );
   win.close();
-  console.log('  ok - a summary tool call leaves Thoughts panels out of its fold');
+  console.log('  ok - a summary tool call folds the Thoughts panels of its steps');
 }
 
 function testThoughtsNeverCollapsedOnReplayOrDigest() {
@@ -354,7 +366,6 @@ function testHeadersAreMixedCase() {
     '.prompt-h',
     '.task-panel-h',
     '.ask-answer-label',
-    '.think .lbl',
     '.tr .rl',
   ];
   for (const sel of sels) {
@@ -376,7 +387,7 @@ function testHeadersAreMixedCase() {
 
 function main() {
   testThoughtsNeverCollapsedWhileStreaming();
-  testThoughtsNeverCollapsedBySummary();
+  testSummaryFoldsThoughtsToo();
   testThoughtsNeverCollapsedOnReplayOrDigest();
   testThoughtsFoldOnlyByClick();
   testBashCollapsedHeaderIsDescription();

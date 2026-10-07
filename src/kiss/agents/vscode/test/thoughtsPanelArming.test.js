@@ -106,8 +106,8 @@ function thoughtEvents(text) {
 // it was written loose into the transcript.
 function panelOfThought(win, text) {
   const out = win.document.getElementById('output');
-  const thoughts = Array.from(out.querySelectorAll('.ev.think .cnt'));
-  const hit = thoughts.find(cnt => cnt.textContent.includes(text));
+  const thoughts = Array.from(out.querySelectorAll('.think'));
+  const hit = thoughts.find(el => el.textContent.includes(text));
   assert.ok(hit, `the transcript must contain the thought ${JSON.stringify(text)}`);
   return hit.closest('.llm-panel');
 }

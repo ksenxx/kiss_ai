@@ -6,8 +6,9 @@
 
 A SEA is a Python file ``xxx/xxx_sea.py`` that defines exactly one
 subclass of :class:`BaseSea`.  The subclass overrides the methods it
-needs; every method has a do-nothing default here, so a SEA defines
-only what it changes::
+needs; every method here passes its input through (the root layer's
+one rule of its own is the ``summary`` cadence, see :class:`BaseSea`),
+so a SEA defines only what it changes::
 
     from kiss.agents.seas.base.base_sea import WorkerSea
 
@@ -89,6 +90,15 @@ WORKER_DEFAULTS: dict[str, Any] = {
 }
 """The settings :class:`WorkerSea` lays under its subclass's own."""
 
+SUMMARY_EVERY_STEPS = 10
+"""A run with the ``summary`` tool must call it at every step that is a multiple of this."""
+
+SUMMARY_DUE_REFUSAL = (
+    "Step {step} is a multiple of {every}: call summary(description=...) first, "
+    "recapping your steps since the last summary, then retry {name}."
+)
+"""The refusal a tool call other than ``summary`` or ``finish`` gets while a summary is due."""
+
 
 def channel_work_dir() -> str:
     """Return the shared scratch directory a channel runs in: ``<home>/channel_work``.
@@ -99,10 +109,28 @@ def channel_work_dir() -> str:
 
 
 class BaseSea:
-    """The SEA contract and the root layer of every run; each method returns its input unchanged."""
+    """The SEA contract and the root layer of every run; each method returns its input unchanged.
+
+    The one rule the root layer enforces is the ``summary`` cadence: a
+    run whose toolset holds the ``summary`` tool must call it at every
+    :data:`SUMMARY_EVERY_STEPS`-th step (the system prompt's "Periodic
+    Activity Summaries" rule).  ``tools`` notes whether the tool is
+    there, ``llm_call_hook`` counts the steps (one LLM call each), and
+    ``tool_call_hook`` refuses every other tool call (``finish``
+    excepted) from the 10th, 20th, ... step on until ``summary`` runs.
+    """
 
     path: Path | None = None
     """The file the SEA was loaded from (the launcher sets it; else the class's module file)."""
+
+    step = 0
+    """The run's step so far: the number of LLM calls made (``llm_call_hook``)."""
+
+    has_summary_tool = False
+    """Whether the run's toolset holds the ``summary`` tool (set by ``tools``)."""
+
+    summary_due = False
+    """Whether a ``summary`` call is owed: a 10th step began and none has run since."""
 
     def __init__(self) -> None:
         module = sys.modules.get(type(self).__module__)
@@ -162,7 +190,20 @@ class BaseSea:
         ``tool_profile: "none"`` the list starts empty).  A tool is a
         function with a docstring; its ``__name__`` is the name the
         model calls.
+
+        The root layer arms the summary cadence guardrail here: the
+        toolset is built once per run (also for each ``<task>`` block
+        of a multi-task prompt, which the daemon runs on the same
+        hooks), so the step count and any owed summary start afresh,
+        and ``has_summary_tool`` records whether the built-in toolset
+        holds ``summary``.  The root runs first in the chain, so a SEA
+        whose own ``tools`` drops ``summary`` should set
+        ``self.has_summary_tool = False`` too (every bundled SEA only
+        appends tools).
         """
+        self.step = 0
+        self.summary_due = False
+        self.has_summary_tool = any(getattr(t, "__name__", "") == "summary" for t in tools)
         return tools
 
     def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
@@ -172,11 +213,31 @@ class BaseSea:
         :class:`~kiss.core.tool_verdict.Verdict` (import ``ALLOW`` and
         ``refuse`` from this module).  A refusal's text is returned to
         the model as the tool's result.
+
+        The root layer's own rule: while a ``summary`` is due (see
+        :class:`BaseSea`), every call but ``summary`` and ``finish`` is
+        refused with :data:`SUMMARY_DUE_REFUSAL`; the ``summary`` call
+        clears the debt.  ``finish`` is exempt because its own summary
+        ends the run (and the agent probes it for an implicit finish).
         """
+        if name == "summary":
+            self.summary_due = False
+        elif self.summary_due and name != "finish":
+            return refuse(
+                SUMMARY_DUE_REFUSAL.format(step=self.step, every=SUMMARY_EVERY_STEPS, name=name)
+            )
         return ALLOW
 
     def llm_call_hook(self, new_messages: list[Any]) -> list[Any]:
-        """Return the messages to send given the *new_messages* of the next LLM call."""
+        """Return the messages to send given the *new_messages* of the next LLM call.
+
+        The root layer counts the run's steps here (one per LLM call)
+        and marks a ``summary`` due at every
+        :data:`SUMMARY_EVERY_STEPS`-th step of a run that has the tool.
+        """
+        self.step += 1
+        if self.has_summary_tool and self.step % SUMMARY_EVERY_STEPS == 0:
+            self.summary_due = True
         return new_messages
 
     def register_as_model(self) -> bool:

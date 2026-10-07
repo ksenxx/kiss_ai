@@ -90,11 +90,11 @@ async function runTests() {
     'BUG: thinking_start with no thought tokens must immediately show ' +
       'the Thoughts panel so the user can see that the model is thinking.',
   );
-  const thinkingContent = immediatePanel.querySelector('.ev.think .cnt');
+  const thinkingContent = immediatePanel.querySelector('.think');
   assert.ok(
     thinkingContent,
     'expected the tokenless Thoughts panel to contain an empty ' +
-      'thinking content element',
+      'thinking text block',
   );
   assert.strictEqual(
     thinkingContent.textContent,

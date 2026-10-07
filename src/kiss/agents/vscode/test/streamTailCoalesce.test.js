@@ -15,10 +15,10 @@
 // original per-event tail.
 //
 // Unreachable-branch note (no mocks are used, per testing policy):
-// inside the deferTail condition, `thinkRaf && !thinkCnt` and
+// inside the deferTail condition, `thinkRaf && !thinkEl` and
 // `bashRaf && !bashPanel` cannot occur — thinking_end cancels thinkRaf
-// before clearing thinkCnt, and tool_call zeroes bashRaf when it
-// clears bashPanel — so the `!!tState.thinkCnt` / `!!tState.bashPanel`
+// before clearing thinkEl, and tool_call zeroes bashRaf when it
+// clears bashPanel — so the `!!tState.thinkEl` / `!!tState.bashPanel`
 // guards are pure defence and their false sides are untestable
 // end-to-end.
 
@@ -308,8 +308,8 @@ async function testThinkingDeltaStreamParity() {
   startRunningTask(win, posted);
 
   send(win, {type: 'thinking_start'});
-  const cnt = O.querySelector('.think .cnt');
-  assert.ok(cnt, 'thinking panel missing');
+  const cnt = O.querySelector('.llm-panel > .think');
+  assert.ok(cnt, 'thinking text block missing');
   geo.sh += 300;
   send(win, {type: 'thinking_delta', text: 'pondering '});
   send(win, {type: 'thinking_delta', text: 'deeply'});
@@ -560,8 +560,9 @@ async function testTaskEndFlushesPendingSweepWhileRunning() {
 // --------------------------------------------------------------------
 // Sweep autoscroll parity: the old per-event tail scrolled EVERY
 // scrollable subpanel of the latest event panel, not only the panels
-// enclosing the streamed text — a completed sibling .think subpanel
-// must still be pinned to its end by the per-frame sweep.
+// enclosing the streamed text — a Bash panel's argument body (.tc-b),
+// sibling of the output its system_output chunks stream into, must
+// still be pinned to its end by the per-frame sweep.
 // --------------------------------------------------------------------
 
 async function testSweepScrollsSiblingSubpanels() {
@@ -570,20 +571,18 @@ async function testSweepScrollsSiblingSubpanels() {
   fakeGeometry(O, {sh: 3000, ch: 500});
   startRunningTask(win, posted);
 
-  send(win, {type: 'thinking_start'});
-  send(win, {type: 'thinking_delta', text: 'mull'});
-  send(win, {type: 'thinking_end'});
-  send(win, {type: 'text_delta', text: 'answer '});
-  const think = O.querySelector('.think');
-  assert.ok(think, 'think subpanel missing');
-  win._geoByClass.think = {sh: 800, ch: 100};
-  think.scrollTop = 10; // reader left it mid-way; no user lock involved
-  send(win, {type: 'text_delta', text: 'text'});
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make', description: 'build'});
+  send(win, {type: 'system_output', text: 'line one\n'});
+  const body = O.querySelector('.ev.tc > .tc-b');
+  assert.ok(body, 'tool-call body subpanel missing');
+  win._geoByClass['tc-b'] = {sh: 800, ch: 100};
+  body.scrollTop = 10; // reader left it mid-way; no user lock involved
+  send(win, {type: 'system_output', text: 'line two\n'});
   await nextFrames(win);
   assert.strictEqual(
-    think.scrollTop,
+    body.scrollTop,
     700,
-    'BUG: the per-frame sweep did not scroll a sibling .think ' +
+    'BUG: the per-frame sweep did not scroll a sibling .tc-b ' +
       'subpanel of the latest event panel to its end',
   );
   win.close();

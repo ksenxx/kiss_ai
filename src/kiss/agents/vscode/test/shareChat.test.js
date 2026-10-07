@@ -545,32 +545,6 @@ async function run() {
     );
   });
 
-  await test('share.js toggles a serialized Thinking section', () => {
-    const page = makeSharePage(
-      '<div id="output"><div class="ev think">' +
-        '<div class="lbl" onclick="toggleThink(this)">' +
-        '<span class="arrow">\u25BE</span> Thinking</div>' +
-        '<div class="cnt">deep thought</div></div></div>',
-    );
-    const lbl = page.document.querySelector('.think .lbl');
-    click(lbl);
-    assert.ok(
-      page.document.querySelector('.think .cnt').classList.contains('hidden'),
-      'a think header click must hide the content',
-    );
-    assert.ok(
-      page.document
-        .querySelector('.think .arrow')
-        .classList.contains('collapsed'),
-      'the arrow must rotate with the collapse',
-    );
-    click(lbl);
-    assert.ok(
-      !page.document.querySelector('.think .cnt').classList.contains('hidden'),
-      'a second click must show the content again',
-    );
-  });
-
   await test('share exports every task of the chat, not only the last', () => {
     const wv = makeWebview();
     const win = wv.win;
