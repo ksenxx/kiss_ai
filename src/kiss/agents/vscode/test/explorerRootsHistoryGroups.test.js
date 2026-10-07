@@ -872,7 +872,7 @@ async function main() {
         chat_first_task: 'first task of A',
       }),
     ]);
-    let [gA, gB] = groups(win);
+    let [gB, gA] = groups(win); // The running chat precedes newer idle chats.
     // The daemon names the chat's FIRST task (which may be beyond the
     // loaded page); the header shows it, clamped by CSS to 3 lines.
     assert.strictEqual(

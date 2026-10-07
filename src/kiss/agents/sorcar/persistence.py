@@ -2038,7 +2038,16 @@ def _tag_filter_sql(tag: str) -> tuple[str, tuple[str, ...]]:
     return "AND (',' || COALESCE(tags, '') || ',') LIKE ? ", (f"%,{tag},%",)
 
 
-def _load_history(limit: int = 0, offset: int = 0, tag: str = "") -> list[_HistoryEntry]:
+def _history_order_sql(running_task_ids: set[str] | None) -> tuple[str, tuple[str, ...]]:
+    """Order running tasks first, then newest first within each section."""
+    ids = tuple(sorted(running_task_ids or ()))
+    priority = f"id IN ({','.join('?' for _ in ids)}) DESC, " if ids else ""
+    return priority + "timestamp DESC, rowid DESC", ids
+
+
+def _load_history(
+    limit: int = 0, offset: int = 0, tag: str = "", *, running_task_ids: set[str] | None = None,
+) -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 
     Args:
@@ -2046,6 +2055,8 @@ def _load_history(limit: int = 0, offset: int = 0, tag: str = "") -> list[_Histo
             0 returns all entries (no cap).
         offset: Number of entries to skip before returning results.
         tag: When set, only entries carrying this tag are returned.
+        running_task_ids: Tasks to put before completed history, including
+            tasks older than the first chronological page.
 
     Returns:
         List of history entry dicts with ``id``, ``timestamp``,
@@ -2055,13 +2066,14 @@ def _load_history(limit: int = 0, offset: int = 0, tag: str = "") -> list[_Histo
         db = _get_db()
         effective_limit = limit if limit > 0 else -1
         tag_sql, tag_params = _tag_filter_sql(tag)
+        order_sql, order_params = _history_order_sql(running_task_ids)
         sql = (
             _HISTORY_SELECT
             + f"WHERE {_HISTORY_NOT_SUBAGENT} "
             + tag_sql
-            + "ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?"
+            + f"ORDER BY {order_sql} LIMIT ? OFFSET ?"
         )
-        rows = db.execute(sql, (*tag_params, effective_limit, offset)).fetchall()
+        rows = db.execute(sql, (*tag_params, *order_params, effective_limit, offset)).fetchall()
         return [_history_row_to_dict(r) for r in rows]
 
 
@@ -2356,7 +2368,8 @@ def _record_steer_input(text: str) -> None:
 
 
 def _search_history(
-    query: str, limit: int = 50, offset: int = 0, tag: str = ""
+    query: str, limit: int = 50, offset: int = 0, tag: str = "", *,
+    running_task_ids: set[str] | None = None,
 ) -> list[_HistoryEntry]:
     """Search history entries by substring match. Thread-safe.
 
@@ -2365,23 +2378,25 @@ def _search_history(
         limit: Maximum number of matching entries to return.
         offset: Number of entries to skip before returning results.
         tag: When set, only entries carrying this tag are returned.
+        running_task_ids: Matching tasks to put before completed history.
 
     Returns:
-        List of matching entries, most-recent-first.
+        List of matching entries, running first when requested, then newest first.
     """
     if not query:
-        return _load_history(limit=limit, offset=offset, tag=tag)
+        return _load_history(limit=limit, offset=offset, tag=tag, running_task_ids=running_task_ids)
     with _rw_lock.read_lock():
         db = _get_db()
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         tag_sql, tag_params = _tag_filter_sql(tag)
+        order_sql, order_params = _history_order_sql(running_task_ids)
         rows = db.execute(
             _HISTORY_SELECT
             + "WHERE task LIKE ? ESCAPE '\\' "
             + f"AND {_HISTORY_NOT_SUBAGENT} "
             + tag_sql
-            + "ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?",
-            (f"%{escaped}%", *tag_params, limit, offset),
+            + f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
+            (f"%{escaped}%", *tag_params, *order_params, limit, offset),
         ).fetchall()
         return [_history_row_to_dict(r) for r in rows]
 

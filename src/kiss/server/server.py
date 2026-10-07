@@ -44,7 +44,6 @@ from kiss.agents.sorcar.persistence import (
     _is_failed_result,
     _load_chat_events_by_task_id,
     _load_frequent_tasks,
-    _load_history,
     _load_input_history,
     _load_last_model,
     _load_latest_chat_events_by_chat_id,
@@ -1259,12 +1258,10 @@ class VSCodeServer(
         window / browser tab that asked — one window's history search
         must not repaint another window's history panel.
         """
-        if query:
-            entries = _search_history(query, limit=50, offset=offset, tag=tag)
-        else:
-            entries = _load_history(limit=50, offset=offset, tag=tag)
-
         running_task_ids = self._get_running_task_ids()
+        entries = _search_history(
+            query or "", limit=50, offset=offset, tag=tag, running_task_ids=running_task_ids,
+        )
 
         sessions = []
         for entry in entries:
