@@ -1361,10 +1361,14 @@ class _CommandsMixin:
                 _record_steer_input(prompt)
             except Exception:
                 logger.warning("steer input not recorded", exc_info=True)
+        # ``steer`` tells the chat webview this is a message the user
+        # typed into a RUNNING task (not the task's own prompt), which
+        # it shows in a panel like the task's.
         echo: dict[str, Any] = {
             "type": "prompt",
             "text": prompt,
             "tabId": tab_id,
+            "steer": True,
         }
         if owner_task:
             echo["taskId"] = owner_task

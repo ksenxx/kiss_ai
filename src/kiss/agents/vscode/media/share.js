@@ -51,7 +51,10 @@
   /**
    * Fill or clear a panel's one-line collapsed preview, mirroring
    * collapsePreview in media/main.js: an expanded panel and a summary
-   * panel show no preview; a collapsed one previews its content text.
+   * panel show no preview; a collapsed Bash panel previews its
+   * description and a collapsed Read or Write panel its path (no
+   * "description:" / "path:" label); any other collapsed panel
+   * previews its content text.
    *
    * @param {Element} panelEl The collapsible panel.
    */
@@ -63,6 +66,18 @@
       !panelEl.classList.contains('collapsed')
     ) {
       prev.textContent = '';
+      return;
+    }
+    let briefSel = null;
+    if (panelEl.classList.contains('tc-bash'))
+      briefSel = '.tc-arg-desc .tc-arg-val';
+    else if (panelEl.classList.contains('tc-path'))
+      briefSel = '.tc-arg-path .tp';
+    const brief = briefSel
+      ? panelEl.querySelector(':scope > .tc-b > ' + briefSel)
+      : null;
+    if (brief) {
+      prev.textContent = brief.textContent.trim();
       return;
     }
     let txt = '';

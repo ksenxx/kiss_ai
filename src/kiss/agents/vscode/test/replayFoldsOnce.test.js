@@ -99,6 +99,16 @@ function isCollapsed(p) {
   return p.classList.contains('collapsed');
 }
 
+/** A Thoughts panel is never folded by any automatic pass. */
+function isThoughts(p) {
+  return p.classList.contains('llm-panel');
+}
+
+/** Folded, or a Thoughts panel (which no pass folds). */
+function isFoldedOrThoughts(p) {
+  return isThoughts(p) || isCollapsed(p);
+}
+
 /** One thinking + Read step of a run. */
 function step(i) {
   return [
@@ -147,8 +157,13 @@ function testLongReplayFoldsOnceAndFast() {
   // the work the per-event pass used to redo hundreds of times.
   const older = ps.slice(0, -2);
   assert.ok(
-    older.every(isCollapsed),
-    'every older panel of a replayed running task is folded',
+    older.every(isFoldedOrThoughts),
+    'every older tool panel of a replayed running task is folded',
+  );
+  assert.ok(
+    ps.filter(isThoughts).length >= STEPS &&
+      !ps.filter(isThoughts).some(isCollapsed),
+    'no Thoughts panel of the replay is folded',
   );
   assert.ok(
     elapsed < REPLAY_BUDGET_MS,
@@ -180,8 +195,8 @@ function testLiveStreamAfterReplayKeepsNewestTwoOpen() {
     'the newest two panels of the live stream are open',
   );
   assert.ok(
-    folded.slice(0, -2).every(Boolean),
-    'every older panel is folded once the stream resumes',
+    ps.slice(0, -2).every(isFoldedOrThoughts),
+    'every older tool panel is folded once the stream resumes',
   );
   win.close();
   console.log('  ok - live streaming after a replay keeps the newest two open');

@@ -377,11 +377,14 @@ function testStatusOnlyEndStillDigests() {
   send(win, {type: 'status', running: false, tabId});
   send(win, {type: 'usage_info', tabId, total_tokens: 5, cost: '$0.01'});
 
-  const panels = outputPanels(win).filter(p => !p.classList.contains('rc'));
-  assert.ok(panels.length >= 3, 'the streamed event panels are on screen');
+  const panels = outputPanels(win).filter(
+    p => !p.classList.contains('rc') && !p.classList.contains('llm-panel'),
+  );
+  assert.ok(panels.length >= 2, 'the streamed event panels are on screen');
   assert.ok(
     panels.every(p => p.classList.contains('collapsed')),
-    'a status-only end keeps the digest pass: every event panel folds',
+    'a status-only end keeps the digest pass: every event panel folds ' +
+      '(a Thoughts panel never does)',
   );
   win.close();
   console.log('  ok - a status-only end still digests');

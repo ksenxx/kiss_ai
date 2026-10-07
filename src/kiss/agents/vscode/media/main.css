@@ -847,8 +847,10 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
 
 /* The task's own text opens every task of the thread: the one panel
    the eye should find first, an accent hairline over the accent tint,
-   the transcript panels being neutral. */
-.ev.task-panel {
+   the transcript panels being neutral. A message the user typed into
+   the running task (.user-msg) is the user's words too and looks the
+   same. */
+.ev.task-panel, .ev.user-msg {
   border: 1px solid var(--accent-line); border-radius: var(--radius-lg);
   margin: var(--space-2) 0 var(--space-2) var(--space-1-5); overflow: hidden;
   background: var(--accent-tint);
@@ -856,7 +858,7 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
 
 .task-panel-h {
   padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
-  font-weight: 400; text-transform: uppercase; letter-spacing: .04em;
+  font-weight: 400; letter-spacing: .04em;
   color: var(--dim);
 }
 .task-panel-h:hover { color: var(--fg); }
@@ -874,6 +876,7 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
 }
 
 .task-panel.collapsed .task-panel-text,
+.user-msg.collapsed .task-panel-text,
 .task-panel.collapsed .task-panel-info { display: none; }
 
 /* The task's settings info on a shared page (model, worktree / parallel
@@ -982,7 +985,7 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 }
 
 .think .lbl {
-  font-size: var(--fs-sm); font-weight: 400; text-transform: uppercase;
+  font-size: var(--fs-sm); font-weight: 400;
   letter-spacing: .04em; color: var(--dim); margin-bottom: var(--space-1);
   display: flex; align-items: center; gap: var(--space-1-5); cursor: pointer; user-select: none;
 }
@@ -1031,7 +1034,7 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
    line inside the panel's single outer border. */
 .tc-h {
   padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
-  font-weight: 400; text-transform: uppercase; letter-spacing: .04em;
+  font-weight: 400; letter-spacing: .04em;
   color: var(--dim);
 }
 .tc-h:hover { color: var(--fg); }
@@ -1182,7 +1185,7 @@ body.ask-answering #input-container {
 }
 
 .tr .rl {
-  font-size: var(--fs-sm); font-weight: 400; text-transform: uppercase;
+  font-size: var(--fs-sm); font-weight: 400;
   letter-spacing: .04em; margin-bottom: var(--space-1);
 }
 .tr .rl.fail { color: var(--red); }
@@ -1221,7 +1224,7 @@ body.ask-answering #input-container {
 
 .system-prompt-h, .prompt-h {
   padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
-  font-weight: 400; text-transform: uppercase; letter-spacing: .04em;
+  font-weight: 400; letter-spacing: .04em;
   color: var(--dim);
 }
 
@@ -1249,7 +1252,7 @@ body.ask-answering #input-container {
 }
 
 .ask-answer-label {
-  font-weight: 400; text-transform: uppercase; letter-spacing: .04em;
+  font-weight: 400; letter-spacing: .04em;
 }
 
 .ask-answer-q {
@@ -4810,7 +4813,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .collapsed .collapse-preview { display: block; }
 
 .llm-panel-hdr {
-  font-size: var(--fs-sm); font-weight: 400; text-transform: uppercase; letter-spacing: .04em;
+  font-size: var(--fs-sm); font-weight: 400; letter-spacing: .04em;
   color: var(--dim);
   display: flex; align-items: center; padding-bottom: var(--space-1);
 }

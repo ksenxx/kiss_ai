@@ -10989,15 +10989,34 @@
    * @returns {HTMLElement} The `.ev.task-panel` element.
    */
   function createTaskPanel(text) {
-    const el = mkEl('div', 'ev task-panel');
+    return createUserTextPanel('task-panel', 'Task', text, undefined);
+  }
+
+  /**
+   * The panel for a message the user typed into a running task (the
+   * daemon echoes it as a `prompt` event flagged `steer`): the task
+   * and the steering messages are both the user's words, so it looks
+   * like the task panel, headed "Message". Like the task panel, no
+   * automatic pass folds it (panelStaysOpen).
+   *
+   * @param {string} text The message text.
+   * @param {*} ts The event's timestamp, for the panel's time badge.
+   * @returns {HTMLElement} The `.ev.user-msg` element.
+   */
+  function createUserMessagePanel(text, ts) {
+    return createUserTextPanel('user-msg', 'Message', text, ts);
+  }
+
+  function createUserTextPanel(cls, label, text, ts) {
+    const el = mkEl('div', 'ev ' + cls);
     const header = mkEl('div', 'task-panel-h');
-    header.textContent = 'Task';
+    header.textContent = label;
     const body = mkEl('div', 'task-panel-text');
     body.textContent = text;
     el.appendChild(header);
     el.appendChild(body);
     el.dataset.rawText = text;
-    addCollapse(el, header);
+    addCollapse(el, header, ts);
     return el;
   }
 
@@ -11293,7 +11312,7 @@
         p.classList.contains('rc') ||
         p.classList.contains('task-panel') ||
         panelShowsImage(p) ||
-        answerPanelStaysOpen(p)
+        panelStaysOpen(p)
       )
         continue;
       // livedone-coverage:start
@@ -12489,6 +12508,11 @@
       prev.textContent = '';
       return;
     }
+    const brief = briefPreviewText(panelEl);
+    if (brief !== null) {
+      prev.textContent = brief;
+      return;
+    }
     let txt = '';
     for (let i = 0; i < panelEl.children.length; i++) {
       const ch = panelEl.children[i];
@@ -12503,6 +12527,25 @@
     }
     txt = txt.replace(/\s+/g, ' ').trim();
     prev.textContent = txt;
+  }
+
+  /**
+   * The one argument a folded tool panel's header shows after the tool
+   * name: a Bash call's description ("Bash list the files"), a Read or
+   * Write call's path ("Read src/app.py"), with no "description:" or
+   * "path:" label in between.
+   *
+   * @param {Element} panelEl The collapsed panel.
+   * @returns {string|null} The argument text, or null for a panel whose
+   *     preview summarizes its whole body.
+   */
+  function briefPreviewText(panelEl) {
+    let sel = null;
+    if (panelEl.classList.contains('tc-bash')) sel = '.tc-arg-desc .tc-arg-val';
+    else if (panelEl.classList.contains('tc-path')) sel = '.tc-arg-path .tp';
+    if (!sel) return null;
+    const el = panelEl.querySelector(':scope > .tc-b > ' + sel);
+    return el ? el.textContent.trim() : null;
   }
 
   /**
@@ -13137,24 +13180,28 @@
   // imagepanel-coverage:end
 
   /**
-   * True for a panel that is a conversation between the user and the
-   * agent: a `/ask` answer (an `ask_answer` event) or an
-   * ask_user_question "Question" panel, which holds the user's answer
-   * too once the tool returns.
+   * True for a panel that no automatic pass ever folds or hides: a
+   * Thoughts panel (`llm-panel`, the agent's words), a message the
+   * user typed into the running task (`user-msg`), a `/ask` answer
+   * (an `ask_answer` event) or an ask_user_question "Question" panel,
+   * which holds the user's answer too once the tool returns.
    *
-   * These are what the user said or asked for while the task ran, so no
-   * automatic pass ever folds or hides them, on any surface the tab is
-   * loaded on: not the streaming sweep (collapseOlderPanels), not a
+   * These are what the agent said and what the user said or asked for
+   * while the task ran, so they stay readable on any surface the tab
+   * is loaded on: not the streaming sweep (collapseOlderPanels), not a
    * replay or share export (collapseAllExceptResult), not the
    * finished-task digest (applyChevronState), and a `summary` tool call
    * leaves them out of the panels it adopts. Only the user folds them,
    * by their header.
    *
    * @param {Element} panel A `.collapsible` panel.
-   * @returns {boolean} Whether *panel* is an answer or question panel.
+   * @returns {boolean} Whether *panel* is a thoughts, user message,
+   *     answer or question panel.
    */
-  function answerPanelStaysOpen(panel) {
+  function panelStaysOpen(panel) {
     return (
+      panel.classList.contains('llm-panel') ||
+      panel.classList.contains('user-msg') ||
       panel.classList.contains('ask-answer') ||
       panel.classList.contains('tc-question')
     );
@@ -13170,9 +13217,9 @@
       if (p.classList.contains('task-panel')) continue;
       if (panelShowsImage(p)) continue;
       // A `/ask` answer is never folded by the software (see
-      // answerPanelStaysOpen): a reloaded, shared or neighbouring
+      // panelStaysOpen): a reloaded, shared or neighbouring
       // transcript shows it exactly as the live one did.
-      if (answerPanelStaysOpen(p)) continue;
+      if (panelStaysOpen(p)) continue;
       if (p.classList.contains('tc-run-parallel')) {
         rpAdoptOpenSubagents(p, ownerId);
         // A fan-out still running when its task's own transcript is
@@ -13262,7 +13309,7 @@
       // A `/ask` answer the user is reading, or a question and its
       // answer, while the task keeps streaming: the next event must not
       // fold it away.
-      if (answerPanelStaysOpen(p)) continue;
+      if (panelStaysOpen(p)) continue;
       if (panelShowsImage(p)) continue;
       if (p.classList.contains('tc-run-parallel'))
         rpAdoptOpenSubagents(p, tabId);
@@ -13943,11 +13990,16 @@
           hdr.appendChild(hint);
           // summaryhint-coverage:end
         }
+        // Folded, a Bash panel's header reads "Bash <description>" and
+        // a Read or Write panel's "Read <path>" (collapsePreview finds
+        // the text by the `tc-arg-desc` / `tc-arg-path` classes).
+        if (ev.name === 'Read' || ev.name === 'Write')
+          c.classList.add('tc-path');
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
           b +=
-            '<div class="tc-arg"><span class="tc-arg-name">path:</span> <span class="tp" data-path-candidate="' +
+            '<div class="tc-arg tc-arg-path"><span class="tc-arg-name">path:</span> <span class="tp" data-path-candidate="' +
             ep +
             '">' +
             esc(ev.path) +
@@ -13955,9 +14007,9 @@
         }
         if (ev.description && !isSummary)
           b +=
-            '<div class="tc-arg"><span class="tc-arg-name">description:</span> ' +
+            '<div class="tc-arg tc-arg-desc"><span class="tc-arg-name">description:</span> <span class="tc-arg-val">' +
             esc(ev.description) +
-            '</div>';
+            '</span></div>';
         if (ev.command)
           b +=
             '<pre><code class="language-bash">' +
@@ -14071,8 +14123,8 @@
             )
               break;
             // A `/ask` answer stays on the transcript, in front of the
-            // summary that folds its neighbours (answerPanelStaysOpen).
-            if (!answerPanelStaysOpen(sib)) adopt.push(sib);
+            // summary that folds its neighbours (panelStaysOpen).
+            if (!panelStaysOpen(sib)) adopt.push(sib);
             sib = sib.previousElementSibling;
           }
           for (let ai = adopt.length - 1; ai >= 0; ai--)
@@ -14165,10 +14217,10 @@
         if (ev.is_error) {
           const r = mkEl('div', 'ev tr err');
           r.innerHTML =
-            '<div class="rl fail">FAILED</div><div class="tr-content">' +
+            '<div class="rl fail">Failed</div><div class="tr-content">' +
             esc(ev.content) +
             '</div>';
-          r.dataset.rawText = 'FAILED\n' + (ev.content || '');
+          r.dataset.rawText = 'Failed\n' + (ev.content || '');
           addCollapse(
             r,
             r.querySelector('.rl'),
@@ -14278,6 +14330,10 @@
       }
       case 'system_prompt':
       case 'prompt': {
+        if (ev.steer) {
+          target.appendChild(createUserMessagePanel(ev.text || '', ev.ts));
+          break;
+        }
         const cls = t === 'system_prompt' ? 'system-prompt' : 'prompt';
         const label = t === 'system_prompt' ? 'System Prompt' : 'Prompt';
         let el = null;

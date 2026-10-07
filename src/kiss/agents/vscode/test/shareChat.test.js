@@ -439,12 +439,13 @@ async function run() {
       'a header click must toggle the collapsed state',
     );
     if (panel.classList.contains('collapsed')) {
-      // The first panel is the Bash call; its preview is the command it
-      // ran (its streamed output is not part of the preview text).
+      // The first panel is the Bash call; its preview is its
+      // description alone ("Bash List files").
       const prev = panel.querySelector('.collapse-preview');
-      assert.ok(
-        prev.textContent.includes('ls -la'),
-        'a collapsed panel must preview its content text',
+      assert.strictEqual(
+        prev.textContent,
+        'List files',
+        'a collapsed Bash panel must preview its description',
       );
     }
     click(header);
@@ -754,10 +755,10 @@ async function run() {
       task: 'replayed task',
       task_id: 'task-hl2',
       chat_id: 'chat-hl',
+      // The code sits in the prompt: a replay folds that panel and
+      // defers its highlighting (a Thoughts panel is never folded).
       events: [
-        {type: 'prompt', text: 'show some code'},
-        {type: 'text_delta', text: '```js\nconst answer = 42;\n```'},
-        {type: 'text_end'},
+        {type: 'prompt', text: 'show some code\n```js\nconst answer = 42;\n```'},
         {type: 'result', text: 'done', success: true},
       ],
     });
@@ -770,9 +771,7 @@ async function run() {
         task: 'earlier task',
         task_id: 'task-hl1',
         events: [
-          {type: 'prompt', text: 'more code'},
-          {type: 'text_delta', text: '```py\nvalue = 1\n```'},
-          {type: 'text_end'},
+          {type: 'prompt', text: 'more code\n```py\nvalue = 1\n```'},
           {type: 'result', text: 'done', success: true},
         ],
       },

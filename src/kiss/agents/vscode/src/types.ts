@@ -808,7 +808,9 @@ type ToWebviewMessageBody =
       cost?: number;
     }
   | {type: 'system_prompt'; text: string}
-  | {type: 'prompt'; text: string}
+  // ``steer``: a message the user typed into the running task (the
+  // daemon's echo), shown like the task panel rather than as a prompt.
+  | {type: 'prompt'; text: string; steer?: boolean}
   // The finished ``/ask`` side-channel answer, delivered into the
   // running (owner) task's transcript as its own panel.
   | {type: 'ask_answer'; question: string; text: string; success: boolean}

@@ -796,7 +796,12 @@ class JsonPrinter(Printer):
         for msg in deferred:
             try:
                 self.broadcast(
-                    {"type": "prompt", "text": msg, "recordOnly": True},
+                    {
+                        "type": "prompt",
+                        "text": msg,
+                        "steer": True,
+                        "recordOnly": True,
+                    },
                 )
             except Exception:
                 # Requeue so the durable echo is retried on the next

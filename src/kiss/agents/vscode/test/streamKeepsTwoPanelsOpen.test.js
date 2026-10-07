@@ -11,9 +11,12 @@
 // TWO open: the panel that just finished stays readable next to the one
 // being streamed. It used to keep only the newest one.
 //
+// A Thoughts panel (the agent's own words) is never folded by the
+// pass: only the tool panels older than the newest two fold.
+//
 // Covered here, on the visible tab and on a tab that ran while hidden:
-//   * after every event, every collapsible panel but the newest two is
-//     folded and the newest two are open;
+//   * after every event, every collapsible panel but the newest two and
+//     the Thoughts panels is folded; the newest two are open;
 //   * a transcript of one or two panels folds nothing;
 //   * a panel the user expanded by hand stays open however old it gets;
 //   * the result event folds nothing, so the two panels that were open
@@ -96,14 +99,19 @@ function isCollapsed(p) {
 
 /**
  * Assert the streaming invariant: every panel but the newest two is
- * folded, the newest two are open (a user-pinned panel is allowed to be
- * open anywhere).
+ * folded, the newest two are open (a user-pinned panel and a Thoughts
+ * panel are open anywhere).
  */
 function assertNewestTwoOpen(win, label) {
   const ps = panels(win);
   ps.forEach((p, i) => {
     const isNewestTwo = i >= ps.length - 2;
-    if (isNewestTwo) {
+    if (p.classList.contains('llm-panel')) {
+      assert.ok(
+        !isCollapsed(p),
+        `${label}: Thoughts panel #${i + 1} of ${ps.length} is never folded`,
+      );
+    } else if (isNewestTwo) {
       assert.ok(
         !isCollapsed(p),
         `${label}: panel #${i + 1} of ${ps.length} (one of the newest two) must be open`,
@@ -154,8 +162,9 @@ function testVisibleStreamKeepsNewestTwoOpen() {
   assert.strictEqual(ps.length, 7, 'the run renders seven panels');
   assert.deepStrictEqual(
     ps.map(isCollapsed),
-    [true, true, true, true, true, false, false],
-    'the five oldest panels are folded, the newest two are open',
+    [false, true, false, true, false, false, false],
+    'the two older tool panels are folded, the Thoughts panels and the ' +
+      'newest two are open',
   );
 
   // The result folds nothing: the same two panels stay open.
@@ -170,8 +179,8 @@ function testVisibleStreamKeepsNewestTwoOpen() {
   send(win, {type: 'status', running: false, tabId: tab});
   assert.deepStrictEqual(
     panels(win).map(isCollapsed),
-    [true, true, true, true, true, false, false],
-    'the result event leaves the two open panels open',
+    [false, true, false, true, false, false, false],
+    'the result event leaves the open panels open',
   );
   win.close();
   console.log('  ok - a visible stream keeps its newest two panels open');
@@ -198,26 +207,26 @@ function testUserPinnedPanelStaysOpen() {
   const tab = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tab, startTs: TS});
   const events = run();
-  // First thoughts + Read: two panels, both open. The Read's result
-  // arms the next Thoughts panel: three panels, #1 folds. The user
-  // reopens it.
-  for (const ev of events.slice(0, 5)) send(win, {...ev, tabId: tab});
+  // Two steps: thoughts, Read one, thoughts, Read two, and the armed
+  // Thoughts panel of the next step: five panels, the first Read (#2)
+  // folds. The user reopens it.
+  for (const ev of events.slice(0, 10)) send(win, {...ev, tabId: tab});
   let ps = panels(win);
-  assert.strictEqual(ps.length, 3);
-  assert.ok(isCollapsed(ps[0]), 'panel #1 folds once two newer panels exist');
-  ps[0]
+  assert.strictEqual(ps.length, 5);
+  assert.ok(isCollapsed(ps[1]), 'panel #2 folds once two newer panels exist');
+  ps[1]
     .querySelector(':scope > .collapse-header')
     .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.ok(!isCollapsed(ps[0]), 'the user reopened panel #1');
-  assert.ok(ps[0].classList.contains('user-pinned'));
+  assert.ok(!isCollapsed(ps[1]), 'the user reopened panel #2');
+  assert.ok(ps[1].classList.contains('user-pinned'));
 
-  for (const ev of events.slice(5)) send(win, {...ev, tabId: tab});
+  for (const ev of events.slice(10)) send(win, {...ev, tabId: tab});
   ps = panels(win);
   assert.strictEqual(ps.length, 7);
   assert.deepStrictEqual(
     ps.map(isCollapsed),
-    [false, true, true, true, true, false, false],
-    'the pinned panel stays open; the other older panels fold',
+    [false, false, false, true, false, false, false],
+    'the pinned panel stays open; the other older tool panel folds',
   );
   win.close();
   console.log('  ok - a user-pinned panel is never folded by the stream');
@@ -244,8 +253,9 @@ function testHiddenTabComesBackWithNewestTwoOpen() {
   assert.strictEqual(ps.length, 7, 'the hidden run renders seven panels');
   assert.deepStrictEqual(
     ps.map(isCollapsed),
-    [true, true, true, true, true, false, false],
-    'a tab restored mid-run shows its newest two panels open',
+    [false, true, false, true, false, false, false],
+    'a tab restored mid-run shows its newest two panels and its ' +
+      'Thoughts panels open',
   );
   win.close();
   console.log(

@@ -135,9 +135,11 @@ class TestAppendUserMessageHandler:
             "follow up A", "follow up B",
         ]
         echoes = [e for e in events if e.get("type") == "prompt"]
+        # ``steer`` marks the echo as a message typed into a running
+        # task, which the chat webview shows like the task panel.
         assert echoes == [
-            {"type": "prompt", "text": "follow up A", "tabId": "tab-1"},
-            {"type": "prompt", "text": "follow up B", "tabId": "tab-1"},
+            {"type": "prompt", "text": "follow up A", "tabId": "tab-1", "steer": True},
+            {"type": "prompt", "text": "follow up B", "tabId": "tab-1", "steer": True},
         ]
 
     def test_dropped_when_no_live_task(self) -> None:
