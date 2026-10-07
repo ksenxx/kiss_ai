@@ -11481,7 +11481,6 @@
   function mkS() {
     return {
       thinkEl: null,
-      thinkCnt: null,
       thinkBuf: '',
       thinkRaf: 0,
       txtEl: null,
@@ -12423,16 +12422,10 @@
     });
   }
 
-  function toggleThink(el) {
-    const p = el.parentElement;
-    const hidden = p.querySelector('.cnt').classList.toggle('hidden');
-    el.setAttribute('aria-expanded', hidden ? 'false' : 'true');
-  }
-
   /**
-   * Enter / Space on a focused disclosure header (a thinking block's
-   * label or a collapsible panel's header) act like a click, so the
-   * header is operable without a mouse.
+   * Enter / Space on a focused disclosure header (a collapsible
+   * panel's header) act like a click, so the header is operable
+   * without a mouse.
    */
   function onDisclosureHeaderKey(e) {
     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -12440,25 +12433,6 @@
     e.preventDefault();
     e.currentTarget.click();
   }
-
-  // The thinking block's label is rendered from an HTML string whose
-  // inline onclick="toggleThink(this)" the webview's CSP never runs
-  // (the shared, CSP-free page exported from this DOM still needs it),
-  // so its click is delegated here -- unless the inline handler is
-  // live (`onclick` reads null when CSP blocked it), which would make
-  // the click toggle twice.
-  document.addEventListener('click', e => {
-    if (!e.target || typeof e.target.closest !== 'function') return;
-    const lbl = e.target.closest('.ev.think > .lbl');
-    if (lbl && typeof lbl.onclick !== 'function') toggleThink(lbl);
-  });
-  document.addEventListener('keydown', e => {
-    if (!e.target || typeof e.target.matches !== 'function') return;
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    if (!e.target.matches('.ev.think > .lbl')) return;
-    e.preventDefault();
-    e.target.click();
-  });
 
   function collectText(node) {
     if (node.nodeType === 3) return node.textContent || '';
@@ -13190,8 +13164,9 @@
    * is loaded on: not the streaming sweep (collapseOlderPanels), not a
    * replay or share export (collapseAllExceptResult), not the
    * finished-task digest (applyChevronState), and a `summary` tool call
-   * leaves them out of the panels it adopts. Only the user folds them,
-   * by their header.
+   * leaves them out of the panels it adopts -- except the Thoughts
+   * panels, which the summary does fold (it recounts those very
+   * steps). Otherwise only the user folds them, by their header.
    *
    * @param {Element} panel A `.collapsible` panel.
    * @returns {boolean} Whether *panel* is a thoughts, user message,
@@ -13485,8 +13460,6 @@
     return el;
   }
 
-  window.toggleThink = toggleThink;
-
   function lineDiff(a, b) {
     const al = a.split('\n'),
       bl = b.split('\n'),
@@ -13634,7 +13607,7 @@
   // event panel follows its own tail as streamed text appears inside
   // it, unless that subpanel's own user scroll lock is engaged.
   const AUTO_SCROLL_SUBPANEL_SEL =
-    '.think, .bash-panel-content, .llm-panel, .tc-b, .tr, ' +
+    '.bash-panel-content, .llm-panel, .tc-b, .tr, ' +
     '.prompt-body, .system-prompt-body';
 
   function scrollPanelToEnd(el) {
@@ -13789,6 +13762,15 @@
   }
   // autoscroll-coverage:end
 
+  /** Flush the buffered thinking text of *tState* into its `.think` block. */
+  function appendThinkText(tState) {
+    const el = tState.thinkEl;
+    const last = el.lastChild;
+    if (last && last.nodeType === 3) last.appendData(tState.thinkBuf);
+    else el.appendChild(document.createTextNode(tState.thinkBuf));
+    tState.thinkBuf = '';
+  }
+
   function handleOutputEvent(ev, target, tState, ownerWorkDir, ownerTabId) {
     const evWorkDir =
       typeof ownerWorkDir === 'string'
@@ -13801,37 +13783,28 @@
     // tableak-coverage:end
     const t = ev.type;
     switch (t) {
+      // The model's thinking tokens stream as plain text straight into
+      // the Thoughts panel (a dim `.think` block, no header or box of
+      // its own), followed by its words (`.txt`).
       case 'thinking_start':
-        tState.thinkEl = mkEl('div', 'ev think');
-        tState.thinkEl.innerHTML =
-          '<div class="lbl" onclick="toggleThink(this)" tabindex="0" ' +
-          'role="button" aria-expanded="true">Thinking</div>' +
-          '<div class="cnt"></div>';
-        tState.thinkCnt = tState.thinkEl.querySelector('.cnt');
+        tState.thinkEl = mkEl('div', 'think');
         tState.thinkBuf = '';
         tState.thinkRaf = 0;
         target.appendChild(tState.thinkEl);
         break;
       case 'thinking_delta':
-        if (tState.thinkCnt) {
+        if (tState.thinkEl) {
           tState.thinkBuf += (ev.text || '').replace(/\n\n+/g, '\n');
           if (!tState.thinkRaf) {
             tState.thinkRaf = requestAnimationFrame(() => {
               tState.thinkRaf = 0;
-              if (!tState.thinkCnt) {
+              if (!tState.thinkEl) {
                 tState.thinkBuf = '';
                 return;
               }
-              const cnt = tState.thinkCnt;
-              const last = cnt.lastChild;
-              if (last && last.nodeType === 3) {
-                last.appendData(tState.thinkBuf);
-              } else {
-                cnt.appendChild(document.createTextNode(tState.thinkBuf));
-              }
-              tState.thinkBuf = '';
+              appendThinkText(tState);
               // autoscroll-coverage:start
-              autoScrollStreamed(cnt);
+              autoScrollStreamed(tState.thinkEl);
               // autoscroll-coverage:end
             });
           }
@@ -13841,19 +13814,15 @@
         if (tState.thinkRaf) {
           cancelAnimationFrame(tState.thinkRaf);
           tState.thinkRaf = 0;
-          if (tState.thinkCnt && tState.thinkBuf) {
-            const cnt = tState.thinkCnt;
-            const last = cnt.lastChild;
-            if (last && last.nodeType === 3) last.appendData(tState.thinkBuf);
-            else cnt.appendChild(document.createTextNode(tState.thinkBuf));
+          if (tState.thinkEl && tState.thinkBuf) {
+            appendThinkText(tState);
             // autoscroll-coverage:start
-            autoScrollStreamed(cnt);
+            autoScrollStreamed(tState.thinkEl);
             // autoscroll-coverage:end
           }
           tState.thinkBuf = '';
         }
         tState.thinkEl = null;
-        tState.thinkCnt = null;
         break;
       case 'text_delta':
         if (!tState.txtEl) {
@@ -14121,9 +14090,14 @@
               !sib.classList.contains('llm-panel')
             )
               break;
-            // A `/ask` answer stays on the transcript, in front of the
-            // summary that folds its neighbours (panelStaysOpen).
-            if (!panelStaysOpen(sib)) adopt.push(sib);
+            // A `/ask` answer, a Question or a steering Message stays
+            // on the transcript, in front of the summary that folds its
+            // neighbours (panelStaysOpen).  A Thoughts panel, which no
+            // other automatic pass folds, IS folded into the summary:
+            // the summary stands for the steps it recounts, their
+            // thoughts included.
+            if (!panelStaysOpen(sib) || sib.classList.contains('llm-panel'))
+              adopt.push(sib);
             sib = sib.previousElementSibling;
           }
           for (let ai = adopt.length - 1; ai >= 0; ai--)
@@ -14818,7 +14792,7 @@
     // sweep replays.
     const deferTail =
       ctx.stepCount === stepsBefore &&
-      ((t === 'thinking_delta' && !!tState.thinkRaf && !!tState.thinkCnt) ||
+      ((t === 'thinking_delta' && !!tState.thinkRaf && !!tState.thinkEl) ||
         (t === 'text_delta' && !!tState.txtRaf) ||
         (t === 'system_output' && !!tState.bashRaf && !!tState.bashPanel));
     if (deferTail) {

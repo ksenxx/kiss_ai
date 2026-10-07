@@ -71,7 +71,7 @@ function renderTranscript(win) {
   send(win, {type: 'system_prompt', text: 'You are a test.'});
   send(win, {type: 'prompt', text: 'Flatten the headers'});
   send(win, {type: 'thinking_start'});
-  send(win, {type: 'thinking', text: 'first thought'});
+  send(win, {type: 'thinking_delta', text: 'first thought'});
   send(win, {type: 'thinking_end'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', description: 'list'});
   send(win, {type: 'tool_call', name: 'Read', path: '/tmp/x.txt'});
@@ -82,8 +82,11 @@ function testNoChevronInAnyHeader() {
   renderTranscript(win);
   const out = win.document.getElementById('output');
   assert.strictEqual(out.querySelectorAll('.collapse-chv').length, 0, 'no chevron span');
-  assert.strictEqual(out.querySelectorAll('.think .lbl .arrow').length, 0, 'no thinking arrow');
-  const headers = out.querySelectorAll('.collapse-header, .think .lbl');
+  // The thinking tokens are plain text inside the Thoughts panel: no
+  // header of their own to flatten.
+  assert.strictEqual(out.querySelectorAll('.think .lbl').length, 0, 'no thinking header');
+  assert.ok(out.querySelector('.llm-panel > .think'), 'the thinking text block sits in the Thoughts panel');
+  const headers = out.querySelectorAll('.collapse-header');
   assert.ok(headers.length >= 4, 'the transcript rendered its headers: ' + headers.length);
   for (const h of headers) {
     assert.ok(
@@ -103,11 +106,6 @@ function testNoChevronInAnyHeader() {
   );
   hdr.click();
   assert.ok(!bash.classList.contains('collapsed'), 'a second click unfolds it');
-  const think = out.querySelector('.think .lbl');
-  think.click();
-  assert.ok(out.querySelector('.think .cnt').classList.contains('hidden'), 'thinking folds');
-  think.click();
-  assert.ok(!out.querySelector('.think .cnt').classList.contains('hidden'), 'and unfolds');
   win.close();
   console.log('  ok - no event panel header starts with a chevron');
 }

@@ -120,7 +120,7 @@
   --status-fail: var(--red);
   --favorite: var(--yellow);
 
-  /* Panel chrome.  Every transcript panel (tool call, thinking, Bash
+  /* Panel chrome.  Every transcript panel (tool call, Bash
      output, tool result, prompts, result card) shares ONE neutral tint
      and hairline, so the transcript reads as one quiet surface; the
      accent tint and hairline mark the few things the eye should find
@@ -849,11 +849,14 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
    the eye should find first, an accent hairline over the accent tint,
    the transcript panels being neutral. A message the user typed into
    the running task (.user-msg) is the user's words too and looks the
-   same. */
+   same.  The user's panels (these and the prompt panels) take four
+   fifths of the chat's width, so they read apart from the full-width
+   transcript panels. */
 .ev.task-panel, .ev.user-msg {
   border: 1px solid var(--accent-line); border-radius: var(--radius-lg);
   margin: var(--space-2) 0 var(--space-2) var(--space-1-5); overflow: hidden;
   background: var(--accent-tint);
+  width: 80%; box-sizing: border-box;
 }
 
 .task-panel-h {
@@ -978,30 +981,18 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 
+/* The model's thinking tokens, streamed as plain text into the Thoughts
+   panel ahead of its words (.txt): dimmer and italic, no box of its own. */
 .think {
-  padding: var(--space-2) var(--space-3); margin: var(--space-2) 0;
-  border: 1px solid var(--panel-line); border-radius: var(--radius-lg);
-  background: var(--panel-tint); max-height: 200px; overflow-y: auto;
+  font-size: var(--fs-md); line-height: 1.5; color: var(--dim); font-style: italic;
+  padding: var(--space-1) var(--space-2-5); white-space: pre-wrap; word-break: break-word;
 }
 
-.think .lbl {
-  font-size: var(--fs-sm); font-weight: 400;
-  letter-spacing: .04em; color: var(--dim); margin-bottom: var(--space-1);
-  display: flex; align-items: center; gap: var(--space-1-5); cursor: pointer; user-select: none;
-}
-
-/* Keyboard focus ring for the two focusable disclosure headers (tabindex="0" role="button"). */
-.collapse-header:focus-visible,
-.think .lbl:focus-visible {
+/* Keyboard focus ring for the focusable disclosure headers (tabindex="0" role="button"). */
+.collapse-header:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
-
-.think .cnt {
-  font-size: var(--fs-md); color: var(--dim); font-style: italic;
-  white-space: pre-wrap; word-break: break-word;
-}
-.think .cnt.hidden { display: none; }
 
 .txt {
   font-size: var(--fs-base); line-height: 1.5; color: color-mix(in srgb, var(--fg) 93%, transparent);
@@ -1220,6 +1211,7 @@ body.ask-answering #input-container {
 .system-prompt, .prompt {
   border: 1px solid var(--border); border-radius: var(--radius-lg); margin: var(--space-2) 0;
   overflow: hidden; background: var(--surface);
+  width: 80%; box-sizing: border-box;
 }
 
 .system-prompt-h, .prompt-h {
@@ -1272,7 +1264,6 @@ body.ask-answering #input-container {
 }
 
 .bash-panel {
-  /* Same background as the thinking panel (.think). */
   background: var(--panel-tint); border: 1px solid var(--border);
   border-radius: var(--radius-lg); margin: var(--space-0-5) 0 var(--space-2); padding: var(--space-2) var(--space-2-5);
 }
@@ -1282,7 +1273,7 @@ body.ask-answering #input-container {
   border-top: 1px solid var(--border);
 
   /* The parent .tc paints the opaque --surface, so the translucent
-     tint alone would render lighter here than the thinking panel
+     tint alone would render lighter here than a standalone .bash-panel
      (which sits over --bg). Pre-mixed over --bg to keep the pixels equal. */
   background: var(--panel-tint-solid);
 }
@@ -1335,7 +1326,6 @@ body.ask-answering #input-container {
   padding: var(--space-2) var(--space-2-5); background: var(--surface);
 }
 .llm-panel .txt { font-size: var(--fs-md); line-height: 1.5; color: color-mix(in srgb, var(--fg) 79%, transparent); }
-.llm-panel .think .cnt { font-size: var(--fs-md); }
 
 /* The composer's wait spinner: the shared ring (see .status-spinner)
    in the accent colour, faded in while a task runs. */
