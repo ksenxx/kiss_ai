@@ -4355,6 +4355,7 @@ body.remote-chat .running-item.history-active-task:hover {
   /* The action strip below takes a full-width line, so the task text
      claims one too; without it the text would be squeezed to nothing. */
   flex-basis: 100%;
+  font-weight: 400;
   white-space: normal;
   word-break: break-word;
   overflow: hidden;
