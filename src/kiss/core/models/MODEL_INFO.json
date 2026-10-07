@@ -365,7 +365,8 @@
     "gen": true,
     "fallback": "claude-opus-4-8",
     "extended_thinking": true,
-    "adaptive_thinking": true
+    "adaptive_thinking": true,
+    "thinking": "high"
   },
   "claude-fable-5-1": {
     "context_length": 500000,
@@ -374,7 +375,128 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "thinking": "high"
+  },
+  "claude-fable-5-1-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "high",
+    "alias_of": "claude-fable-5-1"
+  },
+  "claude-fable-5-1-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "low",
+    "alias_of": "claude-fable-5-1"
+  },
+  "claude-fable-5-1-max": {
+    "context_length": 500000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "max",
+    "alias_of": "claude-fable-5-1"
+  },
+  "claude-fable-5-1-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "medium",
+    "alias_of": "claude-fable-5-1"
+  },
+  "claude-fable-5-1-xhigh": {
+    "context_length": 500000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "xhigh",
+    "alias_of": "claude-fable-5-1"
+  },
+  "claude-fable-5-high": {
+    "context_length": 400000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "fallback": "claude-opus-4-8",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "high",
+    "alias_of": "claude-fable-5"
+  },
+  "claude-fable-5-low": {
+    "context_length": 400000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "fallback": "claude-opus-4-8",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "low",
+    "alias_of": "claude-fable-5"
+  },
+  "claude-fable-5-max": {
+    "context_length": 400000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "fallback": "claude-opus-4-8",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "max",
+    "alias_of": "claude-fable-5"
+  },
+  "claude-fable-5-medium": {
+    "context_length": 400000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "fallback": "claude-opus-4-8",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "medium",
+    "alias_of": "claude-fable-5"
+  },
+  "claude-fable-5-xhigh": {
+    "context_length": 400000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "fallback": "claude-opus-4-8",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "xhigh",
+    "alias_of": "claude-fable-5"
   },
   "claude-haiku-4-5": {
     "context_length": 200000,
@@ -398,7 +520,8 @@
     "output_price_per_1M": 25.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "thinking": "high"
   },
   "claude-opus-4-5-20251101": {
     "context_length": 200000,
@@ -406,7 +529,68 @@
     "output_price_per_1M": 25.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "thinking": "high"
+  },
+  "claude-opus-4-5-20251101-high": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "alias_of": "claude-opus-4-5-20251101"
+  },
+  "claude-opus-4-5-20251101-low": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "low",
+    "alias_of": "claude-opus-4-5-20251101"
+  },
+  "claude-opus-4-5-20251101-medium": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "medium",
+    "alias_of": "claude-opus-4-5-20251101"
+  },
+  "claude-opus-4-5-high": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "alias_of": "claude-opus-4-5"
+  },
+  "claude-opus-4-5-low": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "low",
+    "alias_of": "claude-opus-4-5"
+  },
+  "claude-opus-4-5-medium": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "medium",
+    "alias_of": "claude-opus-4-5"
   },
   "claude-opus-4-6": {
     "context_length": 200000,
@@ -414,7 +598,48 @@
     "output_price_per_1M": 25.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "thinking": "high"
+  },
+  "claude-opus-4-6-high": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "alias_of": "claude-opus-4-6"
+  },
+  "claude-opus-4-6-low": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "low",
+    "alias_of": "claude-opus-4-6"
+  },
+  "claude-opus-4-6-max": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "max",
+    "alias_of": "claude-opus-4-6"
+  },
+  "claude-opus-4-6-medium": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "medium",
+    "alias_of": "claude-opus-4-6"
   },
   "claude-opus-4-7": {
     "context_length": 500000,
@@ -422,7 +647,58 @@
     "output_price_per_1M": 25.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "thinking": "high"
+  },
+  "claude-opus-4-7-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "alias_of": "claude-opus-4-7"
+  },
+  "claude-opus-4-7-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "low",
+    "alias_of": "claude-opus-4-7"
+  },
+  "claude-opus-4-7-max": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "max",
+    "alias_of": "claude-opus-4-7"
+  },
+  "claude-opus-4-7-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "medium",
+    "alias_of": "claude-opus-4-7"
+  },
+  "claude-opus-4-7-xhigh": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "xhigh",
+    "alias_of": "claude-opus-4-7"
   },
   "claude-opus-4-8": {
     "context_length": 500000,
@@ -430,7 +706,58 @@
     "output_price_per_1M": 25.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "thinking": "high"
+  },
+  "claude-opus-4-8-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "alias_of": "claude-opus-4-8"
+  },
+  "claude-opus-4-8-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "low",
+    "alias_of": "claude-opus-4-8"
+  },
+  "claude-opus-4-8-max": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "max",
+    "alias_of": "claude-opus-4-8"
+  },
+  "claude-opus-4-8-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "medium",
+    "alias_of": "claude-opus-4-8"
+  },
+  "claude-opus-4-8-xhigh": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "xhigh",
+    "alias_of": "claude-opus-4-8"
   },
   "claude-opus-5": {
     "context_length": 500000,
@@ -441,7 +768,8 @@
     "gen": true,
     "comment": "NEW",
     "extended_thinking": true,
-    "adaptive_thinking": true
+    "adaptive_thinking": true,
+    "thinking": "high"
   },
   "claude-opus-5-5": {
     "context_length": 500000,
@@ -450,7 +778,128 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "thinking": "high"
+  },
+  "claude-opus-5-5-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 4.0,
+    "output_price_per_1M": 20.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "high",
+    "alias_of": "claude-opus-5-5"
+  },
+  "claude-opus-5-5-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 4.0,
+    "output_price_per_1M": 20.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "low",
+    "alias_of": "claude-opus-5-5"
+  },
+  "claude-opus-5-5-max": {
+    "context_length": 500000,
+    "input_price_per_1M": 4.0,
+    "output_price_per_1M": 20.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "max",
+    "alias_of": "claude-opus-5-5"
+  },
+  "claude-opus-5-5-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 4.0,
+    "output_price_per_1M": 20.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "medium",
+    "alias_of": "claude-opus-5-5"
+  },
+  "claude-opus-5-5-xhigh": {
+    "context_length": 500000,
+    "input_price_per_1M": 4.0,
+    "output_price_per_1M": 20.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "xhigh",
+    "alias_of": "claude-opus-5-5"
+  },
+  "claude-opus-5-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "high",
+    "alias_of": "claude-opus-5"
+  },
+  "claude-opus-5-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "low",
+    "alias_of": "claude-opus-5"
+  },
+  "claude-opus-5-max": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "max",
+    "alias_of": "claude-opus-5"
+  },
+  "claude-opus-5-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "medium",
+    "alias_of": "claude-opus-5"
+  },
+  "claude-opus-5-xhigh": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "xhigh",
+    "alias_of": "claude-opus-5"
   },
   "claude-sonnet-4-5": {
     "context_length": 200000,
@@ -474,7 +923,48 @@
     "output_price_per_1M": 15.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "thinking": "high"
+  },
+  "claude-sonnet-4-6-high": {
+    "context_length": 200000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "high",
+    "alias_of": "claude-sonnet-4-6"
+  },
+  "claude-sonnet-4-6-low": {
+    "context_length": 200000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "low",
+    "alias_of": "claude-sonnet-4-6"
+  },
+  "claude-sonnet-4-6-max": {
+    "context_length": 200000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "max",
+    "alias_of": "claude-sonnet-4-6"
+  },
+  "claude-sonnet-4-6-medium": {
+    "context_length": 200000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "medium",
+    "alias_of": "claude-sonnet-4-6"
   },
   "claude-sonnet-5": {
     "context_length": 500000,
@@ -485,7 +975,8 @@
     "gen": true,
     "comment": "NEW",
     "extended_thinking": true,
-    "adaptive_thinking": true
+    "adaptive_thinking": true,
+    "thinking": "high"
   },
   "claude-sonnet-5-5": {
     "context_length": 500000,
@@ -494,7 +985,128 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "thinking": "high"
+  },
+  "claude-sonnet-5-5-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "high",
+    "alias_of": "claude-sonnet-5-5"
+  },
+  "claude-sonnet-5-5-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "low",
+    "alias_of": "claude-sonnet-5-5"
+  },
+  "claude-sonnet-5-5-max": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "max",
+    "alias_of": "claude-sonnet-5-5"
+  },
+  "claude-sonnet-5-5-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "medium",
+    "alias_of": "claude-sonnet-5-5"
+  },
+  "claude-sonnet-5-5-xhigh": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "thinking": "xhigh",
+    "alias_of": "claude-sonnet-5-5"
+  },
+  "claude-sonnet-5-high": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "high",
+    "alias_of": "claude-sonnet-5"
+  },
+  "claude-sonnet-5-low": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "low",
+    "alias_of": "claude-sonnet-5"
+  },
+  "claude-sonnet-5-max": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "max",
+    "alias_of": "claude-sonnet-5"
+  },
+  "claude-sonnet-5-medium": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "medium",
+    "alias_of": "claude-sonnet-5"
+  },
+  "claude-sonnet-5-xhigh": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true,
+    "thinking": "xhigh",
+    "alias_of": "claude-sonnet-5"
   },
   "codex/codex-auto-review": {
     "context_length": 400000,
