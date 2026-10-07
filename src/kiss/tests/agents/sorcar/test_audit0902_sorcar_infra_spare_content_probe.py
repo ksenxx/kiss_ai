@@ -211,6 +211,7 @@ class TestSpareHasContent:
         assert not (gitdir / "index").exists()
         assert {p for p in Path(tempfile.gettempdir()).glob("kiss-spare-index-*")} == tmp_before
 
+    @posix_only("NTFS rejects control characters such as \\r in file names")
     def test_interrupted_checkout_with_newline_filename_is_content(self) -> None:
         """A byte-distinct external filename (``\\n`` where HEAD has ``\\r``)
         must not be folded onto the tracked name by text-mode decoding."""
