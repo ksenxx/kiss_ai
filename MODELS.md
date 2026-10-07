@@ -1,23 +1,23 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **768 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **776 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 111 |
-| Anthropic | 70 |
+| Anthropic | 76 |
 | Gemini | 20 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 420 |
-| Claude Code CLI (`cc/*`) | 16 |
+| OpenRouter | 421 |
+| Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **743** generation-capable models
-- **580** function-calling-capable models
+- **751** generation-capable models
+- **588** function-calling-capable models
 - **7** embedding models
 - **10** decision models
 
@@ -141,7 +141,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Anthropic (70)</strong></summary>
+<summary><strong>Anthropic (76)</strong></summary>
 
 - `claude-fable-5`
 - `claude-fable-5-1`
@@ -157,6 +157,12 @@ Full model list:
 - `claude-fable-5-xhigh`
 - `claude-haiku-4-5`
 - `claude-haiku-4-5-20251001`
+- `claude-haiku-5-5`
+- `claude-haiku-5-5-high`
+- `claude-haiku-5-5-low`
+- `claude-haiku-5-5-max`
+- `claude-haiku-5-5-medium`
+- `claude-haiku-5-5-xhigh`
 - `claude-opus-4-5`
 - `claude-opus-4-5-20251101`
 - `claude-opus-4-5-20251101-high`
@@ -382,7 +388,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (420)</strong></summary>
+<summary><strong>OpenRouter (421)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -400,6 +406,7 @@ Full model list:
 - `openrouter/anthropic/claude-fable-5`
 - `openrouter/anthropic/claude-fable-5.1`
 - `openrouter/anthropic/claude-haiku-4.5`
+- `openrouter/anthropic/claude-haiku-5.5`
 - `openrouter/anthropic/claude-opus-4.1`
 - `openrouter/anthropic/claude-opus-4.5`
 - `openrouter/anthropic/claude-opus-4.6`
@@ -808,11 +815,12 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Claude Code CLI (cc/*) (16)</strong></summary>
+<summary><strong>Claude Code CLI (cc/*) (17)</strong></summary>
 
 - `cc/claude-fable-5`
 - `cc/claude-fable-5-1`
 - `cc/claude-haiku-4-5-20251001`
+- `cc/claude-haiku-5-5`
 - `cc/claude-opus-4-5-20251101`
 - `cc/claude-opus-4-6`
 - `cc/claude-opus-4-7`
