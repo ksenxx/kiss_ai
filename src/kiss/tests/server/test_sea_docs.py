@@ -24,6 +24,7 @@ from kiss.agents.sorcar.sea_commands import bundled_commands
 from kiss.agents.sorcar.sea_docs import (
     GENERATED_FILES,
     REPO_ROOT,
+    channel_table,
     commands_table,
     kinds_table,
     options_table,
@@ -31,6 +32,7 @@ from kiss.agents.sorcar.sea_docs import (
     settings_table,
 )
 from kiss.agents.sorcar.sea_settings import (
+    CHANNEL_BEHAVIOURS,
     DISPATCHER_SETTINGS,
     PRECEDENCE_RULE,
     SETTING_TYPES,
@@ -66,11 +68,21 @@ def test_settings_table_lists_every_key_with_its_wire_field() -> None:
 
 def test_kinds_table_states_each_kind_without_machine_paths() -> None:
     table = rows(kinds_table())
-    assert list(table) == list(kind_defaults()) == ["session", "worker", "channel"]
+    assert list(table) == list(kind_defaults()) == ["session", "worker"]
     assert table["session"][1] == "nothing"
     assert "`allow_fan_out=False`" in table["worker"][1]
-    assert "`work_dir='<home>/channel_work'`" in table["channel"][1]
     assert str(Path.home()) not in kinds_table()
+
+
+def test_channel_table_lists_every_behaviour_with_its_enforcer() -> None:
+    table = rows(channel_table())
+    assert list(table) == [name for name, _what in CHANNEL_BEHAVIOURS]
+    for name, what in CHANNEL_BEHAVIOURS:
+        assert table[name][1] == what
+        assert "(`" in what and what.endswith(").")  # names the enforcing module
+    assert "`<home>/channel_work`" in table["scratch directory"][1]
+    assert "`inherit: true` option is refused" in table["no inheritance"][1]
+    assert "<home>" not in str(Path.home())
 
 
 def test_options_table_covers_option_types() -> None:

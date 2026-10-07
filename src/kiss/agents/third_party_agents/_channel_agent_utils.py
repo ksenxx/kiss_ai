@@ -831,7 +831,7 @@ def agent_sea_path(agent_cls: type) -> str:
     """Return the SEA file path for a channel agent class.
 
     The ``kiss.server.sorcar.run`` API configures the run from the SEA
-    named by ``extension_agent_path``: a file defining a subclass of
+    named by ``sea_path``: a file defining a subclass of
     :class:`~kiss.agents.seas.base.base_sea.BaseSea` whose ``tools``
     method returns the tool callables.  For channel agents that file is
     the agent's OWN defining module: each agent module defines a SEA
@@ -883,7 +883,7 @@ class BaseChannelAgent:
 
         class SlackSea(BaseSea):
             def settings(self, settings):
-                return settings | {"kind": "channel"}
+                return settings | {"channel": True}
 
             def tools(self, tools):
                 return tools + SlackAgent()._get_tools()
@@ -905,7 +905,7 @@ class BaseChannelAgent:
     def sea_path(self) -> str:
         """Path of the module whose SEA ``tools()`` supplies this agent's tools.
 
-        Passed to the daemon as the run's ``extension_agent_path``.
+        Passed to the daemon as the run's ``sea_path``.
         ``""`` when the agent's defining module has no SEA class (plain
         carriers such as ``KissWebChatAgent`` add no channel tools).
         """
@@ -945,7 +945,7 @@ class BaseChannelAgent:
         Submits the task to the kiss-web daemon via
         :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`,
         which supplies this agent's channel tools through the API's
-        ``extension_agent_path`` contract (:attr:`sea_path` — the agent
+        ``sea_path`` contract (:attr:`sea_path` — the agent
         module whose SEA ``tools()`` the daemon runs), appends
         :attr:`channel_system_prompt` to the prompt, and records the
         YAML result in :attr:`last_run_result` along with the cost /
@@ -1497,7 +1497,7 @@ class ChannelRunner:
         live-visible and interactable from any connected remote
         webview while it runs.  The channel tools come from the
         runner's SEA (the agent module's SEA ``tools()``,
-        passed as the ``kiss.server.sorcar.run`` ``extension_agent_path``); after the
+        passed as the ``kiss.server.sorcar.run`` ``sea_path``); after the
         run the task summary is posted to the message's thread unless
         the agent already replied there itself.  With persistent state
         the thread's daemon chat id is resumed and stored so later

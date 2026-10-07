@@ -2,28 +2,28 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for agent-script ``llm_call_hook``/``tool_call_hook``.
+"""End-to-end tests for SEA ``llm_call_hook``/``tool_call_hook``.
 
 Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` with a
 temporary local endpoint file (the :class:`DaemonRunApiHarness` from
 ``test_append_basic_tools``) and drive ``kiss.server.sorcar.run``
-against it with an ``extension_agent_path`` agent script.  The only
+against it with an ``sea_path`` SEA.  The only
 replaced boundary is the LLM itself: the per-session executor's
 :meth:`kiss.core.kiss_agent.KISSAgent.run` is swapped for a stub that
 records the ``llm_call_hook`` / ``tool_call_hook`` it was handed, so
 the daemon's full run pipeline — ``run`` command dispatch → worker
-thread → ``apply_agent_overrides`` hook staging →
+thread → ``apply_sea`` hook staging →
 ``WorktreeSorcarAgent.run`` → ``SorcarAgent.run`` →
 ``RelentlessAgent.perform_task`` → ``KISSAgent.run`` — executes for
 real without any model API calls.
 
 Contract under test: the ``llm_call_hook`` / ``tool_call_hook`` methods
-of an agent script's ``BaseSea`` subclass become the ``llm_call_hook`` /
+of a SEA's ``BaseSea`` subclass become the ``llm_call_hook`` /
 ``tool_call_hook`` callables the underlying :class:`KISSAgent` receives
 (``evaluate_sea`` wraps the ``base_*`` folds over the SEA chain, which
 starts at ``BaseSea``, in a ``functools.partial``); the executor ALWAYS
 gets callables — a hook no SEA overrides is the identity (same
-messages, ``None``); a ``tool_call_hook`` that is not a method stops
+messages, ``ALLOW``); a ``tool_call_hook`` that is not a method stops
 the task loudly before any executor session starts; and a non-callable hook
 field arriving over the wire is overwritten by the staged callable.
 """
@@ -33,6 +33,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from kiss.core.tool_verdict import ALLOW, refuse
 from kiss.server import sorcar
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
@@ -60,23 +61,23 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         return executor_calls[0]
 
     def _write_hooks_agent(self) -> str:
-        """Write an agent script whose SEA overrides both hook methods.
+        """Write a SEA whose SEA overrides both hook methods.
 
         The hooks stamp marker files under the test tmpdir when
         invoked, so the test can prove the recorded callables run the
         script's own methods in the daemon process.
 
         Returns:
-            The absolute path of the written agent script.
+            The absolute path of the written SEA.
         """
         return self._write_py(
             "hooks_agent.py",
             f'''
-            """Agent script installing LLM-call and tool-call hooks."""
+            """SEA installing LLM-call and tool-call hooks."""
 
             from pathlib import Path
 
-            from kiss.agents.seas.base.base_sea import BaseSea
+            from kiss.agents.seas.base.base_sea import ALLOW, BaseSea, refuse
 
             MARKER_DIR = Path(r"{self.tmpdir}")
 
@@ -101,14 +102,14 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
                     """
                     marker = MARKER_DIR / "tool_hook_called.txt"
                     marker.write_text(name)
-                    return None if name == "finish" else "blocked by hook"
+                    return ALLOW if name == "finish" else refuse("blocked by hook")
             ''',
         )
 
     def test_agent_script_hooks_reach_executor(self) -> None:
         """Both hook methods reach ``KISSAgent.run`` as callables.
 
-        The recorded callables must run the agent script's own
+        The recorded callables must run the SEA's own
         ``llm_call_hook`` / ``tool_call_hook`` methods: invoking them
         performs the script-defined behavior (message rewrite, tool
         veto) and stamps the script's marker files.
@@ -116,9 +117,9 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
         result = sorcar.run(
-            "task with agent-script hooks",
+            "task with SEA hooks",
             work_dir=self.repo,
-            extension_agent_path=self._write_hooks_agent(),
+            sea_path=self._write_hooks_agent(),
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -137,8 +138,8 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             Path(self.tmpdir) / "llm_hook_called.txt"
         ).read_text() == "1"
 
-        assert tool_hook("finish", {}) is None
-        assert tool_hook("Bash", {"command": "ls"}) == "blocked by hook"
+        assert tool_hook("finish", {}) == ALLOW
+        assert tool_hook("Bash", {"command": "ls"}) == refuse("blocked by hook")
         assert (
             Path(self.tmpdir) / "tool_hook_called.txt"
         ).read_text() == "Bash"
@@ -153,11 +154,11 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         assert callable(call["tool_call_hook"]), call
         messages = [{"role": "user", "content": "hi"}]
         assert call["llm_call_hook"](messages) == messages
-        assert call["tool_call_hook"]("Bash", {"command": "ls"}) is None
-        assert call["tool_call_hook"]("finish", {}) is None
+        assert call["tool_call_hook"]("Bash", {"command": "ls"}) == ALLOW
+        assert call["tool_call_hook"]("finish", {}) == ALLOW
 
     def test_no_agent_script_passes_identity_hooks(self) -> None:
-        """Without an agent script the executor receives ``BaseSea``'s identity hooks.
+        """Without a SEA the executor receives ``BaseSea``'s identity hooks.
 
         Every run goes through ``base_sea.py``: the hooks are always
         callables, and with nothing overriding them they leave the
@@ -183,10 +184,10 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         the executor must get a callable LLM hook running the script's
         method and a tool-call hook answering ``None`` to everything.
         """
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "half_hooks_agent.py",
             '''
-            """Agent script with one real hook and the default for the other."""
+            """SEA with one real hook and the default for the other."""
 
             from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -206,7 +207,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with a default tool hook",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -216,7 +217,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         assert callable(call["llm_call_hook"]), call
         assert call["llm_call_hook"]([1, 2, 3]) == [3, 2, 1]
         assert callable(call["tool_call_hook"]), call
-        assert call["tool_call_hook"]("Bash", {"command": "ls"}) is None
+        assert call["tool_call_hook"]("Bash", {"command": "ls"}) == ALLOW
 
     def test_wrong_typed_hook_getter_fails_task(self) -> None:
         """A ``tool_call_hook`` that is not a method stops the task at staging.
@@ -226,10 +227,10 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         method and the script) fails the task before any executor
         session exists.
         """
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "bad_hook_agent.py",
             '''
-            """Agent script whose tool_call_hook is a plain attribute."""
+            """SEA whose tool_call_hook is a plain attribute."""
 
             from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -243,13 +244,13 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with a broken hook getter",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False
-        assert "tool_call_hook of agent script '" in result.text, result.text
+        assert "tool_call_hook of SEA '" in result.text, result.text
         assert "bad_hook_agent.py' must be a method, got int" in result.text, result.text
         assert calls == [], "no executor session may start for a broken script"
 
@@ -259,7 +260,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         The hook command fields are daemon-internal (a callable cannot
         be JSON-serialized), but ``validate_command`` lets unknown
         extra fields through — a buggy or malicious client can send
-        them as plain JSON values.  ``apply_agent_overrides`` writes
+        them as plain JSON values.  ``apply_sea`` writes
         the ``BaseSea`` identity hooks over them, so the task runs
         normally with callable hooks instead of crashing the executor.
         """

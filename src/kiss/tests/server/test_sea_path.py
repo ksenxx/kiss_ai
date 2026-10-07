@@ -2,15 +2,15 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for ``kiss.server.sorcar.run``'s ``extension_agent_path``.
+"""End-to-end tests for ``kiss.server.sorcar.run``'s ``sea_path``.
 
 Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` with a
 temporary local endpoint and drive ``kiss.server.sorcar.run`` with
-an ``extension_agent_path`` script against it.  The only replaced boundary is the
+an ``sea_path`` script against it.  The only replaced boundary is the
 LLM itself: like the other task-runner suites in this directory,
 ``SorcarAgent``'s parent ``run`` is swapped for a stub so the daemon's
 full run pipeline (``run`` command dispatch → worker thread →
-agent-script overrides → agent wiring → event broadcast → status end)
+SEA overrides → agent wiring → event broadcast → status end)
 executes for real without any model API calls.
 """
 
@@ -60,13 +60,13 @@ def _init_repo(repo: str) -> None:
 
 
 class AgentPathApiTest(unittest.TestCase):
-    """Drive ``sorcar.run(extension_agent_path=...)`` against a real local daemon."""
+    """Drive ``sorcar.run(sea_path=...)`` against a real local daemon."""
 
     def setUp(self) -> None:
         # Resolved: macOS mkdtemp returns a symlinked /var/... path while
         # the worktree machinery canonicalizes the repo (git_worktree
         # resolves it), so un-resolved paths break startswith checks.
-        self.tmpdir = str(Path(tempfile.mkdtemp(prefix="sorcar_agent_path_")).resolve())
+        self.tmpdir = str(Path(tempfile.mkdtemp(prefix="sorcar_sea_path_")).resolve())
         self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
@@ -237,7 +237,7 @@ class AgentPathApiTest(unittest.TestCase):
         repo2 = str(Path(self.tmpdir) / "repo2")
         Path(repo2).mkdir(parents=True, exist_ok=True)
         _init_repo(repo2)
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "my_agent.py",
             f'''
             """SEA overriding every supported parameter."""
@@ -290,7 +290,7 @@ class AgentPathApiTest(unittest.TestCase):
             work_dir=self.repo,
             model=available[0],
             system_prompt="client system prompt",
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=True,
             auto_commit=True,
             max_budget=9.5,
@@ -343,10 +343,10 @@ class AgentPathApiTest(unittest.TestCase):
         defaults (``use_worktree=True``, ``is_parallel=True``,
         daemon-config budget).
         """
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "prompt_only_agent.py",
             '''
-            """Agent script overriding only the prompt."""
+            """SEA overriding only the prompt."""
 
             from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -364,7 +364,7 @@ class AgentPathApiTest(unittest.TestCase):
             "original prompt",
             work_dir=self.repo,
             system_prompt="kept system prompt",
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             max_budget=3.5,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -390,10 +390,10 @@ class AgentPathApiTest(unittest.TestCase):
         The agent's tools hook appends the script's tool to whatever
         toolset it is handed, with the basic toolset kept on.
         """
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "add_tools_agent.py",
             '''
-            """Agent script adding a tool to the basic toolset."""
+            """SEA adding a tool to the basic toolset."""
 
             from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -415,7 +415,7 @@ class AgentPathApiTest(unittest.TestCase):
         result = sorcar.run(
             "run with added tools",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -461,7 +461,7 @@ class AgentPathApiTest(unittest.TestCase):
         )
         assert first.success is True
         assert first.chat_id
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "chat_agent.py",
             f'''
             """SEA pinning the chat id."""
@@ -477,7 +477,7 @@ class AgentPathApiTest(unittest.TestCase):
         second = sorcar.run(
             "what was the word?",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -493,7 +493,7 @@ class AgentPathApiTest(unittest.TestCase):
         """Import errors, missing classes, broken ``settings()``/``prompt()`` stop the task.
 
         Every error the loader meets while staging the SEA — before
-        the agent is built — fails the task with the ``AgentFileError``
+        the agent is built — fails the task with the ``SeaError``
         text as its result.  (The ``system_prompt`` and ``tools``
         methods run later, on the assembled prompt and toolset: see
         :meth:`test_broken_hook_methods_fail_the_run`.)
@@ -504,7 +504,7 @@ class AgentPathApiTest(unittest.TestCase):
             (
                 "importfail_agent.py",
                 'raise RuntimeError("boom at import")\n',
-                ["agent script", "failed to import", "boom at import"],
+                ["SEA", "failed to import", "boom at import"],
             ),
             (
                 "raising_settings_agent.py",
@@ -570,7 +570,7 @@ class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'kind': 'rocket'}
 """,
-                ["settings()['kind'] must be one of session, worker, channel; got 'rocket'"],
+                ["settings()['kind'] must be one of session, worker; got 'rocket'"],
             ),
             (
                 "getters_only_agent.py",
@@ -682,20 +682,20 @@ class Sea(BaseSea):
         ]
         for name, source, expected_parts in cases:
             with self.subTest(script=name):
-                agent_path = self._write_py(name, source)
+                sea_path = self._write_py(name, source)
                 result = sorcar.run(
                     "should not run the agent",
                     work_dir=self.repo,
-                    extension_agent_path=agent_path,
+                    sea_path=sea_path,
                     endpoint_file=self.endpoint_file,
                     timeout=60,
                 )
                 assert result.success is False
-                assert "AgentFileError" in result.text
+                assert "SeaError" in result.text
                 for part in expected_parts:
                     assert part in result.text, (part, result.text)
         assert "prompt_template" not in seen, (
-            "a broken agent script must stop the task before the agent runs"
+            "a broken SEA must stop the task before the agent runs"
         )
 
     def test_broken_hook_methods_fail_the_run(self) -> None:
@@ -721,7 +721,7 @@ class Sea(BaseSea):
     def system_prompt(self, system_prompt):
         raise ValueError('no prompt today')
 """,
-                ["system_prompt() of agent script", "raised", "no prompt today"],
+                ["system_prompt() of SEA", "raised", "no prompt today"],
             ),
             (
                 "badtype_system_prompt_agent.py",
@@ -732,16 +732,16 @@ class Sea(BaseSea):
     def system_prompt(self, system_prompt):
         return 5
 """,
-                ["system_prompt() of agent script", "must return a string", "int"],
+                ["system_prompt() of SEA", "must return a string", "int"],
             ),
         ]
         for name, source, expected_parts in cases:
             with self.subTest(script=name):
-                agent_path = self._write_py(name, source)
+                sea_path = self._write_py(name, source)
                 result = sorcar.run(
                     "should not run the agent",
                     work_dir=self.repo,
-                    extension_agent_path=agent_path,
+                    sea_path=sea_path,
                     endpoint_file=self.endpoint_file,
                     timeout=60,
                 )
@@ -759,7 +759,7 @@ class Sea(BaseSea):
     def test_broken_script_leaves_command_untouched(self) -> None:
         """A later failing method must not apply earlier overrides.
 
-        ``apply_agent_overrides`` is the daemon-side loader; drive it
+        ``apply_sea`` is the daemon-side loader; drive it
         directly with a real script whose ``settings()`` succeeds (a
         ``chat_id`` and ``use_worktree`` override) and whose LATER
         ``prompt()`` raises: the command must come out exactly as it
@@ -767,12 +767,12 @@ class Sea(BaseSea):
         from the command, so a partial override surviving the failure
         would leak the broken script's chat id into a later run.
         """
-        from kiss.agents.sorcar.agent_file import (
-            AgentFileError,
-            apply_agent_overrides,
+        from kiss.agents.sorcar.sea_apply import (
+            SeaError,
+            apply_sea,
         )
 
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "partial_agent.py",
             '''
             """SEA whose later method fails."""
@@ -793,20 +793,20 @@ class Sea(BaseSea):
             "prompt": "hi",
             "chatId": "original-chat",
             "useWorktree": True,
-            "agentPath": agent_path,
+            "seaPath": sea_path,
         }
         original = dict(cmd)
-        with self.assertRaises(AgentFileError) as ctx:
-            apply_agent_overrides(cmd)
-        assert "prompt() of agent script" in str(ctx.exception)
+        with self.assertRaises(SeaError) as ctx:
+            apply_sea(cmd)
+        assert "prompt() of SEA" in str(ctx.exception)
         assert "late failure" in str(ctx.exception)
         assert cmd == original
 
-    def test_invalid_agent_path_raises_value_error(self) -> None:
-        """The client rejects a bad ``extension_agent_path`` before connecting."""
+    def test_invalid_sea_path_raises_value_error(self) -> None:
+        """The client rejects a bad ``sea_path`` before connecting."""
         with self.assertRaises(ValueError):
             sorcar.run(
-                "hi", extension_agent_path=str(Path(self.tmpdir) / "missing.py"),
+                "hi", sea_path=str(Path(self.tmpdir) / "missing.py"),
                 endpoint_file=self.endpoint_file,
             )
         not_py = Path(self.tmpdir) / "agent.txt"
@@ -818,10 +818,10 @@ class Sea(BaseSea):
         return settings | {'model': 'x'}
 """)
         with self.assertRaises(ValueError):
-            sorcar.run("hi", extension_agent_path=str(not_py), endpoint_file=self.endpoint_file)
+            sorcar.run("hi", sea_path=str(not_py), endpoint_file=self.endpoint_file)
         with self.assertRaises(ValueError):
             sorcar.run(
-                "hi", extension_agent_path=cast(Any, 123), endpoint_file=self.endpoint_file,
+                "hi", sea_path=cast(Any, 123), endpoint_file=self.endpoint_file,
             )
 
 

@@ -853,7 +853,7 @@ type ToWebviewMessageBody =
         is_subagent: boolean;
         parent_task_id?: string;
         // The run configuration (kiss.agents.sorcar.run_config): the
-        // agent script the task ran as, its kind, the effective tool
+        // SEA the task ran as, its kind, the effective tool
         // profile, the caller's timeout, the setting keys inherited
         // from the calling task and the inherited or default values the
         // SEA pinned to its own ({key: [before, pinned]}).  Absent for a

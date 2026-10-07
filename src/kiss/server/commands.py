@@ -32,7 +32,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.sorcar.sea_commands import (
     RESERVED_SUBCOMMANDS,
-    SeaScriptError,
+    SeaError,
     run_picked_hook,
 )
 from kiss.agents.sorcar.sea_commands import (
@@ -1383,7 +1383,7 @@ class _CommandsMixin:
 
         Spawns a daemon thread that calls
         :func:`daemon_client.run` with the resolved ``ask_sea`` script
-        as ``extension_agent_path``: the daemon accepts the run over
+        as ``sea_path``: the daemon accepts the run over
         its own local endpoint and runs it as a sub-agent of
         *owner_task_id*.  The frontend then renders the answering
         session as a nested sub-agent tab under the running task's
@@ -1448,7 +1448,7 @@ class _CommandsMixin:
             try:
                 result = daemon_client.run(
                     question,
-                    extension_agent_path=str(sea_path),
+                    sea_path=str(sea_path),
                     parent_task_id=owner_task_id,
                     parent_tab_id=tab_id,
                     side_channel=True,
@@ -1657,7 +1657,7 @@ class _CommandsMixin:
                 # dispatch.
                 try:
                     help_text, help_ok = sea_help_text(prompt), True
-                except SeaScriptError as exc:
+                except SeaError as exc:
                     help_text, help_ok = str(exc), False
                 if help_text is not None:
                     self._broadcast_ask_answer(

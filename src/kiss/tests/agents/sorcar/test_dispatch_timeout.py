@@ -5,7 +5,7 @@
 """End-to-end tests for the ``run_agent`` dispatch ``timeout``.
 
 The ``run_agent`` tool has a ``timeout`` parameter (a number string;
-empty applies the agent script's ``timeout`` setting, else
+empty applies the SEA's ``timeout`` setting, else
 ``agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS``, 3600 s).  It
 bounds the CALL, not the sub-task: every dispatch runs as an agent job
 on its own thread, and when the bound expires the tool returns the
@@ -349,7 +349,7 @@ def test_run_agent_tool_waits_past_delayed_result(
         assert parsed == {"success": True, "summary": "slow but done"}
         assert "did not finish within" not in out
         assert daemon.run_cmd is not None
-        assert daemon.run_cmd.get("agentPath") == str(script)
+        assert daemon.run_cmd.get("seaPath") == str(script)
     finally:
         daemon.close()
 

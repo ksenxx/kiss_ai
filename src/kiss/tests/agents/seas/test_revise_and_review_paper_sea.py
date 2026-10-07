@@ -181,7 +181,7 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
         "    def settings(self, settings):\n        raise RuntimeError('broken')\n": "broken",
     }
     for n, (body, text) in enumerate(broken.items(), start=len(resolved)):
-        with pytest.raises(sea_commands.SeaScriptError, match=text):
+        with pytest.raises(sea_commands.SeaError, match=text):
             sea_commands.sea_settings(_script(n, body))
 
 

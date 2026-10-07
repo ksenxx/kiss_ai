@@ -41,6 +41,7 @@ from kiss.core.tool_interrupt import (
     register_tool_call,
     unregister_tool_call,
 )
+from kiss.core.tool_verdict import Verdict
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
@@ -262,7 +263,7 @@ class KISSAgent(Base):
         self.llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None
-        self.tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None
+        self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
         self.context_tokens_used = 0
         self.last_cache_read_tokens = 0
         self.last_call_usage: dict[str, int | float] | None = None
@@ -411,7 +412,7 @@ class KISSAgent(Base):
         llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None,
-        tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -461,11 +462,11 @@ class KISSAgent(Base):
                 new messages in the conversation before the call is made.
                 Default is None (no hook).
             tool_call_hook (Callable | None): Optional hook called before every
-                tool call with the tool's name and its arguments dict. If it
-                returns ``None``, the tool executes as usual; a returned
-                string suppresses the tool execution and is returned to the
-                model as the tool's result instead (any string refuses,
-                ``"OK"`` included). The hook runs before (and its
+                tool call with the tool's name and its arguments dict; it
+                returns a :class:`~kiss.core.tool_verdict.Verdict`:
+                ``ALLOW`` lets the tool execute as usual, ``refuse(text)``
+                suppresses the execution and *text* is returned to the
+                model as the tool's result. The hook runs before (and its
                 rejection takes precedence over) the framework's
                 :attr:`tool_call_guard`; allowing does not override a guard
                 block. An implicit finish (text-only turns) also consults the
@@ -937,7 +938,8 @@ class KISSAgent(Base):
             # means "no objection", not "must execute": the framework's
             # tool_call_guard may still block the call.
             if self.tool_call_hook is not None:
-                blocked = self.tool_call_hook(fc["name"], _call_args(fc))
+                verdict = self.tool_call_hook(fc["name"], _call_args(fc))
+                blocked = None if verdict.allowed else verdict.text
             if blocked is None and self.tool_call_guard is not None:
                 blocked = self.tool_call_guard(fc["name"], _call_args(fc))
             if blocked is None and is_long_running_call(fc["name"], _call_args(fc)):
@@ -1090,7 +1092,7 @@ class KISSAgent(Base):
         Returns:
             bool: ``True`` when neither the hook nor the guard objects.
         """
-        if self.tool_call_hook is not None and self.tool_call_hook("finish", {}) is not None:
+        if self.tool_call_hook is not None and not self.tool_call_hook("finish", {}).allowed:
             return False
         return self.tool_call_guard is None or self.tool_call_guard("finish", {}) is None
 

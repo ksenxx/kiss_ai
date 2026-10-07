@@ -14,8 +14,8 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   cron expression, one-shot duration, one-shot ISO timestamp) and the
   agent translates phrases like "every weekday at 9am" into them.
 - The Sorcar agent does not carry the :func:`cron_job` tool itself:
-  this module is an *agent script* (``kiss.server.sorcar.run``'s
-  ``extension_agent_path`` contract), and a scheduling request is dispatched to
+  this module is an *SEA* (``kiss.server.sorcar.run``'s
+  ``sea_path`` contract), and a scheduling request is dispatched to
   it with the ``run_agent`` tool as ``run_agent(task, agent="cron")`` — the
   dispatched session gets the :func:`cron_job` tool from
   :func:`tools` and runs in ``$KISS_HOME/cron/work`` without a
@@ -38,9 +38,9 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   for running the scheduler outside the daemon; in that mode command
   jobs work standalone while prompt jobs still need a reachable
   kiss-web daemon (they are submitted through its local endpoint).
-- A prompt job runs as the bundled agent script
+- A prompt job runs as the bundled SEA
   :mod:`kiss.agents.sorcar.cron_prompt_sea` through the same
-  ``run_agent`` tool a chat task uses for any ``.py`` agent script
+  ``run_agent`` tool a chat task uses for any ``.py`` SEA
   (:func:`kiss.agents.sorcar.agent_dispatch.make_run_agent_tool`): the
   job's prompt is the task, and its model, budget, ``work_dir`` /
   ``use_worktree`` / ``auto_commit`` are the tool's arguments — a job
@@ -644,7 +644,7 @@ def unattended_child_suffix(append_to_prompt: str) -> str:
 
 
 PROMPT_SEA_PATH = Path(__file__).with_name("cron_prompt_sea.py")
-"""The agent script every prompt job runs as (:mod:`kiss.agents.sorcar.cron_prompt_sea`)."""
+"""The SEA every prompt job runs as (:mod:`kiss.agents.sorcar.cron_prompt_sea`)."""
 
 
 def _job_work_dir(job: dict[str, Any], scratch_dir: Path) -> Path:
@@ -682,7 +682,7 @@ def _run_prompt_job(
 
     Launches :data:`PROMPT_SEA_PATH` with the ``run_agent`` tool
     (:func:`kiss.agents.sorcar.agent_dispatch.make_run_agent_tool`)
-    exactly as a chat task launches any agent script: the task text is
+    exactly as a chat task launches any SEA: the task text is
     the Hermes-style preamble followed by the job's prompt, and the
     job's ``model`` and ``max_budget`` (``""`` / ``None`` mean "daemon
     default"), its ``work_dir`` when set (a prompt that must run inside
@@ -710,7 +710,7 @@ def _run_prompt_job(
     Returns:
         ``(status, summary)`` where status is ``"ok"``, ``"error"`` or
         ``"silent"`` (summary ``None`` — nothing to deliver).  Failures
-        to reach the daemon, agent-script errors and a confirmed
+        to reach the daemon, SEA errors and a confirmed
         timeout come back as ``"error"`` with the ``run_agent`` error
         text.  ``run_agent``'s ``timeout`` (the job's, default
         :data:`PROMPT_TIMEOUT_SECONDS`) bounds the call only and hands
@@ -1806,10 +1806,10 @@ class CronAgentSea(BaseSea):
     """The ``/cron_agent`` SEA."""
 
     def tools(self, tools: list[Any]) -> list[Any]:
-        """Return the cron tools (``kiss.server.sorcar.run`` agent-script contract).
+        """Return the cron tools (``kiss.server.sorcar.run`` SEA contract).
 
         Called by the kiss-web daemon when this module's path is passed as
-        the API's ``extension_agent_path``.
+        the API's ``sea_path``.
 
         Returns:
             The :func:`cron_job` and :func:`gateway_command` tools.
@@ -1832,7 +1832,7 @@ class CronAgentSea(BaseSea):
         preamble in the system prompt.  Classification is off: unattended
         scheduled automations should not spend a classifier round trip.
         """
-        return settings | {"kind": "channel", "work_dir": cron_work_dir()}
+        return settings | {"channel": True, "work_dir": cron_work_dir()}
 
     def system_prompt(self, system_prompt: str) -> str:
         """Return :data:`CRON_DISPATCH_PREAMBLE`, appended to the session's system prompt."""

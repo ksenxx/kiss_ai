@@ -32,6 +32,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _save_task_result,
 )
+from kiss.core.tool_verdict import ALLOW, refuse
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 
@@ -375,9 +376,10 @@ def test_sea_source_and_patch_sea_code_through_the_gate(checkout: Path) -> None:
         '''
     def tool_call_hook(self, name, args):
         """Refuse rm -rf."""
+        from kiss.agents.seas.base.base_sea import ALLOW, refuse
         if name == 'Bash' and 'rm -rf' in str(args):
-            return 'refused'
-        return None
+            return refuse('refused')
+        return ALLOW
 
     def tools(self, tools):
         """Extra tools."""
@@ -389,12 +391,12 @@ def shout(text: str) -> str:
     return text.upper()
 ''',
     )
-    assert report.startswith(f"Patched {path}:") and "+11 lines" in report
+    assert report.startswith(f"Patched {path}:") and "+12 lines" in report
     seas, _cmd, _d = sea_commands.check_sea(path)
     assert sorted(t.__name__ for t in sea_commands.base_tools(seas, [])) == ["count_words", "shout"]
     patched = seas[-1]
-    assert patched.tool_call_hook("Bash", {"command": "rm -rf /"}) == "refused"
-    assert patched.tool_call_hook("Bash", {"command": "ls"}) is None
+    assert patched.tool_call_hook("Bash", {"command": "rm -rf /"}) == refuse("refused")
+    assert patched.tool_call_hook("Bash", {"command": "ls"}) == ALLOW
 
     # Appending with an empty ``old`` adds at the end of the file.
     assert sea.patch_sea_code("tunedemo", "", "\nEXTRA = 1\n").startswith("Patched")
@@ -793,8 +795,8 @@ def test_improve_and_revert_sea_code_snapshot_and_gate(
         assert report["result"] == {"success": True, "summary": "reworked", "cost": 0.0, "steps": 0}
         (command,) = daemon.run_commands
         assert "add an extra() helper" in command["prompt"] and str(path) in command["prompt"]
-        # A plain Sorcar run (no agent script) in the SEA's git checkout.
-        assert command["agentPath"] == "" and command["workDir"] == str(root.resolve())
+        # A plain Sorcar run (no SEA) in the SEA's git checkout.
+        assert command["seaPath"] == "" and command["workDir"] == str(root.resolve())
         assert command["useWorktree"] is False and command["autoCommit"] is False
         assert "error" not in report and "def extra" in path.read_text()
         assert report["other_changes"] == []

@@ -22,7 +22,7 @@ Against a real private daemon (``_Daemon``) with a stand-in model:
 3. A parent that calls ``finish`` with a live job gets the gate text
    once; its second ``finish`` passes, after which the job is dead and
    gone from the registry.
-4. A ``kind: "channel"`` sub-task detached at its bound keeps holding
+4. A ``channel: True`` sub-task detached at its bound keeps holding
    its workspace inside the daemon; a dispatch for another workspace
    waits and fails with the existing error until the first is killed.
 5. ``wait="false"`` keeps its notice; ``daemon_client.run`` is called
@@ -305,7 +305,7 @@ class Sea(BaseSea):
         return 'a channel'
 
     def settings(self, settings):
-        return settings | {'kind': 'channel'}
+        return settings | {'channel': True}
 """,
         encoding="utf-8",
     )
@@ -343,7 +343,7 @@ class Sea(BaseSea):
         # With the workspace released the other dispatch runs.
         done = yaml.safe_load(dispatch("CHAN-B say hi", "b", "30"))
         assert done["success"] is True and "b done" in done["summary"], done
-        assert done["ran"].startswith("chan (channel) ")
+        assert done["ran"].startswith("chan (worker, channel) ")
     finally:
         release.set()
         agent_dispatch.kill_jobs_of(None)
@@ -503,7 +503,7 @@ def test_a_stop_during_the_parent_end_join_still_ends_the_run_as_stopped(
     )
     agent = SorcarAgent("u1-parent")
     job = agent_dispatch.start_agent_job("helper", {
-        "name": "helper", "prompt": "never finishes", "agent_path": str(script),
+        "name": "helper", "prompt": "never finishes", "sea_path": str(script),
         "work_dir": str(tmp_path), "model_name": "", "budget": None, "timeout": 60.0,
         "parent_agent": agent,
     }, agent)

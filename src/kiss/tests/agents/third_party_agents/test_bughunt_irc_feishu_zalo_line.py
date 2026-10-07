@@ -207,7 +207,7 @@ class TestIRCBugs:
 class TestIRCFreshDaemonTools:
     """A fresh daemon-side agent's IRC tools must really reach the server.
 
-    The ``kiss.server.sorcar.run`` agent-script contract builds a FRESH
+    The ``kiss.server.sorcar.run`` SEA contract builds a FRESH
     ``IRCAgent`` inside the daemon via this module's ``IrcSea().tools([])``.
     That backend starts disconnected, so its messaging tools must
     connect on demand from the persisted config instead of silently

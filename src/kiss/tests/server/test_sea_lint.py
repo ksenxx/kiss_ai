@@ -129,11 +129,12 @@ def test_fix_keeps_prefixes_quotes_and_locks_and_skips_nested_dicts(tmp_path: Pa
     }
 
 
-def test_ok_verdict_is_fixable_and_fix_rewrites_it_to_none(tmp_path: Path) -> None:
-    """A ``tool_call_hook`` returning the literal ``"OK"`` (a refusal) is flagged and rewritten.
+def test_literal_verdicts_are_fixable_and_fix_rewrites_them_to_verdicts(tmp_path: Path) -> None:
+    """A ``tool_call_hook`` returning a literal ``None`` or string is flagged and rewritten.
 
-    Only returns inside ``tool_call_hook`` count: an ``"OK"`` returned
-    by another method, or compared rather than returned, is no finding.
+    Only returns inside ``tool_call_hook`` count: a literal returned by
+    another method or a nested helper, or compared rather than
+    returned, is no finding.  ``--fix`` imports the names it needs.
     """
     path = write_sea(
         tmp_path,
@@ -147,23 +148,86 @@ def test_ok_verdict_is_fixable_and_fix_rewrites_it_to_none(tmp_path: Path) -> No
             return "Blocked"
         if name == "Read":
             return 'OK'
-        return "OK"
+        return None
 
     def status(self):
-        return "OK"
+        return None
 """
         ),
     )
     findings = lint_all([path])
-    assert codes(findings) == ["ok-verdict", "ok-verdict"]
-    assert all(f.fixable for f in findings)
-    assert 'returns "OK", which refuses the call (any string does)' in findings[0].message
-    assert fix_sea(path) == [f"{path}:14: 'OK' -> None", f"{path}:15: 'OK' -> None"]
+    assert codes(findings) == ["verdict", "verdict", "verdict", "broken"]
+    assert all(f.fixable for f in findings[:3])
+    assert "returns 'Blocked'; return ALLOW or refuse(text)" in findings[0].message
+    assert "must return a Verdict" in findings[3].message
+    assert fix_sea(path) == [
+        f"{path}:3: import ALLOW, refuse",
+        f"{path}:12: 'Blocked' -> refuse('Blocked')",
+        f"{path}:14: 'OK' -> refuse('OK')",
+        f"{path}:15: None -> ALLOW",
+    ]
     text = path.read_text(encoding="utf-8")
-    assert "            return None\n        return None\n" in text
+    assert text.startswith(
+        "\nfrom kiss.agents.seas.base.base_sea import BaseSea\n"
+        "from kiss.agents.seas.base.base_sea import ALLOW, refuse\n"
+    )
+    assert '            return refuse("Blocked")\n' in text
+    assert "            return refuse('OK')\n        return ALLOW\n" in text
     # The nested helper's return, the comparison and ``status()`` are untouched.
-    assert text.count('"OK"') == 3 and "'OK'" not in text
+    assert text.count('"OK"') == 2 and "        return None\n" in text
     assert lint_all([path]) == [] and fix_sea(path) == []
+    # A script that already imports the names gets no second import line.
+    again = write_sea(tmp_path, DESCRIPTION.replace(
+        "import BaseSea", "import ALLOW, BaseSea, refuse",
+    ) + """
+    def tool_call_hook(self, name, args):
+        return None
+""", name="imported")
+    assert fix_sea(again) == [f"{again}:9: None -> ALLOW"]
+    assert again.read_text(encoding="utf-8").count("import ALLOW") == 1
+
+
+def test_channel_kind_is_fixable_and_fix_rewrites_it_to_the_flag(tmp_path: Path) -> None:
+    """``"kind": "channel"`` in ``settings()`` is flagged and rewritten to ``"channel": True``."""
+    path = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + """
+    def settings(self, settings):
+        return settings | {"kind": "channel", "tool_profile": "bash", "locked": ["tool_profile"]}
+""",
+    )
+    findings = lint_all([path])
+    assert codes(findings) == ["channel-kind", "broken"]
+    assert findings[0].fixable and 'became the flag "channel": True' in findings[0].message
+    assert fix_sea(path) == [
+        f"{path}:9: 'kind' -> 'channel'", f"{path}:9: 'channel' -> True",
+    ]
+    text = path.read_text(encoding="utf-8")
+    assert '{"channel": True, "tool_profile": "bash", "locked": ["tool_profile"]}' in text
+    assert lint_all([path]) == [] and fix_sea(path) == []
+    assert sea_settings_of(path)["channel"] is True and sea_settings_of(path)["kind"] == "worker"
+
+
+def test_channel_kind_inside_a_nested_dict_is_data_not_a_setting(tmp_path: Path) -> None:
+    """A ``"kind": "channel"`` pair inside ``model_config`` is configuration data, left alone."""
+    path = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + """
+    def settings(self, settings):
+        return settings | {
+            "kind": "worker",
+            "model_config": {"kind": "channel", "routes": [{"kind": "channel"}]},
+        }
+""",
+    )
+    assert lint_all([path]) == [] and fix_sea(path) == []
+    text = path.read_text(encoding="utf-8")
+    assert '{"kind": "channel", "routes": [{"kind": "channel"}]}' in text
+    assert sea_settings_of(path)["model_config"] == {
+        "kind": "channel", "routes": [{"kind": "channel"}],
+    }
 
 
 def test_broken_covers_getter_contract_errors(tmp_path: Path) -> None:
@@ -360,8 +424,8 @@ def test_broken_scripts(tmp_path: Path) -> None:
     assert "cannot parse" in findings[0].message
     assert "boom" in findings[1].message
     assert "unknown key 'colour'" in findings[2].message
-    assert "key 'inherit' was removed: a `channel` run never inherits" in findings[3].message
-    assert "must be one of session, worker, channel" in findings[4].message
+    assert "key 'inherit' was removed: a channel never inherits" in findings[3].message
+    assert "must be one of session, worker" in findings[4].message
     assert "cannot parse" in findings[5].message
 
 

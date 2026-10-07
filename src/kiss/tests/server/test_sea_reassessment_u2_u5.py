@@ -28,6 +28,7 @@ import pytest
 
 from kiss.agents.sorcar import agent_dispatch, daemon_client
 from kiss.agents.sorcar.agent_dispatch import (
+    OPTION_DOCS,
     make_run_agent_tool,
     options_keyword_hint,
     parse_run_options,
@@ -35,6 +36,7 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.run_config import RUN_CONFIG_KEYS, is_explicit, run_config_line
+from kiss.agents.sorcar.sea_apply import apply_sea, calling_work_dir
 from kiss.agents.sorcar.sea_commands import (
     declared_settings,
     own_settings,
@@ -47,7 +49,8 @@ from kiss.agents.sorcar.sea_settings import (
     REMOVED_SETTINGS,
     RENAMED_SETTINGS,
     SETTING_DOCS,
-    SettingsError,
+    SeaError,
+    anchored_work_dir,
     locked_conflicts,
     resolve_settings,
 )
@@ -208,10 +211,10 @@ def test_is_explicit_reads_the_provenance_field() -> None:
     assert "classified" in RUN_CONFIG_KEYS and "tool_profile_inferred" in RUN_CONFIG_KEYS
 
 
-# --- U3: a relative work_dir setting is relative to the SEA's folder -------------------
+# --- U3: a relative work_dir is a path under the calling task's directory ------------
 
 
-def test_relative_script_work_dir_resolves_against_the_script_folder(
+def test_relative_work_dir_is_under_the_calling_task_everywhere(
     tmp_path: Path, captured: list[dict[str, Any]],
 ) -> None:
     caller = tmp_path / "caller"
@@ -224,50 +227,41 @@ class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'work_dir': 'sandbox'}
 """)
-    assert sea_settings(sea)["work_dir"] == str(folder / "sandbox")
-    # The script's own ``settings`` keeps its spelling; the fold anchors it at
-    # the folder of the file whose method set it.
+    # The setting is kept as written at every level of the fold: the
+    # launcher anchors it, with one rule for settings and options.
     assert own_settings(sea_layers(sea)[-1])["work_dir"] == "sandbox"
-    assert declared_settings(sea_layers(sea))["work_dir"] == str(folder / "sandbox")
-    # Every way of running the script sees the same folder, whatever the caller's.
+    assert declared_settings(sea_layers(sea))["work_dir"] == "sandbox"
+    assert sea_settings(sea)["work_dir"] == "sandbox"
+    assert anchored_work_dir("sandbox", str(caller)) == str(caller / "sandbox")
+    assert anchored_work_dir("../shared", str(caller)) == str(caller / ".." / "shared")
+    assert anchored_work_dir("~", str(caller)) == str(Path.home())
+    assert anchored_work_dir(str(folder), str(caller)) == str(folder)
+    # run_agent: the SEA's relative setting and the call's relative option
+    # both land under the CALLER's directory, whichever caller runs it.
     run_agent = make_run_agent_tool(str(caller))
     run_agent("t", str(sea))
-    assert captured[-1]["work_dir"] == str(folder / "sandbox")
-    run_agent = make_run_agent_tool(str(tmp_path))
-    run_agent("t", str(sea))
-    assert captured[-1]["work_dir"] == str(folder / "sandbox")
-    # An explicit option still wins, and stays relative to the CALLER.
-    run_agent = make_run_agent_tool(str(caller))
+    assert captured[-1]["work_dir"] == str(caller / "sandbox")
     run_agent("t", str(sea), options='{"work_dir": "sub"}')
     assert captured[-1]["work_dir"] == str(caller / "sub")
-    # ``..`` and ``~`` keep their meaning; an absolute path is untouched.
-    up = _write(folder / "up_sea.py", """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'work_dir': '../shared'}
-""")
-    assert sea_settings(up)["work_dir"] == str(tmp_path / "seas" / "shared")
-    home = _write(folder / "home_sea.py", """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'work_dir': '~'}
-""")
-    assert sea_settings(home)["work_dir"] == str(Path.home())
-    absolute = _write(folder / "abs_sea.py", f"""
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {{'work_dir': {str(caller)!r}}}
-""")
-    assert sea_settings(absolute)["work_dir"] == str(caller)
-    # A relative work_dir inherited from a base class stays relative to the
-    # folder of the file whose ``settings`` set it (the base's); a subclass
-    # that wants its own folder sets its own relative path.
+    run_agent = make_run_agent_tool(str(tmp_path))
+    run_agent("t", str(sea))
+    assert captured[-1]["work_dir"] == str(tmp_path / "sandbox")
+    # The daemon stages the same directory for a ``/box`` run (the tab's
+    # ``workDir`` is the calling directory) and for a dispatched run
+    # (``tabScopeWorkDir`` is the caller's; ``workDir`` is already resolved).
+    cmd: dict[str, Any] = {"seaPath": str(sea), "prompt": "p", "workDir": str(caller)}
+    assert "workDir" in apply_sea(cmd) and cmd["workDir"] == str(caller / "sandbox")
+    cmd = {
+        "seaPath": str(sea), "prompt": "p", "workDir": str(caller / "sandbox"),
+        "tabScopeWorkDir": str(caller),
+    }
+    apply_sea(cmd)
+    assert cmd["workDir"] == str(caller / "sandbox")
+    assert calling_work_dir({"workDir": "/w"}) == "/w" and calling_work_dir({}) == ""
+    assert calling_work_dir({"tabScopeWorkDir": "/c", "workDir": "/w"}) == "/c"
+    # A relative work_dir inherited from a base class is the same path under
+    # the caller as the subclass's own would be: the file that set it does
+    # not matter.
     base = _write(
         tmp_path / "base" / "base_sea.py", """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -283,23 +277,18 @@ from kiss.agents.sorcar.sea_commands import sea_class
 class Child(sea_class({str(base)!r})):
     pass
 """)
-    assert sea_settings(child)["work_dir"] == str(tmp_path / "base" / "data")
-    own = _write(folder / "own_sea.py", f"""
-from kiss.agents.sorcar.sea_commands import sea_class
-
-class Own(sea_class({str(base)!r})):
-    def settings(self, settings):
-        return settings | {{'work_dir': 'data'}}
-""")
-    assert sea_settings(own)["work_dir"] == str(folder / "data")
-    assert "relative path is resolved against the script's own folder" in SETTING_DOCS["work_dir"]
+    assert sea_settings(child)["work_dir"] == "data"
+    run_agent("t", str(child))
+    assert captured[-1]["work_dir"] == str(tmp_path / "data")
+    assert "path under the calling task's directory" in SETTING_DOCS["work_dir"]
+    assert "a path under the calling task's directory" in OPTION_DOCS["work_dir"]
 
 
 def test_relative_work_dir_that_a_script_locks_compares_resolved(
     tmp_path: Path, captured: list[dict[str, Any]],
 ) -> None:
     folder = tmp_path / "seas"
-    (folder / "sandbox").mkdir(parents=True)
+    (tmp_path / "sandbox").mkdir(parents=True)
     sea = _write(
         folder / "locked_sea.py",
         """
@@ -311,9 +300,11 @@ class Sea(BaseSea):
 """,
     )
     run_agent = make_run_agent_tool(str(tmp_path))
-    out = run_agent("t", str(sea), options=json.dumps({"work_dir": str(folder / "sandbox")}))
+    out = run_agent("t", str(sea), options=json.dumps({"work_dir": str(tmp_path / "sandbox")}))
     assert not out.startswith("Error:"), out
-    assert captured[-1]["work_dir"] == str(folder / "sandbox")
+    assert captured[-1]["work_dir"] == str(tmp_path / "sandbox")
+    out = run_agent("t", str(sea), options='{"work_dir": "sandbox"}')
+    assert not out.startswith("Error:"), out
     out = run_agent("t", str(sea), options='{"work_dir": "elsewhere"}')
     assert out.startswith("Error: locked: the script locks work_dir="), out
 
@@ -374,7 +365,8 @@ def test_run_agent_docstring_states_the_inferred_profile_and_the_classified_entr
     doc = make_run_agent_tool("").__doc__ or ""
     assert "tools=review(inferred)" in doc
     assert "classified=use_worktree(True->False)" in doc
-    assert "``work_dir`` setting is relative to the SEA's folder" in doc
+    assert "``work_dir`` (relative to this task's, as is a SEA's" in doc
+    assert "SEA's folder" not in doc
     assert '``"reviewer"`` is not an agent' in doc
 
 
@@ -433,10 +425,10 @@ class Sea(BaseSea):
     assert out.startswith("Error: alias: the script locks tool_profile='review' (asked for 'bash')")
 
 
-def test_the_options_table_states_the_caller_relative_rule_for_work_dir() -> None:
+def test_the_options_table_states_the_one_relative_rule_for_work_dir() -> None:
     row = next(line for line in options_table().splitlines() if line.startswith("| `work_dir` |"))
-    assert "resolved against the calling task's directory" in row
-    assert "relative to the SEA's folder" in row
+    assert "a path under the calling task's directory" in row
+    assert "as a SEA's own `work_dir` setting is" in row
     assert "settings` key" not in row
 
 
@@ -460,9 +452,9 @@ def test_unknown_option_keys_name_their_new_name_or_the_closest_key() -> None:
     # The same names are refused in a script's settings(), with the same new name.
     for old, new in RENAMED_SETTINGS.items():
         message = f"settings\\(\\) key {old!r} was renamed to {new!r}"
-        with pytest.raises(SettingsError, match=message):
+        with pytest.raises(SeaError, match=message):
             resolve_settings({old: "x"})
-    with pytest.raises(SettingsError, match="'append_basic_tools' was removed"):
+    with pytest.raises(SeaError, match="'append_basic_tools' was removed"):
         resolve_settings({"append_basic_tools": True})
 
 

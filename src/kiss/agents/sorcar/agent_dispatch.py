@@ -16,21 +16,21 @@ one dispatch path (:func:`_run_agent`):
 1. the script's effective ``settings()`` are read in the calling
    process (:func:`kiss.agents.sorcar.sea_commands.sea_settings`) for
    the ``timeout``, ``kind`` and ``work_dir`` the dispatcher needs;
-2. unless the kind is ``channel`` or the ``inherit`` option is
+2. unless the SEA is a channel or the ``inherit`` option is
    ``false``, the arguments the call left empty are inherited from the
    calling agent (:func:`inherit_from_parent`:
    model, budget share, chat, prompt suffixes, web/memory flags,
    container, worktree/auto-commit choices, fan-out flag, extra tools);
 3. the sub-task is submitted to the kiss-web daemon
    (:func:`kiss.agents.sorcar.daemon_client.run` with the script as
-   ``extension_agent_path``) as a nested sub-agent of the calling task,
+   ``sea_path``) as a nested sub-agent of the calling task,
    and the call blocks for its result — or, with ``wait="false"``,
    returns a job id at once for :func:`agent_job` to wait on, check or
    kill.
 
 The daemon executes the script once more, applies its settings and
 getters (:mod:`kiss.agents.sorcar.sea_settings`,
-:mod:`kiss.agents.sorcar.agent_file`) and, for ``kind: "channel"``, holds the
+:mod:`kiss.agents.sorcar.sea_apply`) and, for ``channel: True``, holds the
 channel workspace (the ``workspace`` option, forwarded as a wire
 field) for the run's lifetime.
 
@@ -74,6 +74,8 @@ from kiss.agents.sorcar.sea_settings import (
     REMOVED_SETTINGS,
     RENAMED_OPTIONS,
     SETTING_TYPES,
+    SeaError,
+    anchored_work_dir,
     declared_literal,
     declares_hidden,
     locked_conflicts,
@@ -92,7 +94,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_AGENT_PATH = str(
     Path(__file__).resolve().parents[1] / "seas" / "sorcar" / "sorcar_sea.py"
 )
-"""Agent script run when the ``run_agent`` tool's ``agent`` is empty.
+"""SEA run when the ``run_agent`` tool's ``agent`` is empty.
 
 The bundled ``src/kiss/agents/seas/sorcar/sorcar_sea.py`` — a hidden SEA that
 pins no setting, so the sub-task is a plain Sorcar session on the given task
@@ -201,21 +203,20 @@ RUN_OPTION_KEYS = (*ARGUMENT_OPTIONS, *OPTION_TYPES)
 :class:`RunOptions` fields except ``system_prompt``."""
 
 OPTION_DOCS: dict[str, str] = {
-    "work_dir": "The directory the sub-task works in; a relative path is resolved against "
-                "the calling task's directory (a SEA's own `work_dir` setting is relative "
-                "to the SEA's folder instead).",
+    "work_dir": "The directory the sub-task works in; a relative path is a path under the "
+                "calling task's directory, as a SEA's own `work_dir` setting is.",
     "inherit": "`false`: the sub-task takes nothing from the calling task (no model, chat, "
                "prompt suffixes, tools or container; a `run_parallel` child still gets its "
-               "budget share); default `true`. A `channel` run never inherits, so `true` is "
+               "budget share); default `true`. A channel never inherits, so `true` is "
                "refused there.",
-    "workspace": "The account a `kind: channel` agent's run holds (its channel workspace); "
-                 "refused for any other kind and by `run_parallel`.",
+    "workspace": "The account a channel's run holds (its channel workspace); refused for "
+                 "any SEA that is not a channel and by `run_parallel`.",
     "add_to_prompt": "Text appended to the task after the SEA's `prompt(task)`.",
     "add_to_system_prompt": "Text appended to the system prompt before the SEA's "
                             "`system_prompt(system_prompt)` sees it.",
 }
-"""Documentation of the option keys that are not ``settings()`` keys, or mean something
-else as an option (``work_dir``: relative to the caller, not the script), for ``sea docs``.
+"""Documentation of the option keys that are not ``settings()`` keys, or whose option
+form needs its own words (``work_dir``), for ``sea docs``.
 
 Every other option is documented by
 :data:`~kiss.agents.sorcar.sea_settings.SETTING_DOCS`.
@@ -242,8 +243,8 @@ def fanout_conflict(values: Mapping[str, Any]) -> str:
     Returns:
         The reason, or ``""`` when the values fit a fan-out child.
     """
-    if values.get("kind") == "channel":
-        return "is a channel agent, which run_parallel cannot run; use run_agent"
+    if values.get("channel"):
+        return "is a channel, which run_parallel cannot run; use run_agent"
     for key, refused in FANOUT_REFUSED.items():
         if values.get(key) is refused:
             return (
@@ -463,8 +464,9 @@ def available_channels() -> list[str]:
     """Return the names of the installed third-party channel agents.
 
     A channel is a SEA folder ``<channel>/<channel>_sea.py`` of the
-    third-party agents package whose ``settings()`` write ``"kind":
-    "channel"`` and not ``"hidden": True``.  The package's other SEAs
+    third-party agents package whose ``settings()`` write ``"channel":
+    True`` and not ``"hidden": True`` (CHANNEL_BEHAVIOURS "listed as a
+    channel").  The package's other SEAs
     (``a2a``, a session SEA whose tools call peer agents; ``oai``, a
     hidden server set up from a terminal) are not channels.  The scan
     reads the directory listing and parses the two literals from
@@ -482,7 +484,7 @@ def available_channels() -> list[str]:
         for sea_dir in package_dir.iterdir()
         if not sea_dir.name.startswith("_")
         and sea_script_in(sea_dir).is_file()
-        and declared_literal(sea_script_in(sea_dir), "kind") == "channel"
+        and declared_literal(sea_script_in(sea_dir), "channel") is True
         and not declares_hidden(sea_script_in(sea_dir))
     )
 
@@ -666,7 +668,7 @@ def _parent_model_config(
     the launch model (``model_name`` when the agent records no launch
     model) AND the SEA does not pick the model itself: the
     daemon applies a script's ``model`` setting on top of the wire
-    fields without touching ``modelConfig`` (``apply_agent_overrides``),
+    fields without touching ``modelConfig`` (``apply_sea``),
     so a script-chosen model would otherwise run against the caller's
     endpoint.  An empty configuration is reported as ``None``.
 
@@ -913,7 +915,7 @@ def format_dispatch_result(result: TaskResult | str, timeout: float, alias: str 
 def dispatch_result(
     name: str,
     prompt: str,
-    agent_path: str,
+    sea_path: str,
     work_dir: str,
     model_name: str,
     budget: float | None,
@@ -931,8 +933,8 @@ def dispatch_result(
     """Submit a SEA task to the kiss-web daemon and wait.
 
     The tail of :func:`_run_agent`: calls
-    :func:`kiss.server.sorcar.run` with *agent_path* as its
-    *extension_agent_path* and returns the daemon's
+    :func:`kiss.server.sorcar.run` with *sea_path* as its
+    *sea_path* and returns the daemon's
     :class:`~kiss.agents.sorcar.daemon_client.TaskResult` (which
     carries the sub-task's persisted ``task_id``) — or a clean error
     string.  It raises only for the inherited-budget case described
@@ -944,7 +946,7 @@ def dispatch_result(
         name: Display name of the agent for error messages (the
             channel name, or the script's file stem).
         prompt: The full prompt for the sub-task.
-        agent_path: Absolute path of the SEA file.
+        sea_path: Absolute path of the SEA file.
         work_dir: Working directory for the sub-task; created when
             absent.
         model_name: LLM model for the sub-task; empty for the daemon
@@ -981,7 +983,7 @@ def dispatch_result(
             its web-tools and memory settings, its live Docker
             container, and its effective worktree / auto-commit
             choices.  ``True`` for every ``run_agent`` dispatch except
-            a ``kind: "channel"`` script or an ``inherit: false``
+            a ``channel: True`` script or an ``inherit: false``
             option — a sub-task on the same project is a sub-agent of
             the caller, whereas a channel or cron session
             acts on an external service from a scratch directory on
@@ -995,7 +997,7 @@ def dispatch_result(
             (:func:`~kiss.agents.sorcar.sea_commands.sea_settings`),
             when the caller has them; a ``model`` in them blocks the
             ``model_config`` inheritance.  ``None`` means unknown.
-        workspace: Workspace/account identifier a ``kind: "channel"``
+        workspace: Workspace/account identifier a ``channel: True``
             run holds for its lifetime (the daemon's task runner enters
             it); empty means ``"default"``.  Ignored by other scripts.
         cancel: The event that stops the sub-task (:func:`kill_agent_job`
@@ -1080,7 +1082,7 @@ def dispatch_result(
     # commit" settings — the same values a task submitted from the
     # chat panel runs with — not a hard-coded ``True`` that would
     # ignore a user who turned them off.  These are inherited values,
-    # so the SEA's ``settings()`` (the ``channel`` kind pins both off)
+    # so the SEA's ``settings()`` (``channel: True`` pins both off)
     # rank above them on the daemon (sea_settings.PRECEDENCE_RULE).
     cfg = load_config()  # fills every key from DEFAULTS
     default_worktree = (
@@ -1100,7 +1102,7 @@ def dispatch_result(
     try:
         result = daemon_client.run(
             prompt,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             work_dir=work_dir,
             scope_work_dir=scope_work_dir,
             parent_task_id=parent_task_id,
@@ -1231,54 +1233,52 @@ def _run_agent(
     resolved = resolve_agent(agent, parent_work_dir)
     if isinstance(resolved, str):
         return resolved
-    agent_path, name = resolved
-    from kiss.agents.sorcar.sea_commands import SeaScriptError, sea_settings
+    sea_path, name = resolved
+    from kiss.agents.sorcar.sea_commands import sea_settings
 
     try:
-        settings = sea_settings(Path(agent_path))
-    except SeaScriptError as e:
+        settings = sea_settings(Path(sea_path))
+    except SeaError as e:
         return f"Error: {e}"
     seconds = resolve_timeout(run_options.timeout, settings)
     # sea_settings.PRECEDENCE_RULE: an explicit argument or option wins
     # over the SEA's ``settings()``, which win over what the calling
     # task passes on; a key the SEA locks may not be replaced.  A
-    # ``kind: "channel"`` SEA (a channel agent, cron) takes nothing from
-    # the calling task — not its chat, model, budget share, container
-    # or prompt suffixes — and runs in its own ``work_dir`` (the kind's
-    # scratch directory); so does a call with ``inherit: false``.  Every
-    # other SEA is a sub-agent on the caller's project (or on the
-    # ``work_dir`` option, resolved against it): the arguments left
-    # empty are inherited from the calling agent (see
+    # channel (``channel: True``: a channel agent, cron) takes nothing
+    # from the calling task — not its chat, model, budget share,
+    # container or prompt suffixes — and runs in its own ``work_dir``
+    # (CHANNEL_BEHAVIOURS "no inheritance", "scratch directory"); so
+    # does a call with ``inherit: false``.  Every other SEA is a
+    # sub-agent on the caller's project (or on the ``work_dir`` option
+    # or setting, a relative one under the caller's directory): the
+    # arguments left empty are inherited from the calling agent (see
     # ``inherit_from_parent``), and the task's references to the main
     # checkout are rewritten to the caller's worktree.
     asked = explicit_values(run_options.model, run_options.max_budget, run_options)
     conflict = locked_conflicts(settings, asked, parent_work_dir)
     if conflict:
         return f"Error: {name}: {conflict}"
-    channel = settings.get("kind") == "channel"
+    channel = bool(settings.get("channel"))
     if channel and run_options.inherit:
-        return f"Error: {name}: a channel agent never inherits from the calling task"
+        return f"Error: {name}: a channel never inherits from the calling task"
     if run_options.workspace and not channel:
         return (
-            f"Error: {name}: options['workspace'] applies to a channel agent only; "
-            f"{name} is a {settings.get('kind') or 'session'} SEA"
+            f"Error: {name}: options['workspace'] applies to a channel only; "
+            f"{name} is not a channel (no `channel: True` in its settings)"
         )
     inherit = not channel and run_options.inherit is not False
-    work_dir = parent_work_dir or str(kiss_home() / "agent_work")
-    if run_options.work_dir:
-        requested = Path(run_options.work_dir).expanduser()
-        work_dir = str(requested if requested.is_absolute() else Path(work_dir) / requested)
-    else:
-        work_dir = str(settings.get("work_dir") or "") or work_dir
+    base_dir = parent_work_dir or str(kiss_home() / "agent_work")
+    chosen = run_options.work_dir or str(settings.get("work_dir") or "")
+    work_dir = anchored_work_dir(chosen, base_dir) if chosen else base_dir
     if inherit and DEFAULT_CONFIG.dispatch_path_rewrite:
         task = rewrite_parent_repo_paths(task, parent_work_dir)
     kwargs: dict[str, Any] = {
-        "name": name, "prompt": task, "agent_path": agent_path, "work_dir": work_dir,
+        "name": name, "prompt": task, "sea_path": sea_path, "work_dir": work_dir,
         "model_name": run_options.model, "budget": run_options.max_budget, "timeout": seconds,
         "parent_agent": parent_agent, "scope_work_dir": parent_work_dir,
         "options": run_options, "inherit": inherit, "settings": settings,
         "workspace": run_options.workspace, "timeout_explicit": run_options.timeout is not None,
-        "alias": command_alias(agent_path) if is_agent_path(agent.strip()) else "",
+        "alias": command_alias(sea_path) if is_sea_path(agent.strip()) else "",
     }
     job = start_agent_job(name, kwargs, parent_agent)
     try:
@@ -1330,7 +1330,7 @@ class AgentJob:
             started.
         started: ``time.monotonic()`` when the thread was started.
         workspace: The channel workspace the sub-task holds while it
-            runs (``kind: "channel"`` SEAs), else ``""``.
+            runs (``channel: True`` SEAs), else ``""``.
         outcome: What :func:`dispatch_result` returned (the sub-task's
             :class:`TaskResult`, or an error string); ``None`` while
             running.
@@ -1709,37 +1709,37 @@ def resolve_agent(agent: str, parent_work_dir: str) -> tuple[str, str] | str:
         path is not a readable ``.py`` file.
     """
     from kiss.agents.sorcar import sea_commands
-    from kiss.agents.sorcar.daemon_client import resolve_agent_path
+    from kiss.agents.sorcar.daemon_client import resolve_sea_path
 
     requested = agent.strip()
     squashed = _squash(requested)
     if not requested or squashed in _GENERIC_AGENT_NAMES:
         requested = DEFAULT_AGENT_PATH
-    if is_agent_path(requested):
+    if is_sea_path(requested):
         candidate = Path(requested).expanduser()
         if not candidate.is_absolute() and parent_work_dir:
             candidate = Path(parent_work_dir) / candidate
         try:
-            agent_path = resolve_agent_path(str(candidate))
+            sea_path = resolve_sea_path(str(candidate))
         except ValueError as e:
             return f"Error: {e}"
-        return agent_path, script_name(agent_path)
+        return sea_path, script_name(sea_path)
     commands = sea_commands.list_commands()
     for name in commands:
         if _squash(name) == squashed:
-            sea_path = sea_commands.get_command(name)
-            if sea_path is not None:
-                return str(sea_path), name
+            command_path = sea_commands.get_command(name)
+            if command_path is not None:
+                return str(command_path), name
     return _unknown_agent_error(agent, squashed, commands)
 
 
-def is_agent_path(agent: str) -> bool:
+def is_sea_path(agent: str) -> bool:
     """Return whether a ``run_agent`` ``agent`` argument is a path (rule 2 of ``resolve_agent``)."""
     return agent.endswith(".py") or "/" in agent or "\\" in agent
 
 
-def command_alias(agent_path: str) -> str:
-    """Return the registered command name whose script is *agent_path*, or ``""``.
+def command_alias(sea_path: str) -> str:
+    """Return the registered command name whose script is *sea_path*, or ``""``.
 
     Lets a call that reached a bundled or ``SEAS.md`` SEA by its path
     learn the name it could have used instead
@@ -1748,7 +1748,7 @@ def command_alias(agent_path: str) -> str:
     from kiss.agents.sorcar import sea_commands
 
     for name in sea_commands.list_commands():
-        if str(sea_commands.get_command(name)) == agent_path:
+        if str(sea_commands.get_command(name)) == sea_path:
             return name
     return ""
 
@@ -1756,7 +1756,7 @@ def command_alias(agent_path: str) -> str:
 def resolve_timeout(timeout: float | None, settings: dict[str, Any]) -> float:
     """Resolve how long a ``run_agent`` call waits for its sub-task, in seconds.
 
-    The call's ``timeout`` wins; ``None`` takes the agent script's own
+    The call's ``timeout`` wins; ``None`` takes the SEA's own
     ``timeout`` setting (``settings()["timeout"]``, see
     :mod:`kiss.agents.sorcar.sea_settings`), else
     :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
@@ -1896,8 +1896,8 @@ def make_run_agent_tool(
                 keys are the SEA settings vocabulary except ``model``,
                 ``tool_profile``, ``max_budget`` and ``timeout``, which
                 are the arguments above and are refused here:
-                ``work_dir`` (relative to this task's; a SEA's own
-                ``work_dir`` setting is relative to the SEA's folder),
+                ``work_dir`` (relative to this task's, as is a SEA's
+                own ``work_dir`` setting),
                 ``chat_id``,
                 ``workspace`` (the account of a multi-account channel),
                 ``add_to_system_prompt`` / ``add_to_prompt`` (appended

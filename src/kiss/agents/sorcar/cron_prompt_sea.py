@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The agent script (SEA) of one scheduled run of a cron prompt job.
+"""The SEA (SEA) of one scheduled run of a cron prompt job.
 
 :func:`kiss.agents.sorcar.cron_agent._run_prompt_job` runs every LLM
 cron job through ``run_agent(agent=<this file>, task=<preamble + job

@@ -26,7 +26,7 @@ import yaml
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.autorouter.autorouter_sea import AutorouterSea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.agent_file import apply_agent_overrides
+from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
@@ -124,12 +124,12 @@ def test_slash_autorouter_resolves_to_the_bundled_sea() -> None:
 def test_agent_file_loader_stages_the_sea_tools() -> None:
     """The daemon-side loader applies the settings and stages the prompt and tools hooks."""
     cmd: dict[str, Any] = {
-        "agentPath": str(_SEA_PATH),
+        "seaPath": str(_SEA_PATH),
         "toolProfile": "full",
         "model": "x",
         "appendToSystemPrompt": "CALLER TEXT",
     }
-    overridden = apply_agent_overrides(cmd)
+    overridden = apply_sea(cmd)
     # The hooks are written on every run, so the set lists the settings only.
     assert overridden == {
         "model",

@@ -42,12 +42,13 @@ from kiss.agents.seas.git_extract_knowledge.git_knowledge_store import (
     query_tokens,
 )
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cron_agent import cron_job, load_jobs
+from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.config import kiss_home
 from kiss.core.memoryfield.pages import MemoryDir
+from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
@@ -146,7 +147,7 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     # ``worker`` turns worktree, auto-commit, classifier, browser and memory
     # off; the explicit ``is_parallel`` wins over the preset's ``False``.
     # ``system_prompt`` is a hook the daemon applies (checked below
-    # through ``apply_agent_overrides``), not a settings key.
+    # through ``apply_sea``), not a settings key.
     assert sea_commands.base_settings([agent]) == resolve_settings(agent.settings({})) == {
         "kind": "worker",
         "tool_profile": "full",
@@ -176,8 +177,8 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     # The real loader accepts the file and stages ``tools`` / ``system_prompt``
     # as the daemon-side hooks (written on every run, so not listed in the
     # returned set) and the settings on their wire fields.
-    cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH), "workDir": str(tmp_path)}
-    assert apply_agent_overrides(cmd) == {
+    cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "workDir": str(tmp_path)}
+    assert apply_sea(cmd) == {
         "toolProfile", "isParallel", "useWorktree",
         "autoCommit", "classifyTasks", "useWebTools", "useMemory",
     }
@@ -195,7 +196,7 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
         {"role": "user", "content": "x"}
     ]
-    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) is None
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == ALLOW
 
 
 def test_slash_command_resolves_to_the_bundled_sea() -> None:

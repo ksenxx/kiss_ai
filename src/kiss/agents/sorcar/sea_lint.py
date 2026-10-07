@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""``sea lint``: a deterministic checker (and codemod) over every agent script (SEA).
+"""``sea lint``: a deterministic checker (and codemod) over every SEA.
 
 The SEA contract lives in :class:`kiss.agents.seas.base.base_sea.BaseSea`
 (the methods), :mod:`kiss.agents.sorcar.sea_settings` (``settings``
@@ -24,11 +24,17 @@ Rules, each a :class:`Finding` code:
     ``settings()`` uses a former key name
     (:data:`~kiss.agents.sorcar.sea_settings.RENAMED_SETTINGS`);
     ``--fix`` rewrites it.
-``ok-verdict``
-    A ``tool_call_hook`` returns the literal ``"OK"``, the allow
-    spelling of older hooks.  The contract is ``None`` allows, any
-    string refuses — ``"OK"`` now refuses the call and the model reads
-    ``OK`` as the tool's result.  ``--fix`` rewrites it to ``None``.
+``verdict``
+    A ``tool_call_hook`` returns a literal ``None`` or string, the
+    allow / refuse spellings of older hooks.  The contract is a
+    :class:`~kiss.core.tool_verdict.Verdict`: ``ALLOW`` allows,
+    ``refuse(text)`` refuses.  ``--fix`` rewrites ``None`` to ``ALLOW``
+    and ``"text"`` to ``refuse("text")`` and imports both names from
+    ``kiss.agents.seas.base.base_sea``.
+``channel-kind``
+    ``settings()`` writes ``"kind": "channel"``, which became the flag
+    ``"channel": True`` (a kind is defaults only; a channel is a
+    worker).  ``--fix`` rewrites the entry.
 ``redundant-key``
     A declared key merely repeats the default of the script's ``kind``.
 ``no-description``
@@ -210,7 +216,7 @@ PROSE_FILES = (
     "src/kiss/agents/sorcar/agent_dispatch.py",
     "src/kiss/agents/sorcar/sorcar_agent.py",
     "src/kiss/agents/sorcar/run_config.py",
-    "src/kiss/agents/sorcar/agent_file.py",
+    "src/kiss/agents/sorcar/sea_apply.py",
 )
 """Files (relative to the checkout) whose prose the ``stale-prose`` rule reads."""
 
@@ -404,13 +410,23 @@ def _lint_source(path: Path, source: str, tree: ast.Module) -> list[Finding]:
                     fixable=True,
                 )
             )
-    for node in _ok_verdicts(tree):
+    for node in _literal_verdicts(tree):
         findings.append(
             Finding(
                 path,
-                "ok-verdict",
-                f'line {node.lineno}: tool_call_hook returns "OK", which refuses the call '
-                f"(any string does); return None to allow it",
+                "verdict",
+                f"line {node.lineno}: tool_call_hook returns {node.value!r}; return ALLOW or "
+                f"refuse(text) (a Verdict, from kiss.agents.seas.base.base_sea)",
+                fixable=True,
+            )
+        )
+    for key, _value in _channel_kinds(tree):
+        findings.append(
+            Finding(
+                path,
+                "channel-kind",
+                f'line {key.lineno}: settings() writes "kind": "channel", which became the '
+                f'flag "channel": True',
                 fixable=True,
             )
         )
@@ -495,28 +511,41 @@ def _settings_dict_keys(tree: ast.Module) -> list[ast.Constant]:
     which name keys too.
     """
     keys: list[ast.Constant] = []
+    for sub in _settings_dicts(tree):
+        for key, value in zip(sub.keys, sub.values, strict=True):
+            if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                continue
+            keys.append(key)
+            if key.value == "locked" and isinstance(value, ast.List | ast.Tuple):
+                keys.extend(
+                    e
+                    for e in value.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)
+                )
+    return keys
+
+
+def _settings_dicts(tree: ast.Module) -> list[ast.Dict]:
+    """Return the dict literals of the SEA's ``settings`` method that hold settings keys.
+
+    Every dict literal in the function except dicts anywhere inside
+    the *value* of another dict's key (``model_config``'s contents,
+    however deep, are not settings).
+    """
+    dicts: list[ast.Dict] = []
     for node in settings_functions(tree):
         nested = {
-            id(value)
+            id(inner)
             for sub in ast.walk(node)
             if isinstance(sub, ast.Dict)
             for value in sub.values
-            if isinstance(value, ast.Dict)
+            for inner in ast.walk(value)
+            if isinstance(inner, ast.Dict)
         }
-        for sub in ast.walk(node):
-            if not isinstance(sub, ast.Dict) or id(sub) in nested:
-                continue
-            for key, value in zip(sub.keys, sub.values, strict=True):
-                if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
-                    continue
-                keys.append(key)
-                if key.value == "locked" and isinstance(value, ast.List | ast.Tuple):
-                    keys.extend(
-                        e
-                        for e in value.elts
-                        if isinstance(e, ast.Constant) and isinstance(e.value, str)
-                    )
-    return keys
+        dicts.extend(
+            sub for sub in ast.walk(node) if isinstance(sub, ast.Dict) and id(sub) not in nested
+        )
+    return dicts
 
 
 def _own_returns(node: ast.AST) -> list[ast.Return]:
@@ -531,63 +560,118 @@ def _own_returns(node: ast.AST) -> list[ast.Return]:
     return returns
 
 
-def _ok_verdicts(tree: ast.Module) -> list[ast.Constant]:
-    """Return every ``"OK"`` literal a ``tool_call_hook`` method of the script returns itself."""
+def _literal_verdicts(tree: ast.Module) -> list[ast.Constant]:
+    """Return every ``None`` or string literal a ``tool_call_hook`` of the script returns itself."""
     return [
         ret.value
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "tool_call_hook"
         for ret in _own_returns(node)
-        if isinstance(ret.value, ast.Constant) and ret.value.value == "OK"
+        if isinstance(ret.value, ast.Constant)
+        and (ret.value.value is None or isinstance(ret.value.value, str))
     ]
 
 
-def _rewrites(tree: ast.Module) -> list[tuple[ast.Constant, str | None]]:
-    """Return the literals ``--fix`` rewrites: a renamed ``settings()`` key with its
-    current name (kept inside the literal's own quotes), an ``"OK"`` verdict of a
-    ``tool_call_hook`` with ``None`` (the whole literal)."""
-    rewrites: list[tuple[ast.Constant, str | None]] = [
-        (key, RENAMED_SETTINGS[key.value])
-        for key in _settings_dict_keys(tree) if key.value in RENAMED_SETTINGS
+def _channel_kinds(tree: ast.Module) -> list[tuple[ast.Constant, ast.Constant]]:
+    """Return every ``("kind", "channel")`` key/value literal pair of a ``settings()`` dict.
+
+    Nested dicts (``model_config``'s contents) are not settings and are
+    left alone, as in :func:`_settings_dict_keys`.
+    """
+    return [
+        (key, value)
+        for sub in _settings_dicts(tree)
+        for key, value in zip(sub.keys, sub.values, strict=True)
+        if isinstance(key, ast.Constant) and key.value == "kind"
+        and isinstance(value, ast.Constant) and value.value == "channel"
     ]
-    rewrites.extend((node, None) for node in _ok_verdicts(tree))
-    return rewrites
+
+
+def _span(node: ast.expr, offsets: list[int]) -> tuple[int, int]:
+    """Return the ``(start, end)`` byte offsets of *node* in the source *offsets* index."""
+    assert node.end_lineno is not None and node.end_col_offset is not None
+    return (
+        offsets[node.lineno - 1] + node.col_offset,
+        offsets[node.end_lineno - 1] + node.end_col_offset,
+    )
+
+
+def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
+    """Return the byte-span edits ``--fix`` makes to the source *data*, as
+    ``(start, end, new text, note)``.
+
+    A renamed ``settings()`` key gets its current name inside its own
+    quotes; ``"kind": "channel"`` becomes ``"channel": True``; a
+    ``tool_call_hook``'s literal ``None`` becomes ``ALLOW`` and its
+    literal string ``refuse(<the literal>)``, with ``from
+    kiss.agents.seas.base.base_sea import ...`` of the names the
+    script does not import yet inserted after its last top-level
+    import.
+    """
+    lines = data.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+
+    def text(node: ast.expr) -> str:
+        start, end = _span(node, offsets)
+        return data[start:end].decode("utf-8")
+
+    edits: list[tuple[int, int, str, str]] = []
+    for key in _settings_dict_keys(tree):
+        if key.value in RENAMED_SETTINGS:
+            new = RENAMED_SETTINGS[key.value]
+            edits.append((*_span(key, offsets), text(key).replace(key.value, new, 1),
+                          f"{key.value!r} -> {new!r}"))
+    for key, value in _channel_kinds(tree):
+        edits.append((*_span(key, offsets), text(key).replace("kind", "channel", 1),
+                      "'kind' -> 'channel'"))
+        edits.append((*_span(value, offsets), "True", "'channel' -> True"))
+    needed: set[str] = set()
+    for node in _literal_verdicts(tree):
+        if node.value is None:
+            edits.append((*_span(node, offsets), "ALLOW", "None -> ALLOW"))
+            needed.add("ALLOW")
+        else:
+            edits.append((*_span(node, offsets), f"refuse({text(node)})",
+                          f"{node.value!r} -> refuse({node.value!r})"))
+            needed.add("refuse")
+    imported = {
+        alias.asname or alias.name
+        for node in tree.body if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    missing = sorted(needed - imported)
+    if missing:
+        last_import = max(
+            (node for node in tree.body if isinstance(node, ast.Import | ast.ImportFrom)),
+            key=lambda node: node.end_lineno or 0, default=None,
+        )
+        at = offsets[last_import.end_lineno or 0] if last_import is not None else 0
+        import_line = f"from kiss.agents.seas.base.base_sea import {', '.join(missing)}\n"
+        edits.append((at, at, import_line, f"import {', '.join(missing)}"))
+    return edits
 
 
 def fix_sea(path: Path) -> list[str]:
-    """Rewrite the fixable findings of the script at *path* in place.
-
-    Renamed ``settings()`` keys get their current name and a
-    ``tool_call_hook``'s ``"OK"`` verdict becomes ``None``.
+    """Rewrite the fixable findings of the script at *path* in place (:func:`_rewrites`).
 
     Args:
         path: The ``*_sea.py`` file.
 
     Returns:
-        One line per rewritten literal (empty when nothing changed).
+        One line per rewrite (empty when nothing changed).
     """
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     # ``ast`` columns are UTF-8 byte offsets: slice the encoded source.
     data = source.encode("utf-8")
-    lines = data.splitlines(keepends=True)
-    offsets = [0]
-    for line in lines:
-        offsets.append(offsets[-1] + len(line))
-    edits = [
-        (offsets[k.lineno - 1] + k.col_offset, offsets[k.end_lineno - 1] + k.end_col_offset, k, new)
-        for k, new in _rewrites(tree)
-        if k.end_lineno is not None and k.end_col_offset is not None
-    ]
     changed: list[str] = []
-    for start, end, key, new in sorted(edits, reverse=True):  # distinct spans: nodes never compared
-        old = str(key.value)
-        # A renamed key keeps its prefix and quotes; an "OK" verdict becomes None.
-        literal = (
-            "None" if new is None else data[start:end].decode("utf-8").replace(old, new, 1)
-        )
-        data = data[:start] + literal.encode("utf-8") + data[end:]
-        changed.append(f"{path}:{key.lineno}: {old!r} -> {'None' if new is None else repr(new)}")
+    # Applied last span first, so earlier offsets stay valid; the spans are distinct.
+    for start, end, new, note in sorted(_rewrites(tree, data), reverse=True):
+        lineno = data[:start].count(b"\n") + 1
+        data = data[:start] + new.encode("utf-8") + data[end:]
+        changed.append(f"{path}:{lineno}: {note}")
     if changed:
         rewritten = data.decode("utf-8")
         ast.parse(rewritten, filename=str(path))  # never save a script that no longer parses
@@ -596,7 +680,7 @@ def fix_sea(path: Path) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``sea lint [--fix] [PATH ...]``: check (and rewrite) agent scripts.
+    """``sea lint [--fix] [PATH ...]``: check (and rewrite) SEAs.
 
     Args:
         argv: Command-line arguments; ``None`` reads ``sys.argv``.
@@ -614,7 +698,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "paths", nargs="*", help="scripts or SEA folders; default: every bundled script"
     )
-    parser.add_argument("--fix", action="store_true", help="rewrite renamed settings() keys")
+    parser.add_argument(
+        "--fix", action="store_true",
+        help="rewrite the fixable findings (renamed-key, channel-kind, verdict)",
+    )
     parser.add_argument(
         "--registered", action="store_true", help="also check the scripts your SEAS.md registers"
     )

@@ -31,6 +31,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.sea_commands import evaluate_sea
+from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -492,7 +493,7 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
     # ``/ask`` overrides neither LLM-call nor tool-call hook: both are identities.
     messages = [{"role": "user", "content": "hi"}]
     assert run.llm_call_hook is not None and run.llm_call_hook(messages) == messages
-    assert run.tool_call_hook is not None and run.tool_call_hook("x", {}) is None
+    assert run.tool_call_hook is not None and run.tool_call_hook("x", {}) == ALLOW
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("ask-sea-test")
         result = agent.run(

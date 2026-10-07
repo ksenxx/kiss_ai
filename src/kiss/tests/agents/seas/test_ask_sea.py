@@ -20,7 +20,7 @@ real daemon-side loader and the real dispatch code:
    ``/ask <question>`` and hand back the question verbatim with the
    registered ``ask_sea.py`` path: the daemon runs the SEA directly on
    it (no relay directive, no nested sub-agent).
-3. The daemon-side loader ``apply_agent_overrides`` MUST apply the
+3. The daemon-side loader ``apply_sea`` MUST apply the
    settings to the wire fields, substitute ``{task_id}`` in what
    ``prompt()`` returns with the command's ``parentTaskId`` (empty
    string when absent) and stage the ``system_prompt`` and ``tools``
@@ -46,11 +46,12 @@ from kiss.agents.seas.ask import ask_sea
 from kiss.agents.seas.ask.ask_sea import AskSea
 from kiss.agents.sorcar import agent_dispatch, daemon_client, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
-from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.brand import BRAND, render_brand
 from kiss.core.config import kiss_home
+from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
@@ -83,7 +84,7 @@ _EXPECTED_SETTINGS = {
 """``resolve_settings`` output: ``settings()`` plus the ``worker`` preset.
 
 ``system_prompt()`` is a hook the daemon stages as ``systemPromptHook``
-(``apply_agent_overrides``), so its text is not a settings key.
+(``apply_sea``), so its text is not a settings key.
 """
 _ASK_PATH = str(Path(ask_sea.__file__).resolve())
 _EMPTY_SEA = "from kiss.agents.seas.base.base_sea import BaseSea\n\nclass Sea(BaseSea):\n    pass\n"
@@ -327,10 +328,10 @@ def test_slash_resolver_rejects_bare_ask_and_answers_help_from_description() -> 
 # ---------------------------------------------------------------------------
 
 
-def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
+def test_apply_sea_applies_the_ask_settings_to_the_wire() -> None:
     """The daemon loader MUST wire the ask settings and methods onto the cmd.
 
-    This exercises the real ``apply_agent_overrides`` path —
+    This exercises the real ``apply_sea`` path —
     :meth:`TaskRunner._run_task_inner` calls it just before the run —
     so the ``worker`` preset lands on ``useWorktree`` / ``autoCommit`` /
     ``classifyTasks`` / ``isParallel`` / ``useWebTools`` / ``useMemory``,
@@ -344,8 +345,8 @@ def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
     (identities where the SEA overrides nothing), so the returned set
     lists only the settings and the rewritten ``prompt``.
     """
-    cmd: dict[str, Any] = {"agentPath": _ASK_PATH, "prompt": "why did the run fail?"}
-    overridden = apply_agent_overrides(cmd)
+    cmd: dict[str, Any] = {"seaPath": _ASK_PATH, "prompt": "why did the run fail?"}
+    overridden = apply_sea(cmd)
     assert overridden == {
         "prompt", "toolProfile",
         "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
@@ -367,12 +368,12 @@ def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
     assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
         {"role": "user", "content": "x"}
     ]
-    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) is None
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == ALLOW
     # The question opens the prompt; ``prompt()`` appends the task framing.
     assert cmd["prompt"].startswith("why did the run fail?\n\n")
 
 
-def test_apply_agent_overrides_substitutes_task_id_with_the_parent_task_id() -> None:
+def test_apply_sea_substitutes_task_id_with_the_parent_task_id() -> None:
     """``{task_id}`` in ``prompt()``'s result MUST become the command's ``parentTaskId``.
 
     Both ``/ask`` paths dispatch the answering run as a sub-agent of
@@ -380,11 +381,11 @@ def test_apply_agent_overrides_substitutes_task_id_with_the_parent_task_id() -> 
     answerer must pass to ``task_context``.
     """
     cmd: dict[str, Any] = {
-        "agentPath": _ASK_PATH,
+        "seaPath": _ASK_PATH,
         "prompt": "why did the last step fail?",
         "parentTaskId": "task-abc-123",
     }
-    apply_agent_overrides(cmd)
+    apply_sea(cmd)
     assert _PLACEHOLDER not in cmd["prompt"]
     assert cmd["prompt"] == (
         "why did the last step fail?\n\n"
@@ -393,7 +394,7 @@ def test_apply_agent_overrides_substitutes_task_id_with_the_parent_task_id() -> 
     assert cmd["parentTaskId"] == "task-abc-123"
 
 
-def test_apply_agent_overrides_substitutes_empty_when_no_parent_task_id() -> None:
+def test_apply_sea_substitutes_empty_when_no_parent_task_id() -> None:
     """A missing or non-string ``parentTaskId`` MUST still strip the placeholder.
 
     Leaving the literal ``{task_id}`` in place would confuse the
@@ -401,12 +402,12 @@ def test_apply_agent_overrides_substitutes_empty_when_no_parent_task_id() -> Non
     obviously-empty task id that surfaces the bug loudly.
     """
     cmds: list[dict[str, Any]] = [
-        {"agentPath": _ASK_PATH, "prompt": "q"},
-        {"agentPath": _ASK_PATH, "prompt": "q", "parentTaskId": None},
-        {"agentPath": _ASK_PATH, "prompt": "q", "parentTaskId": 42},
+        {"seaPath": _ASK_PATH, "prompt": "q"},
+        {"seaPath": _ASK_PATH, "prompt": "q", "parentTaskId": None},
+        {"seaPath": _ASK_PATH, "prompt": "q", "parentTaskId": 42},
     ]
     for cmd in cmds:
-        apply_agent_overrides(cmd)
+        apply_sea(cmd)
         assert _PLACEHOLDER not in cmd["prompt"]
         # Every other character of the sentence is preserved.
         assert cmd["prompt"].endswith(
@@ -415,7 +416,7 @@ def test_apply_agent_overrides_substitutes_empty_when_no_parent_task_id() -> Non
         )
 
 
-def test_apply_agent_overrides_keeps_the_callers_suffixes_and_stages_the_hook() -> None:
+def test_apply_sea_keeps_the_callers_suffixes_and_stages_the_hook() -> None:
     """The caller's ``appendToPrompt`` / ``appendToSystemPrompt`` are not the SEA's to touch.
 
     ``prompt()`` shapes the prompt body; both caller suffixes stay as
@@ -424,20 +425,20 @@ def test_apply_agent_overrides_keeps_the_callers_suffixes_and_stages_the_hook() 
     ``/ask`` the hook replaces that text with SYSTEM_LITE + playbook.
     """
     cmd: dict[str, Any] = {
-        "agentPath": _ASK_PATH,
+        "seaPath": _ASK_PATH,
         "prompt": "q",
         "parentTaskId": "task-xyz",
         "appendToPrompt": "stale caller suffix",
         "appendToSystemPrompt": "caller system text",
     }
-    apply_agent_overrides(cmd)
+    apply_sea(cmd)
     assert cmd["appendToPrompt"] == "stale caller suffix"
     assert cmd["prompt"] == "q\n\n" + _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "task-xyz")
     assert cmd["appendToSystemPrompt"] == "caller system text"
     assert cmd["systemPromptHook"]("DEFAULT\n\ncaller system text") == _EXPECTED_SYSTEM_PROMPT
 
 
-def test_apply_agent_overrides_fills_a_callers_placeholder_without_prompt_method(
+def test_apply_sea_fills_a_callers_placeholder_without_prompt_method(
     tmp_path: Path,
 ) -> None:
     """``{task_id}`` is filled in wherever it stands in the prompt, not only in a method's text.
@@ -451,21 +452,21 @@ def test_apply_agent_overrides_fills_a_callers_placeholder_without_prompt_method
     other = tmp_path / "other_sea.py"
     other.write_text(_EMPTY_SEA, encoding="utf-8")
     cmd: dict[str, Any] = {
-        "agentPath": str(other),
+        "seaPath": str(other),
         "prompt": "literal {task_id} in the task",
         "parentTaskId": "task-xyz",
         "appendToPrompt": "literal {task_id} stays here",
     }
-    assert apply_agent_overrides(cmd) == {"prompt"}
+    assert apply_sea(cmd) == {"prompt"}
     assert cmd["prompt"] == "literal task-xyz in the task"
     assert cmd["appendToPrompt"] == "literal {task_id} stays here"
     # Without a parent task the placeholder becomes the empty string.
-    cmd = {"agentPath": str(other), "prompt": "literal {task_id} in the task"}
-    assert apply_agent_overrides(cmd) == {"prompt"}
+    cmd = {"seaPath": str(other), "prompt": "literal {task_id} in the task"}
+    assert apply_sea(cmd) == {"prompt"}
     assert cmd["prompt"] == "literal  in the task"
 
 
-def test_apply_agent_overrides_substitutes_for_any_sea_defining_prompt(
+def test_apply_sea_substitutes_for_any_sea_defining_prompt(
     tmp_path: Path,
 ) -> None:
     """``{task_id}`` substitution is general: every SEA's ``prompt()`` result gets it.
@@ -487,8 +488,8 @@ class Sea(BaseSea):
 """,
             encoding="utf-8",
         )
-        cmd: dict[str, Any] = {"agentPath": str(script), "prompt": "q", "parentTaskId": "t-1"}
-        assert apply_agent_overrides(cmd) == {"prompt"}
+        cmd: dict[str, Any] = {"seaPath": str(script), "prompt": "q", "parentTaskId": "t-1"}
+        assert apply_sea(cmd) == {"prompt"}
         assert cmd["prompt"] == "q Report on task t-1."
 
 
@@ -527,7 +528,7 @@ def _parent_with_task_id(task_id: str) -> ChatSorcarAgent:
 
 
 def _run_dispatch(
-    agent_path: str, options: RunOptions, parent_task_id: str,
+    sea_path: str, options: RunOptions, parent_task_id: str,
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> dict[str, Any]:
     """Drive :func:`dispatch_result` through the real ``daemon_client.run``.
@@ -541,7 +542,7 @@ def _run_dispatch(
         result = agent_dispatch.dispatch_result(
             name="ask",
             prompt="why did the last step fail?",
-            agent_path=agent_path,
+            sea_path=sea_path,
             work_dir=str(tmp_path / "wd"),
             model_name="",
             budget=None,
@@ -549,7 +550,7 @@ def _run_dispatch(
             parent_agent=_parent_with_task_id(parent_task_id),
             scope_work_dir="",
             options=options,
-            settings=sea_commands.sea_settings(Path(agent_path)),
+            settings=sea_commands.sea_settings(Path(sea_path)),
         )
     finally:
         daemon.close()
@@ -583,7 +584,7 @@ def test_dispatch_threads_the_parent_task_id_and_passes_the_text_through(
         assert command["appendToPrompt"] == text
         assert command["appendToSystemPrompt"] == "caller system text"
         assert command["parentTaskId"] == "task-abc-123"
-        assert command["agentPath"] == _ASK_PATH
+        assert command["seaPath"] == _ASK_PATH
         assert command["prompt"] == "why did the last step fail?"
 
 

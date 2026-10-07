@@ -10,7 +10,7 @@ tools attach to a REAL Docker container started by the test.  The only
 replaced boundary is the LLM: the executor's :meth:`KISSAgent.run` is
 swapped for a stub that records the tools it was handed and *calls* them,
 so the daemon's whole pipeline — wire ``dockerImage`` field →
-``apply_agent_overrides`` (an SEA's ``settings()["docker_image"]``) →
+``apply_sea`` (an SEA's ``settings()["docker_image"]``) →
 ``task_runner`` → ``SorcarAgent.run(docker_image=...)`` →
 ``DockerManager("container:<id>")`` → container-backed ``Bash`` /
 ``run_commands_parallel`` / ``Read`` / ``Write`` — executes for real.
@@ -186,7 +186,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         assert self.short_id in child["bash"], child["bash"]
 
     def test_sea_docker_image_setting_attaches(self) -> None:
-        """An agent script's ``settings()["docker_image"]`` selects the container."""
+        """A SEA's ``settings()["docker_image"]`` selects the container."""
         calls: list[dict[str, Any]] = []
         self._install_tool_running_stub(calls)
         script = self._write_py(
@@ -210,7 +210,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             "sea attach task",
             work_dir=self.repo,
             use_web_tools=False,
-            extension_agent_path=script,
+            sea_path=script,
             endpoint_file=self.endpoint_file,
             timeout=120,
         )
@@ -242,13 +242,13 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             work_dir=self.repo,
             use_worktree=False,
             use_web_tools=False,
-            extension_agent_path=script,
+            sea_path=script,
             endpoint_file=self.endpoint_file,
             timeout=120,
         )
         assert result.success is False
         assert (
-            f"agent script {script!r}: settings()['docker_image'] must be str, got int"
+            f"SEA {script!r}: settings()['docker_image'] must be str, got int"
         ) in result.text, result.text
         assert calls == []
 

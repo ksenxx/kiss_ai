@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""``run_parallel(agent=...)``: fan-out children run as an agent script.
+"""``run_parallel(agent=...)``: fan-out children run as a SEA.
 
 A real daemon runs a parent whose scripted model calls ``run_parallel``
 with ``agent`` naming a SEA file.  Each child's request to the stand-in
@@ -174,7 +174,7 @@ def test_run_parallel_children_run_as_the_named_agent_script(
     assert any(
         "no-such-agent-xyz" in t and "Error:" in t for t in parent_texts
     ), parent_texts[-1][-500:]
-    assert any("ntfy is a channel agent, which run_parallel cannot run" in t for t in parent_texts)
+    assert any("ntfy is a channel, which run_parallel cannot run" in t for t in parent_texts)
 
 
 PARENT_SEA = textwrap.dedent('''
@@ -246,7 +246,7 @@ def test_run_parallel_children_inherit_the_parent_and_a_broken_child_fails_alone
             work_dir=str(repo),
             model=STANDIN_MODEL,
             model_config=parent_model.model_config,
-            extension_agent_path=str(repo / "parent_sea.py"),
+            sea_path=str(repo / "parent_sea.py"),
             use_worktree=False,
             auto_commit=False,
             add_to_prompt="PARENT-PROMPT-SUFFIX",

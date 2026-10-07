@@ -40,6 +40,7 @@ from kiss.core.kiss_agent import (
     MAX_CONSECUTIVE_NO_TOOL_CALLS,
     KISSAgent,
 )
+from kiss.core.tool_verdict import ALLOW, Verdict, refuse
 from kiss.core.utils import finish as structured_finish
 
 _USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
@@ -97,7 +98,7 @@ def _run(
     server: HTTPServer,
     agent: KISSAgent,
     tools: list[Callable[..., Any]] | None = None,
-    tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None,
+    tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
 ) -> str:
     """Run *agent* against the local server and return its result."""
     return agent.run(
@@ -175,11 +176,11 @@ class TestTextOnlyImplicitFinishIsTerminal:
 class _VetoRecorder:
     """Real ``tool_call_hook`` + ``tool_call_guard`` pair that records call order."""
 
-    def __init__(self, hook_verdicts: list[str | None]) -> None:
+    def __init__(self, hook_verdicts: list[Verdict]) -> None:
         self.calls: list[str] = []
         self._verdicts = iter(hook_verdicts)
 
-    def hook(self, name: str, args: dict[str, Any]) -> str | None:
+    def hook(self, name: str, args: dict[str, Any]) -> Verdict:
         """Record ``hook:<name>`` and answer with the next scripted verdict."""
         del args
         self.calls.append(f"hook:{name}")
@@ -193,13 +194,13 @@ class _VetoRecorder:
 
 
 class TestImplicitFinishHookBeforeGuard:
-    """Review #9: hook first; the guard runs only after the hook allows (``None``)."""
+    """Review #9: hook first; the guard runs only after the hook allows (``ALLOW``)."""
 
     def test_text_only_net_skips_guard_when_hook_rejects(self) -> None:
         """Turn 2 trips the text-only net: the hook says "not yet" and the
-        guard must NOT be consulted.  Turn 3: the hook allows (``None``),
+        guard must NOT be consulted.  Turn 3: the hook allows (``ALLOW``),
         then the guard runs, and the run ends with the text."""
-        recorder = _VetoRecorder(["not yet", None])
+        recorder = _VetoRecorder([refuse("not yet"), ALLOW])
         server = _serve(lambda turn, request: _text_response(f"Text {turn}."))
         try:
             agent = KISSAgent("audit-fix-veto-order-text")

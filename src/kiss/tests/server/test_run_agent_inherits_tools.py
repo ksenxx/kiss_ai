@@ -219,7 +219,7 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
         result = sorcar.run(
             "PARENT-TASK dispatch the three children",
             work_dir=str(repo),
-            extension_agent_path=str(repo / "parent_sea.py"),
+            sea_path=str(repo / "parent_sea.py"),
             model=STANDIN_MODEL,
             model_config=model.model_config,
             use_worktree=False,

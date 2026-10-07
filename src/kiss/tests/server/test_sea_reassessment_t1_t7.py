@@ -38,7 +38,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     RunOptions,
     _run_agent,
     command_alias,
-    is_agent_path,
+    is_sea_path,
     make_run_agent_tool,
     parse_run_options,
     resolve_agent,
@@ -298,7 +298,7 @@ def test_lint_flags_prose_claiming_a_timeout_stops_the_sub_task(tmp_path: Path) 
 
 def test_command_alias_and_run_config_line() -> None:
     sh = str(sea_commands.get_command("sh"))
-    assert is_agent_path(sh) and not is_agent_path("sh")
+    assert is_sea_path(sh) and not is_sea_path("sh")
     assert command_alias(sh) == "sh" and command_alias("/tmp/nowhere_sea.py") == ""
     assert command_alias(DEFAULT_AGENT_PATH) == ""  # hidden: not a command
     line = run_config_line({"sea": "sh", "kind": "worker"}, "sh")

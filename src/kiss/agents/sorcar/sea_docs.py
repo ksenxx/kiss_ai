@@ -38,6 +38,7 @@ from kiss.agents.sorcar.sea_commands import (
     sea_settings,
 )
 from kiss.agents.sorcar.sea_settings import (
+    CHANNEL_BEHAVIOURS,
     DISPATCHER_SETTINGS,
     KIND_DOCS,
     PRECEDENCE_RULE,
@@ -130,6 +131,14 @@ def kinds_table() -> str:
     return "\n".join(rows)
 
 
+def channel_table() -> str:
+    """The behaviours of ``channel: True``: name, what it does and where it is enforced."""
+    rows = ["| Behaviour | What `channel: True` does |", "|---|---|"]
+    for name, what in CHANNEL_BEHAVIOURS:
+        rows.append(f"| {name} | {what} |")
+    return "\n".join(rows)
+
+
 def portable_default(value: object) -> object:
     """A kind default as the docs show it: a path under the Sorcar home becomes ``<home>/...``.
 
@@ -178,6 +187,7 @@ TABLES = {
     "precedence": precedence_block,
     "settings": settings_table,
     "kinds": kinds_table,
+    "channel": channel_table,
     "options": options_table,
     "commands": commands_table,
 }

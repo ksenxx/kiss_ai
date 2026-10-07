@@ -7,13 +7,13 @@
 ``_stop_task``'s watchdog cancels a run by injecting an asynchronous
 ``KeyboardInterrupt`` into the task thread.  The untrusted-code
 loader — ``load_layers`` (which resolves the SEA's ``settings()``)
-and ``apply_agent_overrides`` (which runs its ``prompt()``) —
+and ``apply_sea`` (which runs its ``prompt()``) —
 executes caller-supplied Python on that thread and converts EVERY
 raise, ``BaseException`` included, into its diagnostic error type.
 An injected stop landing while such a method runs was therefore
 swallowed:
 
-* the run was reported ``"Task failed: AgentFileError: agent script
+* the run was reported ``"Task failed: SeaError: SEA
   '...': settings() raised: KeyboardInterrupt"`` instead of ``"Task
   stopped by user"``;
 * ``_cancel_outcome`` never ran, so the stop was never acknowledged
@@ -44,7 +44,7 @@ Branch-coverage notes for the fix (``_stop_interrupt_wrapped``):
   the flag consulted.
 * ``_run_task``'s ``state is None`` re-resolve in its outer catch is
   reachable only when the interrupt lands in the two-statement window
-  between ``apply_agent_overrides`` returning and the state
+  between ``apply_sea`` returning and the state
   resolution in the try — an interrupt INSIDE the overrides is always
   wrapped, so no deterministic test can park there; the arm stays
   uncovered by design.
@@ -156,7 +156,7 @@ _BROKEN_GETTER = textwrap.dedent(
 
     class Sea(BaseSea):
         def settings(self, settings):
-            \"\"\"Raise immediately — a genuinely broken agent script.\"\"\"
+            \"\"\"Raise immediately — a genuinely broken SEA.\"\"\"
             raise ValueError("script bug")
     """
 )
@@ -255,14 +255,14 @@ class TestStopWrappedInterrupt(TestCase):
         self.client.wait_for("status", tab_id, running=False)
 
     def test_stop_during_agent_script_getter_is_a_user_stop(self) -> None:
-        """KI inside ``settings()`` (AgentFileError site, ``_run_task``)."""
+        """KI inside ``settings()`` (SeaError site, ``_run_task``)."""
         script = self._write_script("agent.py", "settings", "agent")
-        self._run_and_stop("wrap-agent-tab", "agent", agentPath=script)
+        self._run_and_stop("wrap-agent-tab", "agent", seaPath=script)
 
     def test_stop_during_agent_script_prompt_method_is_a_user_stop(self) -> None:
         """KI inside ``prompt()`` (the other method the loader runs eagerly)."""
         prompt = self._write_script("prompt.py", "prompt", "prompt")
-        self._run_and_stop("wrap-prompt-tab", "prompt", agentPath=prompt)
+        self._run_and_stop("wrap-prompt-tab", "prompt", seaPath=prompt)
 
     def test_broken_script_without_stop_stays_a_task_error(self) -> None:
         """No stop requested → a raising getter keeps its diagnostic.
@@ -282,10 +282,10 @@ class TestStopWrappedInterrupt(TestCase):
             "useWorktree": False,
             "isParallel": False,
             "autoCommit": False,
-            "agentPath": str(script),
+            "seaPath": str(script),
         })
         result = self.client.wait_for("result", tab_id)
-        self.assertIn("AgentFileError", result["text"])
+        self.assertIn("SeaError", result["text"])
         self.assertIn("script bug", result["text"])
         self.assertFalse(result["success"])
         self.client.wait_for("status", tab_id, running=False)

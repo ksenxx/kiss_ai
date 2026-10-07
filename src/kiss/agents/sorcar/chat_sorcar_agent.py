@@ -184,7 +184,7 @@ class ChatSorcarAgent(SorcarAgent):
         self._chat_id: str = ""
         self._context_task_id: str = ""
         self._subagent_info: dict[str, object] | None = None
-        # File stem of the SEA (agent script, wire field ``agentPath``)
+        # File stem of the SEA (SEA, wire field ``seaPath``)
         # this run executes on behalf of, e.g. ``write_paper_sea`` or
         # ``cron_agent``; set by the task runner and persisted in the
         # ``task_history.sea`` column.  Empty for a plain run.
@@ -426,7 +426,7 @@ class ChatSorcarAgent(SorcarAgent):
         Returns:
             The settings dict carried by the event: the keys above,
             ``chat_id``, ``is_subagent``, ``parent_task_id`` when there
-            is one, ``sea`` when the run executes an agent script and
+            is one, ``sea`` when the run executes a SEA and
             the :attr:`run_config` keys (see
             :data:`kiss.agents.sorcar.run_config.RUN_CONFIG_KEYS`).
         """
@@ -589,7 +589,7 @@ class ChatSorcarAgent(SorcarAgent):
         # so history and the tab keep the raw path the user typed.
         # Only for a task the user typed into a chat box, though: the
         # task runner passes ``_open_bare_path=False`` for a run it
-        # starts on behalf of an agent script (``agentPath``: an SEA
+        # starts on behalf of a SEA (``seaPath``: an SEA
         # dispatched by ``/git_extract_knowledge /path/to/repo`` or
         # ``/review_paper /path/to/paper.pdf`` receives the path as its
         # whole task and defines what it means) or of another agent

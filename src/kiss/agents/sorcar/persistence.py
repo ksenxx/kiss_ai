@@ -1263,7 +1263,7 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             -- Comma-separated classification of the task ("work,coding");
             -- written when the task finishes (task_metadata.classify_task_tags).
             tags TEXT DEFAULT '',
-            -- File stem of the SEA (agent script) that ran the task
+            -- File stem of the SEA that ran the task
             -- ("write_paper_sea", "cron_agent"); '' for a plain run.
             sea TEXT DEFAULT ''
         );

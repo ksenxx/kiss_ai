@@ -603,7 +603,7 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
         control_marker = "control wire child zq9"
         # No parentReviewer flag, but the prompt itself is a review
         # task: the daemon must mark it from the EFFECTIVE prompt (the
-        # path an agent script's prompt() override would take).
+        # path a SEA's prompt() override would take).
         worded_marker = "wire child zq9, inspect it for defects"
         recorded: dict[str, Any] = {}
 

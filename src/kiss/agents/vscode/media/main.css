@@ -3985,7 +3985,7 @@ body.pdf-preview-body {
   color: var(--fg);
 }
 
-/* The agent-script (SEA) filter: a pill like the date range holding
+/* The SEA filter: a pill like the date range holding
    one <select> whose options are the SEAs of the loaded rows. */
 .history-filter-sea {
   display: inline-flex; align-items: center; gap: var(--space-1);
@@ -4454,7 +4454,7 @@ body.remote-chat .running-item.history-active-task:hover {
   text-overflow: ellipsis;
 }
 
-/* The task's tags ("work · coding") and agent script, right after its
+/* The task's tags ("work · coding") and SEA, right after its
    "3 hours ago" label and in the same muted style, so they read as one
    line of metadata. */
 .sidebar-item-tags,

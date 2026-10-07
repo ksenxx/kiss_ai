@@ -20,7 +20,7 @@ KISS Sorcar now uses a quick task classifier to determine whether the task shoul
 
 ## Sorcar Extension Agents (SEAs)
 
-A **Sorcar Extension Agent (SEA)** is a Python file that defines a complete custom agent as one class deriving from `kiss.agents.seas.base.base_sea.BaseSea`: its `settings(settings)` returns a dict with a kind (`session`, `worker`, `channel`) and the run's per-run settings (model, budget, tool profile, dispatch timeout, ...; the list is in [Client Interfaces](cli.md#sorcar-extension-agents-seas)), and its `prompt(task)`, `system_prompt(system_prompt)`, `tools(tools)`, `llm_call_hook(new_messages)` and `tool_call_hook(name, args)` methods supply the prompts, tools and safety hooks; a SEA extends another by deriving from its class. Pass the file's path as `extension_agent_path` to `sorcar.run()` and the daemon executes it on every run; in the chat, `/<name> <text>` runs it directly and a running task dispatches it with `run_agent(agent="<name>", task=...)`. All third-party agents, such as the Slack and Gmail agents, are implemented in KISS Sorcar as SEAs. See the "Sorcar Extension Agents (SEAs)" section in the [README](https://github.com/ksenxx/kiss_ai#sorcar-extension-agents-seas) for a full example, and the detailed SEA guide at [`src/kiss/server/README.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md).
+A **Sorcar Extension Agent (SEA)** is a Python file that defines a complete custom agent as one class deriving from `kiss.agents.seas.base.base_sea.BaseSea`: its `settings(settings)` returns a dict with a kind (`session` or `worker`), the `channel` flag and the run's per-run settings (model, budget, tool profile, dispatch timeout, ...; the list is in [Client Interfaces](cli.md#sorcar-extension-agents-seas)), and its `prompt(task)`, `system_prompt(system_prompt)`, `tools(tools)`, `llm_call_hook(new_messages)` and `tool_call_hook(name, args)` methods supply the prompts, tools and safety hooks; a SEA extends another by deriving from its class. Pass the file's path as `sea_path` to `sorcar.run()` and the daemon executes it on every run; in the chat, `/<name> <text>` runs it directly and a running task dispatches it with `run_agent(agent="<name>", task=...)`. All third-party agents, such as the Slack and Gmail agents, are implemented in KISS Sorcar as SEAs. See the "Sorcar Extension Agents (SEAs)" section in the [README](https://github.com/ksenxx/kiss_ai#sorcar-extension-agents-seas) for a full example, and the detailed SEA guide at [`src/kiss/server/README.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md).
 
 ## Prompt KISS Sorcar Like the Developer of KISS Sorcar
 
@@ -88,7 +88,7 @@ print(result.text, result.success, result.cost)
 sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-Extra tools come from a Sorcar Extension Agent: pass `extension_agent_path="/path/to/my_agent.py"`, a Python file whose `BaseSea` subclass defines `tools(self, tools)` returning `tools + [the extra tool functions]` (added to the built-in toolset; return `settings | {"tool_profile": "none"}` from its `settings()` to run with those tools and `finish` only).
+Extra tools come from a Sorcar Extension Agent: pass `sea_path="/path/to/my_agent.py"`, a Python file whose `BaseSea` subclass defines `tools(self, tools)` returning `tools + [the extra tool functions]` (added to the built-in toolset; return `settings | {"tool_profile": "none"}` from its `settings()` to run with those tools and `finish` only).
 
 ## Run KISS Sorcar in a Docker Container
 

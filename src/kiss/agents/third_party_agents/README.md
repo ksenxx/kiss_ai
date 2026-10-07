@@ -68,7 +68,7 @@ exactly what interactive authentication and write-approval flows need.
 Name the service in your prompt and Sorcar routes it. Internally the session calls its
 `run_agent` tool with the channel name and your request (`run_agent(agent="slack",
 task=...)`); your request goes through verbatim as the sub-session's task. The channel's
-SEA declares `settings()` returning `{"kind": "channel"}`, so the sub-session runs in
+SEA declares `settings()` returning `{"channel": True}`, so the sub-session runs in
 the shared `~/.kiss/channel_work` directory with no worktree, auto-commit, classifier,
 fan-out, web tools or memory, inherits nothing from the calling task (model and budget
 are the daemon defaults unless the caller passes them), and carries that channel's
@@ -79,7 +79,7 @@ argument is optional: omitting it (or passing it blank, or a generic label such 
 a plain Sorcar sub-session with the standard toolset, on the task in the caller's work
 directory (`"reviewer"` is refused with a pointer to `tool_profile="review"`: a reviewer
 is a plain sub-agent with the read-only toolset, not an agent of its own). The same
-argument also takes `"cron"`, a path to an agent script, or the name of a registered
+argument also takes `"cron"`, a path to a SEA, or the name of a registered
 slash command; the call waits for the SEA's `timeout` setting, else 3600 s, unless
 `timeout` is passed, and when the wait expires the sub-task keeps running as an
 `agent_job` whose id the call returns.
@@ -127,7 +127,7 @@ of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 - Every module defines one SEA class deriving from
   `kiss.agents.seas.base.base_sea.BaseSea` (`SlackSea`, `GmailSea`, ...) with
   `description(self)`, the one-sentence summary `/xxx help` prints;
-  `settings(self, settings)`, which returns `settings | {"kind": "channel"}` (the
+  `settings(self, settings)`, which returns `settings | {"channel": True}` (the
   worker defaults — worktree, auto-commit, classifier, fan-out, web tools and memory
   off — plus a run in `$KISS_HOME/channel_work` that inherits nothing from the calling
   task); `tools(self, tools)`; and, when its agent class sets `channel_system_prompt`,
@@ -136,7 +136,7 @@ of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
   channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
-  The daemon appends the channel preamble (`agent_file.CHANNEL_PREAMBLE`: use the
+  The daemon appends the channel preamble (`sea_apply.CHANNEL_PREAMBLE`: use the
   channel tools directly, never call `run_agent`, never edit source or run tests) to
   the run's **system** prompt before `system_prompt()` adds the channel guidance; the
   task text itself is not modified (the `kiss-<channel>` CLI launcher no longer appends

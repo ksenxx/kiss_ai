@@ -2,7 +2,7 @@
 
 A **Sorcar Extension Agent (SEA)** is a Python file that defines one
 class deriving from `kiss.agents.seas.base.base_sea.BaseSea`; you pass
-the file's path as `extension_agent_path` to `kiss.server.sorcar.run()`.
+the file's path as `sea_path` to `kiss.server.sorcar.run()`.
 The daemon executes the file, instantiates the class and threads the
 run's configuration through its methods: `settings(settings)` returns
 the dict of a `kind` and the `run()` parameters the SEA pins (the
@@ -74,7 +74,7 @@ class WeatherSea(BaseSea):
     def description(self) -> str:
         return (
             "Reports the current weather in San Francisco from wttr.in; "
-            "pass its path as extension_agent_path or send `/weather now` "
+            "pass its path as sea_path or send `/weather now` "
             "(any text after the command) once its parent folder is listed "
             "in $KISS_HOME/SEAS.md."
         )
@@ -110,7 +110,7 @@ from kiss.server import sorcar
 
 result = sorcar.run(
     "Paris",  # the task; the SEA's prompt(task) turns it into the prompt
-    extension_agent_path="weather/weather_sea.py",
+    sea_path="weather/weather_sea.py",
 )
 print(result.text, result.success, result.cost)
 ```
@@ -128,17 +128,17 @@ runs the task text as its prompt.
  ──────────────                          ──────────────
  sorcar.run(                             receive "run" JSON command
    prompt=...,                               │
-   extension_agent_path="agent.py"           ▼
+   sea_path="agent.py"           ▼
  )                                       seas = sea_layers(agent.py, base=<picker SEA>)
    │                                         │ execute agent.py ONCE, instantiate its
    │ validate path exists                    │   BaseSea subclass (sea_commands.load_sea)
    │ resolve to absolute                     │ settings: fold settings() over the class's
-   │ send JSON {"agentPath": "…", …}        │   MRO, base first; kind defaults; type-checked
+   │ send JSON {"seaPath": "…", …}        │   MRO, base first; kind defaults; type-checked
    │ over the local WSS endpoint             ▼
-   │                                     kind "channel": enter the workspace
+   │                                     channel: True: enter the workspace
    │                                         │ (held until the run ends)
    │                                         ▼
-   │                                     apply_agent_overrides(cmd, seas)
+   │                                     apply_sea(cmd, seas)
    │                                         │ evaluate_sea(seas, task, task_id):
    │                                         │   prompt(task) chain ({task_id} filled),
    │                                         │   system_prompt / tools / llm_call_hook /
@@ -153,9 +153,9 @@ runs the task text as its prompt.
                                              │ llm_call_hook / tool_call_hook per call
 ```
 
-1. **Client side** — `sorcar.run()` validates that `extension_agent_path`
+1. **Client side** — `sorcar.run()` validates that `sea_path`
    points to an existing `.py` file, resolves it to an absolute path,
-   and sends it as `"agentPath"` on the wire.  `None` or `""` means
+   and sends it as `"seaPath"` on the wire.  `None` or `""` means
    no SEA; any other non-string value (including a
    `pathlib.Path`), a non-`.py` path, or a nonexistent file raises
    `ValueError` immediately (before any daemon connection).
@@ -170,7 +170,7 @@ runs the task text as its prompt.
    returns the next one), then resolved
    (`kiss.agents.sorcar.sea_settings.resolve_settings`: the named
    kind's defaults under the explicit keys, every value type-checked).
-   `apply_agent_overrides()` (in `kiss.agents.sorcar.agent_file`)
+   `apply_sea()` (in `kiss.agents.sorcar.sea_apply`)
    then evaluates the SEA on the task (`evaluate_sea`), writes each
    setting into the command dict's wire field and the result of the
    `prompt(task)` chain into `prompt`, and stages the four daemon-side
@@ -178,7 +178,7 @@ runs the task text as its prompt.
    `llmCallHook`, `toolCallHook`), each a fold of that method over
    the chain, base first.  Overrides are staged: they apply atomically
    only after everything succeeds.  A broken script raises
-   `AgentFileError` and the task fails with a diagnostic message in
+   `SeaError` and the task fails with a diagnostic message in
    `TaskResult.text`.
 
 3. **Run-time hooks** — the hooks never travel the wire (a callable
@@ -205,7 +205,7 @@ override keys and keep the base's; return a dict without a key to
 drop it.  Every key but `kind`, `timeout`, `locked` and `hidden`
 (`sea_settings.DISPATCHER_SETTINGS`) is a parameter of `sorcar.run()` and
 lands on that parameter's wire field; the wire
-name is the keyword in camelCase (`agent_file.wire_field`:
+name is the keyword in camelCase (`sea_apply.wire_field`:
 `use_web_tools` → `useWebTools`), so no hand-kept table is needed.
 Extra tools have no `run()` parameter at all (a callable cannot travel
 the wire): they come from the `tools(tools)` method (see below).  The
@@ -228,10 +228,11 @@ Generated by `uv run sea docs` from `sea_settings.SETTING_TYPES`; the
 <!-- sea-docs: settings -->
 | Key | Type | `run` wire field | Meaning |
 |---|---|---|---|
-| `kind` | `str` | — | What the run is: `session` (the default, an ordinary Sorcar session), `worker` or `channel`; each is a dict of defaults laid under the explicit keys (see the kind table). A `channel` run holds its channel workspace, gets the channel preamble, never inherits from a calling task and is never a `run_parallel` child. |
-| `work_dir` | `str` | `workDir` | The directory the run works in; default: the calling task's or the tab's. A relative path is resolved against the script's own folder, not the caller's (one a base class sets: against the base's file). |
+| `kind` | `str` | — | What the run is: `session` (the default, an ordinary Sorcar session) or `worker`; each is a dict of defaults laid under the explicit keys and nothing more (see the kind table). |
+| `channel` | `bool` | — | `True`: the SEA serves an external service (Slack, email, cron), not the caller's project; every behaviour this adds is listed in the channel table. Like `hidden`, the literal `True` in the class's own `settings()` is what the dispatcher's channel listing reads. |
+| `work_dir` | `str` | `workDir` | The directory the run works in; default: the calling task's or the tab's. A relative path is a path under the calling task's directory (the tab's for `/<name>`), in a SEA's settings and in a call's `work_dir` option alike. |
 | `model` | `str` | `model` | The LLM model, a catalogue name or a model-picker SEA; default: the caller's (`""`, like `None`, is no override — true of every string key). |
-| `chat_id` | `str` | `chatId` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a `channel` run, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
+| `chat_id` | `str` | `chatId` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a channel, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
 | `use_worktree` | `bool` | `useWorktree` | Run in a git worktree of the project; default: the calling task's effective choice, else the persisted setting (an inherited or default `True` is demoted by the classifier for non-implementation tasks, an explicit `True` is kept). |
 | `auto_commit` | `bool` | `autoCommit` | Commit the run's changes when it ends; default: the calling task's effective choice, else the persisted setting. |
 | `max_budget` | `int \| float` | `maxBudget` | USD budget of the run, a finite number; default: the caller's share or the daemon's default. |
@@ -269,40 +270,50 @@ prompt surfaces:
 
 `settings()["kind"]` says what the run is and picks a dict of defaults
 (`sea_settings.kind_defaults()`); explicit keys of the same dict override
-it.  A kind is defaults plus, for `channel`, the daemon's and the
-dispatcher's channel behaviour described below.
+it.  A kind is defaults and nothing more.
 
 <!-- sea-docs: kinds -->
 | Kind | Defaults | Use |
 |---|---|---|
 | `session` | nothing | The default: an ordinary Sorcar session with the caller's or the user's settings (`/write`, `/write_paper`, `bestrouter`). |
-| `worker` | `use_worktree=False`, `auto_commit=False`, `auto_classify=False`, `allow_fan_out=False`, `use_web_tools=False`, `use_memory=False` | A focused tool-bound run on the caller's tree: no worktree, no auto-commit, no classifier, no fan-out, no browser, no memory (`/sh`, `/ask`, `/merge`, `/remember`, `/forget`, `/task_update`). |
-| `channel` | `use_worktree=False`, `auto_commit=False`, `auto_classify=False`, `allow_fan_out=False`, `use_web_tools=False`, `use_memory=False`, `work_dir='<home>/channel_work'` | A worker for an external service, in the shared `channel_work` scratch directory under the Sorcar home, never the caller's project; it holds its channel workspace, gets the channel preamble and never inherits from a calling task (every bundled channel agent and `/cron`). |
+| `worker` | `use_worktree=False`, `auto_commit=False`, `auto_classify=False`, `allow_fan_out=False`, `use_web_tools=False`, `use_memory=False` | A focused tool-bound run on the caller's tree: no worktree, no auto-commit, no classifier, no fan-out, no browser, no memory (`/sh`, `/ask`, `/merge`, `/remember`, `/forget`, `/task_update`, every channel). |
 <!-- /sea-docs -->
 
-A `channel` run's `run_agent` dispatch takes NOTHING from the
-calling task (an `inherit: true` option is refused); `work_dir` keeps
-the run out of the caller's project (cron's own `work_dir`,
-`cron_agent.cron_work_dir()`, wins over the kind's) and is implicitly
-locked.  `kind: "channel"` is the one key the daemon acts on beyond
-passing a value through: it appends the channel preamble
-(`agent_file.CHANNEL_PREAMBLE`, "You are the {name} agent: this
-session already has the {name} tools ... Never call run_agent here
-...", `{name}` being the script's file stem without `_sea`) to the
-system prompt suffix the SEA's `system_prompt()` receives, and holds
-the run's channel workspace (the `run_agent` option
-`workspace`, default `"default"`; the account the channel tools load
-credentials for, exported as `KISS_CHANNEL_WORKSPACE`) from before
-`tools()` runs — the tools bind the credentials of the
-workspace active at that moment — until the run ends, whether the run
-came from `/slack ...`, `run_agent("slack")` or
+### Channels: `channel: True`
+
+A SEA that serves an external service (Slack, email, cron) writes
+`"channel": True`.  The flag is the one setting with behaviour beyond
+a value passed through; every behaviour is listed in
+`sea_settings.CHANNEL_BEHAVIOURS`, rendered here, and the module named
+in each row is where it is enforced.
+
+<!-- sea-docs: channel -->
+| Behaviour | What `channel: True` does |
+|---|---|
+| worker | It is a `worker`: `kind` may stay unset or be `worker` (any other kind is refused), and the worker keys are locked, so no call may give it a worktree, auto-commit, the classifier, fan-out, the browser or memory (`resolve_settings`). |
+| scratch directory | It runs in the shared `<home>/channel_work` scratch directory unless its own `work_dir` says otherwise (`/cron` runs in `<home>/cron_work`); `work_dir` is locked, so it never works in the caller's project (`resolve_settings`). |
+| no inheritance | Its `run_agent` dispatch takes nothing from the calling task: not the chat, model, budget share, container or prompt suffixes; the `inherit: true` option is refused (`agent_dispatch`). |
+| workspace | It holds its channel workspace — the `run_agent` option `workspace`, default `default`, the account its tools load credentials for — from before its `tools()` run until the run ends; `workspace` is refused for any other SEA (`sea_apply.channel_workspace`, `agent_dispatch`). |
+| preamble | The channel preamble is appended to its system prompt before its own `system_prompt()` runs (`sea_apply.CHANNEL_PREAMBLE`). |
+| no fan-out child | It is never a `run_parallel` child: those are threads of the caller on the caller's tree (`agent_dispatch.fanout_conflict`). |
+| listed as a channel | A third-party SEA folder whose own `settings()` writes the literal `"channel": True` is a channel agent: `run_agent(agent="<folder>")` finds it by name and the `channel` tool lists it (`agent_dispatch.available_channels`). |
+<!-- /sea-docs -->
+
+The channel preamble (`sea_apply.CHANNEL_PREAMBLE`, "You are the
+{name} agent: this session already has the {name} tools ... Never call
+run_agent here ...", `{name}` being the script's file stem without
+`_sea`) is appended to the system prompt suffix the SEA's
+`system_prompt()` receives.  The workspace (the account the channel
+tools load credentials for, exported as `KISS_CHANNEL_WORKSPACE`) is
+held from before `tools()` runs — the tools bind the credentials of
+the workspace active at that moment — until the run ends, whether the
+run came from `/slack ...`, `run_agent("slack")` or
 `run_agent(".../slack_sea.py")`; a run whose workspace differs from a
 running channel task's waits (bounded by
 `channel_workspace.WORKSPACE_WAIT_TIMEOUT_SECONDS`) instead of handing
-that task the wrong credentials.  A `kind: "channel"` SEA cannot be a
-`run_parallel` child and is not meant as a base class (see
-[Extending a SEA](#extending-a-sea-python-inheritance)).  A channel
-SEA is four methods:
+that task the wrong credentials.  A channel is not meant as a base
+class (see [Extending a SEA](#extending-a-sea-python-inheritance)).  A
+channel SEA is four methods:
 
 ```python
 class SlackSea(BaseSea):
@@ -310,7 +321,7 @@ class SlackSea(BaseSea):
         return "Messages, channels, users, reactions and search in a Slack workspace ..."
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        return settings | {"kind": "channel"}
+        return settings | {"channel": True}
 
     def system_prompt(self, system_prompt: str) -> str:
         return system_prompt + "\n\n" + SlackAgent.channel_system_prompt
@@ -334,6 +345,7 @@ directory):
 # strict_sh/strict_sh_sea.py
 from typing import Any
 
+from kiss.agents.seas.base.base_sea import ALLOW, Verdict, refuse
 from kiss.agents.seas.sh.sh_sea import ShSea          # or: sea_class("sh")
 
 
@@ -344,10 +356,10 @@ class StrictShSea(ShSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         return settings | {"max_budget": 0.25}          # ShSea's keys stay
 
-    def tool_call_hook(self, name: str, args: dict[str, Any]) -> str | None:
+    def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
         if name == "Bash" and "rm " in str(args.get("command", "")):
-            return "Blocked: read-only run"
-        return None
+            return refuse("Blocked: read-only run")
+        return ALLOW
 ```
 
 The launcher applies every class of the inheritance chain that defines
@@ -363,7 +375,7 @@ run when the subclass's receives the dict.  Per method:
   folded the same way, base first; each class receives the previous
   result and returns the next.
 - `tool_call_hook(name, args)`: the classes are asked in order and the
-  first refusal (a returned string) wins; `None` allows.
+  first refusal (`refuse(text)`) wins; `ALLOW` allows.
 - `description()`, `register_as_model()`, `on_picked_as_model(work_dir)`:
   ordinary Python inheritance; the most derived definition is the one
   called.
@@ -400,8 +412,8 @@ class BaseSea:
 
     def tool_call_hook(self, name, args):
         if name == "Bash" and "rm -rf" in str(args.get("command", "")):
-            return "Blocked: destructive command"
-        return None
+            return refuse("Blocked: destructive command")
+        return ALLOW
 ```
 
 A plain run still names no SEA (`run_agent`'s `ran:` line and the task
@@ -421,7 +433,7 @@ resolved the same way: the run gets the picker's model (the default
 model when it names none), never the picker's name.  A file must
 define exactly one subclass of `BaseSea` of its own (an imported base
 class does not count); none or several is an error (`load_sea`).  Do
-not derive from a `kind: "channel"` SEA: the subclass would inherit the
+not derive from a `channel: True` SEA: the subclass would inherit the
 channel's kind, workspace handling and credential-bound tools.
 
 ### Precedence
@@ -438,7 +450,7 @@ block is generated from the constant):
 
 Example of a refused call: `Error: sh: the script locks
 tool_profile='bash' (asked for 'review')`.  A `/<name>` run in a tab
-and a `run()` call with an `extension_agent_path` pass nothing
+and a `run()` call with an `sea_path` pass nothing
 explicitly (unless the `run()` call marks values `"explicit"` in its
 `provenance` argument, as the dispatcher does), so there the SEA's
 settings apply over the tab's or the client's values.  The `ran:` line of every sub-task result reports the
@@ -478,10 +490,10 @@ then works in the caller's tree).  `run_parallel` children are built
 from the same table (the precedence rule above decides between the
 inherited values and the SEA's).  A `channel` SEA (`agent="slack"`,
 `agent="cron"`, ...) inherits none of these: it runs on the daemon's
-default model and budget unless the call passes its own, and every
-key the kind sets (`work_dir`, `use_worktree`, `auto_commit`,
-`auto_classify`, `allow_fan_out`, `use_web_tools`, `use_memory`) is
-locked, so a call whose `options` contradict one is refused.  A
+default model and budget unless the call passes its own, and the flag
+locks its `work_dir` and the worker keys (`use_worktree`,
+`auto_commit`, `auto_classify`, `allow_fan_out`, `use_web_tools`,
+`use_memory`), so a call whose `options` contradict one is refused.  A
 `use_worktree` any SEA pins, or a `run_agent` call passes explicitly,
 is a decision the task classifier never demotes (it still demotes a
 client's or persisted default, and says so with `classified=`).
@@ -495,7 +507,7 @@ client's or persisted default, and says so with `classified=`).
 Every SEA exposed as a command must define `description()`, returning
 one sentence saying what the SEA does and how to use it (the `BaseSea`
 default returns `""`, which is fine for a hidden base class).  It
-is not a run parameter: `apply_agent_overrides()` ignores it and it
+is not a run parameter: `apply_sea()` ignores it and it
 never reaches the command dict.  The slash-command registry calls it
 when the prompt is `/<name> help` (the bare word `help`, any letter
 case, nothing after it; `sea_commands.help_text_if_command`): the
@@ -561,8 +573,8 @@ explicit: it wins over the SEA's settings, or is refused when the SEA
 locks the key.  Each option replaces the inherited value (and the
 SEA's, unless locked) of one key: `work_dir` (relative to
 the calling task's directory), `chat_id`, `workspace` (the account of
-a multi-account channel; refused for any SEA that is not a `kind:
-"channel"`), `model_config`, `inherit`,
+a multi-account channel; refused for any SEA that is not a channel),
+`model_config`, `inherit`,
 `use_worktree`, `auto_commit`, `auto_classify`, `use_web_tools`,
 `use_memory`, `allow_fan_out`, `docker_image`, `add_to_prompt` and
 `add_to_system_prompt`, e.g. `'{"use_web_tools": false}'`.  `wait="false"`
@@ -608,7 +620,7 @@ without `_sea`.
 A `/xxx text` prompt typed into a chat tab is NOT a dispatch: the
 daemon (`task_runner._run_task`, via `sea_commands.slash_command_task`)
 runs the SEA `xxx` directly in the tab's own run, with `text` as the
-prompt and the SEA's path as the run's `agentPath`, so the SEA's
+prompt and the SEA's path as the run's `seaPath`, so the SEA's
 settings, system prompt and tools apply to that very run; there is no
 relay LLM turn and no nested sub-agent tab, and the raw `/xxx text`
 line stays what the task panel and the chat history show
@@ -618,7 +630,7 @@ classes of its inheritance chain, its kind, effective settings, model,
 the tools `tools()` adds, the methods it defines and the prompt for a
 sample task, or the first error (`sea_commands.sea_check`).  A
 model-picker SEA (`bestrouter`) selected on the
-tab is applied before `/sh` under `/sh ...`: `/sh`'s own `agentPath`
+tab is applied before `/sh` under `/sh ...`: `/sh`'s own `seaPath`
 stays, on the picker's model (`/sh` replaces the system prompt, so
 the picker's routing protocol does not reach it; a SEA that appends
 keeps it).
@@ -636,7 +648,7 @@ replacing the parent's; a `prompt(task)` that raises for one task fails
 that child alone.  A child is a thread of the caller on its own tree
 and chat, so a SEA — or the call's `options` — pinning
 `use_worktree`, `auto_commit` or `auto_classify` to `True`, a
-`chat_id` or a `workspace`, and a `kind: "channel"` SEA, are refused
+`chat_id` or a `workspace`, and a `channel: True` SEA, are refused
 with an error that says to use `run_agent`
 (`agent_dispatch.fanout_conflict`); a SEA's `timeout` bounds each
 child only when the call passes none, and `inherit: false` makes the
@@ -665,7 +677,7 @@ the daemon offers them in the model picker (vendor `Router`, once at
 least one catalog model is runnable), and a task run with such a pick
 becomes a run of the SEA on the model its
 `settings()["model"]` names (else the default model) — `/xxx` slash
-commands and runs that already carry an `agentPath` keep their agent,
+commands and runs that already carry an `seaPath` keep their agent,
 with the picker's methods folded in first (see
 [Extending a SEA](#extending-a-sea-python-inheritance)).  The bundled
 `autorouter` and `bestrouter`
@@ -693,7 +705,7 @@ waiting at most `PICKED_HOOK_TIMEOUT_SECONDS`, 15 s, before the task
 starts).  It is not a run parameter: the return value is only logged,
 a hook that raises is logged as a warning, and one that blocks is
 abandoned on its thread; none of them fails the run.  It does not run
-for a `/xxx` command's agent or an explicit `agentPath`, only for the
+for a `/xxx` command's agent or an explicit `seaPath`, only for the
 SEA the model pick names.  `autorouter` uses it to make sure an
 enabled weekly cron job that runs `/rsi7d autorouter` exists
 (`autorouter_sea.schedule_weekly_rsi7d`: an enabled job of that name is
@@ -759,7 +771,7 @@ The `run()` parameters without a `settings()` key (the allowlist is
   only
   meaningful with `parent_task_id`, and not forgeable for the same
   reason.
-- **`extension_agent_path`** — the script cannot override its own path.
+- **`sea_path`** — the script cannot override its own path.
 - **`scope_work_dir`** — the calling workspace recorded on the run's
   tab in the daemon's shared tab registry (`tabScopeWorkDir`),
   informational only and meaningless for a sub-agent run, which gets
@@ -775,7 +787,7 @@ The `run()` parameters without a `settings()` key (the allowlist is
   prompt also has the tools that prompt refers to; a script decides
   nothing here.
 - **`workspace`** — the multi-account channel workspace a
-  `kind: "channel"` run holds for its lifetime (see
+  `channel: True` run holds for its lifetime (see
   [Kinds](#kinds)); the `run_agent` option `workspace` or a
   channel launcher supplies it, every other run ignores it.
 - **`add_to_system_prompt` / `add_to_prompt`** — the caller's
@@ -841,7 +853,7 @@ The `run()` parameters without a `settings()` key (the allowlist is
 
   A run with a SEA executes its prompt as one task: the
   task runner does not split `<task>` blocks into subtasks for an
-  `agentPath` run (they are the SEA's to interpret), so the text is
+  `seaPath` run (they are the SEA's to interpret), so the text is
   appended once.  A prompt that is nothing but a filesystem path is
   likewise handed to the SEA as-is rather than turned into an "open
   this file" request, as it is for a path typed into a chat box.  The
@@ -947,14 +959,14 @@ The `run()` parameters without a `settings()` key (the allowlist is
 The class may also define two per-call hooks with no corresponding
 `sorcar.run()` parameter or `settings()` key — a callable cannot be
 JSON-serialized, so the hooks exist ONLY as SEA methods, called in
-the daemon process (`agent_file.DAEMON_SIDE_FIELDS` names the staged
+the daemon process (`sea_apply.DAEMON_SIDE_FIELDS` names the staged
 command fields that carry them, together with `systemPromptHook` and
 `toolsHook`):
 
 | Method                                 | Returns      | Staged command field |
 |----------------------------------------|--------------|----------------------|
 | `llm_call_hook(self, new_messages)`    | `list`       | `llmCallHook`        |
-| `tool_call_hook(self, name, args)`     | `str \| None` | `toolCallHook`       |
+| `tool_call_hook(self, name, args)`     | `Verdict`    | `toolCallHook`       |
 
 The hooks are passed to the underlying `KISSAgent.run()` of every
 task-executor sub-session of the task's agent (internal helper
@@ -967,13 +979,15 @@ contract:
   since the previous LLM call) about to be sent; its return value
   replaces those messages.  The `BaseSea` default returns them unchanged.
 - **`tool_call_hook(name, args)`** — called before every tool call
-  with the tool's name and arguments dict.  Returning `None` lets the
-  tool execute; a returned string suppresses the call and is given to
-  the model as the tool's result — any string, `"OK"` (the allow
-  spelling of older hooks, which `uv run sea lint --fix` rewrites to
-  `None`) included.  The `BaseSea` default returns `None`.
+  with the tool's name and arguments dict and returns a typed verdict
+  (`kiss.core.tool_verdict.Verdict`, re-exported by `base_sea`):
+  `ALLOW` lets the tool execute; `refuse(text)` suppresses the call
+  and *text* is given to the model as the tool's result.  The
+  `BaseSea` default returns `ALLOW`.  A literal `None` or string (the
+  allow / refuse spellings of older hooks) is the `verdict` finding of
+  `uv run sea lint`, and `--fix` rewrites it.
 
-A hook that returns the wrong type (a non-list, a non-string refusal)
+A hook that returns the wrong type (a non-list, a non-`Verdict`)
 fails the task with a diagnostic error, like every wrong-typed value.
 In an inheritance chain the `llm_call_hook` results are threaded base
 first, and the first `tool_call_hook` refusal wins.
@@ -982,14 +996,14 @@ first, and the first `tool_call_hook` refusal wins.
 # guarded_agent.py
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ALLOW, BaseSea, Verdict, refuse
 
 
 class GuardedSea(BaseSea):
-    def tool_call_hook(self, name: str, args: dict[str, Any]) -> str | None:
+    def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
         if name == "Bash" and "rm -rf" in str(args.get("command", "")):
-            return "Blocked: destructive command"
-        return None
+            return refuse("Blocked: destructive command")
+        return ALLOW
 ```
 
 ### Only `settings()` configures a run
@@ -998,7 +1012,7 @@ The dispatcher and the task runner evaluate `settings()` alone when
 they need a script's kind, timeout, model or work directory before
 the run exists (`sea_commands.sea_settings`), so `settings()` must be
 cheap and side-effect-free there.  `prompt(task)` runs inside
-`apply_agent_overrides`, once per run; `system_prompt()` and `tools()`
+`apply_sea`, once per run; `system_prompt()` and `tools()`
 run once when the agent starts, the two call hooks on every LLM and
 tool call.  A method named differently from the contract
 (`def use_worktree(self)`, `def add_to_tools(self)`, ...) is an
@@ -1137,37 +1151,38 @@ Errors fall into two categories depending on where they are caught:
 **Client-side errors** (raised as `ValueError` before connecting to
 the daemon):
 - `prompt` is empty or blank
-- `extension_agent_path` is neither `None`/`""` nor a string
+- `sea_path` is neither `None`/`""` nor a string
 - The SEA path is not a `.py` file
 - The SEA file does not exist
 
 **Daemon-side errors** (the task starts, then fails with
 `result.success == False` and the diagnostic in `result.text`, which
-prefixes the message below with `Task failed: AgentFileError: `):
+prefixes the message below with `Task failed: SeaError: `):
 
-| Condition | `AgentFileError` message |
+| Condition | `SeaError` message |
 |-----------|---------------|
-| File deleted between client validation and daemon import | `agent script '...' is not an existing Python (.py) file` |
-| File raises at import time | `agent script '...' failed to import: ...` |
-| No or several `BaseSea` subclasses defined in the file | `agent script '...' must define exactly one subclass of BaseSea (kiss.agents.seas.base.base_sea); found none` / `...; found OneSea, TwoSea` |
-| The class cannot be instantiated without arguments | `agent script '...': MySea() raised: ...` |
-| `settings()` returns something other than a dict | `settings() of agent script '...' must return a dict, got ...` |
-| unknown key | `agent script '...': settings() has an unknown key 'x'; known keys: kind, work_dir, ...` |
-| renamed or removed key | `agent script '...': settings() key 'preset' was renamed to 'kind'; run `uv run sea lint --fix` to rewrite the script`, `... key 'extends' was removed: a SEA extends another by Python inheritance ...` |
-| unknown `kind` | `agent script '...': settings()['kind'] must be one of session, worker, channel; got 'x'` |
-| wrong-typed value (`bool` for a number, `int` for a `str`, ...) | `agent script '...': settings()['max_budget'] must be int or float, got bool` |
-| non-finite `max_budget` / `timeout` | `agent script '...': settings()['max_budget'] must return a finite number or None` |
-| `prompt()` returns an empty string | `prompt() of agent script '...' must return a non-empty string` |
-| a method `X` raises | `X() of agent script '...' raised: ...` |
-| a method returns the wrong type | `system_prompt() of agent script '...' must return a string, got ...`, `tools() of agent script '...' must return a list of tool callables (not a file path), got ...`, `llm_call_hook() of agent script '...' must return a list, got ...`, `tool_call_hook() of agent script '...' must return a string, got ...` |
-| a value whose own methods raise (e.g. a `str` subclass with a raising `__str__`) | `prompt() of agent script '...' returned a broken value: ...`, `agent script '...': settings()['max_budget'] returned a broken value: ...` |
+| File deleted between client validation and daemon import | `SEA '...' is not an existing Python (.py) file` |
+| File raises at import time | `SEA '...' failed to import: ...` |
+| No or several `BaseSea` subclasses defined in the file | `SEA '...' must define exactly one subclass of BaseSea (kiss.agents.seas.base.base_sea); found none` / `...; found OneSea, TwoSea` |
+| The class cannot be instantiated without arguments | `SEA '...': MySea() raised: ...` |
+| `settings()` returns something other than a dict | `settings() of SEA '...' must return a dict, got ...` |
+| unknown key | `SEA '...': settings() has an unknown key 'x'; known keys: kind, work_dir, ...` |
+| renamed or removed key | `SEA '...': settings() key 'preset' was renamed to 'kind'; run `uv run sea lint --fix` to rewrite the script`, `... key 'extends' was removed: a SEA extends another by Python inheritance ...` |
+| unknown `kind` | `SEA '...': settings()['kind'] must be one of session, worker; got 'x'` |
+| `kind: "channel"` (now the flag) | `SEA '...': settings()['kind'] = 'channel' became the flag `"channel": True` (a kind is defaults only; a channel is a worker); run `uv run sea lint --fix` to rewrite the script` |
+| wrong-typed value (`bool` for a number, `int` for a `str`, ...) | `SEA '...': settings()['max_budget'] must be int or float, got bool` |
+| non-finite `max_budget` / `timeout` | `SEA '...': settings()['max_budget'] must return a finite number or None` |
+| `prompt()` returns an empty string | `prompt() of SEA '...' must return a non-empty string` |
+| a method `X` raises | `X() of SEA '...' raised: ...` |
+| a method returns the wrong type | `system_prompt() of SEA '...' must return a string, got ...`, `tools() of SEA '...' must return a list of tool callables (not a file path), got ...`, `llm_call_hook() of SEA '...' must return a list, got ...`, `tool_call_hook() of SEA '...' must return a Verdict (ALLOW, or refuse(text), from kiss.agents.seas.base.base_sea), got ...` |
+| a value whose own methods raise (e.g. a `str` subclass with a raising `__str__`) | `prompt() of SEA '...' returned a broken value: ...`, `SEA '...': settings()['max_budget'] returned a broken value: ...` |
 | a `sea_class(spec)` base that does not exist | `sea_class('x'): not a registered SEA command; known commands: ...`, `sea_class('x.py'): not an existing Python (.py) file` (raised while the file executes, so reported as an import failure) |
 
 Overrides are **atomic**: if loading the class, `settings()` or
 `prompt()` fails, the command keeps all its original values (no
 partial overrides).  `system_prompt()`, `tools()` and the two call
 hooks run later, inside the agent (once at start, or per call): a
-failure there raises the same `SeaScriptError` message, which ends the
+failure there raises the same `SeaError` message, which ends the
 task with `Task failed: ...` after the overrides have been applied.
 
 
@@ -1185,14 +1200,14 @@ the newest ones too, then hard-truncates).
 ```python
 result1 = sorcar.run(
     "Analyze the codebase",
-    extension_agent_path="my_agent.py",
+    sea_path="my_agent.py",
 )
 
 # Continue the same chat
 result2 = sorcar.run(
     "Now fix the issues you found",
     chat_id=result1.chat_id,
-    extension_agent_path="my_agent.py",
+    sea_path="my_agent.py",
 )
 ```
 
@@ -1356,7 +1371,7 @@ class TaskManagerSea(BaseSea):
         return (
             "Manages a personal SQLite task list (add, list, complete) through three "
             "tools; use it as `/task_manager <request>` or pass its path as "
-            "extension_agent_path."
+            "sea_path."
         )
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -1388,7 +1403,7 @@ from kiss.server import sorcar
 # First run — add some tasks (the prompt reaches the LLM directly)
 result = sorcar.run(
     "Add three tasks: buy groceries, review PR #42, write tests",
-    extension_agent_path="task_manager/task_manager_sea.py",
+    sea_path="task_manager/task_manager_sea.py",
 )
 print(result.text)
 print(f"Cost: ${result.cost:.4f}, Steps: {result.steps}")
@@ -1397,7 +1412,7 @@ print(f"Cost: ${result.cost:.4f}, Steps: {result.steps}")
 result2 = sorcar.run(
     "Complete 'buy groceries' and show me remaining tasks",
     chat_id=result.chat_id,
-    extension_agent_path="task_manager/task_manager_sea.py",
+    sea_path="task_manager/task_manager_sea.py",
 )
 print(result2.text)
 ```
@@ -1418,7 +1433,7 @@ def run(
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
-    extension_agent_path: str = "",
+    sea_path: str = "",
     use_worktree: bool = True,
     auto_commit: bool = True,
     max_budget: float | None = None,
@@ -1473,7 +1488,7 @@ class TaskResult:
 - The SEA is **re-imported from source** on every run.
   Edits take effect immediately without restarting the daemon.
 - `max_budget` and `timeout` must be **finite** numbers.  `NaN`,
-  `±inf`, or an overflowing value raises `AgentFileError`.
+  `±inf`, or an overflowing value raises `SeaError`.
 - The file must define **exactly one** subclass of `BaseSea` of its
   own; an imported base class (`from ...sh_sea import ShSea`) does not
   count, and helper classes that do not derive from `BaseSea` are
@@ -1555,10 +1570,10 @@ class TaskResult:
   [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md)
   (source: `website/kisssorcar.github.io/docs/sea-commands.md`).
 - A `/xxx text` command has no outer relay run: the tab's run IS the
-  SEA run (`agentPath` set to the SEA, `text` as the prompt), with the
+  SEA run (`seaPath` set to the SEA, `text` as the prompt), with the
   tab's model, budget, chat and settings as the caller's values and
   the SEA's `settings()` on top of them, exactly as for a `run_agent`
   dispatch (see [Precedence](#precedence)).  The SEA is loaded by the
-  same `apply_agent_overrides` as any `agentPath` run, so a broken
-  script fails the run with an `AgentFileError` before the agent
+  same `apply_sea` as any `seaPath` run, so a broken
+  script fails the run with an `SeaError` before the agent
   starts.

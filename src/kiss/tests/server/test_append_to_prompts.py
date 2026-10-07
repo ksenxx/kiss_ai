@@ -169,7 +169,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
 
     def test_agent_script_additions_override(self) -> None:
         """``system_prompt(system_prompt)`` and ``prompt(task)`` reach both prompts."""
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "append_prompts_agent.py",
             f'''
             """SEA appending to both prompts."""
@@ -192,7 +192,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "script appends to both prompts",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -206,13 +206,13 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
     def test_agent_script_unknown_setting_fails_task(self) -> None:
         """An unknown ``settings()`` key (``add_to_prompt``) stops the task loudly.
 
-        The diagnostic is the ``SettingsError`` text naming the key,
+        The diagnostic is the ``SeaError`` text naming the key,
         prefixed with the script path.
         """
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "bad_append_prompt_agent.py",
             '''
-            """Agent script with an unknown setting."""
+            """SEA with an unknown setting."""
 
             from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -230,14 +230,14 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "script with broken add_to_prompt setting",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False
         assert (
-            f"agent script {agent_path!r}: settings() key 'add_to_prompt' was removed: "
+            f"SEA {sea_path!r}: settings() key 'add_to_prompt' was removed: "
             "a SEA shapes the task text in its `prompt(task)` method"
         ) in result.text, result.text
         assert calls == [], "no executor session may start for a broken script"

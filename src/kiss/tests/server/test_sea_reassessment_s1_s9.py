@@ -12,7 +12,7 @@ S2  the run-configuration key is ``pinned`` (an inherited or default
 S3  a ``channel`` SEA locks every key its kind sets.
 S4  ``worker`` is a kind, not a generic agent label.
 S5  ``dummy``, ``coding`` and ``oai`` are hidden; a channel is a
-    third-party SEA that declares ``"kind": "channel"``.
+    third-party SEA that declares ``"channel": True``.
 S6  one name, "SEA", and whole argument descriptions in the tool schema.
 S8  ``tool_profile`` is also an option; ``workspace`` is refused for a
     non-channel; ``run_parallel`` honours ``inherit: false``.
@@ -45,9 +45,9 @@ from kiss.agents.sorcar.sea_docs import precedence_block, precedence_example, re
 from kiss.agents.sorcar.sea_lint import PROSE_FILES, lint_prose
 from kiss.agents.sorcar.sea_settings import (
     PRECEDENCE_RULE,
+    WORKER_DEFAULTS,
     declared_literal,
     declares_hidden,
-    kind_defaults,
     resolve_settings,
 )
 from kiss.core.models.model_info import model
@@ -150,7 +150,7 @@ def test_pinned_is_the_run_config_key_and_renders_a_reachable_example() -> None:
 
 class _Channel(BaseSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        return settings | {"kind": "channel", "work_dir": "/scratch"}
+        return settings | {"channel": True, "work_dir": "/scratch"}
 
 
 class _ChannelWithMemory(_Channel):
@@ -158,9 +158,10 @@ class _ChannelWithMemory(_Channel):
         return settings | {"use_memory": True}
 
 
-def test_channel_kind_locks_every_key_it_sets() -> None:
+def test_channel_flag_locks_the_worker_keys_and_work_dir() -> None:
     resolved = resolve_settings(declared_settings([_Channel()]))
-    assert resolved["locked"] == sorted(kind_defaults()["channel"])
+    assert resolved["kind"] == "worker" and resolved["channel"] is True
+    assert resolved["locked"] == sorted({"work_dir", *WORKER_DEFAULTS})
     assert set(resolved["locked"]) == {
         "work_dir", "use_worktree", "auto_commit", "auto_classify", "allow_fan_out",
         "use_web_tools", "use_memory",
@@ -169,9 +170,9 @@ def test_channel_kind_locks_every_key_it_sets() -> None:
     # locks are added to the kind's); other kinds lock only what they declare.
     derived = resolve_settings(declared_settings([_ChannelWithMemory()]))
     assert derived["use_memory"] is True
-    assert derived["locked"] == sorted(kind_defaults()["channel"])
-    assert resolve_settings({"kind": "channel", "locked": ["model"]})["locked"] == sorted(
-        {"model", *kind_defaults()["channel"]}
+    assert derived["locked"] == sorted({"work_dir", *WORKER_DEFAULTS})
+    assert resolve_settings({"channel": True, "locked": ["model"]})["locked"] == sorted(
+        {"model", "work_dir", *WORKER_DEFAULTS}
     )
     assert "locked" not in resolve_settings({"kind": "worker"})
     assert resolve_settings({"kind": "worker", "locked": ["tool_profile"]})["locked"] == [
@@ -194,12 +195,12 @@ def test_worker_is_a_kind_not_an_alias_and_infrastructure_seas_are_hidden() -> N
     assert declared_literal(Path(DEFAULT_AGENT_PATH), "hidden") is True
     assert declared_literal(Path(DEFAULT_AGENT_PATH), "kind") is None
     assert declared_literal(Path("/no/such/file.py"), "kind") is None
-    # A channel declares its kind literally; ``a2a`` is a command but not a channel.
+    # A channel declares the flag literally; ``a2a`` is a command but not a channel.
     channels = available_channels()
     assert "a2a" in commands and "a2a" not in channels and "oai" not in channels
     for channel in channels:
         path = sea_commands.get_command(channel)
-        assert path is not None and declared_literal(path, "kind") == "channel", channel
+        assert path is not None and declared_literal(path, "channel") is True, channel
 
 
 # --- S6: whole argument descriptions reach the model -----------------------------
@@ -295,7 +296,7 @@ class Sea(BaseSea):
 """)
     run_agent = make_run_agent_tool(str(tmp_path))
     assert run_agent("hi", "helper.py", options='{"workspace": "acct"}') == (
-        "Error: helper: options['workspace'] applies to a channel agent only; helper is a "
-        "session SEA"
+        "Error: helper: options['workspace'] applies to a channel only; helper is not a "
+        "channel (no `channel: True` in its settings)"
     )
     assert RunOptions().workspace == ""
