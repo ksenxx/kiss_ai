@@ -10980,7 +10980,7 @@
    * The event panel that opens a task's transcript with the task's own
    * text: the first panel of the tab's transcript, of a neighbouring
    * task spliced in by scrolling, and of every task of a shared page.
-   * A regular collapsible event panel (chevron, copy button) that
+   * A regular collapsible event panel (click-to-fold header, copy button) that
    * scrolls with the rest of the thread; the collapse passes leave it
    * open, so the thread reads as each task's text followed by its
    * events.
@@ -12408,7 +12408,6 @@
   function toggleThink(el) {
     const p = el.parentElement;
     const hidden = p.querySelector('.cnt').classList.toggle('hidden');
-    el.querySelector('.arrow').classList.toggle('collapsed', hidden);
     el.setAttribute('aria-expanded', hidden ? 'false' : 'true');
   }
 
@@ -12449,7 +12448,6 @@
       if (
         node.classList.contains('panel-copy-btn') ||
         node.classList.contains('panel-stop-btn') ||
-        node.classList.contains('collapse-chv') ||
         node.classList.contains('collapse-preview') ||
         node.classList.contains('panel-ts') ||
         node.classList.contains('panel-time')
@@ -12494,10 +12492,11 @@
     let txt = '';
     for (let i = 0; i < panelEl.children.length; i++) {
       const ch = panelEl.children[i];
+      // The header (and anything wrapping one) stays out of its own
+      // preview; the preview summarizes the body.
       if (
-        ch.classList.contains('collapse-chv') ||
-        ch === prev ||
-        ch.querySelector('.collapse-chv')
+        ch.classList.contains('collapse-header') ||
+        ch.querySelector('.collapse-header')
       )
         continue;
       txt += collectText(ch) + ' ';
@@ -12543,10 +12542,7 @@
 
   function addCollapse(panelEl, headerEl, ts) {
     panelEl.classList.add('collapsible');
-    const chv = mkEl('span', 'collapse-chv');
-    chv.textContent = '\u25BE';
     const prev = mkEl('span', 'collapse-preview');
-    headerEl.insertBefore(chv, headerEl.firstChild);
     headerEl.appendChild(prev);
     headerEl.classList.add('collapse-header');
     headerEl.style.cursor = 'pointer';
@@ -13763,8 +13759,7 @@
         tState.thinkEl = mkEl('div', 'ev think');
         tState.thinkEl.innerHTML =
           '<div class="lbl" onclick="toggleThink(this)" tabindex="0" ' +
-          'role="button" aria-expanded="true">' +
-          '<span class="arrow">\u25BE</span> Thinking</div>' +
+          'role="button" aria-expanded="true">Thinking</div>' +
           '<div class="cnt"></div>';
         tState.thinkCnt = tState.thinkEl.querySelector('.cnt');
         tState.thinkBuf = '';

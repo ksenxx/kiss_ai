@@ -147,8 +147,12 @@ async function main() {
     );
     // Only the header itself answers Enter / Space: a key pressed on a
     // focusable child (a button placed in the header) must be its own.
-    const inner = header.querySelector('.collapse-chv');
-    assert.ok(inner, 'the header carries a chevron');
+    assert.ok(
+      !header.querySelector('.collapse-chv'),
+      'the header carries no chevron',
+    );
+    const inner = header.querySelector('.collapse-preview');
+    assert.ok(inner, 'the header carries the collapse preview');
     h.key(win, inner, 'Enter');
     assert.strictEqual(
       panel.classList.contains('collapsed'),
@@ -203,7 +207,7 @@ async function main() {
     h.key(win, lbl, 'Enter');
     assert.ok(cnt.classList.contains('hidden'), 'Enter folds the thoughts');
     assert.strictEqual(lbl.getAttribute('aria-expanded'), 'false');
-    assert.ok(lbl.querySelector('.arrow').classList.contains('collapsed'));
+    assert.ok(!lbl.querySelector('.arrow'), 'the thinking header has no chevron');
     h.key(win, lbl, ' ');
     assert.ok(!cnt.classList.contains('hidden'), 'Space unfolds them');
     assert.strictEqual(lbl.getAttribute('aria-expanded'), 'true');

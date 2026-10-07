@@ -850,7 +850,7 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
    the transcript panels being neutral. */
 .ev.task-panel {
   border: 1px solid var(--accent-line); border-radius: var(--radius-lg);
-  margin: var(--space-2) 0; overflow: hidden;
+  margin: var(--space-2) 0 var(--space-2) var(--space-1-5); overflow: hidden;
   background: var(--accent-tint);
 }
 
@@ -986,8 +986,6 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
   letter-spacing: .04em; color: var(--dim); margin-bottom: var(--space-1);
   display: flex; align-items: center; gap: var(--space-1-5); cursor: pointer; user-select: none;
 }
-.think .lbl .arrow { transition: transform var(--dur-slow); display: inline-block; font-size: var(--fs-md); }
-.think .lbl .arrow.collapsed { transform: rotate(-90deg); }
 
 /* Keyboard focus ring for the two focusable disclosure headers (tabindex="0" role="button"). */
 .collapse-header:focus-visible,
@@ -1028,11 +1026,13 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
    prompts, the LLM call and the tool result, so the transcript reads as
    one surface and the eye is drawn only to the content and to the few
    state colours (a pending question, a failed result, a warning).
-   Small caps at the regular weight, never bold. */
+   Small caps at the regular weight, never bold; no chevron, no
+   background and no border of its own: the header is a plain text
+   line inside the panel's single outer border. */
 .tc-h {
   padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
   font-weight: 400; text-transform: uppercase; letter-spacing: .04em;
-  background: var(--panel-tint); color: var(--dim);
+  color: var(--dim);
 }
 .tc-h:hover { color: var(--fg); }
 
@@ -1222,7 +1222,7 @@ body.ask-answering #input-container {
 .system-prompt-h, .prompt-h {
   padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
   font-weight: 400; text-transform: uppercase; letter-spacing: .04em;
-  background: var(--panel-tint); color: var(--dim);
+  color: var(--dim);
 }
 
 .system-prompt-body, .prompt-body {
@@ -1240,7 +1240,6 @@ body.ask-answering #input-container {
 
 .ask-answer-h {
   padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm); color: var(--dim);
-  background: var(--panel-tint);
   display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap;
 }
 
@@ -4800,12 +4799,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .collapse-header {
   display: flex; align-items: center;
 }
-
-.collapse-chv {
-  display: inline-block; transition: transform var(--dur-slow);
-  margin-right: var(--space-1); flex-shrink: 0; font-size: var(--fs-md);
-}
-.collapsed .collapse-chv { transform: rotate(-90deg); }
 
 .collapse-preview {
   display: none; color: var(--dim); font-weight: 400;
