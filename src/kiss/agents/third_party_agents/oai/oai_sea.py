@@ -58,6 +58,7 @@ from typing import Any
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
+    drain_request_body,
     start_http_server,
     stop_http_server,
 )
@@ -252,6 +253,19 @@ def _send_json(handler: BaseHTTPRequestHandler, status: int, obj: dict[str, Any]
     handler.wfile.write(body)
 
 
+def _content_length(handler: BaseHTTPRequestHandler) -> int | None:
+    """Return the request's ``Content-Length``, or ``None`` when missing or malformed.
+
+    Args:
+        handler: The active request handler.
+    """
+    try:
+        length = int(handler.headers.get("Content-Length"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return length if length >= 0 else None
+
+
 def _send_error(handler: BaseHTTPRequestHandler, status: int, message: str, err_type: str) -> None:
     """Send an OpenAI-style error response.
 
@@ -323,6 +337,10 @@ class OpenAICompatChannelBackend(ToolMethodBackend):
             def do_POST(self) -> None:
                 if self.path.split("?", 1)[0] != "/v1/chat/completions":
                     _send_error(self, 404, f"Unknown path: {self.path}", "invalid_request_error")
+                    # Closing on unread request bytes resets the
+                    # connection and loses the response (Windows
+                    # clients see WinError 10053 instead of the 404).
+                    drain_request_body(self, _content_length(self))
                     return
                 try:
                     backend._handle_chat_completions(self)
@@ -359,14 +377,14 @@ class OpenAICompatChannelBackend(ToolMethodBackend):
         """Serve one ``POST /v1/chat/completions`` request."""
         auth = handler.headers.get("Authorization", "")
         token = auth[len("Bearer ") :].strip() if auth.startswith("Bearer ") else ""
+        length = _content_length(handler)
         if not token or not hmac.compare_digest(token, self._api_key):
             _send_error(handler, 401, "Invalid or missing bearer token.", "invalid_request_error")
+            # Same as the 404 above: let the client finish sending so
+            # the 401 is delivered rather than reset away.
+            drain_request_body(handler, length)
             return
-        try:
-            length = int(handler.headers.get("Content-Length"))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            length = -1
-        if length < 0:
+        if length is None:
             _send_error(
                 handler,
                 400,
