@@ -138,7 +138,13 @@ function testNestsAllPanelsBackToPromptInOrder() {
   send(win, {type: 'thinking_delta', text: 'pondering...'});
   send(win, {type: 'thinking_end'});
   const before = topLevel(win);
-  const expectNested = before.slice(1);
+  // A Thoughts panel is never folded or hidden by the software, so the
+  // summary leaves it on the transcript and adopts the tool panels.
+  const thoughts = before.filter(el => el.classList.contains('llm-panel'));
+  assert.strictEqual(thoughts.length, 1, 'the run rendered one Thoughts panel');
+  const expectNested = before
+    .slice(1)
+    .filter(el => !el.classList.contains('llm-panel'));
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
   const sub = p.querySelector(':scope > .summary-sub');
@@ -146,8 +152,8 @@ function testNestsAllPanelsBackToPromptInOrder() {
   const nested = Array.from(sub.children);
   assert.strictEqual(
     nested.length,
-    8,
-    'ALL 8 event panels since the beginning must nest (not just the ' +
+    7,
+    'ALL 7 tool panels since the beginning must nest (not just the ' +
       'last 6) — got ' +
       nested.length,
   );
@@ -159,19 +165,21 @@ function testNestsAllPanelsBackToPromptInOrder() {
     );
   }
   assert.ok(
-    nested.some(el => el.classList.contains('llm-panel')),
-    'Thoughts (llm-panel) panels count as event panels and must nest',
+    !nested.some(el => el.classList.contains('llm-panel')),
+    'a Thoughts (llm-panel) panel is never adopted by a summary',
   );
   const after = topLevel(win);
   assert.strictEqual(
     after.length,
-    2,
-    'top level must be: prompt + summary panel',
+    3,
+    'top level must be: prompt + Thoughts + summary panel',
   );
   assert.ok(after[0].classList.contains('prompt'), 'prompt stays first');
-  assert.strictEqual(after[1], p, 'summary panel is the last child');
+  assert.strictEqual(after[1], thoughts[0], 'the Thoughts panel stays open on the transcript');
+  assert.ok(!thoughts[0].classList.contains('collapsed'));
+  assert.strictEqual(after[2], p, 'summary panel is the last child');
   win.close();
-  console.log('  ok - ALL panels back to the prompt nest, order kept');
+  console.log('  ok - ALL tool panels back to the prompt nest, order kept');
 }
 
 function testStopsAtPromptBoundary() {

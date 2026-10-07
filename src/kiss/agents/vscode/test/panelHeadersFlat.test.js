@@ -152,7 +152,12 @@ function cssRules(win) {
 /** The left margin, in px, that the rule for *selector* declares. */
 function marginLeftPx(win, selector) {
   const rules = cssRules(win);
-  const rule = rules.find(r => r.selectorText === selector);
+  // The rule may group several selectors (`.ev.task-panel, .ev.user-msg`).
+  const rule = rules.find(
+    r =>
+      typeof r.selectorText === 'string' &&
+      r.selectorText.split(',').some(s => s.trim() === selector),
+  );
   assert.ok(rule, 'main.css declares ' + selector);
   const m = /margin:\s*([^;]+);/.exec(rule.cssText);
   assert.ok(m, selector + ' declares a margin: ' + rule.cssText);
