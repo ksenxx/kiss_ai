@@ -10,7 +10,7 @@ populated end-to-end by update_models.py:
 1. ``_build_entry`` emits a ``thinking`` key in the JSON entry when the
    level is set, and omits it otherwise.
 2. ``detect_thinking_level`` short-circuits to ``None`` for backends that
-   don't accept ``reasoning_effort`` (codex/*, claude-*, gemini-*) and for
+   don't accept ``reasoning_effort`` (codex/*, cc/*, gemini-*) and for
    variants known to reject it (``-pro``, ``-chat-latest``, ``-image``) and
    for unrelated prefixes (Together, OpenRouter non-OpenAI), so we never
    waste an API call on them.
@@ -71,9 +71,24 @@ def test_thinking_probe_skipped_for_codex_models():
     assert _probe("codex/gpt-5.5") is None
 
 
-def test_thinking_probe_skipped_for_claude_models():
-    """Anthropic Claude does not accept reasoning_effort."""
-    assert _probe("claude-3-5-sonnet-20241022") is None
+def test_thinking_probe_runs_for_claude_models(monkeypatch):
+    """Direct ``claude-*`` models are probed: the adapter maps
+    ``reasoning_effort`` to Anthropic ``output_config.effort``."""
+    seen: list[str] = []
+
+    class _Stub:
+        def __init__(self, name, model_config=None, **kw):
+            seen.append(model_config["reasoning_effort"])
+
+        def initialize(self, *a, **kw):
+            pass
+
+        def generate(self):
+            return "hi", None
+
+    monkeypatch.setattr("kiss.core.models.model_info.model", _Stub)
+    assert _probe("claude-opus-5-5") == "max"
+    assert seen == ["max"]
 
 
 def test_thinking_probe_skipped_for_gemini_models():

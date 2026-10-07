@@ -1,11 +1,11 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **714 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **768 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 111 |
-| Anthropic | 16 |
+| Anthropic | 70 |
 | Gemini | 20 |
 | Together AI | 103 |
 | Z.AI | 8 |
@@ -16,8 +16,8 @@ KISS Sorcar ships a catalog of **714 models** across **9 provider categories**, 
 
 Current catalog capability totals:
 
-- **690** generation-capable models
-- **527** function-calling-capable models
+- **744** generation-capable models
+- **581** function-calling-capable models
 - **7** embedding models
 - **9** decision models
 
@@ -141,24 +141,78 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Anthropic (16)</strong></summary>
+<summary><strong>Anthropic (70)</strong></summary>
 
 - `claude-fable-5`
 - `claude-fable-5-1`
+- `claude-fable-5-1-high`
+- `claude-fable-5-1-low`
+- `claude-fable-5-1-max`
+- `claude-fable-5-1-medium`
+- `claude-fable-5-1-xhigh`
+- `claude-fable-5-high`
+- `claude-fable-5-low`
+- `claude-fable-5-max`
+- `claude-fable-5-medium`
+- `claude-fable-5-xhigh`
 - `claude-haiku-4-5`
 - `claude-haiku-4-5-20251001`
 - `claude-opus-4-5`
 - `claude-opus-4-5-20251101`
+- `claude-opus-4-5-20251101-high`
+- `claude-opus-4-5-20251101-low`
+- `claude-opus-4-5-20251101-medium`
+- `claude-opus-4-5-high`
+- `claude-opus-4-5-low`
+- `claude-opus-4-5-medium`
 - `claude-opus-4-6`
+- `claude-opus-4-6-high`
+- `claude-opus-4-6-low`
+- `claude-opus-4-6-max`
+- `claude-opus-4-6-medium`
 - `claude-opus-4-7`
+- `claude-opus-4-7-high`
+- `claude-opus-4-7-low`
+- `claude-opus-4-7-max`
+- `claude-opus-4-7-medium`
+- `claude-opus-4-7-xhigh`
 - `claude-opus-4-8`
+- `claude-opus-4-8-high`
+- `claude-opus-4-8-low`
+- `claude-opus-4-8-max`
+- `claude-opus-4-8-medium`
+- `claude-opus-4-8-xhigh`
 - `claude-opus-5`
 - `claude-opus-5-5`
+- `claude-opus-5-5-high`
+- `claude-opus-5-5-low`
+- `claude-opus-5-5-max`
+- `claude-opus-5-5-medium`
+- `claude-opus-5-5-xhigh`
+- `claude-opus-5-high`
+- `claude-opus-5-low`
+- `claude-opus-5-max`
+- `claude-opus-5-medium`
+- `claude-opus-5-xhigh`
 - `claude-sonnet-4-5`
 - `claude-sonnet-4-5-20250929`
 - `claude-sonnet-4-6`
+- `claude-sonnet-4-6-high`
+- `claude-sonnet-4-6-low`
+- `claude-sonnet-4-6-max`
+- `claude-sonnet-4-6-medium`
 - `claude-sonnet-5`
 - `claude-sonnet-5-5`
+- `claude-sonnet-5-5-high`
+- `claude-sonnet-5-5-low`
+- `claude-sonnet-5-5-max`
+- `claude-sonnet-5-5-medium`
+- `claude-sonnet-5-5-xhigh`
+- `claude-sonnet-5-high`
+- `claude-sonnet-5-low`
+- `claude-sonnet-5-max`
+- `claude-sonnet-5-medium`
+- `claude-sonnet-5-xhigh`
 
 </details>
 

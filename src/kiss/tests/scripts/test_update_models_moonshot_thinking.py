@@ -124,7 +124,7 @@ class TestThinkingScaleSelection:
             "gpt-5.6-sol",
             "o4-mini",
             "openrouter/openai/gpt-5.5",
-            "claude-opus-4-7",
+            "openrouter/anthropic/claude-opus-4.7",
             "gemini-3.6-flash",
             "glm-4.6",
         ):
@@ -478,7 +478,7 @@ class TestDetectThinkingLevelMoonshot:
         import kiss.scripts.update_models as mod
 
         _MoonshotHandler.captured_efforts = []
-        for name in ("claude-opus-4-7", "gemini-3.6-flash", "codex/gpt-5.5", "glm-4.6"):
+        for name in ("cc/claude-opus-4-7", "gemini-3.6-flash", "codex/gpt-5.5", "glm-4.6"):
             assert mod.detect_thinking_level(name) is None, name
         assert _MoonshotHandler.captured_efforts == []
 

@@ -1808,7 +1808,7 @@ def get_default_model() -> str:
     """
     return _model_for_first_configured_provider(
         {
-            "ANTHROPIC_API_KEY": "claude-opus-5-5-medium",
+            "ANTHROPIC_API_KEY": "claude-opus-5-5",
             "OPENAI_API_KEY": "gpt-6.1-sol-medium",
             "GEMINI_API_KEY": "gemini-3.8-flash",
             "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-5.5",
@@ -2072,18 +2072,38 @@ def openrouter_twin(model_name: str) -> str | None:
     Args:
         model_name: A model name from the catalog.
 
+    A generated ``-{level}`` effort alias (``claude-opus-5-5-medium``,
+    ``gpt-6.1-sol-medium``) is matched by its base id; the twin keeps the
+    same level when OpenRouter's side has a matching generated alias
+    (``openrouter/openai/gpt-6.1-sol-medium``) and falls back to the bare
+    twin otherwise (``openrouter/anthropic/claude-opus-5.5``).
+
+    Args:
+        model_name: A model name from the catalog.
+
     Returns:
         The OpenRouter catalog key, or ``None`` when *model_name* already
         names a routed model (contains ``/``) or has no twin.
     """
-    bare = _strip_provider_prefix(model_name)
-    if "/" in bare:
+    # Harbor-style ``anthropic/`` / ``openai/`` / ``google/`` prefixes are
+    # dropped first so the alias lookup below sees the exact catalog key;
+    # anything still routed (``openrouter/...``, ``meta-llama/...``) has no
+    # twin.  The alias lookup needs the exact key, which is why the
+    # alias is resolved only after the redundant prefix is gone.
+    bare_alias = _strip_provider_prefix(model_name)
+    if "/" in bare_alias:
         return None
+    bare = _strip_thinking_alias(bare_alias)
+    level_suffix = bare_alias[len(bare) :] if bare != bare_alias else ""
     wanted = _twin_key(bare)
     for key in MODEL_INFO:
         if not key.startswith("openrouter/") or "/~" in key:
             continue
         if _twin_key(key.rsplit("/", 1)[-1]) == wanted:
+            if level_suffix:
+                leveled = MODEL_INFO.get(key + level_suffix)
+                if leveled is not None and leveled.alias_of == key:
+                    return key + level_suffix
             return key
     return None
 
