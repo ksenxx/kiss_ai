@@ -219,6 +219,10 @@ export type PanelEvent =
       pendingText?: string;
       // Fresh chats: submit pendingText as the first task once ready.
       autoSubmit?: boolean;
+      // Leave a panel already bound to chatId untouched (no reveal, no
+      // task change): the chat's history panel was expanded, which
+      // only brings a chat on screen that is not there yet.
+      onlyIfMissing?: boolean;
     }
   // Close this panel. retire=true means the USER closed the root chat
   // inside the panel, so the host must also retire the tab from the
@@ -1731,6 +1735,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           title: message.title,
           pendingText: message.pendingText,
           autoSubmit: message.autoSubmit,
+          onlyIfMissing: message.onlyIfMissing,
         });
         break;
 
@@ -2104,13 +2109,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * or show the task text read-only when there is nothing to resume).
    *
    * @param event The clicked chat/task: backend chat id ('' or absent
-   *     when the task has nothing to resume), the task's id, and the
-   *     task text for the read-only fallback.
+   *     when the task has nothing to resume), the task's id, the
+   *     task text for the read-only fallback, and onlyIfMissing when
+   *     a tab already showing the chat must be left alone (a chat
+   *     panel expanded in the history list).
    */
   public async openChatFromHistory(event: {
     chatId?: string;
     taskId?: string | number | null;
     title?: string;
+    onlyIfMissing?: boolean;
   }): Promise<void> {
     await this.focusChatInput();
     await this._waitForWebviewReady();
@@ -2127,6 +2135,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       chatId: event.chatId ? String(event.chatId) : '',
       taskId: event.taskId === undefined ? null : event.taskId,
       title: event.title || '',
+      onlyIfMissing: !!event.onlyIfMissing,
     });
   }
 

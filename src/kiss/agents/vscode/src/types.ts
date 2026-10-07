@@ -436,6 +436,11 @@ export type FromWebviewMessage =
       // first task as soon as the panel is ready (the Apps subpanel's
       // "connect this app" launch).
       autoSubmit?: boolean;
+      // Only bring the chat on screen when no tab shows it yet: a tab
+      // already bound to chatId is left as it is (no reveal, no task
+      // change). Posted when a chat's panel in the history list is
+      // expanded, as opposed to a click on one of its task rows.
+      onlyIfMissing?: boolean;
     }
   // Editor-tabs mode: close this panel — because the daemon's registry
   // no longer lists its chat tab (another client closed it; retire
@@ -1055,6 +1060,8 @@ type ToWebviewMessageBody =
       chatId: string;
       taskId: string | number | null;
       title: string;
+      // A tab already bound to chatId is left alone (see openChatPanel).
+      onlyIfMissing: boolean;
     }
   // Daemon: answer to a `complete` command (the input-box ghost /
   // autocomplete list), scoped to the requesting connection and tab.

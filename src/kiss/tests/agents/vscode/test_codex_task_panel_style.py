@@ -457,7 +457,18 @@ _EXPAND_GROUP_JS = r"""
   // running): open the injected chat's panel so its row lays out.
   const g = document.querySelector('#history-list .history-chat-group');
   if (g && g.classList.contains('collapsed')) {
+    // Expanding a panel also opens the chat's last task in a tab when
+    // no tab shows the chat yet; the injected transcript lives in the
+    // original tab, so come back to it (its output is saved and
+    // restored across the switch).
+    const before = window.kissActiveTabId();
     g.querySelector('.history-chat-header').click();
+    if (window.kissActiveTabId() !== before) {
+      const tab = document.querySelector(
+        '#main-tab-list .chat-tab[data-tab-id="' + before + '"]',
+      );
+      if (tab) tab.click();
+    }
   }
   return g ? !g.classList.contains('collapsed') : false;
 })()
