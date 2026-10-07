@@ -3,8 +3,8 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The ask_user_question "Question" panel, which carries the user's
-// Answer once the tool returns, is never folded or hidden by any
+// The ask_user_question "Question" panel and its separate user response
+// once the tool returns are never folded or hidden by any
 // automatic pass of the chat webview, on any surface the tab is loaded
 // on (the VS Code sidebar, an editor panel, the remote webapp, a share
 // export):
@@ -137,9 +137,10 @@ function assertOpenAndOnScreen(panel, where) {
     !panel.closest('.summary-sub'),
     'BUG: the question panel was swallowed by a summary ' + where,
   );
-  const answer = panel.querySelector('.tc-question-answer-text');
-  assert.ok(answer, 'the answer renders inside the question ' + where);
-  assert.strictEqual(answer.textContent, ANSWER);
+  const response = panel.nextElementSibling;
+  assert.ok(response.classList.contains('user-msg'), 'the response is a user message ' + where);
+  assert.ok(!response.classList.contains('collapsed'), 'the response stays open ' + where);
+  assert.strictEqual(response.querySelector('.task-panel-text').textContent, ANSWER);
   assert.ok(
     !panel.classList.contains('tc-question-pending'),
     'an answered question is not marked pending ' + where,
@@ -252,9 +253,9 @@ async function testSummaryToolLeavesQuestionOnTranscript() {
   const panel = questionPanelIn(out);
   assertOpenAndOnScreen(panel, 'when a summary adopted its neighbours');
   assert.strictEqual(
-    panel.nextElementSibling,
+    panel.previousElementSibling,
     summary,
-    'the question sits on the transcript right before the summary',
+    'the question sits on the transcript right after the summary',
   );
   await closeQuietly(win);
   console.log('  ok - the summary tool leaves the question on the transcript');

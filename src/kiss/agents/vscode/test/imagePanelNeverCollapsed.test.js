@@ -235,9 +235,8 @@ function testReplayKeepsImagePanelOpenAndVisible() {
   console.log('ok: a replayed image panel stays open and on screen');
 }
 
-// A `summary` tool call adopts every panel before it into its own
-// collapsed digest.  When one of those shows an image, the digest must
-// stay open (the picture would otherwise vanish behind the fold).
+// A `summary` folds ordinary panels and leaves image panels expanded
+// after it, outside the collapsed digest.
 function testSummaryAdoptionKeepsImageVisible() {
   const wv = makeWebview();
   const win = wv.win;
@@ -265,13 +264,13 @@ function testSummaryAdoptionKeepsImageVisible() {
   const summary = win.document.querySelector('#output .tc-summary');
   assert.ok(summary, 'the summary panel renders');
   assert.ok(
-    summary.querySelector('.summary-sub img.tr-img'),
-    'the summary adopted the image panel',
+    !summary.querySelector('.summary-sub img.tr-img'),
+    'the summary must not adopt the image panel',
   );
-  assert.ok(
-    !summary.classList.contains('collapsed'),
-    'BUG: a summary that adopted an image panel was auto-collapsed',
-  );
+  const imagePanel = summary.nextElementSibling;
+  assert.ok(imagePanel.querySelector('img.tr-img'), 'the image follows the summary');
+  assert.ok(!imagePanel.classList.contains('collapsed'), 'the image remains expanded');
+  assert.ok(summary.classList.contains('collapsed'), 'the summary folds normally');
   // Without an image the digest folds as before.
   send(win, {type: 'tool_call', name: 'Read', path: 'x.txt', tabId: TAB});
   send(win, {
@@ -293,7 +292,7 @@ function testSummaryAdoptionKeepsImageVisible() {
     summaries[1].classList.contains('collapsed'),
     'a summary adopting only text panels still folds',
   );
-  console.log('ok: a summary that adopts an image panel stays open');
+  console.log('ok: a summary folds with its image panel visible after it');
 }
 
 function main() {

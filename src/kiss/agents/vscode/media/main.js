@@ -11342,7 +11342,7 @@
         inRunning ||
         p.classList.contains('rc') ||
         p.classList.contains('task-panel') ||
-        panelShowsImage(p) ||
+        panelShowsMedia(p) ||
         panelStaysOpen(p)
       )
         continue;
@@ -13179,18 +13179,15 @@
 
   // imagepanel-coverage:start
   /**
-   * Whether *panel* shows a picture (a tool result's images, see
-   * appendResultImages).  Such a panel is never folded or hidden by the
-   * automatic passes below -- on any surface, a screenshot the agent
-   * took or a chart it produced stays in view; only the user's own
-   * click on the chevron collapses it.
+   * Whether a panel contains an image or video, including rendered
+   * Markdown and HTML. Automatic folding leaves these panels readable;
+   * the user can still fold them by clicking their header.
+   *
+   * @param {Element} panel The transcript panel.
+   * @returns {boolean} Whether the panel contains visual media.
    */
-  function panelShowsImage(panel) {
-    return !!(
-      panel &&
-      panel.querySelector &&
-      panel.querySelector('img.tr-img')
-    );
+  function panelShowsMedia(panel) {
+    return !!panel.querySelector('img, video');
   }
   // imagepanel-coverage:end
 
@@ -13198,8 +13195,8 @@
    * True for a panel that no automatic pass ever folds or hides: a
    * Thoughts panel (`llm-panel`, the agent's words), a message the
    * user typed into the running task (`user-msg`), a `/ask` answer
-   * (an `ask_answer` event) or an ask_user_question "Question" panel,
-   * which holds the user's answer too once the tool returns.
+   * (an `ask_answer` event) or an ask_user_question "Question" panel.
+   * The user's response is a separate `user-msg` panel.
    *
    * These are what the agent said and what the user said or asked for
    * while the task ran, so they stay readable on any surface the tab
@@ -13231,7 +13228,7 @@
       if (p.classList.contains('rc')) continue;
       // The task's own text opens its transcript and stays readable.
       if (p.classList.contains('task-panel')) continue;
-      if (panelShowsImage(p)) continue;
+      if (panelShowsMedia(p)) continue;
       // A `/ask` answer is never folded by the software (see
       // panelStaysOpen): a reloaded, shared or neighbouring
       // transcript shows it exactly as the live one did.
@@ -13326,7 +13323,7 @@
       // answer, while the task keeps streaming: the next event must not
       // fold it away.
       if (panelStaysOpen(p)) continue;
-      if (panelShowsImage(p)) continue;
+      if (panelShowsMedia(p)) continue;
       if (p.classList.contains('tc-run-parallel'))
         rpAdoptOpenSubagents(p, tabId);
       if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
@@ -13632,7 +13629,7 @@
     // imagepanel-coverage:start
     // The panel now shows a picture: if an automatic pass folded it
     // before the result arrived (an older panel of a streaming
-    // transcript), open it again -- see panelShowsImage.
+    // transcript), open it again -- see panelShowsMedia.
     const panel = container.closest ? container.closest('.collapsible') : null;
     if (panel && panel.classList.contains('collapsed')) {
       panel.classList.remove('collapsed');
@@ -14116,9 +14113,11 @@
         if (isSummary) {
           const sub = mkEl('div', 'summary-sub');
           const adopt = [];
+          const preserve = [];
           let sib = c.previousElementSibling;
           while (sib) {
             if (
+              sib.dataset.summaryPreserved ||
               sib.classList.contains('tc-summary') ||
               sib.classList.contains('trajectory') ||
               sib.classList.contains('prompt') ||
@@ -14133,30 +14132,27 @@
               !sib.classList.contains('llm-panel')
             )
               break;
-            // A `/ask` answer, a Question or a steering Message stays
-            // on the transcript, in front of the summary that folds its
-            // neighbours (panelStaysOpen).  A Thoughts panel, which no
-            // other automatic pass folds, IS folded into the summary:
-            // the summary stands for the steps it recounts, their
-            // thoughts included.
-            if (!panelStaysOpen(sib) || sib.classList.contains('llm-panel'))
-              adopt.push(sib);
+            // Text-only Thoughts belong in the digest; media, questions
+            // and messages remain expanded siblings after it.
+            if (
+              panelShowsMedia(sib) ||
+              (panelStaysOpen(sib) && !sib.classList.contains('llm-panel'))
+            )
+              preserve.push(sib);
+            else adopt.push(sib);
             sib = sib.previousElementSibling;
           }
           for (let ai = adopt.length - 1; ai >= 0; ai--)
             sub.appendChild(adopt[ai]);
           c.appendChild(sub);
-          // A summary folds the panels it adopted -- unless one of
-          // them shows an image: a picture the agent produced stays on
-          // screen until the user folds it (panelShowsImage).
-          if (!panelShowsImage(c)) {
-            c.classList.add('collapsed');
-            // The adopted panels are now hidden behind this collapsed
-            // summary; a fan-out panel among them must give its
-            // sub-agent tabs up like any other collapsed fan-out.
-            collapseNestedRunParallel(c);
-            syncCollapseAria(c);
+          for (let pi = preserve.length - 1; pi >= 0; pi--) {
+            // A later summary must not move this summary's panels again.
+            preserve[pi].dataset.summaryPreserved = '1';
+            target.appendChild(preserve[pi]);
           }
+          c.classList.add('collapsed');
+          collapseNestedRunParallel(c);
+          syncCollapseAria(c);
         }
         tState.lastToolCallEl = c;
         stampPanelStart(c, ev.ts);
@@ -14249,17 +14245,16 @@
           tState.lastToolCallEl &&
           tState.lastToolCallEl.classList.contains('tc-question')
         ) {
-          // The user's answer, read back from the tool's return value
-          // so a replay shows it under its question too.
-          const ans = mkEl('div', 'tc-question-answer');
-          const lbl = mkEl('span', 'tc-question-answer-label');
-          lbl.textContent = 'Answer';
-          const txt = mkEl('div', 'tc-question-answer-text');
-          txt.textContent = ev.content || '';
-          ans.appendChild(lbl);
-          ans.appendChild(txt);
-          ans.dataset.rawText = 'Answer: ' + (ev.content || '');
-          resultTarget.appendChild(ans);
+          // The tool returns the user's words: render a separate user
+          // bubble, not agent output nested inside the question.
+          target.appendChild(
+            createUserTextPanel(
+              'user-msg tc-question-answer',
+              'Response',
+              ev.content || '',
+              ev.ts,
+            ),
+          );
           setQuestionPanelPending(resultTarget, false);
         } else {
           const op = mkEl('div', 'bash-panel');

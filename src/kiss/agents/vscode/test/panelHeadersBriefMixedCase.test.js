@@ -148,7 +148,7 @@ function testSummaryFoldsThoughtsToo() {
   // The one automatic fold a Thoughts panel takes part in: a summary
   // tool call adopts the Thoughts panels of the steps it recounts
   // along with their tool panels (a steering Message, an answer or a
-  // Question still stay out in front of it).
+  // Question remain expanded after it).
   const win = makeWebview();
   startTask(win, 'Summarize around the thoughts');
   for (let i = 1; i <= 3; i++) sendStep(win, i);
@@ -165,7 +165,8 @@ function testSummaryFoldsThoughtsToo() {
     'the summary adopts the tool panels: ' + adopted.map(e => e.className).join(','),
   );
   const top = topLevel(win);
-  assert.strictEqual(top[top.length - 1], summary, 'the summary is the newest panel');
+  assert.strictEqual(top[top.length - 2], summary, 'the summary precedes the preserved message');
+  assert.ok(top[top.length - 1].classList.contains('user-msg'), 'the preserved message follows the summary');
   assert.strictEqual(
     top.filter(p => p.classList.contains('llm-panel')).length,
     0,
@@ -173,7 +174,7 @@ function testSummaryFoldsThoughtsToo() {
   );
   assert.ok(
     top.some(p => p.classList.contains('user-msg')),
-    'the steering Message panel stays top-level, in front of the summary',
+    'the steering Message panel stays top-level, after the summary',
   );
   win.close();
   console.log('  ok - a summary tool call folds the Thoughts panels of its steps');
