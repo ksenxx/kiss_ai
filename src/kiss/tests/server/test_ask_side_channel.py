@@ -215,6 +215,7 @@ def test_ask_message_bypasses_pending_queue_and_dispatches() -> None:
         "type": "prompt",
         "text": "/ask why did the last step fail?",
         "tabId": "tab-1",
+        "steer": True,
         "taskId": "task-abc",
     }]
 
@@ -242,7 +243,8 @@ def test_ask_help_answers_with_the_description_without_dispatch() -> None:
     assert st.pending_user_messages == []
     assert calls == []
     assert [e for e in events if e.get("type") == "prompt"] == [{
-        "type": "prompt", "text": "/ask HELP", "tabId": "tab-1", "taskId": "task-abc",
+        "type": "prompt", "text": "/ask HELP", "tabId": "tab-1", "steer": True,
+        "taskId": "task-abc",
     }]
     assert [e for e in events if e.get("type") == "ask_answer"] == [{
         "type": "ask_answer",

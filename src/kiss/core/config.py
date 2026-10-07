@@ -8,6 +8,7 @@
 import math
 import os
 import random
+import sqlite3
 import threading
 import time
 from collections.abc import Callable
@@ -208,6 +209,43 @@ def _adoption_pending(path: Path, legacy: Path, stale: Callable[[Path], bool] | 
     except OSError:  # pragma: no cover — one of the two vanished meanwhile
         return False
     return not same and stale(path)
+
+
+def is_pre_2026_04_db(path: Path) -> bool:
+    """Tell whether the task database at *path* was last written before 2026-04-24.
+
+    The database was called ``history.db`` until 2026-04-24, ``sorcar.db``
+    from then until version 2026.10.2, and ``history.db`` again since; an
+    install from the spring of 2026 therefore holds both names, and the
+    leftover under the current name is told apart by its schema:
+    ``task_history.id`` is an ``INTEGER``, which no version since the UUID
+    migration of 2026-06-28 writes.  The deploy helper
+    ``src/kiss/scripts/legacy_task_db.py`` carries the same probe because
+    it is piped standalone into a remote ``python3 -`` and cannot import
+    this package.
+
+    Args:
+        path: The database file to inspect; it is opened read-only.
+
+    Returns:
+        True for the pre-rename schema; False for the current schema, for
+        a file without a ``task_history`` table, and for one SQLite cannot
+        read (left as it is: nothing is set aside on a guess).
+    """
+    try:
+        conn = sqlite3.connect(f"{Path(os.path.abspath(path)).as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error:  # pragma: no cover — unreadable file
+        return False
+    try:
+        cols = {
+            r[1]: (r[2] or "").upper()
+            for r in conn.execute("PRAGMA table_info(task_history)").fetchall()
+        }
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+    return cols.get("id") == "INTEGER"
 
 
 def agents_md_path() -> Path:

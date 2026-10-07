@@ -60,6 +60,10 @@ SIDECARS = ("-wal", "-shm", "")
 def is_pre_2026_04_db(path: Path) -> bool:
     """Tell whether the database at *path* was last written before 2026-04-24.
 
+    Same probe as :func:`kiss.core.config.is_pre_2026_04_db`, repeated
+    here because this file is piped standalone into a remote ``python3 -``
+    and cannot import the package.
+
     Args:
         path: The database file to inspect; it is opened read-only.
 

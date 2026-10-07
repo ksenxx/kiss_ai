@@ -600,6 +600,7 @@ _LEGACY_VIEW_PROBE_JS = r"""(() => {
     borderRightColor: cs.borderRightColor,
     borderLeftColor: cs.borderLeftColor,
     inlineStyle: row.getAttribute('style'),
+    activeRow: row.classList.contains('history-active-task'),
   };
   toggle.click();
   out.restoredGroups = list.querySelectorAll('.history-chat-group').length;
@@ -987,7 +988,10 @@ def test_live_task_panel_typography_and_history_rows(
     assert legacy["borderRightWidth"] == legacy["borderLeftWidth"] == "1px", (
         "the legacy row carries no per-chat colour bar: " + repr(legacy)
     )
-    assert _alpha_of(legacy["borderRightColor"]) == 0, (
+    # The row of the task the chat on screen is bound to carries the
+    # accent outline of ``.running-item.history-active-task`` (pinned by
+    # test_history_panel_tints); every other legacy row has none.
+    assert legacy["activeRow"] or _alpha_of(legacy["borderRightColor"]) == 0, (
         "the legacy row's outline is transparent: " + repr(legacy)
     )
     assert legacy["inlineStyle"] is None, (

@@ -861,11 +861,18 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
             await ws.send(json.dumps({"type": "stop", "tabId": "no-task"}))
             await ws.send(json.dumps({"type": "getModels"}))
-            ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            # The startup PyPI check broadcasts ``update_available`` to
+            # every client whenever it completes, so an unrelated
+            # broadcast may land between the two replies.
+            replies: list[dict[str, Any]] = []
+            while len(replies) < 2:
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                if msg["type"] != "update_available":
+                    replies.append(msg)
+            ack, resp = replies
             self.assertEqual(ack["type"], "stop_ack")
             self.assertIs(ack["accepted"], False)
             self.assertEqual(ack["tabId"], "no-task")
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
 
     async def test_ws_record_file_usage(self) -> None:

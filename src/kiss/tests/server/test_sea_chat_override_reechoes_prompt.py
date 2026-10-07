@@ -83,7 +83,7 @@ class TestSeaChatOverrideReechoesPrompt(unittest.TestCase):
             "useWorktree": False,
             "autoCommit": False,
             "model": "",
-            "agentPath": str(script),
+            "seaPath": str(script),
         })
         state = agent_state.find_by_tab(tab_id)
         assert state is not None and state.task_thread is not None

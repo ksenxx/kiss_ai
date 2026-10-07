@@ -78,6 +78,7 @@ def test_thinking_probe_runs_for_claude_models(monkeypatch):
 
     class _Stub:
         def __init__(self, name, model_config=None, **kw):
+            assert model_config is not None
             seen.append(model_config["reasoning_effort"])
 
         def initialize(self, *a, **kw):

@@ -241,7 +241,6 @@ test('a run with an agent script shows the Agent row; a plain run hides it', () 
       ...SETTINGS,
       task_id: 'task-3',
       sea: 'sh',
-      kind: 'worker',
       tool_profile: 'bash',
       timeout: 3600,
       inherited: ['model', 'chat_id'],
@@ -253,7 +252,7 @@ test('a run with an agent script shows the Agent row; a plain run hides it', () 
   assert.ok(!doc.getElementById('meta-agent-item').hidden, 'script: row shown');
   assert.strictEqual(
     doc.getElementById('meta-agent').textContent,
-    'sh (worker) \u2022 tools bash \u2022 timeout 3600s \u2022 ' +
+    'sh \u2022 tools bash \u2022 timeout 3600s \u2022 ' +
       'pinned use_worktree(true->false), work_dir(empty->/tmp/x)',
   );
   send(win, {type: 'clear', chat_id: 'chat-abc', tabId: TAB});
