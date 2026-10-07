@@ -418,6 +418,18 @@ _rw_lock = _RWLock()
 
 _init_tables_lock = threading.Lock()
 
+# Serializes a task's usage finalization against spend charged to it
+# from another thread: a run's final "read the ledger, save the row with
+# its end stamp" and its last ``usage_info`` on one side, a late charge's
+# "is the row finished? then add to the row, else bank on the live
+# ledger and publish" on the other (``charge_side_channel_usage``).
+# Without it a charge could check the row (unfinished), lose the CPU to
+# the final save, then bank on a ledger nothing reads again — or publish
+# newer totals that the run's stale last event then overwrites.  Held
+# only around those short DB/ledger/printer sections, never across a
+# join or a model call.
+TASK_USAGE_LOCK = threading.Lock()
+
 
 _chat_context_text_cache: dict[str, str] = {}
 _chat_context_cache_lock = threading.Lock()

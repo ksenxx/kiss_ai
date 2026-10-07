@@ -20,9 +20,11 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.bare_path_task import with_open_directive
 from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
+    TASK_USAGE_LOCK,
     _add_task,
     _allocate_chat_id,
     _append_chat_event,
@@ -837,10 +839,6 @@ class ChatSorcarAgent(SorcarAgent):
                 else:
                     final_model = resolved_model
                     final_is_parallel = run_is_parallel
-                # One coherent triple (see usage_snapshot): three
-                # property reads could tear across a concurrent
-                # abandoned-subagent reclaim.
-                final_cost, final_tokens, final_steps = self.usage_snapshot()
                 extra_payload = self._build_extra_payload(
                     model=final_model,
                     work_dir=resolved_work_dir,
@@ -849,13 +847,22 @@ class ChatSorcarAgent(SorcarAgent):
                     max_budget=resolved_budget,
                     auto_commit_mode=auto_commit_mode,
                 )
-                extra_payload["tokens"] = final_tokens
-                extra_payload["cost"] = round(final_cost, 6)
-                extra_payload["steps"] = final_steps
-                # The run is over: stamp its end so sub-agents (which no
-                # server runner finalises) get a duration too.
-                extra_payload["endTs"] = int(time.time() * 1000)
-                _save_task_extra(extra_payload, task_id=task_id)
+                # One coherent triple (see usage_snapshot): three
+                # property reads could tear across a concurrent
+                # abandoned-subagent reclaim.  Read and saved under
+                # TASK_USAGE_LOCK, so a sub-task's late charge either
+                # lands on the ledger before this read or finds the
+                # finished row and adds to it (charge_side_channel_usage).
+                with TASK_USAGE_LOCK:
+                    final_cost, final_tokens, final_steps = self.usage_snapshot()
+                    _race_delay()  # test hook: widens the snapshot-to-save window
+                    extra_payload["tokens"] = final_tokens
+                    extra_payload["cost"] = round(final_cost, 6)
+                    extra_payload["steps"] = final_steps
+                    # The run is over: stamp its end so sub-agents (which
+                    # no server runner finalises) get a duration too.
+                    extra_payload["endTs"] = int(time.time() * 1000)
+                    _save_task_extra(extra_payload, task_id=task_id)
                 self._persist_replay_events_if_missing(
                     task_id=task_id,
                     prompt=agent_prompt,

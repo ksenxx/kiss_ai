@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.channel_workspace import (
     WORKSPACE_WAIT_TIMEOUT_SECONDS,
     enter_workspace,
@@ -40,6 +41,7 @@ from kiss.agents.sorcar.git_worktree import (
     strip_worktree_suffix,
 )
 from kiss.agents.sorcar.persistence import (
+    TASK_USAGE_LOCK,
     _add_task,
     _append_chat_event,
     _load_last_model,
@@ -2780,26 +2782,32 @@ class _TaskRunnerMixin:
                 task_id=task_id,
                 task=task_prompt,
             )
-            tokens, cost, steps = _subtask_metrics(state.agent)
-            _save_task_extra(
-                build_task_extra_payload(
-                    model=model,
-                    work_dir=work_dir,
-                    version=__version__,
-                    tokens=tokens,
-                    cost=round(cost, 6),
-                    steps=steps,
-                    is_parallel=state.use_parallel,
-                    is_worktree=use_worktree,
-                    auto_commit_mode=state.auto_commit_mode,
-                    start_ms=sub_start_ms,
-                    end_ms=(
-                        end_ms if end_ms is not None
-                        else int(time.time() * 1000)
+            # Read and saved under TASK_USAGE_LOCK, so a sub-task's late
+            # charge either lands on the ledger before this read or
+            # finds the finished row and adds to it
+            # (charge_side_channel_usage).
+            with TASK_USAGE_LOCK:
+                tokens, cost, steps = _subtask_metrics(state.agent)
+                _race_delay()  # test hook: widens the snapshot-to-save window
+                _save_task_extra(
+                    build_task_extra_payload(
+                        model=model,
+                        work_dir=work_dir,
+                        version=__version__,
+                        tokens=tokens,
+                        cost=round(cost, 6),
+                        steps=steps,
+                        is_parallel=state.use_parallel,
+                        is_worktree=use_worktree,
+                        auto_commit_mode=state.auto_commit_mode,
+                        start_ms=sub_start_ms,
+                        end_ms=(
+                            end_ms if end_ms is not None
+                            else int(time.time() * 1000)
+                        ),
                     ),
-                ),
-                task_id=task_id,
-            )
+                    task_id=task_id,
+                )
             self.printer.broadcast({"type": "tasks_updated"})
             logger.info(
                 "Task result persisted: task_id=%s result=%r",

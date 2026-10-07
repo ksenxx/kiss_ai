@@ -488,18 +488,32 @@ def _daemon_endpoint_file() -> str | None:
     return cron_agent._daemon_endpoint_file
 
 
-def _attribute_dispatch_usage(parent_agent: Any, result: Any, epoch: Any = None) -> None:
-    """Fold a dispatched sub-task's spend into the calling agent.
+def _attribute_dispatch_usage(
+    parent_agent: Any, result: Any, epoch: Any = None, parent_task_id: str = "",
+) -> None:
+    """Fold a dispatched sub-task's spend into the calling task.
 
     The daemon's terminal ``result`` event carries the sub-task's
     cost, tokens, and steps (parsed into the
     :class:`~kiss.agents.sorcar.daemon_client.TaskResult`).  Without
     this fold, that spend would vanish from the calling task's
     accounting — the parent's end-of-task cost, its live usage
-    header, and its persisted per-task cost would all lie low —
-    exactly the gap :func:`~kiss.agents.sorcar.sorcar_agent._attribute_sub_usage`
-    already closes for ``run_parallel`` sub-agents and ``talk`` TTS
-    calls.
+    header, and its persisted per-task cost would all lie low.
+
+    A calling task with a persisted ``task_history`` row and a server
+    printer is charged through the printer's ``charge_task_usage``
+    bridge (:func:`~kiss.server.task_update.charge_side_channel_usage`):
+    while its row is unfinished the spend is banked on its live
+    ledger (bound to *epoch*) and its new totals go out as a
+    ``usage_info``, so the chat header follows every fold — including
+    one landing after the run's terminal ``result``; once the row is
+    finished (a job that outlived :func:`kill_jobs_of`'s grace and
+    settled after the row was saved) the spend is added to the row and
+    its finished ancestors instead, with a persisted ``usage_info``
+    for each, so the history, the Spend panel and the replayed
+    transcript all show it.  A caller without a row or without that
+    printer (standalone use) gets the plain ledger fold
+    (:func:`~kiss.agents.sorcar.sorcar_agent._attribute_sub_usage`).
 
     Args:
         parent_agent: The agent that called ``run_agent``; ``None``
@@ -512,19 +526,23 @@ def _attribute_dispatch_usage(parent_agent: Any, result: Any, epoch: Any = None)
             job that finishes after the parent's run ended settles into
             that run's ledger, never into a later run's; ``None`` for
             the parent's current epoch.
+        parent_task_id: The calling task's persisted row id captured
+            when the dispatch started (the agent may since have moved
+            on to another task), or ``""`` when it has none.
     """
     if parent_agent is None or result is None:
         return
+    cost = float(getattr(result, "cost", 0.0) or 0.0)
+    tokens = int(getattr(result, "tokens", 0) or 0)
+    steps = int(getattr(result, "steps", 0) or 0)
     try:
+        charge = getattr(getattr(parent_agent, "printer", None), "charge_task_usage", None)
+        if parent_task_id and callable(charge):
+            charge(parent_agent, parent_task_id, cost, tokens, steps, epoch=epoch)
+            return
         from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
 
-        _attribute_sub_usage(
-            parent_agent,
-            float(getattr(result, "cost", 0.0) or 0.0),
-            int(getattr(result, "tokens", 0) or 0),
-            int(getattr(result, "steps", 0) or 0),
-            epoch=epoch,
-        )
+        _attribute_sub_usage(parent_agent, cost, tokens, steps, epoch=epoch)
     except Exception:  # pragma: no cover — attribution must never break dispatch
         logger.warning("dispatched sub-task usage attribution failed", exc_info=True)
 
@@ -1108,7 +1126,7 @@ def dispatch_result(
     except daemon_client.CancelledError as e:
         # A confirmed stop carries the stopped task's spend, which still
         # counts towards the caller.
-        _attribute_dispatch_usage(parent_agent, e.result, epoch)
+        _attribute_dispatch_usage(parent_agent, e.result, epoch, parent_task_id)
         if not e.confirmed:
             return unconfirmed_stop_error(name)
         spend = ""
@@ -1119,16 +1137,20 @@ def dispatch_result(
             f"completed before the stop (side effects) is not reported here{spend}."
         )
     except Exception as e:
-        _attribute_dispatch_usage(parent_agent, getattr(e, "task_result", None), epoch)
+        _attribute_dispatch_usage(
+            parent_agent, getattr(e, "task_result", None), epoch, parent_task_id,
+        )
         logger.warning("agent dispatch failed", exc_info=True)
         return f"Error: the {name} agent task could not run: {e}"
     except BaseException as e:
         # The calling task was stopped (an injected KeyboardInterrupt)
         # while waiting: the sub-task is stopped too, and what it spent
         # so far still counts towards the caller's cost.
-        _attribute_dispatch_usage(parent_agent, getattr(e, "task_result", None), epoch)
+        _attribute_dispatch_usage(
+            parent_agent, getattr(e, "task_result", None), epoch, parent_task_id,
+        )
         raise
-    _attribute_dispatch_usage(parent_agent, result, epoch)
+    _attribute_dispatch_usage(parent_agent, result, epoch, parent_task_id)
     return result
 
 

@@ -1616,26 +1616,49 @@ class RelentlessAgent(Base):
     def _emit_usage_totals(self) -> None:
         """Emit a ``usage_info`` event carrying this task's cumulative totals.
 
-        For spend banked after the last session's final event (the
-        pre-run classifier's, folded at the end of ``SorcarAgent.run``),
-        so the UI's cost matches the persisted task cost.
+        The run's last word on its spend: emitted at the end of
+        ``SorcarAgent.run``, after every fold that can land past the
+        last session's final event (a stopped or late ``run_agent``
+        job's spend, the pre-run classifier's), so the UI's cost
+        matches the persisted task cost.
+
+        The structured fields are the ledger's ABSOLUTE totals, sent
+        through the printer's ``broadcast`` rather than ``print``: the
+        latter adds its per-task offsets to session-relative values,
+        and a fold on another thread moving those offsets between this
+        method's read and the printer's add would overstate the event.
+        A printer without ``broadcast`` (console) has no offsets and
+        gets the same totals through ``print``.
+
+        Snapshot and publication happen under
+        :data:`~kiss.agents.sorcar.persistence.TASK_USAGE_LOCK`, which a
+        sub-task's late charge holds across its own bank and
+        publication, so the two publications cannot interleave and
+        leave this older snapshot as the task's last word.
         """
         if self.printer is None:
             return
-        # One snapshot for both the text and the structured fields, so a
-        # reclaim landing between two reads cannot make them disagree.
-        budget, tokens, steps = self.usage_snapshot()
-        net_budget, net_tokens, net_steps = self._usage_net_of_printer_offsets(
-            (budget, tokens, steps),
-        )
-        self.printer.print(
-            f"Steps: {steps}/{self.max_steps}, Total tokens: {tokens:,}, "
-            f"Budget: ${budget:.4f}/${self.max_budget:.2f}, ",
-            type="usage_info",
-            total_tokens=net_tokens,
-            cost=f"${net_budget:.4f}",
-            total_steps=net_steps,
-        )
+        from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK
+
+        with TASK_USAGE_LOCK:
+            # One snapshot for both the text and the structured fields,
+            # so a reclaim landing between two reads cannot make them
+            # disagree.
+            budget, tokens, steps = self.usage_snapshot()
+            # No limits in the text: this runs in ``SorcarAgent.run``'s
+            # ``finally``, also for a run that never reached ``_reset``.
+            text = f"Steps: {steps}, Total tokens: {tokens:,}, Budget: ${budget:.4f}, "
+            cost = f"${budget:.4f}"
+            broadcast = getattr(self.printer, "broadcast", None)
+            if callable(broadcast):
+                broadcast({
+                    "type": "usage_info", "text": text, "total_tokens": tokens,
+                    "cost": cost, "total_steps": steps,
+                })
+                return
+            self.printer.print(
+                text, type="usage_info", total_tokens=tokens, cost=cost, total_steps=steps,
+            )
 
     def _usage_net_of_printer_offsets(
         self, snapshot: tuple[float, int, int] | None = None,
