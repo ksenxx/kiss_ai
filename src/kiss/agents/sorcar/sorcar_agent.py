@@ -280,7 +280,7 @@ def summary(description: str) -> str:
         A short confirmation string.
     """
     del description
-    return "Summary recorded."
+    return ""
 
 
 def _memory_root_for_run(
