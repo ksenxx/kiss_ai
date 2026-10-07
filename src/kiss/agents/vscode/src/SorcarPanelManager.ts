@@ -904,9 +904,10 @@ export class SorcarPanelManager {
    * panel's clicks.
    *
    * @param event The chat to open — backend chat id ('' or absent for
-   *     a fresh one), the task to scroll to, the panel title, and (for
+   *     a fresh one), the task to scroll to, the panel title, (for
    *     fresh chats) the opener's composer draft to seed the new
-   *     panel's textarea with.
+   *     panel's textarea with, and onlyIfMissing to leave a panel
+   *     already bound to the chat untouched.
    */
   public openChat(event: {
     chatId?: string;
@@ -914,6 +915,7 @@ export class SorcarPanelManager {
     title?: string;
     pendingText?: string;
     autoSubmit?: boolean;
+    onlyIfMissing?: boolean;
   }): void {
     const chatId = event.chatId ? String(event.chatId) : '';
     if (chatId) {
@@ -921,9 +923,11 @@ export class SorcarPanelManager {
       // has an editor tab reveals that tab (the daemon registry
       // enforces the same one-tab-per-chat invariant) and brings the
       // clicked task on screen instead of leaving the panel parked on
-      // whatever task it was showing.
+      // whatever task it was showing. An expanded history panel only
+      // wants the chat on screen somewhere: it leaves the tab alone.
       for (const other of this._panels.values()) {
         if (other.chatId === chatId) {
+          if (event.onlyIfMissing) return;
           other.panel.reveal();
           if (
             event.taskId !== undefined &&

@@ -16627,6 +16627,7 @@
         const hasTaskId =
           ev.taskId !== undefined && ev.taskId !== null && ev.taskId !== '';
         const ocTab = chatId ? getTabByBackendChatId(chatId) : null;
+        if (ocTab && ev.onlyIfMissing) break;
         if (ocTab) {
           switchToTab(ocTab.id);
           if (
@@ -21979,6 +21980,142 @@
     line.replaceChildren(makeLaunchedAgoLabelFor(ms, 'last launched'));
   }
 
+  /**
+   * The status icon a history task row shows for *s*: the pulsing "?"
+   * while the task is blocked on an ask_user_question (the daemon nudges
+   * a repaint with tasks_updated when the question opens and closes),
+   * the spinner while it runs, the red cross once it failed, the green
+   * tick once it completed during this page's life, or null for a task
+   * that settled before the page loaded.
+   *
+   * @param {Object} s A history row from the daemon.
+   * @returns {HTMLElement|null} The icon span, or null when none applies.
+   */
+  function historyStatusMark(s) {
+    const mark = document.createElement('span');
+    let label = '';
+    if (s.is_running && s.awaiting_answer) {
+      mark.className = 'sidebar-item-running sidebar-item-asking';
+      mark.textContent = '?';
+      label = 'Waiting for your answer';
+    } else if (s.is_running) {
+      mark.className = 'sidebar-item-running status-spinner';
+      label = 'Task running';
+    } else if (s.failed) {
+      mark.className = 'sidebar-item-failed status-cross';
+      label = 'Task failed';
+    } else if (s.task_id && historyJustCompletedTaskIds.has(s.task_id)) {
+      mark.className = 'sidebar-item-completed status-tick';
+      label = 'Task completed';
+    } else {
+      return null;
+    }
+    mark.dataset.tooltip = label;
+    mark.setAttribute('aria-label', label);
+    return mark;
+  }
+
+  /**
+   * Keep *group* tracking the chat's LAST task: its header shows that
+   * task's status icon (the same icon the task's own row shows) and
+   * `group._kissLastSession` names the task the header opens when the
+   * panel is expanded. Rows arrive newest first, so a chat's first row
+   * is normally its last task, but a later page or a search can hand
+   * the chat a row out of order: the newest launch time wins, and on a
+   * tie the row seen first.
+   *
+   * @param {HTMLElement} group The chat's .history-chat-group.
+   * @param {Object} session The row just added to the group.
+   */
+  function updateHistoryGroupLastTask(group, session) {
+    const btn = group.querySelector(':scope > .history-chat-header');
+    const ms = taskLaunchMs(session);
+    const known =
+      group.dataset.statusTs === undefined
+        ? NaN
+        : Number(group.dataset.statusTs);
+    if (isFinite(known) && !(ms > known)) return;
+    group.dataset.statusTs = String(isFinite(ms) ? ms : 0);
+    group._kissLastSession = session;
+    const old = btn.querySelector(':scope > .history-chat-status');
+    if (old) old.remove();
+    const mark = historyStatusMark(session);
+    if (!mark) return;
+    mark.classList.add('history-chat-status');
+    btn.insertBefore(mark, btn.querySelector(':scope > .history-chat-title'));
+  }
+
+  /**
+   * Show history row *s* in a tab, as clicking its row does: reveal
+   * the tab already bound to its chat (scrolled or replayed to the
+   * task), or open a new tab that resumes the chat at the task (in
+   * editor-tabs mode the host opens or reveals the chat's own panel).
+   * A task with nothing to resume is shown read-only in a fresh tab.
+   *
+   * @param {Object} s The history row from the daemon.
+   * @param {boolean} onlyIfMissing Leave a tab already bound to the
+   *   chat as it is (the host does the same for its editor panels):
+   *   an expanded history panel only wants the chat on screen. The
+   *   chat is then always resumed by id, even for a task without
+   *   persisted events: a read-only tab would bind to no chat, so the
+   *   next expand could not tell the chat is on screen already.
+   */
+  function openHistoryTask(s, onlyIfMissing) {
+    // The task text goes to the read-only task panel only.  #task-input
+    // holds the user's own draft for the NEXT prompt and is never written.
+    const taskText = s.preview || s.title || '';
+    const existingChatTab = getTabByBackendChatId(s.id);
+    if (onlyIfMissing && existingChatTab) return;
+    const resumable =
+      !!s.id && (s.has_events || s.is_running || !!onlyIfMissing);
+    // Editor-tabs mode: a chat that is not THIS panel's belongs in
+    // its own editor tab. The host either reveals the panel already
+    // bound to the chat or opens a new one that resumes it.
+    if (EDITOR_TAB_MODE && !existingChatTab) {
+      postToHost({
+        type: 'openChatPanel',
+        chatId: resumable ? s.id : undefined,
+        taskId:
+          s.task_id === undefined || s.task_id === null ? null : s.task_id,
+        title: taskText,
+        onlyIfMissing: !!onlyIfMissing,
+      });
+      return;
+    }
+    if (existingChatTab) {
+      switchToTab(existingChatTab.id);
+      // The tab may be parked on a different task of the same chat.
+      // Scroll the clicked task's region into view so the static
+      // task panel names it; when its events are not spliced into
+      // the transcript yet, replay the tab at that task instead.
+      if (
+        !existingChatTab.isContentTab &&
+        !scrollChatToTask(s.task_id) &&
+        s.task_id !== undefined &&
+        s.task_id !== null &&
+        s.task_id !== ''
+      ) {
+        api.resumeSession({
+          id: s.id,
+          taskId: s.task_id,
+          tabId: existingChatTab.id,
+        });
+      }
+    } else if (resumable) {
+      // A running task is resumable even before its first event is
+      // persisted: the server reattaches the live chat on replay.
+      createNewTab();
+      setTaskText(taskText);
+      api.resumeSession({id: s.id, taskId: s.task_id, tabId: activeTabId});
+    } else {
+      // Nothing to resume, but the row still knows what the task was, so
+      // show it read-only in the fresh tab.
+      createNewTab();
+      setTaskText(taskText);
+      inp.focus();
+    }
+  }
+
   /** Build the collapsible chat panel's clickable header. */
   function historyGroupHeader(group, chatId) {
     const btn = document.createElement('button');
@@ -22006,6 +22143,12 @@
         if (chatId) historyChatCollapseOverrides.set(chatId, collapsed);
       }
       applyHistoryGroupCollapsed(group);
+      // Expanding a chat's panel also brings the chat on screen: its
+      // last task is loaded in a tab unless a tab already shows the
+      // chat (the panel stays open so the tasks remain in view).
+      if (!collapsed && group._kissLastSession) {
+        openHistoryTask(group._kissLastSession, true);
+      }
     });
     return btn;
   }
@@ -22617,35 +22760,8 @@
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
 
-      if (s.is_running && s.awaiting_answer) {
-        // The task is blocked on an ask_user_question: a "?" takes the
-        // spinner's place until the user answers (the daemon nudges a
-        // repaint with tasks_updated when the question opens and closes).
-        const askingMark = document.createElement('span');
-        askingMark.className = 'sidebar-item-running sidebar-item-asking';
-        askingMark.textContent = '?';
-        askingMark.dataset.tooltip = 'Waiting for your answer';
-        askingMark.setAttribute('aria-label', 'Waiting for your answer');
-        div.appendChild(askingMark);
-      } else if (s.is_running) {
-        const runningDot = document.createElement('span');
-        runningDot.className = 'sidebar-item-running status-spinner';
-        runningDot.dataset.tooltip = 'Task running';
-        runningDot.setAttribute('aria-label', 'Task running');
-        div.appendChild(runningDot);
-      } else if (s.failed) {
-        const failedDot = document.createElement('span');
-        failedDot.className = 'sidebar-item-failed status-cross';
-        failedDot.dataset.tooltip = 'Task failed';
-        failedDot.setAttribute('aria-label', 'Task failed');
-        div.appendChild(failedDot);
-      } else if (s.task_id && historyJustCompletedTaskIds.has(s.task_id)) {
-        const completedDot = document.createElement('span');
-        completedDot.className = 'sidebar-item-completed status-tick';
-        completedDot.dataset.tooltip = 'Task completed';
-        completedDot.setAttribute('aria-label', 'Task completed');
-        div.appendChild(completedDot);
-      }
+      const statusMark = historyStatusMark(s);
+      if (statusMark) div.appendChild(statusMark);
 
       const textSpan = document.createElement('span');
       textSpan.className = 'sidebar-item-text';
@@ -22788,56 +22904,7 @@
       div.appendChild(info);
 
       div.addEventListener('click', () => {
-        // The task text goes to the read-only task panel only.  #task-input
-        // holds the user's own draft for the NEXT prompt and is never written.
-        const taskText = s.preview || s.title || '';
-        const existingChatTab = getTabByBackendChatId(s.id);
-        // Editor-tabs mode: a chat that is not THIS panel's belongs in
-        // its own editor tab. The host either reveals the panel already
-        // bound to the chat or opens a new one that resumes it.
-        if (EDITOR_TAB_MODE && !existingChatTab) {
-          postToHost({
-            type: 'openChatPanel',
-            chatId: s.id && (s.has_events || s.is_running) ? s.id : undefined,
-            taskId:
-              s.task_id === undefined || s.task_id === null ? null : s.task_id,
-            title: taskText,
-          });
-          closeSidebar();
-          return;
-        }
-        if (existingChatTab) {
-          switchToTab(existingChatTab.id);
-          // The tab may be parked on a different task of the same chat.
-          // Scroll the clicked task's region into view so the static
-          // task panel names it; when its events are not spliced into
-          // the transcript yet, replay the tab at that task instead.
-          if (
-            !existingChatTab.isContentTab &&
-            !scrollChatToTask(s.task_id) &&
-            s.task_id !== undefined &&
-            s.task_id !== null &&
-            s.task_id !== ''
-          ) {
-            api.resumeSession({
-              id: s.id,
-              taskId: s.task_id,
-              tabId: existingChatTab.id,
-            });
-          }
-        } else if (s.id && (s.has_events || s.is_running)) {
-          // A running task is resumable even before its first event is
-          // persisted: the server reattaches the live chat on replay.
-          createNewTab();
-          setTaskText(taskText);
-          api.resumeSession({id: s.id, taskId: s.task_id, tabId: activeTabId});
-        } else {
-          // Nothing to resume, but the row still knows what the task was, so
-          // show it read-only in the fresh tab.
-          createNewTab();
-          setTaskText(taskText);
-          inp.focus();
-        }
+        openHistoryTask(s);
         closeSidebar();
       });
       if (historyLegacyView) {
@@ -22846,6 +22913,7 @@
       } else {
         const group = historyGroupFor(s);
         historyGroupBody(group).appendChild(div);
+        updateHistoryGroupLastTask(group, s);
         if (s.is_running && group.dataset.hasRunning !== '1') {
           // A running task keeps its chat's panel open by default.
           group.dataset.hasRunning = '1';

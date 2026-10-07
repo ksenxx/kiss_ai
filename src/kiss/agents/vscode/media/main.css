@@ -4273,6 +4273,14 @@ body.pdf-preview-body {
   transform: rotate(90deg);
 }
 
+/* The status icon of the chat's last task (the same "?", spinner,
+   cross or tick its row shows), between the chevron and the title; the
+   header's gap spaces it, not the row icons' margin. */
+.history-chat-header > .history-chat-status {
+  flex-shrink: 0;
+  margin-right: 0;
+}
+
 .history-chat-title {
   flex: 1;
   min-width: 0;
