@@ -209,6 +209,11 @@ _PANEL_EDGES_JS = r"""() => {
     lefts: rects.map(r => r.left),
     rights: rects.map(r => r.right),
     gaps: rects.slice(1).map((r, i) => r.top - rects[i].bottom),
+    sectionHeight: document.querySelector(
+      '#history-list > .history-day-sep[data-day]:not([data-day="running"])'
+    ).getBoundingClientRect().height,
+    sections: [...document.querySelectorAll('#history-list > .history-day-sep')]
+      .map(el => el.textContent),
     radii: groups.map(g => getComputedStyle(g).borderRadius),
     borderTops: groups.map(g => getComputedStyle(g).borderTopWidth),
     borderSides: groups.map(g => {
@@ -236,10 +241,14 @@ def _assert_seamless_panels(page, what: str) -> None:
         assert left == pytest.approx(e["leftBoundary"], abs=0.5), (what, e)
         assert right == pytest.approx(e["rightBoundary"], abs=0.5), (what, e)
     assert e["painted"] == [[True, True]] * 3, (what, e)
-    assert e["gaps"] == [pytest.approx(0, abs=0.5)] * 2, (what, e)
+    assert e["sections"][0] == "Running", (what, e)
+    assert len(e["sections"]) == 2 and e["sectionHeight"] > 0, (what, e)
+    assert e["gaps"] == [
+        pytest.approx(e["sectionHeight"], abs=0.5), pytest.approx(0, abs=0.5),
+    ], (what, e)
     assert e["radii"] == ["0px"] * 3, (what, e)
-    # One shared 1px line between neighbours, none on the sides.
-    assert e["borderTops"] == ["0px", "1px", "1px"], (what, e)
+    # One shared hairline within a section; the separator replaces it between sections.
+    assert e["borderTops"] == ["0px", "0px", "1px"], (what, e)
     assert e["borderSides"] == [["0px", "0px"]] * 3, (what, e)
     # The day separator keeps the panel's usual inset.
     assert e["sepL"] == pytest.approx(e["insetL"], abs=0.5), (what, e)

@@ -228,7 +228,7 @@ def summary(description: str) -> str:
 
 
 def test_stock_base_requires_a_summary_at_every_tenth_step_and_before_finish() -> None:
-    """Require a summary before finish and every tenth step."""
+    """Require a summary before finish and before other tools at every tenth step."""
     sea = BaseSea()
     sea.tools([summary, house_tool])
     assert sea.has_summary_tool

@@ -21707,15 +21707,9 @@
     return btn;
   }
 
-  // ---- History grouping: one block per chat, day separators ----
-  //
-  // The daemon lists tasks newest first, so the first task seen for a
-  // chat is its latest one and the chats come out ordered by their
-  // latest task; later pages only add older tasks to existing blocks or
-  // open blocks for older chats.  A separator ("Today", "Yesterday", or
-  // the date) precedes the first chat of each day, by local time.
+  // ---- History sections: running tasks/chats, then local-day buckets ----
+  // Keep pagination order in the session/row arrays; arrange only the DOM.
   const historyChatGroups = new Map(); // chat id -> .history-chat-group
-  let historyLastDay = '';
   let historyMidnightTimer = null;
 
   function historyDayKey(d) {
@@ -22177,16 +22171,17 @@
   function historyGroupFor(session) {
     const chatId = typeof session.id === 'string' ? session.id : '';
     const existing = chatId ? historyChatGroups.get(chatId) : null;
+    const ts = historyTimestamp(session);
     if (existing) {
+      // A running row can arrive before a newer completed row of its chat.
+      if (
+        !isFinite(Number(existing.dataset.ts)) ||
+        ts > Number(existing.dataset.ts)
+      ) {
+        existing.dataset.ts = String(ts);
+      }
       updateHistoryGroupHeader(existing, session);
       return existing;
-    }
-    const ts = historyTimestamp(session);
-    const dayKey = historyDayBucket(ts);
-    if (dayKey !== historyLastDay) {
-      historyLastDay = dayKey;
-      historyList.appendChild(historyDaySeparator(ts));
-      if (!historyMidnightTimer) scheduleHistoryMidnightRelabel(true);
     }
     const group = document.createElement('div');
     group.className = 'history-chat-group';
@@ -22233,33 +22228,64 @@
     return sep;
   }
 
+  /** Newest first, with undated history after dated history; ties stay stable. */
+  function historyNewestFirst(a, b) {
+    const aTs = Number(a.dataset.ts);
+    const bTs = Number(b.dataset.ts);
+    return (
+      (isFinite(bTs) ? bTs : -Infinity) - (isFinite(aTs) ? aTs : -Infinity)
+    );
+  }
+
+  /** Whether a flat row or an entire chat belongs in the Running section. */
+  function historyItemRunning(item) {
+    return (
+      item.dataset.category === 'running' || item.dataset.hasRunning === '1'
+    );
+  }
+
+  /** Running items first, newest first within each section. */
+  function historySectionOrder(a, b) {
+    return (
+      Number(historyItemRunning(b)) - Number(historyItemRunning(a)) ||
+      historyNewestFirst(a, b)
+    );
+  }
+
   /**
-   * Recompute every separator's label: "Today" turns into "Yesterday"
-   * at local midnight, and a machine woken after a sleep may find the
-   * day (or the time zone) changed.  Runs at each midnight while
-   * separators are on screen, and whenever the page becomes visible
-   * again.
+   * Arrange running tasks/chats before dated history and rebuild separators.
+   * Also runs at midnight and on visibility changes to reflect local-day or
+   * time-zone changes. Reuse rows and groups so folds and focus survive.
    */
   function relabelHistoryDaySeparators() {
-    // Separators are rebuilt from the chat blocks' own timestamps: a
-    // time-zone change can move a block to another local day, so the
-    // partition may change, not just the words.
     historyList.querySelectorAll('.history-day-sep').forEach(sep => {
       sep.remove();
     });
-    const groups = historyList.querySelectorAll(':scope > .history-chat-group');
+    const items = Array.from(
+      historyList.querySelectorAll(
+        ':scope > .history-chat-group, :scope > .sidebar-item',
+      ),
+    ).sort(historySectionOrder);
+    let cursor = historyList.firstElementChild;
     let lastDay = '';
-    groups.forEach(group => {
-      const ts = Number(group.dataset.ts);
-      const dayKey = historyDayBucket(ts);
+    items.forEach(item => {
+      if (item !== cursor) historyList.insertBefore(item, cursor);
+      cursor = item.nextElementSibling;
+      const ts = Number(item.dataset.ts);
+      const running = historyItemRunning(item);
+      const dayKey = running ? 'running' : historyDayBucket(ts);
       if (dayKey !== lastDay) {
         lastDay = dayKey;
-        historyList.insertBefore(historyDaySeparator(ts), group);
+        const sep = historyDaySeparator(ts);
+        if (running) {
+          sep.dataset.day = 'running';
+          sep.textContent = 'Running';
+        }
+        historyList.insertBefore(sep, item);
       }
     });
-    historyLastDay = lastDay;
-    if (groups.length) applyHistoryFilterVisibility();
-    scheduleHistoryMidnightRelabel(groups.length > 0);
+    if (items.length) applyHistoryFilterVisibility();
+    scheduleHistoryMidnightRelabel(items.length > 0);
   }
 
   /**
@@ -22729,7 +22755,6 @@
       historyRenderedRows = [];
       allHistSessions = [];
       historyChatGroups.clear();
-      historyLastDay = '';
       scheduleHistoryMidnightRelabel(false);
       // Emptying the list drops its scroll offset: the rebuilt list
       // lands at the top, so the highlighted row is brought back into
@@ -22774,6 +22799,7 @@
           ? 'errors'
           : 'completed';
       div.dataset.timestamp = String(Number(s.timestamp || 0));
+      div.dataset.ts = String(historyTimestamp(s));
       div.dataset.favorite = s.is_favorite ? '1' : '0';
       div.dataset.workDir = s.work_dir || '';
       div.dataset.sea = typeof s.sea === 'string' ? s.sea.trim() : '';
@@ -22929,11 +22955,14 @@
         closeSidebar();
       });
       if (historyLegacyView) {
-        // The flat list: rows in the daemon's newest-first order.
         historyList.appendChild(div);
       } else {
         const group = historyGroupFor(s);
-        historyGroupBody(group).appendChild(div);
+        const body = historyGroupBody(group);
+        const before = Array.from(body.children).find(
+          row => historyNewestFirst(div, row) < 0,
+        );
+        body.insertBefore(div, before || null);
         updateHistoryGroupLastTask(group, s);
         if (s.is_running && group.dataset.hasRunning !== '1') {
           // A running task keeps its chat's panel open by default.
@@ -22949,7 +22978,7 @@
       historyHasMore = false;
     }
     refreshHistorySeaOptions();
-    applyHistoryFilterVisibility();
+    relabelHistoryDaySeparators();
     syncHistoryActiveTask();
     if (focusKey) {
       // The rebuild detached the focused row; give the keyboard the
@@ -23321,7 +23350,8 @@
         daySep = el;
         dayShown = false;
       } else if (
-        el.classList.contains('history-chat-group') &&
+        (el.classList.contains('history-chat-group') ||
+          el.classList.contains('sidebar-item')) &&
         el.style.display !== 'none'
       ) {
         dayShown = true;
