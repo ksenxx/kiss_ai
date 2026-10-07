@@ -2,27 +2,36 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The class every Sorcar Extension Agent (SEA) derives from.
+"""The classes every Sorcar Extension Agent (SEA) derives from.
 
 A SEA is a Python file ``xxx/xxx_sea.py`` that defines exactly one
 subclass of :class:`BaseSea`.  The subclass overrides the methods it
 needs; every method has a do-nothing default here, so a SEA defines
 only what it changes::
 
-    from kiss.agents.seas.base.base_sea import BaseSea
+    from kiss.agents.seas.base.base_sea import WorkerSea
 
-    class ShellSea(BaseSea):
+    class ShellSea(WorkerSea):
         def description(self):
             return "Runs the command in the prompt."
 
         def settings(self, settings):
-            return settings | {"kind": "worker", "tool_profile": "bash"}
+            return settings | {"tool_profile": "bash"}
 
         def prompt(self, task):
             return f"Run `{task}` and report its output."
 
         def system_prompt(self, system_prompt):
             return system_prompt + "\\n\\nAnswer in one line."
+
+What a SEA *is* is its base class: :class:`BaseSea` is an ordinary
+Sorcar session with the caller's or the user's settings;
+:class:`WorkerSea` a focused tool-bound run on the caller's tree (no
+worktree, no auto-commit, no classifier, no browser, no memory);
+:class:`ChannelSea` a worker that serves an external service (Slack,
+email, cron) from a scratch directory, inherits nothing from the
+calling task and holds a channel workspace (every behaviour is listed
+in :data:`kiss.agents.sorcar.sea_settings.CHANNEL_BEHAVIOURS`).
 
 The launcher (:mod:`kiss.agents.sorcar.sea_commands`) instantiates the
 class and threads the run's configuration through the methods of
@@ -66,9 +75,27 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from kiss.core.config import kiss_home
 from kiss.core.tool_verdict import ALLOW, Verdict, refuse
 
-__all__ = ["ALLOW", "BaseSea", "Verdict", "refuse"]
+__all__ = ["ALLOW", "BaseSea", "ChannelSea", "Verdict", "WorkerSea", "refuse"]
+
+WORKER_DEFAULTS: dict[str, Any] = {
+    "use_worktree": False,
+    "auto_commit": False,
+    "auto_classify": False,
+    "use_web_tools": False,
+    "use_memory": False,
+}
+"""The settings :class:`WorkerSea` lays under its subclass's own."""
+
+
+def channel_work_dir() -> str:
+    """Return the shared scratch directory a channel runs in: ``<home>/channel_work``.
+
+    Computed on every call so a redirected ``$KISS_HOME`` is honoured.
+    """
+    return str(kiss_home() / "channel_work")
 
 
 class BaseSea:
@@ -95,15 +122,12 @@ class BaseSea:
         """Return the SEA's settings, laid over *settings* (what the base classes declared).
 
         The keys are those of
-        :data:`kiss.agents.sorcar.sea_settings.SETTING_TYPES`: a
-        ``kind`` (``session`` or ``worker``: defaults only), the flag
-        ``channel`` (an external-service agent; its behaviours are
-        ``sea_settings.CHANNEL_BEHAVIOURS``), per-run parameters
-        (``model``, ``tool_profile``, ``max_budget``, ...), ``timeout``,
-        ``locked`` and ``hidden``.  The launcher lays the kind's
-        defaults under the result and type-checks every value; a
-        relative ``work_dir`` is a path under the calling task's
-        directory.
+        :data:`kiss.agents.sorcar.sea_settings.SETTING_TYPES`: per-run
+        parameters (``model``, ``tool_profile``, ``max_budget``, ...),
+        ``timeout``, ``locked`` and ``hidden``.  The launcher
+        type-checks every value; a relative ``work_dir`` is a path
+        under the calling task's directory.  What the run *is* (a
+        session, a worker, a channel) is the base class, not a key.
         Return *settings* with the SEA's keys added (``settings |
         {...}``); a value of ``None`` means "no override".
         """
@@ -166,3 +190,36 @@ class BaseSea:
             work_dir: The tab's or run's work directory.
         """
         return ""
+
+
+class WorkerSea(BaseSea):
+    """A focused tool-bound run on the caller's tree.
+
+    Lays :data:`~kiss.agents.sorcar.sea_settings.WORKER_DEFAULTS` under
+    the subclass's own settings: no worktree, no auto-commit, no
+    classifier, no browser, no memory (``/sh``, ``/ask``, ``/merge``,
+    ``/remember``, ``/forget``, ``/task_update``).  A subclass that
+    writes one of those keys overrides the default, as with any base.
+    """
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Return *settings* with the worker defaults laid under the subclass's keys."""
+        return settings | WORKER_DEFAULTS
+
+
+class ChannelSea(WorkerSea):
+    """A worker that serves an external service (Slack, email, cron), not the caller's project.
+
+    Runs in the shared ``<home>/channel_work`` scratch directory unless
+    its own ``work_dir`` says otherwise, takes nothing from the calling
+    task, holds a channel workspace, gets the channel preamble, and
+    has ``work_dir`` and the worker keys locked.  The loader reads the
+    class (``isinstance(sea, ChannelSea)``), and the command registry
+    reads the base name from the source, so a channel must derive
+    from this class by name — see
+    :data:`kiss.agents.sorcar.sea_settings.CHANNEL_BEHAVIOURS`.
+    """
+
+    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Return *settings* with the channel scratch directory as the default ``work_dir``."""
+        return settings | {"work_dir": channel_work_dir()}

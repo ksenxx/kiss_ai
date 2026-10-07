@@ -270,7 +270,6 @@ class AgentPathApiTest(unittest.TestCase):
                         # client-passed True values.
                         "use_web_tools": False,
                         "use_memory": False,
-                        "allow_fan_out": False,
                         # ``none`` switches the basic toolset off, so
                         # ``tools()`` becomes the whole tool set.
                         "tool_profile": "none",
@@ -297,7 +296,6 @@ class AgentPathApiTest(unittest.TestCase):
             model_config={"base_url": "http://client:1/v1"},
             use_web_tools=True,
             use_memory=True,
-            allow_fan_out=True,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -317,11 +315,10 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_auto_commit_attr"] is False
         assert seen["max_budget"] == 1.25
         assert seen["model_config"] == {"base_url": "http://localhost:1234/v1"}
-        # The script's ``use_web_tools`` / ``allow_fan_out`` / ``use_memory``
-        # False values override the client-passed True values, so the
-        # run built no web or memory tools and no fan-out.
+        # The script's ``use_web_tools`` / ``use_memory`` False values
+        # override the client-passed True values, so the run built no
+        # web or memory tools.
         assert seen["_web_tools_attr"] is False
-        assert seen["_is_parallel_attr"] is False
         assert seen["_use_memory_attr"] is False
         # The daemon passes no ``tools``: the SEA's ``tools()`` is the
         # agent's tools hook, applied to the built-in toolset by
@@ -560,17 +557,6 @@ class Sea(BaseSea):
         return settings | {'prompt_x': 'hi'}
 """,
                 ["settings()", "unknown key 'prompt_x'"],
-            ),
-            (
-                "unknown_kind_agent.py",
-                """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'kind': 'rocket'}
-""",
-                ["settings()['kind'] must be one of session, worker; got 'rocket'"],
             ),
             (
                 "getters_only_agent.py",

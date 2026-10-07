@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 import yaml
 
+from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.git_extract_knowledge import git_extract_knowledge_sea as sea
 from kiss.agents.seas.git_extract_knowledge import git_knowledge_index as index
 from kiss.agents.seas.git_extract_knowledge.git_extract_knowledge_sea import (
@@ -140,18 +141,18 @@ def _keys(hits: list[Any]) -> list[str]:
 def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     """The settings pin the run: full tools + knowledge tools, no worktree, no web, no memory."""
     agent = GitExtractKnowledgeSea()
-    assert agent.settings({}) == {
-        "kind": "worker", "tool_profile": "full", "allow_fan_out": True,
-    }
+    assert isinstance(agent, WorkerSea)
+    assert agent.settings({}) == {"tool_profile": "full"}
     assert agent.settings({"model": "m"})["model"] == "m"
-    # ``worker`` turns worktree, auto-commit, classifier, browser and memory
-    # off; the explicit ``is_parallel`` wins over the preset's ``False``.
-    # ``system_prompt`` is a hook the daemon applies (checked below
-    # through ``apply_sea``), not a settings key.
-    assert sea_commands.base_settings([agent]) == resolve_settings(agent.settings({})) == {
-        "kind": "worker",
+    # ``WorkerSea`` turns worktree, auto-commit, classifier, browser and
+    # memory off; ``run_parallel`` is always available for the
+    # per-repository indexing sub-agents.  ``system_prompt`` is a hook
+    # the daemon applies (checked below through ``apply_sea``), not a
+    # settings key.
+    assert sea_commands.base_settings([agent]) == resolve_settings(
+        {**WORKER_DEFAULTS, **agent.settings({})}
+    ) == {
         "tool_profile": "full",
-        "allow_fan_out": True,
         "use_worktree": False,
         "auto_commit": False,
         "auto_classify": False,
@@ -179,7 +180,7 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     # returned set) and the settings on their wire fields.
     cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "workDir": str(tmp_path)}
     assert apply_sea(cmd) == {
-        "toolProfile", "isParallel", "useWorktree",
+        "toolProfile", "useWorktree",
         "autoCommit", "classifyTasks", "useWebTools", "useMemory",
     }
     assert [tool.__name__ for tool in cmd["toolsHook"]([])] == names
@@ -187,7 +188,7 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     for field in ("tools", "toolsFile", "appendBasicTools", "systemPrompt", "prompt"):
         assert field not in cmd, field
     assert cmd["toolProfile"] == "full"
-    assert cmd["isParallel"] is True
+    assert "isParallel" not in cmd
     assert cmd["useWorktree"] is False and cmd["autoCommit"] is False
     assert cmd["classifyTasks"] is False and cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
@@ -1090,7 +1091,6 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
             system_prompt_hook=run.system_prompt_hook,
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

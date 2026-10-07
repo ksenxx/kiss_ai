@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.core.brand import HOME_DIR
 
 PROMPT_TEMPLATE = (
@@ -71,7 +71,7 @@ say so and report its final result.
 """
 
 
-class TaskUpdateSea(BaseSea):
+class TaskUpdateSea(WorkerSea):
     """The ``/task_update`` SEA."""
 
     def description(self) -> str:
@@ -90,7 +90,6 @@ class TaskUpdateSea(BaseSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
         return settings | {
-            "kind": "worker",
             "tool_profile": "bash",
             "max_budget": 1.0,
         }

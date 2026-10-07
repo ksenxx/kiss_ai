@@ -6,17 +6,21 @@
 ``run_parallel(model=..., tool_profile=...)`` (WP3), and the cost-lever
 config toggles (WP0).
 
-The fan-out tests spawn real ``ChatSorcarAgent`` children against the
-scripted local model server and read the children's state back.
+The fan-out tests run the parent's ``run_parallel`` tool against a
+real daemon on a loopback endpoint; the children it spawns talk to the
+scripted local model server and their state is read back from the
+daemon's history database.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
+import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +28,6 @@ import pytest
 import yaml
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar import sorcar_agent as sa
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.fanout_guard import is_implementation_task
 from kiss.agents.sorcar.sorcar_agent import (
@@ -35,7 +38,13 @@ from kiss.agents.sorcar.sorcar_agent import (
     resolve_tool_profile,
 )
 from kiss.core.config import DEFAULT_CONFIG, Config
-from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.server.parallel_agent_harness import (
+    STANDIN_MODEL,
+    IsolatedKissHome,
+    StandInModelServer,
+    finish_response,
+)
 
 
 def _bare_agent(tmp_path: Path, **attrs: Any) -> ChatSorcarAgent:
@@ -278,6 +287,79 @@ class TestComposableProfiles:
         assert {"Bash", "Edit", "Write", "run_agent", "run_parallel"} <= _names(agent._get_tools())
 
 
+@pytest.fixture
+def env() -> Iterator[IsolatedKissHome]:
+    home = IsolatedKissHome(prefix="kiss-tool-profiles-")
+    home.write_config(is_worktree=False, auto_commit_mode=False, classify_tasks=False)
+    try:
+        yield home
+    finally:
+        home.cleanup()
+
+
+@pytest.fixture
+def daemon(env: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """A real daemon on a loopback endpoint that ``run_parallel`` dispatches to."""
+    endpoint_file = str(env.tmpdir / "sorcar-local.json")
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", endpoint_file)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    server = RemoteAccessServer(local_endpoint_file=endpoint_file, work_dir=str(env.repo))
+    asyncio.run_coroutine_threadsafe(server.start_private_async(), loop).result(timeout=30)
+    try:
+        yield endpoint_file
+    finally:
+        asyncio.run_coroutine_threadsafe(server.stop_async(), loop).result(timeout=15)
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+
+class _FinishingModel:
+    """A stand-in model that answers every request with ``finish`` and records the requests.
+
+    Daemon-run children stream their completions, so the harness's
+    :class:`StandInModelServer` (which speaks the SSE wire format) is
+    used rather than the non-streaming scripted server.
+    """
+
+    def __init__(self, summary: str) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.summary = summary
+        self.server = StandInModelServer(self)
+
+    def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Record *request* and answer it with a ``finish`` call.
+
+        The usage is large enough that the child's spend survives the
+        daemon's four-decimal cost reporting and shows up in the parent.
+        """
+        self.requests.append(request)
+        body = finish_response(self.summary)
+        body["usage"] = {"prompt_tokens": 20000, "completion_tokens": 5, "total_tokens": 20005}
+        return body
+
+
+@pytest.fixture
+def model() -> Iterator[_FinishingModel]:
+    finishing = _FinishingModel("<p>done</p>")
+    try:
+        yield finishing
+    finally:
+        finishing.server.stop()
+
+
+def _parent(env: IsolatedKissHome, model: _FinishingModel, max_budget: float) -> ChatSorcarAgent:
+    """A parent whose ``run_parallel`` children inherit *model*'s endpoint."""
+    agent = _bare_agent(env.repo, max_budget=max_budget, budget_used=0.0)
+    agent.model_name = STANDIN_MODEL
+    agent.model_config = model.server.model_config
+    agent._chat_id = ""
+    agent._last_task_id = uuid.uuid4().hex
+    return agent
+
+
 def _child_rows(parent_agent: ChatSorcarAgent) -> list[tuple[str, float, str]]:
     """Return ``(model, max_budget, task)`` of the persisted children of *parent_agent*."""
     parent_id = str(getattr(parent_agent, "_last_task_id", "") or "")
@@ -294,28 +376,31 @@ def _child_rows(parent_agent: ChatSorcarAgent) -> list[tuple[str, float, str]]:
     return rows
 
 
-class TestFanoutPropagation:
-    """Real fan-outs: the children run against the scripted server and are
-    observed through the server's requests and their persisted rows."""
+def _child_results(out: str) -> list[dict[str, Any]]:
+    """``run_parallel`` returns a YAML list of per-child YAML result strings."""
+    return [yaml.safe_load(item) for item in yaml.safe_load(out)]
 
-    def test_children_get_profile_model_and_plain_budget_share(self, tmp_path: Path) -> None:
-        script = [finish_body("<p>reviewed</p>", prompt_tokens=1000)]
-        with serve(script) as (url, requests):
-            agent = _bare_agent(tmp_path, max_budget=4.0, budget_used=0.0)
-            agent.model_name = MODEL
-            agent.model_config = {"base_url": url, "api_key": "local"}
-            agent._chat_id = ""
-            agent._last_task_id = uuid.uuid4().hex
-            run_parallel = _tool(agent, "run_parallel")
-            out = run_parallel(
-                '["Review module A for bugs"]', model=MODEL, tool_profile="review",
-            )
-        # run_parallel returns a YAML list of per-child YAML result strings.
-        result = yaml.safe_load(yaml.safe_load(out)[0])
+
+class TestFanoutPropagation:
+    """Real fan-outs: the children are daemon sub-tasks that run against
+    the scripted server and are observed through the server's requests
+    and their persisted rows."""
+
+    def test_children_get_profile_model_and_plain_budget_share(
+        self, env: IsolatedKissHome, daemon: str, model: _FinishingModel,
+    ) -> None:
+        model.summary = "<p>reviewed</p>"
+        agent = _parent(env, model, max_budget=4.0)
+        run_parallel = _tool(agent, "run_parallel")
+        out = run_parallel(
+            '["Review module A for bugs"]', model=STANDIN_MODEL, tool_profile="review",
+        )
+        result = _child_results(out)[0]
         assert result["success"] is True and "reviewed" in result["summary"]
         # The child reached OUR server: the parent's model_config was
         # forwarded (same model), and its request carried the review
         # toolset only.
+        requests = model.requests
         assert len(requests) == 1
         sent_tools = {t["function"]["name"] for t in requests[0]["tools"]}
         assert "Edit" not in sent_tools and "run_parallel" not in sent_tools
@@ -325,72 +410,57 @@ class TestFanoutPropagation:
         # not clipped below it.
         rows = _child_rows(agent)
         assert len(rows) == 1
-        model, max_budget, task = rows[0]
-        assert model == MODEL and task == "Review module A for bugs"
+        child_model, max_budget, task = rows[0]
+        assert child_model == STANDIN_MODEL and task == "Review module A for bugs"
         assert max_budget == pytest.approx(2.0)
         assert float(getattr(agent, "budget_used", 0.0)) > 0
 
-    def test_different_model_is_dispatched_with_default_routing(self, tmp_path: Path) -> None:
+    def test_different_model_is_dispatched_with_default_routing(
+        self, env: IsolatedKissHome, daemon: str, model: _FinishingModel,
+    ) -> None:
         # A different model gets default provider routing, not the parent's
         # endpoint: the child never reaches the parent's local server and,
-        # having no key for the real provider, fails fast with a result the
-        # parent can read.
-        script = [finish_body("<p>never</p>", prompt_tokens=500)]
-        with serve(script) as (url, requests):
-            agent = _bare_agent(tmp_path, max_budget=4.0, budget_used=0.0)
-            agent.model_name = MODEL
-            agent.model_config = {"base_url": url, "api_key": "local"}
-            agent._chat_id = ""
-            agent._last_task_id = uuid.uuid4().hex
-            run_parallel = _tool(agent, "run_parallel")
-            out = run_parallel('["summarize a"]', model="no-such-model-cost-levers")
-        assert requests == []
-        assert yaml.safe_load(yaml.safe_load(out)[0])["success"] is False
-        rows = _child_rows(agent)
-        assert rows and rows[0][0] == "no-such-model-cost-levers"
+        # having no key for the real provider, the daemon refuses it
+        # before it starts, with a result the parent can read.
+        agent = _parent(env, model, max_budget=4.0)
+        run_parallel = _tool(agent, "run_parallel")
+        out = run_parallel('["summarize a"]', model="no-such-model-cost-levers")
+        assert model.requests == []
+        result = _child_results(out)[0]
+        assert result["success"] is False
+        assert "No model available" in result["summary"], result
+        assert _child_rows(agent) == []
 
-    def test_reviewer_and_plain_children_get_the_same_share(self, tmp_path: Path) -> None:
+    def test_reviewer_and_plain_children_get_the_same_share(
+        self, env: IsolatedKissHome, daemon: str, model: _FinishingModel,
+    ) -> None:
         """A mixed fan-out hands every child the plain share: the review
         child is neither clipped nor charged against a separate allowance."""
-        script = [finish_body("<p>done</p>", prompt_tokens=1000)]
-        with serve(script) as (url, requests):
-            agent = _bare_agent(tmp_path, max_budget=6.0, budget_used=0.0)
-            agent.model_name = MODEL
-            agent.model_config = {"base_url": url, "api_key": "local"}
-            agent._chat_id = ""
-            agent._last_task_id = uuid.uuid4().hex
-            run_parallel = _tool(agent, "run_parallel")
-            out = run_parallel('["Review module A for bugs", "Summarize module B"]')
-        assert len(yaml.safe_load(out)) == 2 and len(requests) == 2
+        agent = _parent(env, model, max_budget=6.0)
+        run_parallel = _tool(agent, "run_parallel")
+        out = run_parallel('["Review module A for bugs", "Summarize module B"]')
+        assert len(_child_results(out)) == 2 and len(model.requests) == 2
         rows = {task: budget for _model, budget, task in _child_rows(agent)}
         # Plain share is 6.0 / (2 + 1) = 2.0 for both children.
         assert rows["Review module A for bugs"] == pytest.approx(2.0)
         assert rows["Summarize module B"] == pytest.approx(2.0)
 
 
-def test_child_profile_is_stamped_by_engine(tmp_path: Path) -> None:
-    """``run_tasks_parallel`` stamps ``_tool_profile_name`` on every child."""
-    script = [finish_body("<p>ok</p>", prompt_tokens=500)]
-    with serve(script) as (url, requests):
-        results = sa.run_tasks_parallel(
-            ["Summarize this", "Summarize that"],
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_budget=1.0,
-            model_config={"base_url": url, "api_key": "local"},
-            web_tools=False,
-            use_memory=False,
-            tool_profile="shell",
-        )
-    assert all(yaml.safe_load(r)["success"] for r in results)
-    assert len(requests) == 2
-    for request in requests:
+def test_child_profile_is_stamped_by_daemon(
+    env: IsolatedKissHome, daemon: str, model: _FinishingModel,
+) -> None:
+    """``run_parallel(tool_profile=...)`` reaches every child's toolset and system prompt."""
+    agent = _parent(env, model, max_budget=1.0)
+    run_parallel = _tool(agent, "run_parallel")
+    out = run_parallel('["Summarize this", "Summarize that"]', tool_profile="shell")
+    assert all(r["success"] for r in _child_results(out))
+    assert len(model.requests) == 2
+    for request in model.requests:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"Bash", "bash_job", "Read", "run_commands_parallel", "finish"}
         system = next(m for m in request["messages"] if m["role"] == "system")["content"]
         assert "# Restricted tool profile: shell" in system
         assert "Bash, Read, bash_job, run_commands_parallel" in system
-    assert os.environ.get("KISS_HOME")  # tests run against an isolated KISS_HOME
 
 
 class TestImplementationTasksKeepFullToolset:
@@ -407,18 +477,18 @@ class TestImplementationTasksKeepFullToolset:
         assert agent._tool_profile("Patch the vulnerability") == "full"
         assert agent._tool_profile("Audit the vulnerability") == "review"
 
-    def test_engine_stamps_full_for_implementation_review_words(self, tmp_path: Path) -> None:
-        script = [finish_body("<p>ok</p>", prompt_tokens=500)]
-        with serve(script) as (url, requests):
-            sa.run_tasks_parallel(
-                ["Implement a regression test for the parser", "Review the parser for bugs"],
-                model_name=MODEL, work_dir=str(tmp_path), max_budget=1.0,
-                model_config={"base_url": url, "api_key": "local"},
-                web_tools=False, use_memory=False,
-            )
-        assert len(requests) == 2
+    def test_daemon_stamps_full_for_implementation_review_words(
+        self, env: IsolatedKissHome, daemon: str, model: _FinishingModel,
+    ) -> None:
+        agent = _parent(env, model, max_budget=1.0)
+        run_parallel = _tool(agent, "run_parallel")
+        out = run_parallel(
+            '["Implement a regression test for the parser", "Review the parser for bugs"]',
+        )
+        assert all(r["success"] for r in _child_results(out))
+        assert len(model.requests) == 2
         by_task = {}
-        for request in requests:
+        for request in model.requests:
             prompt = request["messages"][-1]["content"]
             names = {t["function"]["name"] for t in request["tools"]}
             key = "impl" if "Implement a regression" in prompt else "review"
@@ -434,29 +504,26 @@ def test_env_float_rejects_non_finite(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Config().context_limit_fraction == 0.7
 
 
-def test_review_share_in_prompt_leaves_reviewers_uncapped(tmp_path: Path) -> None:
+def test_review_share_in_prompt_leaves_reviewers_uncapped(
+    env: IsolatedKissHome, daemon: str, model: _FinishingModel,
+) -> None:
     """A real run whose prompt names a review share ("at most 10% of the
     budget for reviewing") creates no reviewer allowance: a review fan-out
     issued by that agent afterwards hands its child the plain share of the
     remaining budget, not 10% of the task budget."""
-    script = [
-        finish_body("<p>done</p>", prompt_tokens=500),
-        finish_body("<p>reviewed</p>", prompt_tokens=500),
-    ]
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("share-in-prompt")
-        agent.run(
-            prompt_template="Say done. Use at most 10% of the budget for reviewing.",
-            model_name=MODEL, work_dir=str(tmp_path), max_steps=3, max_budget=8.0,
-            model_config={"base_url": url, "api_key": "local"},
-            web_tools=False, use_memory=False, verbose=False,
-        )
-        assert not hasattr(agent, "_review_quota")
-        spent_before_fanout = float(agent.budget_used)
-        run_parallel = _tool(agent, "run_parallel")
-        out = run_parallel('["Review module A for bugs"]')
-    assert yaml.safe_load(yaml.safe_load(out)[0])["success"] is True
-    assert len(requests) == 2
+    agent = ChatSorcarAgent("share-in-prompt")
+    agent.run(
+        prompt_template="Say done. Use at most 10% of the budget for reviewing.",
+        model_name=STANDIN_MODEL, work_dir=str(env.repo), max_steps=3, max_budget=8.0,
+        model_config=model.server.model_config,
+        web_tools=False, use_memory=False, verbose=False,
+    )
+    assert not hasattr(agent, "_review_quota")
+    spent_before_fanout = float(agent.budget_used)
+    run_parallel = _tool(agent, "run_parallel")
+    out = run_parallel('["Review module A for bugs"]')
+    assert _child_results(out)[0]["success"] is True
+    assert len(model.requests) == 2
     rows = _child_rows(agent)
     assert len(rows) == 1
     # The removed allowance would have been 0.8; the plain share of the

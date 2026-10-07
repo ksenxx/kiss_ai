@@ -54,7 +54,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any
 from urllib.parse import urlsplit
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
@@ -86,7 +86,7 @@ _WEBHOOK_DIR = kiss_home() / "third_party_agents" / "webhook"
 _config = ChannelConfig(_WEBHOOK_DIR, ("port",))
 
 
-class WebhookSea(BaseSea):
+class WebhookSea(ChannelSea):
     """The ``/webhook`` SEA."""
 
     def description(self) -> str:
@@ -108,15 +108,6 @@ class WebhookSea(BaseSea):
         authentication and backend tools.
         """
         return tools + WebhookAgent()._get_tools()
-
-    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` SEA contract).
-
-        No git lifecycle, nothing inherited from the calling task, the
-        channel preamble in the system prompt (see
-        :mod:`kiss.agents.sorcar.sea_settings`).
-        """
-        return settings | {"channel": True}
 
     def system_prompt(self, system_prompt: str) -> str:
         """Return the channel guidance appended to the run's system prompt."""

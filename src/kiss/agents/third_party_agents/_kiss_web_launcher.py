@@ -282,7 +282,7 @@ def run_agent_via_kiss_web(
     agent's own module, whose SEA class's ``tools()`` the daemon runs
     to build a fresh agent from the credentials persisted under the
     KISS home and whose ``settings()`` / ``system_prompt()``
-    make the run a channel (``channel: True``) session with the channel's
+    make the run a channel (a ``ChannelSea``) session with the channel's
     guidance in its system prompt), and submits the task to the in-process kiss-web daemon over its
     Unix-domain socket.  Blocks until the daemon reports the task
     finished and returns the task's YAML result.
@@ -371,7 +371,7 @@ def run_agent_via_kiss_web(
         max_budget=max_budget,
         model_config=model_config,
         use_web_tools=web_tools,
-        allow_fan_out=is_parallel,
+        is_parallel=is_parallel,
         workspace=agent.workspace,
         provenance=provenance,
         timeout=None,

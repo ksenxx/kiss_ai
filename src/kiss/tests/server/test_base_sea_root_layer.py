@@ -4,9 +4,10 @@
 # add your name here
 """``BaseSea`` (``base_sea.py``) is the root layer of every run.
 
-A plain chat run, a ``/xxx`` SEA run and a ``run_parallel`` child go
-through the methods of :class:`kiss.agents.seas.base.base_sea.BaseSea`
-first, so editing that one file customizes every run.  The tests
+A plain chat run, a ``/xxx`` SEA run and the daemon-launched side
+channels (task update, merge resolver) go through the methods of
+:class:`kiss.agents.seas.base.base_sea.BaseSea` first, so editing that
+one file customizes every run.  The tests
 stand in for such an edit by rebinding the methods on the class for
 their duration (what a daemon restart after editing the file does)
 and drive the real pipeline: the daemon's ``run`` command through
@@ -40,7 +41,6 @@ from kiss.agents.sorcar.sea_commands import (
     sea_layers,
     sea_name,
 )
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _sea_run_kwargs
 from kiss.server import sorcar
 from kiss.server.merge_conflict_resolver import run_merge_sea
 from kiss.server.task_update import run_task_update_sea
@@ -211,9 +211,7 @@ def test_a_plain_command_runs_the_bare_base_and_names_no_sea() -> None:
     assert sea_name(layers) == ""
     cmd: dict[str, Any] = {"prompt": "p", "useMemory": False}
     assert apply_sea(cmd) == set()
-    assert cmd.pop(RUN_CONFIG_FIELD) == {
-        "sea": "", "kind": "session", "channel": False, "pinned": {},
-    }
+    assert cmd.pop(RUN_CONFIG_FIELD) == {"sea": "", "channel": False, "pinned": {}}
     assert cmd["prompt"] == "p" and cmd["useMemory"] is False
     assert cmd["systemPromptHook"]("X") == "X"
     assert cmd["toolsHook"]([house_tool]) == [house_tool]
@@ -378,55 +376,3 @@ def test_merge_resolver_side_channel_goes_through_the_base(
     # base's appended rule is (correctly) gone from this child.
     system = next(m for m in requests[0]["messages"] if m["role"] == "system")
     assert HOUSE_RULE not in str(system["content"])
-
-
-def test_a_fan_out_child_states_the_base_rule_once_by_running_its_own_layers(
-    customized_base: None, tmp_path: Path,
-) -> None:
-    # The parent's hooked prompt is not forwarded: the child's own
-    # ``BaseSea`` layer appends the rule, so it appears exactly once in
-    # both prompts even though the parent's prompt also carries it.
-    parent_class = SorcarAgent.__mro__[1]
-    original_run = parent_class.run  # type: ignore[attr-defined]
-    composed: list[str] = []
-    fanned_out: list[bool] = []
-
-    def stub_run(self_agent: Any, **kwargs: Any) -> str:
-        composed.append(str(kwargs.get("system_prompt")))
-        if not fanned_out:
-            fanned_out.append(True)
-            self_agent._run_tasks_parallel(["child task"])
-        return "success: true\nis_continue: false\nsummary: ok\n"
-
-    parent_class.run = stub_run  # type: ignore[attr-defined]
-    try:
-        parent = ChatSorcarAgent("parent")
-        parent.run(
-            prompt_template="parent task", work_dir=str(tmp_path), web_tools=False,
-            system_prompt="\n\nCALLER SUFFIX",
-            system_prompt_hook=evaluate_sea([BaseSea()], "parent task").system_prompt_hook,
-        )
-    finally:
-        parent_class.run = original_run  # type: ignore[attr-defined]
-    assert len(composed) == 2, composed
-    parent_prompt, child_prompt = composed
-    assert parent_prompt.count(HOUSE_RULE) == 1, parent_prompt
-    assert child_prompt.count(HOUSE_RULE) == 1, child_prompt
-    # The caller-supplied suffix is what the child inherits, once.
-    assert parent_prompt.count("CALLER SUFFIX") == 1
-    assert child_prompt.count("CALLER SUFFIX") == 1
-
-
-def test_run_parallel_children_without_an_agent_go_through_the_base(
-    customized_base: None,
-) -> None:
-    overrides, run_config = _sea_run_kwargs(
-        [BaseSea()], "child task", {"prompt_suffix": " SUFFIX", "tool_profile": "full"}, None,
-    )
-    assert run_config == {"sea": "", "kind": "session", "channel": False, "pinned": {}}
-    assert overrides["prompt_template"] == "child task SUFFIX"
-    assert overrides["system_prompt_hook"]("X") == "X" + HOUSE_RULE
-    assert overrides["tools_hook"]([]) == [house_tool]
-    assert overrides["llm_call_hook"]([1, 2]) == [2, 1]
-    assert overrides["tool_call_hook"]("Bash", {"command": "rm -rf ."}) == refuse("Blocked by base")
-    assert "tool_profile" not in overrides

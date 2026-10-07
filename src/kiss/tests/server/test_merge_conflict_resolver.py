@@ -33,10 +33,12 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.seas.merge import merge_sea
 from kiss.agents.sorcar import persistence, sea_commands
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, MergeResult, _git
 from kiss.agents.sorcar.persistence import _add_task, _add_task_usage
+from kiss.agents.sorcar.sea_commands import base_settings
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
@@ -376,25 +378,22 @@ class TestMergeUsagePersistsWhenTheMergeIsStopped:
 
 class TestMergeSea:
     def test_settings_follow_the_sea_contract(self) -> None:
-        # ``settings()`` is the one configuration getter: the ``worker``
-        # preset (no parallelism, web, memory, worktree, commits or
-        # classification — a merge runs on the real checkout) with the
-        # budget cap; ``system_prompt()`` supplies the base prompt.
+        # ``settings()`` is the one configuration getter: a ``WorkerSea``
+        # (no web, memory, worktree, commits or classification — a merge
+        # runs on the real checkout) with the budget cap;
+        # ``system_prompt()`` supplies the base prompt.
         sea = merge_sea.MergeSea()
+        assert isinstance(sea, WorkerSea)
         assert sea.system_prompt("ASSEMBLED") == merge_sea.SYSTEM_PROMPT
-        assert sea.settings({}) == {
-            "kind": "worker", "max_budget": merge_sea.MAX_BUDGET_USD,
-        }
-        resolved = resolve_settings(sea.settings({}))
-        assert resolved["kind"] == "worker"
-        assert resolved["allow_fan_out"] is False
+        assert sea.settings({}) == {"max_budget": merge_sea.MAX_BUDGET_USD}
+        resolved = resolve_settings(base_settings([sea]))
         assert resolved["use_web_tools"] is False
         assert resolved["use_memory"] is False
         assert resolved["use_worktree"] is False
         assert resolved["auto_commit"] is False
         assert resolved["auto_classify"] is False
         assert resolved["max_budget"] == merge_sea.MAX_BUDGET_USD
-        for legacy in ("allow_fan_out", "use_web_tools", "use_memory", "use_worktree",
+        for legacy in ("use_web_tools", "use_memory", "use_worktree",
                        "auto_commit", "max_budget"):
             assert not hasattr(merge_sea, legacy), legacy
 

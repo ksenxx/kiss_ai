@@ -10,10 +10,10 @@ Sorcar Extension Agent through ``run_agent`` on the tab's working
 directory, with the command as the task.  The agent runs with the
 ``bash`` tool profile — ``Bash`` (plus the always-present ``finish``)
 and no other built-in tool — directly on the checkout (no worktree, no
-auto-commit, no classification, no browser, no memory, no fan-out), so
+auto-commit, no classification, no browser, no memory), so
 the command's output is the result of the run.
 
-``settings()`` (the ``worker`` kind with the ``bash`` tool profile) and
+``settings()`` (a ``WorkerSea`` with the ``bash`` tool profile) and
 the methods ``system_prompt()`` / ``prompt(task)`` of :class:`ShSea` follow the
 SEA contract in :mod:`kiss.agents.seas.base.base_sea`.
 """
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 
 SYSTEM_PROMPT = (
     "You are a shell-command execution assistant. The user's message contains a shell "
@@ -46,7 +46,7 @@ SYSTEM_PROMPT = (
 """The whole base system prompt of the shell agent (replaces ``SYSTEM.md``)."""
 
 
-class ShSea(BaseSea):
+class ShSea(WorkerSea):
     """The ``/sh`` SEA."""
 
     def description(self) -> str:
@@ -70,7 +70,6 @@ class ShSea(BaseSea):
         than run as something else.
         """
         return settings | {
-            "kind": "worker",
             "tool_profile": "bash",
             "locked": ["tool_profile"],
         }

@@ -19,7 +19,7 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   it with the ``run_agent`` tool as ``run_agent(task, agent="cron")`` — the
   dispatched session gets the :func:`cron_job` tool from
   :func:`tools` and runs in ``$KISS_HOME/cron/work`` without a
-  worktree (the ``channel`` kind and ``work_dir`` of :func:`settings`).
+  worktree (a ``ChannelSea`` with the ``work_dir`` of :func:`settings`).
 - The kiss-web daemon runs the scheduler automatically in a
   background thread (:func:`start_scheduler_thread`): every ~60
   seconds a tick finds due jobs, reschedules them *before* running
@@ -95,7 +95,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.config import kiss_home
 from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
@@ -576,11 +576,10 @@ UNATTENDED_CHILD_PREAMBLE = (
 )
 """Paragraph added to every sub-task (``run_agent`` / ``run_parallel``)
 spawned from an unattended run, so the child inherits the no-questions rule
-instead of blocking on ``ask_user_question`` until its timeout.  Prepended
-to ``run_parallel`` tasks (:func:`unattended_child_prompt`); appended to
-``run_agent`` tasks through ``append_to_prompt``
-(:func:`unattended_child_suffix`), which the daemon adds after an agent
-script's ``prompt()`` override has replaced the prompt body."""
+instead of blocking on ``ask_user_question`` until its timeout.  Appended
+through ``append_to_prompt`` (:func:`unattended_child_suffix`), which the
+daemon adds after an agent script's ``prompt()`` override has replaced
+the prompt body."""
 
 CHAT_TASK_HEADING = "# Task"
 """Heading ``ChatSorcarAgent.build_chat_prompt`` puts in front of the current
@@ -606,37 +605,21 @@ def is_unattended(agent: Any) -> bool:
     """True when *agent* runs an unattended (cron) task or a sub-task of one.
 
     The current task text must start with :data:`PROMPT_PREAMBLE` (a cron
-    prompt job) or start or end with :data:`UNATTENDED_CHILD_PREAMBLE` (a
-    sub-task); a prompt that merely quotes the sentence elsewhere is not
-    unattended.
+    prompt job) or end with :data:`UNATTENDED_CHILD_PREAMBLE` (a sub-task);
+    a prompt that merely quotes the sentence elsewhere is not unattended.
 
     Args:
         agent: A running agent (see :func:`_current_task_text`).
     """
     text = _current_task_text(agent)
-    return (
-        text.startswith(PROMPT_PREAMBLE.strip())
-        or text.startswith(UNATTENDED_CHILD_PREAMBLE)
-        or text.endswith(UNATTENDED_CHILD_PREAMBLE)
-    )
-
-
-def unattended_child_prompt(prompt: str) -> str:
-    """Return *prompt* with :data:`UNATTENDED_CHILD_PREAMBLE` prepended (once).
-
-    Args:
-        prompt: A ``run_parallel`` task about to be spawned from an unattended run.
-    """
-    if prompt.lstrip().startswith(UNATTENDED_CHILD_PREAMBLE):
-        return prompt
-    return UNATTENDED_CHILD_PREAMBLE + "\n\n" + prompt
+    return text.startswith(PROMPT_PREAMBLE.strip()) or text.endswith(UNATTENDED_CHILD_PREAMBLE)
 
 
 def unattended_child_suffix(append_to_prompt: str) -> str:
     """Return *append_to_prompt* ending with :data:`UNATTENDED_CHILD_PREAMBLE` (once).
 
     Args:
-        append_to_prompt: The ``run_agent`` caller's prompt suffix (may be empty).
+        append_to_prompt: The sub-task caller's prompt suffix (may be empty).
     """
     if append_to_prompt.rstrip().endswith(UNATTENDED_CHILD_PREAMBLE):
         return append_to_prompt
@@ -1802,7 +1785,7 @@ Appended by the SEA's ``system_prompt`` method, which the daemon applies when
 """
 
 
-class CronAgentSea(BaseSea):
+class CronAgentSea(ChannelSea):
     """The ``/cron_agent`` SEA."""
 
     def tools(self, tools: list[Any]) -> list[Any]:
@@ -1825,14 +1808,14 @@ class CronAgentSea(BaseSea):
         )
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Configure a cron-management session: a ``channel`` worker in the cron work directory.
+        """Configure a cron-management session: a channel in the cron work directory.
 
-        ``channel``: no git lifecycle (managing the JSON job store needs
+        A ``ChannelSea``: no git lifecycle (managing the JSON job store needs
         none), nothing inherited from the calling task, the channel
         preamble in the system prompt.  Classification is off: unattended
         scheduled automations should not spend a classifier round trip.
         """
-        return settings | {"channel": True, "work_dir": cron_work_dir()}
+        return settings | {"work_dir": cron_work_dir()}
 
     def system_prompt(self, system_prompt: str) -> str:
         """Return :data:`CRON_DISPATCH_PREAMBLE`, appended to the session's system prompt."""

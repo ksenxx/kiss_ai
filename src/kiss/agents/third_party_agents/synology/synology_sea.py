@@ -26,7 +26,7 @@ from urllib.parse import parse_qs
 
 import requests
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
@@ -49,7 +49,7 @@ _SYNOLOGY_DIR = kiss_home() / "third_party_agents" / "synology"
 _config = ChannelConfig(_SYNOLOGY_DIR, ("webhook_url",))
 
 
-class SynologySea(BaseSea):
+class SynologySea(ChannelSea):
     """The ``/synology`` SEA."""
 
     def description(self) -> str:
@@ -70,15 +70,6 @@ class SynologySea(BaseSea):
         authentication and backend tools.
         """
         return tools + SynologyChatAgent()._get_tools()
-
-    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` SEA contract).
-
-        No git lifecycle, nothing inherited from the calling task, the
-        channel preamble in the system prompt (see
-        :mod:`kiss.agents.sorcar.sea_settings`).
-        """
-        return settings | {"channel": True}
 
 
 def _embedded_token(webhook_url: str) -> str:

@@ -2452,15 +2452,13 @@ class VSCodeServer(
            match.
 
         2. **Chat-id match.**  Sub-agents inherit ``chat_id`` from
-           the parent (see ``ChatSorcarAgent._run_tasks_parallel``).
+           the parent (see ``agent_dispatch.inherit_from_parent``).
            Scan for non-subagent states whose ``chat_id`` matches.
            If exactly one such state exists, use it.  More than one
            is ambiguous — bail out so we don't pick the wrong tab.
 
-        3. **Synthetic-tab-id parse.**  Live sub-agent tab ids are
-           generated as ``f"task-{parent_task_id}__sub_{idx}"`` by
-           :meth:`ChatSorcarAgent._run_tasks_parallel` and as
-           ``f"{parent_tab_id}__sub_{sub_task_id}"`` by
+        3. **Synthetic-tab-id parse.**  Sub-agent tab ids are
+           generated as ``f"{parent_tab_id}__sub_{sub_task_id}"`` by
            :meth:`_open_persisted_subagent_tabs`.  Split on
            ``"__sub_"`` and, if the prefix matches a known
            non-subagent ``tab_id``, use it.

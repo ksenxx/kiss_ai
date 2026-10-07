@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 import yaml
 
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.review_paper import review_paper_sea
 from kiss.agents.seas.revise_and_review_paper import revise_and_review_paper_sea as sea
 from kiss.agents.seas.revise_and_review_paper.revise_and_review_paper_sea import (
@@ -67,7 +68,7 @@ def _review(tmp_path: Path, name: str, tail: str) -> Path:
 
 
 def test_sea_methods_follow_the_user_contract() -> None:
-    """The SEA appends the coordinator rules, offers three tools, neither browses nor fans out."""
+    """The SEA appends the coordinator rules, offers three tools and does not browse."""
     agent = ReviseAndReviewPaperSea()
     assert agent.system_prompt("ASSEMBLED") == "ASSEMBLED\n\n" + sea.SYSTEM_PROMPT
     prompt = sea.SYSTEM_PROMPT
@@ -83,17 +84,17 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert names == ["print", "writer_task", "reviewer_task", "loop_status"]
     assert agent.settings({}) == {
         "use_web_tools": False,
-        "allow_fan_out": False,
         "auto_classify": False,
         "tool_profile": "full",
         "timeout": sea.DISPATCH_TIMEOUT_SECONDS,
     }
     assert agent.settings({"model": "m"}) == {"model": "m", **agent.settings({})}
     assert sea.DISPATCH_TIMEOUT_SECONDS == 86400
-    # No preset named, so the resolved settings are these five keys under
-    # the default ``session`` preset; the deprecated getters are gone.
-    assert resolve_settings(agent.settings({})) == {"kind": "session", **agent.settings({})}
-    assert sea_commands.base_settings([agent]) == {"kind": "session", **agent.settings({})}
+    # A plain ``BaseSea``: the resolved settings are these four keys and
+    # nothing else; the deprecated getters are gone.
+    assert type(agent).__bases__ == (BaseSea,)
+    assert resolve_settings(agent.settings({})) == agent.settings({})
+    assert sea_commands.base_settings([agent]) == agent.settings({})
     assert_no_removed_getters(sea)
     assert "strong accept" in agent.description()
 
@@ -114,7 +115,7 @@ def test_slash_command_resolves_to_the_bundled_sea() -> None:
     assert path == _SEA_PATH
     assert task_text == "Writing: a paper. Review: for ICLR."
     settings = sea_commands.sea_settings(path)
-    assert settings == {"kind": "session", **ReviseAndReviewPaperSea().settings({})}
+    assert settings == ReviseAndReviewPaperSea().settings({})
     assert resolve_timeout(None, settings) == 86400.0
     loaded = sea_commands.load_sea(_SEA_PATH)
     assert type(loaded).__name__ == "ReviseAndReviewPaperSea" and loaded.path == _SEA_PATH
@@ -370,7 +371,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
 
     The scripted model builds a writer task, reads the loop status of one
     review on disk, and finishes.  The test checks the offered tools (no
-    browser, no ``run_parallel``), that the default system prompt was kept
+    browser), that the default system prompt was kept
     and the coordinator rules appended, and that both tool results flowed
     back through the tool-result messages.
     """
@@ -404,7 +405,6 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
             tools_hook=run.tools_hook,
             tool_profile=settings["tool_profile"],
             web_tools=settings["use_web_tools"],
-            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)
@@ -423,7 +423,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
             "Bash",
             "finish",
         } <= names
-        assert not names & {"go_to_url", "run_parallel"}, names
+        assert "go_to_url" not in names, names
         system = str(next(m for m in request["messages"] if m["role"] == "system")["content"])
         assert not system.startswith(sea.SYSTEM_PROMPT)
         assert "# Revise-and-review loop coordinator" in system

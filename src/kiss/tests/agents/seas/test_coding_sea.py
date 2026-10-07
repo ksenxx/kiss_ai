@@ -27,7 +27,7 @@ import pytest
 
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, resolve_settings
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.tool_verdict import ALLOW, refuse
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
@@ -93,13 +93,12 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     assert not hasattr(coding_sea, "add_to_tools")
     assert_no_removed_getters(coding_sea)
     assert not hasattr(harness, "if_append_basic_tools") and not hasattr(harness, "tools")
-    assert not settings["use_memory"] and not settings["use_web_tools"]
-    # The bundled ``coding`` SEA itself is hidden: it is a factory of trial
-    # SEAs, never a slash command of its own.
+    # The bundled ``coding`` SEA itself is a hidden worker: it is a factory
+    # of trial SEAs, never a slash command of its own.
     assert coding_sea.CodingSea().settings({"model": "m"}) == {"model": "m", "hidden": True}
     assert sea_commands.get_command("coding") is None
     assert sea_commands.sea_settings(Path(coding_sea.__file__).resolve()) == {
-        "kind": "session", "hidden": True,
+        **WORKER_DEFAULTS, "hidden": True,
     }
     assert "/app" in harness.system_prompt() and "wall-clock" not in harness.system_prompt()
     events = [
@@ -429,10 +428,11 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     assert settings["docker_image"] == "container:kiss-test-trial"
     assert settings["work_dir"] == str(tmp_path / "sea-trial")
     assert settings["model_config"] is None
-    resolved = resolve_settings(sea.settings({}))
+    # The trial's effective settings: a worker (no browser, no memory),
+    # see ``ContainerHarness.settings``.
+    resolved = sea_commands.sea_settings(sea_path)
     assert resolved["use_web_tools"] is False
     assert resolved["use_memory"] is False
-    assert resolved["allow_fan_out"] is True
     assert sea.tool_call_hook("Bash", {"command": "ls"}) == ALLOW
     # ``llm_call_hook`` delegates to the harness: the call is counted and
     # logged before the liveness check, which ends the trial when a Docker

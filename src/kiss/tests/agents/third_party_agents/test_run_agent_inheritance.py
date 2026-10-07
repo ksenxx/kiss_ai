@@ -290,11 +290,11 @@ class Sea(BaseSea):
 """,
             "worker": (
                 """
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 
-class Sea(BaseSea):
+class Sea(WorkerSea):
     def settings(self, settings):
-        return settings | {'kind': 'worker', 'model': 'claude-sonnet-4-5'}
+        return settings | {'model': 'claude-sonnet-4-5'}
 """
             ),
             # The SEA class defined under a condition the script evaluates
@@ -437,7 +437,7 @@ class Sea(BaseSea):
         assert _sent(daemon)["modelConfig"] == PARENT_CONFIG
         result = dispatch_result(
             "sorcar_sea", "say hi", DUMMY_SEA, str(env.repo), "", None, 30.0,
-            parent_agent=parent, inherit=True, settings={"kind": "session", "model": "x"},
+            parent_agent=parent, inherit=True, settings={"model": "x"},
         )
         assert isinstance(result, daemon_client.TaskResult), result
         assert _sent(daemon)["modelConfig"] is None
@@ -554,7 +554,7 @@ class Sea(BaseSea):
         to the system prompt), in the shared ``channel_work`` scratch
         directory.  Worktree and auto-commit follow the persisted
         settings on the wire, not the parent's run, and the module's
-        ``channel`` preset pins both off on the daemon.
+        ``ChannelSea`` base pins both off on the daemon.
         """
         from kiss.agents.third_party_agents.slack import slack_sea
 

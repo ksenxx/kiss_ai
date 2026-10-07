@@ -86,7 +86,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import BaseSea, ChannelSea
 from kiss.agents.sorcar.sea_settings import (
     SeaError,
     declares_hidden,
@@ -707,7 +707,7 @@ def _fold[T](seas: list[BaseSea], name: str, value: T, check: Callable[[str, Any
 def declared_settings(seas: list[BaseSea]) -> dict[str, Any]:
     """Return the settings *seas* declare: every ``settings`` method folded over ``{}``, base first.
 
-    What a SEA writes before its kind's defaults are laid under it.  A
+    What a SEA writes before its base class's defaults are laid under it.  A
     ``work_dir`` is kept as written: the launcher anchors a relative one
     at the calling task's directory
     (:func:`kiss.agents.sorcar.sea_settings.anchored_work_dir`), as it
@@ -730,12 +730,31 @@ def own_settings(sea: BaseSea) -> dict[str, Any]:
     return _check_dict(_label(method), _call(method, {}))
 
 
+def inherited_settings(sea: BaseSea) -> dict[str, Any]:
+    """Return what the SEA's base classes write in ``settings``, over ``{}``, base first.
+
+    The values a key of :func:`own_settings` repeats when it equals one
+    of these (the linter's ``redundant-key`` finding).
+    """
+    settings: dict[str, Any] = {}
+    for cls in reversed(type(sea).__mro__[1:]):
+        if "settings" in vars(cls):
+            method = _bound(sea, cls, "settings")
+            settings = _check_dict(_label(method), _call(method, settings))
+    return settings
+
+
+def is_channel(seas: list[BaseSea]) -> bool:
+    """Return whether the run of *seas* is a channel (a SEA derives from ``ChannelSea``)."""
+    return any(isinstance(sea, ChannelSea) for sea in seas)
+
+
 def base_settings(seas: list[BaseSea]) -> dict[str, Any]:
     """Return the effective settings of *seas*: the declared ones resolved.
 
     :func:`declared_settings` through
-    :func:`kiss.agents.sorcar.sea_settings.resolve_settings` (kind
-    defaults, type checks, channel locks).
+    :func:`kiss.agents.sorcar.sea_settings.resolve_settings` (type
+    checks, channel locks for a :func:`is_channel` run).
 
     Raises:
         SeaError: When a ``settings`` method raises or returns no
@@ -743,7 +762,7 @@ def base_settings(seas: list[BaseSea]) -> dict[str, Any]:
     """
     declared = declared_settings(seas)
     try:
-        return resolve_settings(declared)
+        return resolve_settings(declared, is_channel(seas))
     except SeaError as exc:
         raise SeaError(f"SEA {str(seas[-1].path)!r}: {exc}") from exc
 
@@ -751,8 +770,8 @@ def base_settings(seas: list[BaseSea]) -> dict[str, Any]:
 def sea_settings(sea_path: Path) -> dict[str, Any]:
     """Return the effective settings of the SEA at *sea_path* (:func:`base_settings`).
 
-    The dispatcher reads the ``kind``, ``timeout``, ``work_dir`` and
-    ``model`` from it; the task runner the ``model`` and ``work_dir``.
+    The dispatcher reads the ``timeout``, ``work_dir`` and ``model``
+    from it; the task runner the ``model`` and ``work_dir``.
 
     Raises:
         SeaError: When the file is broken or its settings are
@@ -1005,7 +1024,9 @@ def run_picked_hook(
 
 
 # A ``class X(Base):`` line whose base is not plain ``BaseSea``.
-_DERIVED_CLASS = re.compile(r"^class\s+\w+\s*\((?!\s*BaseSea\s*\))", re.MULTILINE)
+_DERIVED_CLASS = re.compile(
+    r"^class\s+\w+\s*\((?!\s*(?:BaseSea|WorkerSea|ChannelSea)\s*\))", re.MULTILINE
+)
 
 
 def _registers_as_model(sea_path: Path) -> bool:
@@ -1189,8 +1210,7 @@ def sea_check(name: str, sea_path: Path) -> str:
         seas, cmd, description = check_sea(sea_path)
     except SeaError as exc:
         return f"/{name} is broken: {exc}"
-    merged = base_settings(seas)
-    settings = {key: value for key, value in merged.items() if key != "kind"}
+    settings = base_settings(seas)
     model = settings.get("model") or "the calling task's model (else the default model)"
     classes = [
         cls.__name__ for cls in reversed(type(seas[-1]).__mro__) if issubclass(cls, BaseSea)
@@ -1204,7 +1224,6 @@ def sea_check(name: str, sea_path: Path) -> str:
     lines = [
         f"/{name}: {description}",
         "classes: " + " > ".join(classes),
-        f"kind: {merged['kind']}",
         "settings: " + (json.dumps(settings, sort_keys=True, default=str) or "{}"),
         f"model: {model}",
         "tools added: " + (", ".join(_tool_name(tool) for tool in base_tools(seas, [])) or "none"),

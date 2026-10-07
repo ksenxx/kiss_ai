@@ -15,7 +15,7 @@ first cut of the ``settings()`` contract:
   exception instead of a :exc:`SeaError` naming the source;
 * an unknown settings key was accepted silently when its value was
   ``None``;
-* a ``/xxx text`` run of a ``channel``-preset SEA worked in the
+* a ``/xxx text`` run of a ``ChannelSea`` worked in the
   project directory instead of ``~/.kiss/channel_work``, unlike the
   same SEA dispatched through ``run_agent``;
 * the terminal persistence of a slash-command run stored the stripped
@@ -101,15 +101,15 @@ def test_finite_numbers_are_returned_as_floats() -> None:
 
 
 def test_unknown_key_with_none_value_is_rejected() -> None:
-    declared = {"kind": "worker", "tiemout": None}
+    declared = {"use_web_tools": True, "tiemout": None}
     with pytest.raises(SeaError, match="unknown key 'tiemout'"):
         resolve_settings(declared)
 
 
 def test_known_key_with_none_value_is_dropped() -> None:
-    resolved = resolve_settings({"kind": "worker", "timeout": None})
+    resolved = resolve_settings({"use_web_tools": True, "timeout": None})
     assert "timeout" not in resolved
-    assert resolved["kind"] == "worker"
+    assert resolved["use_web_tools"] is True
 
 
 def _history_tasks() -> list[str]:
@@ -250,19 +250,16 @@ class Sea(BaseSea):
         child_tools = by_prompt["# Task\nCHILD"]["tool_names"]
         assert sorted(child_tools) == ["_child_tool", "finish"], child_tools
 
-    def test_channel_preset_slash_command_runs_in_the_channel_scratch_dir(self) -> None:
+    def test_channel_sea_slash_command_runs_in_the_channel_scratch_dir(self) -> None:
         """``/chan text`` works in ``~/.kiss/channel_work``, as ``run_agent`` would."""
         _seed_seas_md(
             Path(self.tmpdir) / "user-seas", "chan",
             """
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 
-class Sea(BaseSea):
+class Sea(ChannelSea):
     def description(self):
         return 'a channel'
-
-    def settings(self, settings):
-        return settings | {'channel': True}
 """,
         )
         runs: list[dict[str, Any]] = []
@@ -279,7 +276,7 @@ class Sea(BaseSea):
         assert runs[0]["work_dirs"] == [scratch], runs[0]
         assert Path(scratch).is_dir()
 
-    def test_session_preset_slash_command_keeps_the_project_dir(self) -> None:
+    def test_plain_sea_slash_command_keeps_the_project_dir(self) -> None:
         """A plain SEA's slash run stays in the calling project."""
         _seed_seas_md(
             Path(self.tmpdir) / "user-seas", "plain",

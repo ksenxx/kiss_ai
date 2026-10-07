@@ -25,6 +25,7 @@ import yaml
 
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.autorouter.autorouter_sea import AutorouterSea
+from kiss.agents.seas.base.base_sea import BaseSea, WorkerSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
@@ -80,11 +81,8 @@ def test_sea_methods_follow_the_contract() -> None:
     )
     assert [tool.__name__ for tool in sea.tools([print])][0] == "print"
     assert {tool.__name__ for tool in sea.tools([])} == _TOOL_NAMES
-    # run_parallel workers inherit the parent's custom system prompt, which
-    # would make every routed unit a router; dispatch goes through run_agent.
     assert sea.settings({}) == {
         "model": autorouter_sea.orchestrator_model(),
-        "allow_fan_out": False,
         "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,
@@ -93,13 +91,14 @@ def test_sea_methods_follow_the_contract() -> None:
     assert sea.settings({"model": "x", "max_budget": 3.0}) == {
         "max_budget": 3.0, **sea.settings({})
     }
-    # No preset named: the resolved settings are the five keys above under
-    # the default ``session`` preset (which adds no defaults), so the
-    # caller's budget, worktree, auto-commit and tool profile win.  The
-    # protocol is ADDED to the default prompt, never a replacement.
-    assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == {
-        "kind": "session", **sea.settings({})
-    }
+    # A ``BaseSea`` (which lays no defaults): the resolved settings are the
+    # four keys above, so the caller's budget, worktree, auto-commit and
+    # tool profile win.  The protocol is ADDED to the default prompt,
+    # never a replacement.
+    assert isinstance(sea, BaseSea) and not isinstance(sea, WorkerSea)
+    assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == (
+        sea.settings({})
+    )
     assert_no_removed_getters(autorouter_sea)
 
 
@@ -117,7 +116,7 @@ def test_slash_autorouter_resolves_to_the_bundled_sea() -> None:
     task_text, path = hit
     assert path == _SEA_PATH
     assert task_text == "add a --json flag"
-    assert sea_commands.sea_settings(path) == {"kind": "session", **AutorouterSea().settings({})}
+    assert sea_commands.sea_settings(path) == AutorouterSea().settings({})
     assert sea_commands.help_text_if_command("/autorouter help") == AutorouterSea().description()
 
 
@@ -133,7 +132,6 @@ def test_agent_file_loader_stages_the_sea_tools() -> None:
     # The hooks are written on every run, so the set lists the settings only.
     assert overridden == {
         "model",
-        "isParallel",
         "classifyTasks",
         "useWebTools",
         "useMemory",
@@ -151,7 +149,7 @@ def test_agent_file_loader_stages_the_sea_tools() -> None:
     # only a ``none`` tool profile removes it, and nothing stages
     # ``appendBasicTools`` any more.
     assert "appendBasicTools" not in cmd
-    assert cmd["isParallel"] is False
+    assert "isParallel" not in cmd
     assert cmd["classifyTasks"] is False and cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
     assert cmd["toolProfile"] == "full"
@@ -331,8 +329,8 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
 
     The scripted model picks a medium model, logs the decision and finishes
     with the pick.  The test checks the tool schemas offered on every step
-    (routing tools, ``run_agent``/``set_model``/``Bash`` present, no
-    ``run_parallel``, browser or memory tools), the system prompt, the real
+    (routing tools, ``run_agent``/``run_parallel``/``set_model``/``Bash``
+    present, no browser or memory tools), the system prompt, the real
     pick — or the real "no runnable model" error on an installation without
     a medium-tier credential — in the tool-result message, and that the
     ledger row landed in ``$KISS_HOME/MODEL_DECISIONS.md`` (not under the
@@ -380,7 +378,6 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
                 tools_hook=run.tools_hook,
                 web_tools=settings["use_web_tools"],
                 use_memory=settings["use_memory"],
-                is_parallel=settings["allow_fan_out"],
                 verbose=False,
             )
     finally:
@@ -394,10 +391,10 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert _TOOL_NAMES <= names, names
-        assert {"run_agent", "set_model", "Bash", "run_commands_parallel", "finish"} <= names, names
-        assert not {"run_parallel", "go_to_url", "click", "screenshot", "memory_search"} & names, (
-            names
-        )
+        assert {
+            "run_agent", "run_parallel", "set_model", "Bash", "run_commands_parallel", "finish",
+        } <= names, names
+        assert not {"go_to_url", "click", "screenshot", "memory_search"} & names, names
         system = str(next(m for m in request["messages"] if m["role"] == "system")["content"])
         assert autorouter_sea.SYSTEM_PROMPT in system, system[:200]
         assert system.startswith("<identity>"), system[:200]

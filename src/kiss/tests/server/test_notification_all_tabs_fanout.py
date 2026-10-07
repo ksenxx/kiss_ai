@@ -4,25 +4,22 @@
 # add your name here
 """End-to-end tests: agent UI notifications reach EVERY watching tab.
 
-Three notification paths used to target only the owning tab
+Two notification paths used to target only the owning tab
 (``agent._tab_id``); they must instead reach every tab subscribed to
 the task's event stream (``JsonPrinter._subscribers`` /
 ``_fanout_targets``):
 
 * the auto-commit lifecycle toasts emitted by
-  ``WorktreeSorcarAgent._broadcast_commit_notification``,
+  ``WorktreeSorcarAgent._broadcast_commit_notification``, and
 * the live model-picker override emitted by
   ``SorcarAgent._show_model_in_picker`` via
   ``JsonPrinter.broadcast_agent_model_pick`` (which must fan out even
   when the calling thread has no thread-local ``task_id`` bound,
-  using the new explicit ``task_id`` fallback), and
-* the ``subagentDone`` broadcasts of the non-UI
-  ``run_tasks_parallel`` path.
+  using the new explicit ``task_id`` fallback).
 
 All tests drive the real code paths — real on-disk git worktrees for
-the auto-commit toasts, a real :class:`JsonPrinter` subscriber map,
-and the real ``run_tasks_parallel`` executor — with a capture
-printer that records ``broadcast`` payloads.
+the auto-commit toasts and a real :class:`JsonPrinter` subscriber map
+— with a capture printer that records ``broadcast`` payloads.
 
 Also covers the printer-side "transient, all-watching-tabs"
 primitive ``JsonPrinter.broadcast_transient`` (which the toast path
@@ -40,7 +37,6 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.agents.sorcar.test_notification_all_tabs_fanout import (  # noqa: F401
@@ -69,22 +65,6 @@ class _CapturePrinter(JsonPrinter):
     def of_type(self, event_type: str) -> list[dict[str, Any]]:
         """Return recorded events whose ``type`` equals *event_type*."""
         return [e for e in self.events if e.get("type") == event_type]
-
-
-_SUB_TASK_ID = "313131"
-
-
-_VIEWER_TAB = "frontend-viewer-tab"
-
-
-def _patched_run(self: ChatSorcarAgent, **kwargs: Any) -> str:
-    """Simulate the sub-agent lifecycle: allocate ``_last_task_id``
-    and subscribe a frontend viewer tab to its event stream."""
-    self._last_task_id = _SUB_TASK_ID
-    printer: Any = kwargs.get("printer") or self.printer
-    if printer is not None and hasattr(printer, "subscribe_tab"):
-        printer.subscribe_tab(_SUB_TASK_ID, _VIEWER_TAB)
-    return "success: true\nsummary: done"
 
 
 class TestAutoCommitToastReachesAllTabs:
@@ -222,67 +202,6 @@ class TestModelPickReachesAllTabs:
 
         picks = printer.of_type("modelPick")
         assert {e["tabId"] for e in picks} == {"tab-launch", "tab-viewer"}
-
-
-class TestNonUiSubagentDoneReachesAllTabs:
-    """The non-UI ``run_tasks_parallel`` path broadcasts
-    ``subagentDone`` to every tab watching the sub-agent, plus the
-    synthetic ``task-{parent}__sub_{idx}`` tab.
-    """
-
-    def setup_method(self) -> None:
-        agent_state.agent_states.clear()
-
-    def teardown_method(self) -> None:
-        agent_state.agent_states.clear()
-
-    def _run(self, printer: _CapturePrinter, parent_key: str) -> None:
-        printer._thread_local.task_id = parent_key or None
-        original_run = ChatSorcarAgent.run
-        ChatSorcarAgent.run = _patched_run  # type: ignore[assignment, method-assign]
-        try:
-            results = run_tasks_parallel(
-                ["compute 1+1"], max_workers=1, printer=printer,
-            )
-        finally:
-            ChatSorcarAgent.run = original_run  # type: ignore[method-assign]
-            printer._thread_local.task_id = None
-        assert len(results) == 1
-
-    def test_viewer_and_synthetic_tabs_notified(self) -> None:
-        printer = _CapturePrinter()
-        self._run(printer, "9090")
-
-        done_tabs = {
-            e.get("tab_id") for e in printer.of_type("subagentDone")
-        }
-        assert _VIEWER_TAB in done_tabs
-        assert "task-9090__sub_0" in done_tabs
-
-    def test_viewer_notified_even_without_parent_task(self) -> None:
-        """With no parent task id, the subscribed viewer tab must still
-        be told the sub-agent is done — previously nothing was
-        broadcast at all.
-
-        The sub-agent's own synthetic tab is notified too: the single
-        fan-out engine always names its children ``task-{key}__sub_{n}``
-        (falling back to a generated key when the parent has no
-        persisted task), assigns that id to the child as its
-        ``_tab_id``, and the child registers under it — so it is a real
-        tab, not the phantom the old base-only copy signalled.
-        """
-        printer = _CapturePrinter()
-        self._run(printer, "")
-
-        done_tabs = {
-            e.get("tab_id") for e in printer.of_type("subagentDone")
-        }
-        assert _VIEWER_TAB in done_tabs
-        synthetic = done_tabs - {_VIEWER_TAB}
-        assert len(synthetic) == 1
-        synthetic_tab = synthetic.pop()
-        assert synthetic_tab is not None
-        assert synthetic_tab.endswith("__sub_0")
 
 
 class TestBroadcastTransientPrimitive:

@@ -429,7 +429,7 @@ def run(
     use_web_tools: bool | None = None,
     auto_classify: bool | None = None,
     use_memory: bool | None = None,
-    allow_fan_out: bool = True,
+    is_parallel: bool = True,
     add_to_system_prompt: str = "",
     add_to_prompt: str = "",
     tool_profile: str = "",
@@ -545,32 +545,30 @@ def run(
             A SEA extends another by deriving from its class (the
             launcher runs every class of the chain, base first; do not
             call ``super()``).  ``settings`` returns its argument with
-            a ``kind`` and any of the keyword parameters of this
-            function except the transport, identity and prompt ones
-            (``prompt`` and ``system_prompt`` are the methods above,
-            not settings) laid over it: ``work_dir``,
-            ``model``, ``chat_id``, ``use_worktree``, ``auto_commit``,
-            ``max_budget`` (finite), ``model_config``,
-            ``use_web_tools``, ``auto_classify``, ``use_memory``,
-            ``allow_fan_out``, ``tool_profile``, ``docker_image``; plus
+            any of the keyword parameters of this function except the
+            transport, identity and prompt ones (``prompt`` and
+            ``system_prompt`` are the methods above, not settings)
+            laid over it: ``work_dir``, ``model``, ``chat_id``,
+            ``use_worktree``, ``auto_commit``, ``max_budget`` (finite),
+            ``model_config``, ``use_web_tools``, ``auto_classify``,
+            ``use_memory``, ``tool_profile``, ``docker_image``; plus
             two dispatcher keys: ``timeout`` (seconds a ``run_agent``
             call waits for this SEA's sub-task) and ``locked`` (keys an
             explicit caller argument may not change).  ``prompt(task)``
-            receives the task text
-            and returns the prompt body; every ``{task_id}`` of the
-            result is replaced by *parent_task_id*.  A ``None`` value,
-            or ``""`` for a string key, means "no
-            override".  A kind is pure defaults under the explicit
-            keys: ``session`` (the default, changes nothing) or
-            ``worker`` (``use_worktree``, ``auto_commit``,
-            ``auto_classify``, ``allow_fan_out``, ``use_web_tools``,
-            ``use_memory`` all off).  The separate flag ``channel:
-            True`` marks a messaging channel: it forces ``worker``,
-            defaults ``work_dir`` to ``$KISS_HOME/channel_work`` and
-            locks it with the worker keys, gives the run the channel
-            preamble and a workspace held for the run, makes a
-            ``run_agent`` sub-task of it inherit nothing from the
-            caller, and lists it as a channel.
+            receives the task text and returns the prompt body; every
+            ``{task_id}`` of the result is replaced by
+            *parent_task_id*.  A ``None`` value, or ``""`` for a
+            string key, means "no override".  The base class says what
+            the SEA is: ``BaseSea`` changes nothing; ``WorkerSea``
+            lays the worker defaults under the explicit keys
+            (``use_worktree``, ``auto_commit``, ``auto_classify``,
+            ``use_web_tools``, ``use_memory`` all off); ``ChannelSea``
+            (a worker) marks a messaging channel: it defaults
+            ``work_dir`` to ``$KISS_HOME/channel_work`` and locks it
+            with the worker keys, gives the run the channel preamble
+            and a workspace held for the run, makes a ``run_agent``
+            sub-task of it inherit nothing from the caller, and lists
+            it as a channel.
 
             ``system_prompt(system_prompt)`` receives the run's
             assembled system prompt (the base prompt plus
@@ -678,8 +676,8 @@ def run(
             run-to-completion CLI model (``cc/*``, ``codex/*``), or a
             caller-supplied ``model_config["system_instruction"]``
             stays memory-free even with ``True``.
-        allow_fan_out: Whether the agent may spawn parallel sub-agents
-            (the ``run_parallel`` tool).  Defaults to True.
+        is_parallel: Whether the agent gets the ``run_parallel`` tool
+            (the user's parallel-mode toggle).  Defaults to True.
         add_to_system_prompt: Extra text appended to the run's
             system prompt when the agent is executed — after the
             default ``SYSTEM.md`` prompt (or the *system_prompt*
@@ -902,7 +900,7 @@ def run(
             "useWebTools": use_web_tools,
             "classifyTasks": auto_classify,
             "useMemory": use_memory,
-            "isParallel": allow_fan_out,
+            "isParallel": is_parallel,
             "appendToSystemPrompt": add_to_system_prompt,
             "appendToPrompt": add_to_prompt,
             "toolProfile": tool_profile,

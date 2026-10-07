@@ -18,8 +18,8 @@ Tests
 1. Frontend handler (static check on ``main.js``) reads ``ev.isDone``
    and sets ``subTab.isDone`` / ``subTab.isRunning`` accordingly.
 2. Frontend handler default (no ``isDone`` field) is still "running"
-   — preserves the existing fresh-launch path
-   (``_run_tasks_parallel``) which doesn't send ``isDone``.
+   — preserves the existing fresh-launch path (a ``run_agent`` /
+   ``run_parallel`` sub-task's tab) which doesn't send ``isDone``.
 
 The backend ``isDone`` broadcast tests (pure kiss.agents.sorcar +
 kiss.server closure) moved to

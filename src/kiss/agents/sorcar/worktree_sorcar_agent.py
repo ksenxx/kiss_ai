@@ -54,7 +54,6 @@ class _WorktreeCleanupOutcome(enum.Enum):
     COMMITTED_AND_REMOVED = "committed_and_removed"
     PRESERVED_NO_AUTOCOMMIT = "preserved_no_autocommit"
     PRESERVED_COMMIT_FAILED = "preserved_commit_failed"
-    PRESERVED_SUBAGENT_ACTIVE = "preserved_subagent_active"
     PRESERVED_RESCUE_FAILED = "preserved_rescue_failed"
 
 
@@ -62,14 +61,6 @@ _PRECOMMIT_FIX_LINES = (
     "    # fix pre-commit issues, then:\n"
     "    git commit --no-verify\n"
 )
-
-# How long a worktree cleanup waits for an abandoned sub-agent thread
-# to finish before preserving the directory instead of deleting it.
-# Short: the user is watching, and preserving is the safe outcome —
-# the next cleanup (or the reclaim pass in a later process) removes it
-# once the thread is really gone.
-_ABANDONED_SUBAGENT_WAIT_SECONDS = 5.0
-
 
 def _broadcast_launch_phase(printer: Any, text: str, tab_id: str) -> None:
     """Show *text* as the task's launch-phase line, if the printer can.
@@ -130,36 +121,11 @@ def _manual_merge_cmd(wt: GitWorktree) -> str:
     return f"git merge --squash {shlex.quote(wt.branch)}"
 
 
-def _subagent_active_warning(wt: GitWorktree) -> str:
-    """User warning for a worktree kept because a sub-agent still runs in it.
-
-    Shared by every path that can end in
-    :attr:`_WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE` —
-    :meth:`WorktreeSorcarAgent._release_worktree`,
-    :meth:`WorktreeSorcarAgent._preserve_pending_worktree_for_review`
-    and :meth:`WorktreeSorcarAgent.merge` — so the cause the user is
-    told about is the real one instead of a guessed pre-commit hook.
-
-    Args:
-        wt: The preserved worktree.
-
-    Returns:
-        The warning text.
-    """
-    return (
-        f"A sub-agent of branch '{wt.branch}' is still running "
-        f"and writing into {wt.wt_dir}, so the worktree was kept "
-        "instead of being deleted underneath it.  Merge or "
-        "discard the branch once the sub-agent has stopped."
-    )
-
-
 def _rescue_failed_warning(wt: GitWorktree) -> str:
     """User warning for a worktree kept because ignored output was unrescuable.
 
     Shared by every path that can end in
-    :attr:`_WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED` (see
-    :func:`_subagent_active_warning`).
+    :attr:`_WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED`.
 
     Args:
         wt: The preserved worktree.
@@ -475,15 +441,8 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 
         Shared engine of :meth:`_finalize_worktree` and
         :meth:`_preserve_pending_worktree_for_review` — the exact
-        reclaim → auto-commit → late-arriver-retry → preserve-or-remove
+        auto-commit → late-arriver-retry → preserve-or-remove
         sequence previously duplicated in both.
-
-        The reclaim comes first: an abandoned sub-agent thread is
-        still writing into this worktree, and whatever it produces
-        before it finishes has to be visible to the staging passes
-        below.  Waiting after them would let a child that finished
-        during the wait have its last files deleted with the
-        directory.
 
         After the LLM-driven auto-commit, a single-shot retry runs
         :meth:`GitWorktreeOps.commit_all` with a generic message to
@@ -512,25 +471,8 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             worktree directory is removed and pruned only on
             :attr:`_WorktreeCleanupOutcome.COMMITTED_AND_REMOVED`; the
             preserved outcomes leave it in place so no work is lost —
-            including
-            :attr:`_WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE`,
-            returned when an abandoned sub-agent thread is still
-            writing into this worktree.
         """
         if wt.wt_dir.exists():
-            # A sub-agent thread this agent abandoned still has its
-            # work_dir set to this worktree.  Removing the directory
-            # under a live writer loses whatever it produces next and
-            # can make `git worktree remove` itself fail.  Waiting
-            # BEFORE the commit passes below is what makes the wait
-            # worth anything: a child that finishes during it writes
-            # its last files first, so they are staged and committed
-            # like every other change instead of being deleted with
-            # the directory moments later.
-            if not self.reclaim_abandoned_subagents(
-                timeout=_ABANDONED_SUBAGENT_WAIT_SECONDS,
-            ):
-                return _WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE, ""
             self._auto_commit_worktree(force_commit=force_commit)
             if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
                 if not (self.auto_commit_enabled or force_commit):
@@ -606,15 +548,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # the real reason the worktree was preserved.
         self._last_preserve_outcome = outcome
         if outcome is _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT:
-            return False
-        if outcome is _WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE:
-            logger.warning(
-                "A sub-agent thread is still running inside worktree "
-                "'%s'; preserving %s rather than deleting a directory "
-                "that is being written to",
-                wt.branch,
-                wt.wt_dir,
-            )
             return False
         if outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
             logger.warning(
@@ -843,9 +776,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             # The worktree directory is being left on disk with
             # uncommitted work.
             outcome = self._last_preserve_outcome
-            if outcome is _WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE:
-                self._set_warnings(merge=_subagent_active_warning(wt))
-            elif outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
+            if outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
                 self._set_warnings(merge=_rescue_failed_warning(wt))
             elif outcome is _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT:
                 self._set_warnings(merge=(
@@ -1014,13 +945,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 f"{wt.wt_dir}. Recover them there, or commit them to the "
                 f"branch yourself; nothing else will clean it up."
             ))
-        elif outcome is _WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE:
-            logger.warning(
-                "A sub-agent thread is still running inside worktree "
-                "'%s'; preserving %s",
-                wt.branch, wt.wt_dir,
-            )
-            self._set_warnings(merge=_subagent_active_warning(wt))
         elif outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
             logger.warning(
                 "Worktree '%s' has uncommitted changes after "
@@ -1790,11 +1714,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # setting only governs the automatic paths.
         if not self._finalize_worktree(force_commit=True):
             outcome = self._last_preserve_outcome
-            if outcome is _WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE:
-                return (
-                    "Cannot merge yet: " + _subagent_active_warning(wt)
-                    + "\n\nThen retry: agent.merge()"
-                )
             if outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
                 return (
                     "Cannot merge: " + _rescue_failed_warning(wt)
@@ -1925,14 +1844,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Acquires ``repo_lock`` to serialize against concurrent
         merge/release operations on the same repository.
 
-        Like the commit-and-remove path
-        (:meth:`_commit_and_clean_worktree`), the removal first waits
-        up to :data:`_ABANDONED_SUBAGENT_WAIT_SECONDS` for abandoned
-        sub-agent threads still writing into this worktree.  When one
-        is still running after the wait, nothing is discarded and a
-        "Discard deferred" message tells the caller to retry: deleting
-        a directory under a live writer loses whatever it produces
-        next and can leave a half-recreated zombie directory behind.
 
         Args:
             rescue_ignored: When True, git-ignored files the task
@@ -1959,20 +1870,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             raise RuntimeError("No pending worktree task to discard")
 
         wt = self._wt
-        if wt.wt_dir.exists() and not self.reclaim_abandoned_subagents(
-            timeout=_ABANDONED_SUBAGENT_WAIT_SECONDS,
-        ):
-            logger.warning(
-                "A sub-agent thread is still running inside worktree "
-                "'%s'; deferring discard of %s",
-                wt.branch, wt.wt_dir,
-            )
-            return (
-                f"Discard deferred: a sub-agent of branch '{wt.branch}' "
-                f"is still running inside {wt.wt_dir}, so the worktree "
-                "was kept instead of being deleted underneath it. "
-                "Retry the discard once the sub-agent has stopped."
-            )
         checkout_warning = ""
         delete_warning = ""
         # The flock keeps this discard's main-worktree mutations (the

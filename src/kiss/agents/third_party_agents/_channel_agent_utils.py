@@ -881,10 +881,7 @@ class BaseChannelAgent:
 
         class SlackAgent(BaseChannelAgent): ...
 
-        class SlackSea(BaseSea):
-            def settings(self, settings):
-                return settings | {"channel": True}
-
+        class SlackSea(ChannelSea):
             def tools(self, tools):
                 return tools + SlackAgent()._get_tools()
     """

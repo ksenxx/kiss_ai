@@ -1401,9 +1401,8 @@ class _TaskRunnerMixin:
     ) -> None:
         """Broadcast ``subagentDone`` for a finished ``run_agent`` child.
 
-        The completion signal a ``run_tasks_parallel`` worker sends
-        for its sub-agent, emitted here for a daemon-dispatched
-        sub-agent instead (a run submitted with ``parentTaskId``):
+        The completion signal of a daemon-dispatched sub-agent (a run
+        submitted with ``parentTaskId``):
         every tab watching the child's task stream — subscribed via
         ``resumeSession`` after the child's ``new_tab`` broadcast —
         stops its running indicator and gets the user's model pick
@@ -1635,9 +1634,8 @@ class _TaskRunnerMixin:
         agent._task_start_ms = start_ms
         # A ``run_agent`` dispatch on behalf of a calling task (wire
         # fields ``parentTaskId`` / ``parentTabId``, see
-        # ``daemon_client.run``) runs as that task's SUB-AGENT — the
-        # exact marking ``run_tasks_parallel`` gives its children, so
-        # the run inherits their whole frontend contract for free:
+        # ``daemon_client.run``) runs as that task's SUB-AGENT, so the
+        # run gets the sub-agent frontend contract:
         # ``ChatSorcarAgent.run`` self-broadcasts ``new_tab`` (every
         # client viewing the parent opens a nested sub-agent tab), the
         # history row nests under the parent task via the persisted
