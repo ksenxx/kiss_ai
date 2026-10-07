@@ -29,6 +29,8 @@
       if (
         node.classList.contains('panel-copy-btn') ||
         node.classList.contains('panel-stop-btn') ||
+        // Pages shared before the headers lost their chevron still
+        // carry one.
         node.classList.contains('collapse-chv') ||
         node.classList.contains('collapse-preview') ||
         node.classList.contains('panel-ts') ||
@@ -67,9 +69,8 @@
     for (let i = 0; i < panelEl.children.length; i++) {
       const ch = panelEl.children[i];
       if (
-        ch.classList.contains('collapse-chv') ||
-        ch === prev ||
-        ch.querySelector('.collapse-chv')
+        ch.classList.contains('collapse-header') ||
+        ch.querySelector('.collapse-header')
       )
         continue;
       txt += collectText(ch) + ' ';
@@ -96,6 +97,7 @@
         cnt.classList.contains('hidden') ? 'false' : 'true',
       );
     }
+    // Pages shared before the header lost its chevron still carry one.
     const arrow = el.querySelector('.arrow');
     if (arrow) arrow.classList.toggle('collapsed');
   };

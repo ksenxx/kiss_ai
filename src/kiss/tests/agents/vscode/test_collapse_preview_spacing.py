@@ -211,12 +211,7 @@ function buildPanel(bodyChildren) {
     hdr.textContent = 'Bash';
     panel.appendChild(hdr);
 
-    // Add collapse infrastructure: chevron and preview on header
-    var chv = mkTestEl('span');
-    chv.classList.add('collapse-chv');
-    chv.textContent = '\u25BE';
-    hdr.insertBefore(chv, hdr.firstChild);
-
+    // Add collapse infrastructure: the preview on the header
     var prev = mkTestEl('span');
     prev.classList.add('collapse-preview');
     hdr.appendChild(prev);
