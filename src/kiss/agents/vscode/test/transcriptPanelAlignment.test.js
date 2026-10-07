@@ -5,12 +5,14 @@
 
 'use strict';
 
-// The panels holding the user's words -- the task panel, a steering
-// Message, the Prompt and the System Prompt panels -- take four fifths
-// of the chat's width, so they read apart from the full-width
-// transcript panels (tool calls, Thoughts, results).  The thinking
-// tokens inside a Thoughts panel are plain text, not a boxed
-// "Thinking" subpanel with a header of its own.
+// The panels holding the user's own words -- the task panel and a
+// steering Message -- are right-justified at four fifths of the chat's
+// width; every other transcript panel (Prompt, System Prompt, tool
+// calls, Thoughts, results, status lines) is left-justified at seven
+// eighths, so the thread reads as a conversation.  A panel nested
+// inside another (a tool error under its tool call) fills its parent.
+// The thinking tokens inside a Thoughts panel are plain text, not a
+// boxed "Thinking" subpanel with a header of its own.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -88,33 +90,77 @@ function renderTranscript(win) {
   send(win, {type: 'prompt', text: 'also check the margins', steer: true});
 }
 
-function testUserPanelsTakeFourFifths() {
+function testUserPanelsRightAgentPanelsLeft() {
   const win = makeWebview();
   renderTranscript(win);
   const out = output(win);
   const userPanels = {
     'task panel': out.querySelector(':scope > .ev.task-panel'),
     'steering Message': out.querySelector(':scope > .ev.user-msg'),
-    Prompt: out.querySelector(':scope > .prompt'),
-    'System Prompt': out.querySelector(':scope > .system-prompt'),
   };
   for (const [name, panel] of Object.entries(userPanels)) {
     assert.ok(panel, 'the transcript rendered the ' + name);
     const cs = win.getComputedStyle(panel);
     assert.strictEqual(cs.width, '80%', 'the ' + name + ' is 4/5 of the chat wide');
+    assert.strictEqual(cs.marginLeft, 'auto', 'the ' + name + ' is pushed to the right edge');
+    assert.notStrictEqual(cs.marginRight, 'auto', 'the ' + name + ' touches the right edge');
     assert.strictEqual(cs.boxSizing, 'border-box', 'the ' + name + ' width includes its border');
   }
-  for (const sel of ['.ev.tc', '.llm-panel']) {
-    const panel = out.querySelector(':scope > ' + sel);
-    assert.ok(panel, sel + ' rendered');
-    assert.notStrictEqual(
+  const agentPanels = {
+    Prompt: out.querySelector(':scope > .ev.prompt'),
+    'System Prompt': out.querySelector(':scope > .ev.system-prompt'),
+    'tool call': out.querySelector(':scope > .ev.tc'),
+    Thoughts: out.querySelector(':scope > .llm-panel'),
+  };
+  for (const [name, panel] of Object.entries(agentPanels)) {
+    assert.ok(panel, 'the transcript rendered the ' + name);
+    const cs = win.getComputedStyle(panel);
+    assert.strictEqual(cs.width, '87.5%', 'the ' + name + ' is 7/8 of the chat wide');
+    assert.notStrictEqual(cs.marginLeft, 'auto', 'the ' + name + ' stays on the left edge');
+    assert.strictEqual(cs.boxSizing, 'border-box', 'the ' + name + ' width includes its border');
+  }
+  win.close();
+  console.log('  ok - user panels are right-justified at 80%, the rest left at 87.5%');
+}
+
+function testNestedPanelFillsItsParent() {
+  const win = makeWebview();
+  renderTranscript(win);
+  send(win, {type: 'tool_call', name: 'Bash', command: 'false', description: 'fail'});
+  send(win, {type: 'tool_result', name: 'Bash', content: 'boom', is_error: true});
+  const out = output(win);
+  const nested = out.querySelector(':scope > .ev.tc .ev.tr');
+  assert.ok(nested, 'the tool error renders inside its tool call panel');
+  assert.strictEqual(
+    win.getComputedStyle(nested).width,
+    'auto',
+    'a panel nested in another fills its parent instead of 7/8 of it',
+  );
+  win.close();
+  console.log('  ok - a nested panel fills its parent');
+}
+
+function testSummaryAdoptedPanelsFillTheSummary() {
+  const win = makeWebview();
+  renderTranscript(win);
+  send(win, {type: 'tool_call', name: 'summary', description: 'Progress so far'});
+  const out = output(win);
+  const sub = out.querySelector(':scope > .ev.tc-summary > .summary-sub');
+  assert.ok(sub, 'the summary adopted its neighbours into .summary-sub');
+  const adopted = {
+    Thoughts: sub.querySelector(':scope > .llm-panel'),
+    'tool call': sub.querySelector(':scope > .ev.tc'),
+  };
+  for (const [name, panel] of Object.entries(adopted)) {
+    assert.ok(panel, 'the summary adopted the ' + name);
+    assert.strictEqual(
       win.getComputedStyle(panel).width,
-      '80%',
-      sel + ' keeps the full width of the transcript',
+      'auto',
+      'the adopted ' + name + ' fills the summary instead of 7/8 of it',
     );
   }
   win.close();
-  console.log('  ok - task, Message, Prompt and System Prompt panels are 80% wide');
+  console.log('  ok - panels a summary adopts fill the summary');
 }
 
 function testThinkingIsPlainTextInsideThoughts() {
@@ -139,6 +185,8 @@ function testThinkingIsPlainTextInsideThoughts() {
   console.log('  ok - thinking tokens are plain text inside the Thoughts panel');
 }
 
-testUserPanelsTakeFourFifths();
+testUserPanelsRightAgentPanelsLeft();
+testNestedPanelFillsItsParent();
+testSummaryAdoptedPanelsFillTheSummary();
 testThinkingIsPlainTextInsideThoughts();
-console.log('userPanelsFourFifthsWidth: all tests passed');
+console.log('transcriptPanelAlignment: all tests passed');

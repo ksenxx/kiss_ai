@@ -849,14 +849,15 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
    the eye should find first, an accent hairline over the accent tint,
    the transcript panels being neutral. A message the user typed into
    the running task (.user-msg) is the user's words too and looks the
-   same.  The user's panels (these and the prompt panels) take four
-   fifths of the chat's width, so they read apart from the full-width
-   transcript panels. */
+   same.  The user's panels (these two) sit against the right edge at
+   four fifths of the chat's width, the rest of the transcript against
+   the left edge at seven eighths (see .ev below), so the thread reads
+   as a conversation: the user on the right, the agent on the left. */
 .ev.task-panel, .ev.user-msg {
   border: 1px solid var(--accent-line); border-radius: var(--radius-lg);
-  margin: var(--space-2) 0 var(--space-2) var(--space-1-5); overflow: hidden;
+  margin: var(--space-2) 0; margin-left: auto; overflow: hidden;
   background: var(--accent-tint);
-  width: 80%; box-sizing: border-box;
+  width: 80%;
 }
 
 .task-panel-h {
@@ -977,6 +978,14 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 .remote-url-tls-hint a { color: var(--accent); text-decoration: none; }
 .remote-url-tls-hint a:hover { text-decoration: underline; }
 
+/* Every transcript panel (tool calls, results, Thoughts, prompts, status
+   lines) is left-justified at seven eighths of the chat's width; the
+   user's own panels (.task-panel, .user-msg above) are the exception,
+   right-justified at four fifths.  A panel nested inside another (a
+   tool error under its tool call, the panels a summary adopts into its
+   .summary-sub) fills its parent instead. */
+.ev, .llm-panel { width: 87.5%; box-sizing: border-box; }
+.ev .ev, .ev .llm-panel { width: auto; }
 .ev { margin-bottom: var(--space-1-5); animation: fadeIn var(--dur-base) var(--ease); }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
@@ -1211,7 +1220,6 @@ body.ask-answering #input-container {
 .system-prompt, .prompt {
   border: 1px solid var(--border); border-radius: var(--radius-lg); margin: var(--space-2) 0;
   overflow: hidden; background: var(--surface);
-  width: 80%; box-sizing: border-box;
 }
 
 .system-prompt-h, .prompt-h {
