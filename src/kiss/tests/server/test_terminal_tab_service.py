@@ -117,7 +117,9 @@ class ConnPrinter:
             if predicate():
                 return
             time.sleep(0.02)
-        raise AssertionError("timed out waiting for terminal events")
+        with self.lock:
+            seen = [(e["type"], e.get("tab_id"), e.get("data", "")) for e in self.events]
+        raise AssertionError(f"timed out waiting for terminal events; got {seen!r}")
 
 
 def _wait_until(predicate: Any, timeout: float = 10.0) -> None:
@@ -268,8 +270,12 @@ def test_dropped_connection_keeps_the_shell_for_a_reattach(
     opened = printer.of_type("terminalOpened", "conn-2")
     assert opened and opened[-1]["attached"] is True
     svc.input("tab-g", "conn-2", "echo $MARK; stty size\n")
+    # The MARK wait above is met by the pty's echo of the typed line,
+    # which precedes the shell's own start: this wait also covers a
+    # login bash starting under a loaded machine.
     printer.wait_for(
         lambda: "kept-" in printer.output("tab-g") and "25 90" in printer.output("tab-g"),
+        timeout=20,
     )
     assert all(e["connId"] == "conn-2" for e in printer.events[-3:])
 

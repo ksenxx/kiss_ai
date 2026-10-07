@@ -291,6 +291,16 @@ def test_remote_metadata_separator_between_groups(selector: str) -> None:
 _INJECT_PAGE_JS = r"""
 (() => {
   const out = document.getElementById('output');
+  // The transcript goes into a tab the daemon's tab registry knows
+  // (createNewTab registers it with openTab; the page's initial tab
+  // is registered only once a task runs in it).  The chat-panel
+  // expand below opens the injected chat in another registered tab,
+  // and the daemon's next tabs_state snapshot prunes every tab it
+  // does not list -- an unregistered transcript tab vanished with
+  // its injected panels whenever that snapshot landed before the
+  // probes (it does once the daemon handshake is quick, e.g. late in
+  // a warmed-up pytest process).
+  window._testApi.createNewTab();
   const welcome = document.getElementById('welcome');
   if (welcome) welcome.style.display = 'none';
   const app = document.getElementById('app');

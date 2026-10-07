@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -130,7 +129,9 @@ class OverridingSea(sea_class('picker')):
     assert base_settings([load_sea(picker), load_sea(plain)])["work_dir"] == "assets"
     assert base_settings([load_sea(inheriting)])["work_dir"] == "assets"
     assert base_settings([load_sea(overriding)])["work_dir"] == "out"
-    assert anchored_work_dir("out", "/caller") == os.path.join("/caller", "out")
+    # A native absolute base: Path renders the result with the OS
+    # separator, so a POSIX literal would not round-trip on Windows.
+    assert anchored_work_dir("out", str(registry)) == str(registry / "out")
 
 
 def test_inherited_model_registration_is_discovered(registry: Path) -> None:
