@@ -11162,8 +11162,7 @@
   function metaAgentText(s) {
     if (!s || typeof s !== 'object') return '\u2014';
     const parts = [];
-    if (s.sea)
-      parts.push(String(s.sea) + (s.kind ? ' (' + String(s.kind) + ')' : ''));
+    if (s.sea) parts.push(String(s.sea) + (s.channel ? ' (channel)' : ''));
     if (s.tool_profile) parts.push('tools ' + String(s.tool_profile));
     if (typeof s.timeout === 'number')
       parts.push('timeout ' + String(s.timeout) + 's');

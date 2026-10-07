@@ -4587,8 +4587,8 @@ def _load_subagent_rows_by_parent_task_id(
     layout.
 
     A sub-agent row is identified by its ``parent_task_id`` column
-    matching *parent_task_id* — the dedicated column written by
-    :meth:`ChatSorcarAgent._run_tasks_parallel`'s worker thread (the
+    matching *parent_task_id* — the dedicated column written for a
+    run submitted with ``parentTaskId`` (a ``run_agent`` sub-task; the
     ``extra`` payload's ``subagent`` object is synthesized back from
     this column by :func:`_row_to_extra_json`).
 
@@ -4689,8 +4689,8 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 
     Sub-agent rows (those with a non-empty ``parent_task_id`` column —
-    set by :class:`ChatSorcarAgent._run_tasks_parallel`
-    on every worker thread's task row) are filtered out via the shared
+    set on the task row of every run submitted with ``parentTaskId``,
+    a ``run_agent`` sub-task) are filtered out via the shared
     ``_HISTORY_NOT_SUBAGENT`` SQL predicate.  Sub-agent
     tasks/results are an internal implementation detail of the
     parent's ``run_parallel`` tool call; surfacing them in the chat

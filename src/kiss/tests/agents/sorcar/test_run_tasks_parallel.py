@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests for run_tasks_parallel() in sorcar_agent.py.
+"""Tests for the ``run_parallel`` tool offering in sorcar_agent.py.
 
 No mocks, patches, fakes, or test doubles.  All tests exercise the real
 SorcarAgent code path.
@@ -10,34 +10,11 @@ SorcarAgent code path.
 
 from __future__ import annotations
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
-class TestRunTasksParallel:
-    """Test concurrent task execution via ThreadPoolExecutor."""
-
-    def test_empty_task_list(self) -> None:
-        """Empty input returns empty output."""
-        assert run_tasks_parallel([]) == []
-
-    def test_accepts_list_of_strings(self) -> None:
-        """Verify the function signature accepts list[str], not list[dict]."""
-        try:
-            run_tasks_parallel(["task one", "task two"], max_workers=0)
-        except ValueError:
-            pass
-
-    def test_accepts_model_and_work_dir(self) -> None:
-        """Verify model_name and work_dir parameters are accepted."""
-        try:
-            run_tasks_parallel(
-                ["task"],
-                max_workers=0,
-                model_name="gpt-4o",
-                work_dir="/tmp",
-            )
-        except ValueError:
-            pass
+class TestRunParallelTool:
+    """``run_parallel`` is offered exactly when ``_is_parallel`` is true."""
 
     def test_run_parallel_tool_in_agent_tools_when_parallel(self) -> None:
         """The run_parallel tool is included when is_parallel is True."""

@@ -22,7 +22,7 @@ wire input by the daemon (non-string appends nothing).
 from __future__ import annotations
 
 import unittest
-from typing import Any, cast
+from typing import Any
 
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.server import sorcar
@@ -262,67 +262,6 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert "MALFORMED-PROMPT-3341" not in (
             call["arguments"]["task_description"]
         )
-
-    def test_append_to_system_prompt_reaches_subagents(self) -> None:
-        """The fan-out engine passes the suffix to every sub-agent.
-
-        Covers both halves of the sub-agent wiring: the engine's
-        ``system_prompt_suffix`` parameter (called directly) and the
-        parent-agent forwarding of its stored ``_system_prompt_suffix``
-        (``SorcarAgent._run_tasks_parallel``) — mirroring the existing
-        ``base_system_prompt`` inheritance, so a run's extra system
-        instructions constrain its whole task tree.
-        """
-        import threading as _threading
-
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-        from kiss.agents.sorcar.sorcar_agent import (
-            SorcarAgent,
-            run_tasks_parallel,
-        )
-
-        parent_class = cast(Any, SorcarAgent.__mro__[1])
-        original_run = parent_class.run
-        lock = _threading.Lock()
-        composed_prompts: list[str] = []
-
-        def stub_run(self_agent: Any, **kwargs: Any) -> str:
-            with lock:
-                composed_prompts.append(str(kwargs.get("system_prompt")))
-            return "success: true\nis_continue: false\nsummary: ok\n"
-
-        parent_class.run = stub_run
-        try:
-            # Half 1: the engine parameter, as forwarded by a parent.
-            results = run_tasks_parallel(
-                ["child task one", "child task two"],
-                work_dir=self.repo,
-                system_prompt_suffix=_SYS_MARKER,
-            )
-            assert len(results) == 2
-            assert len(composed_prompts) == 2
-            for composed in composed_prompts:
-                assert composed.startswith(SYSTEM_PROMPT)
-                assert _SYS_MARKER in composed
-
-            # Half 2: a parent agent that ran with the suffix stores it
-            # and forwards it through its own fan-out.
-            composed_prompts.clear()
-            parent = ChatSorcarAgent("suffix-parent")
-            parent._system_prompt_suffix = _SYS_MARKER
-            results = parent._run_tasks_parallel(["nested child task"])
-            assert len(results) == 1
-            assert len(composed_prompts) == 1
-            assert _SYS_MARKER in composed_prompts[0]
-
-            # A parent WITHOUT a suffix spawns suffix-free children.
-            composed_prompts.clear()
-            plain_parent = ChatSorcarAgent("plain-parent")
-            plain_parent._run_tasks_parallel(["plain child task"])
-            assert len(composed_prompts) == 1
-            assert _SYS_MARKER not in composed_prompts[0]
-        finally:
-            parent_class.run = original_run
 
     def test_early_panels_mirror_the_suffixes(self) -> None:
         """The optimistic panels show the suffixes the run executes with.

@@ -45,7 +45,7 @@ from kiss.agents.seas.skillopt.skillopt_sea import (
 )
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.sea_apply import apply_sea
-from kiss.agents.sorcar.sea_settings import SeaError, resolve_settings
+from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, SeaError, resolve_settings
 from kiss.core.tool_verdict import ALLOW, refuse
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
@@ -120,12 +120,11 @@ def test_sea_target_reads_splices_and_validates_the_prompt_constant(tmp_path: Pa
     assert candidate.path.name == "sh_candidate.py"
     assert candidate.text() == tricky
     # Everything but the prompt is untouched: the candidate is loaded like a
-    # SEA, so its ``settings()`` (``worker`` kind, Bash profile) reach the
+    # SEA, so its ``settings()`` (a ``WorkerSea``, Bash profile) reach the
     # rollout exactly as the daemon would apply them.
     kwargs = candidate.rollout_kwargs()
     assert kwargs["system_prompt_hook"]("DEFAULT PROMPT") == tricky
     assert kwargs["tool_profile"] == "bash"
-    assert kwargs["is_parallel"] is False
     assert kwargs["web_tools"] is False
     assert kwargs["use_memory"] is False
     # The folds the SEA does not override are ``BaseSea``'s identities.
@@ -699,7 +698,7 @@ def test_one_round_accepts_a_candidate_that_passes_more_selection_tasks(tmp_path
     )
     # Every other line of the SEA is kept: its ``settings()`` still pin the Bash profile.
     assert proposed.settings({}) == sh.settings({}) == {
-        "kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"],
+        "tool_profile": "bash", "locked": ["tool_profile"],
     }
     assert sea.read_text(encoding="utf-8") == _SH_SEA.read_text(encoding="utf-8")
 
@@ -1134,22 +1133,21 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     assert skillopt.system_prompt("DEFAULT PROMPT").startswith("You are SkillOpt")
     assert [t.__name__ for t in skillopt.tools([])] == ["optimize", "status"]
     assert skillopt.tools([greet_stub])[0] is greet_stub
-    declared = {"kind": "worker", "tool_profile": "shell"}
+    declared = {"tool_profile": "shell"}
     assert skillopt.settings({}) == declared
-    assert skillopt.settings({"model": "m", "kind": "session"}) == {"model": "m", **declared}
-    # ``worker`` turns worktree, auto-commit, classifier, fan-out, browser
-    # and memory off; ``system_prompt`` is a method, not a settings key.
+    assert skillopt.settings({"model": "m"}) == {"model": "m", **declared}
+    # ``WorkerSea`` lays its defaults under the SEA's own keys: worktree,
+    # auto-commit, classifier, browser and memory off; ``system_prompt``
+    # is a method, not a settings key.
     effective = {
-        "kind": "worker",
-        "tool_profile": "shell",
         "use_worktree": False,
         "auto_commit": False,
         "auto_classify": False,
-        "allow_fan_out": False,
         "use_web_tools": False,
         "use_memory": False,
+        "tool_profile": "shell",
     }
-    assert resolve_settings(declared) == effective
+    assert resolve_settings(WORKER_DEFAULTS | declared) == effective
     assert skillopt.system_prompt("") == skillopt_sea.SYSTEM_PROMPT
     # The class is the contract: the module keeps no getter of the old shape.
     assert_no_removed_getters(skillopt_sea)
@@ -1162,7 +1160,7 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     # The hooks are written on every run, so the set lists the settings only.
     assert apply_sea(cmd) == {
         "toolProfile", "useWorktree", "autoCommit",
-        "classifyTasks", "isParallel", "useWebTools", "useMemory",
+        "classifyTasks", "useWebTools", "useMemory",
     }
     assert cmd["autoCommit"] is False and cmd["useWorktree"] is False
     assert cmd["toolProfile"] == "shell" and cmd["prompt"] == "x.py evals.json"
@@ -1176,7 +1174,7 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
         {"role": "user", "content": "x"}
     ]
     assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == ALLOW
-    assert cmd["_runConfig"]["sea"] == "skillopt" and cmd["_runConfig"]["kind"] == "worker"
+    assert cmd["_runConfig"]["sea"] == "skillopt" and cmd["_runConfig"]["channel"] is False
     assert skillopt_sea.status(str(tmp_path / "none")) == f"no state.json under {tmp_path / 'none'}"
     # The tool wrapper with a zero cost cap runs no round and needs no model.
     sea = _copy_sh_sea(tmp_path)

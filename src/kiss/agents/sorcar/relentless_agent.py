@@ -637,12 +637,12 @@ class RelentlessAgent(Base):
         # and :meth:`_accumulate_usage`).  The writers run on different
         # threads of the SAME agent: the agent thread
         # (:meth:`_accumulate_usage` at session end,
-        # ``_attribute_sub_usage`` when a fan-out or a ``talk``
-        # synthesis banks its spend, :meth:`_reset` at run start,
+        # ``_attribute_sub_usage`` when a ``talk`` synthesis banks its
+        # spend, :meth:`_reset` at run start,
         # ``_fold_classifier_usage`` in ``SorcarAgent.run``'s
-        # ``finally``) and server threads
-        # (``reclaim_abandoned_subagents`` from worktree cleanup /
-        # teardown / discard).  Each writer commits with one atomic
+        # ``finally``) and server threads (``task_update`` folding a
+        # daemon sub-task's spend into its caller, ``commands`` killing
+        # a job).  Each writer commits with one atomic
         # ``list.append`` of an immutable record, so no lock is needed
         # — nothing can deadlock on a stop-injected
         # ``KeyboardInterrupt`` and no writer can overwrite another's
@@ -680,8 +680,8 @@ class RelentlessAgent(Base):
         self.verbose = verbose
         # One atomic ledger swap resets the three counters AND the
         # banked-session marks together (see reset_usage): a
-        # server-thread attribution in flight
-        # (reclaim_abandoned_subagents) lands wholly in the old epoch
+        # server-thread attribution in flight (a daemon sub-task's
+        # spend folded by ``task_update``) lands wholly in the old epoch
         # (discarded with it) or wholly in the new one — never a mixed
         # state, and never a torn triple.
         self._begin_run_usage_epoch()
@@ -896,13 +896,12 @@ class RelentlessAgent(Base):
         session key, and the old epoch's record is no longer summed.
 
         The swap is also the EPOCH BOUNDARY for adjustment sources
-        that outlive a run: abandoned-subagent items are tagged with
-        the epoch token (:meth:`_usage_epoch`) at registration and
-        their reclaims commit into that exact object, so a prior
-        epoch's late spend settles in the discarded ledger and is
-        never banked into the new epoch (an explicit, documented
-        undercount versus real provider spend — see
-        ``SorcarAgent.reclaim_abandoned_subagents``).
+        that outlive a run: a daemon sub-task's spend is tagged with
+        the epoch token (:meth:`_usage_epoch`) when the job starts and
+        its fold commits into that exact object, so a prior epoch's
+        late spend settles in the discarded ledger and is never banked
+        into the new epoch (an explicit, documented undercount versus
+        real provider spend — see ``kiss.server.task_update``).
 
         Also the coherent replacement for zeroing the three counter
         properties one by one (the server's ``_zero_usage_counters``),
@@ -1016,8 +1015,9 @@ class RelentlessAgent(Base):
           make the retry append a DUPLICATE record with the SAME
           session key (:func:`_session_key` is retry-stable), which
           readers count once (:func:`_ledger_totals`).
-        * A server-thread reclaim (``reclaim_abandoned_subagents``)
-          racing the agent thread's bank of the same executor likewise
+        * A server-thread fold of a daemon sub-task's spend
+          (``task_update``) racing the agent thread's bank of the same
+          executor likewise
           appends at most one extra same-key record — deduplicated on
           read, so no interleaving double-counts or loses the spend.
 

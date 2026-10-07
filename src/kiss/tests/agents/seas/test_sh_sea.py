@@ -21,6 +21,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.seas.sh import sh_sea
 from kiss.agents.seas.sh.sh_sea import ShSea
 from kiss.agents.sorcar import sea_commands
@@ -61,24 +62,22 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "call the Bash tool with the user's command exactly as written" in prompt
     assert "call the `finish` tool" in prompt
     assert "must never be empty" in prompt
-    assert sea.settings({}) == {
-        "kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"],
-    }
+    assert isinstance(sea, WorkerSea)
+    assert sea.settings({}) == {"tool_profile": "bash", "locked": ["tool_profile"]}
     assert sea.settings({"model": "m"}) == {
-        "model": "m", "kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"],
+        "model": "m", "tool_profile": "bash", "locked": ["tool_profile"],
     }
     assert TOOL_PROFILES["bash"] == frozenset({"Bash"})
-    # The ``worker`` preset turns worktree, auto-commit, classifier,
-    # fan-out, browser and memory off; ``system_prompt`` is a hook the
-    # daemon applies, so the resolved settings do not carry its text.
-    assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == {
-        "kind": "worker",
+    # ``WorkerSea`` turns worktree, auto-commit, classifier, browser and
+    # memory off under the class's own keys; ``system_prompt`` is a hook
+    # the daemon applies, so the resolved settings do not carry its text.
+    assert resolve_settings(sea.settings({})) == sea.settings({})
+    assert sea_commands.base_settings([sea]) == {
         "tool_profile": "bash",
         "locked": ["tool_profile"],
         "use_worktree": False,
         "auto_commit": False,
         "auto_classify": False,
-        "allow_fan_out": False,
         "use_web_tools": False,
         "use_memory": False,
     }
@@ -131,7 +130,6 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
             tool_profile=settings["tool_profile"],
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

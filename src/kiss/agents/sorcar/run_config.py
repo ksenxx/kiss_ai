@@ -7,8 +7,8 @@
 Every task's ``task_settings`` event (the persisted display event
 :meth:`kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent._task_settings_payload`
 builds) carries, besides the model, work directory and budget, the
-run-configuration keys of :data:`RUN_CONFIG_KEYS`: which SEA ran, its
-kind, the tool profile, the caller's timeout, which values were
+run-configuration keys of :data:`RUN_CONFIG_KEYS`: which SEA ran,
+whether it is a channel, the tool profile, the caller's timeout, which values were
 inherited from the calling agent and which inherited or default values
 the SEA pinned to its own.  :func:`run_config_line` renders that record
 as the ``ran:`` line every ``run_agent`` / ``run_parallel`` result
@@ -31,7 +31,6 @@ import yaml
 
 RUN_CONFIG_KEYS = (
     "sea",
-    "kind",
     "channel",
     "tool_profile",
     "tool_profile_inferred",
@@ -44,9 +43,8 @@ RUN_CONFIG_KEYS = (
 and ``max_budget``.
 
 ``sea``: the SEA's name (its file stem), ``""`` for a plain sub-agent;
-``kind``: the SEA's ``kind`` setting (``session`` or ``worker``);
-``channel``: ``True`` for a channel (``channel: True`` in its settings; shown as
-``(worker, channel)`` on the line);
+``channel``: ``True`` for a channel (a SEA deriving from ``ChannelSea``; shown as
+``(channel)`` on the line);
 ``tool_profile``: the effective profile, ``""`` for the full toolset;
 ``tool_profile_inferred``: ``True`` when nobody named the profile and the run got
 ``review`` because it is a reviewer sub-agent (``tools=review(inferred)`` on the line);
@@ -152,8 +150,10 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
 
     Example (``/sh`` run from a task that uses a worktree)::
 
-        sh (worker) model=gpt-5 tools=bash budget=$1.00 timeout=3600s
+        sh model=gpt-5 tools=bash budget=$1.00 timeout=3600s
         inherited=model,chat_id,max_budget pinned=use_worktree(True->False)
+
+    A channel's line starts ``slack (channel)``.
 
     A plain sub-agent whose worktree default the classifier dropped
     ends with ``classified=use_worktree(True->False)`` instead; the
@@ -170,9 +170,8 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
         The line, without a trailing newline.
     """
     sea = str(settings.get("sea") or "") or "sub-agent"
-    kind = str(settings.get("kind") or "session")
     if settings.get("channel"):
-        kind += ", channel"
+        sea += " (channel)"
     model = str(settings.get("model") or "") or "default"
     tools = str(settings.get("tool_profile") or "") or "full"
     if settings.get("tool_profile_inferred"):
@@ -184,7 +183,7 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
     inherited = settings.get("inherited")
     inherited_text = ",".join(str(k) for k in inherited) if inherited else "none"
     line = (
-        f"{sea} ({kind}) model={model} tools={tools} budget={budget_text} "
+        f"{sea} model={model} tools={tools} budget={budget_text} "
         f"timeout={timeout_text} inherited={inherited_text} "
         f"pinned={_changes_text(settings.get('pinned')) or 'none'}"
     )

@@ -32,9 +32,7 @@ import yaml
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.agent_dispatch import RunOptions, _run_agent, dispatch_result
 from kiss.agents.sorcar.run_config import note_pinned, run_config_line, with_run_config
-from kiss.agents.sorcar.sea_settings import SeaError
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
@@ -152,7 +150,7 @@ class Sea(BaseSea):
         assert list(parsed) == ["ran", "success", "summary"], out
         assert parsed["success"] is True and parsed["summary"] == "done"
         ran = parsed["ran"]
-        assert ran.startswith(f"echo (session) model={PARENT_MODEL} tools=review budget=$0.75 "), (
+        assert ran.startswith(f"echo model={PARENT_MODEL} tools=review budget=$0.75 "), (
             ran
         )
         assert "timeout=45s" in ran
@@ -180,7 +178,7 @@ class Sea(BaseSea):
             tool_profile="shell",
             parent_agent=parent,
         )
-        assert yaml.safe_load(out)["ran"].startswith("locked (session) model=")
+        assert yaml.safe_load(out)["ran"].startswith("locked model=")
         # The daemon enforces the lock too: a run command marked explicit is refused.
         result = dispatch_result(
             "locked",
@@ -218,7 +216,7 @@ class Sea(BaseSea):
         assert result.task_id
         settings = result.settings
         assert settings["sea"] == "echo"
-        assert settings["kind"] == "session"
+        assert settings["channel"] is False
         assert settings["tool_profile"] == "review"
         assert settings["timeout"] == 30.0
         assert settings["max_budget"] == 0.75
@@ -227,7 +225,7 @@ class Sea(BaseSea):
         # The explicit profile and memory flag stood; the inherited budget share did not.
         assert settings["pinned"] == {"max_budget": [1.5, 0.75]}
         persisted = self._persisted_settings(result.task_id)
-        for key in ("sea", "kind", "tool_profile", "timeout", "inherited", "pinned"):
+        for key in ("sea", "channel", "tool_profile", "timeout", "inherited", "pinned"):
             assert persisted[key] == settings[key], (key, persisted, settings)
 
     def test_plain_dispatch_records_no_sea_and_nothing_pinned(self) -> None:
@@ -252,138 +250,20 @@ class Sea(BaseSea):
         assert "max_budget" not in settings["inherited"]
         assert "chat_id" in settings["inherited"]
         line = run_config_line({**settings, "timeout": 30.0})
-        assert line.startswith(f"plain (session) model={OTHER_MODEL} tools=full budget=$0.20 ")
+        assert line.startswith(f"plain model={OTHER_MODEL} tools=full budget=$0.20 ")
         assert line.endswith("pinned=none")
 
-    def test_reviewer_child_records_the_effective_review_profile(self) -> None:
-        """A reviewer-marked child asked for no profile runs ``review`` and says so."""
-        parent = _parent(self.repo)
-        parent.printer = None
-        saved = DEFAULT_CONFIG.tool_profiles
-        DEFAULT_CONFIG.tool_profiles = True
-        try:
-            (result,) = parent._run_tasks_parallel(
-                ["Review only; do not make changes."],
-                max_budget=0.3,
-            )
-        finally:
-            DEFAULT_CONFIG.tool_profiles = saved
-        ran = yaml.safe_load(result)["ran"]
-        # Nobody named the profile: the line says the rule chose it.
-        assert ran.startswith(
-            f"sub-agent (session) model={PARENT_MODEL} tools=review(inferred) budget=$0.30 "
-        ), ran
-        # An explicit budget is not inherited; the model and chat are.
-        inherited = ran.split("inherited=")[1].split(" ")[0].split(",")
-        assert "max_budget" not in inherited and "model" in inherited, ran
-        assert "use_worktree" not in inherited and "auto_commit" not in inherited, ran
-
-    def test_failed_child_result_still_starts_with_ran(self) -> None:
-        """A child whose run raises reports the configuration it failed under."""
-
-        def failing_run(self_agent: Any, **kwargs: Any) -> str:
-            raise RuntimeError("boom in child")
-
-        self._parent_class.run = failing_run
-        results = run_tasks_parallel(
-            ["child"],
-            work_dir=self.repo,
-            model_name=PARENT_MODEL,
-            max_budget=0.1,
-            run_config={"inherited": ["model"]},
-        )
-        parsed = yaml.safe_load(results[0])
-        assert list(parsed)[0] == "ran", results[0]
-        assert parsed["success"] is False and "boom in child" in parsed["summary"]
-        assert "inherited=model" in parsed["ran"]
-
-    def test_headless_child_persists_its_task_settings(self) -> None:
-        """A child without a printer persists the ``task_settings`` event itself."""
-        results = run_tasks_parallel(
-            ["child"],
-            work_dir=self.repo,
-            model_name=PARENT_MODEL,
-            max_budget=0.1,
-            sea_layers=None,
-            run_config={"inherited": ["chat_id"]},
-        )
-        assert yaml.safe_load(results[0])["success"] is True
-        # The newest task row is the child's (no printer, so no tab named it).
-        db = _persistence._get_db()
-        with _persistence._rw_lock.read_lock():
-            row = db.execute(
-                "SELECT task_id FROM events WHERE event_json LIKE '%\"task_settings\"%' "
-                "ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        assert row is not None, "no persisted task_settings event"
-        settings = self._persisted_settings(str(row[0]))
-        assert settings["inherited"] == ["chat_id"]
-        assert settings["model"] == PARENT_MODEL
-
-    def test_run_parallel_children_start_with_their_configuration(self) -> None:
-        """A fan-out child's YAML result gets the same ``ran`` key first."""
-        parent = _parent(self.repo)
-        parent.printer = None
-        results = parent._run_tasks_parallel(
-            ["child one"],
-            agent=str(self.sea),
-            tool_profile="review",
-        )
-        (result,) = results
-        parsed = yaml.safe_load(result)
-        assert list(parsed)[0] == "ran", result
-        ran = parsed["ran"]
-        assert ran.startswith(f"echo (session) model={PARENT_MODEL} tools=review budget=$0.75 ")
-        assert "timeout=none" in ran
-        assert "inherited=" in ran and "model" in ran.split("inherited=")[1].split(" ")[0]
-        assert ran.endswith("pinned=max_budget(1.5->0.75)"), ran
-        assert parsed["success"] is True and parsed["summary"] == "done"
-        # Without the explicit profile the script's applies and is recorded as inherited-over.
-        (result,) = parent._run_tasks_parallel(["child two"], agent=str(self.sea))
-        assert "tools=shell " in yaml.safe_load(result)["ran"]
-        with pytest.raises(SeaError, match="run_parallel: the script locks tool_profile='shell'"):
-            parent._run_tasks_parallel(
-                ["child three"],
-                agent=str(self.locked_sea),
-                tool_profile="review",
-            )
-
-    def test_run_parallel_timeout_stops_a_slow_child(self) -> None:
-        """A child still running when ``timeout`` expires is stopped and says so."""
-        import time
-
-        from kiss.core.stop_signal import get_thread_stop_event
-
-        def slow_run(self_agent: Any, **kwargs: Any) -> str:
-            stop = get_thread_stop_event()
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                if stop is not None and stop.is_set():
-                    raise KeyboardInterrupt
-                time.sleep(0.02)
-            return "success: true\nsummary: too late\n"
-
-        self._parent_class.run = slow_run
-        parent = _parent(self.repo)
-        parent.printer = None
-        started = time.monotonic()
-        (result,) = parent._run_tasks_parallel(["slow child"], timeout=0.5)
-        assert time.monotonic() - started < 10
-        parsed = yaml.safe_load(result)
-        assert parsed["success"] is False
-        assert parsed["summary"] == "Sub-agent task did not finish within 0.5 s and was stopped."
-        assert "timeout=0.5s" in parsed["ran"]
 
 
 def test_with_run_config_prefixes_a_non_mapping_result() -> None:
     """A result that is not YAML mapping gets the line prefixed instead of re-dumped."""
-    settings = {"sea": "x", "kind": "session", "model": "m"}
+    settings = {"sea": "x", "model": "m"}
     assert with_run_config("plain text", settings) == (
-        "ran: x (session) model=m tools=full budget=none timeout=none "
+        "ran: x model=m tools=full budget=none timeout=none "
         "inherited=none pinned=none\nplain text"
     )
-    assert with_run_config("- a\n- b\n", settings).startswith("ran: x (session)")
-    assert with_run_config("key: [unclosed", settings).startswith("ran: x (session)")
+    assert with_run_config("- a\n- b\n", settings).startswith("ran: x model=m")
+    assert with_run_config("key: [unclosed", settings).startswith("ran: x model=m")
     out = with_run_config("ran: old\nsuccess: true\n", settings)
     assert yaml.safe_load(out) == {
         "ran": run_config_line(settings),
@@ -479,80 +359,3 @@ def test_locked_conflicts_covers_dispatcher_keys_paths_and_inheritance(tmp_path:
         resolve_settings({"locked": ["kind", "nope"]})
     with pytest.raises(SeaError, match="must be a positive number of seconds, got 0"):
         resolve_settings({"timeout": 0})
-
-
-def test_sea_run_kwargs_anchors_a_relative_work_dir_at_the_parent(tmp_path: Path) -> None:
-    """A fan-out child's relative ``work_dir`` setting lands under the PARENT's directory.
-
-    ``run_parallel`` passes the anchored directory in the child's
-    defaults; the SEA's own value must not overwrite it with the raw
-    relative path (which the child would resolve against the process's
-    current directory).
-    """
-    from kiss.agents.sorcar.sea_commands import sea_layers
-    from kiss.agents.sorcar.sorcar_agent import _sea_run_kwargs
-
-    sea = tmp_path / "box_sea.py"
-    sea.write_text(
-        """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'work_dir': 'sandbox'}
-"""
-    )
-    layers = sea_layers(sea)
-    parent = tmp_path / "parent"
-    parent.mkdir()
-    agent = SorcarAgent("parent")
-    agent.work_dir = str(parent)
-    defaults = {"work_dir": str(parent / "sandbox"), "tool_profile": ""}
-    overrides, record = _sea_run_kwargs(layers, "t", defaults, agent, set())
-    assert overrides["work_dir"] == str(parent / "sandbox")
-    assert record["pinned"] == {}  # the same directory the defaults already carry
-    # The pin records the anchored directory, never the raw 'sandbox'.
-    overrides, record = _sea_run_kwargs(layers, "t", {"work_dir": str(parent)}, agent, set())
-    assert record["pinned"] == {"work_dir": [str(parent), str(parent / "sandbox")]}
-    # Without a parent (a bare call) the process's current directory anchors it.
-    overrides, _ = _sea_run_kwargs(layers, "t", {"tool_profile": ""}, None, set())
-    assert overrides["work_dir"] == str(Path.cwd() / "sandbox")
-    # An explicit run_parallel work_dir keeps the SEA's out of the overrides.
-    overrides, _ = _sea_run_kwargs(layers, "t", defaults, agent, {"work_dir"})
-    assert "work_dir" not in overrides
-
-
-def test_sea_run_kwargs_keeps_an_explicit_model_config(tmp_path: Path) -> None:
-    """An explicit model / model_config is neither replaced nor reset by the script's."""
-    from kiss.agents.sorcar.sea_commands import sea_layers
-    from kiss.agents.sorcar.sorcar_agent import _sea_run_kwargs
-
-    sea = tmp_path / "cfg_sea.py"
-    sea.write_text(
-        """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'model': 'sea-model', 'model_config': {'base_url': 'https://sea.invalid'}}
-"""
-    )
-    layers = sea_layers(sea)
-    defaults = {
-        "model_name": "caller-model",
-        "model_config": {"base_url": "https://caller.invalid"},
-        "tool_profile": "",
-    }
-    overrides, record = _sea_run_kwargs(layers, "t", defaults, None, {"model", "model_config"})
-    assert "model_name" not in overrides and "model_config" not in overrides, overrides
-    assert record["pinned"] == {}
-    # Without the explicit keys the script's model applies and resets the config.
-    overrides, record = _sea_run_kwargs(layers, "t", defaults, None, set())
-    assert overrides["model_name"] == "sea-model"
-    assert overrides["model_config"] == {"base_url": "https://sea.invalid"}
-    assert set(record["pinned"]) == {"model", "model_config"}
-    # Only the model explicit: the script's model does not apply, so the
-    # caller's config is not cleared for a model that never changed.
-    overrides, _ = _sea_run_kwargs(layers, "t", defaults, None, {"model"})
-    assert "model_name" not in overrides
-    assert overrides["model_config"] == {"base_url": "https://sea.invalid"}

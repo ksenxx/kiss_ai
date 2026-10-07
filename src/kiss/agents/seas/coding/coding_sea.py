@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import ALLOW, BaseSea, Verdict, refuse
+from kiss.agents.seas.base.base_sea import ALLOW, Verdict, WorkerSea, refuse
 from kiss.agents.seas.coding import coding_test_context as test_context
 from kiss.agents.sorcar.shell_guards import (
     INSTALL_COMMANDS,
@@ -223,7 +223,7 @@ INPUT_FILES_NOTE = (
 )
 
 
-class CodingSea(BaseSea):
+class CodingSea(WorkerSea):
     """The ``/coding`` SEA."""
 
     def description(self) -> str:
@@ -363,8 +363,8 @@ class ContainerHarness:
     def settings(self) -> dict[str, Any]:
         """The trial's run settings (the trial SEA's ``settings``).
 
-        A ``worker`` whose sub-agents stay on (they share the trial
-        container): the trial's model, hard USD cap and per-trial model
+        A worker (its sub-agents share the trial container): the
+        trial's model, hard USD cap and per-trial model
         overrides (``None`` for the provider defaults), the host scratch
         directory the daemon runs the task in (the tools run in the
         container the ``docker_image`` attaches), no host git worktree or
@@ -372,13 +372,11 @@ class ContainerHarness:
         pre-run classification, no browser, no persistent memory.
         """
         return {
-            "kind": "worker",
             "model": self.model_name,
             "max_budget": self.budget,
             "model_config": self.model_overrides or None,
             "work_dir": self.host_work_dir,
             "docker_image": f"container:{self.container}",
-            "allow_fan_out": True,
         }
 
     # ---- hooks ------------------------------------------------------------
@@ -893,13 +891,13 @@ def _jsonable(value: Any) -> Any:
 
 
 SEA_TEMPLATE = '''"""Generated per-trial SEA; see kiss.agents.seas.coding.coding_sea."""
-from kiss.agents.seas.base.base_sea import BaseSea, Verdict
+from kiss.agents.seas.base.base_sea import Verdict, WorkerSea
 from kiss.agents.seas.coding.coding_sea import ContainerHarness
 
 _harness = ContainerHarness.shared({config_path!r})
 
 
-class TrialSea(BaseSea):
+class TrialSea(WorkerSea):
     """One coding-benchmark trial, run by the shared ContainerHarness."""
 
     def description(self) -> str:

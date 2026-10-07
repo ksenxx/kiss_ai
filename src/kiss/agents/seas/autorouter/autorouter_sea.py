@@ -394,17 +394,13 @@ class AutorouterSea(BaseSea):
         return system_prompt + "\n\n" + SYSTEM_PROMPT
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Configure a routed session: the orchestrator model, no fan-out, no browser, no memory.
+        """Configure a routed session: the orchestrator model, no browser, no memory.
 
-        ``allow_fan_out`` is off because routing is one unit per
-        ``run_agent`` call, each on the model the router picked; a
-        ``run_parallel`` fan-out would run every worker on the router's
-        own model without a routing decision.  Classification is off so
-        the router always sees the full protocol.
+        Classification is off so the router always sees the full
+        protocol.
         """
         return settings | {
             "model": orchestrator_model(),
-            "allow_fan_out": False,
             "auto_classify": False,
             "use_web_tools": False,
             "use_memory": False,

@@ -19,7 +19,7 @@ import json
 import sys
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -41,7 +41,7 @@ _config = ChannelConfig(
 )
 
 
-class SmsSea(BaseSea):
+class SmsSea(ChannelSea):
     """The ``/sms`` SEA."""
 
     def description(self) -> str:
@@ -64,15 +64,6 @@ class SmsSea(BaseSea):
         authentication and backend tools.
         """
         return tools + SMSAgent()._get_tools()
-
-    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` SEA contract).
-
-        No git lifecycle, nothing inherited from the calling task, the
-        channel preamble in the system prompt (see
-        :mod:`kiss.agents.sorcar.sea_settings`).
-        """
-        return settings | {"channel": True}
 
 
 class SMSChannelBackend(ToolMethodBackend):

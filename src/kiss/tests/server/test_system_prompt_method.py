@@ -10,7 +10,7 @@ it as the ``systemPromptHook`` callable the daemon applies once the
 prompt is assembled.  The hook is written on EVERY run (``BaseSea`` is
 the root of the chain; it is the identity when nothing overrides the
 method), so it is never reported among the overridden fields.  The
-caller's ``appendToSystemPrompt`` and the ``channel`` kind's preamble
+caller's ``appendToSystemPrompt`` and the ``ChannelSea`` preamble
 stay on the ``appendToSystemPrompt`` field, which the hook never
 touches.
 """
@@ -63,7 +63,7 @@ def test_callers_suffix_stays_on_its_field(tmp_path: Path) -> None:
 
 
 def test_channel_preamble_goes_to_the_suffix_not_the_hook(tmp_path: Path) -> None:
-    """A ``channel`` SEA's preamble follows the caller's text on ``appendToSystemPrompt``.
+    """A ``ChannelSea``'s preamble follows the caller's text on ``appendToSystemPrompt``.
 
     The hook is independent of the suffix: it rewrites whatever prompt
     the daemon assembled (base plus suffix), so the preamble that keeps
@@ -73,13 +73,10 @@ def test_channel_preamble_goes_to_the_suffix_not_the_hook(tmp_path: Path) -> Non
     script = _script(
         tmp_path,
         """
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 
 
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {"channel": True}
-
+class Sea(ChannelSea):
     def system_prompt(self, system_prompt):
         return system_prompt + "\\n\\nPROTOCOL"
 """,

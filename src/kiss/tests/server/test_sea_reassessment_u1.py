@@ -22,7 +22,7 @@ Against a real private daemon (``_Daemon``) with a stand-in model:
 3. A parent that calls ``finish`` with a live job gets the gate text
    once; its second ``finish`` passes, after which the job is dead and
    gone from the registry.
-4. A ``channel: True`` sub-task detached at its bound keeps holding
+4. A ``ChannelSea`` sub-task detached at its bound keeps holding
    its workspace inside the daemon; a dispatch for another workspace
    waits and fails with the existing error until the first is killed.
 5. ``wait="false"`` keeps its notice; ``daemon_client.run`` is called
@@ -298,14 +298,11 @@ def test_detached_channel_sub_task_holds_its_workspace_until_killed(
     sea = home.repo / "chan_sea.py"
     sea.write_text(
         """
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 
-class Sea(BaseSea):
+class Sea(ChannelSea):
     def description(self):
         return 'a channel'
-
-    def settings(self, settings):
-        return settings | {'channel': True}
 """,
         encoding="utf-8",
     )
@@ -343,7 +340,7 @@ class Sea(BaseSea):
         # With the workspace released the other dispatch runs.
         done = yaml.safe_load(dispatch("CHAN-B say hi", "b", "30"))
         assert done["success"] is True and "b done" in done["summary"], done
-        assert done["ran"].startswith("chan (worker, channel) ")
+        assert done["ran"].startswith("chan (channel) ")
     finally:
         release.set()
         agent_dispatch.kill_jobs_of(None)

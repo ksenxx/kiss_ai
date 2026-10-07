@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.cron_agent import (
     cron_job,
@@ -69,7 +70,7 @@ def test_get_tools_and_sorcar_wiring() -> None:
     # The dispatch preamble reaches the session through the SEA
     # contract (the SEA's ``system_prompt`` method), not through a prompt prefix.
     assert sea.system_prompt("S") == "S\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
-    assert sea.settings({})["channel"] is True
+    assert isinstance(sea, ChannelSea)
     # Sorcar's system prompt, as the product loads it, sends scheduling
     # requests to this agent.
     assert 'run_agent tool with "cron"' in SYSTEM_PROMPT

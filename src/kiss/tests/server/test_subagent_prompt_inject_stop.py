@@ -24,12 +24,12 @@ Reproduces two user-reported bugs:
 The tests replicate the exact production wiring: real
 :class:`ChatSorcarAgent` instances, real ``task_history`` rows
 allocated via ``_add_task``, real task-keyed
-:class:`kiss.server.agent_state.AgentState` registrations mirroring
-``ChatSorcarAgent._run_tasks_parallel``'s ``_run_single`` (synthetic
-``task-{parent}__sub_{idx}`` tab ids, ``_SubagentStopEvent`` chained
-to the parent's), a real :class:`WebPrinter` and a real
-:class:`VSCodeServer` dispatching the same commands the webview
-posts.  No mocks, patches, or test doubles.
+:class:`kiss.server.agent_state.AgentState` registrations mirroring a
+``run_agent`` sub-task (a ``parent_task_id``, a
+``{parent_tab}__sub_{task_id}`` tab id and its own stop event), a
+real :class:`WebPrinter` and a real :class:`VSCodeServer` dispatching
+the same commands the webview posts.  No mocks, patches, or test
+doubles.
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ import pytest
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.sorcar_agent import _SubagentStopEvent
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
@@ -99,9 +98,9 @@ class _Harness:
         self.sub._last_task_id = sub_task_id
         self.sub_task_id = str(sub_task_id)
         self.parent_task_id = str(parent_task_id)
-        self.sub_tab_id = f"task-{parent_task_id}__sub_0"
+        self.sub_tab_id = f"tab-parent__sub_{sub_task_id}"
         self.sub._tab_id = self.sub_tab_id  # type: ignore[attr-defined]
-        self.sub_stop = _SubagentStopEvent(self.parent_stop)
+        self.sub_stop = threading.Event()
         self.sub_state = agent_state.AgentState(
             self.sub_task_id,
             agent=self.sub,  # type: ignore[arg-type]
@@ -698,13 +697,6 @@ class TestSubagentStop:
         assert h.sub_stop.is_set()
         assert not h.parent_stop.is_set()
 
-    def test_stop_on_parent_propagates_to_subagent(self, isolated_db) -> None:
-        """Stopping the parent chains into the sub-agent's stop event."""
-        h = _Harness()
-        h.server._handle_command({"type": "stop", "tabId": "tab-parent"})
-        assert h.parent_stop.is_set()
-        assert h.sub_stop.is_set()
-
     def test_stop_on_sibling_viewer_leaves_this_subagent_running(
         self, isolated_db,
     ) -> None:
@@ -718,9 +710,9 @@ class TestSubagentStop:
             extra={"subagent": {"parent_task_id": h.parent_task_id}},
         )
         sib._last_task_id = sib_task_id
-        sib_tab_id = f"task-{h.parent_task_id}__sub_1"
+        sib_tab_id = f"tab-parent__sub_{sib_task_id}"
         sib._tab_id = sib_tab_id  # type: ignore[attr-defined]
-        sib_stop = _SubagentStopEvent(h.parent_stop)
+        sib_stop = threading.Event()
         sib_state = agent_state.AgentState(
             str(sib_task_id),
             agent=sib,  # type: ignore[arg-type]

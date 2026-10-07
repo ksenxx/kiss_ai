@@ -39,7 +39,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
@@ -70,7 +70,7 @@ _QQ_DIR = kiss_home() / "third_party_agents" / "qq"
 _config = ChannelConfig(_QQ_DIR, ("appid", "secret"))
 
 
-class QqSea(BaseSea):
+class QqSea(ChannelSea):
     """The ``/qq`` SEA."""
 
     def description(self) -> str:
@@ -91,15 +91,6 @@ class QqSea(BaseSea):
         authentication and backend tools.
         """
         return tools + QQAgent()._get_tools()
-
-    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` SEA contract).
-
-        No git lifecycle, nothing inherited from the calling task, the
-        channel preamble in the system prompt (see
-        :mod:`kiss.agents.sorcar.sea_settings`).
-        """
-        return settings | {"channel": True}
 
     def system_prompt(self, system_prompt: str) -> str:
         """Return the channel guidance appended to the run's system prompt."""

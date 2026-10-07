@@ -41,6 +41,7 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar import agent_dispatch, cron_agent
 from kiss.agents.sorcar.agent_dispatch import (
     _daemon_endpoint_file,
@@ -49,6 +50,7 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.sea_apply import apply_sea, channel_workspace, load_layers
 from kiss.agents.sorcar.sea_commands import load_sea
+from kiss.agents.sorcar.sea_settings import declares_channel
 from kiss.agents.third_party_agents.auth_status import _agent_class
 from kiss.core.config import kiss_home
 from kiss.core.tool_verdict import ALLOW
@@ -122,7 +124,7 @@ def test_available_channels_discovery() -> None:
     channels = available_channels()
     for expected in ("slack", "telegram", "discord", "email", "ntfy"):
         assert expected in channels
-    # SEAs of another kind (``a2a``, a session with peer-agent tools),
+    # SEAs of another base class (``a2a``, a session with peer-agent tools),
     # hidden SEAs (``oai``) and private modules are not channels.
     for other in ("a2a", "oai", "channel_cli", "backend_utils"):
         assert other not in channels
@@ -260,11 +262,10 @@ def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
     even appear.  The dispatcher no longer special-cases them: it sends
     the same wire values as for any other sub-task (the persisted "Use
     worktree" / "Auto commit" settings, no classifier override), and
-    the ``channel`` preset of the module's ``settings()`` pins
-    worktree, auto-commit, classification and fan-out off on the
-    daemon (``apply_sea``), where every script's settings
-    win.  A path-mode SEA with the default ``session`` preset
-    keeps the standard lifecycle on the calling project.  The recorded
+    the module's ``ChannelSea`` base pins worktree, auto-commit and
+    classification off on the daemon (``apply_sea``), where every
+    script's settings win.  A path-mode ``BaseSea`` SEA keeps the
+    standard lifecycle on the calling project.  The recorded
     ``run`` command is checked as sent, then after
     ``apply_sea`` rewrote it the way the daemon does.
     """
@@ -282,13 +283,12 @@ def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
             assert cmd["classifyTasks"] is None, agent
             assert cmd["isParallel"] is True, agent
             overridden = apply_sea(cmd)
-            assert {"useWorktree", "autoCommit", "classifyTasks", "isParallel"} <= overridden
+            assert {"useWorktree", "autoCommit", "classifyTasks"} <= overridden
             assert cmd["useWorktree"] is False, agent
             assert cmd["autoCommit"] is False, agent
             assert cmd["classifyTasks"] is False, agent
-            assert cmd["isParallel"] is False, agent
 
-        # Path mode, ``session`` preset: worktree + auto-commit follow
+        # Path mode, ``BaseSea``: worktree + auto-commit follow
         # the persisted settings; classification follows the daemon's
         # configured default; the script's settings change nothing.
         tool("say hi", str(script))
@@ -331,7 +331,6 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
         "use_web_tools",
         "auto_classify",
         "use_memory",
-        "allow_fan_out",
     ):
         out = run_agent("say hi", "ntfy", options=f'{{"{name}": "maybe"}}')
         assert out == f"Error: {name} must be true or false, got 'maybe'."
@@ -355,6 +354,9 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     assert run_agent("say hi", "ntfy", options='{"system_prompt": "x"}').startswith(
         "Error: options has an unknown key 'system_prompt'"
     )
+    # Fan-out is not a run property any more: the key is refused by name.
+    out = run_agent("say hi", "ntfy", options='{"allow_fan_out": true}')
+    assert out.startswith("Error: options key 'allow_fan_out' was removed: ")
     assert run_agent("say hi", "ntfy", options="[1, 2]") == (
         "Error: options must be a JSON object, got '[1, 2]'."
     )
@@ -393,12 +395,12 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
             run_agent("say hi", "ntfy", **{kwarg: str(tmp_path / "x.py")})
 
 
-def test_channel_and_cron_refuse_options_that_contradict_the_kind(
+def test_channel_and_cron_refuse_options_that_contradict_the_base_class(
     tmp_path: Path, daemon: RecordingDaemon
 ) -> None:
     """Asking a channel/cron sub-task for a worktree is refused, never silently undone.
 
-    Every key the ``channel`` kind sets is locked
+    Every key ``ChannelSea`` lays is locked
     (``sea_settings.merge_settings``), so an explicit option that
     differs from it is a ``locked`` conflict under the one precedence
     rule; an option that agrees is forwarded as usual.
@@ -408,7 +410,7 @@ def test_channel_and_cron_refuse_options_that_contradict_the_kind(
         ('{"auto_commit": "TRUE"}', "auto_commit=False (asked for True)"),
         ('{"use_worktree": "false", "auto_commit": true}', "auto_commit=False (asked for True)"),
         ('{"use_memory": true}', "use_memory=False (asked for True)"),
-        ('{"allow_fan_out": true}', "allow_fan_out=False (asked for True)"),
+        ('{"use_web_tools": true}', "use_web_tools=False (asked for True)"),
     )
     for agent in ("ntfy", "cron"):
         for options, clash in cases:
@@ -430,8 +432,9 @@ def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDa
     """The ``options`` JSON object reaches the daemon as the ``run`` command's fields.
 
     Keys left out forward the option's default (``None`` for the
-    tri-state daemon-decides options, ``True`` for ``isParallel``,
-    ``""`` for the text options); explicit values are parsed and
+    tri-state daemon-decides options, ``""`` for the text options;
+    ``isParallel`` is the caller's own fan-out flag, ``True`` without
+    a calling agent); explicit values are parsed and
     forwarded verbatim, booleans as JSON booleans or as the words
     ``"true"`` / ``"false"``, ``null`` as "not passed".  No tools path
     travels: the ``run`` command has no tools field, so the sub-task's
@@ -473,7 +476,6 @@ def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDa
             "use_web_tools": true,
             "auto_classify": false,
             "use_memory": "true",
-            "allow_fan_out": false,
             "add_to_system_prompt": "Answer in French.",
             "add_to_prompt": "Cite sources."
         }""",
@@ -488,7 +490,6 @@ def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDa
     assert sent["useWebTools"] is True
     assert sent["classifyTasks"] is False
     assert sent["useMemory"] is True
-    assert sent["isParallel"] is False
     assert sent["appendToSystemPrompt"] == "Answer in French."
     assert sent["appendToPrompt"] == "Cite sources."
     assert sent["toolProfile"] == "review"
@@ -501,14 +502,13 @@ def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDa
     # Path mode honours an explicit worktree request too; ``null`` and
     # ``""`` mean "not passed", so the defaults stand.
     tool("say hi", str(script), options='{"use_worktree": true, "use_memory": null, '
-                                        '"allow_fan_out": "", "chat_id": null}')
+                                        '"chat_id": null}')
     sent = _sent(daemon)
     assert sent["useWorktree"] is True
     assert sent["useMemory"] is None
-    assert sent["isParallel"] is True
     assert sent["chatId"] == ""
 
-    # For cron and the channel agents the ``channel`` kind locks
+    # For cron and the channel agents ``ChannelSea`` locks
     # classification off: asking for it is refused, agreeing is forwarded.
     before = len(daemon.run_commands)
     out = tool("run 'echo hi' every 5 minutes", "cron", options='{"auto_classify": true}')
@@ -629,11 +629,11 @@ class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'model': 'm'}
 """)
-    # ``workspace`` is a channel option: a session SEA refuses it.
+    # ``workspace`` is a channel option: a ``BaseSea`` SEA refuses it.
     out = run_agent("say hi", str(script), options='{"workspace": "ignored-ws"}')
     assert out == (
         "Error: my_researcher: options['workspace'] applies to a channel only; "
-        "my_researcher is not a channel (no `channel: True` in its settings)"
+        "my_researcher is not a channel (its class does not derive from ChannelSea)"
     )
     out = run_agent("say hi", str(script))
     assert out.startswith("Error: the my_researcher agent task could not run:")
@@ -662,9 +662,7 @@ def test_default_agent_is_the_bundled_sorcar_sea(tmp_path: Path, daemon: Recordi
     # staged hooks are all identities.
     cmd: dict[str, Any] = {"seaPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
     assert apply_sea(cmd) == set()
-    assert cmd.pop("_runConfig") == {
-        "sea": "sorcar", "kind": "session", "channel": False, "pinned": {},
-    }
+    assert cmd.pop("_runConfig") == {"sea": "sorcar", "channel": False, "pinned": {}}
     messages = [{"role": "user", "content": "hi"}]
     assert cmd.pop("systemPromptHook")("S") == "S"
     assert cmd.pop("toolsHook")([print, len]) == [print, len]
@@ -866,12 +864,13 @@ def test_every_channel_module_is_dispatchable() -> None:
             str,
         ), channel
         assert module.__file__ and Path(module.__file__).is_file(), channel
-        # Every channel module is a ``channel: True`` SEA whose
-        # ``tools()`` adds the channel's tools to the toolset and whose
+        # Every channel module is a ``ChannelSea`` whose ``tools()``
+        # adds the channel's tools to the toolset and whose
         # ``system_prompt()`` appends the channel's guidance (the agent
         # class's ``channel_system_prompt``) to the assembled prompt.
         sea = load_sea(Path(module.__file__))
-        assert sea.settings({})["channel"] is True, channel
+        assert isinstance(sea, ChannelSea), channel
+        assert declares_channel(Path(module.__file__)), channel
         assert sea.tools([]) and all(callable(t) for t in sea.tools([])), channel
         guidance = getattr(cls, "channel_system_prompt", "")
         assert sea.system_prompt("ASSEMBLED") == (
@@ -883,10 +882,10 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     """The exact SEA contract a channel dispatch relies on.
 
     Passing a channel module as ``sea_path`` makes the
-    daemon apply its ``settings()`` (the ``channel`` preset: no
-    worktree, no auto-commit, no classifier, no fan-out, no browser,
-    no memory), stage its ``tools()`` as the run's tools hook (the
-    channel tools on top of the built-in toolset), append the channel
+    daemon apply its ``settings()`` (the ``ChannelSea`` defaults: no
+    worktree, no auto-commit, no classifier, no browser, no memory),
+    stage its ``tools()`` as the run's tools hook (the channel tools on
+    top of the built-in toolset), append the channel
     preamble to the system-prompt suffix, and stage its
     ``system_prompt()`` as the run's system-prompt hook (the channel
     guidance).  The dispatcher sends the task text verbatim: nothing
@@ -900,7 +899,7 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     # Only the settings fields are reported; the hooks are always staged.
     assert overridden == {
         "useWorktree", "autoCommit", "classifyTasks",
-        "isParallel", "useWebTools", "useMemory", "appendToSystemPrompt", "workDir",
+        "useWebTools", "useMemory", "appendToSystemPrompt", "workDir",
     }
     assert cmd["workDir"] == str(kiss_home() / "channel_work")
     assert channel_workspace(cmd, load_layers(cmd)) == "default"
@@ -909,8 +908,7 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     assert "appendBasicTools" not in cmd
     assert "toolProfile" not in cmd  # ``tools()`` keeps the built-in toolset
     assert "toolsFile" not in cmd
-    for field in ("useWorktree", "autoCommit", "classifyTasks", "isParallel",
-                  "useWebTools", "useMemory"):
+    for field in ("useWorktree", "autoCommit", "classifyTasks", "useWebTools", "useMemory"):
         assert cmd[field] is False, field
     assert cmd["appendToSystemPrompt"] == (
         "Caller suffix.\n\n" + CHANNEL_PREAMBLE.format(name="ntfy")

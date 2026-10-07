@@ -687,11 +687,10 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert _budget_line(request) == 1.25
         names = _tool_names(request)
         assert "go_to_url" not in names, "web_tools=False must drop the browser tools"
-        # The channel module's ``settings()`` (the ``channel`` preset:
-        # no fan-out) win over the launcher's ``is_parallel=True`` on
-        # the daemon, like every SEA's settings do.
-        assert "run_parallel" not in names
-        assert "Parallel mode: sequential" in _system_text(request)
+        # ``run_parallel`` is N x ``run_agent``: a ChannelSea no longer
+        # forces it off, so the launcher's ``is_parallel=True`` stands.
+        assert "run_parallel" in names
+        assert "Parallel mode: parallel" in _system_text(request)
 
     def test_carrier_tools_getter_restricts_the_daemon_built_agent(self) -> None:
         """A carrier's ``sea_path`` script restricts the run to its ``tools()``.

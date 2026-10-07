@@ -15,7 +15,7 @@ evaluates it (:func:`kiss.agents.sorcar.sea_commands.evaluate_sea`)
 and applies the result in place on the command dict
 (:func:`apply_sea`):
 
-* the effective settings: a ``kind`` plus per-run parameters, each
+* the effective settings: per-run parameters, each
   written over the command's corresponding wire field
   (:data:`SETTING_FIELDS`) unless the caller marked that field explicit
   (:data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`: an
@@ -25,7 +25,7 @@ and applies the result in place on the command dict
 * ``prompt(task)``: the task text replaced by what the method returns
   (``{task_id}`` in it -> the calling task's id);
 * the channel preamble, appended to ``appendToSystemPrompt`` of a
-  ``channel: True`` run;
+  channel run (a SEA deriving from ``ChannelSea``);
 * the ``system_prompt``, ``tools``, ``llm_call_hook`` and
   ``tool_call_hook`` methods — callables no wire field can carry —
   staged on the daemon-side fields :data:`DAEMON_SIDE_FIELDS`, which
@@ -53,7 +53,7 @@ from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT, sea_pinned
-from kiss.agents.sorcar.sea_commands import base_settings, evaluate_sea, sea_layers, sea_name
+from kiss.agents.sorcar.sea_commands import evaluate_sea, is_channel, sea_layers, sea_name
 from kiss.agents.sorcar.sea_settings import (
     DISPATCHER_SETTINGS,
     SETTING_TYPES,
@@ -85,13 +85,8 @@ CHANNEL_PREAMBLE = (
     "broken, report the failure in your result so it is fixed in a normal "
     "development task."
 )
-"""System-prompt preamble of every ``channel: True`` run; ``{name}`` is the SEA's name
-(``CHANNEL_BEHAVIOURS`` "preamble")."""
-
-
-def is_channel(seas: list[BaseSea]) -> bool:
-    """Return whether the run of *seas* is a channel (its effective ``channel`` setting is true)."""
-    return bool(seas) and bool(base_settings(seas).get("channel"))
+"""System-prompt preamble of every channel run (a SEA deriving from ``ChannelSea``);
+``{name}`` is the SEA's name (``CHANNEL_BEHAVIOURS`` "preamble")."""
 
 
 NO_TOOLS_PROFILE = "none"
@@ -261,7 +256,8 @@ def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str
             del staged[field]
     if run.prompt != task:
         staged["prompt"] = run.prompt
-    if run.settings.get("channel"):
+    channel = is_channel(seas)
+    if channel:
         suffix = cmd.get("appendToSystemPrompt")
         preamble = CHANNEL_PREAMBLE.format(name=script_name(str(seas[-1].path)))
         staged["appendToSystemPrompt"] = (
@@ -279,8 +275,7 @@ def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str
     # values were removed from ``staged`` above and never appear here).
     cmd[RUN_CONFIG_FIELD] = {
         "sea": sea_name(seas),
-        "kind": run.settings["kind"],
-        "channel": bool(run.settings.get("channel")),
+        "channel": channel,
         "pinned": sea_pinned(cmd, staged, SETTING_FIELDS),
     }
     cmd.update(staged)
@@ -290,6 +285,6 @@ def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str
 RUN_CONFIG_FIELD = "_runConfig"
 """The daemon-side ``run`` command field :func:`apply_sea` leaves its provenance record in.
 
-``{"sea": <SEA name, "" for a plain run>, "kind": <kind>, "channel": <bool>,
+``{"sea": <SEA name, "" for a plain run>, "channel": <bool>,
 "pinned": {key: [before, pinned]}}``.
 """

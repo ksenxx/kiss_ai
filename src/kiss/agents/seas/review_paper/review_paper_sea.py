@@ -388,15 +388,15 @@ class ReviewPaperSea(BaseSea):
         return tools + [read_paper, check_review]
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Browse (related work), fan out (second opinion), skip the classifier, wait two hours.
+        """Browse (related work), skip the classifier, wait two hours.
 
         Reading the paper, searching the related work and the second-opinion
         round take far longer than the default ``run_agent`` wait; the
-        ``timeout`` tells the dispatcher how long a ``/review_paper`` run may run.
+        ``timeout`` tells the dispatcher how long a ``run_agent`` call on
+        ``/review_paper`` should block before returning its job id.
         """
         return settings | {
             "use_web_tools": True,
-            "allow_fan_out": True,
             "auto_classify": False,
             "timeout": DISPATCH_TIMEOUT_SECONDS,
         }

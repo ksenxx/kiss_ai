@@ -12,8 +12,8 @@ real daemon-side loader and the real dispatch code:
    assembled prompt with the bundled SYSTEM_LITE ablation prompt
    (``_ask_system_lite.md``) followed by the no-internet and
    answer-quickly directives and the answering playbook, ``tools`` MUST
-   add the single ``task_context`` tool, ``settings()`` MUST be a
-   ``worker`` with the ``none`` tool profile (so there is no built-in
+   add the single ``task_context`` tool, the class MUST be a
+   ``WorkerSea`` with the ``none`` tool profile (so there is no built-in
    tool besides ``finish``), and ``prompt()`` MUST append the fixed
    sentence carrying the ``{task_id}`` placeholder.
 2. The slash-command resolver ``slash_command_task`` MUST recognise
@@ -44,6 +44,7 @@ import pytest
 
 from kiss.agents.seas.ask import ask_sea
 from kiss.agents.seas.ask.ask_sea import AskSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.sorcar import agent_dispatch, daemon_client, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -71,17 +72,15 @@ _EXPECTED_SUFFIX_START = (
     "at any point. You must answer quickly because the user is waiting.**"
 )
 _EXPECTED_SETTINGS = {
-    "kind": "worker",
     "use_worktree": False,
     "auto_commit": False,
     "auto_classify": False,
-    "allow_fan_out": False,
     "use_web_tools": False,
     "use_memory": False,
     "tool_profile": "none",
     "locked": ["tool_profile"],
 }
-"""``resolve_settings`` output: ``settings()`` plus the ``worker`` preset.
+"""``base_settings`` output: ``WorkerSea``'s defaults under ``settings()``.
 
 ``system_prompt()`` is a hook the daemon stages as ``systemPromptHook``
 (``apply_sea``), so its text is not a settings key.
@@ -161,19 +160,18 @@ def test_system_prompt_ends_with_the_fixed_playbook() -> None:
 def test_settings_follow_the_contract() -> None:
     """``settings()`` MUST be a tool-less worker; ``prompt()`` MUST name the task.
 
-    ``worker`` pins worktree, auto-commit, classifier, fan-out, browser
-    and memory off; ``tool_profile: "none"`` keeps even the built-in
+    ``WorkerSea`` pins worktree, auto-commit, classifier, browser and
+    memory off; ``tool_profile: "none"`` keeps even the built-in
     toolset out so the answerer cannot run commands or touch files.
     ``prompt(question)`` is the question followed by the fixed sentence
     with ``{task_id}`` still a placeholder (the daemon fills it from
-    ``parentTaskId``).  The resolved settings add the preset's defaults
-    and nothing else: the other methods are applied by the daemon.
+    ``parentTaskId``).  The resolved settings add the base class's
+    defaults and nothing else: the other methods are applied by the daemon.
     """
     sea = AskSea()
-    assert sea.settings({}) == {
-        "kind": "worker", "tool_profile": "none", "locked": ["tool_profile"],
-    }
-    assert resolve_settings(sea.settings({})) == _EXPECTED_SETTINGS
+    assert isinstance(sea, WorkerSea)
+    assert sea.settings({}) == {"tool_profile": "none", "locked": ["tool_profile"]}
+    assert resolve_settings(sea.settings({})) == sea.settings({})
     assert sea_commands.base_settings([sea]) == _EXPECTED_SETTINGS
     assert sea.prompt("why?") == "why?\n\n" + _EXPECTED_ADD_TO_PROMPT
     assert _PLACEHOLDER in sea.prompt("why?")
@@ -283,7 +281,7 @@ def test_slash_resolver_treats_unrelated_commands_the_same_way(tmp_path: Path) -
     task_text, sea_path = hit
     assert task_text == "hello"
     assert sea_path == folder / "notify" / "notify_sea.py"
-    assert sea_commands.sea_settings(sea_path) == {"kind": "session"}
+    assert sea_commands.sea_settings(sea_path) == {}
 
 
 def test_slash_resolver_honours_a_user_sea_shadowing_ask(tmp_path: Path) -> None:
@@ -305,7 +303,7 @@ def test_slash_resolver_honours_a_user_sea_shadowing_ask(tmp_path: Path) -> None
     task_text, sea_path = hit
     assert sea_path == shadow / "ask_sea.py"
     assert task_text == "what happened?"
-    assert sea_commands.sea_settings(sea_path) == {"kind": "session"}
+    assert sea_commands.sea_settings(sea_path) == {}
 
 
 def test_slash_resolver_rejects_bare_ask_and_answers_help_from_description() -> None:
@@ -333,8 +331,8 @@ def test_apply_sea_applies_the_ask_settings_to_the_wire() -> None:
 
     This exercises the real ``apply_sea`` path —
     :meth:`TaskRunner._run_task_inner` calls it just before the run —
-    so the ``worker`` preset lands on ``useWorktree`` / ``autoCommit`` /
-    ``classifyTasks`` / ``isParallel`` / ``useWebTools`` / ``useMemory``,
+    so the ``WorkerSea`` defaults land on ``useWorktree`` / ``autoCommit`` /
+    ``classifyTasks`` / ``useWebTools`` / ``useMemory``,
     the ``none`` profile on ``toolProfile`` (the daemon derives "no
     built-in tools" from it: nothing stages ``appendBasicTools`` any
     more), ``system_prompt`` on the daemon-side ``systemPromptHook``
@@ -349,14 +347,13 @@ def test_apply_sea_applies_the_ask_settings_to_the_wire() -> None:
     overridden = apply_sea(cmd)
     assert overridden == {
         "prompt", "toolProfile",
-        "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
+        "useWorktree", "autoCommit", "classifyTasks", "useWebTools", "useMemory",
     }
     assert cmd["systemPromptHook"]("ASSEMBLED PROMPT") == _EXPECTED_SYSTEM_PROMPT
     assert cmd["toolProfile"] == "none"
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
     assert cmd["classifyTasks"] is False
-    assert cmd["isParallel"] is False
     assert cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
     assert [tool.__name__ for tool in cmd["toolsHook"]([])] == ["task_context"]

@@ -30,6 +30,8 @@ import uuid
 from pathlib import Path
 from typing import Any, cast
 
+import yaml
+
 from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -1024,7 +1026,7 @@ class SorcarRunApiTest(unittest.TestCase):
             model_config={"base_url": "http://localhost:9999/v1"},
             use_web_tools=False,
             use_memory=False,
-            allow_fan_out=True,
+            is_parallel=True,
         )
         assert result.success is True
         assert seen["max_budget"] == 2.5
@@ -1382,19 +1384,23 @@ class SorcarRunApiTest(unittest.TestCase):
         )
 
     def test_custom_system_prompt_reaches_subagents(self) -> None:
-        """The fan-out engine passes the override to every sub-agent.
+        """A parent's custom system prompt reaches its ``run_parallel`` children.
 
-        Covers both halves of the sub-agent wiring: the engine's
-        ``base_system_prompt`` parameter (called directly) and the
-        parent-agent forwarding of its stored ``_base_system_prompt``
-        (``SorcarAgent._run_tasks_parallel``).
+        A parent that ran with the override stores it as
+        ``_base_system_prompt``; ``run_parallel`` is N daemon ``run_agent``
+        dispatches that inherit it (``agent_dispatch``), so every child
+        the daemon builds composes its system prompt on the override.  A
+        parent without an override spawns default-prompt children.
         """
         import threading as _threading
 
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-        from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
         from kiss.core.base import SYSTEM_PROMPT
+        from kiss.core.models.model_info import get_available_models
 
+        models = get_available_models()
+        if not models:
+            self.skipTest("the daemon accepts a run only with a configured model")
         custom = "You are a security-review sub-agent. Be paranoid."
         lock = _threading.Lock()
         composed_prompts: list[str] = []
@@ -1402,39 +1408,51 @@ class SorcarRunApiTest(unittest.TestCase):
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
             with lock:
                 composed_prompts.append(str(kwargs.get("system_prompt")))
-            return "success: true\nis_continue: false\nsummary: ok\n"
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(raw, type="result", step_count=1)
+            return raw
 
         self._parent_class.run = stub_run
 
-        # Half 1: the engine parameter, as forwarded by a parent.
-        results = run_tasks_parallel(
-            ["child task one", "child task two"],
-            work_dir=self.repo,
-            base_system_prompt=custom,
-        )
-        assert len(results) == 2
-        assert len(composed_prompts) == 2
-        for composed in composed_prompts:
-            assert composed.startswith(custom)
-            assert SYSTEM_PROMPT not in composed
+        def parent(name: str, base_system_prompt: str) -> ChatSorcarAgent:
+            agent = ChatSorcarAgent(name)
+            agent.model_name = models[0]
+            agent.work_dir = self.repo
+            agent._chat_id = ""
+            agent._last_task_id = uuid.uuid4().hex
+            agent._base_system_prompt = base_system_prompt
+            agent._use_web_tools = False
+            agent._is_parallel = True
+            return agent
 
-        # Half 2: a parent agent that ran with the override stores it
-        # and forwards it through its own fan-out.
-        composed_prompts.clear()
-        parent = ChatSorcarAgent("system-prompt-parent")
-        parent._base_system_prompt = custom
-        results = parent._run_tasks_parallel(["nested child task"])
-        assert len(results) == 1
-        assert len(composed_prompts) == 1
-        assert composed_prompts[0].startswith(custom)
-        assert SYSTEM_PROMPT not in composed_prompts[0]
+        def fan_out(agent: ChatSorcarAgent, tasks: str) -> list[str]:
+            tool = next(t for t in agent._get_tools() if t.__name__ == "run_parallel")
+            return [str(r) for r in yaml.safe_load(tool(tasks))]
 
-        # A parent WITHOUT an override spawns default-prompt children.
-        composed_prompts.clear()
-        plain_parent = ChatSorcarAgent("default-prompt-parent")
-        plain_parent._run_tasks_parallel(["plain child task"])
-        assert len(composed_prompts) == 1
-        assert composed_prompts[0].startswith(SYSTEM_PROMPT)
+        saved_endpoint = os.environ.get("KISS_SORCAR_LOCAL")
+        os.environ["KISS_SORCAR_LOCAL"] = self.endpoint_file
+        try:
+            results = fan_out(
+                parent("system-prompt-parent", custom), '["child task one", "child task two"]',
+            )
+            assert len(results) == 2
+            assert len(composed_prompts) == 2
+            for composed in composed_prompts:
+                assert composed.startswith(custom)
+                assert SYSTEM_PROMPT not in composed
+
+            composed_prompts.clear()
+            results = fan_out(parent("default-prompt-parent", ""), '["plain child task"]')
+            assert len(results) == 1
+            assert len(composed_prompts) == 1
+            assert composed_prompts[0].startswith(SYSTEM_PROMPT)
+        finally:
+            if saved_endpoint is None:
+                os.environ.pop("KISS_SORCAR_LOCAL", None)
+            else:
+                os.environ["KISS_SORCAR_LOCAL"] = saved_endpoint
 
     def test_api_tab_state_disposed_after_run(self) -> None:
         """``run()`` explicitly closes its synthetic tab; no state leaks.

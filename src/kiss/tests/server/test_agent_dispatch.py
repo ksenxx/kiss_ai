@@ -31,8 +31,8 @@ from kiss.agents.sorcar.sea_apply import (
 from kiss.agents.sorcar.sea_settings import (
     WORKER_DEFAULTS,
     SeaError,
+    base_class_defaults,
     channel_work_dir,
-    kind_defaults,
 )
 from kiss.core.config import kiss_home
 from kiss.core.tool_verdict import ALLOW
@@ -40,7 +40,7 @@ from kiss.core.tool_verdict import ALLOW
 
 def test_cron_agent_module_is_a_valid_agent_script() -> None:
     # The contract the cron dispatch relies on: the cron module is a
-    # ``channel``-kind SEA whose ``settings()`` moves the session to
+    # ``ChannelSea`` whose ``settings()`` moves the session to
     # ~/.kiss/cron/work with no git lifecycle, whose ``tools()`` adds
     # the cron_job and gateway_command tools ON TOP of the tools the run
     # has (no tool profile is staged, so the daemon keeps the basics),
@@ -50,13 +50,13 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
     # on every run (``BaseSea`` roots the chain), so only the settings
     # wire fields are reported as overridden.
     sea = cron_agent.CronAgentSea()
-    assert sea.settings({}) == {"channel": True, "work_dir": cron_agent.cron_work_dir()}
+    assert sea.settings({}) == {"work_dir": cron_agent.cron_work_dir()}
     assert sea.system_prompt("BASE") == "BASE\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
     cmd: dict[str, Any] = {"seaPath": cron_agent.__file__, "appendToSystemPrompt": "CALLER"}
     overridden = apply_sea(cmd)
     assert overridden == {
         "appendToSystemPrompt", "workDir",
-        "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
+        "useWorktree", "autoCommit", "classifyTasks", "useWebTools", "useMemory",
     }
     # The workspace a channel run holds is decided from the settings
     # alone (entered by the task runner before the tools are built).
@@ -74,12 +74,15 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
     assert cmd["workDir"] == cron_agent.cron_work_dir()
     for key, value in WORKER_DEFAULTS.items():
         assert value is False, key
-    assert kind_defaults() == {"session": {}, "worker": WORKER_DEFAULTS}
+    assert base_class_defaults() == {
+        "BaseSea": {},
+        "WorkerSea": WORKER_DEFAULTS,
+        "ChannelSea": {**WORKER_DEFAULTS, "work_dir": channel_work_dir()},
+    }
     assert channel_work_dir() == str(kiss_home() / "channel_work")
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
     assert cmd["classifyTasks"] is False
-    assert cmd["isParallel"] is False
     assert cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
     assert cmd["appendToSystemPrompt"] == (
@@ -329,7 +332,6 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
         "seaPath": str(script),
         "model": "kept-model",
         "useMemory": True,
-        "isParallel": True,
         "useWebTools": None,
         "classifyTasks": False,
         "appendToSystemPrompt": "CALLER",
@@ -339,7 +341,7 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
     # replaced nothing and the four hook callables every run gets,
     # all of them ``BaseSea``'s identities here.
     assert cmd.pop("_runConfig") == {
-        "sea": "old_contract_agent", "kind": "session", "channel": False, "pinned": {},
+        "sea": "old_contract_agent", "channel": False, "pinned": {},
     }
     assert cmd.pop("systemPromptHook")("BASE") == "BASE"
     assert cmd.pop("toolsHook")([_hello]) == [_hello]
@@ -349,7 +351,6 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
         "seaPath": str(script),
         "model": "kept-model",
         "useMemory": True,
-        "isParallel": True,
         "useWebTools": None,
         "classifyTasks": False,
         "appendToSystemPrompt": "CALLER",
@@ -357,9 +358,9 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
 
 
 def test_settings_keys_override_their_wire_fields(tmp_path: Path) -> None:
-    # ``use_web_tools``, ``auto_classify`` and ``allow_fan_out`` are
-    # ``settings()`` keys: each is written over its wire field on the
-    # run command, whatever the caller sent there.
+    # ``use_web_tools`` and ``auto_classify`` are ``settings()`` keys:
+    # each is written over its wire field on the run command, whatever
+    # the caller sent there.
     script = tmp_path / "settings_agent.py"
     script.write_text(textwrap.dedent("""
         from kiss.agents.seas.base.base_sea import BaseSea
@@ -369,7 +370,6 @@ def test_settings_keys_override_their_wire_fields(tmp_path: Path) -> None:
                 return settings | {
                     "use_web_tools": False,
                     "auto_classify": True,
-                    "allow_fan_out": False,
                 }
 
 
@@ -378,13 +378,11 @@ def test_settings_keys_override_their_wire_fields(tmp_path: Path) -> None:
         "seaPath": str(script),
         "useWebTools": None,
         "classifyTasks": None,
-        "isParallel": True,
     }
     overridden = apply_sea(cmd)
-    assert overridden == {"useWebTools", "classifyTasks", "isParallel"}
+    assert overridden == {"useWebTools", "classifyTasks"}
     assert cmd["useWebTools"] is False
     assert cmd["classifyTasks"] is True
-    assert cmd["isParallel"] is False
 
 
 def test_web_and_classify_settings_accept_none(tmp_path: Path) -> None:
@@ -407,43 +405,28 @@ class Sea(BaseSea):
     assert cmd["classifyTasks"] is False
 
 
-def test_is_parallel_setting_accepts_none(tmp_path: Path) -> None:
-    # ``None`` is "no override" for EVERY settings key, ``is_parallel``
-    # included: the caller's ``isParallel`` stands and nothing is
-    # reported as overridden.  (A non-bool, non-None value is still
-    # rejected: see the type-check tests below.)
-    script = tmp_path / "none_parallel_agent.py"
+def test_allow_fan_out_setting_is_refused(tmp_path: Path) -> None:
+    # ``run_parallel`` is N ``run_agent`` calls, so ``allow_fan_out`` is
+    # a removed key: the script fails to load, whatever the value, and
+    # the caller's wire fields stand.
+    script = tmp_path / "fan_out_agent.py"
     script.write_text("""
 from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {'allow_fan_out': None}
+        return settings | {'allow_fan_out': False}
 """)
-    cmd = {"seaPath": str(script), "isParallel": True}
-    assert apply_sea(cmd) == set()
-    assert cmd["isParallel"] is True
-
-
-def test_is_parallel_setting_rejects_non_bool(tmp_path: Path) -> None:
-    script = tmp_path / "bad_parallel_agent.py"
-    script.write_text("""
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'allow_fan_out': 'no'}
-""")
-    cmd = {"seaPath": str(script), "isParallel": True}
+    cmd = {"seaPath": str(script), "useWebTools": True}
     with pytest.raises(
         SeaError,
         match=(
-            r"SEA '.*bad_parallel_agent\.py': "
-            r"settings\(\)\['allow_fan_out'\] must be bool, got str"
+            r"SEA '.*fan_out_agent\.py': settings\(\) key 'allow_fan_out' was removed: "
+            r"`run_parallel` is N `run_agent` calls"
         ),
     ):
         apply_sea(cmd)
-    assert cmd["isParallel"] is True, "a broken setting must not override"
+    assert cmd["useWebTools"] is True, "a refused script must not override"
 
 
 def test_use_web_tools_setting_rejects_non_bool(tmp_path: Path) -> None:

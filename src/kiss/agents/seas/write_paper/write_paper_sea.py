@@ -478,14 +478,13 @@ class WritePaperSea(BaseSea):
         return tools + [check_paper, build_paper]
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Browse (related work, venue guidelines), fan out (the reviewer), skip the classifier.
+        """Browse (related work, venue guidelines), skip the classifier.
 
-        The ``timeout`` tells the dispatcher a ``/write_paper`` run may take
-        up to :data:`DISPATCH_TIMEOUT_SECONDS`.
+        The ``timeout`` tells the dispatcher a ``run_agent`` call on
+        ``/write_paper`` should block for up to :data:`DISPATCH_TIMEOUT_SECONDS`.
         """
         return settings | {
             "use_web_tools": True,
-            "allow_fan_out": True,
             "auto_classify": False,
             "timeout": DISPATCH_TIMEOUT_SECONDS,
         }

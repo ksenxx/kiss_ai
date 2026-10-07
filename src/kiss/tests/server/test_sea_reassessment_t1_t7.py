@@ -100,10 +100,13 @@ def test_the_four_argument_settings_have_one_place_the_argument() -> None:
 def test_a_renamed_setting_in_options_names_its_new_name() -> None:
     run_agent = make_run_agent_tool("/tmp")
     assert run_agent("say hi", options='{"is_parallel": false}') == (
-        "Error: options key 'is_parallel' was renamed to 'allow_fan_out'; use the new name."
+        "Error: options key 'is_parallel' was removed: `run_parallel` is N `run_agent` "
+        "calls, so there is nothing to allow or forbid separately; `tool_profile` chooses "
+        "the toolset."
     )
-    assert run_agent("say hi", options='{"preset": "worker"}') == (
-        "Error: options key 'preset' was renamed to 'kind'; use the new name."
+    assert run_agent("say hi", options='{"preset": "worker"}').startswith(
+        "Error: options key 'preset' was removed: what a SEA is became its base class: "
+        "derive from `WorkerSea`"
     )
     assert run_agent("say hi", options='{"colour": 1}').startswith(
         "Error: options has an unknown key 'colour'; known keys: work_dir, chat_id, "
@@ -127,7 +130,7 @@ def test_a_setting_passed_as_a_tool_keyword_is_pointed_at_options() -> None:
         {"name": "run_agent", "arguments": {"task": "hi", "use_worktree": False, "model": "m"}}
     )
     assert out.startswith("Failed to call run_agent with ")
-    assert "Expected signature: run_agent(task: str, agent: str = ''" in out
+    assert "Expected signature: run_agent(task: 'str', agent: 'str' = ''" in out
     # The tool knows its vocabulary: the hint is definite, not conditional.
     assert out.rstrip().endswith(
         "use_worktree is a run setting, not an argument; pass it in the `options` JSON "
@@ -199,12 +202,11 @@ def test_the_plain_sub_agent_sea_is_named_sorcar() -> None:
 def test_timeout_has_one_sentence_and_one_resolution() -> None:
     doc = SETTING_DOCS["timeout"]
     assert doc.startswith(
-        "Seconds the call blocks for the run: the call's `timeout` argument wins"
+        "Seconds a `run_agent` / `run_parallel` call blocks for the run: the call's "
+        "`timeout` argument wins, then this setting, then 3600."
     )
-    assert "3600 for a `run_agent` call" in doc
     assert "keeps going as an `agent_job`" in doc
-    assert "no limit of its own for a `run_parallel` child" in doc
-    assert "ignored by `/<name>`" in doc
+    assert "Ignored by `/<name>`" in doc
     assert resolve_timeout(None, {}) == 3600.0
     assert resolve_timeout(None, {"timeout": 10}) == 10.0
     assert resolve_timeout(5.0, {"timeout": 10}) == 5.0
@@ -239,12 +241,12 @@ def _prose_root(tmp_path: Path, sentence: str) -> Path:
 
 
 def test_lint_checks_declares_claims_against_the_script(tmp_path: Path) -> None:
-    sh = '`{"kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"]}`'
+    sh = '`{"tool_profile": "bash", "locked": ["tool_profile"]}`'
     # A true claim, in either word order, passes; the generated block is never read.
     assert lint_prose(_prose_root(tmp_path / "a", f"`/sh` declares {sh}.")) == []
     assert lint_prose(_prose_root(tmp_path / "b", f"for example {sh} (what `/sh` declares)")) == []
     # A Python literal is read like JSON.
-    literal = "`{'kind': 'worker', 'tool_profile': 'bash', 'locked': ['tool_profile']}`"
+    literal = "`{'tool_profile': 'bash', 'locked': ['tool_profile']}`"
     assert lint_prose(_prose_root(tmp_path / "c", f"`/sh` declares {literal}.")) == []
     # A stale claim names the current literal.
     [finding] = lint_prose(
@@ -256,8 +258,7 @@ def test_lint_checks_declares_claims_against_the_script(tmp_path: Path) -> None:
         _prose_root(tmp_path / "e", '`{"tool_profile": "none"}` (what `/ask` declares)')
     )
     assert finding.message == (
-        'line 3: `/ask` declares `{"kind": "worker", "tool_profile": "none", '
-        '"locked": ["tool_profile"]}`'
+        'line 3: `/ask` declares `{"tool_profile": "none", "locked": ["tool_profile"]}`'
     )
     [finding] = lint_prose(_prose_root(tmp_path / "f", "`/no_such_sea` declares `{}`"))
     assert finding.message == "line 3: `/no_such_sea` is not a registered command"
@@ -301,9 +302,9 @@ def test_command_alias_and_run_config_line() -> None:
     assert is_sea_path(sh) and not is_sea_path("sh")
     assert command_alias(sh) == "sh" and command_alias("/tmp/nowhere_sea.py") == ""
     assert command_alias(DEFAULT_AGENT_PATH) == ""  # hidden: not a command
-    line = run_config_line({"sea": "sh", "kind": "worker"}, "sh")
+    line = run_config_line({"sea": "sh"}, "sh")
     assert line.endswith('inherited=none pinned=none (also agent="sh")')
-    assert "(also" not in run_config_line({"sea": "sh", "kind": "worker"})
+    assert "(also" not in run_config_line({"sea": "sh"})
 
 
 # --- T7: hidden documents the literal ----------------------------------------------
@@ -362,16 +363,16 @@ class ReassessmentDaemonTest(DaemonLocalHarness):
         sh = str(sea_commands.get_command("sh"))
         out = _run_agent(self.repo, "echo hi", agent=sh, parent_agent=parent)
         ran = yaml.safe_load(out)["ran"]
-        assert ran.startswith("sh (worker) ") and " tools=bash " in ran, ran
+        assert ran.startswith("sh model=") and " tools=bash " in ran, ran
         assert ran.endswith(' (also agent="sh")'), ran
         # By name, nothing to add; a non-command path has no alias either.
         out = _run_agent(self.repo, "echo hi", agent="sh", parent_agent=parent)
         ran = yaml.safe_load(out)["ran"]
-        assert ran.startswith("sh (worker) ") and "(also" not in ran, ran
+        assert ran.startswith("sh model=") and "(also" not in ran, ran
         ran = yaml.safe_load(
             _run_agent(self.repo, "hi", agent=str(self.local_sea), parent_agent=parent)
         )["ran"]
-        assert ran.startswith("local (session) ") and "(also" not in ran, ran
+        assert ran.startswith("local model=") and "(also" not in ran, ran
         # The lock: the same profile is fine, another is refused.
         out = _run_agent(self.repo, "echo hi", agent="sh", parent_agent=parent, tool_profile="bash")
         assert yaml.safe_load(out)["success"] is True, out

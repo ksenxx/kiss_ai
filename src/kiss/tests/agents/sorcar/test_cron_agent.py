@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 import yaml
 
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.cron_agent import (
     SCHEDULE_TZ,
@@ -757,7 +758,7 @@ def test_cli_nothing_to_do(
 def test_agent_script_getters(tmp_path: Path) -> None:
     """The SEA contract used by ``run_agent(agent="cron", ...)``.
 
-    ``settings()`` picks the ``channel`` preset in ``~/.kiss/cron/work``,
+    The SEA is a ``ChannelSea`` in ``~/.kiss/cron/work``,
     so the resolved settings (what the dispatcher and the daemon read)
     turn the git lifecycle, classification and inheritance off; the
     cron guidance reaches the session through ``system_prompt()``
@@ -770,15 +771,16 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     assert work_dir == str(tmp_path / "cron" / "work")
     assert Path(work_dir).is_dir()
     sea = cron_agent.CronAgentSea()
-    assert sea.settings({}) == {"channel": True, "work_dir": work_dir}
+    assert isinstance(sea, ChannelSea)
+    assert sea.settings({}) == {"work_dir": work_dir}
     resolved = sea_settings(Path(cron_agent.__file__))
     # A channel is a worker whose worker keys and work_dir are locked
     # (CHANNEL_BEHAVIOURS "worker"): a call cannot give cron a worktree.
     assert resolved == {
-        "kind": "worker", **WORKER_DEFAULTS, "channel": True,
+        **WORKER_DEFAULTS,
         "work_dir": work_dir, "locked": sorted({"work_dir", *WORKER_DEFAULTS}),
     }
-    assert resolved["kind"] == "worker" and resolved["channel"] is True
+    assert "kind" not in resolved and "channel" not in resolved
     assert resolved["use_worktree"] is False
     assert resolved["auto_commit"] is False
     assert resolved["auto_classify"] is False

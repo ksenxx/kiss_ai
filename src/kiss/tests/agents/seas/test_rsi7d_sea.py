@@ -203,10 +203,10 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     declared = {"max_budget": 2000.0, "use_memory": True, "use_web_tools": False}
     assert rsi7d.settings({}) == declared
     assert rsi7d.settings({"model": "m", "max_budget": 1.0}) == {"model": "m", **declared}
-    # No kind named: the resolved settings are exactly those three keys under
-    # the default ``session`` kind; ``system_prompt`` is a method the daemon
-    # applies separately, not a settings key.
-    assert resolve_settings(declared) == {"kind": "session", **declared}
+    # A plain ``BaseSea``: the resolved settings are exactly those three
+    # keys; ``system_prompt`` is a method the daemon applies separately,
+    # not a settings key.
+    assert resolve_settings(declared) == declared
     assert "system_prompt" not in resolve_settings(declared)
     # The class is the contract: the module keeps no getter of the old shape.
     for legacy in (

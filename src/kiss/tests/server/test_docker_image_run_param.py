@@ -27,12 +27,14 @@ The tests skip when no Docker daemon is reachable.
 
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Any, cast
 
 import docker
 import pytest
 
+from kiss.agents.sorcar import local_endpoint
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
@@ -59,6 +61,11 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
 
     def setUp(self) -> None:
         super().setUp()
+        # A ``run_parallel`` child is a daemon sub-task: the dispatch
+        # reaches the daemon through the endpoint file, so point it at
+        # this harness's daemon rather than the machine's.
+        self._saved_endpoint_env = os.environ.get(local_endpoint.LOCAL_ENDPOINT_ENV)
+        os.environ[local_endpoint.LOCAL_ENDPOINT_ENV] = self.endpoint_file
         self.client = docker.from_env()
         self.container = self.client.containers.run(
             IMAGE, command="sleep infinity", detach=True, working_dir="/srv",
@@ -71,6 +78,10 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         try:
             self.container.remove(force=True)
         finally:
+            if self._saved_endpoint_env is None:
+                os.environ.pop(local_endpoint.LOCAL_ENDPOINT_ENV, None)
+            else:
+                os.environ[local_endpoint.LOCAL_ENDPOINT_ENV] = self._saved_endpoint_env
             super().tearDown()
 
     def _install_tool_running_stub(
@@ -109,9 +120,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             tools["Write"](note, "written by the stub\n")
             record["read"] = tools["Read"](note)
             if run_parallel_task and run_parallel_task not in record["task"]:
-                record["run_parallel"] = tools["run_parallel"](
-                    f'["{run_parallel_task}"]', max_workers="1",
-                )
+                record["run_parallel"] = tools["run_parallel"](f'["{run_parallel_task}"]')
             calls.append(record)
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.0001

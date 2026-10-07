@@ -24,9 +24,9 @@ from kiss.agents.sorcar.sea_commands import bundled_commands
 from kiss.agents.sorcar.sea_docs import (
     GENERATED_FILES,
     REPO_ROOT,
+    bases_table,
     channel_table,
     commands_table,
-    kinds_table,
     options_table,
     render,
     settings_table,
@@ -36,7 +36,7 @@ from kiss.agents.sorcar.sea_settings import (
     DISPATCHER_SETTINGS,
     PRECEDENCE_RULE,
     SETTING_TYPES,
-    kind_defaults,
+    base_class_defaults,
     wire_field,
 )
 
@@ -54,10 +54,7 @@ def test_settings_table_lists_every_key_with_its_wire_field() -> None:
     table = rows(settings_table())
     assert list(table) == list(SETTING_TYPES)
     assert table["max_budget"][1] == "`int \\| float`" and table["timeout"][1] == "`int \\| float`"
-    assert (
-        table["allow_fan_out"][2] == "`isParallel`"
-        and table["auto_classify"][2] == "`classifyTasks`"
-    )
+    assert table["auto_classify"][2] == "`classifyTasks`"
     for key in DISPATCHER_SETTINGS:
         assert table[key][2] == "—"
     for key in SETTING_TYPES:
@@ -66,12 +63,13 @@ def test_settings_table_lists_every_key_with_its_wire_field() -> None:
         assert table[key][3].endswith(".")
 
 
-def test_kinds_table_states_each_kind_without_machine_paths() -> None:
-    table = rows(kinds_table())
-    assert list(table) == list(kind_defaults()) == ["session", "worker"]
-    assert table["session"][1] == "nothing"
-    assert "`allow_fan_out=False`" in table["worker"][1]
-    assert str(Path.home()) not in kinds_table()
+def test_bases_table_states_each_base_class_without_machine_paths() -> None:
+    table = rows(bases_table())
+    assert list(table) == list(base_class_defaults()) == ["BaseSea", "WorkerSea", "ChannelSea"]
+    assert table["BaseSea"][1] == "nothing"
+    assert "`use_worktree=False`" in table["WorkerSea"][1]
+    assert "`work_dir='<home>/channel_work'`" in table["ChannelSea"][1]
+    assert str(Path.home()) not in bases_table()
 
 
 def test_channel_table_lists_every_behaviour_with_its_enforcer() -> None:
@@ -92,7 +90,7 @@ def test_options_table_covers_option_types() -> None:
     assert "never inherits" in table["inherit"][2]
     # The tool's own arguments and the script-describing keys are not options.
     assert not {"model", "tool_profile", "max_budget", "timeout"} & set(table)
-    assert not {"kind", "extends", "locked", "hidden"} & set(table)
+    assert not {"kind", "channel", "extends", "locked", "hidden"} & set(table)
 
 
 def test_commands_table_lists_every_bundled_command_once() -> None:
@@ -108,7 +106,7 @@ def test_render_rewrites_only_marked_blocks(
 ) -> None:
     page = tmp_path / "page.md"
     page.write_text(
-        "# Title\n\nprose stays\n\n<!-- sea-docs: kinds -->\nold\n<!-- /sea-docs -->\n\n"
+        "# Title\n\nprose stays\n\n<!-- sea-docs: bases -->\nold\n<!-- /sea-docs -->\n\n"
         "<!-- sea-docs: options -->\n<!-- /sea-docs -->\n\ntail\n",
         encoding="utf-8",
     )
@@ -119,7 +117,7 @@ def test_render_rewrites_only_marked_blocks(
     assert capsys.readouterr().out == f"updated: {page}\n"
     text = page.read_text(encoding="utf-8")
     assert text.startswith(
-        "# Title\n\nprose stays\n\n<!-- sea-docs: kinds -->\n| Kind | Defaults | Use |"
+        "# Title\n\nprose stays\n\n<!-- sea-docs: bases -->\n| Base class | Lays | Use |"
     )
     assert "old\n" not in text and text.endswith("<!-- /sea-docs -->\n\ntail\n")
     assert f"<!-- sea-docs: options -->\n{options_table()}\n<!-- /sea-docs -->" in text

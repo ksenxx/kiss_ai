@@ -83,7 +83,7 @@ def test_slash_write_resolves_to_the_bundled_sea() -> None:
     assert WriteSea().settings({}) == {"timeout": write_sea.DISPATCH_TIMEOUT_SECONDS}
     assert write_sea.DISPATCH_TIMEOUT_SECONDS == 3600
     settings = sea_commands.sea_settings(path)
-    assert settings == {"kind": "session", "timeout": 3600.0}
+    assert settings == {"timeout": 3600.0}
     assert resolve_timeout(None, settings) == 3600.0
     assert resolve_timeout(120.0, settings) == 120.0
     # The timeout lives in ``settings()`` alone: no removed getter

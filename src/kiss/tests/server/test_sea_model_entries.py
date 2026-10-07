@@ -93,8 +93,8 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
     """The protocol fixes the primary and the review model by name and the 75% cap."""
     sea = bestrouter_sea.BestrouterSea()
     assert sea.register_as_model() is True
-    assert sea.settings({"kind": "worker"}) == {
-        "kind": "worker", "model": bestrouter_sea.PRIMARY_MODEL,
+    assert sea.settings({"tool_profile": "shell"}) == {
+        "tool_profile": "shell", "model": bestrouter_sea.PRIMARY_MODEL,
     }
     assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-1"
     protocol = bestrouter_sea.SYSTEM_PROMPT
@@ -115,9 +115,9 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
     assert "codex" not in bestrouter_sea.REVIEW_MODEL
     assert "bestrouter" in sea.description()
     # The protocol relies on run_parallel, so the SEA must not withhold it:
-    # it appends to the system prompt, keeps every tool and leaves the
-    # fan-out and prompt untouched.
-    assert sea.settings({"allow_fan_out": True})["allow_fan_out"] is True
+    # it appends to the system prompt, pins no tool profile, keeps every
+    # tool and leaves the prompt untouched.
+    assert "tool_profile" not in sea.settings({})
     assert sea.tools([print]) == [print]
     assert sea.prompt("the task") == "the task"
 

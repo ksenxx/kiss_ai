@@ -28,7 +28,7 @@ import pytest
 import yaml
 
 from kiss.agents.seas import agents_md
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import BaseSea, WorkerSea
 from kiss.agents.seas.forget import forget_sea
 from kiss.agents.seas.forget.forget_sea import ForgetSea
 from kiss.agents.seas.remember import remember_sea
@@ -48,17 +48,15 @@ from kiss.tests.agents.sorcar.local_model_server import (
 _REMEMBER_PATH = Path(remember_sea.__file__).resolve()
 _FORGET_PATH = Path(forget_sea.__file__).resolve()
 _WORKER_SETTINGS: dict[str, Any] = {
-    "kind": "worker",
     "tool_profile": "bash",
     "max_budget": 1.0,
     "use_worktree": False,
     "auto_commit": False,
     "auto_classify": False,
-    "allow_fan_out": False,
     "use_web_tools": False,
     "use_memory": False,
 }
-"""Both SEAs' resolved settings: ``settings()`` plus the ``worker`` preset."""
+"""Both SEAs' resolved settings: ``settings()`` plus the ``WorkerSea`` defaults."""
 
 
 @pytest.fixture(autouse=True)
@@ -89,7 +87,6 @@ def _run(sea: BaseSea, prompt: str, script: list[bytes], work_dir: Path) -> tupl
             system_prompt_hook=run.system_prompt_hook,
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     return yaml.safe_load(result), [r for r in requests if r.get("tools")]
@@ -113,11 +110,14 @@ def test_sea_methods_follow_the_contract() -> None:
     assert "`list_instructions`" in forget_sea.SYSTEM_PROMPT
     assert ForgetSea().tools([]) == [forget_sea.forget_instruction, agents_md.list_instructions]
     for module, sea in ((remember_sea, RememberSea()), (forget_sea, ForgetSea())):
-        assert sea.settings({}) == {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
+        assert isinstance(sea, WorkerSea), module.__name__
+        assert sea.settings({}) == {"tool_profile": "bash", "max_budget": 1.0}
         assert sea.settings({"model": "m"})["model"] == "m"
-        # ``resolve_settings`` evaluates ``settings()`` plus the ``worker``
-        # preset only; ``system_prompt`` is a hook the daemon applies.
-        assert resolve_settings(sea.settings({})) == _WORKER_SETTINGS, module.__name__
+        # ``resolve_settings`` evaluates the declared settings (``settings()``
+        # over the ``WorkerSea`` defaults) only; ``system_prompt`` is a hook
+        # the daemon applies.
+        declared = sea_commands.declared_settings([sea])
+        assert resolve_settings(declared) == _WORKER_SETTINGS, module.__name__
         assert sea_commands.base_settings([sea]) == _WORKER_SETTINGS, module.__name__
         assert_no_removed_getters(module)
 

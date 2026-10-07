@@ -11,14 +11,15 @@ What these tests pin down (``reports/sea-design-report.html``):
   through :func:`~kiss.agents.sorcar.sea_commands.sea_class`); the
   ``prompt`` / ``system_prompt`` family are methods, never settings.
 * Inherited settings fold base-first (the subclass's ``settings`` sees
-  what its base returned, so a later value wins); a base's ``kind`` is
-  never masked by the default ``session``.
+  what its base returned, so a later value wins); ``WorkerSea`` lays its
+  defaults under the subclass's own, and a channel is a ``ChannelSea``.
 * Methods chain base-first through the class hierarchy: the subclass's
   ``prompt`` receives what the base produced; a class contributes once
   even when it appears in both a picker base and the script's own MRO.
 * The dispatcher resolves every agent spelling to a script path, accepts
-  ``work_dir`` and ``allow_fan_out`` options, and refuses the old wire
-  spellings of the ``add_to_*`` options.
+  the ``work_dir`` option, refuses the old wire spellings of the
+  ``add_to_*`` options, and takes the caller's ``is_parallel`` off the
+  calling agent rather than from an option.
 * On a real daemon: a slash command on a derived SEA runs the whole chain;
   a channel SEA holds its workspace for the run and releases it; a client-
   sent daemon-side field is dropped.
@@ -35,9 +36,9 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, BaseSea, ChannelSea, WorkerSea
 from kiss.agents.sorcar import agent_dispatch, channel_workspace, daemon_client, sea_commands
-from kiss.agents.sorcar.agent_dispatch import RunOptions, inherit_from_parent, resolve_agent
+from kiss.agents.sorcar.agent_dispatch import resolve_agent
 from kiss.agents.sorcar.sea_apply import (
     CHANNEL_PREAMBLE,
     apply_sea,
@@ -48,6 +49,7 @@ from kiss.agents.sorcar.sea_commands import (
     base_settings,
     declared_settings,
     evaluate_sea,
+    is_channel,
     sea_layers,
     sea_settings,
 )
@@ -65,7 +67,7 @@ from kiss.server import sorcar
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 BASE_SEA = """
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 
 def base_tool(x: str) -> str:
     '''Base tool.'''
@@ -75,11 +77,11 @@ def shared(x: str) -> str:
     '''Shared (base).'''
     return 'base ' + x
 
-class Sea(BaseSea):
+class Sea(WorkerSea):
     def description(self):
         return 'base'
     def settings(self, settings):
-        return settings | {'kind': 'worker', 'use_web_tools': True, 'max_budget': 1}
+        return settings | {'use_web_tools': True, 'max_budget': 1}
     def prompt(self, task):
         return '[base] ' + task + ' BASE-ADD {task_id}'
     def system_prompt(self, system_prompt):
@@ -149,14 +151,14 @@ def test_settings_vocabulary_has_no_prompt_or_extends_keys() -> None:
     # The dispatcher's option vocabulary is the run-settings subset of
     # the SEA vocabulary (no script-describing keys) plus its own.
     assert set(agent_dispatch.OPTION_TYPES) == (
-        set(SETTING_TYPES) - {"kind", "channel", "locked", "hidden"}
+        set(SETTING_TYPES) - {"locked", "hidden"}
         - set(agent_dispatch.ARGUMENT_OPTIONS)
     ) | {"inherit", "workspace", "add_to_prompt", "add_to_system_prompt"}
 
 
-class _Worker(BaseSea):
+class _Worker(WorkerSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        return settings | {"kind": "worker", "use_web_tools": True}
+        return settings | {"use_web_tools": True}
 
 
 class _Budgeted(_Worker):
@@ -164,29 +166,30 @@ class _Budgeted(_Worker):
         return settings | {"max_budget": 1}
 
 
-class _Channel(_Worker):
-    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        return settings | {"channel": True}
+class _Channel(_Worker, ChannelSea):
+    pass
 
 
-def test_inherited_settings_fold_base_first_and_session_never_masks_a_kind() -> None:
+def test_inherited_settings_fold_base_first_and_a_base_lays_its_defaults_under() -> None:
     assert declared_settings([]) == {}
-    assert resolve_settings({}) == {"kind": "session"}
-    # The subclass's settings() sees the base's and its value wins.
+    assert resolve_settings({}) == {}
+    # The subclass's settings() sees the base's and its value wins:
+    # ``WorkerSea`` lays its defaults first, ``_Worker`` turns the browser on.
     assert declared_settings([_Budgeted()]) == {
-        "kind": "worker", "use_web_tools": True, "max_budget": 1,
+        **WORKER_DEFAULTS, "use_web_tools": True, "max_budget": 1,
     }
     resolved = base_settings([_Budgeted()])
-    assert resolved["kind"] == "worker"
     assert resolved["use_web_tools"] is True and resolved["max_budget"] == 1.0
-    assert resolved["allow_fan_out"] is False  # the worker preset
-    # A subclass without a kind keeps its base's; the channel flag is a key
-    # like any other: the subclass's ``True`` folds over the base's dict.
-    assert base_settings([_Budgeted()])["kind"] == "worker"
-    assert base_settings([_Channel()])["kind"] == "worker"
-    assert base_settings([_Channel()])["channel"] is True
+    assert resolved["use_worktree"] is False  # the worker default
+    # What a SEA is, is its class: a ``ChannelSea`` anywhere in the
+    # chain makes the run a channel; it lays the channel scratch
+    # directory under the subclass's keys.
+    assert is_channel([_Budgeted()]) is False
+    assert is_channel([_Channel()]) is True
+    assert base_settings([_Channel()])["work_dir"] == str(kiss_home() / "channel_work")
+    assert base_settings([_Channel()])["use_web_tools"] is True
     # Two layers (picker base, then the script) fold the same way.
-    assert declared_settings([_Worker(), _Channel()])["channel"] is True
+    assert is_channel([_Worker(), _Channel()]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -229,11 +232,11 @@ def test_inheriting_by_command_name_and_by_path_chains_both_classes(registry: Pa
     for derived in (by_name, by_path):
         layers = sea_layers(derived)
         assert [layer.path for layer in layers] == [derived]
-        assert _mro_names(layers[0]) == ["BaseSea", "Sea", "Derived"]
+        assert _mro_names(layers[0]) == ["BaseSea", "WorkerSea", "Sea", "Derived"]
         base_module = sys.modules[type(layers[0]).__mro__[1].__module__]
         assert Path(base_module.__file__ or "") == base.resolve()
         settings = base_settings(layers)
-        assert settings["kind"] == "worker"
+        assert settings["use_worktree"] is False  # the base's worker default
         assert settings["use_web_tools"] is True and settings["max_budget"] == 2.0
         run = evaluate_sea(layers, "do it", task_id="T-1")
         assert run.prompt == "[derived] [base] do it BASE-ADD T-1 DERIVED-ADD"
@@ -296,21 +299,20 @@ class Sea(sea_class('gone.py')):
     ):
         sea_layers(gone)
     # A channel SEA may inherit from a worker base; a picker base may run
-    # under a channel SEA; either way the channel's settings win.
+    # under a channel SEA; either way the run is a channel.
     _write(registry / "wbase" / "wbase_sea.py", BASE_SEA)
     chan2 = _write(registry / "chan2" / "chan2_sea.py", """
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar.sea_commands import sea_class
 
-class Chan(sea_class('wbase')):
+class Chan(sea_class('wbase'), ChannelSea):
     def description(self):
         return 'c'
-    def settings(self, settings):
-        return settings | {'channel': True}
 """)
     sea_commands.refresh_registry()
     layers = sea_layers(chan2)
-    assert _mro_names(layers[0]) == ["BaseSea", "Sea", "Chan"]
-    assert base_settings(layers)["channel"] is True
+    assert _mro_names(layers[0]) == ["BaseSea", "WorkerSea", "ChannelSea", "Sea", "Chan"]
+    assert is_channel(layers) is True
     wbase = registry / "wbase" / "wbase_sea.py"
     cmd: dict[str, Any] = {"seaPath": str(chan2), "prompt": "p", "workspace": "acct"}
     assert held_workspace(cmd, load_layers(cmd)) == "acct"
@@ -318,7 +320,7 @@ class Chan(sea_class('wbase')):
     assert held_workspace({"seaPath": str(wbase)}, load_layers({"seaPath": str(wbase)})) == ""
     picker_layers = sea_layers(chan2, base=wbase)
     assert [layer.path for layer in picker_layers] == [wbase.resolve(), chan2]
-    assert base_settings(picker_layers)["channel"] is True
+    assert is_channel(picker_layers) is True
     cmd = {"seaPath": str(chan2), "prompt": "p"}
     apply_sea(cmd)
     assert cmd["appendToSystemPrompt"].startswith(CHANNEL_PREAMBLE.format(name="chan2"))
@@ -346,7 +348,7 @@ from kiss.agents.sorcar.sea_commands import sea_class
 
 class Picker(sea_class('root')):
     def settings(self, settings):
-        return settings | {'kind': 'worker'}
+        return settings | {'use_web_tools': True}
     def prompt(self, task):
         return '[picker] ' + task
 """)
@@ -369,7 +371,7 @@ class Direct(sea_class('picker')):
     # … but the chain contributes a class once however many times its
     # file was executed: ``prompt`` applies root, picker and direct once each.
     assert evaluate_sea(layers, "t").prompt == "[direct] [picker] [root] t"
-    assert base_settings(layers)["kind"] == "worker"
+    assert base_settings(layers)["use_web_tools"] is True
     # A common ancestor keeps its place under the base chain: a sibling
     # of the picker that shares its root still applies root once, first.
     sibling = _write(registry / "sibling" / "sibling_sea.py", counting.format(name="sibling") + """
@@ -466,7 +468,7 @@ class Sea(BaseSea):
     cmd: dict[str, Any] = {"seaPath": str(sea), "prompt": "kept"}
     assert apply_sea(cmd) == set()
     assert cmd.pop("_runConfig") == {
-        "sea": "noprompt", "kind": "session", "channel": False, "pinned": {},
+        "sea": "noprompt", "channel": False, "pinned": {},
     }
     # The four hooks are always staged; here they are all identities.
     messages = [{"role": "user", "content": "hi"}]
@@ -480,7 +482,7 @@ class Sea(BaseSea):
 
 
 # ---------------------------------------------------------------------------
-# Dispatcher: one path, work_dir option, renamed options, allow_fan_out
+# Dispatcher: one path, work_dir option, renamed options, is_parallel
 # ---------------------------------------------------------------------------
 
 
@@ -569,20 +571,22 @@ def test_is_parallel_is_inherited_from_the_calling_agent(
     parent = SorcarAgent("parent")
     parent.model_name = "gpt-6-astra"
     parent._is_parallel = False
-    inherited = inherit_from_parent(parent, "", None, RunOptions())
-    assert inherited.options.allow_fan_out is False
-    explicit = inherit_from_parent(parent, "", None, RunOptions(allow_fan_out=True))
-    assert explicit.options.allow_fan_out is True
-    assert inherit_from_parent(None, "", None, RunOptions()).options.allow_fan_out is None
     plain = _write(tmp_path / "plain.py", PLAIN_SEA)
     run_agent = agent_dispatch.make_run_agent_tool(str(tmp_path), parent)
     run_agent("t", str(plain))
-    assert captured[-1]["allow_fan_out"] is False
-    run_agent("t", str(plain), options='{"allow_fan_out": true}')
-    assert captured[-1]["allow_fan_out"] is True
-    # Without a parent (standalone use) the daemon default — fan-out on — stands.
+    assert captured[-1]["is_parallel"] is False
+    # Not a setting: ``run_parallel`` is N ``run_agent`` calls, so the
+    # old option is refused with that explanation.
+    out = run_agent("t", str(plain), options='{"allow_fan_out": true}')
+    assert out.startswith(
+        "Error: options key 'allow_fan_out' was removed: `run_parallel` is N",
+    ), out
+    # A sub-task that inherits nothing, or has no parent (standalone
+    # use), gets the daemon default: fan-out on.
+    run_agent("t", str(plain), options='{"inherit": false}')
+    assert captured[-1]["is_parallel"] is True
     agent_dispatch.make_run_agent_tool(str(tmp_path))("t", str(plain))
-    assert captured[-1]["allow_fan_out"] is True
+    assert captured[-1]["is_parallel"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -650,13 +654,13 @@ class SeaCompositionDaemonTest(DaemonRunApiHarness):
     def _channel_source(self, extra_methods: str = "") -> str:
         return f"""
 import os
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 
-class Chan(BaseSea):
+class Chan(ChannelSea):
     def description(self):
         return 'c'
     def settings(self, settings):
-        return settings | {{'channel': True, 'work_dir': {self.repo!r}}}
+        return settings | {{'work_dir': {self.repo!r}}}
 {extra_methods}"""
 
     def test_slash_command_on_a_derived_sea_runs_the_whole_chain(self) -> None:
@@ -672,7 +676,6 @@ class Chan(BaseSea):
         assert "BASE PROTOCOL" in run["system_prompt"]
         assert "DERIVED PROTOCOL" in run["system_prompt"]
         assert "base_tool" in run["tool_names"] and "shared" in run["tool_names"]
-        assert "run_parallel" not in run["tool_names"]  # the worker preset
 
     def test_channel_run_holds_its_workspace_for_the_run_and_releases_it(self) -> None:
         # ``tools()`` runs with the run's workspace active (a channel

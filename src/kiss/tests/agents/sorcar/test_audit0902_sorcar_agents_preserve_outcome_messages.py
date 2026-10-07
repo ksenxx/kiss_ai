@@ -16,29 +16,23 @@ callers collapsed the outcome to a bool:
 * ``merge()`` returned "auto-commit ... failed (a pre-commit hook may
   have rejected the commit)" for every preserved outcome.
 
-So a user whose worktree was kept because an abandoned sub-agent was
-still writing into it, or because a git-ignored output file could not
-be rescued into the main repo, was told to go fix a pre-commit hook.
+So a user whose worktree was kept because a git-ignored output file
+could not be rescued into the main repo was told to go fix a pre-commit
+hook.
 
-These tests use real git repos, a real ``ThreadPoolExecutor`` thread
-standing in for the abandoned sub-agent, and a real symlinked directory
-in the main repo to make the ignored-file rescue fail closed.
+These tests use real git repos and a real symlinked directory in the
+main repo to make the ignored-file rescue fail closed.
 """
 
 from __future__ import annotations
 
 import os
 import subprocess
-import threading
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import worktree_sorcar_agent
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.sorcar_agent import _AbandonedSubagent
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _WorktreeCleanupOutcome,
@@ -54,14 +48,6 @@ def env() -> Iterator[IsolatedKissHome]:
         yield isolated
     finally:
         isolated.cleanup()
-
-
-@pytest.fixture
-def short_wait(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shorten the abandoned-sub-agent grace wait so the tests stay fast."""
-    monkeypatch.setattr(
-        worktree_sorcar_agent, "_ABANDONED_SUBAGENT_WAIT_SECONDS", 0.2,
-    )
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -81,37 +67,6 @@ def _agent_with_worktree(env: IsolatedKissHome) -> WorktreeSorcarAgent:
     assert agent._wt is not None
     (agent._wt.wt_dir / "agent.txt").write_text("agent work\n", encoding="utf-8")
     return agent
-
-
-class _LiveChild:
-    """A real thread that stands in for an abandoned sub-agent.
-
-    ``_AbandonedSubagent`` holds a ``Future`` and the child's agent;
-    the reclaim path only asks the future whether it is done and reads
-    the agent's usage counters, so a real pool thread parked on an
-    event plus a never-run ``ChatSorcarAgent`` reproduce the exact
-    state a wedged child leaves behind.
-    """
-
-    def __init__(self, parent: WorktreeSorcarAgent) -> None:
-        self.release = threading.Event()
-        self.pool = ThreadPoolExecutor(max_workers=1)
-        self.future = self.pool.submit(self._wait_for_release)
-        self.agent = ChatSorcarAgent("audit0902-child")
-        with parent._abandoned_lock:
-            parent._abandoned_subagents.append(
-                _AbandonedSubagent(self.future, self.agent, (0.0, 0, 0)),
-            )
-
-    def _wait_for_release(self) -> str:
-        """Block like a running sub-agent until :meth:`finish` releases it."""
-        self.release.wait(60)
-        return ""
-
-    def finish(self) -> None:
-        """Let the thread exit and reclaim the pool."""
-        self.release.set()
-        self.pool.shutdown(wait=True)
 
 
 def _make_rescue_fail(env: IsolatedKissHome, agent: WorktreeSorcarAgent) -> None:
@@ -135,29 +90,6 @@ def _make_rescue_fail(env: IsolatedKissHome, agent: WorktreeSorcarAgent) -> None
     # Make the worktree's .gitignore match the main repo's so the
     # file really is ignored there too.
     (agent._wt.wt_dir / ".gitignore").write_text("out/\n", encoding="utf-8")
-
-
-def test_release_warning_names_live_subagent_not_hook(
-    env: IsolatedKissHome, short_wait: None,
-) -> None:
-    """Auto-release preserved for a live sub-agent must say so."""
-    agent = _agent_with_worktree(env)
-    wt = agent._wt
-    assert wt is not None
-    child = _LiveChild(agent)
-    try:
-        released = agent._release_worktree()
-    finally:
-        child.finish()
-    assert released is None
-    assert wt.wt_dir.exists(), "worktree deleted under a live sub-agent"
-    assert agent._last_preserve_outcome is (
-        _WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE
-    )
-    warning = agent._merge_conflict_warning or ""
-    assert "sub-agent" in warning, warning
-    assert "pre-commit" not in warning, warning
-    assert str(wt.wt_dir) in warning, warning
 
 
 def test_release_warning_names_failed_rescue_not_hook(
@@ -241,25 +173,16 @@ def test_merge_still_blames_hook_when_commit_was_rejected(
     assert "sub-agent" not in message and "ignored" not in message
 
 
-def test_merge_reports_live_subagent_and_failed_rescue(
-    env: IsolatedKissHome, short_wait: None,
+def test_merge_reports_failed_rescue_not_hook(
+    env: IsolatedKissHome,
 ) -> None:
-    """``merge()`` must not blame a hook for the other preserve causes."""
+    """``merge()`` must not blame a hook for a failed ignored-file rescue."""
     agent = _agent_with_worktree(env)
     wt = agent._wt
     assert wt is not None
-    child = _LiveChild(agent)
-    try:
-        message = agent.merge()
-    finally:
-        child.finish()
-    assert agent._wt is wt, "merge dropped the pending worktree"
-    assert "sub-agent" in message, message
-    assert "pre-commit" not in message, message
-
     _make_rescue_fail(env, agent)
     message = agent.merge()
-    assert agent._wt is wt
+    assert agent._wt is wt, "merge dropped the pending worktree"
     assert "ignored" in message, message
     assert "pre-commit" not in message, message
 

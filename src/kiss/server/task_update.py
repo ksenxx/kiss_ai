@@ -360,7 +360,6 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
             tool_call_hook=ask.tool_call_hook,
             append_basic_tools=False,
             tool_profile=ask_settings["tool_profile"],
-            is_parallel=ask_settings["allow_fan_out"],
             max_budget=UPDATE_BUDGET_USD,
             model_config=(
                 getattr(parent_agent, "model_config", None)

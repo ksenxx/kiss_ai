@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
@@ -47,7 +47,7 @@ _SCOPES = [
 ]
 
 
-class GooglechatSea(BaseSea):
+class GooglechatSea(ChannelSea):
     """The ``/googlechat`` SEA."""
 
     def description(self) -> str:
@@ -68,15 +68,6 @@ class GooglechatSea(BaseSea):
         authentication and backend tools.
         """
         return tools + GoogleChatAgent()._get_tools()
-
-    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` SEA contract).
-
-        No git lifecycle, nothing inherited from the calling task, the
-        channel preamble in the system prompt (see
-        :mod:`kiss.agents.sorcar.sea_settings`).
-        """
-        return settings | {"channel": True}
 
     def system_prompt(self, system_prompt: str) -> str:
         """Return the channel guidance appended to the run's system prompt."""
