@@ -16,10 +16,10 @@ KISS Sorcar ships a catalog of **768 models** across **9 provider categories**, 
 
 Current catalog capability totals:
 
-- **744** generation-capable models
-- **581** function-calling-capable models
+- **743** generation-capable models
+- **580** function-calling-capable models
 - **7** embedding models
-- **9** decision models
+- **10** decision models
 
 Full model list:
 
@@ -483,7 +483,6 @@ Full model list:
 - `openrouter/inference-net/schematron-v2-small`
 - `openrouter/inference-net/schematron-v2-turbo`
 - `openrouter/jaredpalmer/kev-4b`
-- `openrouter/kwaipilot/kat-coder-pro-v2.5`
 - `openrouter/liquid/d1`
 - `openrouter/mancer/weaver`
 - `openrouter/meituan/longcat-2.0`
@@ -597,6 +596,7 @@ Full model list:
 - `openrouter/openai/gpt-6-astra-medium`
 - `openrouter/openai/gpt-6-astra-xhigh`
 - `openrouter/openai/gpt-6-luna`
+- `openrouter/openai/gpt-6-luna-decisions`
 - `openrouter/openai/gpt-6-luna-high`
 - `openrouter/openai/gpt-6-luna-low`
 - `openrouter/openai/gpt-6-luna-medium`
