@@ -197,8 +197,8 @@ class TestImplicitFinishHookBeforeGuard:
 
     def test_text_only_net_skips_guard_when_hook_rejects(self) -> None:
         """Turn 2 trips the text-only net: the hook says "not yet" and the
-        guard must NOT be consulted.  Turn 3: the hook says OK, then the
-        guard runs, and the run ends with the text."""
+        guard must NOT be consulted.  Turn 3: the hook allows (``None``),
+        then the guard runs, and the run ends with the text."""
         recorder = _VetoRecorder(["not yet", None])
         server = _serve(lambda turn, request: _text_response(f"Text {turn}."))
         try:

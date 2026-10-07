@@ -259,7 +259,7 @@ class Sea(BaseSea):
         return new_messages + ['seen']
 
     def tool_call_hook(self, name, args):
-        return 'refused' if name == 'Bash' else 'OK'
+        return 'refused' if name == 'Bash' else None
 
     def tools(self, tools):
         return tools + [greet]

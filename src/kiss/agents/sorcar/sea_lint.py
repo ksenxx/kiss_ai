@@ -25,10 +25,10 @@ Rules, each a :class:`Finding` code:
     (:data:`~kiss.agents.sorcar.sea_settings.RENAMED_SETTINGS`);
     ``--fix`` rewrites it.
 ``ok-verdict``
-    A ``tool_call_hook`` returns the literal ``"OK"`` to allow a call.
-    The contract is ``None`` allows, a string refuses; ``"OK"`` is the
-    allow spelling of older hooks and still allows, but ``"ok"`` or
-    any other text refuses.  ``--fix`` rewrites it to ``None``.
+    A ``tool_call_hook`` returns the literal ``"OK"``, the allow
+    spelling of older hooks.  The contract is ``None`` allows, any
+    string refuses — ``"OK"`` now refuses the call and the model reads
+    ``OK`` as the tool's result.  ``--fix`` rewrites it to ``None``.
 ``redundant-key``
     A declared key merely repeats the default of the script's ``kind``.
 ``no-description``
@@ -409,8 +409,8 @@ def _lint_source(path: Path, source: str, tree: ast.Module) -> list[Finding]:
             Finding(
                 path,
                 "ok-verdict",
-                f'line {node.lineno}: tool_call_hook returns "OK" to allow the call; '
-                f"return None (a string refuses)",
+                f'line {node.lineno}: tool_call_hook returns "OK", which refuses the call '
+                f"(any string does); return None to allow it",
                 fixable=True,
             )
         )

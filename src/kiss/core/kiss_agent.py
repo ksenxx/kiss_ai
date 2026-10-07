@@ -132,23 +132,6 @@ def _call_args(function_call: dict[str, Any]) -> dict[str, Any]:
     return raw_args if isinstance(raw_args, dict) else {}
 
 
-def hook_refusal(verdict: str | None) -> str | None:
-    """Return the refusal text of a ``tool_call_hook`` verdict, or ``None`` when it allows.
-
-    The hook contract: ``None`` lets the tool call run; a string
-    refuses it and is the text the model receives as the tool's
-    result.  ``"OK"``, the allow spelling of older hooks, is still
-    accepted so an existing hook keeps working.
-
-    Args:
-        verdict: What a ``tool_call_hook`` returned.
-
-    Returns:
-        ``None`` when the call may run, else the refusal text.
-    """
-    return None if verdict is None or verdict == "OK" else verdict
-
-
 def unknown_argument_hint(
     sig: inspect.Signature | None, args: dict[str, Any], tool: Any = None,
 ) -> str:
@@ -481,9 +464,8 @@ class KISSAgent(Base):
                 tool call with the tool's name and its arguments dict. If it
                 returns ``None``, the tool executes as usual; a returned
                 string suppresses the tool execution and is returned to the
-                model as the tool's result instead (``"OK"``, the allow
-                spelling of older hooks, is still accepted; see
-                :func:`hook_refusal`). The hook runs before (and its
+                model as the tool's result instead (any string refuses,
+                ``"OK"`` included). The hook runs before (and its
                 rejection takes precedence over) the framework's
                 :attr:`tool_call_guard`; allowing does not override a guard
                 block. An implicit finish (text-only turns) also consults the
@@ -955,7 +937,7 @@ class KISSAgent(Base):
             # means "no objection", not "must execute": the framework's
             # tool_call_guard may still block the call.
             if self.tool_call_hook is not None:
-                blocked = hook_refusal(self.tool_call_hook(fc["name"], _call_args(fc)))
+                blocked = self.tool_call_hook(fc["name"], _call_args(fc))
             if blocked is None and self.tool_call_guard is not None:
                 blocked = self.tool_call_guard(fc["name"], _call_args(fc))
             if blocked is None and is_long_running_call(fc["name"], _call_args(fc)):
@@ -1108,10 +1090,7 @@ class KISSAgent(Base):
         Returns:
             bool: ``True`` when neither the hook nor the guard objects.
         """
-        if (
-            self.tool_call_hook is not None
-            and hook_refusal(self.tool_call_hook("finish", {})) is not None
-        ):
+        if self.tool_call_hook is not None and self.tool_call_hook("finish", {}) is not None:
             return False
         return self.tool_call_guard is None or self.tool_call_guard("finish", {}) is None
 

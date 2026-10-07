@@ -11,8 +11,8 @@ The two hooks are ``run()`` parameters:
   previous LLM call) and returns a possibly modified list that is sent to the
   LLM instead.
 * ``tool_call_hook`` is called before every tool call with the tool name and
-  its arguments. A return of ``None`` lets the tool execute as usual (so
-  does ``"OK"``, the allow spelling of older hooks); any other string
+  its arguments. A return of ``None`` lets the tool execute as usual; any
+  string (``"OK"``, the allow spelling of older hooks, included)
   suppresses execution and becomes the tool's result.
 
 Every test runs the real ``KISSAgent.run`` against a local HTTP server
@@ -346,32 +346,12 @@ class TestToolCallHook:
             ("finish", {"result": "ALL_GREEN"}),
         ]
 
-    def test_legacy_ok_verdict_still_allows(self) -> None:
-        """The string "OK" (what older hooks return to allow) still lets the tool run."""
-
-        def tool_call_hook(name: str, args: dict[str, Any]) -> str:
-            return "OK"
-
-        def respond(turn: int, request: dict[str, Any]) -> dict[str, Any]:
-            if turn == 0:
-                return _tool_call_response("Checking.", "check_build", {})
-            return _tool_call_response("Done.", "finish", {"result": "ALL_GREEN"})
-
-        counter = _CountingTool()
-        server = _serve(respond)
-        try:
-            result, _ = _run_agent(server, [counter.make()], tool_call_hook=tool_call_hook)
-        finally:
-            server.shutdown()
-
-        assert result == "ALL_GREEN"
-        assert counter.executions == 1
-
     def test_string_verdict_suppresses_tool_and_becomes_result(self) -> None:
         """Any returned string blocks execution and is fed back to the model
         as the tool's result — verified on the wire in the next request.
-        ``"ok"`` is such a string: only ``None`` (or exactly ``"OK"``) allows."""
-        for rejection in ("check_build denied: read-only mode", "ok"):
+        ``"ok"`` and ``"OK"`` (the allow spelling of older hooks, no longer
+        special) are such strings: only ``None`` allows."""
+        for rejection in ("check_build denied: read-only mode", "ok", "OK"):
             self._check_refusal(rejection)
 
     def _check_refusal(self, rejection: str) -> None:

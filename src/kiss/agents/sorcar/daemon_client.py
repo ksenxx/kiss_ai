@@ -558,8 +558,9 @@ def run(
             call waits for this SEA's sub-task) and ``locked`` (keys an
             explicit caller argument may not change).  ``prompt(task)``
             receives the task text
-            and returns the prompt body; ``{task_id}`` in its result is
-            replaced by *parent_task_id*.  A ``None`` value means "no
+            and returns the prompt body; every ``{task_id}`` of the
+            result is replaced by *parent_task_id*.  A ``None`` value,
+            or ``""`` for a string key, means "no
             override".  A kind is pure defaults under the explicit
             keys: ``session`` (the default, changes nothing), ``worker``
             (``use_worktree``, ``auto_commit``, ``auto_classify``,
@@ -594,9 +595,9 @@ def run(
             call and its return value replaces the new messages about
             to be sent, and ``tool_call_hook(name, args)`` is called
             before every tool call — the tool executes when the hook
-            returns ``None`` (or ``"OK"``, the allow spelling of older
-            hooks); any other returned string is given to the model as
-            the tool's result instead.  The hooks apply
+            returns ``None``; any returned string (``"OK"`` included)
+            is given to the model as the tool's result instead.  The
+            hooks apply
             to the task's own agent, not to sub-agents it spawns via
             ``run_parallel``.
 

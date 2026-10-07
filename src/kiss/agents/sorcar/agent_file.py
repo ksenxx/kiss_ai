@@ -182,8 +182,9 @@ def apply_agent_overrides(
     (:func:`~kiss.agents.sorcar.sea_commands.evaluate_sea` on the
     command's ``prompt`` and ``parentTaskId``) and writes the result
     over the command: one wire field per effective setting
-    (:data:`SETTING_FIELDS`); ``prompt`` when a ``prompt`` method
-    rewrote the task; ``appendToSystemPrompt`` extended with
+    (:data:`SETTING_FIELDS`); ``prompt`` when the evaluated prompt
+    differs from the task (a ``prompt`` method rewrote it, or a
+    ``{task_id}`` of the task text was filled in); ``appendToSystemPrompt`` extended with
     :data:`CHANNEL_PREAMBLE` (``kind: "channel"``); the daemon-side
     fields :data:`DAEMON_SIDE_FIELDS`, always (every chain starts at
     :class:`BaseSea`, whose methods are identities unless

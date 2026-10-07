@@ -23,7 +23,7 @@ A KISS agent using native function calling.
       tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None) -> str
   ```
 
-  Key parameters: `model_name` (LLM to use), `prompt_template` + `arguments` (task prompt with substitutions), `tools` (callables exposed to the model; a built-in `finish` tool is always added), `max_steps` (default 10000), `max_budget` (default $10), `attachments` (images/PDFs for the initial prompt), `llm_call_hook` (called before every LLM call with the new messages about to be sent; its return value replaces them), `tool_call_hook` (called before every tool call with the tool's name and arguments; returning `"OK"` lets the tool execute, any other string suppresses the call and is returned to the model as the tool's result). Returns the result string of the agent's task.
+  Key parameters: `model_name` (LLM to use), `prompt_template` + `arguments` (task prompt with substitutions), `tools` (callables exposed to the model; a built-in `finish` tool is always added), `max_steps` (default 10000), `max_budget` (default $10), `attachments` (images/PDFs for the initial prompt), `llm_call_hook` (called before every LLM call with the new messages about to be sent; its return value replaces them), `tool_call_hook` (called before every tool call with the tool's name and arguments; returning `None` lets the tool execute, any string suppresses the call and is returned to the model as the tool's result). Returns the result string of the agent's task.
 
 - **finish** — `finish(result: str) -> str`. The agent must call this with the final answer.
 

@@ -437,16 +437,16 @@ def test_apply_agent_overrides_keeps_the_callers_suffixes_and_stages_the_hook() 
     assert cmd["systemPromptHook"]("DEFAULT\n\ncaller system text") == _EXPECTED_SYSTEM_PROMPT
 
 
-def test_apply_agent_overrides_leaves_a_callers_placeholder_alone_without_prompt_method(
+def test_apply_agent_overrides_fills_a_callers_placeholder_without_prompt_method(
     tmp_path: Path,
 ) -> None:
-    """The substitution is a property of what a ``prompt()`` method writes.
+    """``{task_id}`` is filled in wherever it stands in the prompt, not only in a method's text.
 
     A SEA whose class defines no ``prompt`` runs the task text through
-    the identity ``prompt()`` of :class:`BaseSea` only, which leaves
-    it untouched: a literal ``{task_id}`` in the caller's own text
-    reaches the run unchanged, and so does the caller's
-    ``appendToPrompt`` (a wire field, not a ``prompt()`` result).
+    the identity ``prompt()`` of :class:`BaseSea` only; a ``{task_id}``
+    in the caller's own text still gets the parent task's id.  The
+    caller's ``appendToPrompt`` (a wire field, not part of the prompt
+    chain) is left alone.
     """
     other = tmp_path / "other_sea.py"
     other.write_text(_EMPTY_SEA, encoding="utf-8")
@@ -456,9 +456,13 @@ def test_apply_agent_overrides_leaves_a_callers_placeholder_alone_without_prompt
         "parentTaskId": "task-xyz",
         "appendToPrompt": "literal {task_id} stays here",
     }
-    assert apply_agent_overrides(cmd) == set()
-    assert cmd["prompt"] == "literal {task_id} in the task"
+    assert apply_agent_overrides(cmd) == {"prompt"}
+    assert cmd["prompt"] == "literal task-xyz in the task"
     assert cmd["appendToPrompt"] == "literal {task_id} stays here"
+    # Without a parent task the placeholder becomes the empty string.
+    cmd = {"agentPath": str(other), "prompt": "literal {task_id} in the task"}
+    assert apply_agent_overrides(cmd) == {"prompt"}
+    assert cmd["prompt"] == "literal  in the task"
 
 
 def test_apply_agent_overrides_substitutes_for_any_sea_defining_prompt(

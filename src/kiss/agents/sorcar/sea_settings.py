@@ -123,8 +123,8 @@ SETTING_DOCS: dict[str, str] = {
     "work_dir": "The directory the run works in; default: the calling task's or the tab's. A "
                 "relative path is resolved against the script's own folder, not the caller's "
                 "(one a base class sets: against the base's file).",
-    "model": "The LLM model, a catalogue name or a model-picker SEA; `\"\"` or `None` keeps "
-             "the caller's.",
+    "model": "The LLM model, a catalogue name or a model-picker SEA; default: the caller's "
+             "(`\"\"`, like `None`, is no override — true of every string key).",
     "chat_id": "The chat the run's events go to; default under `run_agent`: the calling "
                "task's chat, or a new chat when nothing is inherited (a `channel` run, an "
                "`inherit: false` call); a `/<name>` run keeps the tab's chat.",
@@ -548,9 +548,11 @@ def resolve_settings(declared: Mapping[str, Any]) -> dict[str, Any]:
     Returns:
         A new dict: ``{"kind": name, <key>: value, ...}`` with the
         kind's defaults already merged in under the explicit keys.
-        A key whose value is ``None`` is dropped — as is a ``model`` of
-        ``""`` — it means "no override", so the caller's or the
-        persisted value stands.
+        A key whose value is ``None`` is dropped — as is a string key
+        (``kind``, ``work_dir``, ``model``, ``chat_id``,
+        ``tool_profile``, ``docker_image``) whose value is ``""`` — it
+        means "no override", so the caller's or the persisted value
+        stands.
 
     Raises:
         SettingsError: When *declared* names an unknown, renamed or
@@ -572,11 +574,12 @@ def resolve_settings(declared: Mapping[str, Any]) -> dict[str, Any]:
                 f"known keys: {', '.join(SETTING_TYPES)}"
             )
     # ``None`` means "no override": the caller's or persisted value
-    # stands.  So does an empty ``model`` (the spelling of "no model" a
-    # script computing its model may produce).
+    # stands.  So does ``""`` for a string key (the spelling of "none"
+    # a script computing its model, profile or directory may produce),
+    # as a blank ``run_agent`` option does (``agent_dispatch.parse_options``).
     settings = {
         key: value for key, value in declared.items()
-        if value is not None and not (key == "model" and value == "")
+        if value is not None and not (SETTING_TYPES[key] is str and value == "")
     }
     if isinstance(settings.get("tool_profile"), str):
         settings["tool_profile"] = alias_free_profile(settings["tool_profile"])
