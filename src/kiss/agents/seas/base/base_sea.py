@@ -31,7 +31,8 @@ what the previous one returned: ``settings`` starts from ``{}``,
 ``prompt`` from the task text, ``system_prompt`` from the run's
 assembled system prompt, ``tools`` from the run's built-in toolset,
 ``llm_call_hook`` from the messages of the LLM call, and
-``tool_call_hook`` stops at the first refusal (a string; ``None`` allows).
+``tool_call_hook`` stops at the first refusing verdict (``refuse(text)``;
+``ALLOW`` allows — both importable from this module).
 The chaining is the launcher's job: a method must NOT call
 ``super()`` (the base's method runs anyway), and it must not
 expect to be called in a particular order relative to another.
@@ -65,6 +66,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from kiss.core.tool_verdict import ALLOW, Verdict, refuse
+
+__all__ = ["ALLOW", "BaseSea", "Verdict", "refuse"]
+
 
 class BaseSea:
     """The SEA contract and the root layer of every run; each method returns its input unchanged."""
@@ -91,10 +96,14 @@ class BaseSea:
 
         The keys are those of
         :data:`kiss.agents.sorcar.sea_settings.SETTING_TYPES`: a
-        ``kind`` (``session``, ``worker`` or ``channel``), per-run
-        parameters (``model``, ``tool_profile``, ``max_budget``, ...),
-        ``timeout``, ``locked`` and ``hidden``.  The launcher lays the
-        kind's defaults under the result and type-checks every value.
+        ``kind`` (``session`` or ``worker``: defaults only), the flag
+        ``channel`` (an external-service agent; its behaviours are
+        ``sea_settings.CHANNEL_BEHAVIOURS``), per-run parameters
+        (``model``, ``tool_profile``, ``max_budget``, ...), ``timeout``,
+        ``locked`` and ``hidden``.  The launcher lays the kind's
+        defaults under the result and type-checks every value; a
+        relative ``work_dir`` is a path under the calling task's
+        directory.
         Return *settings* with the SEA's keys added (``settings |
         {...}``); a value of ``None`` means "no override".
         """
@@ -132,14 +141,15 @@ class BaseSea:
         """
         return tools
 
-    def tool_call_hook(self, name: str, args: dict[str, Any]) -> str | None:
-        """Return ``None`` to let the tool call *name*(*args*) run, else the text to refuse it with.
+    def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
+        """Return ``ALLOW`` to let the tool call *name*(*args*) run, else ``refuse(text)``.
 
-        Called before every tool call of the run; a refusal is returned
-        to the model as the tool's result.  Any string refuses, ``"OK"``
-        included.
+        Called before every tool call of the run; the verdict is a
+        :class:`~kiss.core.tool_verdict.Verdict` (import ``ALLOW`` and
+        ``refuse`` from this module).  A refusal's text is returned to
+        the model as the tool's result.
         """
-        return None
+        return ALLOW
 
     def llm_call_hook(self, new_messages: list[Any]) -> list[Any]:
         """Return the messages to send given the *new_messages* of the next LLM call."""

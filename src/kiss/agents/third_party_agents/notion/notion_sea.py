@@ -62,20 +62,20 @@ class NotionSea(BaseSea):
         """Return the Notion channel tools (the SEA ``tools`` method).
 
         Called by the kiss-web daemon when this module's path is passed as
-        the API's ``extension_agent_path``: builds a fresh agent from the
+        the API's ``sea_path``: builds a fresh agent from the
         credentials persisted under ``$KISS_HOME`` and returns its
         authentication and backend tools.
         """
         return tools + NotionAgent()._get_tools()
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` SEA contract).
 
         No git lifecycle, nothing inherited from the calling task, the
         channel preamble in the system prompt (see
         :mod:`kiss.agents.sorcar.sea_settings`).
         """
-        return settings | {"kind": "channel"}
+        return settings | {"channel": True}
 
     def system_prompt(self, system_prompt: str) -> str:
         """Return the channel guidance appended to the run's system prompt."""

@@ -11,7 +11,7 @@ stand in for such an edit by rebinding the methods on the class for
 their duration (what a daemon restart after editing the file does)
 and drive the real pipeline: the daemon's ``run`` command through
 :class:`DaemonRunApiHarness` (only the executor's LLM loop is swapped
-for a recorder), and the launcher's :func:`apply_agent_overrides` /
+for a recorder), and the launcher's :func:`apply_sea` /
 :func:`evaluate_sea` directly.
 """
 
@@ -25,14 +25,14 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ALLOW, BaseSea, Verdict, refuse
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.agent_file import RUN_CONFIG_FIELD, apply_agent_overrides, load_layers
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT
+from kiss.agents.sorcar.sea_apply import RUN_CONFIG_FIELD, apply_sea, load_layers
 from kiss.agents.sorcar.sea_commands import (
-    SeaScriptError,
+    SeaError,
     base_prompt,
     base_system_prompt,
     base_tool_call_hook,
@@ -74,41 +74,47 @@ def _custom_tools(self: BaseSea, tools: list[Any]) -> list[Any]:
     return tools + [house_tool]
 
 
-def _custom_tool_call_hook(self: BaseSea, name: str, args: dict[str, Any]) -> str | None:
+def _custom_tool_call_hook(self: BaseSea, name: str, args: dict[str, Any]) -> Verdict:
     if name == "task_context" or (name == "Bash" and "rm -rf" in str(args.get("command", ""))):
-        return "Blocked by base"
-    return None
+        return refuse("Blocked by base")
+    return ALLOW
 
 
-def test_tool_call_hook_fold_allows_on_none_only_and_stops_at_a_refusal() -> None:
-    """``base_tool_call_hook`` returns the first refusal (a string) of the chain, else ``None``.
+def test_tool_call_hook_fold_stops_at_the_first_refusing_verdict() -> None:
+    """``base_tool_call_hook`` returns the first refusing ``Verdict`` of the chain, else ``ALLOW``.
 
-    Only ``None`` allows; any string, ``"OK"`` (the allow spelling of
-    older hooks) and ``"ok"`` included, is a refusal; a non-string,
-    non-``None`` return is a script error.
+    Only a ``Verdict`` is accepted: the former ``None`` (allow) and
+    string (refuse) spellings, ``"OK"`` included, are script errors.
     """
 
     class Allows(BaseSea):
-        def tool_call_hook(self, name: str, args: dict[str, Any]) -> str | None:
-            return None
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
+            return ALLOW
 
     class FormerAllows(BaseSea):
-        def tool_call_hook(self, name: str, args: dict[str, Any]) -> str:
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Any:
             return "OK"
 
+    class FormerAllowsNone(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Any:
+            return None
+
     class Refuses(BaseSea):
-        def tool_call_hook(self, name: str, args: dict[str, Any]) -> str | None:
-            return "ok" if name == "Bash" else None
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
+            return refuse("ok") if name == "Bash" else ALLOW
 
     class Broken(BaseSea):
         def tool_call_hook(self, name: str, args: dict[str, Any]) -> Any:
             return 1
 
-    assert base_tool_call_hook([Allows(), FormerAllows()], "Bash", {}) == "OK"
-    assert base_tool_call_hook([Allows(), Refuses()], "Bash", {}) == "ok"
-    assert base_tool_call_hook([Refuses(), Allows()], "Read", {}) is None
-    with pytest.raises(SeaScriptError, match=r"tool_call_hook\(\) of agent script .* must return"):
-        base_tool_call_hook([Broken()], "Bash", {})
+    assert base_tool_call_hook([Allows(), Refuses()], "Bash", {}) == refuse("ok")
+    assert base_tool_call_hook([Refuses(), Allows()], "Read", {}) == ALLOW
+    assert base_tool_call_hook([Refuses(), Allows()], "Read", {}).allowed
+    for broken in (FormerAllows(), FormerAllowsNone(), Broken()):
+        with pytest.raises(SeaError, match=r"tool_call_hook\(\) of SEA .* must return a Verdict"):
+            base_tool_call_hook([Allows(), broken], "Bash", {})
+    with pytest.raises(ValueError, match="non-blank"):
+        refuse("  ")
 
 
 def _custom_llm_call_hook(self: BaseSea, new_messages: list[Any]) -> list[Any]:
@@ -169,8 +175,10 @@ class BaseSeaRootLayerDaemonTest(DaemonRunApiHarness):
             assert "house_tool" in call["tool_names"]
             # The hooks look the base's methods up when called, so they
             # are exercised while the customization is still in place.
-            assert call["tool_call_hook"]("Bash", {"command": "rm -rf /"}) == "Blocked by base"
-            assert call["tool_call_hook"]("Bash", {"command": "ls"}) is None
+            assert call["tool_call_hook"]("Bash", {"command": "rm -rf /"}) == refuse(
+                "Blocked by base"
+            )
+            assert call["tool_call_hook"]("Bash", {"command": "ls"}) == ALLOW
             assert call["llm_call_hook"]([1, 2, 3]) == [3, 2, 1]
         finally:
             for name, method in originals.items():
@@ -191,7 +199,7 @@ class BaseSeaRootLayerDaemonTest(DaemonRunApiHarness):
         assert len(executor_calls) == 1, calls
         call = executor_calls[0]
         assert call["llm_call_hook"]([1, 2]) == [1, 2]
-        assert call["tool_call_hook"]("Bash", {"command": "ls"}) is None
+        assert call["tool_call_hook"]("Bash", {"command": "ls"}) == ALLOW
         assert "house_tool" not in call["tool_names"]
         assert HOUSE_RULE not in call["system_prompt"]
 
@@ -202,31 +210,35 @@ def test_a_plain_command_runs_the_bare_base_and_names_no_sea() -> None:
     assert layers[0].path == Path(sea_commands.__file__).parents[1] / "seas/base/base_sea.py"
     assert sea_name(layers) == ""
     cmd: dict[str, Any] = {"prompt": "p", "useMemory": False}
-    assert apply_agent_overrides(cmd) == set()
-    assert cmd.pop(RUN_CONFIG_FIELD) == {"sea": "", "kind": "session", "pinned": {}}
+    assert apply_sea(cmd) == set()
+    assert cmd.pop(RUN_CONFIG_FIELD) == {
+        "sea": "", "kind": "session", "channel": False, "pinned": {},
+    }
     assert cmd["prompt"] == "p" and cmd["useMemory"] is False
     assert cmd["systemPromptHook"]("X") == "X"
     assert cmd["toolsHook"]([house_tool]) == [house_tool]
     assert cmd["llmCallHook"]([1]) == [1]
-    assert cmd["toolCallHook"]("Bash", {}) is None
+    assert cmd["toolCallHook"]("Bash", {}) == ALLOW
     # ``defines`` still asks what a SEA adds on top of the base.
     assert sea_commands.defines(layers, "system_prompt") is False
 
 
 def test_customized_base_applies_to_a_plain_command(customized_base: None) -> None:
     cmd: dict[str, Any] = {"prompt": "p"}
-    assert apply_agent_overrides(cmd) == set()
+    assert apply_sea(cmd) == set()
     assert cmd["systemPromptHook"]("X") == "X" + HOUSE_RULE
     assert cmd["toolsHook"]([]) == [house_tool]
     assert cmd["llmCallHook"]([1, 2]) == [2, 1]
-    assert cmd["toolCallHook"]("Bash", {"command": "rm -rf x"}) == "Blocked by base"
+    assert cmd["toolCallHook"]("Bash", {"command": "rm -rf x"}) == refuse(
+        "Blocked by base"
+    )
 
 
 def test_customized_base_runs_first_under_a_sea(customized_base: None, tmp_path: Path) -> None:
     sea = tmp_path / "rule_sea.py"
     sea.write_text(textwrap.dedent(SEA_WITH_RULE))
-    cmd: dict[str, Any] = {"agentPath": str(sea), "prompt": "do it"}
-    assert apply_agent_overrides(cmd) == {"prompt"}
+    cmd: dict[str, Any] = {"seaPath": str(sea), "prompt": "do it"}
+    assert apply_sea(cmd) == {"prompt"}
     assert cmd["prompt"] == "[sea] do it"
     assert cmd["systemPromptHook"]("X") == "X" + HOUSE_RULE + "\n\nSEA RULE"
     assert cmd["toolsHook"]([]) == [house_tool]
@@ -263,14 +275,14 @@ def test_base_settings_pin_a_plain_run_unless_the_caller_chose_explicitly() -> N
     BaseSea.settings = _custom_settings  # type: ignore[method-assign]
     try:
         persisted: dict[str, Any] = {"prompt": "p", "useMemory": False}
-        assert apply_agent_overrides(persisted) == {"useMemory"}
+        assert apply_sea(persisted) == {"useMemory"}
         assert persisted["useMemory"] is True
         assert persisted[RUN_CONFIG_FIELD]["pinned"] == {"use_memory": [False, True]}
         explicit: dict[str, Any] = {
             "prompt": "p", "useMemory": False,
             "provenance": {"use_memory": PROVENANCE_EXPLICIT},
         }
-        assert apply_agent_overrides(explicit) == set()
+        assert apply_sea(explicit) == set()
         assert explicit["useMemory"] is False
     finally:
         BaseSea.settings = original  # type: ignore[method-assign]
@@ -286,7 +298,7 @@ def test_base_prompt_rewrites_every_task_and_an_identity_passes_an_empty_one() -
     BaseSea.prompt = _custom_prompt  # type: ignore[method-assign]
     try:
         cmd: dict[str, Any] = {"prompt": "p"}
-        assert apply_agent_overrides(cmd) == {"prompt"}
+        assert apply_sea(cmd) == {"prompt"}
         assert cmd["prompt"] == "p (be brief)"
         run = evaluate_sea([BaseSea()], "t {task_id}", task_id="T-1")
         assert run.prompt == "t T-1 (be brief)"
@@ -294,7 +306,7 @@ def test_base_prompt_rewrites_every_task_and_an_identity_passes_an_empty_one() -
         BaseSea.prompt = original  # type: ignore[method-assign]
     BaseSea.prompt = lambda self, task: ""  # type: ignore[method-assign]
     try:
-        with pytest.raises(SeaScriptError, match="must return a non-empty string"):
+        with pytest.raises(SeaError, match="must return a non-empty string"):
             base_prompt([BaseSea()], "t")
     finally:
         BaseSea.prompt = original  # type: ignore[method-assign]
@@ -411,10 +423,10 @@ def test_run_parallel_children_without_an_agent_go_through_the_base(
     overrides, run_config = _sea_run_kwargs(
         [BaseSea()], "child task", {"prompt_suffix": " SUFFIX", "tool_profile": "full"}, None,
     )
-    assert run_config == {"sea": "", "kind": "session", "pinned": {}}
+    assert run_config == {"sea": "", "kind": "session", "channel": False, "pinned": {}}
     assert overrides["prompt_template"] == "child task SUFFIX"
     assert overrides["system_prompt_hook"]("X") == "X" + HOUSE_RULE
     assert overrides["tools_hook"]([]) == [house_tool]
     assert overrides["llm_call_hook"]([1, 2]) == [2, 1]
-    assert overrides["tool_call_hook"]("Bash", {"command": "rm -rf ."}) == "Blocked by base"
+    assert overrides["tool_call_hook"]("Bash", {"command": "rm -rf ."}) == refuse("Blocked by base")
     assert "tool_profile" not in overrides

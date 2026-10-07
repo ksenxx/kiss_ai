@@ -38,7 +38,7 @@ already-running daemon and block until it finishes::
     # Continue the same chat (the agent sees the prior task as context):
     follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
-``extension_agent_path="/path/to/my_agent.py"`` names a Sorcar
+``sea_path="/path/to/my_agent.py"`` names a Sorcar
 Extension Agent (SEA): a file defining one subclass of
 :class:`kiss.agents.seas.base.base_sea.BaseSea` whose ``settings``
 method computes the run's parameters on the daemon — e.g. a
@@ -70,7 +70,7 @@ functions — the daemon loads the file itself, so the tools execute
             return tools + [get_temperature]
 
     result = sorcar.run("What's the temperature in Paris?",
-                        extension_agent_path="my_agent.py")
+                        sea_path="my_agent.py")
 
 The class may also define ``system_prompt(system_prompt)``,
 ``llm_call_hook(new_messages)`` and ``tool_call_hook(name, args)``,

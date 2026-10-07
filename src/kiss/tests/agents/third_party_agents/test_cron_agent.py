@@ -14,7 +14,7 @@ daemon and require a live LLM endpoint, which is unavailable (and
 non-deterministic) in unit tests; the failure path is covered via
 ``_execute_job``'s exception handling.
 
-The daemon/agent-script scenarios (pure kiss.agents.sorcar +
+The daemon/SEA scenarios (pure kiss.agents.sorcar +
 kiss.server closure) moved to ``kiss.tests.server.test_cron_agent``;
 this file keeps the delivery test that imports real
 ``kiss.agents.third_party_agents`` channel modules and the SEA
@@ -66,10 +66,10 @@ def test_delivery_error_notes() -> None:
 def test_get_tools_and_sorcar_wiring() -> None:
     sea = cron_agent.CronAgentSea()
     assert sea.tools([]) == [cron_job, cron_agent.gateway_command]
-    # The dispatch preamble reaches the session through the agent-script
+    # The dispatch preamble reaches the session through the SEA
     # contract (the SEA's ``system_prompt`` method), not through a prompt prefix.
     assert sea.system_prompt("S") == "S\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
-    assert sea.settings({})["kind"] == "channel"
+    assert sea.settings({})["channel"] is True
     # Sorcar's system prompt, as the product loads it, sends scheduling
     # requests to this agent.
     assert 'run_agent tool with "cron"' in SYSTEM_PROMPT

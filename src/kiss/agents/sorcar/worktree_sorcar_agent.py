@@ -1613,7 +1613,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
           execution, never promote a pinned-off one (see
           ``kiss.agents.sorcar.task_classifier``) — and never demotes
           a run whose ``worktree_pinned`` kwarg is ``True`` (the run's
-          agent script decided ``use_worktree`` in its ``settings()``,
+          SEA decided ``use_worktree`` in its ``settings()``,
           or the calling ``run_agent`` passed it explicitly)
         - ``work_dir`` is not inside a git repo
         - The repo has no commits

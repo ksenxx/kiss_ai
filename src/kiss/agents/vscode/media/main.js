@@ -21500,7 +21500,7 @@
   }
 
   /**
-   * The agent script (SEA) that ran the task, e.g. "write_paper_sea",
+   * The SEA that ran the task, e.g. "write_paper_sea",
    * shown with the tags; null for a plain run.
    */
   function makeTaskSeaLabel(session) {
@@ -21509,16 +21509,16 @@
     const span = document.createElement('span');
     span.className = 'sidebar-item-sea';
     span.textContent = sea;
-    span.title = 'Agent script: ' + sea;
+    span.title = 'SEA: ' + sea;
     return span;
   }
 
-  // The SEA <select>'s value for rows with no agent script.
+  // The SEA <select>'s value for rows with no SEA.
   const HF_SEA_NONE = '__none__';
 
   /**
    * Rebuild the SEA filter's options from the loaded history rows: All,
-   * None (plain runs) and every distinct agent script seen, sorted.
+   * None (plain runs) and every distinct SEA seen, sorted.
    * The current selection survives even when no loaded row carries it
    * any more (a later page or a refresh may bring it back).
    */
@@ -22771,7 +22771,7 @@
       }
 
       actions.appendChild(makeSidebarCollapseToggle(div, s));
-      // After the buttons: the task's age, then its tags and agent script.
+      // After the buttons: the task's age, then its tags and SEA.
       const launchedAgo = makeLaunchedAgoLabel(s);
       if (launchedAgo) actions.appendChild(launchedAgo);
       const tagsLabel = makeTaskTagsLabel(s);
@@ -23173,7 +23173,7 @@
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
     const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
-    // '' = every agent script, HF_SEA_NONE = plain runs only, otherwise
+    // '' = every SEA, HF_SEA_NONE = plain runs only, otherwise
     // the exact SEA name.
     const seaFilter = hfSea ? hfSea.value : '';
     // The daemon already filters each page by tag; checking the rows

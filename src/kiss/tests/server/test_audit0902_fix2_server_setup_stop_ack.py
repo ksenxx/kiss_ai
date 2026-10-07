@@ -6,7 +6,7 @@
 
 ``_run_task`` wraps the whole run in an outer ``try``; a
 ``KeyboardInterrupt`` injected before the run reaches
-``_run_task_inner``'s own ``try`` (agent-script overrides, state
+``_run_task_inner``'s own ``try`` (SEA overrides, state
 resolution, the ``status`` broadcast, the inner prologue up to the
 ``Task started`` log line) is caught by that OUTER catch.  It used to
 hard-code ``"Task stopped by user"`` there without calling
@@ -29,9 +29,9 @@ runner's logger that parks the worker inside the production
 inside the outer catch's own log call, holding the cancellation
 handling past the watchdog's retry moment (6 s after Stop).
 
-Why the interrupt cannot be aimed at ``apply_agent_overrides`` itself:
+Why the interrupt cannot be aimed at ``apply_sea`` itself:
 ``execute_python_file`` and every getter call wrap ``BaseException``
-into ``AgentFileError``, so an interrupt landing inside user script
+into ``SeaError``, so an interrupt landing inside user script
 code never reaches the outer catch as a ``KeyboardInterrupt``.
 """
 
@@ -301,17 +301,17 @@ class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
         self.logger.addHandler(handler)
         self.client.send({
             "type": "run",
-            "prompt": "broken agent script",
+            "prompt": "broken SEA",
             "tabId": tab_id,
             "workDir": str(self.work_dir),
-            "agentPath": str(self.tmp / "missing_agent.py"),
+            "seaPath": str(self.tmp / "missing_agent.py"),
             "useWorktree": False,
             "isParallel": False,
             "autoCommit": False,
         })
         result = self.client.wait_for("result", tab_id)
         self.assertTrue(
-            result["text"].startswith("Task failed: AgentFileError: "), result["text"],
+            result["text"].startswith("Task failed: SeaError: "), result["text"],
         )
         self.client.wait_for("status", tab_id, running=False)
         self.assertIn("Task setup failed", "\n".join(handler.messages))

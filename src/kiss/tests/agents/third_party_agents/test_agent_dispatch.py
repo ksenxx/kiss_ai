@@ -5,7 +5,7 @@
 """End-to-end tests for the immediate agent dispatch tool.
 
 Everything runs against the real installed channel modules and the
-real agent-script loader — no mocks or test doubles (``monkeypatch``
+real SEA loader — no mocks or test doubles (``monkeypatch``
 is used only to isolate environment variables, the working directory,
 and the cron module's daemon-endpoint default between tests).  A
 dispatch that must succeed goes over the wire to the ``daemon``
@@ -13,7 +13,7 @@ fixture's stand-in
 (:class:`~kiss.tests.agents.third_party_agents.recording_daemon.RecordingDaemon`),
 which records the ``run`` command the real ``daemon_client.run`` sends; the
 tests assert on that command's wire fields, and apply
-``apply_agent_overrides`` to it exactly as the daemon would.  Branches
+``apply_sea`` to it exactly as the daemon would.  Branches
 not exercised here, and why they need no doubles-based tests:
 
 - the sub-task's execution on the daemon needs a live LLM endpoint
@@ -26,7 +26,7 @@ not exercised here, and why they need no doubles-based tests:
   installed channel (``test_every_channel_module_is_dispatchable``
   proves the contract holds for all of them).
 
-The agent-script loader tests that never touch a channel (pure
+The SEA loader tests that never touch a channel (pure
 kiss.agents.sorcar + kiss.server closure) moved to
 ``kiss.tests.server.test_agent_dispatch``.
 """
@@ -47,10 +47,11 @@ from kiss.agents.sorcar.agent_dispatch import (
     available_channels,
     make_run_agent_tool,
 )
-from kiss.agents.sorcar.agent_file import apply_agent_overrides, channel_workspace, load_layers
+from kiss.agents.sorcar.sea_apply import apply_sea, channel_workspace, load_layers
 from kiss.agents.sorcar.sea_commands import load_sea
 from kiss.agents.third_party_agents.auth_status import _agent_class
 from kiss.core.config import kiss_home
+from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
@@ -97,14 +98,14 @@ def daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
 def _sent(daemon: RecordingDaemon) -> dict[str, Any]:
     """Return the latest ``run`` command *daemon* received, as the daemon would apply it.
 
-    A copy, so a test may hand it to ``apply_agent_overrides`` (which
+    A copy, so a test may hand it to ``apply_sea`` (which
     writes the script's overrides into it) without disturbing the record.
     """
     return dict(daemon.run_commands[-1])
 
 
 def _write_helper_script(caller: Path) -> Path:
-    """Create *caller* with a minimal ``helper.py`` agent script; return the script path."""
+    """Create *caller* with a minimal ``helper.py`` SEA; return the script path."""
     caller.mkdir()
     script = caller / "helper.py"
     script.write_text("""
@@ -261,11 +262,11 @@ def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
     worktree" / "Auto commit" settings, no classifier override), and
     the ``channel`` preset of the module's ``settings()`` pins
     worktree, auto-commit, classification and fan-out off on the
-    daemon (``apply_agent_overrides``), where every script's settings
-    win.  A path-mode agent script with the default ``session`` preset
+    daemon (``apply_sea``), where every script's settings
+    win.  A path-mode SEA with the default ``session`` preset
     keeps the standard lifecycle on the calling project.  The recorded
     ``run`` command is checked as sent, then after
-    ``apply_agent_overrides`` rewrote it the way the daemon does.
+    ``apply_sea`` rewrote it the way the daemon does.
     """
     caller = tmp_path / "caller_project"
     script = _write_helper_script(caller)
@@ -280,7 +281,7 @@ def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
             assert cmd["autoCommit"] is True, agent
             assert cmd["classifyTasks"] is None, agent
             assert cmd["isParallel"] is True, agent
-            overridden = apply_agent_overrides(cmd)
+            overridden = apply_sea(cmd)
             assert {"useWorktree", "autoCommit", "classifyTasks", "isParallel"} <= overridden
             assert cmd["useWorktree"] is False, agent
             assert cmd["autoCommit"] is False, agent
@@ -295,7 +296,7 @@ def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
         assert cmd["useWorktree"] is True
         assert cmd["autoCommit"] is True
         assert cmd["classifyTasks"] is None
-        assert apply_agent_overrides(cmd) == {"model"}
+        assert apply_sea(cmd) == {"model"}
         assert cmd["useWorktree"] is True and cmd["autoCommit"] is True
 
         # The user turned both settings off in the settings panel: a
@@ -378,7 +379,7 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
         "Error: options key 'tool_profile' is the tool_profile argument of this tool; "
         "pass tool_profile=... instead of putting it in options."
     )
-    # Extra tools come only from the agent script's ``tools()``:
+    # Extra tools come only from the SEA's ``tools()``:
     # the tool has no tools-path arguments, and the old per-option
     # keyword arguments (and the ``model_name`` alias) are gone.
     import inspect
@@ -420,7 +421,7 @@ def test_channel_and_cron_refuse_options_that_contradict_the_kind(
     cmd = _sent(daemon)
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
-    apply_agent_overrides(cmd)
+    apply_sea(cmd)
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
 
@@ -434,7 +435,7 @@ def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDa
     forwarded verbatim, booleans as JSON booleans or as the words
     ``"true"`` / ``"false"``, ``null`` as "not passed".  No tools path
     travels: the ``run`` command has no tools field, so the sub-task's
-    extra tools can only come from the agent script's own ``tools()``.
+    extra tools can only come from the SEA's own ``tools()``.
     """
 
     caller = tmp_path / "caller_project"
@@ -600,7 +601,7 @@ def test_docstring_and_error_mention_cron() -> None:
 def test_path_mode_missing_file_error(tmp_path: Path) -> None:
     missing = tmp_path / "no_such_agent.py"
     out = run_agent("say hi", str(missing))
-    assert out.startswith("Error: agent script")
+    assert out.startswith("Error: SEA")
     assert "does not exist" in out
 
 
@@ -608,14 +609,14 @@ def test_path_mode_non_python_file_error(tmp_path: Path) -> None:
     not_py = tmp_path / "agent.txt"
     not_py.write_text("hello")
     out = run_agent("say hi", str(not_py))
-    assert out.startswith("Error: agent script")
+    assert out.startswith("Error: SEA")
     assert "is not a Python (.py) file" in out
 
 
 def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
     tmp_path: Path,
 ) -> None:
-    # A valid agent-script path takes the path branch (no channel
+    # A valid SEA path takes the path branch (no channel
     # lookup, no workspace handling) and fails cleanly on the
     # unreachable daemon, named by the script's file stem.
     import os
@@ -631,8 +632,8 @@ class Sea(BaseSea):
     # ``workspace`` is a channel option: a session SEA refuses it.
     out = run_agent("say hi", str(script), options='{"workspace": "ignored-ws"}')
     assert out == (
-        "Error: my_researcher: options['workspace'] applies to a channel agent only; "
-        "my_researcher is a session SEA"
+        "Error: my_researcher: options['workspace'] applies to a channel only; "
+        "my_researcher is not a channel (no `channel: True` in its settings)"
     )
     out = run_agent("say hi", str(script))
     assert out.startswith("Error: the my_researcher agent task could not run:")
@@ -650,7 +651,7 @@ def test_default_agent_is_the_bundled_sorcar_sea(tmp_path: Path, daemon: Recordi
     The default is the installed file's absolute path (not a path
     relative to the calling work directory), so it resolves from any
     project; the sub-task runs in the calling task's work directory
-    like every other path-named agent script.
+    like every other path-named SEA.
     """
     from kiss.agents.sorcar.agent_dispatch import DEFAULT_AGENT_PATH
 
@@ -659,30 +660,32 @@ def test_default_agent_is_the_bundled_sorcar_sea(tmp_path: Path, daemon: Recordi
     assert default.parts[-4:] == ("agents", "seas", "sorcar", "sorcar_sea.py")
     # The dummy SEA defines no getters: a plain Sorcar session whose four
     # staged hooks are all identities.
-    cmd: dict[str, Any] = {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
-    assert apply_agent_overrides(cmd) == set()
-    assert cmd.pop("_runConfig") == {"sea": "sorcar", "kind": "session", "pinned": {}}
+    cmd: dict[str, Any] = {"seaPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
+    assert apply_sea(cmd) == set()
+    assert cmd.pop("_runConfig") == {
+        "sea": "sorcar", "kind": "session", "channel": False, "pinned": {},
+    }
     messages = [{"role": "user", "content": "hi"}]
     assert cmd.pop("systemPromptHook")("S") == "S"
     assert cmd.pop("toolsHook")([print, len]) == [print, len]
     assert cmd.pop("llmCallHook")(messages) == messages
-    assert cmd.pop("toolCallHook")("x", {}) is None
-    assert cmd == {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
+    assert cmd.pop("toolCallHook")("x", {}) == ALLOW
+    assert cmd == {"seaPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
 
     caller = tmp_path / "caller_project"
     caller.mkdir()
     tool = make_run_agent_tool(str(caller))
     tool("say hi")
     sent = _sent(daemon)
-    assert sent["agentPath"] == DEFAULT_AGENT_PATH
+    assert sent["seaPath"] == DEFAULT_AGENT_PATH
     assert sent["workDir"] == str(caller)
     assert sent["prompt"] == "say hi"
     # Whitespace counts as "not given", like every other option.
     tool("say hi", agent="   ")
-    assert _sent(daemon)["agentPath"] == DEFAULT_AGENT_PATH
+    assert _sent(daemon)["seaPath"] == DEFAULT_AGENT_PATH
     # An explicit agent still wins over the default.
     tool("say hi", agent="ntfy")
-    assert _sent(daemon)["agentPath"].endswith("ntfy_sea.py")
+    assert _sent(daemon)["seaPath"].endswith("ntfy_sea.py")
 
 
 def test_default_agent_unreachable_daemon_is_a_clean_error() -> None:
@@ -724,11 +727,11 @@ def test_path_mode_detected_by_py_suffix_and_separator(
 ) -> None:
     # ".py" suffix without a separator is path mode, not a channel.
     out = run_agent("say hi", "slack_sea.py")
-    assert out.startswith("Error: agent script")
+    assert out.startswith("Error: SEA")
     # A separator without a ".py" suffix is path mode too — rejected
     # with the loader's .py diagnostic rather than "unknown agent".
     out = run_agent("say hi", str(tmp_path / "somedir" / "agent"))
-    assert out.startswith("Error: agent script")
+    assert out.startswith("Error: SEA")
     assert "is not a Python (.py) file" in out
 
 
@@ -759,7 +762,7 @@ class Sea(BaseSea):
     assert "no-daemon.json" in out
     # A missing relative path names the project-anchored resolution.
     out = tool("say hi", "agents/nope.py")
-    assert out.startswith("Error: agent script")
+    assert out.startswith("Error: SEA")
     assert str(project / "agents" / "nope.py") in out
     assert "does not exist" in out
 
@@ -811,7 +814,7 @@ def test_dispatch_forwards_the_workspace_to_the_daemon(daemon: RecordingDaemon) 
     run_agent("say hi", "ntfy", options='{"workspace": " my-ws "}')
     sent = _sent(daemon)
     assert sent["workspace"] == "my-ws"
-    assert Path(sent["agentPath"]).parts[-2:] == ("ntfy", "ntfy_sea.py")
+    assert Path(sent["seaPath"]).parts[-2:] == ("ntfy", "ntfy_sea.py")
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
     run_agent("say hi", "ntfy")
     assert _sent(daemon)["workspace"] == ""
@@ -863,12 +866,12 @@ def test_every_channel_module_is_dispatchable() -> None:
             str,
         ), channel
         assert module.__file__ and Path(module.__file__).is_file(), channel
-        # Every channel module is a ``channel``-preset SEA whose
+        # Every channel module is a ``channel: True`` SEA whose
         # ``tools()`` adds the channel's tools to the toolset and whose
         # ``system_prompt()`` appends the channel's guidance (the agent
         # class's ``channel_system_prompt``) to the assembled prompt.
         sea = load_sea(Path(module.__file__))
-        assert sea.settings({})["kind"] == "channel", channel
+        assert sea.settings({})["channel"] is True, channel
         assert sea.tools([]) and all(callable(t) for t in sea.tools([])), channel
         guidance = getattr(cls, "channel_system_prompt", "")
         assert sea.system_prompt("ASSEMBLED") == (
@@ -877,9 +880,9 @@ def test_every_channel_module_is_dispatchable() -> None:
 
 
 def test_channel_module_is_a_valid_agent_script() -> None:
-    """The exact agent-script contract a channel dispatch relies on.
+    """The exact SEA contract a channel dispatch relies on.
 
-    Passing a channel module as ``extension_agent_path`` makes the
+    Passing a channel module as ``sea_path`` makes the
     daemon apply its ``settings()`` (the ``channel`` preset: no
     worktree, no auto-commit, no classifier, no fan-out, no browser,
     no memory), stage its ``tools()`` as the run's tools hook (the
@@ -890,10 +893,10 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     of the channel guidance travels in the prompt any more.
     """
     import kiss.agents.third_party_agents.ntfy.ntfy_sea as ntfy_sea
-    from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE
+    from kiss.agents.sorcar.sea_apply import CHANNEL_PREAMBLE
 
-    cmd: dict[str, Any] = {"agentPath": ntfy_sea.__file__, "appendToSystemPrompt": "Caller suffix."}
-    overridden = apply_agent_overrides(cmd)
+    cmd: dict[str, Any] = {"seaPath": ntfy_sea.__file__, "appendToSystemPrompt": "Caller suffix."}
+    overridden = apply_sea(cmd)
     # Only the settings fields are reported; the hooks are always staged.
     assert overridden == {
         "useWorktree", "autoCommit", "classifyTasks",

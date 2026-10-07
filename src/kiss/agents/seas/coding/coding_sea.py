@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ALLOW, BaseSea, Verdict, refuse
 from kiss.agents.seas.coding import coding_test_context as test_context
 from kiss.agents.sorcar.shell_guards import (
     INSTALL_COMMANDS,
@@ -440,7 +440,7 @@ class ContainerHarness:
         except Exception:  # transient daemon hiccup: do not end the trial on it
             return True
 
-    def on_tool_call(self, name: str, args: dict[str, Any]) -> str | None:
+    def on_tool_call(self, name: str, args: dict[str, Any]) -> Verdict:
         """Log a tool call; answer tools that need a human without running them.
 
         Args:
@@ -448,7 +448,7 @@ class ContainerHarness:
             args: Tool arguments.
 
         Returns:
-            ``None`` to let the call run, or the text the model sees instead.
+            ``ALLOW`` to let the call run, or ``refuse(text)`` with the text the model sees.
         """
         verdict = UNATTENDED_TOOL_VERDICTS.get(name)
         try:
@@ -479,7 +479,7 @@ class ContainerHarness:
             except Exception as error:
                 self._log({"event": "hook_error", "turn": self.turns, "hook": name,
                            "error": repr(error)})
-        return verdict
+        return ALLOW if verdict is None else refuse(verdict)
 
     def before_shell(self, args: dict[str, Any]) -> None:
         """Remember the process table before the turn's first shell call; note kill attempts.
@@ -893,7 +893,7 @@ def _jsonable(value: Any) -> Any:
 
 
 SEA_TEMPLATE = '''"""Generated per-trial SEA; see kiss.agents.seas.coding.coding_sea."""
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import BaseSea, Verdict
 from kiss.agents.seas.coding.coding_sea import ContainerHarness
 
 _harness = ContainerHarness.shared({config_path!r})
@@ -922,7 +922,7 @@ class TrialSea(BaseSea):
     def llm_call_hook(self, new_messages: list) -> list:
         return _harness.on_llm_call(new_messages)
 
-    def tool_call_hook(self, name: str, args: dict) -> str | None:
+    def tool_call_hook(self, name: str, args: dict) -> Verdict:
         return _harness.on_tool_call(name, args)
 '''
 

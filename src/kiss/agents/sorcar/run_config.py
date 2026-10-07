@@ -32,6 +32,7 @@ import yaml
 RUN_CONFIG_KEYS = (
     "sea",
     "kind",
+    "channel",
     "tool_profile",
     "tool_profile_inferred",
     "timeout",
@@ -43,7 +44,9 @@ RUN_CONFIG_KEYS = (
 and ``max_budget``.
 
 ``sea``: the SEA's name (its file stem), ``""`` for a plain sub-agent;
-``kind``: the SEA's ``kind`` setting (``session``, ``worker`` or ``channel``);
+``kind``: the SEA's ``kind`` setting (``session`` or ``worker``);
+``channel``: ``True`` for a channel (``channel: True`` in its settings; shown as
+``(worker, channel)`` on the line);
 ``tool_profile``: the effective profile, ``""`` for the full toolset;
 ``tool_profile_inferred``: ``True`` when nobody named the profile and the run got
 ``review`` because it is a reviewer sub-agent (``tools=review(inferred)`` on the line);
@@ -168,6 +171,8 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
     """
     sea = str(settings.get("sea") or "") or "sub-agent"
     kind = str(settings.get("kind") or "session")
+    if settings.get("channel"):
+        kind += ", channel"
     model = str(settings.get("model") or "") or "default"
     tools = str(settings.get("tool_profile") or "") or "full"
     if settings.get("tool_profile_inferred"):

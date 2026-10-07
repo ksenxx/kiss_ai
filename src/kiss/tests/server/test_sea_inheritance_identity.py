@@ -8,7 +8,8 @@
   executed by ``load_sea``: it contributes once to a chain even when the
   picker base is the file-loaded copy and the script derives from the
   imported one.
-* A relative ``work_dir`` belongs to the file whose ``settings`` set it,
+* A relative ``work_dir`` is kept as written by the fold (the launcher
+  anchors it at the calling task's directory, whichever file set it),
   whichever picker or subclass sits above or below it in the chain.
 * A SEA that only inherits ``register_as_model()`` is a model-picker
   entry.
@@ -32,12 +33,13 @@ from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions, inherit_from_parent
 from kiss.agents.sorcar.sea_commands import (
-    SeaScriptError,
+    SeaError,
     base_settings,
     base_system_prompt,
     check_sea,
     load_sea,
 )
+from kiss.agents.sorcar.sea_settings import anchored_work_dir
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.config import kiss_home
 
@@ -99,7 +101,7 @@ def test_an_imported_class_and_its_file_loaded_copy_are_one_class(
     assert base_system_prompt([child], "BASE") == "BASE\n\nPICKER PROTOCOL\n\nCHILD"
 
 
-def test_relative_work_dir_belongs_to_the_file_that_set_it(registry: Path) -> None:
+def test_relative_work_dir_is_kept_as_written_whichever_file_set_it(registry: Path) -> None:
     picker = _write(registry / "picker" / "picker_sea.py", PICKER_SEA)
     plain = _write(registry / "plain" / "plain_sea.py", """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -122,16 +124,13 @@ class OverridingSea(sea_class('picker')):
         return settings | {'work_dir': 'out'}
 """)
     sea_commands.refresh_registry()
-    picker_assets = os.path.normpath(registry / "picker" / "assets")
-    assert base_settings([load_sea(picker)])["work_dir"] == picker_assets
-    # Layering an unrelated command under the picker, or inheriting the
-    # setting, keeps the picker's folder.
-    assert base_settings([load_sea(picker), load_sea(plain)])["work_dir"] == picker_assets
-    assert base_settings([load_sea(inheriting)])["work_dir"] == picker_assets
-    # A subclass that sets its own relative path means its own folder.
-    assert base_settings([load_sea(overriding)])["work_dir"] == os.path.normpath(
-        registry / "overriding" / "out"
-    )
+    # The fold never anchors a relative path: the launcher resolves it
+    # against the calling task's directory, whichever file set it.
+    assert base_settings([load_sea(picker)])["work_dir"] == "assets"
+    assert base_settings([load_sea(picker), load_sea(plain)])["work_dir"] == "assets"
+    assert base_settings([load_sea(inheriting)])["work_dir"] == "assets"
+    assert base_settings([load_sea(overriding)])["work_dir"] == "out"
+    assert anchored_work_dir("out", "/caller") == os.path.join("/caller", "out")
 
 
 def test_inherited_model_registration_is_discovered(registry: Path) -> None:
@@ -181,7 +180,7 @@ class RouterSea(BaseSea):
     def on_picked_as_model(self):
         return 'picked'
 """, encoding="utf-8")
-    with pytest.raises(SeaScriptError, match="on_picked_as_model.*must accept the work directory"):
+    with pytest.raises(SeaError, match="on_picked_as_model.*must accept the work directory"):
         check_sea(sea)
 
 

@@ -110,7 +110,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ALLOW, BaseSea, Verdict
 from kiss.agents.sorcar.sea_settings import SeaError
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.kiss_agent import KISSAgent
@@ -726,13 +726,13 @@ class _TrajectoryRecorder:
                 self.trajectory.append(_message_summary(message, self.limit))
         return self.inner_llm_hook(messages) if self.inner_llm_hook is not None else messages
 
-    def tool_call(self, name: str, args: dict[str, Any]) -> str | None:
+    def tool_call(self, name: str, args: dict[str, Any]) -> Verdict:
         """Record a tool call (the ``tool_call_hook``), then defer to the target's hook."""
         rendered = json.dumps(args, ensure_ascii=False, default=str)
         self.trajectory.append(
             {"role": "assistant", "text": f"[call {name}] {rendered}"[: self.limit]}
         )
-        return self.inner_tool_hook(name, args) if self.inner_tool_hook is not None else None
+        return self.inner_tool_hook(name, args) if self.inner_tool_hook is not None else ALLOW
 
 
 def run_rollout(

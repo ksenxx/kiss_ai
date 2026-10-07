@@ -213,9 +213,9 @@
           <!-- Agent-script (SEA) filter: the options are rebuilt from the
                loaded rows on every history render (see
                refreshHistorySeaOptions in main.js). -->
-          <div class="history-filter-sea" role="group" aria-label="Filter tasks by agent script">
+          <div class="history-filter-sea" role="group" aria-label="Filter tasks by SEA">
             <label for="hf-sea" class="history-filter-date-lbl">SEA</label>
-            <select id="hf-sea" class="history-filter-sea-select" title="Show only tasks run by this agent script (SEA)" aria-label="Agent script">
+            <select id="hf-sea" class="history-filter-sea-select" title="Show only tasks run by this SEA" aria-label="SEA">
               <option value="">All</option>
               <option value="__none__">None</option>
             </select>
@@ -336,7 +336,7 @@
           <li class="meta-item"><span class="meta-label">Chat id:</span><span id="meta-chat-id" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Task id:</span><span id="meta-task-id" class="meta-value">&mdash;</span></li>
           <li class="meta-item" id="meta-parent-item" hidden><span class="meta-label">Parent task:</span><span id="meta-parent-id" class="meta-value">&mdash;</span></li>
-          <!-- The agent script the task ran as and what it did to the
+          <!-- The SEA the task ran as and what it did to the
                caller's settings (task_settings keys sea, kind,
                tool_profile, timeout, overridden); hidden for a plain run. -->
           <li class="meta-item" id="meta-agent-item" hidden><span class="meta-label">Agent:</span><span id="meta-agent" class="meta-value">&mdash;</span></li>

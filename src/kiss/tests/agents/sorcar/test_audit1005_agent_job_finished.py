@@ -55,7 +55,7 @@ def test_a_recorded_result_is_never_reported_as_still_running(tmp_path: Path) ->
     job = agent_dispatch.start_agent_job(
         "sorcar",
         {
-            "name": "sorcar", "prompt": "say hi", "agent_path": DEFAULT_AGENT_PATH,
+            "name": "sorcar", "prompt": "say hi", "sea_path": DEFAULT_AGENT_PATH,
             "work_dir": str(tmp_path), "model_name": "", "budget": None, "timeout": 5.0,
             "alias": "",
         },

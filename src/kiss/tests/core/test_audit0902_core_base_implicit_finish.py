@@ -31,6 +31,7 @@ from typing import Any
 import yaml
 
 from kiss.core.kiss_agent import MAX_CONSECUTIVE_NO_TOOL_CALLS, KISSAgent
+from kiss.core.tool_verdict import ALLOW, Verdict, refuse
 from kiss.core.utils import finish as structured_finish
 
 _USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
@@ -109,7 +110,7 @@ def _run(
     server: HTTPServer,
     agent: KISSAgent,
     tools: list[Callable[..., Any]] | None = None,
-    tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None,
+    tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
 ) -> str:
     """Run *agent* against the local server and return its result."""
     return agent.run(
@@ -215,13 +216,13 @@ class TestTextOnlyImplicitFinishHonoursGuard:
             server.shutdown()
 
     def test_tool_call_hook_can_veto_text_only_finish(self) -> None:
-        """A ``tool_call_hook`` returning a string for ``finish``
-        suppresses the text-only implicit finish.  Once it allows (``None``)
-        the run ends with the text."""
-        verdicts = iter(["not yet, keep going", None])
+        """A ``tool_call_hook`` refusing ``finish`` suppresses the text-only
+        implicit finish.  Once it allows (``ALLOW``) the run ends with the
+        text."""
+        verdicts = iter([refuse("not yet, keep going"), ALLOW])
         hook_calls: list[tuple[str, dict[str, Any]]] = []
 
-        def hook(name: str, args: dict[str, Any]) -> str | None:
+        def hook(name: str, args: dict[str, Any]) -> Verdict:
             hook_calls.append((name, args))
             return next(verdicts)
 

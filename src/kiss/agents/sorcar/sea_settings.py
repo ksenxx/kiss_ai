@@ -12,9 +12,11 @@ its base classes declared::
     def settings(self, settings: dict) -> dict:
         return settings | {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
 
-The result is data: a ``kind`` (``session``, the default, ``worker``
-or ``channel``: a named dict of defaults laid under the explicit keys,
-see :func:`kind_defaults`), any of the per-run parameters of
+The result is data: a ``kind`` (``session``, the default, or
+``worker``: a named dict of defaults laid under the explicit keys and
+nothing more, see :func:`kind_defaults`), the flag ``channel`` (the
+SEA serves an external service; its behaviours are
+:data:`CHANNEL_BEHAVIOURS`), any of the per-run parameters of
 :func:`kiss.server.sorcar.run` listed in :data:`SETTING_TYPES`, and
 three keys read by the launcher: ``timeout`` (seconds the sub-task may
 take: the call's value, else this setting, else 3600 for ``run_agent``
@@ -22,7 +24,9 @@ and no own limit for a ``run_parallel`` child), ``locked`` (the keys
 an explicit caller argument may not replace) and ``hidden`` (the file
 is no command).  Against the caller there is one precedence rule,
 :data:`PRECEDENCE_RULE`, enforced by :func:`locked_conflicts` and
-rendered by ``sea docs`` into every page that states it.
+rendered by ``sea docs`` into every page that states it.  A relative
+``work_dir`` — a SEA's setting or a call's option — is a path under
+the calling task's directory (:func:`anchored_work_dir`).
 
 The other methods of the class — ``prompt``, ``system_prompt``,
 ``tools``, ``tool_call_hook``, ``llm_call_hook`` — shape the run;
@@ -43,20 +47,17 @@ Settings honoured   all but ``timeout``   all                     all; a pinned
                                                                   ``auto_classify: True``
                                                                   or ``chat_id`` is
                                                                   refused with an error
-Parent inheritance  none (tab settings)   yes, unless the kind    yes; budget =
-                                          is ``channel`` or the   remaining / (N+1)
+Parent inheritance  none (tab settings)   yes, unless the SEA is  yes; budget =
+                                          a ``channel`` or the    remaining / (N+1)
                                           ``inherit`` option
                                           is ``false``
 ``timeout``         none                  argument > setting      argument > setting
                                           > 3600                  > none (per child)
-``kind: "channel"`` allowed               allowed                 refused
+``channel: True``   allowed               allowed                 refused
 ==================  ====================  ======================  ========================
 
-``kind: "channel"`` is the one key the daemon acts on beyond passing a
-value through: the run holds its channel workspace
-(``run_agent(options='{"workspace": ...}')``, default ``"default"``),
-the channel preamble is added to its system prompt, and it cannot be a
-``run_parallel`` child.
+``channel`` is the one setting with behaviour beyond a value passed
+through — every behaviour is listed in :data:`CHANNEL_BEHAVIOURS`.
 
 :func:`execute_python_file` is the ONE loader every reader of a SEA
 file uses: it compiles and executes the file into a throw-away module,
@@ -96,6 +97,7 @@ docstrings quote it, so a change here changes every statement of it.
 
 SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
     "kind": str,
+    "channel": bool,
     "work_dir": str,
     "model": str,
     "chat_id": str,
@@ -116,17 +118,20 @@ SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
 """Every key ``settings()`` may return, with the type its value must have."""
 
 SETTING_DOCS: dict[str, str] = {
-    "kind": "What the run is: `session` (the default, an ordinary Sorcar session), `worker` or "
-            "`channel`; each is a dict of defaults laid under the explicit keys (see the kind "
-            "table). A `channel` run holds its channel workspace, gets the channel preamble, "
-            "never inherits from a calling task and is never a `run_parallel` child.",
+    "kind": "What the run is: `session` (the default, an ordinary Sorcar session) or `worker`; "
+            "each is a dict of defaults laid under the explicit keys and nothing more (see the "
+            "kind table).",
+    "channel": "`True`: the SEA serves an external service (Slack, email, cron), not the "
+               "caller's project; every behaviour this adds is listed in the channel table. "
+               "Like `hidden`, the literal `True` in the class's own `settings()` is what the "
+               "dispatcher's channel listing reads.",
     "work_dir": "The directory the run works in; default: the calling task's or the tab's. A "
-                "relative path is resolved against the script's own folder, not the caller's "
-                "(one a base class sets: against the base's file).",
+                "relative path is a path under the calling task's directory (the tab's for "
+                "`/<name>`), in a SEA's settings and in a call's `work_dir` option alike.",
     "model": "The LLM model, a catalogue name or a model-picker SEA; default: the caller's "
              "(`\"\"`, like `None`, is no override — true of every string key).",
     "chat_id": "The chat the run's events go to; default under `run_agent`: the calling "
-               "task's chat, or a new chat when nothing is inherited (a `channel` run, an "
+               "task's chat, or a new chat when nothing is inherited (a channel, an "
                "`inherit: false` call); a `/<name>` run keeps the tab's chat.",
     "use_worktree": "Run in a git worktree of the project; default: the calling task's "
                     "effective choice, else the persisted setting (an inherited or default "
@@ -161,14 +166,15 @@ SETTING_DOCS: dict[str, str] = {
 }
 """One line of documentation per :data:`SETTING_TYPES` key (rendered by ``sea docs``)."""
 
-META_SETTINGS = ("kind", "locked", "hidden")
+META_SETTINGS = ("kind", "channel", "locked", "hidden")
 """Keys that shape the settings themselves rather than the run; never lockable."""
 
-DISPATCHER_SETTINGS = ("kind", "timeout", "locked", "hidden")
+DISPATCHER_SETTINGS = ("kind", "channel", "timeout", "locked", "hidden")
 """``settings()`` keys with no ``run`` command wire field.
 
-``kind`` is resolved by :func:`resolve_settings` (the daemon reads it
-from the SEA's settings, :mod:`kiss.agents.sorcar.agent_file`); ``timeout``
+``kind`` and ``channel`` are resolved by :func:`resolve_settings` (the
+daemon reads ``channel`` from the SEA's settings,
+:mod:`kiss.agents.sorcar.sea_apply`); ``timeout``
 is read by the dispatcher (:mod:`kiss.agents.sorcar.agent_dispatch`);
 ``locked`` names the keys an explicit caller argument may not replace
 (:func:`locked_conflicts`); ``hidden`` keeps the script out of the
@@ -250,8 +256,8 @@ _SYSTEM_PROMPT_SUFFIX_REMOVED = (
 )
 
 REMOVED_SETTINGS = {
-    "inherit": "a `channel` run never inherits from the calling task and every other kind "
-               "always does; the caller's `inherit` option opts out of inheriting",
+    "inherit": "a channel never inherits from the calling task and every other SEA always "
+               "does; the caller's `inherit` option opts out of inheriting",
     "append_to_prompt": _PROMPT_SUFFIX_REMOVED,
     "add_to_prompt": _PROMPT_SUFFIX_REMOVED,
     "append_to_system_prompt": _SYSTEM_PROMPT_SUFFIX_REMOVED,
@@ -263,7 +269,7 @@ REMOVED_SETTINGS = {
 }
 """Former settings keys with no replacement, and why; refused with the explanation."""
 
-KINDS = ("session", "worker", "channel")
+KINDS = ("session", "worker")
 """The values of the ``kind`` setting (see :func:`kind_defaults`)."""
 
 WORKER_DEFAULTS: dict[str, Any] = {
@@ -274,18 +280,14 @@ WORKER_DEFAULTS: dict[str, Any] = {
     "use_web_tools": False,
     "use_memory": False,
 }
-"""The defaults of the ``worker`` kind (and, with a ``work_dir``, of ``channel``)."""
+"""The defaults of the ``worker`` kind."""
 
 KIND_DOCS: dict[str, str] = {
     "session": "The default: an ordinary Sorcar session with the caller's or the user's "
                "settings (`/write`, `/write_paper`, `bestrouter`).",
     "worker": "A focused tool-bound run on the caller's tree: no worktree, no auto-commit, no "
               "classifier, no fan-out, no browser, no memory (`/sh`, `/ask`, `/merge`, "
-              "`/remember`, `/forget`, `/task_update`).",
-    "channel": "A worker for an external service, in the shared `channel_work` scratch "
-               "directory under the Sorcar home, never the caller's project; it holds its "
-               "channel workspace, gets the channel preamble and never inherits from a calling "
-               "task (every bundled channel agent and `/cron`).",
+              "`/remember`, `/forget`, `/task_update`, every channel).",
 }
 """One line of documentation per kind (rendered by ``sea docs``)."""
 
@@ -296,29 +298,65 @@ def kind_defaults() -> dict[str, dict[str, Any]]:
     ``session`` is empty: the run is an ordinary Sorcar session with
     the caller's or the user's settings.  ``worker`` is a focused
     tool-bound run on the caller's tree: no worktree, no auto-commit,
-    no classifier, no fan-out, no browser, no memory.  ``channel`` is
-    a worker for an external service with a ``work_dir`` of the shared
-    ``channel_work`` scratch directory under the Sorcar home (never the caller's
-    project, whose git lifecycle it does not join); the daemon and the
-    dispatcher give a channel its workspace and preamble and never let
-    it inherit from a calling task.  Computed on every call so a
-    redirected ``$KISS_HOME`` is honoured.
+    no classifier, no fan-out, no browser, no memory.  A kind is these
+    defaults and nothing else; the behaviours of a channel hang on the
+    ``channel`` flag (:data:`CHANNEL_BEHAVIOURS`).
     """
-    return {
-        "session": {},
-        "worker": dict(WORKER_DEFAULTS),
-        "channel": {**WORKER_DEFAULTS, "work_dir": str(kiss_home() / "channel_work")},
-    }
+    return {"session": {}, "worker": dict(WORKER_DEFAULTS)}
+
+
+def channel_work_dir() -> str:
+    """Return the shared scratch directory a channel runs in: ``<home>/channel_work``.
+
+    Computed on every call so a redirected ``$KISS_HOME`` is honoured.
+    """
+    return str(kiss_home() / "channel_work")
+
+
+CHANNEL_BEHAVIOURS: tuple[tuple[str, str], ...] = (
+    ("worker",
+     "It is a `worker`: `kind` may stay unset or be `worker` (any other kind is refused), and "
+     "the worker keys are locked, so no call may give it a worktree, auto-commit, the "
+     "classifier, fan-out, the browser or memory (`resolve_settings`)."),
+    ("scratch directory",
+     "It runs in the shared `<home>/channel_work` scratch directory unless its own "
+     "`work_dir` says otherwise (`/cron` runs in `<home>/cron_work`); `work_dir` is locked, "
+     "so it never works in the caller's project (`resolve_settings`)."),
+    ("no inheritance",
+     "Its `run_agent` dispatch takes nothing from the calling task: not the chat, model, "
+     "budget share, container or prompt suffixes; the `inherit: true` option is refused "
+     "(`agent_dispatch`)."),
+    ("workspace",
+     "It holds its channel workspace — the `run_agent` option `workspace`, default "
+     "`default`, the account its tools load credentials for — from before its `tools()` "
+     "run until the run ends; `workspace` is refused for any other SEA "
+     "(`sea_apply.channel_workspace`, `agent_dispatch`)."),
+    ("preamble",
+     "The channel preamble is appended to its system prompt before its own "
+     "`system_prompt()` runs (`sea_apply.CHANNEL_PREAMBLE`)."),
+    ("no fan-out child",
+     "It is never a `run_parallel` child: those are threads of the caller on the caller's "
+     "tree (`agent_dispatch.fanout_conflict`)."),
+    ("listed as a channel",
+     "A third-party SEA folder whose own `settings()` writes the literal `\"channel\": "
+     "True` is a channel agent: `run_agent(agent=\"<folder>\")` finds it by name and the "
+     "`channel` tool lists it (`agent_dispatch.available_channels`)."),
+)
+"""Every behaviour ``channel: True`` adds, as ``(name, what it does and where it is enforced)``.
+
+The one place the list exists: ``sea docs`` renders it, and the
+modules named enforce exactly these.  A setting other than ``channel``
+has no behaviour beyond its value.
+"""
 
 
 class SeaError(Exception):
-    """Base of every "this SEA is broken" error.
+    """The one "this SEA is broken" error: a bad file, settings, method or dispatch.
 
-    :exc:`kiss.agents.sorcar.sea_commands.SeaScriptError` (raised by the
-    registry and the dispatcher) and
-    :exc:`kiss.agents.sorcar.agent_file.AgentFileError` (raised by the daemon's
-    task runner) both derive from it, so a caller that only wants to
-    know "the script failed" catches one class.
+    Raised by the loader, the settings resolver, the command registry,
+    the dispatcher and the daemon's task runner alike, so a caller that
+    wants to know "the SEA failed" catches one class and the message
+    (prefixed with the SEA's file name where known) is the diagnostic.
     """
 
 
@@ -384,7 +422,7 @@ def execute_python_file(
 ) -> dict[str, Any]:
     """Execute a caller-supplied Python file and return its namespace.
 
-    The one loader of SEAs (the daemon's ``agentPath``, the
+    The one loader of SEAs (the daemon's ``seaPath``, the
     slash-command registry, the dispatcher, SEAs that load other
     scripts such as ``skillopt``).  The source is compiled and executed
     directly (no ``__pycache__`` read or write), so every call observes
@@ -461,8 +499,24 @@ def execute_python_file(
     return module.__dict__
 
 
-class SettingsError(SeaError, ValueError):
-    """A SEA's settings are malformed (wrong type, unknown key or kind)."""
+def anchored_work_dir(work_dir: str, base_dir: str) -> str:
+    """Return *work_dir* as the absolute directory it names from the calling task's *base_dir*.
+
+    The one rule for a relative ``work_dir``, wherever it is written: a
+    SEA's ``work_dir`` setting, a ``run_agent`` / ``run_parallel``
+    ``work_dir`` option and the daemon's staging of a SEA's setting
+    all resolve it against the directory of the calling task (the tab's
+    for ``/<name>``), never against the SEA file's folder.
+
+    Args:
+        work_dir: The directory as written; ``~`` is expanded.
+        base_dir: The calling task's directory.
+
+    Returns:
+        *work_dir* itself when absolute, else ``base_dir/work_dir``.
+    """
+    path = Path(work_dir.strip()).expanduser()
+    return str(path if path.is_absolute() else Path(base_dir).expanduser() / path)
 
 
 def declares_hidden(path: Path) -> bool:
@@ -536,11 +590,13 @@ def resolve_settings(declared: Mapping[str, Any]) -> dict[str, Any]:
     folds them).  The ``kind``'s defaults are merged under its keys,
     every value is type-checked against :data:`SETTING_TYPES`, a
     ``tool_profile`` alias (``readonly``) becomes its key
-    (:func:`alias_free_profile`), and a ``channel`` locks the keys of
-    its kind: it runs in its own scratch directory, never the caller's,
-    and no call may give it a worktree, auto-commit, the classifier,
-    fan-out, the browser or memory.  ``work_dir`` is kept as declared;
-    the launcher anchors a relative one at the SEA's folder.
+    (:func:`alias_free_profile`), and ``channel: True`` applies the
+    settings side of :data:`CHANNEL_BEHAVIOURS`: the SEA is a
+    ``worker`` (a ``kind`` other than ``worker`` is refused), its
+    ``work_dir`` defaults to :func:`channel_work_dir`, and ``work_dir``
+    plus the worker keys are locked.  ``work_dir`` is otherwise kept as
+    declared; the launcher anchors a relative one at the calling task's
+    directory (:func:`anchored_work_dir`).
 
     Args:
         declared: The declared settings.
@@ -555,21 +611,21 @@ def resolve_settings(declared: Mapping[str, Any]) -> dict[str, Any]:
         stands.
 
     Raises:
-        SettingsError: When *declared* names an unknown, renamed or
-            removed key or an unknown ``kind``, or a value has the
-            wrong type.
+        SeaError: When *declared* names an unknown, renamed or removed
+            key or an unknown ``kind``, a value has the wrong type, or
+            a channel names a ``kind`` other than ``worker``.
     """
     sources = {key: f"settings()[{key!r}]" for key in declared}
     for key in declared:
         if key in RENAMED_SETTINGS:
-            raise SettingsError(
+            raise SeaError(
                 f"settings() key {key!r} was renamed to {RENAMED_SETTINGS[key]!r}; "
                 f"run `uv run sea lint --fix` to rewrite the script"
             )
         if key in REMOVED_SETTINGS:
-            raise SettingsError(f"settings() key {key!r} was removed: {REMOVED_SETTINGS[key]}")
+            raise SeaError(f"settings() key {key!r} was removed: {REMOVED_SETTINGS[key]}")
         if key not in SETTING_TYPES:
-            raise SettingsError(
+            raise SeaError(
                 f"settings() has an unknown key {key!r}; "
                 f"known keys: {', '.join(SETTING_TYPES)}"
             )
@@ -591,17 +647,22 @@ def resolve_settings(declared: Mapping[str, Any]) -> dict[str, Any]:
                 " or ".join(t.__name__ for t in expected)
                 if isinstance(expected, tuple) else expected.__name__
             )
-            raise SettingsError(
+            raise SeaError(
                 f"{sources[key]} must be {names}, got {type(value).__name__}"
             )
         settings[key] = _check_value(sources[key], key, value)
     kind = settings.get("kind", "session")
-    resolved = {"kind": kind, **kind_defaults()[kind], **settings}
-    if kind == "channel":
-        resolved["locked"] = sorted(
-            {*resolved.get("locked", ()), *kind_defaults()["channel"]}
-        )
-    return resolved
+    if settings.get("channel"):
+        # CHANNEL_BEHAVIOURS "worker" and "scratch directory".
+        if "kind" in settings and kind != "worker":
+            raise SeaError(
+                f"{sources['kind']} is {kind!r}, but a channel is a worker: leave `kind` "
+                f"unset or write \"worker\""
+            )
+        kind = "worker"
+        settings.setdefault("work_dir", channel_work_dir())
+        settings["locked"] = sorted({*settings.get("locked", ()), "work_dir", *WORKER_DEFAULTS})
+    return {"kind": kind, **kind_defaults()[kind], **settings}
 
 
 def locked_conflicts(
@@ -660,15 +721,20 @@ def _check_value(source: str, key: str, value: Any) -> Any:
     reported as broken.  ``kind`` must be one of :data:`KINDS`.
 
     Raises:
-        SettingsError: Naming *source* (``settings()['timeout']``).
+        SeaError: Naming *source* (``settings()['timeout']``).
     """
+    if key == "kind" and value == "channel":
+        raise SeaError(
+            f"{source} = 'channel' became the flag `\"channel\": True` (a kind is defaults "
+            f"only; a channel is a worker); run `uv run sea lint --fix` to rewrite the script"
+        )
     if key == "kind" and value not in KINDS:
-        raise SettingsError(f"{source} must be one of {', '.join(KINDS)}; got {value!r}")
+        raise SeaError(f"{source} must be one of {', '.join(KINDS)}; got {value!r}")
     if key == "locked":
         lockable = [k for k in SETTING_TYPES if k not in META_SETTINGS]
         bad = [item for item in value if not isinstance(item, str) or item not in lockable]
         if bad:
-            raise SettingsError(
+            raise SeaError(
                 f"{source} may only name settings keys ({', '.join(lockable)}); got {bad!r}"
             )
         return sorted(set(value))
@@ -678,11 +744,11 @@ def _check_value(source: str, key: str, value: Any) -> Any:
         except OverflowError:
             value = math.inf
         except BaseException as exc:  # noqa: BLE001 — an untrusted number subclass may raise
-            raise SettingsError(
+            raise SeaError(
                 f"{source} returned a broken value: {safe_message(exc)}"
             ) from exc
         if not math.isfinite(value):
-            raise SettingsError(f"{source} must return a finite number or None")
+            raise SeaError(f"{source} must return a finite number or None")
         if key == "timeout" and value <= 0:
-            raise SettingsError(f"{source} must be a positive number of seconds, got {value:g}")
+            raise SeaError(f"{source} must be a positive number of seconds, got {value:g}")
     return value

@@ -6,7 +6,7 @@
 
 ``reports/sea-run-agent-semantics-and-automation-2026-10-04.md``: a
 ``run_agent`` or ``run_parallel`` result used to be ``{success,
-summary}``; nothing told the calling model that the agent script
+summary}``; nothing told the calling model that the SEA
 replaced the ``tool_profile`` it asked for, which values the sub-task
 inherited, or what budget it ran with, and nothing persisted that
 record for ``rsi7d`` to mine.  Now the daemon folds the effective
@@ -428,7 +428,7 @@ def test_locked_conflicts_covers_dispatcher_keys_paths_and_inheritance(tmp_path:
     from kiss.agents.seas.base.base_sea import BaseSea
     from kiss.agents.sorcar.sea_commands import base_settings, declared_settings
     from kiss.agents.sorcar.sea_settings import (
-        SettingsError,
+        SeaError,
         locked_conflicts,
         resolve_settings,
     )
@@ -474,11 +474,52 @@ def test_locked_conflicts_covers_dispatcher_keys_paths_and_inheritance(tmp_path:
         "the script locks max_budget=1.0 (asked for 2)"
     )
     with pytest.raises(
-        SettingsError, match=r"settings\(\)\['locked'\] may only name settings keys"
+        SeaError, match=r"settings\(\)\['locked'\] may only name settings keys"
     ):
         resolve_settings({"locked": ["kind", "nope"]})
-    with pytest.raises(SettingsError, match="must be a positive number of seconds, got 0"):
+    with pytest.raises(SeaError, match="must be a positive number of seconds, got 0"):
         resolve_settings({"timeout": 0})
+
+
+def test_sea_run_kwargs_anchors_a_relative_work_dir_at_the_parent(tmp_path: Path) -> None:
+    """A fan-out child's relative ``work_dir`` setting lands under the PARENT's directory.
+
+    ``run_parallel`` passes the anchored directory in the child's
+    defaults; the SEA's own value must not overwrite it with the raw
+    relative path (which the child would resolve against the process's
+    current directory).
+    """
+    from kiss.agents.sorcar.sea_commands import sea_layers
+    from kiss.agents.sorcar.sorcar_agent import _sea_run_kwargs
+
+    sea = tmp_path / "box_sea.py"
+    sea.write_text(
+        """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'work_dir': 'sandbox'}
+"""
+    )
+    layers = sea_layers(sea)
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    agent = SorcarAgent("parent")
+    agent.work_dir = str(parent)
+    defaults = {"work_dir": str(parent / "sandbox"), "tool_profile": ""}
+    overrides, record = _sea_run_kwargs(layers, "t", defaults, agent, set())
+    assert overrides["work_dir"] == str(parent / "sandbox")
+    assert record["pinned"] == {}  # the same directory the defaults already carry
+    # The pin records the anchored directory, never the raw 'sandbox'.
+    overrides, record = _sea_run_kwargs(layers, "t", {"work_dir": str(parent)}, agent, set())
+    assert record["pinned"] == {"work_dir": [str(parent), str(parent / "sandbox")]}
+    # Without a parent (a bare call) the process's current directory anchors it.
+    overrides, _ = _sea_run_kwargs(layers, "t", {"tool_profile": ""}, None, set())
+    assert overrides["work_dir"] == str(Path.cwd() / "sandbox")
+    # An explicit run_parallel work_dir keeps the SEA's out of the overrides.
+    overrides, _ = _sea_run_kwargs(layers, "t", defaults, agent, {"work_dir"})
+    assert "work_dir" not in overrides
 
 
 def test_sea_run_kwargs_keeps_an_explicit_model_config(tmp_path: Path) -> None:

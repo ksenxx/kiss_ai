@@ -86,7 +86,7 @@ class SlackSea(BaseSea):
         """Return the Slack channel tools (the SEA ``tools`` method).
 
         Called by the kiss-web daemon when this module's path is passed as
-        the API's ``extension_agent_path``: builds a fresh agent from the token
+        the API's ``sea_path``: builds a fresh agent from the token
         persisted under ``$KISS_HOME`` and returns its authentication and
         backend tools.  The workspace comes from the
         ``KISS_CHANNEL_WORKSPACE`` environment variable (set by the
@@ -96,13 +96,13 @@ class SlackSea(BaseSea):
         return tools + SlackAgent(workspace=workspace)._get_tools()
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` SEA contract).
 
         No git lifecycle, nothing inherited from the calling task, the
         channel preamble in the system prompt (see
         :mod:`kiss.agents.sorcar.sea_settings`).
         """
-        return settings | {"kind": "channel"}
+        return settings | {"channel": True}
 
     def system_prompt(self, system_prompt: str) -> str:
         """Return the channel guidance appended to the run's system prompt."""
@@ -169,7 +169,7 @@ def _slack_dir() -> Path:
 
     Resolved lazily on every call (like ``ChannelConfig.path``) so a
     ``KISS_HOME`` set after import, or a process that re-executes this
-    module as an agent script, never reads the developer's real tokens.
+    module as a SEA, never reads the developer's real tokens.
     """
     return kiss_home() / "third_party_agents" / "slack"
 

@@ -19,7 +19,7 @@ local OpenAI-compatible HTTP server:
   invoking the blocking callback.
 * ``run_parallel`` prepends ``UNATTENDED_CHILD_PREAMBLE`` to every child
   task of an unattended run; ``run_agent`` (``_dispatch``) appends
-  it through ``append_to_prompt`` so that an agent script's ``prompt()``
+  it through ``append_to_prompt`` so that a SEA's ``prompt()``
   override cannot drop it.  Either way the children inherit the rule.
 
 Detection looks at the current task only (after the chat history's

@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sea", description=(__doc__ or "").split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sea_lint.add_arguments(
-        sub.add_parser("lint", help="check agent scripts against the SEA contract")
+        sub.add_parser("lint", help="check SEAs against the SEA contract")
     )
     sea_docs.add_arguments(
         sub.add_parser("docs", help="regenerate the settings/kind/option/command tables")

@@ -240,7 +240,7 @@ class TestRunAgentDispatch:
         _mark_reviewer(parent)
         result = dispatch_result(
             name="helper", prompt="Review the diff for regressions",
-            agent_path="/nonexistent/agent.py", work_dir="/tmp",
+            sea_path="/nonexistent/agent.py", work_dir="/tmp",
             model_name="", budget=None, timeout=1.0, parent_agent=parent,
         )
         # Without a daemon the dispatch itself fails; what matters is

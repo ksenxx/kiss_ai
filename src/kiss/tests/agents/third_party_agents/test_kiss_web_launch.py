@@ -11,8 +11,8 @@ Every agent in ``kiss/agents/third_party_agents/`` must launch through
 synchronous client API :func:`kiss.server.sorcar.run`: the launcher
 connects to a daemon's local endpoint, sends the documented ``run``
 command, and supplies the agent's channel tools through the API's
-``extension_agent_path`` agent-script contract: the agent's OWN
-module is the agent script, and the daemon imports it and calls its
+``sea_path`` SEA contract: the agent's OWN
+module is the SEA, and the daemon imports it and calls its
 SEA class's ``tools()`` to build a fresh agent from the
 credentials persisted under the active kiss home.  No bridge,
 registry, wrapper, or generated file is involved.  The task is executed
@@ -238,7 +238,7 @@ class _ApiLaunchBase(unittest.TestCase):
         self.repo = str(self.home.repo)
         self.endpoint_file = str(self.home.tmpdir / "sorcar-local.json")
         # The daemon imports each channel agent's module as the task's
-        # agent script, so credential paths under ``~`` are re-evaluated
+        # SEA, so credential paths under ``~`` are re-evaluated
         # there: point HOME at the empty tmpdir so every test observes
         # the deterministic "not authenticated" state and never the
         # developer machine's real credentials.
@@ -444,7 +444,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
 
         agent = SlackAgent()
         assert agent.sea_path == str(slack_sea.__file__), (
-            "the agent's own module must be its agent script"
+            "the agent's own module must be its SEA"
         )
         assert not hasattr(agent, "tools_file")
 
@@ -488,7 +488,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         params = inspect.signature(run_agent_via_kiss_web).parameters
         assert "tools" not in params
         assert "append_basic_tools" not in params
-        assert "extension_agent_path" not in params
+        assert "sea_path" not in params
         assert filter_launch_kwargs(
             {"tools": "/x.py", "append_basic_tools": False, "max_budget": 2.0}
         ) == {"max_budget": 2.0}
@@ -689,7 +689,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert "go_to_url" not in names, "web_tools=False must drop the browser tools"
         # The channel module's ``settings()`` (the ``channel`` preset:
         # no fan-out) win over the launcher's ``is_parallel=True`` on
-        # the daemon, like every agent script's settings do.
+        # the daemon, like every SEA's settings do.
         assert "run_parallel" not in names
         assert "Parallel mode: sequential" in _system_text(request)
 
@@ -698,7 +698,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
 
         The channel runner hands its channel module to the
         :class:`KissWebChatAgent` carrier as ``sea_path``; the launcher
-        must pass it on as ``extension_agent_path`` so the daemon-built
+        must pass it on as ``sea_path`` so the daemon-built
         agent gets exactly what that script decides: the ``none`` tool
         profile drops the built-in tools and ``tools()`` adds
         the script's own.
@@ -908,7 +908,7 @@ class Sea(BaseSea):
                 work_dir=self.repo,
             )
         assert self.model_server.requests == [], (
-            "no task may start for a bad agent script"
+            "no task may start for a bad SEA"
         )
         assert agent_state.snapshot() == []
 
@@ -1231,7 +1231,7 @@ class Sea(BaseSea):
         runner._handle_message("C123", {"text": "hi", "ts": "1.0"})
         first, second = self.model_server.requests
         assert "shout" in _tool_names(first), (
-            "the runner's agent script must supply the task's tools"
+            "the runner's SEA must supply the task's tools"
         )
         assert _only_tool_result(second).startswith("HI")
         prompt = _task_text(first)

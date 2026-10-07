@@ -324,20 +324,20 @@ class SorcarRunApiTest(unittest.TestCase):
 
     def _raw_daemon_run(
         self,
-        agent_path: Any,
+        sea_path: Any,
         extra_cmd: dict[str, Any] | None = None,
         events_out: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """Drive one raw ``run`` command over the local endpoint and wait for the end.
 
         Bypasses :func:`kiss.server.sorcar.run` so malformed
-        ``agentPath`` payloads (or other malformed command fields via
+        ``seaPath`` payloads (or other malformed command fields via
         *extra_cmd*) can be sent exactly as an arbitrary/buggy client
         would.
 
         Args:
-            agent_path: Raw value for the ``run`` command's
-                ``agentPath`` field.
+            sea_path: Raw value for the ``run`` command's
+                ``seaPath`` field.
             extra_cmd: Additional raw fields merged into the ``run``
                 command.
             events_out: Optional list that receives every event the
@@ -357,7 +357,7 @@ class SorcarRunApiTest(unittest.TestCase):
                 "taskId": uuid.uuid4().hex,
                 "workDir": self.repo,
                 "model": "",
-                "agentPath": agent_path,
+                "seaPath": sea_path,
                 **(extra_cmd or {}),
             }
             ws.send(json.dumps(cmd))
@@ -385,7 +385,7 @@ class SorcarRunApiTest(unittest.TestCase):
             ws.close()
 
     def _write_agent_script(self, name: str, content: str) -> str:
-        """Write an agent script under the test tmpdir and return its path.
+        """Write a SEA under the test tmpdir and return its path.
 
         Args:
             name: File name (e.g. ``"my_agent.py"``).
@@ -401,7 +401,7 @@ class SorcarRunApiTest(unittest.TestCase):
     def test_agent_script_tools_become_agent_tools(self) -> None:
         """The tools returned by the SEA's ``tools()`` become agent tools.
 
-        The daemon must import the client-supplied agent script itself
+        The daemon must import the client-supplied SEA itself
         (no serialization by the client), hand the run its ``tools()``
         as the tools hook, and that hook must return every function
         AS-IS: original
@@ -478,7 +478,7 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "use my tools",
             work_dir=self.repo,
-            extension_agent_path=tools_path,
+            sea_path=tools_path,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -571,7 +571,7 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "use the selected tools",
             work_dir=self.repo,
-            extension_agent_path=tools_path,
+            sea_path=tools_path,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -631,7 +631,7 @@ class SorcarRunApiTest(unittest.TestCase):
             result = sorcar.run(
                 "greet bob",
                 work_dir=self.repo,
-                extension_agent_path="rel_tools.py",
+                sea_path="rel_tools.py",
                 endpoint_file=self.endpoint_file,
                 timeout=60,
             )
@@ -647,10 +647,10 @@ class SorcarRunApiTest(unittest.TestCase):
         ``seen["tool_lists"]`` and stores the tools themselves in
         ``seen["tools"]``, then drives one successful
         :func:`kiss.server.sorcar.run` with
-        ``extension_agent_path=tools_path``.
+        ``sea_path=tools_path``.
 
         Args:
-            tools_path: Path of the agent script to pass to ``run``.
+            tools_path: Path of the SEA to pass to ``run``.
             seen: Cross-thread recording dict, mutated in place.
         """
 
@@ -669,16 +669,16 @@ class SorcarRunApiTest(unittest.TestCase):
 
         self._parent_class.run = stub_run
         result = sorcar.run(
-            "use the agent script's tools",
+            "use the SEA's tools",
             work_dir=self.repo,
-            extension_agent_path=tools_path,
+            sea_path=tools_path,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
 
     def test_edited_agent_script_reloads_fresh_code(self) -> None:
-        """A run always sees the agent script's CURRENT code.
+        """A run always sees the SEA's CURRENT code.
 
         Regression: loading through ``importlib``'s ``SourceFileLoader``
         cached bytecode in ``__pycache__`` keyed on (mtime, size) — two
@@ -693,7 +693,7 @@ class SorcarRunApiTest(unittest.TestCase):
             from kiss.agents.seas.base.base_sea import BaseSea
 
             def version() -> str:
-                """Report the agent script version."""
+                """Report the SEA version."""
                 return "ONE"
 
 
@@ -715,7 +715,7 @@ class SorcarRunApiTest(unittest.TestCase):
             from kiss.agents.seas.base.base_sea import BaseSea
 
             def version() -> str:
-                """Report the agent script version."""
+                """Report the SEA version."""
                 return "TWO"
 
 
@@ -733,13 +733,13 @@ class SorcarRunApiTest(unittest.TestCase):
         assert not (Path(self.tmpdir) / "__pycache__").exists()
 
     def test_misbehaving_tool_getter_fails_task(self) -> None:
-        """An agent script with a bad ``tools()`` fails the task loudly.
+        """A SEA with a bad ``tools()`` fails the task loudly.
 
         The contract requires ``tools()``, when defined, to return a
         list of callables, and ``settings()['tool_profile']`` to be a
         string.  A file that defines no SEA class or names a
         wrong-typed tool profile is rejected when the daemon loads it:
-        the task stops with an ``AgentFileError`` diagnostic and the
+        the task stops with an ``SeaError`` diagnostic and the
         agent never runs.  A ``tools()`` that raises, returns a
         non-list (e.g. a file path) or non-callable entries is caught
         when the run builds its toolset (the hook the daemon hands the
@@ -812,45 +812,45 @@ class SorcarRunApiTest(unittest.TestCase):
             seen.setdefault("hooks", []).append(self_agent._tools_hook is not None)
             names = [t.__name__ for t in _sea_tools(self_agent)]
             seen.setdefault("tool_lists", []).append(names)
-            raise AssertionError("agent must not run with a broken agent script")
+            raise AssertionError("agent must not run with a broken SEA")
 
         self._parent_class.run = stub_run
-        for agent_path, diagnostic in (
+        for sea_path, diagnostic in (
             (no_sea_class, "must define exactly one subclass of BaseSea"),
             (bad_profile, "settings()['tool_profile'] must be str, got int"),
         ):
-            result_event = self._raw_daemon_run(agent_path)
-            assert result_event is not None, f"no result for {agent_path!r}"
-            assert result_event["success"] is False, f"for {agent_path!r}"
-            assert "AgentFileError" in result_event["text"], f"for {agent_path!r}"
-            assert diagnostic in result_event["text"], f"for {agent_path!r}"
-        assert "hooks" not in seen, "the agent must not run with a broken agent script"
-        for agent_path, diagnostic in (
-            (raising_getter, "tools() of agent script"),
+            result_event = self._raw_daemon_run(sea_path)
+            assert result_event is not None, f"no result for {sea_path!r}"
+            assert result_event["success"] is False, f"for {sea_path!r}"
+            assert "SeaError" in result_event["text"], f"for {sea_path!r}"
+            assert diagnostic in result_event["text"], f"for {sea_path!r}"
+        assert "hooks" not in seen, "the agent must not run with a broken SEA"
+        for sea_path, diagnostic in (
+            (raising_getter, "tools() of SEA"),
             (raising_getter, "raised: RuntimeError: boom in add_to_tools"),
             (bad_return, "must return a list of tool callables (not a file path), got str"),
             (non_callable_entry, "must return a list of tool callables"),
         ):
             seen.clear()
             events: list[dict[str, Any]] = []
-            self._raw_daemon_run(agent_path, events_out=events)
-            assert seen["hooks"] == [True], f"for {agent_path!r}"
-            assert "tool_lists" not in seen, f"the hook must raise for {agent_path!r}"
+            self._raw_daemon_run(sea_path, events_out=events)
+            assert seen["hooks"] == [True], f"for {sea_path!r}"
+            assert "tool_lists" not in seen, f"the hook must raise for {sea_path!r}"
             # The run ends as a failed task (a ``task_error`` event
             # carrying the diagnostic) whose persisted result carries
             # the diagnostic too.
             (end_event,) = [e for e in events if e.get("type") == "task_error"]
-            assert diagnostic in end_event["text"], f"for {agent_path!r}: {end_event!r}"
+            assert diagnostic in end_event["text"], f"for {sea_path!r}: {end_event!r}"
             (task_id,) = {e["taskId"] for e in events if e.get("type") == "task_settings"}
             (row,) = [r for r in _persistence._load_history() if r["id"] == task_id]
-            assert "Task failed" in str(row["result"]), f"for {agent_path!r}: {row!r}"
-            assert diagnostic in str(row["result"]), f"for {agent_path!r}: {row!r}"
+            assert "Task failed" in str(row["result"]), f"for {sea_path!r}: {row!r}"
+            assert diagnostic in str(row["result"]), f"for {sea_path!r}: {row!r}"
 
     def test_sys_exit_in_agent_script_fails_task_with_diagnostic(self) -> None:
-        """An agent script calling ``sys.exit()`` fails the task loudly.
+        """A SEA calling ``sys.exit()`` fails the task loudly.
 
         ``SystemExit`` is not an ``Exception`` subclass; the loader
-        must convert it into ``AgentFileError`` (letting it escape
+        must convert it into ``SeaError`` (letting it escape
         unwrapped would kill the task thread) so the task stops with a
         diagnostic result instead of silently running without the
         requested tools — and without ever invoking the agent.
@@ -874,18 +874,18 @@ class SorcarRunApiTest(unittest.TestCase):
             seen.setdefault("tool_lists", []).append(
                 [t.__name__ for t in kwargs.get("tools") or []],
             )
-            raise AssertionError("agent must not run with a broken agent script")
+            raise AssertionError("agent must not run with a broken SEA")
 
         self._parent_class.run = stub_run
         result = sorcar.run(
-            "use the broken agent script",
+            "use the broken SEA",
             work_dir=self.repo,
-            extension_agent_path=tools_path,
+            sea_path=tools_path,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False
-        assert "AgentFileError" in result.text
+        assert "SeaError" in result.text
         assert "SystemExit" in result.text
         # The diagnostic quotes the resolved path with repr() (doubled
         # backslashes on Windows, /private/var on macOS).
@@ -893,14 +893,14 @@ class SorcarRunApiTest(unittest.TestCase):
         assert "tool_lists" not in seen
 
     def test_broken_agent_script_stops_task_with_diagnostic(self) -> None:
-        """A broken ``agentPath`` fails the task with a diagnostic error.
+        """A broken ``seaPath`` fails the task with a diagnostic error.
 
         A hand-crafted client can send anything: a non-string value, a
         missing path, a directory, a non-``.py`` file, a module that
         raises at import time, or one with a syntax error.  The daemon
         must stop the task with a failed result whose text carries the
         loader's diagnostic — never invoke the agent — and stay alive
-        for later tasks.  An absent agent script (``None``) still runs
+        for later tasks.  An absent SEA (``None``) still runs
         the task normally with no extra tools.
         """
         raising = self._write_agent_script(
@@ -926,7 +926,7 @@ class SorcarRunApiTest(unittest.TestCase):
             return raw
 
         self._parent_class.run = stub_run
-        for agent_path, diagnostic in (
+        for sea_path, diagnostic in (
             (42, "path string"),
             (str(Path(self.tmpdir) / "nowhere.py"), "not an existing"),
             (self.tmpdir, "not an existing"),
@@ -934,11 +934,11 @@ class SorcarRunApiTest(unittest.TestCase):
             (raising, "RuntimeError: boom at import"),
             (broken, "SyntaxError"),
         ):
-            result_event = self._raw_daemon_run(agent_path)
-            assert result_event is not None, f"no result for {agent_path!r}"
-            assert result_event["success"] is False, f"for {agent_path!r}"
-            assert "AgentFileError" in result_event["text"], f"for {agent_path!r}"
-            assert diagnostic in result_event["text"], f"for {agent_path!r}"
+            result_event = self._raw_daemon_run(sea_path)
+            assert result_event is not None, f"no result for {sea_path!r}"
+            assert result_event["success"] is False, f"for {sea_path!r}"
+            assert "SeaError" in result_event["text"], f"for {sea_path!r}"
+            assert diagnostic in result_event["text"], f"for {sea_path!r}"
         assert "tool_lists" not in seen
         result_event = self._raw_daemon_run(None)
         assert result_event is not None
@@ -952,8 +952,8 @@ class SorcarRunApiTest(unittest.TestCase):
         )
         assert result.success is True
 
-    def test_invalid_agent_path_raises_value_error(self) -> None:
-        """Invalid ``extension_agent_path`` values are rejected before connecting.
+    def test_invalid_sea_path_raises_value_error(self) -> None:
+        """Invalid ``sea_path`` values are rejected before connecting.
 
         ``endpoint_file`` names a nonexistent file, so reaching the
         connect stage would raise ``ConnectionError`` instead of the
@@ -977,11 +977,11 @@ class SorcarRunApiTest(unittest.TestCase):
             str(Path(self.tmpdir) / "tools.txt"),
         ]
         Path(self.tmpdir, "tools.txt").write_text("not python\n")
-        for agent_path in cases:
+        for sea_path in cases:
             with self.assertRaises(ValueError):
                 sorcar.run(
                     "hello",
-                    extension_agent_path=agent_path,
+                    sea_path=sea_path,
                     endpoint_file=missing_endpoint,
                     timeout=5,
                 )
@@ -1547,7 +1547,7 @@ class SorcarRunApiTest(unittest.TestCase):
     def test_scope_survives_agent_script_work_dir_override(self) -> None:
         """A ``settings()['work_dir']`` override re-pins ``workDir``, not the scope.
 
-        The agent script overrides the execution directory via
+        The SEA overrides the execution directory via
         ``settings()['work_dir']``, and ``_run_task`` re-pins the
         registry tab's ``workDir`` to the overridden value.  The tab's
         ``scopeWorkDir`` must survive that re-pin — it is what keeps a
@@ -1570,7 +1570,7 @@ class SorcarRunApiTest(unittest.TestCase):
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.0
             self_agent.total_steps = 1
-            # Snapshot AFTER apply_agent_overrides re-pinned workDir
+            # Snapshot AFTER apply_sea re-pinned workDir
             # (both run on this worker thread before the agent runs).
             captured["tabs"] = [
                 dict(entry)
@@ -1591,7 +1591,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "say hi",
             work_dir=str(Path(self.tmpdir) / "initial_work"),
             scope_work_dir=workspace,
-            extension_agent_path=str(agent_script),
+            sea_path=str(agent_script),
             use_worktree=False,
             auto_commit=False,
             endpoint_file=self.endpoint_file,
@@ -1649,7 +1649,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "say hi",
             work_dir=str(Path(self.tmpdir) / "scope_exec_work"),
             scope_work_dir=client_scope,
-            extension_agent_path=str(agent_script),
+            sea_path=str(agent_script),
             use_worktree=False,
             auto_commit=False,
             endpoint_file=self.endpoint_file,
@@ -1721,7 +1721,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "from kiss.agents.seas.base.base_sea import BaseSea\n"
             "\n"
             "class Sea(BaseSea):\n"
-            '    """An agent script that changes nothing."""\n'
+            '    """A SEA that changes nothing."""\n'
         )
         saved_endpoint = cron_agent._daemon_endpoint_file
         cron_agent._daemon_endpoint_file = self.endpoint_file

@@ -34,6 +34,7 @@ from kiss.core.kiss_error import (
 from kiss.core.models.model import SYSTEM_CACHE_BREAK, Attachment
 from kiss.core.models.model_info import model_runs_task_to_completion
 from kiss.core.printer import Printer
+from kiss.core.tool_verdict import Verdict
 from kiss.core.utils import _coerce_bool as _str_to_bool
 from kiss.core.utils import finish, read_text_waiting_for_writer, substitute_prompt_args
 
@@ -695,7 +696,7 @@ class RelentlessAgent(Base):
         self.llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None
-        self.tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None
+        self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
         self.set_printer(printer, verbose=verbose)
 
     @property
@@ -1682,7 +1683,7 @@ class RelentlessAgent(Base):
         llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None,
-        tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
     ) -> str:
         """Run the agent with the provided tools.
 
@@ -1711,10 +1712,11 @@ class RelentlessAgent(Base):
             tool_call_hook: Optional hook installed on every per-session
                 executor :class:`KISSAgent` (see
                 :meth:`kiss.core.kiss_agent.KISSAgent.run`): called before
-                every tool call with the tool's name and arguments; any
-                returned string (``None`` allows) suppresses the call and is
-                returned to the model as the tool's result.  Defaults to
-                None (no hook).
+                every tool call with the tool's name and arguments and
+                returns a :class:`~kiss.core.tool_verdict.Verdict`:
+                ``refuse(text)`` suppresses the call and the model reads
+                *text* as the tool's result, ``ALLOW`` lets it run.
+                Defaults to None (no hook).
 
         Returns:
             YAML string with 'success' and 'summary' keys.

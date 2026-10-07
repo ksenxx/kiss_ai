@@ -51,6 +51,7 @@ from kiss.agents.sorcar.sea_settings import (
     PRECEDENCE_RULE,
     SeaError,
     alias_free_profile,
+    anchored_work_dir,
     locked_conflicts,
 )
 from kiss.agents.sorcar.skills import make_skill_tool
@@ -84,6 +85,7 @@ from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
 from kiss.core.stop_signal import get_thread_stop_event, set_thread_stop_event
 from kiss.core.tool_interrupt import ToolCallInterrupted
+from kiss.core.tool_verdict import Verdict
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
@@ -1883,7 +1885,7 @@ class SorcarAgent(RelentlessAgent):
                 *options* — pin what a fan-out child cannot honour
                 (:func:`kiss.agents.sorcar.agent_dispatch.fanout_conflict`).
         """
-        from kiss.agents.sorcar.sea_commands import SeaScriptError, base_settings, sea_layers
+        from kiss.agents.sorcar.sea_commands import base_settings, sea_layers
 
         run_options = RunOptions(tool_profile=tool_profile) if options is None else options
         # A call naming no agent runs the bare ``BaseSea`` — the root
@@ -1894,13 +1896,13 @@ class SorcarAgent(RelentlessAgent):
         if agent.strip():
             resolved = resolve_agent(agent, self.work_dir)
             if isinstance(resolved, str):
-                raise SeaScriptError(resolved.removeprefix("Error: "))
+                raise SeaError(resolved.removeprefix("Error: "))
             layers = sea_layers(Path(resolved[0]))
             name = resolved[1]
         settings = base_settings(layers)
         conflict = fanout_conflict(settings)
         if conflict:
-            raise SeaScriptError(f"{name} {conflict}")
+            raise SeaError(f"{name} {conflict}")
         # sea_settings.PRECEDENCE_RULE: an explicit argument or option
         # wins over the SEA's settings unless the SEA locks the key —
         # then the clash is an error — and the SEA's settings rank
@@ -1917,19 +1919,13 @@ class SorcarAgent(RelentlessAgent):
             pinned["timeout"] = timeout
         conflict = locked_conflicts(settings, pinned, self.work_dir)
         if conflict:
-            raise SeaScriptError(f"run_parallel: {conflict}")
+            raise SeaError(f"run_parallel: {conflict}")
         explicit = set(pinned)
         conflict = fanout_conflict({**settings, **pinned})
         if conflict:
-            raise SeaScriptError(f"run_parallel options {conflict}")
-        work_dir = self.work_dir
-        if run_options.work_dir:
-            requested = Path(run_options.work_dir).expanduser()
-            if not requested.is_absolute():
-                requested = Path(self.work_dir) / requested
-            work_dir = str(requested)
-        elif settings.get("work_dir"):
-            work_dir = str(settings["work_dir"])
+            raise SeaError(f"run_parallel options {conflict}")
+        chosen = run_options.work_dir or str(settings.get("work_dir") or "")
+        work_dir = anchored_work_dir(chosen, self.work_dir) if chosen else self.work_dir
         # Bank whatever an earlier fan-out's abandoned children spent
         # after this agent stopped waiting for them, before the budget
         # share below is computed from those totals.
@@ -2989,7 +2985,7 @@ class SorcarAgent(RelentlessAgent):
         llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None,
-        tool_call_hook: Callable[[str, dict[str, Any]], str | None] | None = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
         use_memory: bool | None = None,
         tool_profile: str = "",
         live_browser: Any = None,
@@ -3077,9 +3073,10 @@ class SorcarAgent(RelentlessAgent):
                 :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
                 sub-session this agent runs (see that docstring): called
                 before every tool call with the tool's name and
-                arguments; a returned string (``None`` allows) suppresses
-                the call and is returned to the model as the tool's
-                result.  Applies to this agent only, not to
+                arguments and returns a
+                :class:`~kiss.core.tool_verdict.Verdict` (``ALLOW``, or
+                ``refuse(text)``: the call is suppressed and the model
+                reads *text* as its result).  Applies to this agent only, not to
                 ``run_parallel`` sub-agents.  Defaults to None (no
                 hook).
             use_memory: Per-run persistent-memory toggle
@@ -3494,7 +3491,7 @@ def _sea_run_kwargs(
     """Return the ``run()`` keyword overrides a SEA makes for one child.
 
     The in-process counterpart of the daemon's
-    :func:`kiss.agents.sorcar.agent_file.apply_agent_overrides`: the SEA's
+    :func:`kiss.agents.sorcar.sea_apply.apply_sea`: the SEA's
     settings replace the inherited *defaults* (an explicit fan-out
     argument was checked against ``locked`` by the caller), its
     ``prompt(task)`` shapes the prompt, and its ``system_prompt``,
@@ -3511,7 +3508,9 @@ def _sea_run_kwargs(
         defaults: The keyword arguments the child would run with
             otherwise (read, not modified).
         parent_agent: The fanning-out agent, whose persisted task id
-            replaces ``{task_id}`` in the prompt.
+            replaces ``{task_id}`` in the prompt and whose ``work_dir``
+            anchors a relative ``work_dir`` setting (the process's
+            current directory when there is no parent).
         explicit: The setting keys the ``run_parallel`` call passed
             explicitly; the script's values for them are not applied
             (the call's win; a locked clash was refused before).
@@ -3522,7 +3521,7 @@ def _sea_run_kwargs(
         ``pinned``; see :mod:`kiss.agents.sorcar.run_config`).
 
     Raises:
-        SeaScriptError: When a method is broken (see
+        SeaError: When a method is broken (see
             :func:`~kiss.agents.sorcar.sea_commands.evaluate_sea`).
     """
     run = evaluate_sea(seas, task, _persisted_task_id(parent_agent))
@@ -3530,6 +3529,7 @@ def _sea_run_kwargs(
     run_config: dict[str, Any] = {
         "sea": sea_name(seas),
         "kind": settings["kind"],
+        "channel": bool(settings.get("channel")),
         "pinned": {},
     }
     # ``run()`` only records ``prompt_suffix``: the prompt carries it.
@@ -3540,6 +3540,7 @@ def _sea_run_kwargs(
         "llm_call_hook": run.llm_call_hook,
         "tool_call_hook": run.tool_call_hook,
     }
+    parent_work_dir = str(getattr(parent_agent, "work_dir", None) or Path.cwd())
     for key, kwarg in (
         ("model", "model_name"), ("max_budget", "max_budget"),
         ("tool_profile", "tool_profile"), ("docker_image", "docker_image"),
@@ -3547,8 +3548,11 @@ def _sea_run_kwargs(
         ("use_memory", "use_memory"), ("allow_fan_out", "is_parallel"),
     ):
         if key in settings and settings[key] != "" and key not in (explicit or ()):
-            overrides[kwarg] = settings[key]
-            note_pinned(run_config["pinned"], key, defaults.get(kwarg), settings[key])
+            value = settings[key]
+            if key == "work_dir":
+                value = anchored_work_dir(value, parent_work_dir)
+            overrides[kwarg] = value
+            note_pinned(run_config["pinned"], key, defaults.get(kwarg), value)
     if "model_name" in overrides and settings["model"] != defaults.get("model_name"):
         # The parent's model_config belongs to the parent's model.
         overrides["model_config"] = None

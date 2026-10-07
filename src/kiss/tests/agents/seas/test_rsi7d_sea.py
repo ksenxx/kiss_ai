@@ -43,6 +43,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.brand import HOME_DIR, render_brand
+from kiss.core.tool_verdict import ALLOW
 from kiss.core.utils import rmtree_force
 from kiss.server import agent_state
 from kiss.tests.agents.sorcar.local_model_server import (
@@ -60,6 +61,7 @@ _SEAS_DIR = _SEA_PATH.parents[1]
 _PLAIN_SEA = '''"""Demo SEA with a plain prompt constant."""
 
 from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.core.tool_verdict import ALLOW
 
 SYSTEM_PROMPT = (
     "You run demo tasks. Always report the exit code. Always report the exit code. "
@@ -264,7 +266,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert run.llm_call_hook([{"role": "user", "content": "x"}]) == [
         {"role": "user", "content": "x"}
     ]
-    assert run.tool_call_hook("Bash", {"command": "ls"}) is None
+    assert run.tool_call_hook("Bash", {"command": "ls"}) == ALLOW
 
 
 def test_sea_name_of_handles_paths_channels_and_plain_subagents() -> None:
@@ -328,12 +330,12 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
     sub-agent child (no ``agent``) is ignored.  A side-channel child whose
     system prompt starts with ``fdemo``'s prompt is matched by signature.
     """
-    agent_path = str(checkout / "demo" / "demo_sea.py")
+    sea_path = str(checkout / "demo" / "demo_sea.py")
     parent = _persist(
         "/demo do the thing",
         [
-            _dispatch(agent_path, "do the thing"),
-            _dispatch(agent_path, "never persisted"),
+            _dispatch(sea_path, "do the thing"),
+            _dispatch(sea_path, "never persisted"),
             {
                 "type": "tool_call",
                 "name": "run_agent",
@@ -372,7 +374,7 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
     data = json.loads(sea.sea_runs(days=1))
     assert data["unmatched_dispatches"] >= 1
     demo = data["seas"]["demo"]
-    assert demo["agents"] == [agent_path]
+    assert demo["agents"] == [sea_path]
     assert [r["task_id"] for r in demo["runs"]] == [child]
     run = demo["runs"][0]
     assert run["status"] == "success" and run["model"] == "model-b"
@@ -484,9 +486,9 @@ def test_sea_findings_aggregates_signals_over_a_seas_runs(checkout: Path) -> Non
     Dispatches ``noprompt`` (no other test does, and it has no prompt
     signature) so the shared session history cannot add runs.
     """
-    agent_path = str(checkout / "noprompt" / "noprompt_sea.py")
+    sea_path = str(checkout / "noprompt" / "noprompt_sea.py")
     parent = _persist(
-        "/noprompt twice", [_dispatch(agent_path, "run 1"), _dispatch(agent_path, "run 2")]
+        "/noprompt twice", [_dispatch(sea_path, "run 1"), _dispatch(sea_path, "run 2")]
     )
     for task, ok in (("run 1", True), ("run 2", False)):
         _persist(
