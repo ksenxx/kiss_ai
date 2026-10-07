@@ -68,6 +68,14 @@
       prev.textContent = '';
       return;
     }
+    // A finished task's Trajectory panel (foldTrajectory in main.js)
+    // previews its event count, as in the live webview.
+    if (panelEl.classList.contains('trajectory')) {
+      const sub = panelEl.querySelector(':scope > .trajectory-sub');
+      const n = sub ? sub.children.length : 0;
+      prev.textContent = n + (n === 1 ? ' event' : ' events');
+      return;
+    }
     let briefSel = null;
     if (panelEl.classList.contains('tc-bash'))
       briefSel = '.tc-arg-desc .tc-arg-val';

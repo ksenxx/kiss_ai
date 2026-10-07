@@ -289,49 +289,80 @@
     if (endTab) sealPanelTimes(endTab.outputFragment, endTs);
   }
 
-  // livedone-coverage:start
+  // trajectory-coverage:start
   /**
-   * Stamp every event panel of *root* as having finished on screen.
+   * Fold the event panels of a finished task into one collapsed
+   * "Trajectory" panel.
    *
    * Called when a task ends (task_done / task_error / task_stopped /
-   * task_interrupted): a stamped panel keeps the exact collapsed or
-   * expanded state the live stream left it in — the finish must not
-   * explicitly collapse (or hide) any event panel the user was
-   * watching (see applyChevronState). The stamp is a plain JS
-   * property, so a REPLAYED transcript (a reload or reattach builds
-   * fresh DOM from stored events) carries none and keeps the
-   * finished-task digest presentation.
+   * task_interrupted) and after the replay of a task that has ended:
+   * every `.ev` / `.llm-panel` child of *root* -- tool calls and
+   * results, Thoughts, prompts, summaries, status lines -- moves, in
+   * order, into the `.trajectory-sub` of one `.ev.trajectory`
+   * panel standing where the first of them stood, so the transcript
+   * reads as the task's text, its trajectory and its result.  Left
+   * outside: the task panel heading the transcript, the result
+   * panels, and a neighbouring task's `.adjacent-task` container (its
+   * own replay folds it).  A trajectory panel already there (a task
+   * that ends twice: a terminal event after a status-only end) adopts
+   * the newcomers.
    *
-   * @param {Element|DocumentFragment|null} root The tab's transcript.
+   * @param {Element|DocumentFragment|null} root The task's transcript:
+   *   #output, a hidden tab's fragment or an adjacent-task container.
    */
-  function markPanelsLiveFinished(root) {
-    if (!root || !root.querySelectorAll) return;
-    const panels = root.querySelectorAll('.collapsible');
-    for (let i = 0; i < panels.length; i++) {
-      // A neighbouring task's replayed transcript did not finish on
-      // screen — it keeps its digest, so it takes no stamp.
-      if (panels[i].closest('.adjacent-task')) continue;
-      panels[i]._liveFinished = true;
+  function foldTrajectory(root) {
+    if (!root || !root.children) return;
+    let panel = null;
+    const adopt = [];
+    for (let i = 0; i < root.children.length; i++) {
+      const el = root.children[i];
+      if (el.classList.contains('trajectory')) {
+        panel = el;
+      } else if (
+        (el.classList.contains('ev') || el.classList.contains('llm-panel')) &&
+        !el.classList.contains('task-panel') &&
+        !el.classList.contains('rc')
+      ) {
+        adopt.push(el);
+      }
     }
+    if (!adopt.length) return;
+    if (!panel) {
+      panel = mkEl('div', 'ev trajectory');
+      const hdr = mkEl('div', 'trajectory-h');
+      hdr.textContent = 'Trajectory';
+      panel.appendChild(hdr);
+      panel.appendChild(mkEl('div', 'trajectory-sub'));
+      addCollapse(panel, hdr, undefined);
+      root.insertBefore(panel, adopt[0]);
+    }
+    const sub = panel.querySelector(':scope > .trajectory-sub');
+    for (let i = 0; i < adopt.length; i++) sub.appendChild(adopt[i]);
+    panel.classList.add('collapsed');
+    panel.classList.remove('user-pinned');
+    collapsePreview(panel);
+    // The fan-outs now hidden hand their sub-agent tabs in, as they
+    // do under any collapsed panel.
+    collapseNestedRunParallel(panel);
   }
 
   /**
-   * Stamp the panels of the tab a terminal event names (see
-   * markPanelsLiveFinished). The tab's transcript is #output when it
-   * is on screen and its detached fragment when it is hidden; a
-   * terminal event for a tab this client no longer has is a no-op.
+   * Fold the transcript of the tab a terminal event names (see
+   * foldTrajectory). The tab's transcript is #output when it is on
+   * screen and its detached fragment when it is hidden; a terminal
+   * event for a tab this client no longer has is a no-op.
    *
    * @param {string|undefined} evTabId The terminal event's tab id.
    */
-  function markTabPanelsLiveFinished(evTabId) {
+  function foldTabTrajectory(evTabId) {
     if (evTabId === undefined || evTabId === activeTabId) {
-      markPanelsLiveFinished(O);
+      foldTrajectory(O);
       return;
     }
     const endTab = getTab(evTabId);
-    if (endTab) markPanelsLiveFinished(endTab.outputFragment);
+    if (endTab) foldTrajectory(endTab.outputFragment);
   }
-  // livedone-coverage:end
+  // trajectory-coverage:end
 
   function discardProvisionalPanel(el) {
     if (!el) return;
@@ -11287,9 +11318,10 @@
    * preview, so any event of a past task can be opened by a click.
    * Left as they are: the panels of a running task, the result, a
    * panel showing an image, a `/ask` answer, a panel the user opened
-   * (`user-pinned`), a panel that finished on screen (`_liveFinished`)
-   * and the panels a `summary` tool call adopted (`.summary-sub`, shown
-   * when the summary panel is opened).
+   * (`user-pinned`), the panels a `summary` tool call adopted
+   * (`.summary-sub`, shown when the summary panel is opened) and the
+   * panels of a finished task's Trajectory (`.trajectory-sub`, folded
+   * by foldTrajectory when the task ended).
    *
    * @param {string} taskName Only panels of this task are folded; a
    *     falsy name folds every task on screen.
@@ -11314,14 +11346,7 @@
         panelStaysOpen(p)
       )
         continue;
-      // livedone-coverage:start
-      // The panel was on screen when its task finished: the finish must
-      // not explicitly collapse any event panel, so the panel keeps the
-      // exact state the live stream left it in — untouched — until a
-      // replay rebuilds the transcript (markPanelsLiveFinished).
-      if (p._liveFinished) continue;
-      // livedone-coverage:end
-      if (p.closest('.summary-sub')) continue;
+      if (p.closest('.summary-sub') || p.closest('.trajectory-sub')) continue;
       if (p.classList.contains('user-pinned')) continue;
       // Already folded: its preview was built when it collapsed and
       // its nested fan-outs were folded with it.
@@ -12469,6 +12494,19 @@
     }
   }
 
+  /**
+   * The preview a collapsed Trajectory panel shows: how many event
+   * panels it holds (their text would run to the whole transcript).
+   *
+   * @param {Element} panelEl The `.trajectory` panel.
+   * @returns {string} "N events".
+   */
+  function trajectoryPreviewText(panelEl) {
+    const sub = panelEl.querySelector(':scope > .trajectory-sub');
+    const n = sub ? sub.children.length : 0;
+    return n + (n === 1 ? ' event' : ' events');
+  }
+
   function collapsePreview(panelEl) {
     syncCollapseAria(panelEl);
     const prev = panelEl.querySelector('.collapse-preview');
@@ -12479,6 +12517,10 @@
     }
     if (!panelEl.classList.contains('collapsed')) {
       prev.textContent = '';
+      return;
+    }
+    if (panelEl.classList.contains('trajectory')) {
+      prev.textContent = trajectoryPreviewText(panelEl);
       return;
     }
     const brief = briefPreviewText(panelEl);
@@ -14078,6 +14120,7 @@
           while (sib) {
             if (
               sib.classList.contains('tc-summary') ||
+              sib.classList.contains('trajectory') ||
               sib.classList.contains('prompt') ||
               sib.classList.contains('system-prompt') ||
               sib.classList.contains('task-panel') ||
@@ -14576,15 +14619,9 @@
    */
   function streamEnd(ctx, ev, target) {
     const t = ev.type;
-    // livedone-coverage:start
-    // The result IS the task finishing: the pass that folds older
-    // panels behind each new event must not run for it, or the finish
-    // would explicitly collapse the panels (a done run_parallel
-    // fan-out, the last open tool panel) the user was watching.
-    if (target === ctx.container && t !== 'result') {
+    if (target === ctx.container) {
       collapseOlderPanels(ctx.container, ctx.tabId);
     }
-    // livedone-coverage:end
     if (t === 'tool_result' && ctx.lastToolName !== 'finish' && !ctx.llmPanel) {
       // The agent is thinking again; the panel its words will land in is
       // opened now so the transcript does not sit empty, and withdrawn
@@ -16148,6 +16185,15 @@
           // sub-agent composer) waits for the real tab switch.
           setRunningState(ev.running);
         }
+        // trajectory-coverage:start
+        // A task that ended without a terminal event this client saw
+        // (a status-only end after a replay, a refused run) folds its
+        // panels into the Trajectory here, after setRunningState has
+        // settled the stream's pending tail sweep on the panels still
+        // in place; after a terminal event the fold is already done
+        // and this finds nothing to adopt.
+        if (!ev.running) foldTabTrajectory(ev.tabId);
+        // trajectory-coverage:end
         renderTabBar();
         refreshHistory();
         syncMobileInputDrawer();
@@ -17225,9 +17271,9 @@
         // donelabel-coverage:end
         markTabDone(ev.tabId, ev.success === false);
         sealTabPanelTimes(ev.tabId, ev.endTs);
-        // livedone-coverage:start
-        markTabPanelsLiveFinished(ev.tabId);
-        // livedone-coverage:end
+        // trajectory-coverage:start
+        foldTabTrajectory(ev.tabId);
+        // trajectory-coverage:end
         clearActionProgressForTab(ev.tabId);
         setReady(doneLabel, ev.tabId, ev.startTs, ev.endTs);
         focusFinishedTab(ev.tabId);
@@ -17258,9 +17304,9 @@
           }
         }
         sealTabPanelTimes(ev.tabId, ev.endTs);
-        // livedone-coverage:start
-        markTabPanelsLiveFinished(ev.tabId);
-        // livedone-coverage:end
+        // trajectory-coverage:start
+        foldTabTrajectory(ev.tabId);
+        // trajectory-coverage:end
         const label =
           t === 'task_error'
             ? 'Error'
@@ -18719,6 +18765,15 @@
     // that wants the numbers this replay painted must read them now.
     if (opts && opts.onEventsRendered) opts.onEventsRendered();
     collapseAllExceptResult(container, ownerTabId);
+    // trajectory-coverage:start
+    // A task that has ended reads as its text, one Trajectory panel
+    // and its result, replayed or live (foldTrajectory).  A running
+    // task's replay keeps its panels in the open: they are still the
+    // live stream's, and the terminal event folds them when it ends.
+    if (isAdjacentReplay || !(replayOwnerTab && replayOwnerTab.isRunning)) {
+      foldTrajectory(container);
+    }
+    // trajectory-coverage:end
     if (typeof hljs !== 'undefined') {
       container.querySelectorAll('code.needs-hl').forEach(bl => {
         if (!bl.closest('.collapsible.collapsed')) {

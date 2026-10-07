@@ -558,7 +558,22 @@ function replayCompletedSummaryTask(win) {
   });
 }
 
-function testReplayedSummaryStaysVisibleDespiteChevronCollapse() {
+/**
+ * The replay of a finished task folds every panel into one collapsed
+ * Trajectory panel; open it, as the user would, and return it.
+ */
+function openTrajectory(win) {
+  const traj = output(win).querySelector(':scope > .trajectory');
+  assert.ok(traj, 'the finished task replays with a Trajectory panel');
+  assert.ok(traj.classList.contains('collapsed'), 'collapsed at first');
+  traj
+    .querySelector(':scope > .trajectory-h')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true, cancelable: true}));
+  assert.ok(!traj.classList.contains('collapsed'), 'the header click opens it');
+  return traj;
+}
+
+function testReplayedSummaryStaysVisibleInsideTrajectory() {
   const {win} = makeWebview();
   injectCss(win);
   replayCompletedSummaryTask(win);
@@ -568,43 +583,43 @@ function testReplayedSummaryStaysVisibleDespiteChevronCollapse() {
     p.classList.contains('collapsed'),
     'the replayed summary panel stays in its collapsed digest state',
   );
+  const traj = output(win).querySelector(':scope > .trajectory');
+  assert.ok(
+    traj && traj.contains(p) && isDisplayed(win, traj) && !isDisplayed(win, p),
+    'the summary panel sits behind the collapsed Trajectory of the ' +
+      'finished task',
+  );
+  openTrajectory(win);
   assert.ok(
     isDisplayed(win, p),
-    'the summary panel (and all its ancestors) must remain displayed ' +
-      'after a completed-task replay',
+    'the summary panel (and all its ancestors) is displayed once the ' +
+      'Trajectory is opened',
   );
   const desc = p.querySelector(':scope > .tc-summary-desc');
   assert.ok(
     isDisplayed(win, desc),
     'the description must be fully visible after replay',
   );
-  const plainTc = topLevel(win)
-    .flatMap(el =>
-      el.classList && el.classList.contains('adjacent-task')
-        ? Array.from(el.querySelectorAll(':scope > .tc'))
-        : [el],
-    )
-    .filter(
-      el =>
-        el.classList &&
-        el.classList.contains('tc') &&
-        !el.classList.contains('tc-summary'),
-    );
-  assert.ok(plainTc.length > 0, 'the replay leaves plain panels on screen');
+  const plainTc = Array.from(
+    traj.querySelectorAll(':scope > .trajectory-sub > .tc:not(.tc-summary)'),
+  );
+  assert.ok(plainTc.length > 0, 'the Trajectory holds the plain panels');
   assert.ok(
     plainTc.every(
       el => el.classList.contains('collapsed') && isDisplayed(win, el),
     ),
-    'non-summary panels of a replayed task are folded, never hidden',
+    'non-summary panels of a replayed task are folded inside the ' +
+      'Trajectory, shown when it is open',
   );
   win.close();
-  console.log('  ok - replayed summary and plain panels stay visible');
+  console.log('  ok - replayed summary and plain panels sit in the Trajectory');
 }
 
 function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
   const {win} = makeWebview();
   injectCss(win);
   replayCompletedSummaryTask(win);
+  openTrajectory(win);
   const p = summaryPanels(win)[0];
   const hdr = p.querySelector('.tc-h');
   hdr.dispatchEvent(
@@ -783,7 +798,7 @@ function runTests() {
   testToolResultLandsInsideCollapsedSummaryPanel();
   testNonSummaryToolCallUnaffected();
   testReplayPathNestsAndCollapses();
-  testReplayedSummaryStaysVisibleDespiteChevronCollapse();
+  testReplayedSummaryStaysVisibleInsideTrajectory();
   testAdoptedPanelsRevealAfterManualExpandPostReplay();
   testAdoptedPanelKeepsOwnCollapsePreview();
   testReplayWithTwoSummariesSegmentsCorrectly();
