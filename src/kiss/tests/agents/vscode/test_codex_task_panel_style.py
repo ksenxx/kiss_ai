@@ -8,7 +8,7 @@ Features on the remote webapp (served by ``RemoteAccessServer``):
 
 1. The inline task panel (``.ev.task-panel``, the first event of a
    task's thread) inherits main.css's look verbatim (the page
-   foreground over the accent tint, plus a 1px accent hairline; the
+   foreground over the user bubble's accent wash, plus a 1px accent hairline; the
    remote page merely swaps the palette variables), its text sized by
    the page's injected 14px ``--vscode-editor-font-size``.  The event
    panels likewise inherit
@@ -1015,16 +1015,18 @@ def test_live_task_panel_typography_and_history_rows(
         "(main.css .task-panel-text: var(--fg)): " + repr(probes)
     )
     # The thinking text is plain text inside the Thoughts panel, with no
-    # tint of its own; the task panel alone sits on the accent tint
-    # (--accent-tint, 8%) behind a 1px accent hairline (--accent-line).
+    # tint of its own; the task panel alone sits on the user bubble's
+    # accent wash (--bubble-user-tint, 16%, deeper than the 8%
+    # --accent-tint of other accent-marked panels) behind a 1px accent
+    # hairline (--accent-line).
     assert _alpha_of(probes["thinkBg"]) == 0, (
         "the thinking text paints no background of its own: " + repr(probes)
     )
     assert _hue_of(probes["taskPanelBg"]) == pytest.approx(
         _hue_of(probes["accentColor"]), abs=2
-    ), "the task panel background must be the accent tint: " + repr(probes)
-    assert 0.07 <= _alpha_of(probes["taskPanelBg"]) <= 0.09, (
-        "the task panel tint is 8% of the accent: " + repr(probes)
+    ), "the task panel background must be the accent wash: " + repr(probes)
+    assert 0.15 <= _alpha_of(probes["taskPanelBg"]) <= 0.17, (
+        "the task panel tint is 16% of the accent: " + repr(probes)
     )
     assert probes["taskPanelBorderStyle"] == "solid", probes
     assert probes["taskPanelBorderWidth"] == "1px", (

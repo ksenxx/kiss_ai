@@ -4,8 +4,8 @@
 // add your name here
 
 // The task panel that opens every task of the chat thread is the one
-// panel the eye should find first: it paints the accent tint under a
-// 1px accent hairline, on every surface (sidebar webview, editor-tab
+// panel the eye should find first: it paints the user bubble's accent
+// wash under a 1px accent hairline, on every surface (sidebar webview, editor-tab
 // webview, remote webapp and shared chat pages all inline
 // media/main.css).  The model's thinking tokens are a plain text block
 // inside the Thoughts panel, not a boxed panel of their own.
@@ -53,7 +53,9 @@ function testTaskPanelIsTheAccentTintedPanel() {
   assert.ok(panel, 'main.css must style .ev.task-panel');
 
   // The transcript panels share the neutral surface; the task panel
-  // alone paints the accent tint under an accent hairline.
+  // alone paints the user bubble's accent wash (deeper than the
+  // --accent-tint of other accent-marked panels) under an accent
+  // hairline, with a tight top-right corner as the bubble's tail.
   assert.strictEqual(
     decl(tool, 'background'),
     'var(--surface)',
@@ -61,8 +63,8 @@ function testTaskPanelIsTheAccentTintedPanel() {
   );
   assert.strictEqual(
     decl(panel, 'background'),
-    'var(--accent-tint)',
-    'BUG: .ev.task-panel background must be the accent tint',
+    'var(--bubble-user-tint)',
+    'BUG: .ev.task-panel background must be the user bubble tint',
   );
   assert.strictEqual(
     decl(panel, 'border'),
@@ -74,7 +76,17 @@ function testTaskPanelIsTheAccentTintedPanel() {
     decl(tool, 'border-radius'),
     'the task panel is rounded like the other transcript panels',
   );
-  console.log('  ok - .ev.task-panel paints the accent tint and hairline');
+  assert.strictEqual(
+    decl(panel, 'border-top-right-radius'),
+    'var(--radius-sm)',
+    'the task panel has a tight top-right corner, the bubble tail',
+  );
+  assert.strictEqual(
+    decl(tool, 'border-top-right-radius'),
+    null,
+    'a tool panel has no bubble tail',
+  );
+  console.log('  ok - .ev.task-panel paints the user bubble tint and hairline');
 }
 
 function testThinkingTextIsNotABoxedPanel() {

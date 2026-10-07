@@ -185,7 +185,60 @@ function testThinkingIsPlainTextInsideThoughts() {
   console.log('  ok - thinking tokens are plain text inside the Thoughts panel');
 }
 
+// On a narrow sidebar 80% and 87.5% look alike, so the bubbles carry
+// the cue themselves: the user's panels wear the deeper accent wash
+// (--bubble-user-tint, not the --accent-tint of other accent-marked
+// panels) with a tight top-right corner; the result card wears the
+// deeper neutral wash (--bubble-agent-tint) with a tight top-left
+// corner; the tool panels in between keep the plain surface.  JSDOM
+// hands back the unresolved var() names, which is what we compare.
+function testBubbleTintsAndTailCorners() {
+  const win = makeWebview();
+  renderTranscript(win);
+  send(win, {
+    type: 'result',
+    summary: 'All done.',
+    success: true,
+    total_tokens: 10,
+    cost: '0.01',
+  });
+  const out = output(win);
+  const userPanels = {
+    'task panel': out.querySelector(':scope > .ev.task-panel'),
+    'steering Message': out.querySelector(':scope > .ev.user-msg'),
+  };
+  for (const [name, panel] of Object.entries(userPanels)) {
+    assert.ok(panel, 'the transcript rendered the ' + name);
+    const cs = win.getComputedStyle(panel);
+    assert.strictEqual(cs.background, 'var(--bubble-user-tint)', 'the ' + name + ' wears the user bubble tint');
+    assert.strictEqual(cs.borderTopRightRadius, 'var(--radius-sm)', 'the ' + name + ' has a tight top-right corner');
+    assert.strictEqual(cs.borderRadius, 'var(--radius-lg)', 'the ' + name + ' keeps its round corners elsewhere');
+  }
+  const result = out.querySelector(':scope > .ev.rc');
+  assert.ok(result, 'the transcript rendered the result card');
+  const rcs = win.getComputedStyle(result);
+  assert.strictEqual(rcs.background, 'var(--bubble-agent-tint)', 'the result card wears the agent bubble tint');
+  assert.strictEqual(rcs.borderTopLeftRadius, 'var(--radius-sm)', 'the result card has a tight top-left corner');
+  assert.strictEqual(rcs.borderRadius, 'var(--radius-xl)', 'the result card keeps its round corners elsewhere');
+  assert.strictEqual(rcs.width, '87.5%', 'the result card stays a left-justified agent panel');
+  assert.notStrictEqual(rcs.marginLeft, 'auto', 'the result card stays on the left edge');
+  const tool = out.querySelector(':scope > .ev.tc');
+  const tcs = win.getComputedStyle(tool);
+  assert.strictEqual(tcs.background, 'var(--surface)', 'a tool call keeps the plain surface');
+  assert.notStrictEqual(tcs.borderTopLeftRadius, 'var(--radius-sm)', 'a tool call has no tail corner');
+  assert.notStrictEqual(tcs.borderTopRightRadius, 'var(--radius-sm)', 'a tool call has no tail corner');
+  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  const remote = fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8');
+  for (const token of ['--bubble-user-tint', '--bubble-agent-tint']) {
+    assert.ok(css.includes(token + ':'), 'main.css defines ' + token);
+    assert.ok(remote.includes(token + ':'), 'remote-codex.css re-derives ' + token + ' for the remote themes');
+  }
+  win.close();
+  console.log('  ok - the user and result bubbles carry their own tint and tail corner');
+}
+
 testUserPanelsRightAgentPanelsLeft();
+testBubbleTintsAndTailCorners();
 testNestedPanelFillsItsParent();
 testSummaryAdoptedPanelsFillTheSummary();
 testThinkingIsPlainTextInsideThoughts();

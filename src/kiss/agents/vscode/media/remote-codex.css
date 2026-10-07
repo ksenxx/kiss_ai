@@ -92,6 +92,8 @@ body.remote-chat {
   --accent-tint: color-mix(in srgb, var(--accent) 8%, transparent);
   --accent-tint-solid: color-mix(in srgb, var(--accent) 8%, var(--bg));
   --accent-line: color-mix(in srgb, var(--accent) 45%, var(--border));
+  --bubble-user-tint: color-mix(in srgb, var(--accent) 16%, transparent);
+  --bubble-agent-tint: color-mix(in srgb, var(--fg) 7%, var(--bg));
 
   /* The settings dialog's outline (see #settings-panel below): the
      theme's widget border, so the dialog reads like a native VS Code
