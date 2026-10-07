@@ -135,6 +135,14 @@
   --accent-tint: color-mix(in srgb, var(--accent) 8%, transparent);
   --accent-tint-solid: color-mix(in srgb, var(--accent) 8%, var(--bg));
   --accent-line: color-mix(in srgb, var(--accent) 45%, var(--border));
+
+  /* The two speech bubbles of the thread: the user's (task panel,
+     steering Message) a deeper accent wash than --accent-tint, the
+     agent's (the result card) a deeper neutral wash than --panel-tint,
+     so each still reads as a bubble when a narrow sidebar leaves no
+     room for the right / left alignment to show. */
+  --bubble-user-tint: color-mix(in srgb, var(--accent) 16%, transparent);
+  --bubble-agent-tint: color-mix(in srgb, var(--fg) 7%, var(--bg));
   --on-accent: #fff;
   --menu-selected-bg: var(--vscode-menu-selectionBackground, #0078d4);
   --paper: #fff;   /* white surfaces: confirm buttons, HTML previews */
@@ -852,11 +860,16 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
    same.  The user's panels (these two) sit against the right edge at
    four fifths of the chat's width, the rest of the transcript against
    the left edge at seven eighths (see .ev below), so the thread reads
-   as a conversation: the user on the right, the agent on the left. */
+   as a conversation: the user on the right, the agent on the left.
+   On a narrow sidebar the two widths are nearly the same, so the
+   bubble itself carries the cue: a deeper accent wash than the other
+   accent-marked panels and a tight top-right corner, the speech-bubble
+   tail pointing at the user's side. */
 .ev.task-panel, .ev.user-msg {
   border: 1px solid var(--accent-line); border-radius: var(--radius-lg);
+  border-top-right-radius: var(--radius-sm);
   margin: var(--space-2) 0; margin-left: auto; overflow: hidden;
-  background: var(--accent-tint);
+  background: var(--bubble-user-tint);
   width: 80%;
 }
 
@@ -1190,9 +1203,15 @@ body.ask-answering #input-container {
 }
 .tr .rl.fail { color: var(--red); }
 
+/* The result card is the agent's bubble, the counterpart of the user's
+   (.task-panel above): a deeper neutral wash than the surrounding
+   tool panels and a tight top-left corner, the tail pointing at the
+   agent's side, so it reads as the answer even where a narrow sidebar
+   hides the left / right alignment. */
 .rc {
   border: 1px solid var(--border); border-radius: var(--radius-xl);
-  margin: var(--space-3) 0; overflow: hidden; background: var(--surface);
+  border-top-left-radius: var(--radius-sm);
+  margin: var(--space-3) 0; overflow: hidden; background: var(--bubble-agent-tint);
 }
 
 .rc-h {
