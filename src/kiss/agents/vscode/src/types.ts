@@ -837,8 +837,8 @@ type ToWebviewMessageBody =
   | {type: 'task_stopped'; startTs?: number; endTs?: number}
   | {type: 'task_interrupted'; startTs?: number; endTs?: number}
   // Emitted once per run (chat_sorcar_agent.py) and synthesised into a
-  // replay (json_printer.py task_settings_event); the static task panel
-  // renders these like a history row.
+  // replay (json_printer.py task_settings_event); the Task Info rows
+  // and the shared page's task panel render these like a history row.
   | {
       type: 'task_settings';
       settings: {

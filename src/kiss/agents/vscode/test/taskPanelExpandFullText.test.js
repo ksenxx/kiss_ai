@@ -81,8 +81,10 @@ function click(win, id) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-function cs(win, id) {
-  return win.getComputedStyle(win.document.getElementById(id));
+function cs(win, selector) {
+  const el = win.document.querySelector(selector);
+  assert.ok(el, `element ${selector} must exist`);
+  return win.getComputedStyle(el);
 }
 
 /** Whether *el* and every ancestor up to #output is displayed. */
@@ -105,15 +107,13 @@ function showTaskPanel(win, posted, task) {
     tabId: ready.tabId,
     chat_id: 'chat-taskpanel',
   });
-  assert.ok(
-    win.document.getElementById('task-panel').classList.contains('visible'),
-    'task panel must be visible after a task replay',
-  );
+  const panel = win.document.querySelector('#output .task-panel');
+  assert.ok(panel, 'the transcript must open with the task panel');
   return ready.tabId;
 }
 
 function assertFullTextPanel(win, why) {
-  const textCs = cs(win, 'task-panel-text');
+  const textCs = cs(win, '#output .task-panel .task-panel-text');
   assert.strictEqual(
     textCs.whiteSpace,
     'pre-wrap',
@@ -148,102 +148,72 @@ function assertFullTextPanel(win, why) {
   );
 }
 
-function testCollapseChatsButtonGone(remote) {
+function testTaskPanelOpensTheTranscript(remote) {
   const {win, posted} = makeWebview({remote});
   showTaskPanel(win, posted, LONG_TASK);
   const d = win.document;
+  const output = d.getElementById('output');
+  const panel = output.querySelector('.task-panel');
   assert.strictEqual(
-    d.getElementById('task-panel-collapse-btn'),
-    null,
-    `#task-panel-collapse-btn must not exist (remote=${remote})`,
-  );
-  assert.strictEqual(
-    d.getElementById('task-panel-collapse-label'),
-    null,
-    `#task-panel-collapse-label must not exist (remote=${remote})`,
+    output.firstElementChild,
+    panel,
+    `the task panel is the first panel of the transcript (remote=${remote})`,
   );
   assert.ok(
-    !/(Uncollapse Chats|Collapse Chats)/.test(
-      d.getElementById('task-panel').textContent,
-    ),
-    `no Collapse/Uncollapse Chats text may remain (remote=${remote})`,
-  );
-  assert.ok(
-    d.getElementById('task-panel-drawer-btn'),
-    'the drawer toggle must survive the removal',
-  );
-  assert.ok(
-    d.getElementById('task-panel-copy'),
-    'the copy-task button must survive the removal',
-  );
-  win.close();
-}
-
-function testExpandTaskPanelShowsEntireTask(remote) {
-  const {win, posted} = makeWebview({remote});
-  showTaskPanel(win, posted, LONG_TASK);
-  const d = win.document;
-  const panel = d.getElementById('task-panel');
-  const btn = d.getElementById('task-panel-drawer-btn');
-
-  assert.ok(
-    panel.classList.contains('drawer-collapsed'),
-    'the task drawer opens collapsed',
+    panel.classList.contains('collapsible') &&
+      !panel.classList.contains('collapsed'),
+    `the task panel is a regular, open event panel (remote=${remote})`,
   );
   assert.strictEqual(
-    btn.getAttribute('aria-label'),
-    'Expand task panel',
-    'the collapsed drawer toggle must offer "Expand task panel"',
+    panel.querySelector('.task-panel-h').textContent.includes('Task'),
+    true,
+    'the panel header names it as the task',
   );
   assert.strictEqual(
-    cs(win, 'task-panel-text').whiteSpace,
-    'nowrap',
-    'collapsed task drawer must clamp the task text to one line',
-  );
-
-  click(win, 'task-panel-drawer-btn');
-  assert.ok(
-    !panel.classList.contains('drawer-collapsed'),
-    '"Expand task panel" must expand the drawer',
-  );
-  assert.strictEqual(
-    btn.getAttribute('aria-label'),
-    'Collapse task panel',
-    'the expanded drawer toggle must offer "Collapse task panel"',
-  );
-  assert.strictEqual(
-    d.getElementById('task-panel-text').textContent,
+    panel.querySelector('.task-panel-text').textContent,
     LONG_TASK,
-    'the expanded panel must contain the entire task text',
+    'the panel must contain the entire task text',
   );
-  assertFullTextPanel(win, `after Expand task panel, remote=${remote}`);
+  assert.ok(
+    panel.querySelector(':scope > .panel-copy-btn'),
+    'the task panel carries the copy button every event panel has',
+  );
+  assert.strictEqual(
+    d.getElementById('task-panel'),
+    null,
+    `no fixed task panel remains above the transcript (remote=${remote})`,
+  );
+  assertFullTextPanel(win, `transcript task panel, remote=${remote}`);
   win.close();
 }
 
-// The panel opens collapsed, so the whole task is in the DOM but clamped to
-// one line. One click on the chevron and all of it is on screen.
-function testCollapsedPanelKeepsTheWholeTaskOneClickAway() {
+// A click on the header folds the panel like any other event panel:
+// the text is hidden behind a one-line preview, and the whole task is
+// one click away again.
+function testTaskPanelFoldsLikeAnyPanel() {
   const {win, posted} = makeWebview();
   showTaskPanel(win, posted, LONG_TASK);
-  const text = win.document.getElementById('task-panel-text');
+  const panel = win.document.querySelector('#output .task-panel');
+  const header = panel.querySelector('.collapse-header');
+  header.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(panel.classList.contains('collapsed'), 'a header click folds');
   assert.strictEqual(
-    text.textContent,
-    LONG_TASK,
-    'the collapsed panel must still hold the entire task text',
+    cs(win, '#output .task-panel .task-panel-text').display,
+    'none',
+    'the folded panel hides the task text',
   );
-  assert.strictEqual(
-    cs(win, 'task-panel-text').textOverflow,
-    'ellipsis',
-    'the collapsed panel ellipsizes what does not fit on its one line',
+  assert.ok(
+    panel.querySelector('.collapse-preview').textContent.startsWith('step 1'),
+    'the folded panel previews the task text',
   );
-
-  click(win, 'task-panel-drawer-btn');
+  header.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(!panel.classList.contains('collapsed'), 'a second click opens');
   assert.strictEqual(
-    text.textContent,
+    panel.querySelector('.task-panel-text').textContent,
     LONG_TASK,
     'expanding must hold the entire task text',
   );
-  assertFullTextPanel(win, 'expanded from the default collapsed state');
+  assertFullTextPanel(win, 'expanded again');
   win.close();
 }
 
@@ -388,7 +358,7 @@ function testChevronPassWorksWithoutButton() {
   });
   const adjacent = O.querySelector('.adjacent-task[data-task="Older task"]');
   assert.ok(adjacent, 'the adjacent task container must render');
-  const adjPanel = adjacent.querySelector('.collapsible:not(.rc)');
+  const adjPanel = adjacent.querySelector('.collapsible:not(.rc):not(.task-panel)');
   assert.ok(adjPanel, 'the adjacent task must replay its tool panel');
   assert.ok(
     adjPanel.classList.contains('collapsed') && isDisplayed(win, adjPanel),
@@ -432,20 +402,16 @@ function testLiveFinishedPanelsSkipChevronPass() {
 
 function runTests() {
   const tests = [
-    () => testCollapseChatsButtonGone(false),
-    () => testCollapseChatsButtonGone(true),
-    () => testExpandTaskPanelShowsEntireTask(false),
-    () => testExpandTaskPanelShowsEntireTask(true),
-    testCollapsedPanelKeepsTheWholeTaskOneClickAway,
+    () => testTaskPanelOpensTheTranscript(false),
+    () => testTaskPanelOpensTheTranscript(true),
+    testTaskPanelFoldsLikeAnyPanel,
     testChevronPassWorksWithoutButton,
     testLiveFinishedPanelsSkipChevronPass,
   ];
   const names = [
-    'testCollapseChatsButtonGone(vscode)',
-    'testCollapseChatsButtonGone(remote)',
-    'testExpandTaskPanelShowsEntireTask(vscode)',
-    'testExpandTaskPanelShowsEntireTask(remote)',
-    'testCollapsedPanelKeepsTheWholeTaskOneClickAway',
+    'testTaskPanelOpensTheTranscript(vscode)',
+    'testTaskPanelOpensTheTranscript(remote)',
+    'testTaskPanelFoldsLikeAnyPanel',
     'testChevronPassWorksWithoutButton',
     'testLiveFinishedPanelsSkipChevronPass',
   ];

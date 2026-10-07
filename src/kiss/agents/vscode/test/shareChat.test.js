@@ -120,9 +120,11 @@ function runSmallTask(wv, chatId, taskId) {
   const win = wv.win;
   const TAB = tabIdOf(wv);
   const now = Date.now();
+  // The daemon's order: the prompt echo, then the 'clear' that opens
+  // the transcript with the task panel, then the live stream.
+  send(win, {type: 'setTaskText', text: 'list the files', tabId: TAB});
   send(win, {type: 'clear', chat_id: chatId, tabId: TAB});
   send(win, {type: 'status', running: true, tabId: TAB, startTs: now});
-  send(win, {type: 'setTaskText', text: 'list the files', tabId: TAB});
   send(win, {
     type: 'tool_call',
     name: 'Bash',
@@ -228,7 +230,7 @@ async function run() {
     assert.ok(msg, 'the share_tasks reply must produce a shareChat command');
     assert.strictEqual(msg.tabId, TAB);
     assert.strictEqual(msg.chatId, 'chat-777');
-    assert.ok(msg.html.includes('id="task-panel"'), 'task panel serialized');
+    assert.ok(msg.html.includes('class="ev task-panel'), 'task panel serialized');
     assert.ok(
       msg.html.includes('list the files'),
       'task panel text serialized',
@@ -423,7 +425,9 @@ async function run() {
     runSmallTask(wv, 'chat-4', 'task-4');
     const msg = shareWithTasks(wv, []);
     const page = makeSharePage(msg.html);
-    const panel = page.document.querySelector('#output .collapsible');
+    const panel = page.document.querySelector(
+      '#output .collapsible:not(.task-panel)',
+    );
     assert.ok(panel, 'the exported page must hold a collapsible panel');
     const header = panel.querySelector('.collapse-header');
     assert.ok(header, 'the panel must keep its collapse header');
@@ -459,34 +463,36 @@ async function run() {
     }
   });
 
-  await test('share.js toggles the static task panel drawer', () => {
+  await test('share.js folds a task panel like any event panel', () => {
     const wv = makeWebview();
     runSmallTask(wv, 'chat-5', 'task-5');
     const msg = shareWithTasks(wv, []);
     const page = makeSharePage(msg.html);
-    const panel = page.document.getElementById('task-panel');
-    const btn = page.document.getElementById('task-panel-drawer-btn');
-    assert.ok(panel && btn, 'exported page keeps the task panel + drawer');
-    const wasCollapsed = panel.classList.contains('drawer-collapsed');
-    click(btn);
-    assert.strictEqual(
-      panel.classList.contains('drawer-collapsed'),
-      !wasCollapsed,
-      'the drawer button must toggle the task panel',
+    const panel = page.document.querySelector('#output .task-panel');
+    assert.ok(panel, 'exported page keeps the task panel');
+    assert.ok(
+      !panel.classList.contains('collapsed'),
+      'the task panel is exported open: the thread reads task, then events',
+    );
+    const header = panel.querySelector('.collapse-header');
+    click(header);
+    assert.ok(
+      panel.classList.contains('collapsed'),
+      'a header click folds the task panel',
     );
     assert.strictEqual(
-      btn.getAttribute('aria-expanded'),
-      panel.classList.contains('drawer-collapsed') ? 'false' : 'true',
+      panel.querySelector('.collapse-preview').textContent,
+      'list the files',
+      'a folded task panel previews the task text',
     );
-    click(btn);
-    assert.strictEqual(
-      panel.classList.contains('drawer-collapsed'),
-      wasCollapsed,
-      'a second click must restore the drawer',
+    click(header);
+    assert.ok(
+      !panel.classList.contains('collapsed'),
+      'a second click must restore the task panel',
     );
   });
 
-  await test('each exported task panel folds its own drawer', () => {
+  await test('each exported task opens with its own task panel', () => {
     const wv = makeWebview();
     runSmallTask(wv, 'chat-6', 'task-6b');
     const msg = shareWithTasks(wv, [
@@ -505,43 +511,35 @@ async function run() {
       {task: 'list the files', task_id: 'task-6b', events: []},
     ]);
     const page = makeSharePage(msg.html);
-    const panels = page.document.querySelectorAll('[id="task-panel"]');
+    const sections = page.document.querySelectorAll('.share-task');
+    assert.strictEqual(sections.length, 2, 'one section per task');
+    const panels = page.document.querySelectorAll('#output .task-panel');
+    assert.strictEqual(panels.length, 2, 'one task panel per task of the chat');
     assert.strictEqual(
-      panels.length,
-      2,
-      'one static task panel per task of the chat',
-    );
-    // Attribute selector, not '#task-panel-drawer-btn': jsdom's
-    // subtree querySelector shortcuts id selectors through the
-    // document-wide id map, which holds only the FIRST duplicate.
-    // share.js itself is immune — closest()/matches() test the
-    // element's own id attribute.
-    const secondBtn = panels[1].querySelector(
-      'button[aria-controls^="task-panel-text"]',
-    );
-    assert.ok(secondBtn, "the second task's panel keeps its drawer button");
-    const firstBtn = panels[0].querySelector(
-      'button[aria-controls^="task-panel-text"]',
-    );
-    assert.notStrictEqual(
-      firstBtn.getAttribute('aria-controls'),
-      secondBtn.getAttribute('aria-controls'),
-      "each drawer must name ITS OWN text element (unique aria-controls)",
+      sections[0].firstElementChild,
+      panels[0],
+      "the first section opens with the first task's panel",
     );
     assert.strictEqual(
-      panels[1].querySelector(
-        '[id="' + secondBtn.getAttribute('aria-controls') + '"]',
-      ),
-      panels[1].querySelector('[id^="task-panel-text"]'),
-      "the second drawer's aria-controls resolves inside its own panel",
+      panels[0].querySelector('.task-panel-text').textContent,
+      'first task',
     );
-    click(secondBtn);
+    assert.strictEqual(
+      sections[1].firstElementChild,
+      panels[1],
+      "the second section opens with the second task's panel",
+    );
+    assert.strictEqual(
+      panels[1].querySelector('.task-panel-text').textContent,
+      'list the files',
+    );
+    click(panels[1].querySelector('.collapse-header'));
     assert.ok(
-      panels[1].classList.contains('drawer-collapsed'),
-      "the second task's drawer folds",
+      panels[1].classList.contains('collapsed'),
+      "the second task's panel folds",
     );
     assert.ok(
-      !panels[0].classList.contains('drawer-collapsed'),
+      !panels[0].classList.contains('collapsed'),
       "the first task's panel must not fold with it",
     );
   });

@@ -6,8 +6,9 @@
 
 The chat webview's EVENT PANELS (thinking, assistant text, tool calls,
 tool results, bash output, nested-agent panels, system/prompt panels,
-merge review, result cards, timing badges) and the FIXED TASK PANEL
-(``#task-panel``) must render with the SAME style, fonts, and format on
+merge review, result cards, timing badges) and the TASK PANEL that
+opens every task of the thread (``.ev.task-panel``) must render with
+the SAME style, fonts, and format on
 the remote webapp (served by ``RemoteAccessServer``) as in the VS Code
 extension webview.  Both pages share ``chat.html`` + ``main.css`` +
 ``main.js``; the remote page additionally loads ``remote-codex.css``
@@ -18,7 +19,7 @@ never the event panels or the task panel.
 Reproduction/pinning:
 
 * Static test: ``remote-codex.css`` must contain NO rule targeting an
-  event-panel selector or ``#task-panel``.
+  event-panel selector or ``.task-panel``.
 * Static test: the remote page must define the same ``--vscode-*``
   typography variables this test injects into the extension-reference
   page (including ``--vscode-editor-font-family``, which the VS Code
@@ -71,10 +72,10 @@ WEB_SERVER_PY = (
 # block, so any computed-style difference between the two pages can
 # only come from CSS rule differences (i.e. remote-codex.css).
 
-# Selector fragments that identify EVENT PANELS or the FIXED TASK
-# PANEL.  remote-codex.css must not target any of them.
+# Selector fragments that identify EVENT PANELS (the task panel among
+# them).  remote-codex.css must not target any of them.
 FORBIDDEN_SELECTOR_PATTERNS = [
-    r"#task-panel",
+    r"\.task-panel",
     r"#output",
     r"\.tc\b",
     r"\.tc-",
@@ -121,8 +122,8 @@ def _css_selectors(css: str) -> list[str]:
 def test_remote_codex_does_not_restyle_event_or_task_panels(
     pattern: str,
 ) -> None:
-    """remote-codex.css must not target event panels or #task-panel, so
-    those panels inherit the extension's main.css look verbatim."""
+    """remote-codex.css must not target event panels (the task panel
+    among them), so they inherit the extension's main.css look verbatim."""
     offenders = [
         sel
         for sel in _css_selectors(CODEX_CSS.read_text(encoding="utf-8"))
@@ -232,12 +233,21 @@ _INJECT_PAGE_JS = r"""
   const loading = document.getElementById('kiss-server-loading');
   if (loading) loading.style.display = 'none';
 
-  document.getElementById('task-panel-text').textContent =
-    'Fix the flux capacitor so the DeLorean can time travel again.';
-  document.getElementById('task-panel').classList.add('visible');
-
   if (!window._testApi || typeof window._testApi.processEvent !== 'function') {
     throw new Error('production output renderer is unavailable');
+  }
+  // The transcript opens with its task panel, exactly as the daemon's
+  // setTaskText + clear pair starts a task.
+  const tabId = window._testApi.getActiveTabId();
+  for (const ev of [
+    {type: 'setTaskText', tabId,
+     text: 'Fix the flux capacitor so the DeLorean can time travel again.'},
+    {type: 'clear', tabId},
+  ]) {
+    window.dispatchEvent(new MessageEvent('message', {data: ev}));
+  }
+  if (!out.querySelector('.task-panel')) {
+    throw new Error('the transcript did not open with its task panel');
   }
   // Rendered FIRST so the summary panel adopts no earlier siblings.
   window._testApi.processEvent({
@@ -384,10 +394,10 @@ PANEL_PROBES = {
     "rsB": ".rs b",
     "rcBody": ".rc-body",
     "rcStatus": ".rc-status",
-    "taskPanel": "#task-panel",
-    "taskPanelText": "#task-panel-text",
-    "taskPanelCopy": "#task-panel-copy",
-    "taskPanelDrawerBtn": "#task-panel-drawer-btn",
+    "taskPanel": "#output .task-panel",
+    "taskPanelH": "#output .task-panel-h",
+    "taskPanelText": "#output .task-panel-text",
+    "taskPanelCopy": "#output .task-panel .panel-copy-btn",
 }
 
 # Style/font/format properties that must be identical between the
@@ -420,28 +430,25 @@ _PROBE_STYLES_JS = (
     const cs = getComputedStyle(el);
     styles[key] = props.map(p => p + '=' + cs[p]).join(' | ');
   }
-  const app = document.getElementById('app');
   const out = document.getElementById('output');
-  const tp = document.getElementById('task-panel');
+  const tp = out.querySelector('.task-panel');
   const tc = document.querySelector('.ev.tc');
-  const appRect = app.getBoundingClientRect();
   const outRect = out.getBoundingClientRect();
   const tpRect = tp.getBoundingClientRect();
   const tcRect = tc.getBoundingClientRect();
-  const tpCs = getComputedStyle(tp);
-  // Collapsed drawer state: toggle, measure, restore (probes run
-  // after the screenshot, so the toggle never shows up in it).
-  tp.classList.add('drawer-collapsed');
-  const collapsedCs = getComputedStyle(tp);
-  const collapsedPadding =
-    collapsedCs.paddingTop + ' ' + collapsedCs.paddingBottom;
-  tp.classList.remove('drawer-collapsed');
+  const tpText = getComputedStyle(tp.querySelector('.task-panel-text'));
+  // Folded state: toggle, measure, restore (probes run after the
+  // screenshot, so the toggle never shows up in it).
+  tp.classList.add('collapsed');
+  const collapsedTextDisplay =
+    getComputedStyle(tp.querySelector('.task-panel-text')).display;
+  tp.classList.remove('collapsed');
   return {
     styles,
-    taskPanelCollapsedPadding: collapsedPadding,
-    taskPanelMaxWidth: tpCs.maxWidth,
-    taskPanelGapLeft: tpRect.left - appRect.left,
-    taskPanelGapRight: appRect.right - tpRect.right,
+    taskPanelCollapsedTextDisplay: collapsedTextDisplay,
+    taskPanelTextMaxHeight: tpText.maxHeight,
+    taskPanelGapLeft: tpRect.left - outRect.left,
+    taskPanelGapRight: outRect.right - tpRect.right,
     eventGapLeft: tcRect.left - outRect.left,
     eventGapRight: outRect.right - tcRect.right,
   };
@@ -647,11 +654,11 @@ def _assert_probe_parity(
     )
 
     for scalar in (
-        "taskPanelCollapsedPadding",
-        "taskPanelMaxWidth",
+        "taskPanelCollapsedTextDisplay",
+        "taskPanelTextMaxHeight",
     ):
         assert rem_probes[scalar] == ext_probes[scalar], (
-            f"[{label}] {scalar}: the fixed task panel must keep the "
+            f"[{label}] {scalar}: the task panel must keep the "
             f"extension's value: {ext_probes[scalar]!r} != "
             f"{rem_probes[scalar]!r}"
         )
@@ -671,7 +678,7 @@ def _assert_probe_parity(
 
 @pytest.mark.timeout(240)
 def test_live_remote_panels_match_extension(tmp_path: Path) -> None:
-    """The remote webapp's event panels and fixed task panel render
+    """The remote webapp's event panels and task panel render
     with the extension's computed style, fonts, and format, on both a
     desktop and a phone-sized viewport.
 

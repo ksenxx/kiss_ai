@@ -37,7 +37,7 @@ PROBE_JS = r"""
   const sel = 'button, input, textarea, select, a, [role=menuitem], [role=tab], ' +
     '[role=option], .chip, .pill, .badge, .tc-h, .think-h, .prompt-h, .rc-h, .tr, ' +
     '.history-chat-header, .history-item, .menu-item, .dropdown-item, ' +
-    '.kiss-notification, #task-panel, .card, h1, h2, h3, label, summary, .hdr, ' +
+    '.kiss-notification, .task-panel, .card, h1, h2, h3, label, summary, .hdr, ' +
     '.sidebar-hdr-row, .status, #tab-status-bar, #tab-bar';
   const out = [];
   const seen = new Set();

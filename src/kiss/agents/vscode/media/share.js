@@ -6,11 +6,10 @@
 // Standalone viewer script for shared chat pages
 // (reports/chat-<id>.html, written by the daemon's shareChat
 // handler).  The page body holds one section per task of the chat —
-// a clone of the webview's static task panel above the task's
-// transcript — so this script re-creates the interactions the webview
+// the task's panel above the task's transcript, as in the webview's
+// thread — so this script re-creates the interactions the webview
 // attaches through JavaScript: collapsing / expanding event panels
-// (media/main.js addCollapse), each section's task-panel drawer
-// button, and the "Thinking" section toggle.  The styling
+// (media/main.js addCollapse) and the "Thinking" section toggle.  The styling
 // comes from the page's inlined main.css, driven purely by the same
 // classes this script toggles.
 (function () {
@@ -661,22 +660,6 @@
       return;
     }
     // resultimages-coverage:end
-
-    const drawerBtn = target.closest('#task-panel-drawer-btn');
-    if (drawerBtn) {
-      // The page holds one #task-panel per task of the chat, so the
-      // toggled panel must be the clicked button's own ancestor —
-      // getElementById would always fold the first task's panel.
-      const panel = drawerBtn.closest('#task-panel');
-      if (!panel) return;
-      const collapsed = panel.classList.toggle('drawer-collapsed');
-      drawerBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-      drawerBtn.setAttribute(
-        'aria-label',
-        collapsed ? 'Expand task panel' : 'Collapse task panel',
-      );
-      return;
-    }
 
     const header = target.closest('.collapse-header');
     if (!header) return;

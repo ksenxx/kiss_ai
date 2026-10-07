@@ -338,7 +338,9 @@ function testAdjacentReplayKeepsDigestThroughSameNameFinish() {
   });
   const adjacent = win.document.querySelector('#output .adjacent-task');
   assert.ok(adjacent, 'the earlier task must be spliced in');
-  const adjPanel = adjacent.querySelector('.collapsible:not(.rc)');
+  const adjPanel = adjacent.querySelector(
+    '.collapsible:not(.rc):not(.task-panel)',
+  );
   assert.ok(
     adjPanel.classList.contains('collapsed'),
     'precondition: the adjacent digest panel is folded',

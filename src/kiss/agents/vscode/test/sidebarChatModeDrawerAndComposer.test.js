@@ -481,9 +481,9 @@ async function main() {
       assert.strictEqual(resume.id, 'chat-far');
       assert.strictEqual(resume.taskId, 7);
       assert.strictEqual(
-        win.document.getElementById('task-panel-text').textContent,
+        win.document.querySelector('#output .task-panel-text').textContent,
         'A chat from another day',
-        'the task panel names the clicked task',
+        'the fresh transcript opens with the clicked task',
       );
     },
   );
@@ -507,8 +507,13 @@ async function main() {
         'nothing to resume',
       );
       assert.strictEqual(
-        win.document.getElementById('task-panel-text').textContent,
+        win.document.querySelector('#output .task-panel-text').textContent,
         'An eventless task',
+      );
+      assert.strictEqual(
+        win.document.getElementById('welcome').style.display,
+        'none',
+        'the task text replaces the welcome screen',
       );
     },
   );

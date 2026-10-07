@@ -706,7 +706,7 @@ class _CommandsMixin:
                 # script setup — a client that reconnects during that
                 # window replays this run through the pre-history-row
                 # branch of ``_replay_session``, whose ``task`` field
-                # (the fixed task panel's text) reads this attribute.
+                # (the task panel's text) reads this attribute.
                 state.last_user_prompt = str(cmd.get("prompt", "") or "")
                 if prev is not None:
                     # Carry the previous task's agent (it may hold a
@@ -767,8 +767,8 @@ class _CommandsMixin:
                 # CREATES its tab — a Python client's synthetic ``api-…``
                 # tab (``sorcar.run``): no
                 # client had adopted the tab yet, so every client dropped
-                # the task-panel text and the tab showed its transcript
-                # WITHOUT the fixed task panel at the top.  Re-echo the
+                # the task text and the tab's transcript opened WITHOUT
+                # its task panel (and the tab had no title).  Re-echo the
                 # text now that the registration's ``tabs_state`` snapshot
                 # has handed every client the tab.  Unconditional on
                 # purpose: gating it on a pre-registration ``has_tab``

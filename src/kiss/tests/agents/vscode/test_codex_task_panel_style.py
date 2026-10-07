@@ -6,11 +6,12 @@
 
 Features on the remote webapp (served by ``RemoteAccessServer``):
 
-1. The pinned task panel (``#task-panel``) inherits main.css's
-   look verbatim (the thinking panel's foreground over the accent tint,
-   plus a 1px accent hairline; the remote page merely swaps the
-   palette variables), sized by the page's injected 14px
-   ``--vscode-editor-font-size``.  The event panels likewise inherit
+1. The inline task panel (``.ev.task-panel``, the first event of a
+   task's thread) inherits main.css's look verbatim (the page
+   foreground over the accent tint, plus a 1px accent hairline; the
+   remote page merely swaps the palette variables), its text sized by
+   the page's injected 14px ``--vscode-editor-font-size``.  The event
+   panels likewise inherit
    the extension's main.css typography — that extension-parity
    contract is pinned end to end by
    ``test_remote_panels_match_extension.py``.
@@ -297,10 +298,19 @@ _INJECT_PAGE_JS = r"""
   const loading = document.getElementById('kiss-server-loading');
   if (loading) loading.style.display = 'none';
 
-  // Pin the task panel (the typography reference) with real text.
-  document.getElementById('task-panel-text').textContent =
-    'Fix the flux capacitor';
-  document.getElementById('task-panel').classList.add('visible');
+  // Open the transcript with its task panel (the typography
+  // reference), exactly as the daemon's setTaskText + clear pair
+  // starts a task.
+  const tabId = window._testApi.getActiveTabId();
+  for (const ev of [
+    {type: 'setTaskText', tabId, text: 'Fix the flux capacitor'},
+    {type: 'clear', tabId},
+  ]) {
+    window.dispatchEvent(new MessageEvent('message', {data: ev}));
+  }
+  if (!out.querySelector(':scope > .task-panel > .task-panel-text')) {
+    throw new Error('the transcript did not open with its task panel');
+  }
 
   out.insertAdjacentHTML('beforeend', `
     <div class="ev think">
@@ -475,7 +485,13 @@ _EXPAND_GROUP_JS = r"""
 """
 
 _PROBE_STYLES_JS = r"""(() => {
-  const tp = getComputedStyle(document.getElementById('task-panel'));
+  const tp = getComputedStyle(document.querySelector('#output .task-panel'));
+  const tpText = getComputedStyle(
+    document.querySelector('#output .task-panel .task-panel-text'),
+  );
+  const tpHeader = getComputedStyle(
+    document.querySelector('#output .task-panel .task-panel-h'),
+  );
 
   // The thinking panel injected by _INJECT_TRANSCRIPT_JS: the task
   // panel must paint the SAME background and foreground.
@@ -490,6 +506,8 @@ _PROBE_STYLES_JS = r"""(() => {
   accentProbe.style.color = 'var(--accent)';
   document.body.appendChild(accentProbe);
   const accentColor = getComputedStyle(accentProbe).color;
+  accentProbe.style.color = 'var(--fg)';
+  const fgColor = getComputedStyle(accentProbe).color;
   accentProbe.remove();
 
   // The old per-chat accent (djb2 hash of the chat id), resolved to an
@@ -528,8 +546,9 @@ _PROBE_STYLES_JS = r"""(() => {
     infoClipped = info.scrollWidth > info.clientWidth + 1;
   }
   return {
-    taskPanelFontSize: tp.fontSize,
-    taskPanelColor: tp.color,
+    taskPanelFontSize: tpText.fontSize,
+    taskPanelColor: tpText.color,
+    taskPanelHeaderColor: tpHeader.color,
     taskPanelBg: tp.backgroundColor,
     taskPanelBorderWidth: tp.borderTopWidth,
     taskPanelBorderStyle: tp.borderTopStyle,
@@ -537,6 +556,7 @@ _PROBE_STYLES_JS = r"""(() => {
     thinkBg: thinkCs ? thinkCs.backgroundColor : 'MISSING',
     thinkColor: thinkCntCs ? thinkCntCs.color : 'MISSING',
     accentColor,
+    fgColor,
     infoLineRects,
     infoClipped,
     oldAccent,
@@ -987,9 +1007,13 @@ def test_live_task_panel_typography_and_history_rows(
     assert probes["thinkColor"] != "MISSING", (
         "the injected transcript must render a .think panel: " + repr(probes)
     )
-    assert probes["taskPanelColor"] == probes["thinkColor"], (
-        "the task panel text must use the SAME foreground as the "
-        "thinking panel (main.css --panel-fg: var(--dim)): " + repr(probes)
+    assert probes["taskPanelHeaderColor"] == probes["thinkColor"], (
+        "the task panel header must use the SAME foreground as the "
+        "thinking panel (main.css .task-panel-h: var(--dim)): " + repr(probes)
+    )
+    assert probes["taskPanelColor"] == probes["fgColor"], (
+        "the task text reads like a user message, in the page foreground "
+        "(main.css .task-panel-text: var(--fg)): " + repr(probes)
     )
     # The thinking panel is neutral (main.css --panel-tint, 4% of --fg);
     # the task panel alone sits on the accent tint (--accent-tint, 8%)

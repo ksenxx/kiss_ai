@@ -2361,11 +2361,11 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
         # neither the tab count nor "every old id vanished" is a stable
         # outcome.  Assert the designed outcome instead: the surviving
         # ACTIVE tab is fresh (an id the page did not have before the
-        # click), it shows the clicked task in its read-only task panel,
+        # click), its transcript opens with the clicked task's panel,
         # and a canonical `tabs_state` snapshot names that fresh id.
         page.wait_for_function(
-            "document.getElementById('task-panel-text')"
-            " && document.getElementById('task-panel-text').textContent"
+            "document.querySelector('#output .task-panel-text')"
+            " && document.querySelector('#output .task-panel-text').textContent"
             "      === 'alpha one'",
             timeout=15000,
         )
@@ -2487,8 +2487,8 @@ def test_history_click_survives_mid_press_refresh(browser, harness, worktree):
         page.mouse.up()
         # The browser-synthesized click still opens the pressed task.
         page.wait_for_function(
-            "document.getElementById('task-panel-text')"
-            " && document.getElementById('task-panel-text').textContent"
+            "document.querySelector('#output .task-panel-text')"
+            " && document.querySelector('#output .task-panel-text').textContent"
             "      === 'hold target'",
             timeout=15000,
         )

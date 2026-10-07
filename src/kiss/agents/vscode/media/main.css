@@ -845,117 +845,50 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
 }
 .tab-ctx-item:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 
-#task-panel {
-  position: relative;
-  flex-shrink: 0;
-  margin: var(--space-2) var(--space-2-5) 0;
-  padding: var(--space-2) 64px var(--space-2) var(--space-3);
-  border: 1px solid var(--accent-line);
-  border-radius: var(--radius-lg);
-
-  /* The task is the one panel the eye should find first: an accent
-     hairline over the accent tint, the transcript panels being neutral.
-     Text is the thinking panel's --dim; secondary content (controls,
-     info rows, scrollbar) shares it and hover states brighten to --fg. */
-  --panel-bg: var(--accent-tint);
-  --panel-fg: var(--fg);
-  --panel-dim: var(--dim);
-
-  background: var(--panel-bg);
-  font-size: var(--vscode-editor-font-size);
-  color: var(--dim);
-  line-height: 1.6;
-  display: none;
+/* The task's own text opens every task of the thread: the one panel
+   the eye should find first, an accent hairline over the accent tint,
+   the transcript panels being neutral. */
+.ev.task-panel {
+  border: 1px solid var(--accent-line); border-radius: var(--radius-lg);
+  margin: var(--space-2) 0; overflow: hidden;
+  background: var(--accent-tint);
 }
-#task-panel.visible { display: block; }
 
-#task-panel-text {
+.task-panel-h {
+  padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
+  font-weight: 400; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--dim);
+}
+.task-panel-h:hover { color: var(--fg); }
+
+.task-panel-text {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--vscode-editor-font-size);
+  color: var(--fg);
+  line-height: 1.6;
   max-height: 60vh;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  scrollbar-color: var(--panel-dim) transparent;
+  scrollbar-color: var(--dim) transparent;
 }
 
-#task-panel-text::-webkit-scrollbar-thumb { background: var(--panel-dim); }
-#task-panel-text::-webkit-scrollbar-thumb:hover { background: var(--panel-fg); }
+.task-panel.collapsed .task-panel-text,
+.task-panel.collapsed .task-panel-info { display: none; }
 
-#task-panel-copy {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  background: none;
-  border: none;
-  color: var(--panel-dim);
-  cursor: pointer;
-  padding: var(--space-0-5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: color var(--dur-base);
-  user-select: none;
-}
-#task-panel-copy * { user-select: none; }
-#task-panel-copy:hover { color: var(--panel-fg); }
-#task-panel-copy.copied { color: var(--green); }
-
-#task-panel-drawer-btn {
-  position: absolute;
-  right: 28px;
-  top: 50%;
-  transform: translateY(-50%);
-  background: none;
-  border: none;
-  color: var(--panel-dim);
-  cursor: pointer;
-  padding: 0;
-  width: 36px;
-  height: 36px;
-  font-size: var(--fs-2xl);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: color var(--dur-base);
-  user-select: none;
-}
-#task-panel-drawer-btn * { user-select: none; }
-#task-panel-drawer-btn:hover { color: var(--panel-fg); }
-
-#task-panel-drawer-btn:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 1px;
-}
-#task-panel-drawer-btn svg { transition: transform var(--dur-slow) var(--ease); }
-#task-panel-drawer-btn[aria-expanded="false"] svg { transform: rotate(180deg); }
-
-#task-panel.drawer-collapsed {
+/* The task's settings info on a shared page (model, worktree / parallel
+   modes, budget, start time, chat / task / parent ids), like the info
+   rows of the history sidebar. */
+.task-panel-info {
+  margin: 0 var(--space-3) var(--space-2);
   padding-top: var(--space-1);
-  padding-bottom: var(--space-1);
-}
-
-#task-panel.drawer-collapsed #task-panel-text {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-/* The task's settings info (model, worktree / parallel modes, budget,
-   start time, chat / task / parent ids) — shown only while the panel
-   is expanded, like the info rows of the history sidebar. */
-#task-panel-info {
-  margin-top: var(--space-1);
-  padding-top: var(--space-1);
-  border-top: 1px solid color-mix(in srgb, var(--panel-fg) 20%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--fg) 20%, transparent);
   font-size: var(--fs-sm);
-  color: var(--panel-dim);
+  color: var(--dim);
   line-height: 1.5;
 }
 
-#task-panel-info:empty,
-#task-panel.drawer-collapsed #task-panel-info {
-  display: none;
-}
+.task-panel-info:empty { display: none; }
 
 .task-panel-info-line {
   display: block;
@@ -4730,16 +4663,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   max-height: calc(100vh - 16px); overflow: hidden; box-sizing: border-box;
 }
 #custom-tooltip.visible { opacity: 1; }
-
-#custom-tooltip.task-panel-tooltip {
-  font-size: var(--vscode-editor-font-size);
-
-  /* Match the task panel's palette (opaque: the tooltip floats over
-     arbitrary content, so the accent tint is pre-mixed over --bg). */
-  background: var(--accent-tint-solid);
-  color: var(--dim);
-  border-color: var(--accent-line);
-}
 
 .wt-bar {
   display: flex; flex-direction: column; gap: var(--space-2-5); padding: var(--space-2-5) var(--space-3);

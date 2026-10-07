@@ -88,7 +88,7 @@ _DISPLAY_EVENT_TYPES = frozenset(
         # events table and replays show the cost under each thoughts
         # panel.
         "llm_call",
-        # Persisted so replays repopulate the static task panel's
+        # Persisted so replays repopulate the shared task panel's
         # settings info (model, worktree / parallel modes, budget,
         # start time, chat / task / parent ids); broadcast once per
         # run by ``ChatSorcarAgent.run``.

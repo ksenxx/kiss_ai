@@ -7,7 +7,7 @@
 // (#meta-list in media/chat.html, painted by updateMetaTaskDetails in
 // media/main.js) — Date, Base model, Worktree mode, Parallel mode,
 // Chat id, Task id and (when the task has one) Parent task — and for the
-// static task panel, which no longer carries a settings block:
+// task panels of a shared page, which carry a settings block each:
 //
 // * a live task's `task_settings` event paints the rows,
 // * a new submit clears the previous task's rows ('—') until the new
@@ -535,7 +535,7 @@ test('share export gives every task panel its own settings info', () => {
   assert.ok(msg, 'the share_tasks reply must produce a shareChat command');
   const dom = new JSDOM('<div id="app">' + msg.html + '</div>');
   const infos = Array.from(
-    dom.window.document.querySelectorAll('#task-panel-info'),
+    dom.window.document.querySelectorAll('.task-panel-info'),
   ).map(el => el.textContent);
   assert.strictEqual(infos.length, 2, 'one info block per task panel');
   assert.ok(
@@ -548,7 +548,7 @@ test('share export gives every task panel its own settings info', () => {
   );
 });
 
-test('share markup: the info block sits between the text and the buttons', () => {
+test('share markup: the info block follows the task text', () => {
   const wv = makeWebview();
   const win = wv.win;
   const TAB = tabIdOf(wv);
@@ -568,25 +568,24 @@ test('share markup: the info block sits between the text and the buttons', () =>
   const msg = wv.posted.filter(m => m.type === 'shareChat').pop();
   const dom = new JSDOM('<div id="app">' + msg.html + '</div>');
   const doc = dom.window.document;
-  const info = doc.querySelector('#task-panel #task-panel-info');
+  const info = doc.querySelector('.task-panel .task-panel-info');
   assert.ok(info, 'the exported panel carries an info block');
   assert.strictEqual(info.textContent, '', 'no settings, empty block');
   assert.strictEqual(
-    info.previousElementSibling.id,
-    'task-panel-text-1',
+    info.previousElementSibling.className,
+    'task-panel-text',
     'the block follows the task text',
   );
-  assert.strictEqual(
-    info.nextElementSibling.id,
-    'task-panel-drawer-btn',
-    'the block precedes the drawer button',
+  // The live transcript's own task panel shows no info block: the Task
+  // Info panel carries the settings there.
+  assert.ok(
+    !win.document.querySelector('#output .task-panel-info'),
+    'no info block on the live task panel',
   );
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   assert.ok(
-    /#task-panel-info:empty,\s*#task-panel\.drawer-collapsed #task-panel-info\s*\{\s*display:\s*none;/.test(
-      css,
-    ),
-    'the info block hides when empty or when the drawer is collapsed',
+    /\.task-panel-info:empty\s*\{\s*display:\s*none;/.test(css),
+    'the info block hides when empty',
   );
 });
 

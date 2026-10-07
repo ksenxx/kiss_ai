@@ -3,10 +3,13 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The static task panel names the task the reader is looking at.  These
+// The active tab's label names the task the reader is looking at: the
+// tab's own task, or the neighbouring task scrolled into view. Each task
+// of the thread opens with its own task panel in the transcript, so
+// the label and the status row are what follow the reader. These
 // end-to-end tests drive the real webview (chat.html + media/main.js) in
 // JSDOM, stub a deterministic layout for #output, scroll it like a user
-// would, and assert the panel text plus the token/budget/step metrics.
+// would, and assert the label plus the token/budget/step metrics.
 
 'use strict';
 
@@ -59,7 +62,9 @@ function send(win, data) {
 
 function heightOf(el) {
   const h = el.dataset ? el.dataset.testHeight : '';
-  return h ? Number(h) : DEFAULT_HEIGHT;
+  if (h) return Number(h);
+  // The "Loading … task" strip is one thin line of chrome.
+  return el.id === 'adjacent-loader' ? 0 : DEFAULT_HEIGHT;
 }
 
 function rect(top, height) {
@@ -131,8 +136,21 @@ function clickTab(win, tabId) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-function panelText(win) {
-  return win.document.getElementById('task-panel-text').textContent;
+/** The active tab's label: the task the reader is looking at. */
+function shownTask(win) {
+  const label = win.document.querySelector(
+    '.chat-tab[aria-selected="true"] .chat-tab-label',
+  );
+  assert.ok(label, 'the active tab must be in the tab bar');
+  return label.textContent;
+}
+
+/** The task panel that opens the transcript region of *name*. */
+function taskPanelOf(O, name) {
+  const region = name === 'Main task' ? O : taskEl(O, name);
+  const panel = region.querySelector(':scope > .task-panel');
+  assert.ok(panel, 'the region of ' + name + ' must open with a task panel');
+  return panel;
 }
 
 function metrics(win) {
@@ -193,13 +211,7 @@ function setup(opts) {
       events: taskEvents(name),
     });
   });
-  return {
-    win,
-    posted,
-    tabId,
-    O,
-    panel: win.document.getElementById('task-panel'),
-  };
+  return {win, posted, tabId, O};
 }
 
 function taskEl(O, name) {
@@ -240,13 +252,13 @@ function testPanelNamesTheTaskFillingTheScreen() {
   setHeight(next, 1000);
 
   scrollTo(win, O, topOf(O, prev));
-  assert.strictEqual(panelText(win), 'Prev task', 'top of the previous task');
+  assert.strictEqual(shownTask(win), 'Prev task', 'top of the previous task');
 
   scrollTo(win, O, topOf(O, mainChildren(O)[0]));
-  assert.strictEqual(panelText(win), 'Main task', 'back on the main task');
+  assert.strictEqual(shownTask(win), 'Main task', 'back on the main task');
 
   scrollTo(win, O, topOf(O, next));
-  assert.strictEqual(panelText(win), 'Next task', 'top of the next task');
+  assert.strictEqual(shownTask(win), 'Next task', 'top of the next task');
 
   win.close();
   console.log('PASS the panel names the task that fills the screen');
@@ -262,7 +274,7 @@ function testLastTaskNamedWhenScrolledToBottom() {
 
   scrollToBottom(win, O);
   assert.strictEqual(
-    panelText(win),
+    shownTask(win),
     'Last task',
     'the panel must name the last task once it owns most of the viewport',
   );
@@ -279,7 +291,7 @@ function testSliverOfLastTaskDoesNotStealThePanel() {
 
   scrollToBottom(win, O);
   assert.strictEqual(
-    panelText(win),
+    shownTask(win),
     'Main task',
     'a 60px sliver must not rename the panel',
   );
@@ -296,7 +308,7 @@ function testFirstTaskNamedWhenScrolledToTop() {
 
   scrollTo(win, O, 0);
   assert.strictEqual(
-    panelText(win),
+    shownTask(win),
     'First task',
     'the panel must name the first task at the very top',
   );
@@ -315,7 +327,7 @@ function testMetricsFollowTheVisibleTask() {
   setHeight(last, 300);
 
   scrollToBottom(win, O);
-  assert.strictEqual(panelText(win), 'Last task');
+  assert.strictEqual(shownTask(win), 'Last task');
   assert.deepStrictEqual(metrics(win), {
     tokens: 'Tokens: 777',
     budget: 'Budget: $7',
@@ -323,7 +335,7 @@ function testMetricsFollowTheVisibleTask() {
   });
 
   scrollTo(win, O, 0);
-  assert.strictEqual(panelText(win), 'Main task');
+  assert.strictEqual(shownTask(win), 'Main task');
   assert.deepStrictEqual(metrics(win), {
     tokens: 'Tokens: 999',
     budget: 'Cost: $0.50',
@@ -333,33 +345,309 @@ function testMetricsFollowTheVisibleTask() {
   console.log('PASS the status metrics follow the visible task');
 }
 
-// Stepping with the wheel over the panel and then nudging the scroller
-// must not make the panel disagree with itself.
-function testWheelStepToLastTaskSurvivesANudge() {
-  const {win, O, panel} = setup({next: ['Last task']});
+// Every region of the thread opens with its own task panel: the tab's
+// own transcript and each spliced-in neighbour, in reading order.
+function testEveryRegionOpensWithItsTaskPanel() {
+  const {win, O} = setup({prev: ['Prev task'], next: ['Next task']});
+  const prevPanel = taskPanelOf(O, 'Prev task');
+  const mainPanel = taskPanelOf(O, 'Main task');
+  const nextPanel = taskPanelOf(O, 'Next task');
+  assert.strictEqual(
+    prevPanel.querySelector('.task-panel-text').textContent,
+    'Prev task',
+  );
+  assert.strictEqual(
+    mainPanel.querySelector('.task-panel-text').textContent,
+    'Main task',
+  );
+  assert.strictEqual(
+    nextPanel.querySelector('.task-panel-text').textContent,
+    'Next task',
+  );
+  const order = Array.from(O.querySelectorAll('.task-panel'));
+  assert.deepStrictEqual(order, [prevPanel, mainPanel, nextPanel]);
+  assert.strictEqual(
+    taskEl(O, 'Prev task').firstElementChild,
+    prevPanel,
+    "a neighbour's task panel is the first thing in its container",
+  );
+  assert.strictEqual(
+    mainChildren(O)[0],
+    mainPanel,
+    "the tab's own task panel is the first thing in its region",
+  );
+  order.forEach(p =>
+    assert.ok(
+      !p.classList.contains('collapsed'),
+      'the replay leaves every task panel open',
+    ),
+  );
+  assert.strictEqual(
+    win.document.getElementById('task-panel'),
+    null,
+    'no fixed task panel sits above the transcript',
+  );
+  win.close();
+  console.log('PASS every region of the thread opens with its task panel');
+}
+
+// The thread reads on without a stop: scrolling near the top fetches
+// the previous task before the reader reaches it, near the bottom the
+// next one; a reply without a task closes that end for good.
+function testScrollingNearAnEdgePrefetchesTheNeighbour() {
+  const {win, O, posted, tabId} = setup({});
+  const requests = () => posted.filter(m => m.type === 'getAdjacentTask');
+  mainChildren(O).forEach(el => setHeight(el, 1000));
+  scrollTo(win, O, O.scrollHeight - VIEWPORT - 100);
+  assert.deepStrictEqual(
+    requests().map(m => [m.direction, m.taskId]),
+    [['next', '50']],
+    'near the bottom the next task is fetched',
+  );
+  assert.strictEqual(
+    O.lastElementChild.id,
+    'adjacent-loader',
+    'the loading strip joins the bottom of the transcript',
+  );
+  send(win, {type: 'adjacent_task_events', tabId, direction: 'next'});
+  assert.strictEqual(
+    win.document.getElementById('adjacent-loader'),
+    null,
+    'a reply without a task removes the strip',
+  );
+  scrollTo(win, O, O.scrollHeight - VIEWPORT - 50);
+  assert.strictEqual(requests().length, 1, 'no next task: nothing more');
+
+  scrollTo(win, O, 200);
+  assert.deepStrictEqual(
+    requests().slice(1).map(m => [m.direction, m.taskId]),
+    [['prev', '50']],
+    'near the top the previous task is fetched',
+  );
+  assert.strictEqual(O.firstElementChild.id, 'adjacent-loader');
+  scrollTo(win, O, 100);
+  assert.strictEqual(requests().length, 2, 'one fetch at a time');
+  send(win, {
+    type: 'adjacent_task_events',
+    tabId,
+    direction: 'prev',
+    task: 'Prev task',
+    task_id: '49',
+    events: taskEvents('Prev task'),
+  });
+  assert.strictEqual(
+    O.firstElementChild,
+    taskEl(O, 'Prev task'),
+    'the previous task is spliced in above',
+  );
+  assert.strictEqual(
+    O.scrollTop,
+    100 + heightOf(taskEl(O, 'Prev task')),
+    'the reader keeps their place while the thread grows above them',
+  );
+  scrollTo(win, O, 0);
+  assert.deepStrictEqual(
+    requests().slice(2).map(m => [m.direction, m.taskId]),
+    [['prev', '49']],
+    'the next fetch continues from the oldest task on screen',
+  );
+  win.close();
+  console.log('PASS scrolling near an edge prefetches the neighbour');
+}
+
+// A transcript too short to scroll never fires a scroll event: pushing
+// the wheel past an edge fetches the task beyond it at once, with no
+// gesture to accumulate.
+function testEdgePushFetchesAtOnce() {
+  const {win, O, posted, tabId} = setup({});
+  const requests = () => posted.filter(m => m.type === 'getAdjacentTask');
+  mainChildren(O).forEach(el => setHeight(el, 50));
+  assert.ok(O.scrollHeight <= VIEWPORT, 'setup: nothing to scroll');
+  // A real scroller clamps an unscrollable transcript at 0.
+  O.scrollTop = 0;
+  wheel(win, O, 1);
+  assert.deepStrictEqual(
+    requests().map(m => m.direction),
+    ['next'],
+    'one push past the bottom fetches the next task at once',
+  );
+  wheel(win, O, 1);
+  assert.strictEqual(requests().length, 1, 'one fetch at a time');
+  send(win, {type: 'adjacent_task_events', tabId, direction: 'next'});
+  wheel(win, O, 1);
+  assert.strictEqual(requests().length, 1, 'no next task: nothing more');
+  wheel(win, O, -1);
+  assert.deepStrictEqual(
+    requests().map(m => m.direction),
+    ['next', 'prev'],
+    'one push past the top fetches the previous task at once',
+  );
+  win.close();
+  console.log('PASS an edge push fetches the neighbour at once');
+}
+
+// A running task is the newest of its chat: nothing is fetched below it,
+// whether the reader scrolls towards the bottom or pushes past it. The
+// tasks above it still join the thread.
+function testRunningTaskHasNoNextTask() {
+  const {win, O, posted, tabId} = setup({});
+  const requests = () => posted.filter(m => m.type === 'getAdjacentTask');
+  send(win, {type: 'status', running: true, tabId, startTs: 1});
+  mainChildren(O).forEach(el => setHeight(el, 1000));
+  scrollToBottom(win, O);
+  wheel(win, O, 1);
+  assert.strictEqual(requests().length, 0, 'no next task below a running task');
+  scrollTo(win, O, 0);
+  wheel(win, O, -1);
+  assert.deepStrictEqual(
+    requests().map(m => m.direction),
+    ['prev'],
+    'the previous task still joins the thread above a running task',
+  );
+  win.close();
+  console.log('PASS a running task has no next task');
+}
+
+// A history click lands the reader ON the clicked task: its region is
+// scrolled to the top of the viewport and pinned there, so the label
+// names it even when the region is too short to own most of the screen;
+// a scroll event that moves nothing keeps the pin, a real scroll ends it.
+function testHistoryClickPinsTheClickedTask() {
+  const {win, O, posted} = setup({next: ['Last task']});
   const last = taskEl(O, 'Last task');
   setHeight(last, 300);
-
   scrollTo(win, O, 0);
-  while (O.scrollTop < O.scrollHeight - VIEWPORT) {
-    const before = O.scrollTop;
-    wheel(win, panel, 120);
-    if (O.scrollTop === before) break;
-  }
-  wheel(win, panel, 120);
+  assert.strictEqual(shownTask(win), 'Main task');
+
+  send(win, {
+    type: 'openChatFromHistory',
+    chatId: 'chat-abc',
+    taskId: '51',
+    title: 'Last task',
+  });
   assert.strictEqual(
-    panelText(win),
+    shownTask(win),
     'Last task',
-    'wheeling past the end must land on the last task',
+    'the clicked task is what the label names',
+  );
+  assert.strictEqual(
+    last.getBoundingClientRect().top,
+    O.getBoundingClientRect().top,
+    'the clicked region sits at the top of the viewport',
+  );
+  assert.ok(
+    !posted.some(m => m.type === 'resumeSession'),
+    'a task already on screen is not replayed',
   );
   O.dispatchEvent(new win.Event('scroll'));
   assert.strictEqual(
-    panelText(win),
+    shownTask(win),
     'Last task',
-    'a scroll event that does not move the scroller must not rename the panel',
+    'a scroll event that does not move the scroller keeps the pin',
   );
+  scrollTo(win, O, 0);
+  assert.strictEqual(shownTask(win), 'Main task', 'a real scroll ends it');
   win.close();
-  console.log('PASS a wheel step onto the last task survives a scroll nudge');
+  console.log('PASS a history click pins the clicked task');
+}
+
+// A history row whose chat is not open gets a fresh tab that shows the
+// task panel at once; the daemon answers the tab's `newChat` with a
+// `showWelcome` reset, which must not blank that panel (neither while
+// the tab is active nor after the reader has moved to another tab).
+function testHistoryTabSurvivesTheWelcomeReset() {
+  const {win, O, posted, tabId} = setup({});
+  send(win, {
+    type: 'openChatFromHistory',
+    chatId: 'chat-other',
+    taskId: '70',
+    title: 'Other task',
+  });
+  const newTabId = posted.filter(m => m.type === 'newChat').pop().tabId;
+  assert.notStrictEqual(newTabId, tabId, 'the row opens a fresh tab');
+  assert.strictEqual(shownTask(win), 'Other task');
+  assert.strictEqual(
+    taskPanelOf(O, 'Main task').querySelector('.task-panel-text').textContent,
+    'Other task',
+    'the fresh tab opens with the clicked task panel',
+  );
+  assert.ok(
+    posted.some(m => m.type === 'resumeSession' && m.tabId === newTabId),
+    'the chat is resumed into the fresh tab',
+  );
+  send(win, {type: 'showWelcome', tabId: newTabId, model: 'm'});
+  assert.strictEqual(
+    taskPanelOf(O, 'Main task').querySelector('.task-panel-text').textContent,
+    'Other task',
+    'the welcome reset of the active history tab keeps its panel',
+  );
+  assert.strictEqual(
+    win.document.getElementById('welcome').style.display,
+    'none',
+    'the welcome screen stays hidden behind the task panel',
+  );
+  clickTab(win, tabId);
+  send(win, {type: 'showWelcome', tabId: newTabId, model: 'm'});
+  clickTab(win, newTabId);
+  assert.strictEqual(
+    taskPanelOf(O, 'Main task').querySelector('.task-panel-text').textContent,
+    'Other task',
+    'the welcome reset of a background history tab keeps its panel',
+  );
+  // A genuinely new tab is still reset to the welcome screen.
+  send(win, {type: 'clearChat'});
+  const blankTabId = posted.filter(m => m.type === 'newChat').pop().tabId;
+  send(win, {type: 'showWelcome', tabId: blankTabId, model: 'm'});
+  assert.strictEqual(
+    win.document.getElementById('welcome').style.display,
+    '',
+    'a blank tab shows the welcome screen',
+  );
+  assert.ok(!O.querySelector('.task-panel'), 'a blank tab has no task panel');
+  win.close();
+  console.log('PASS a history tab survives the daemon welcome reset');
+}
+
+// The daemon echoes every submitted prompt as setTaskText, queued
+// follow-ups and refused submits included. Until a run claims the echo
+// with 'clear', the label and the task panel keep naming the task on
+// screen — across a tab round trip too.
+function testFollowupEchoDoesNotRenameTheTaskOnScreen() {
+  const {win, O, tabId} = setup({});
+  const panelText = () =>
+    taskPanelOf(O, 'Main task').querySelector('.task-panel-text').textContent;
+  send(win, {type: 'setTaskText', tabId, text: 'Queued follow-up'});
+  assert.strictEqual(shownTask(win), 'Main task', 'the label keeps the task');
+  assert.strictEqual(panelText(), 'Main task', 'the panel keeps the task');
+  assert.strictEqual(
+    O.querySelectorAll('.task-panel').length,
+    1,
+    'the echo puts up no second panel',
+  );
+  win._testApi.createNewTab();
+  const otherTabId = win._testApi.getActiveTabId();
+  assert.notStrictEqual(otherTabId, tabId);
+  clickTab(win, tabId);
+  assert.strictEqual(shownTask(win), 'Main task', 'a round trip keeps it');
+  assert.strictEqual(panelText(), 'Main task');
+  // A background tab's echo is held the same way.
+  send(win, {type: 'setTaskText', tabId: otherTabId, text: 'Other task'});
+  send(win, {type: 'clear', tabId: otherTabId});
+  clickTab(win, otherTabId);
+  assert.strictEqual(shownTask(win), 'Other task');
+  assert.strictEqual(
+    O.querySelector('.task-panel-text').textContent,
+    'Other task',
+    "a background tab's clear opens its transcript with the echoed text",
+  );
+  // The run that the echo announced opens its transcript with its text.
+  clickTab(win, tabId);
+  send(win, {type: 'clear', tabId});
+  assert.strictEqual(shownTask(win), 'Queued follow-up');
+  assert.strictEqual(panelText(), 'Queued follow-up');
+  assert.strictEqual(O.querySelectorAll('.task-panel').length, 1);
+  win.close();
+  console.log('PASS a follow-up echo does not rename the task on screen');
 }
 
 // Walking the whole transcript one scroll step at a time: the panel must
@@ -376,7 +664,7 @@ function testPanelAlwaysNamesAnOnScreenTask() {
   const max = O.scrollHeight - VIEWPORT;
   for (let top = 0; top <= max; top += 50) {
     scrollTo(win, O, top);
-    const name = panelText(win);
+    const name = shownTask(win);
     let onScreen = false;
     for (let i = 0; i < O.children.length; i++) {
       const child = O.children[i];
@@ -408,7 +696,7 @@ function testLoaderIsNotTranscript() {
   setHeight(taskEl(O, 'Last task'), 300);
 
   scrollToBottom(win, O);
-  assert.strictEqual(panelText(win), 'Last task');
+  assert.strictEqual(shownTask(win), 'Last task');
   for (let i = 0; i < 5; i++) wheel(win, O, 50);
   assert.ok(
     posted.some(m => m.type === 'getAdjacentTask' && m.direction === 'next'),
@@ -420,7 +708,7 @@ function testLoaderIsNotTranscript() {
 
   scrollToBottom(win, O);
   assert.strictEqual(
-    panelText(win),
+    shownTask(win),
     'Last task',
     'the loading strip must not shadow the task it is loading past',
   );
@@ -448,7 +736,7 @@ function testSplicedInTaskRenamesThePanelWithoutAScroll() {
   });
   setHeight(taskEl(O, 'Last task'), 400);
   assert.strictEqual(
-    panelText(win),
+    shownTask(win),
     'Last task',
     'the freshly spliced-in task owns the screen and must be named',
   );
@@ -464,7 +752,7 @@ function testTabRoundTripKeepsTheTabsOwnTask() {
   const first = win._testApi.getActiveTabId();
 
   scrollToBottom(win, O);
-  assert.strictEqual(panelText(win), 'Last task', 'reading the neighbour');
+  assert.strictEqual(shownTask(win), 'Last task', 'reading the neighbour');
 
   win._testApi.createNewTab();
   clickTab(win, first);
@@ -474,7 +762,7 @@ function testTabRoundTripKeepsTheTabsOwnTask() {
 
   scrollTo(win, back, 0);
   assert.strictEqual(
-    panelText(win),
+    shownTask(win),
     'Main task',
     'back on its own events, the tab must name its own task',
   );
@@ -499,13 +787,13 @@ function testReturningToATabNamesWhatIsOnScreen() {
   const first = win._testApi.getActiveTabId();
 
   scrollToBottom(win, O);
-  assert.strictEqual(panelText(win), 'Last task', 'reading the neighbour');
+  assert.strictEqual(shownTask(win), 'Last task', 'reading the neighbour');
 
   win._testApi.createNewTab();
   clickTab(win, first);
 
   assert.strictEqual(
-    panelText(win),
+    shownTask(win),
     'Last task',
     'the reader came back to the neighbour, so the panel must name it',
   );
@@ -544,7 +832,7 @@ function testMetricsDoNotLeakBetweenTabs() {
   setHeight(taskEl(back, 'Last task'), 600);
 
   scrollTo(win, back, 0);
-  assert.strictEqual(panelText(win), 'Main task');
+  assert.strictEqual(shownTask(win), 'Main task');
   assert.deepStrictEqual(
     metrics(win),
     {tokens: 'Tokens: 999', budget: 'Cost: $0.50', steps: 'Steps: 3'},
@@ -565,7 +853,7 @@ function testLiveMetricsDoNotOverrideTheVisibleTask() {
   setHeight(last, 600);
 
   scrollToBottom(win, O);
-  assert.strictEqual(panelText(win), 'Last task');
+  assert.strictEqual(shownTask(win), 'Last task');
 
   win._testApi.processEvent({
     type: 'usage_info',
@@ -573,7 +861,7 @@ function testLiveMetricsDoNotOverrideTheVisibleTask() {
     cost: '1.20',
     total_steps: 12,
   });
-  assert.strictEqual(panelText(win), 'Last task', 'the panel must not flip');
+  assert.strictEqual(shownTask(win), 'Last task', 'the panel must not flip');
   assert.deepStrictEqual(
     metrics(win),
     {tokens: 'Tokens: 777', budget: 'Cost: 7.00', steps: 'Steps: 7'},
@@ -581,7 +869,7 @@ function testLiveMetricsDoNotOverrideTheVisibleTask() {
   );
 
   scrollTo(win, O, 0);
-  assert.strictEqual(panelText(win), 'Main task');
+  assert.strictEqual(shownTask(win), 'Main task');
   assert.deepStrictEqual(
     metrics(win),
     {tokens: 'Tokens: 1.23K', budget: 'Cost: $1.20', steps: 'Steps: 12'},
@@ -602,7 +890,7 @@ function testPartialLiveMetricsKeepTheLiveTasksOwnNumbers() {
   setHeight(last, 600);
 
   scrollToBottom(win, O);
-  assert.strictEqual(panelText(win), 'Last task');
+  assert.strictEqual(shownTask(win), 'Last task');
   win._testApi.processEvent({
     type: 'usage_info',
     total_tokens: 1234,
@@ -703,7 +991,7 @@ function testHiddenTabStreamLeavesTheVisibleRowAlone() {
   const back = win.document.getElementById('output');
   setHeight(taskEl(back, 'Last task'), 600);
   scrollToBottom(win, back);
-  assert.strictEqual(panelText(win), 'Last task', 'reading the neighbour');
+  assert.strictEqual(shownTask(win), 'Last task', 'reading the neighbour');
 
   send(win, {
     type: 'system_output',
@@ -724,7 +1012,7 @@ function testHiddenTabStreamLeavesTheVisibleRowAlone() {
   );
 
   scrollTo(win, back, 0);
-  assert.strictEqual(panelText(win), 'Main task');
+  assert.strictEqual(shownTask(win), 'Main task');
   assert.deepStrictEqual(
     metrics(win),
     {tokens: 'Tokens: 999', budget: 'Cost: $0.50', steps: 'Steps: 3'},
@@ -764,7 +1052,7 @@ function testHiddenTabReplayLeavesTheVisibleRowAlone() {
       {type: 'system_output', text: 'hidden replay\n'},
     ],
   });
-  assert.strictEqual(panelText(win), 'Last task', 'the panel must not move');
+  assert.strictEqual(shownTask(win), 'Last task', 'the panel must not move');
   assert.deepStrictEqual(
     metrics(win),
     {tokens: 'Tokens: 777', budget: 'Cost: 7.00', steps: 'Steps: 7'},
@@ -868,7 +1156,7 @@ function testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers() {
 function testPanelUnchangedWithoutAdjacentTasks() {
   const {win, O} = setup({});
   scrollToBottom(win, O);
-  assert.strictEqual(panelText(win), 'Main task');
+  assert.strictEqual(shownTask(win), 'Main task');
   win.close();
   console.log('PASS the panel is untouched when no neighbour is loaded');
 }
@@ -880,7 +1168,13 @@ async function main() {
     testSliverOfLastTaskDoesNotStealThePanel,
     testFirstTaskNamedWhenScrolledToTop,
     testMetricsFollowTheVisibleTask,
-    testWheelStepToLastTaskSurvivesANudge,
+    testEveryRegionOpensWithItsTaskPanel,
+    testScrollingNearAnEdgePrefetchesTheNeighbour,
+    testEdgePushFetchesAtOnce,
+    testRunningTaskHasNoNextTask,
+    testHistoryClickPinsTheClickedTask,
+    testHistoryTabSurvivesTheWelcomeReset,
+    testFollowupEchoDoesNotRenameTheTaskOnScreen,
     testPanelAlwaysNamesAnOnScreenTask,
     testLoaderIsNotTranscript,
     testSplicedInTaskRenamesThePanelWithoutAScroll,
@@ -906,10 +1200,10 @@ async function main() {
     }
   }
   if (failures.length) {
-    console.error('\n' + failures.length + ' static task panel test(s) failed');
+    console.error('\n' + failures.length + ' visible-task label test(s) failed');
     process.exit(1);
   }
-  console.log('\nALL static task panel visible-task tests passed');
+  console.log('\nALL visible-task label tests passed');
 }
 
 main().catch(e => {

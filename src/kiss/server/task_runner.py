@@ -1021,7 +1021,17 @@ class _TaskRunnerMixin:
                     # chat id — so every client tracking the run's chat
                     # from that event (e.g. ``kiss.server.sorcar.run``)
                     # would report a chat this run never touches.
-                    # Re-announce the overridden one.
+                    # Re-announce the overridden one.  A ``clear`` opens
+                    # the transcript with the prompt echoed just before
+                    # it (the ``setTaskText`` of ``_cmd_run``), and a
+                    # follow-up submitted during this setup window was
+                    # echoed since, so the run's own prompt is echoed
+                    # again first.
+                    self.printer.broadcast({
+                        "type": "setTaskText",
+                        "text": str(cmd.get("prompt", "") or ""),
+                        "tabId": tab_id,
+                    })
                     self.printer.broadcast({
                         "type": "clear",
                         "chat_id": override_chat_id,
