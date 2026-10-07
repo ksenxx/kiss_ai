@@ -194,7 +194,7 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         # Self-contained: the webview stylesheet, the highlight.js
         # theme, the VS Code palette and the collapse script are all
         # inlined, so the page needs no server and no other file.
-        self.assertIn(".ev.task-panel {", page)  # main.css
+        self.assertIn(".ev.task-panel, .ev.user-msg {", page)  # main.css
         self.assertIn(".collapse-preview", page)  # main.css
         self.assertIn(".hljs", page)  # highlight theme
         self.assertIn("--vscode-editor-background: #1f1f1f", page)

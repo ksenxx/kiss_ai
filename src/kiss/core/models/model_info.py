@@ -1790,8 +1790,8 @@ def get_fast_model() -> str:
     return _model_for_first_configured_provider(
         {
             "ANTHROPIC_API_KEY": "claude-sonnet-5-5",
-            "OPENAI_API_KEY": "gpt-6.1-luna",
-            "GEMINI_API_KEY": "gemini-2.0-flash",
+            "OPENAI_API_KEY": "gpt-6-luna",
+            "GEMINI_API_KEY": "gemini-3.5-flash-lite",
             "OPENROUTER_API_KEY": "openrouter/anthropic/claude-sonnet-5.5",
             "TOGETHER_API_KEY": "deepseek-ai/DeepSeek-V4.1-Flash",
             "cc": "cc/haiku",

@@ -39,9 +39,8 @@ from typing import IO, Any
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.chat_summary import upsert_chat_summary
 from kiss.agents.sorcar.task_metadata import classify_task_tags
-from kiss.core.config import adopt_legacy_file, kiss_home
+from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
-from kiss.scripts.legacy_task_db import is_pre_2026_04_db
 
 logger = logging.getLogger(__name__)
 
@@ -1732,7 +1731,7 @@ def _adopt_legacy_db_name(current_path: str) -> None:
     upgrades, and the leftover under the new name is not the database:
     its schema cannot even be opened (``no such column:
     parent_task_id``), while every task since lives in ``sorcar.db``.
-    :func:`kiss.scripts.legacy_task_db.is_pre_2026_04_db` recognises
+    :func:`kiss.core.config.is_pre_2026_04_db` recognises
     the leftover by its schema and :func:`adopt_legacy_file` sets it
     aside (as ``history.db.stale-<UTC time>``) before the rename.
 

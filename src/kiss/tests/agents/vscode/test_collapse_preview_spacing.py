@@ -250,12 +250,14 @@ def _build_test_script(body_children_json: str, collapse: bool = True) -> str:
     collapse_fn = _extract_function(source, "collapsePreview")
     sync_aria_fn = _extract_function(source, "syncCollapseAria")
     mkel_fn = _extract_function(source, "mkEl")
+    brief_fn = _extract_function(source, "briefPreviewText")
 
     script = _NODE_SHIM + "\n"
     script += "var document = { createElement: mkTestEl };\n"
     script += mkel_fn + "\n"
     script += collect_fn + "\n"
     script += sync_aria_fn + "\n"
+    script += brief_fn + "\n"
     script += collapse_fn + "\n"
     script += f"var bodyChildren = {body_children_json};\n"
     script += "var panel = buildPanel(bodyChildren);\n"
