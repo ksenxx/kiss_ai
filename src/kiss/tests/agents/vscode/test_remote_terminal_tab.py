@@ -164,7 +164,11 @@ def test_menu_item_opens_a_shell_in_the_work_dir(browser, harness):
         assert tab.inner_text().startswith(">_")
         assert "Terminal" in tab.inner_text()
         page.keyboard.type("echo marker-$((40+2)); pwd; stty size\n")
-        text = _wait_for_output(page, "marker-42")
+        _wait_for_output(page, "marker-42")
+        # The marker lands before pwd and stty answer: wait for the
+        # ``rows cols`` line too before reading the screen.
+        _wait_for_sizes(page, 1)
+        text = _screen(page)
         assert str(harness.work_dir) in text
         size = re.search(r"(?m)^(\d+) (\d+)$", text)
         assert size is not None
