@@ -80,18 +80,19 @@ def _custom_tool_call_hook(self: BaseSea, name: str, args: dict[str, Any]) -> st
     return None
 
 
-def test_tool_call_hook_fold_allows_on_none_or_legacy_ok_and_stops_at_a_refusal() -> None:
+def test_tool_call_hook_fold_allows_on_none_only_and_stops_at_a_refusal() -> None:
     """``base_tool_call_hook`` returns the first refusal (a string) of the chain, else ``None``.
 
-    ``None`` and the legacy ``"OK"`` both allow; any other string, even
-    ``"ok"``, is a refusal; a non-string, non-``None`` return is a script error.
+    Only ``None`` allows; any string, ``"OK"`` (the allow spelling of
+    older hooks) and ``"ok"`` included, is a refusal; a non-string,
+    non-``None`` return is a script error.
     """
 
     class Allows(BaseSea):
         def tool_call_hook(self, name: str, args: dict[str, Any]) -> str | None:
             return None
 
-    class LegacyAllows(BaseSea):
+    class FormerAllows(BaseSea):
         def tool_call_hook(self, name: str, args: dict[str, Any]) -> str:
             return "OK"
 
@@ -103,7 +104,7 @@ def test_tool_call_hook_fold_allows_on_none_or_legacy_ok_and_stops_at_a_refusal(
         def tool_call_hook(self, name: str, args: dict[str, Any]) -> Any:
             return 1
 
-    assert base_tool_call_hook([Allows(), LegacyAllows()], "Bash", {}) is None
+    assert base_tool_call_hook([Allows(), FormerAllows()], "Bash", {}) == "OK"
     assert base_tool_call_hook([Allows(), Refuses()], "Bash", {}) == "ok"
     assert base_tool_call_hook([Refuses(), Allows()], "Read", {}) is None
     with pytest.raises(SeaScriptError, match=r"tool_call_hook\(\) of agent script .* must return"):
@@ -277,6 +278,10 @@ def test_base_settings_pin_a_plain_run_unless_the_caller_chose_explicitly() -> N
 
 def test_base_prompt_rewrites_every_task_and_an_identity_passes_an_empty_one() -> None:
     assert base_prompt([BaseSea()], "") == ""  # the stock base leaves an empty task alone
+    # ``{task_id}`` is filled in whether or not a method changed the text:
+    # the caller's own placeholder gets the id too (``""`` without one).
+    assert base_prompt([BaseSea()], "about {task_id}", "T-1") == "about T-1"
+    assert base_prompt([BaseSea()], "about {task_id}") == "about "
     original = vars(BaseSea)["prompt"]
     BaseSea.prompt = _custom_prompt  # type: ignore[method-assign]
     try:

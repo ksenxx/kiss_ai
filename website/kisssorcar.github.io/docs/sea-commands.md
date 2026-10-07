@@ -145,7 +145,7 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 |---|---|---|---|
 | `kind` | `str` | — | What the run is: `session` (the default, an ordinary Sorcar session), `worker` or `channel`; each is a dict of defaults laid under the explicit keys (see the kind table). A `channel` run holds its channel workspace, gets the channel preamble, never inherits from a calling task and is never a `run_parallel` child. |
 | `work_dir` | `str` | `workDir` | The directory the run works in; default: the calling task's or the tab's. A relative path is resolved against the script's own folder, not the caller's (one a base class sets: against the base's file). |
-| `model` | `str` | `model` | The LLM model, a catalogue name or a model-picker SEA; `""` or `None` keeps the caller's. |
+| `model` | `str` | `model` | The LLM model, a catalogue name or a model-picker SEA; default: the caller's (`""`, like `None`, is no override — true of every string key). |
 | `chat_id` | `str` | `chatId` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a `channel` run, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
 | `use_worktree` | `bool` | `useWorktree` | Run in a git worktree of the project; default: the calling task's effective choice, else the persisted setting (an inherited or default `True` is demoted by the classifier for non-implementation tasks, an explicit `True` is kept). |
 | `auto_commit` | `bool` | `autoCommit` | Commit the run's changes when it ends; default: the calling task's effective choice, else the persisted setting. |

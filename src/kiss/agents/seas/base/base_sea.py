@@ -103,8 +103,9 @@ class BaseSea:
     def prompt(self, task: str) -> str:
         """Return the prompt the run gets for *task* (the user's text, or a base's result).
 
-        ``{task_id}`` in the result is replaced by the calling task's
-        id.  The result must be a non-empty string.
+        Every ``{task_id}`` of the final text (yours or the task's own)
+        is replaced by the calling task's id, ``""`` without one.  The
+        result must be a non-empty string.
         """
         return task
 
@@ -135,8 +136,8 @@ class BaseSea:
         """Return ``None`` to let the tool call *name*(*args*) run, else the text to refuse it with.
 
         Called before every tool call of the run; a refusal is returned
-        to the model as the tool's result.  (``"OK"``, the allow
-        spelling of older hooks, still allows.)
+        to the model as the tool's result.  Any string refuses, ``"OK"``
+        included.
         """
         return None
 

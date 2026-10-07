@@ -992,13 +992,10 @@ class _TaskRunnerMixin:
             if overridden_fields & {"chatId", "prompt", "workDir"}:
                 override_chat_id: str | None = None
                 if "chatId" in overridden_fields:
-                    # An empty override means "fresh chat" — mint the id
-                    # here, exactly like the dispatch handler does for an
-                    # empty client-sent ``chatId``, so the announced and
-                    # the persisted chat agree.
-                    override_chat_id = (
-                        str(cmd["chatId"] or "") or uuid.uuid4().hex
-                    )
+                    # A script's ``chat_id`` is never empty
+                    # (``resolve_settings`` drops ``""``): it names the
+                    # chat to resume.
+                    override_chat_id = str(cmd["chatId"])
                     state.chat_id = override_chat_id
                     with self._state_lock:
                         self._tab_chat_views[tab_id] = override_chat_id
@@ -1013,13 +1010,9 @@ class _TaskRunnerMixin:
                         else None
                     ),
                     work_dir=(
-                        # ``TabRegistry.update_tab`` keeps the current
-                        # value for an empty work dir, so an empty override
-                        # (meaning "the daemon's default") must be pinned
-                        # as the EFFECTIVE directory the run uses.
-                        (cmd["workDir"] or self.work_dir)
-                        if "workDir" in overridden_fields
-                        else None
+                        # A script's ``work_dir`` is never empty either:
+                        # the override is the directory the run uses.
+                        cmd["workDir"] if "workDir" in overridden_fields else None
                     ),
                 )
                 if override_chat_id is not None:

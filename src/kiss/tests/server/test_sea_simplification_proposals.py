@@ -485,15 +485,37 @@ class Sea(BaseSea):
         return settings | {'model': 'm-1'}
 """)
     assert sea_settings(named)["model"] == "m-1"
-    # Other empty strings keep their meaning (``chat_id: ""`` is a fresh chat).
-    fresh = _write(tmp_path / "fresh_sea.py", """
+    # ``""`` is "no override" for EVERY string key, as a blank run_agent
+    # option is: a worker whose string keys are all blank keeps the
+    # kind's defaults and the caller's values (``kind: ""`` is the
+    # default kind), and a lock on such a key has no value to hold.
+    blanks = _write(tmp_path / "blanks_sea.py", """
 from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {'chat_id': ''}
+        return settings | {'kind': 'worker', 'work_dir': '', 'chat_id': '',
+                           'tool_profile': '', 'docker_image': ''}
 """)
-    assert sea_settings(fresh)["chat_id"] == ""
+    assert sea_settings(blanks) == {"kind": "worker", **kind_defaults()["worker"]}
+    default_kind = _write(tmp_path / "default_kind_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'kind': ''}
+""")
+    assert sea_settings(default_kind) == {"kind": "session"}
+    # A non-string key is type-checked as before: ``""`` is not a bool.
+    wrong = _write(tmp_path / "wrong_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {'use_memory': ''}
+""")
+    with pytest.raises(SeaScriptError, match=r"settings\(\)\['use_memory'\] must be bool, got str"):
+        sea_settings(wrong)
 
 
 # ---------------------------------------------------------------------------

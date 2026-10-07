@@ -130,7 +130,7 @@ def test_fix_keeps_prefixes_quotes_and_locks_and_skips_nested_dicts(tmp_path: Pa
 
 
 def test_ok_verdict_is_fixable_and_fix_rewrites_it_to_none(tmp_path: Path) -> None:
-    """A ``tool_call_hook`` allowing with the literal ``"OK"`` is flagged and rewritten.
+    """A ``tool_call_hook`` returning the literal ``"OK"`` (a refusal) is flagged and rewritten.
 
     Only returns inside ``tool_call_hook`` count: an ``"OK"`` returned
     by another method, or compared rather than returned, is no finding.
@@ -157,7 +157,7 @@ def test_ok_verdict_is_fixable_and_fix_rewrites_it_to_none(tmp_path: Path) -> No
     findings = lint_all([path])
     assert codes(findings) == ["ok-verdict", "ok-verdict"]
     assert all(f.fixable for f in findings)
-    assert 'returns "OK" to allow the call; return None' in findings[0].message
+    assert 'returns "OK", which refuses the call (any string does)' in findings[0].message
     assert fix_sea(path) == [f"{path}:14: 'OK' -> None", f"{path}:15: 'OK' -> None"]
     text = path.read_text(encoding="utf-8")
     assert "            return None\n        return None\n" in text

@@ -97,7 +97,6 @@ from kiss.agents.sorcar.sea_settings import (
     script_name,
 )
 from kiss.core.config import kiss_home
-from kiss.core.kiss_agent import hook_refusal
 
 logger = logging.getLogger("kiss.sea_commands")
 
@@ -785,25 +784,25 @@ def sea_settings(sea_path: Path) -> dict[str, Any]:
 
 
 def base_prompt(seas: list[BaseSea], task: str, task_id: str = "") -> str:
-    """Return *task* after every ``prompt`` method of *seas*, base first.
+    """Return *task* after every ``prompt`` method of *seas*, base first, ``{task_id}`` filled in.
 
-    ``{task_id}`` in a method's result is replaced by *task_id* (the
-    calling task's id, or ``""`` when there is none); a method that
-    returns the text unchanged (the stock :class:`BaseSea`) leaves a
-    literal ``{task_id}`` of the caller's own text alone.
+    Every ``{task_id}`` of the final text — written by a method or by
+    the caller's own task text — is replaced by *task_id* (the calling
+    task's id, or ``""`` when there is none).
 
     Raises:
         SeaScriptError: When a ``prompt`` method raises or returns
-            anything but a non-empty string.
+            anything but a string, or changes the text to one that is
+            empty once ``{task_id}`` is filled in (a method that returns
+            its argument unchanged, the stock :class:`BaseSea`, may pass
+            an empty task through).
     """
     for method in _chain(seas, "prompt"):
         result = _check_text(_label(method), _call(method, task))
-        if result == task:
-            continue  # an identity (the stock ``BaseSea``) leaves the text, placeholders included
-        task = result.replace("{task_id}", task_id)
-        if not task.strip():
+        if result != task and not result.replace("{task_id}", task_id).strip():
             raise SeaScriptError(f"{_label(method)} must return a non-empty string")
-    return task
+        task = result
+    return task.replace("{task_id}", task_id)
 
 
 def base_system_prompt(seas: list[BaseSea], system_prompt: str) -> str:
@@ -829,15 +828,14 @@ def base_tool_call_hook(seas: list[BaseSea], name: str, args: dict[str, Any]) ->
     """Return the first refusal a ``tool_call_hook`` of *seas* gives, else ``None`` (allowed).
 
     A hook allows the call by returning ``None`` and refuses it by
-    returning the text the model sees instead (``"OK"``, the allow
-    spelling of older hooks, still allows; see
-    :func:`kiss.core.kiss_agent.hook_refusal`).
+    returning the text the model sees instead; any string refuses,
+    ``"OK"`` included (``uv run sea lint`` flags that former allow
+    spelling as ``ok-verdict``).
     """
     for method in _chain(seas, "tool_call_hook"):
         verdict = _call(method, name, args)
-        refusal = hook_refusal(None if verdict is None else _check_text(_label(method), verdict))
-        if refusal is not None:
-            return refusal
+        if verdict is not None:
+            return _check_text(_label(method), verdict)
     return None
 
 
