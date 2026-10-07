@@ -9,7 +9,7 @@
 // the task's panel above the task's transcript, as in the webview's
 // thread — so this script re-creates the interactions the webview
 // attaches through JavaScript: collapsing / expanding event panels
-// (media/main.js addCollapse) and the "Thinking" section toggle.  The styling
+// (media/main.js addCollapse).  The styling
 // comes from the page's inlined main.css, driven purely by the same
 // classes this script toggles.
 (function () {
@@ -92,51 +92,6 @@
     }
     prev.textContent = txt.replace(/\s+/g, ' ').trim();
   }
-
-  /**
-   * Toggle a "Thinking" section open or closed.  The transcript's
-   * think headers carry the webview's inline
-   * onclick="toggleThink(this)", so the shared page defines the same
-   * global (media/main.js exposes it as window.toggleThink too).
-   *
-   * @param {Element} el The clicked .lbl header of the think section.
-   */
-  window.toggleThink = function (el) {
-    const p = el.parentElement;
-    if (!p) return;
-    const cnt = p.querySelector('.cnt');
-    if (cnt) {
-      cnt.classList.toggle('hidden');
-      el.setAttribute(
-        'aria-expanded',
-        cnt.classList.contains('hidden') ? 'false' : 'true',
-      );
-    }
-    // Pages shared before the header lost its chevron still carry one.
-    const arrow = el.querySelector('.arrow');
-    if (arrow) arrow.classList.toggle('collapsed');
-  };
-
-  /**
-   * Keyboard parity for the thinking header: the header is a focusable
-   * role="button", so Enter and Space toggle it like a click does.
-   *
-   * @param {KeyboardEvent} e The keydown event.
-   */
-  function onThinkHeaderKeydown(e) {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    const target = e.target;
-    if (
-      !target ||
-      typeof target.matches !== 'function' ||
-      !target.matches('.think > .lbl')
-    ) {
-      return;
-    }
-    e.preventDefault();
-    window.toggleThink(target);
-  }
-  document.addEventListener('keydown', onThinkHeaderKeydown);
 
   /**
    * Collapse every run_parallel panel inside *root*, mirroring

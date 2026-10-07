@@ -106,7 +106,6 @@ function testNoCollapsibleHeaderIsBold() {
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   const headerSelectors = [
     '.tc-h',
-    '.think .lbl',
     '.tr .rl',
     '.system-prompt-h, .prompt-h',
     '.llm-panel-hdr',

@@ -257,10 +257,7 @@ _INJECT_PAGE_JS = r"""
   });
 
   out.insertAdjacentHTML('beforeend', `
-    <div class="ev think">
-      <div class="lbl"><span class="arrow">\u25BE</span> Thinking</div>
-      <div class="cnt">Reasoning about panel typography.</div>
-    </div>
+    <div class="think">Reasoning about panel typography.</div>
     <div class="ev txt md-body">Plain assistant text with
       <code>inline code</code> and a table.
       <pre><code class="hljs language-python">print("x")</code></pre>
@@ -340,9 +337,7 @@ _INJECT_PAGE_JS = r"""
 
 # Event-panel probes: selector -> probe key.
 PANEL_PROBES = {
-    "think": ".ev.think",
-    "thinkLbl": ".ev.think .lbl",
-    "thinkCnt": ".ev.think .cnt",
+    "think": ".think",
     "txt": ".ev.txt",
     "txtCode": ".ev.txt code",
     "txtPre": ".ev.txt pre",
@@ -448,7 +443,13 @@ _PROBE_STYLES_JS = (
     taskPanelCollapsedTextDisplay: collapsedTextDisplay,
     taskPanelTextMaxHeight: tpText.maxHeight,
     taskPanelGapLeft: tpRect.left - outRect.left,
-    taskPanelGapRight: outRect.right - tpRect.right,
+    // The task panel is 4/5 of the chat's content width, so its right
+    // gap is a share of that width (the two pages' viewports differ).
+    taskPanelWidthShare:
+      tpRect.width /
+      (outRect.width -
+        parseFloat(getComputedStyle(out).paddingLeft) -
+        parseFloat(getComputedStyle(out).paddingRight)),
     eventGapLeft: tcRect.left - outRect.left,
     eventGapRight: outRect.right - tcRect.right,
   };
@@ -664,7 +665,6 @@ def _assert_probe_parity(
         )
     for key in (
         "taskPanelGapLeft",
-        "taskPanelGapRight",
         "eventGapLeft",
         "eventGapRight",
     ):
@@ -674,6 +674,12 @@ def _assert_probe_parity(
             f"[{label}] {key}: remote panel format must match the "
             f"extension (extension={ext_gap}px, remote={rem_gap}px)"
         )
+    ext_share = float(ext_probes["taskPanelWidthShare"])
+    rem_share = float(rem_probes["taskPanelWidthShare"])
+    assert abs(ext_share - 0.8) <= 0.01 and abs(rem_share - 0.8) <= 0.01, (
+        f"[{label}] the task panel is 4/5 of the chat wide on both surfaces "
+        f"(extension={ext_share:.3f}, remote={rem_share:.3f})"
+    )
 
 
 @pytest.mark.timeout(240)

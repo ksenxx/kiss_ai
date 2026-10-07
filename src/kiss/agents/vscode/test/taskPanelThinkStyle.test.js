@@ -7,7 +7,8 @@
 // panel the eye should find first: it paints the accent tint under a
 // 1px accent hairline, on every surface (sidebar webview, editor-tab
 // webview, remote webapp and shared chat pages all inline
-// media/main.css).
+// media/main.css).  The model's thinking tokens are a plain text block
+// inside the Thoughts panel, not a boxed panel of their own.
 // Fresh installs must default to editor-tabs mode
 // (kissSorcar.editorTabsMode default true in package.json).
 
@@ -46,17 +47,17 @@ function decl(body, prop) {
 }
 
 function testTaskPanelIsTheAccentTintedPanel() {
-  const think = ruleBody('.think');
+  const tool = ruleBody('.tc');
   const panel = ruleBody('.ev.task-panel');
-  assert.ok(think, 'main.css must style .think');
+  assert.ok(tool, 'main.css must style .tc');
   assert.ok(panel, 'main.css must style .ev.task-panel');
 
-  // The transcript panels share the neutral --panel-tint; the task
-  // panel alone paints the accent tint under an accent hairline.
+  // The transcript panels share the neutral surface; the task panel
+  // alone paints the accent tint under an accent hairline.
   assert.strictEqual(
-    decl(think, 'background'),
-    'var(--panel-tint)',
-    '.think must paint the neutral --panel-tint',
+    decl(tool, 'background'),
+    'var(--surface)',
+    '.tc must paint the neutral --surface',
   );
   assert.strictEqual(
     decl(panel, 'background'),
@@ -70,10 +71,22 @@ function testTaskPanelIsTheAccentTintedPanel() {
   );
   assert.strictEqual(
     decl(panel, 'border-radius'),
-    decl(think, 'border-radius'),
+    decl(tool, 'border-radius'),
     'the task panel is rounded like the other transcript panels',
   );
   console.log('  ok - .ev.task-panel paints the accent tint and hairline');
+}
+
+function testThinkingTextIsNotABoxedPanel() {
+  const think = ruleBody('.think');
+  assert.ok(think, 'main.css must style .think');
+  assert.strictEqual(decl(think, 'background'), null, '.think paints no background');
+  assert.strictEqual(decl(think, 'border'), null, '.think draws no border');
+  assert.strictEqual(decl(think, 'max-height'), null, '.think is no scroller of its own');
+  assert.strictEqual(decl(think, 'font-style'), 'italic', '.think reads as thinking');
+  assert.strictEqual(ruleBody('.think .lbl'), '', 'no "Thinking" header rule');
+  assert.strictEqual(ruleBody('.think .cnt'), '', 'no thinking content box rule');
+  console.log('  ok - .think is plain text inside the Thoughts panel');
 }
 
 function testTaskPanelTextMatchesTheTranscript() {
@@ -118,6 +131,7 @@ function testEditorTabsModeDefaultsOn() {
 function main() {
   console.log('taskPanelThinkStyle.test.js');
   testTaskPanelIsTheAccentTintedPanel();
+  testThinkingTextIsNotABoxedPanel();
   testTaskPanelTextMatchesTheTranscript();
   testEditorTabsModeDefaultsOn();
   console.log('all task-panel style tests passed');
