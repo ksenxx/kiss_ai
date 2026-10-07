@@ -131,7 +131,7 @@
           </div>
           <div id="input-actions">
             <div id="model-picker">
-              <button id="model-btn" data-tooltip="Select model" aria-label="Select model">
+              <button id="model-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-list" data-tooltip="Select model" aria-label="Select model">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
                 <!-- The &lrm; marks pin the LTR character order inside
                      the pill's RTL (leading-truncation) line, exactly
@@ -140,10 +140,10 @@
               </button>
               <div id="model-dropdown">
                 <div class="search-wrap">
-                  <input type="text" id="model-search" placeholder="Search models..." aria-label="Search models">
+                  <input type="text" id="model-search" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="model-list" placeholder="Search models..." aria-label="Search models">
                   <button class="search-clear-btn" id="model-search-clear" aria-label="Clear search" style="display:none;">&times;</button>
                 </div>
-                <div id="model-list"></div>
+                <div id="model-list" role="listbox" aria-label="Models"></div>
               </div>
             </div>
             <span id="wait-spinner"></span>
@@ -558,6 +558,42 @@
                toggle pattern as the history panel's Filters drawer;
                main.js re-collapses both every time the settings panel
                opens, so they always START collapsed. -->
+          <div class="config-subpanel" id="cli-connections-subpanel">
+            <button type="button" id="cli-connections-toggle" class="config-subpanel-toggle" aria-expanded="false" aria-controls="cli-connections-body"><svg class="config-subpanel-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>CLI Connections</span></button>
+            <div id="cli-connections-body" class="config-subpanel-body" hidden>
+              <p class="config-field-note">Reuse a CLI login on the Sorcar server machine. Subscription mode prevents Sorcar from switching to API billing. Provider limits and extra-usage settings still apply.</p>
+              <div class="cli-connection">
+                <strong>Claude Code</strong>
+                <div id="cli-claude-status" class="config-field-note" role="status" aria-live="polite">Checking connection…</div>
+                <label class="config-label" for="cfg-claude-cli-billing-mode">Billing mode
+                  <select id="cfg-claude-cli-billing-mode"><option value="subscription">Subscription</option><option value="existing">Existing CLI configuration</option></select>
+                </label>
+                <div class="config-update-row">
+                  <button type="button" id="cli-claude-signin" class="config-update-btn">Sign in</button>
+                  <button type="button" id="cli-claude-refresh" class="config-update-btn">Refresh status</button>
+                  <a href="https://code.claude.com/docs/en/setup" target="_blank" rel="noopener noreferrer">Installation help</a>
+                </div>
+                <div class="config-field-note">Sign-in command: <code>claude auth login</code></div>
+                <button type="button" id="cli-claude-copy" class="config-update-btn">Copy sign-in command</button>
+              </div>
+              <div class="cli-connection">
+                <strong>Codex</strong>
+                <div id="cli-codex-status" class="config-field-note" role="status" aria-live="polite">Checking connection…</div>
+                <label class="config-label" for="cfg-codex-cli-billing-mode">Billing mode
+                  <select id="cfg-codex-cli-billing-mode"><option value="subscription">Subscription</option><option value="existing">Existing CLI configuration</option></select>
+                </label>
+                <div class="config-update-row">
+                  <button type="button" id="cli-codex-signin" class="config-update-btn">Sign in</button>
+                  <button type="button" id="cli-codex-refresh" class="config-update-btn">Refresh status</button>
+                  <a href="https://developers.openai.com/codex/cli" target="_blank" rel="noopener noreferrer">Installation help</a>
+                </div>
+                <div class="config-field-note">Sign-in command: <code>codex login --device-auth</code></div>
+                <button type="button" id="cli-codex-copy" class="config-update-btn">Copy sign-in command</button>
+              </div>
+              <label class="config-label config-checkbox"><input type="checkbox" id="cfg-allow-fable-usage-credits"><span>Allow Fable models that may charge usage credits</span></label>
+              <p class="config-field-note">Fable and Mythos may use separately purchased credits without a CLI prompt. This applies to any Claude subscription login, in either billing mode. Opus is the recommended default.</p>
+            </div>
+          </div>
           <div class="config-subpanel" id="api-keys-subpanel">
             <button type="button" id="api-keys-toggle" class="config-subpanel-toggle" aria-expanded="false" aria-controls="api-keys-body"><svg class="config-subpanel-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>API Keys</span></button>
             <div id="api-keys-body" class="config-subpanel-body" hidden>
@@ -582,7 +618,7 @@
           <label class="config-label">Together API Key
             <input type="password" autocomplete="off" id="cfg-key-TOGETHER_API_KEY" placeholder="Enter Together API key">
           </label>
-          <label class="config-label">Gemini API Key (NOT RECOMMENDED)
+          <label class="config-label">Gemini API Key
             <input type="password" autocomplete="off" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
           </label>
             </div>

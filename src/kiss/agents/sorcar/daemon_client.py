@@ -24,6 +24,7 @@ Depends only on ``websockets`` and the sorcar/core layers.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -854,6 +855,17 @@ def run(
     dispatched task had reported so far, so the caller can still
     charge it.
     """
+    from kiss.core.models.cli_connections import enforce_model_policy, subscription_only
+
+    if subscription_only() or (model_config or {}).get("subscription_only") is True:
+        model = model or os.environ.get("KISS_SUBSCRIPTION_MODEL", "")
+        model_config = dict(model_config or {}) | {
+            "subscription_only": True,
+            "cli_billing_mode": "subscription",
+        }
+        if model:
+            enforce_model_policy(model, model_config)
+
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
     agent_file = resolve_agent_path(extension_agent_path)

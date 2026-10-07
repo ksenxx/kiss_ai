@@ -328,6 +328,7 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   getAdjacentTask: ['tabId', 'taskId', 'direction'],
   getConfig: [],
   saveConfig: ['config', 'apiKeys'],
+  getCLIConnections: ['refresh'],
   // The settings panel's Custom Models subpanel: the daemon owns
   // ~/.kiss/MY_MODELS.json, so the CRUD travels to it whole and the
   // `myModelsData` replies come back through the client relay.
@@ -1675,6 +1676,28 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             : 'workbench.action.focusFirstEditorGroup',
         );
         break;
+
+      case 'openCLITerminal': {
+        if (message.machine !== os.hostname()) {
+          vscode.window.showInformationMessage(
+            'Sign in on the Sorcar server machine. Copy the command from CLI Connections and run it there.',
+          );
+          break;
+        }
+        const command =
+          message.provider === 'claude'
+            ? 'claude auth login'
+            : message.provider === 'codex'
+              ? 'codex login --device-auth'
+              : '';
+        if (!command) break;
+        const terminal = vscode.window.createTerminal({
+          name: 'Sorcar CLI sign-in',
+        });
+        terminal.show();
+        terminal.sendText(command);
+        break;
+      }
 
       case 'runUpdate':
         this.runUpdate();

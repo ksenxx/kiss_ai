@@ -73,6 +73,7 @@ def __getattr__(name: str) -> Path:
         return _config_path()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+
 DEFAULTS: dict[str, Any] = {
     "max_budget": DEFAULT_MAX_BUDGET,
     "custom_endpoint": "",
@@ -109,6 +110,9 @@ DEFAULTS: dict[str, Any] = {
     "memory_dir": "",
     "work_dir": "",
     "last_model": "",
+    "claude_cli_billing_mode": "subscription",
+    "codex_cli_billing_mode": "subscription",
+    "allow_fable_usage_credits": False,
 }
 
 RETIRED_KEYS: frozenset[str] = frozenset({"demo_mode", "is_parallel"})
@@ -130,6 +134,9 @@ was written to every user's ``config.json`` and broadcast in every
 ``configData``, which invites a future reader to wire it up and
 silently disagree with the real source of truth.
 """
+
+#: Per-CLI billing preferences; ``""`` means an older settings file awaiting detection.
+_CLI_BILLING_KEYS = ("claude_cli_billing_mode", "codex_cli_billing_mode")
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({
     "GEMINI_API_KEY",
@@ -189,6 +196,11 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
         A new dict with sanitized values; *data* is not modified.
     """
     result = {k: v for k, v in data.items() if k not in RETIRED_KEYS}
+    for key in _CLI_BILLING_KEYS:
+        if key in result and result[key] not in ("", "subscription", "existing"):
+            result[key] = "subscription"
+    if "allow_fable_usage_credits" in result:
+        result["allow_fable_usage_credits"] = result["allow_fable_usage_credits"] is True
     for key, default in DEFAULTS.items():
         if key not in result:
             continue
@@ -258,7 +270,15 @@ def load_config() -> dict[str, Any]:
     value cannot break downstream consumers.
     """
     result = dict(DEFAULTS)
-    result.update(_read_stored_config(_config_path()))
+    stored = _read_stored_config(_config_path())
+    result.update(stored)
+    # A settings file without these keys predates explicit CLI billing
+    # (``save_config`` seeds them when it creates the file). Detect its
+    # effective configuration once; fresh installations start on Subscription.
+    if stored:
+        for key in _CLI_BILLING_KEYS:
+            if key not in stored:
+                result[key] = ""
     return sanitize_config(result)
 
 
@@ -287,6 +307,11 @@ def save_config(data: dict[str, Any]) -> None:
     cfg_path = _config_path()
     with _config_lock, exclusive_file_lock(_config_dir() / ".config.lock"):
         existing = _read_stored_config(cfg_path)
+        if not cfg_path.exists():
+            # A fresh installation records its Subscription defaults with
+            # the first save, so ``load_config`` never mistakes the new
+            # file for one that predates explicit CLI billing.
+            existing.update(dict.fromkeys(_CLI_BILLING_KEYS, "subscription"))
         for k, v in data.items():
             if k not in API_KEY_ENV_VARS:
                 existing[k] = v

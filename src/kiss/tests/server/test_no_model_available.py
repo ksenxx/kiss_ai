@@ -133,7 +133,8 @@ class TestNoModelAvailableResultEvent(TestCase):
                 f"Result event should have success=False, got {result_ev.get('success')}"
             )
             expected_text = (
-                "No model available.  Set at least one API key in the environment."
+                "No model available. Sign in to a CLI subscription "
+                "or configure an API key in Settings."
             )
             assert expected_text in (result_ev.get("text") or ""), (
                 f"Result text should contain '{expected_text}', got: {result_ev.get('text')}"

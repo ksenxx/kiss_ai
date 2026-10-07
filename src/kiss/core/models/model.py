@@ -15,6 +15,7 @@ transports — the subprocess supervision those two share:
 import base64
 import contextlib
 import dataclasses
+import functools
 import inspect
 import json
 import logging
@@ -31,7 +32,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Collection, Iterator
 from pathlib import Path
-from typing import Any, Union, get_args, get_origin
+from typing import Any, Union, cast, get_args, get_origin
 
 from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
@@ -427,6 +428,7 @@ _AUDIO_MIME_TO_FORMAT: dict[str, str] = {
     "audio/mp4": "mp4",
 }
 
+
 # format -> MIME, keeping the FIRST (canonical) MIME for formats that have
 # aliases: mp3 -> audio/mpeg (not audio/mp3), wav -> audio/wav.
 def _invert_audio_table(mime_to_format: dict[str, str]) -> dict[str, str]:
@@ -486,6 +488,10 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
     import httpx
     from openai import OpenAI
 
+    from kiss.core.models.cli_connections import subscription_only
+
+    if subscription_only():
+        raise ValueError("Audio transcription requires an API task.")
     key = api_key or os.environ.get("OPENAI_API_KEY", "")
     if not key:
         raise ValueError("OpenAI API key is required for audio transcription")
@@ -649,6 +655,9 @@ FRAMEWORK_ONLY_CONFIG_KEYS = frozenset(
     {
         "system_instruction",
         "use_responses_api",
+        "subscription_only",
+        "cli_billing_mode",
+        "allow_fable_usage_credits",
         "stream_stall_timeout",
         "enable_cache",
         # Whether a turn streams follows from whether a token callback is
@@ -682,6 +691,18 @@ def accepted_request_params(method: Any) -> frozenset[str]:
     return frozenset(inspect.signature(method).parameters) - {"self"}
 
 
+def billing_checked[F: Callable[..., Any]](func: F) -> F:
+    """Check task billing before a request, including on a previously cached adapter."""
+    @functools.wraps(func)
+    def wrapped(self: "Model", *args: Any, **kwargs: Any) -> Any:
+        from kiss.core.models.cli_connections import subscription_scope
+
+        with subscription_scope(self.model_config.get("subscription_only") is True):
+            self._check_billing_policy()
+            return func(self, *args, **kwargs)
+    return cast(F, wrapped)
+
+
 class Model(ABC):
     """Abstract base class for LLM provider implementations."""
 
@@ -709,6 +730,12 @@ class Model(ABC):
         """
         self.model_name = model_name
         self.model_config = model_config or {}
+        if (
+            isinstance(self, CLITextModel)
+            and self.model_config.get("cli_billing_mode") == "subscription"
+        ):
+            self.model_config = dict(self.model_config) | {"subscription_only": True}
+        self._check_billing_policy()
         self.token_callback = token_callback
         self.thinking_callback = thinking_callback
         self.usage_info_for_messages: str = ""
@@ -732,6 +759,18 @@ class Model(ABC):
         # model_config keys already reported as unsupported, so a long run
         # is told once rather than on every step.
         self._reported_unsupported_config_keys: set[str] = set()
+
+    def _check_billing_policy(self) -> None:
+        """Prevent API requests or adapter construction in a subscription task."""
+        from kiss.core.models.cli_connections import subscription_only
+
+        if (
+            subscription_only() or self.model_config.get("subscription_only") is True
+        ) and not isinstance(self, CLITextModel):
+            raise KISSError(
+                "Subscription mode cannot initiate API model calls. "
+                "Select a CLI model or start a separate API task."
+            )
 
     def system_instruction_text(self) -> str | None:
         """Return ``model_config["system_instruction"]`` as provider-neutral text.
@@ -1500,6 +1539,7 @@ class CLITextModel(Model):
             return f"{task}{CLI_SYSTEM_PROMPT_HEADER}{system_instruction}"
         return task
 
+    @billing_checked
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
 
@@ -1640,7 +1680,11 @@ class CLITextModel(Model):
         """
         timeout = self.model_config.get("timeout", 300)
         work_dir = self.model_config.get("work_dir") or None
-        with _CLIProcess(args, label, timeout, cwd=work_dir) as proc:
+        from kiss.core.models.cli_connections import prepare_cli
+
+        env, isolation_args = prepare_cli(self.model_name, self.model_config)
+        args = [args[0], *isolation_args, *args[1:]]
+        with _CLIProcess(args, label, timeout, cwd=work_dir, env=env) as proc:
             try:
                 yield proc
             except _StreamReadTimeoutError:
@@ -1730,7 +1774,12 @@ class _CLIProcess:
     """
 
     def __init__(
-        self, args: list[str], label: str, timeout: float, cwd: str | None = None
+        self,
+        args: list[str],
+        label: str,
+        timeout: float,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         """Start *args* and begin draining both of its output pipes.
 
@@ -1768,6 +1817,7 @@ class _CLIProcess:
                 encoding="utf-8",
                 errors="replace",
                 cwd=cwd,
+                env=env,
             )
         except OSError as e:
             raise KISSError(f"Failed to start {label}: {e}") from e

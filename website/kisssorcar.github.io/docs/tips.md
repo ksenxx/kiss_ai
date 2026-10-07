@@ -30,16 +30,16 @@ See the commit messages at <https://github.com/ksenxx/kiss_ai> which include the
 
 **No need to use generic skills for debugging, code review, etc.** Frontier models have been trained on those skills.
 
-## Get the Highest Quality Work
+## Choose a Model for Your Connection
 
-- Add both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` in the Settings panel.
+- For API tasks, add both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` in Settings.
 - Add the following text to your prompt:
 
 ```text
-Use 'claude-fable-5-1' model for all tasks, including software development. Use 'gpt-5.6-sol'
+Use 'claude-opus-5-5' model for all tasks, including software development. Use 'gpt-6.1-sol-medium'
 (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the
 other model's work. Thoroughly check whether the other model has missed any code or wiring
-or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and
+or introduced any bugs. Use at most 50% of the task budget in gpt-6.1-sol-medium for reviewing and
 debugging, and ask the model not to invent new problems. Use model names literally; don't
 hallucinate new model names.
 ```
@@ -170,11 +170,15 @@ If ./ROUTING.md exists, use the instructions in the file for model routing. Othe
 the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet
 extensively to figure out which model is best yet cheap for each subtask. Here are some
 hints, but the internet has better knowledge: claude-fable-5 and
-openrouter/moonshotai/kimi-k3 — best for SWE work; gpt-5.6-sol — best for reviewing;
+openrouter/moonshotai/kimi-k3 — best for SWE work; gpt-6.1-sol-medium — best for reviewing;
 openrouter/qwen/qwen3.8-max, openrouter/x-ai/grok-4.6, openrouter/z-ai/glm-5.3,
 openrouter/deepseek/deepseek-v4-pro-0813 — for SWE tasks when budget is low; and
-gpt-5.6-luna and openrouter/deepseek/deepseek-v4-pro-0813 for review when budget is low.
+gpt-6-luna and openrouter/deepseek/deepseek-v4-pro-0813 for review when budget is low.
 Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your
 experience in completing the task, create or update the model routing strategy (as text) in
 ./ROUTING.md that reduces token cost while not degrading the quality of the work.
 ```
+
+## Use Your CLI Subscription
+
+Open Settings → CLI Connections, sign in on the daemon machine, choose Subscription, and refresh status. Select `cc/opus` or `codex/gpt-6.1-sol`. The same billing constraint applies to child tasks and helpers. API models require a separate API task. Fable requires the saved usage-credit opt-in; Opus is the recommended Claude coding model.

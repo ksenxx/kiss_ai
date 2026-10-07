@@ -282,6 +282,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("getWelcomeInfo", handler="get_welcome_info"),
     ApiCommand("activeTasksQuery", handler="active_tasks_query"),
     ApiCommand("getModels"),
+    ApiCommand("getCLIConnections"),
     ApiCommand("selectModel", required=("model",)),
     ApiCommand("getConfig"),
     ApiCommand("saveConfig", required=("config",)),

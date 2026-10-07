@@ -41,6 +41,7 @@ from kiss.core.models.model import (
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
     accepted_request_params,
+    billing_checked,
 )
 from kiss.core.models.openai_compatible_model import (
     OPENAI_INPUT_AUDIO_FORMATS,
@@ -1972,6 +1973,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             )
         return out
 
+    @billing_checked
     def generate(self) -> tuple[str, Any]:
         """Generate a response with no tools.
 
@@ -2006,6 +2008,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             self.conversation.append({"role": "assistant", "content": content})
         return content, response
 
+    @billing_checked
     def generate_and_process_with_tools(
         self,
         function_map: dict[str, Callable[..., Any]],

@@ -5,8 +5,8 @@
 
 """Claude Code model implementation — uses the ``claude`` CLI as an LLM backend.
 
-This lets you use Claude models through a Claude Code subscription at
-subsidized per-token pricing.  The model invokes
+This lets you use Claude models through a Claude subscription or the CLI's
+explicit existing billing configuration.  The model invokes
 ``claude --print --dangerously-skip-permissions`` in single-shot mode and
 consumes the stream-json event stream emitted on stdout.  Like
 :class:`kiss.core.models.codex_model.CodexModel`, the CLI runs **agentically**:
@@ -56,6 +56,7 @@ from kiss.core.models.model import (
     _iter_balanced_json_objects,
     _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
+    billing_checked,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,6 @@ logger = logging.getLogger(__name__)
 def _dict_field(record: Any, name: str) -> Any:
     """Return key *name* of the dict *record*, or ``None`` when absent."""
     return record.get(name) if isinstance(record, dict) else None
-
 
 
 def _find_claude_cli() -> str:
@@ -286,6 +286,14 @@ class ClaudeCodeModel(CLITextModel):
             "--verbose",
             "--include-partial-messages",
         ]
+        effort = self.model_config.get("reasoning_effort")
+        if effort is not None:
+            if (
+                not isinstance(effort, str)
+                or effort not in {"low", "medium", "high", "xhigh", "max"}
+            ):
+                raise KISSError("Unsupported Claude Code reasoning effort.")
+            args.extend(["--effort", str(effort)])
         system_instruction = self.system_instruction_text()
         if system_instruction:
             args += ["--append-system-prompt", system_instruction]
@@ -306,6 +314,7 @@ class ClaudeCodeModel(CLITextModel):
         """
         return self._task_text()
 
+    @billing_checked
     def generate(self) -> tuple[str, Any]:
         """Generate a response using the Claude Code CLI.
 

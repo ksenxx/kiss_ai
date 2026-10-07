@@ -37,6 +37,7 @@ from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core._version import __version__
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.models.cli_connections import subscription_run
 from kiss.core.printer import parse_result_yaml
 
 MAX_TASKS = 10
@@ -534,6 +535,7 @@ class ChatSorcarAgent(SorcarAgent):
         (e.g. classifying).
         """
 
+    @subscription_run
     def run(  # type: ignore[override]
         self,
         prompt_template: str = "",

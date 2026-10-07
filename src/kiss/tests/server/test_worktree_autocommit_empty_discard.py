@@ -26,15 +26,18 @@ database in ``tearDown`` so it does not pollute later tests.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core import config as config_module
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
@@ -72,6 +75,18 @@ class _WorktreeAutocommitEmptyBase(unittest.TestCase):
     """Shared setUp / tearDown — fresh git repo, isolated persistence DB."""
 
     def setUp(self) -> None:
+        # The LLM loop is mocked. Admission still needs a configured provider;
+        # do not rely on real machine credentials or an authenticated local CLI.
+        configured = patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "offline-test-key", "ANTHROPIC_API_KEY": "offline-test-key"},
+        )
+        configured.start()
+        self.addCleanup(configured.stop)
+        for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            keyed = patch.object(config_module.DEFAULT_CONFIG, name, "offline-test-key")
+            keyed.start()
+            self.addCleanup(keyed.stop)
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-wt-empty-")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)

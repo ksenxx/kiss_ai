@@ -119,6 +119,7 @@ def _writes_default_catalog() -> bool:
         logger.debug("Exception caught", exc_info=True)
         return MODEL_INFO_PATH == DEFAULT_MODEL_INFO_PATH
 
+
 _EXCLUDED_PREFIXES: tuple[str, ...] = (
     "minimax-",
     "MiniMaxAI/",
@@ -814,6 +815,8 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
         return _GROK_EFFORT_LEVELS
     if _is_glm_5_2_family(model_name):
         return _GLM_5_2_EFFORT_LEVELS
+    if model_name in {"gpt-6.1-sol", "openrouter/openai/gpt-6.1-sol"}:
+        return (*_THINKING_LEVELS, "max")
     return _THINKING_LEVELS
 
 
@@ -2185,24 +2188,34 @@ def _summary_label(category: str) -> str:
     return category.replace("`", "")
 
 
-def sync_catalog_docs() -> bool:
-    """Sync ``README.md`` and ``MODELS.md`` with the bundled catalog.
+def sync_catalog_docs(*, check_only: bool = False) -> bool:
+    """Sync repository and website model documentation with the bundled catalog.
 
-    Runs :func:`sync_readme_catalog` on each of the two files that exists:
+    Runs :func:`sync_readme_catalog` on every catalog document that exists:
     the README carries only the catalog totals, ``MODELS.md`` the
     per-provider table and the full model lists. Returns ``True`` when
-    either file was modified.
+    any file differs from the catalog.
     """
     changed = False
-    for path in (README_PATH, MODELS_PATH):
+    for path in (
+        README_PATH,
+        MODELS_PATH,
+        PROJECT_ROOT / "website/kisssorcar.github.io/docs/models.md",
+        PROJECT_ROOT / "FEATURES.md",
+    ):
         if path.exists():
-            file_changed = sync_readme_catalog(path, MODEL_INFO_PATH)
+            file_changed = sync_readme_catalog(path, MODEL_INFO_PATH, check_only=check_only)
             print(f"  {path.name} updated: {file_changed} ({path})")
             changed = changed or file_changed
     return changed
 
 
-def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
+def sync_readme_catalog(
+    readme_path: Path,
+    model_info_path: Path,
+    *,
+    check_only: bool = False,
+) -> bool:
     """Rewrite the catalog counts and lists in a Markdown file to match MODEL_INFO.json.
 
     Updates the catalog totals, capability counts, per-provider table
@@ -2287,9 +2300,36 @@ def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
             details_pat = rf"(<summary><strong>{re.escape(summary)} \()\d+(\)</strong></summary>)"
             text = re.sub(details_pat, rf"\g<1>{count}\g<2>", text)
 
+    # FEATURES has concise generated summaries instead of a provider table.
+    text = re.sub(
+        r"- \*\*\d+ model entries\*\*[^\n]*",
+        f"- **{total} model entries** in `src/kiss/core/models/MODEL_INFO.json` "
+        f"({generation} generation, {function_calling} with function calling, "
+        f"{embedding} embedding, {decisions} typed decisions), "
+        f"across {cat_count} routing providers. "
+        f"Claude Code CLI: {counts.get('Claude Code CLI (`cc/*`)', 0)}; "
+        f"Codex CLI: {counts.get('Codex CLI (`codex/*`)', 0)}. "
+        "API and CLI entries are separated in the picker; `autorouter` and `bestrouter` are SEAs.",
+        text,
+    )
+    text = re.sub(
+        r"- \*\*Catalogue\*\*: [^\n]*",
+        f"- **Catalogue**: {total} entries across {cat_count} routing providers. "
+        "See [MODELS.md](MODELS.md) for generated per-provider counts and model lists. "
+        "Custom OpenAI-compatible endpoints can be added in Settings.",
+        text,
+    )
+    text = re.sub(r"(Models \()\d+( entries\))", rf"\g<1>{total}\g<2>", text)
+    # Namespace descriptions also contain a catalog-derived OpenRouter count.
+    text = re.sub(
+        r"(routes through OpenRouter \()\d+( entries)",
+        rf"\g<1>{counts.get('OpenRouter', 0)}\g<2>",
+        text,
+    )
     if text == original:
         return False
-    readme_path.write_text(text, encoding="utf-8")
+    if not check_only:
+        readme_path.write_text(text, encoding="utf-8")
     return True
 
 
@@ -2414,8 +2454,21 @@ def main() -> None:
             "README.md catalog totals and model lists. Requires no API keys."
         ),
     )
+    parser.add_argument(
+        "--check-docs",
+        action="store_true",
+        help="Check bundled catalog documentation offline without writing files",
+    )
+    parser.add_argument(
+        "--sync-docs", action="store_true", help="Synchronize bundled catalog documentation offline"
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
+    if args.check_docs or args.sync_docs:
+        changed = sync_catalog_docs(check_only=args.check_docs)
+        if args.check_docs and changed:
+            raise SystemExit(1)
+        return
 
     if args.model_info is not None:
         # An explicit --model-info retargets the module-global write path

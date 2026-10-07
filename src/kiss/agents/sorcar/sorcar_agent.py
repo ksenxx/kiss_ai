@@ -71,6 +71,7 @@ from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.memoryfield.tools import MemoryTools
+from kiss.core.models.cli_connections import subscription_run
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -181,7 +182,6 @@ A profile name is either one key or several keys joined with ``+``
 
 PROFILE_SEPARATOR = "+"
 """Joins the parts of a composite tool profile name."""
-
 
 
 def canonical_tool_profile(name: str) -> str:
@@ -1818,7 +1818,6 @@ class SorcarAgent(RelentlessAgent):
             return own
         return viewer_ids[0]
 
-
     def _run_tasks_parallel(
         self,
         tasks: list[str],
@@ -2256,6 +2255,7 @@ class SorcarAgent(RelentlessAgent):
                 live_browser=self._live_browser,
             )
             tools.extend(self.web_use_tool.get_tools())
+
         def run_parallel(
             tasks: str, agent: str = "", model: str = "", tool_profile: str = "",
             max_budget: str = "", timeout: str = "", max_workers: str = "",
@@ -2443,9 +2443,12 @@ class SorcarAgent(RelentlessAgent):
                 change (or a "no change" message when the requested
                 model is already active).
             """
+            from kiss.core.models.cli_connections import enforce_model_policy
             from kiss.core.models.model_info import (
                 model_runs_task_to_completion,
             )
+
+            enforce_model_policy(model_name, getattr(self, "model_config", None))
 
             if getattr(self, "docker_image", None) and model_runs_task_to_completion(
                 model_name
@@ -2963,6 +2966,7 @@ class SorcarAgent(RelentlessAgent):
             self._classifier_spend = None
         self._reset_task_classification()
 
+    @subscription_run
     def run(  # type: ignore[override]
         self,
         model_name: str | None = None,
@@ -2986,9 +2990,7 @@ class SorcarAgent(RelentlessAgent):
         base_system_prompt: str = "",
         append_basic_tools: bool = True,
         inherited_tools: list[Callable[..., Any]] | None = None,
-        llm_call_hook: (
-            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
-        ) = None,
+        llm_call_hook: (Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
         use_memory: bool | None = None,
         tool_profile: str = "",
@@ -3564,6 +3566,13 @@ def _sea_run_kwargs(
         # taken over from the parent.
         overrides["append_basic_tools"] = False
         overrides["inherited_tools"] = []
+    if (defaults.get("model_config") or {}).get("subscription_only") is True:
+        overrides["model_config"] = dict(
+            overrides.get("model_config") or defaults.get("model_config") or {}
+        ) | {
+            "subscription_only": True,
+            "cli_billing_mode": "subscription",
+        }
     return overrides, run_config
 
 

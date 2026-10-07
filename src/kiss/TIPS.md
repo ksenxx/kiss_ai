@@ -10,11 +10,11 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 
 # Tip
 
-You can ask a question about the current task by prefixing the question with the command /ask. 
+You can ask a question about the current task by prefixing the question with the command /ask.
 
 # Tip
 
-{{PRODUCT_NAME}} supports commands prefixed with `/`. Type `/` in the chat textbox to see all available commands. To build your own command say `/xyz`, write a Sorcar Extension Agent (or a SEA) in a folder `/path/to/seas` and append the folder to the file `~/{{HOME_DIR}}/SEAS.md`.  Coammnd `/xyz` will then be availble to {{PRODUCT_NAME}} UI.  More information on Sorcar Extension Agents (SEAs) can be found at [https://github.com/ksenxx/kiss_ai/blob/main/README.md](https://github.com/ksenxx/kiss_ai/blob/main/README.md).
+{{PRODUCT_NAME}} supports commands prefixed with `/`. Type `/` in the chat textbox to see all available commands. To build your own command say `/xyz`, write a Sorcar Extension Agent (or a SEA) in a folder `/path/to/seas` and append the folder to the file `~/{{HOME_DIR}}/SEAS.md`.  The `/xyz` command will then be available in the {{PRODUCT_NAME}} UI.  More information on Sorcar Extension Agents (SEAs) can be found at [https://github.com/ksenxx/kiss_ai/blob/main/README.md](https://github.com/ksenxx/kiss_ai/blob/main/README.md).
 
 # Tip
 
@@ -44,8 +44,8 @@ A **Sorcar Extension Agent (SEA)** is a plain Python file that defines a complet
 
 # Tip
 
-Run `/git_extract_knowledge <repo-name>` to create a memory/context based on the 
-repository <rep-name>.  While running a task, {{PRODUCT_NAME}} can quickly lookup 
+Run `/git_extract_knowledge <repo-name>` to create a memory/context based on the
+repository <repo-name>.  While running a task, {{PRODUCT_NAME}} can quickly look up
 the memory about the repository to perform complex tasks on the repository or to
 quickly answer questions about the repository.
 
@@ -54,7 +54,7 @@ quickly answer questions about the repository.
 
 In VS Code, you can run {{PRODUCT_NAME}} in two modes: full editor mode, where the chats open as editor tabs, and non-editor mode, where the chats open in the sidebar.  You can switch between the two modes by selecting/deselecting the "Chat in the editor" option on the {{PRODUCT_NAME}} settings page.
 
-# Tip 
+# Tip
 
 {{PRODUCT_NAME}} now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple.  You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key and "Use Jev (decisions model)" selected (the default), the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task) and the agent gets the `decide` tool for its own classification, routing and scoring questions; deselect "Use Jev" to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models), and to keep every task from calling Jev.
 
@@ -72,11 +72,11 @@ See the commit messages at https://github.com/ksenxx/kiss_ai which include the p
 
 ## To get the Highest Quality Work from {{PRODUCT_NAME}}
 
-- Add both ANTHROPIC_API_KEY and OPENAI_API_KEY in the Settings panel
+- For API tasks, add both ANTHROPIC_API_KEY and OPENAI_API_KEY in Settings.
 - Add the following text to your prompt:
 
 ```
-claude-fable-5-1 model be used for all tasks, including software development. Use gpt-6-astra (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 75% of the task budget in gpt-6-astra for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
+Use claude-opus-5-5 for all tasks, including software development. Use gpt-6-astra (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 75% of the task budget in gpt-6-astra for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
 ```
 
 # Tip
@@ -155,7 +155,7 @@ rsorcar username@ip_address
 
 ## No Need to Use a Shell
 
-Just type or speak your shell command prefixed with the command `/sh` in 
+Just type or speak your shell command prefixed with the command `/sh` in
 the chat input textbox.
 
 # Tip
@@ -195,3 +195,10 @@ Click the burger menu button in the bottom-left corner to see all agents in {{PR
 ## Settings
 
 Click on the settings button in the "..." menu. Use the Settings interface to get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint.
+
+
+# Tip
+
+## Use Your CLI Subscription
+
+Open Settings → CLI Connections, sign in on the daemon machine, choose Subscription, and refresh status. Select `cc/opus` or `codex/gpt-6.1-sol`. The same billing constraint applies to child tasks and helpers. API models require a separate API task. Fable requires the saved usage-credit opt-in; Opus is the recommended Claude coding model.

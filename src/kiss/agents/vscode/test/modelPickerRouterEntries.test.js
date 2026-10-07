@@ -133,7 +133,7 @@ test('the router rows show their cost_label, priced rows show prices', () => {
   }
   const real = rows.find(r => r.name === REAL_MODEL);
   assert.ok(real, 'the picker must list the real model');
-  assert.strictEqual(real.cost, '$5.00 / $25.00');
+  assert.strictEqual(real.cost, '$5.00 / $25.00 / 1M tokens');
   win.close();
 });
 
@@ -146,7 +146,7 @@ test('the router rows sit in their own vendor group', () => {
     win.document.querySelectorAll('#model-list .model-group-hdr'),
   ).map(el => el.textContent);
   assert.ok(
-    groups.indexOf('Router') >= 0,
+    groups.indexOf('Routers') >= 0,
     `expected a Router group; got ${JSON.stringify(groups)}`,
   );
   win.close();

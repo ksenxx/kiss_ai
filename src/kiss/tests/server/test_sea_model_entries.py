@@ -64,8 +64,12 @@ BESTROUTER_MARKER = "## Model routing protocol (bestrouter)"
 def test_orchestrator_model_is_runnable_whenever_the_picker_offers_autorouter() -> None:
     """First runnable frontier candidate, else the picker's best runnable model."""
     name = orchestrator_model()
-    assert name in MODEL_INFO, name
     runnable = set(get_available_models())
+    if not runnable:
+        assert name == "No model"
+        assert ranked_function_calling_models() == []
+        return
+    assert name in MODEL_INFO, name
     frontier = [n for n, _note in autorouter_sea.TIERS["frontier"] if n in runnable]
     ranked = ranked_function_calling_models()
     if frontier:

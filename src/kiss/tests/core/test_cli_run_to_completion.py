@@ -68,6 +68,12 @@ _CODEX_EVENTS: list[dict] = [
 
 _FAKE_CLI_TEMPLATE = """#!/usr/bin/env python3
 import json, os, sys, pathlib, time
+if "--version" in sys.argv:
+    print("2.1.300")
+    sys.exit(0)
+if "status" in sys.argv:
+    print('{{"authMethod": "api_key"}}' if "auth" in sys.argv else "Logged in using an API key")
+    sys.exit(0)
 record_dir = pathlib.Path({record_dir!r})
 n = len(list(record_dir.glob("call-*.json")))
 prompt = sys.stdin.read()
@@ -107,6 +113,11 @@ def _install_fake_cli(
     """
     bin_dir = tmp_path / "bin"
     record_dir = tmp_path / "records"
+    from kiss.core.models import cli_connections
+    from kiss.core.vscode_config import save_config
+
+    save_config({"claude_cli_billing_mode": "existing", "codex_cli_billing_mode": "existing"})
+    monkeypatch.setattr(cli_connections, "_executable", lambda provider: str(bin_dir / name))
     bin_dir.mkdir(exist_ok=True)
     record_dir.mkdir(exist_ok=True)
     install_cli_script(

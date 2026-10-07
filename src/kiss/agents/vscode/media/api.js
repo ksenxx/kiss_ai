@@ -28,6 +28,7 @@
     'getWelcomeInfo',
     'activeTasksQuery',
     'getModels',
+    'getCLIConnections',
     'selectModel',
     'getConfig',
     'saveConfig',

@@ -49,6 +49,7 @@ from kiss.core.models.model import (
     Model,
     ThinkingCallback,
     TokenCallback,
+    billing_checked,
     flatten_content_to_text,
 )
 
@@ -180,6 +181,7 @@ class DecisionsModel(Model):
         self.api_key = api_key
         self.timeout = float(self.model_config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
 
+    @billing_checked
     def decide(
         self,
         state: str | dict[str, Any] | list[Any],
@@ -252,6 +254,7 @@ class DecisionsModel(Model):
             )
         self.conversation = [{"role": "user", "content": prompt}]
 
+    @billing_checked
     def generate(self) -> tuple[str, Any]:
         """Judge the conversation text against ``model_config["questions"]``.
 
@@ -283,6 +286,7 @@ class DecisionsModel(Model):
         self._invoke_token_callback(text)
         return text, response
 
+    @billing_checked
     def generate_and_process_with_tools(
         self,
         function_map: dict[str, Callable[..., Any]],
@@ -327,6 +331,7 @@ class DecisionsModel(Model):
         """
         return reported_cost(response)
 
+    @billing_checked
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Decisions models do not produce embeddings.
 

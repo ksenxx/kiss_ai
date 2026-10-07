@@ -775,10 +775,39 @@ def inherit_from_parent(
             caller has nothing left to spend (the same signal a
             ``run_parallel`` fan-out raises).
     """
+    from kiss.core.models.cli_connections import subscription_only
+
+    parent_config = getattr(parent_agent, "model_config", None) or {}
+    restricted = (
+        subscription_only()
+        or parent_config.get("subscription_only") is True
+        or (options.model_config or {}).get("subscription_only") is True
+    )
     asked = Inherited(model_name, budget, options, options.docker_image, None, None)
+    got = (
+        _inherit_from_parent(parent_agent, model_name, budget, options, script_picks_model)
+        if parent_agent is not None
+        else asked
+    )
+    if restricted:
+        got = dataclasses.replace(
+            got,
+            options=dataclasses.replace(
+                got.options,
+                model_config=dict(got.options.model_config or {})
+                | {
+                    "subscription_only": True,
+                    "cli_billing_mode": "subscription",
+                },
+            ),
+        )
+        from kiss.core.models.cli_connections import enforce_model_policy
+
+        # An empty name still resolves to a verified CLI default at run time.
+        if got.model_name:
+            enforce_model_policy(got.model_name, got.options.model_config)
     if parent_agent is None:
-        return asked
-    got = _inherit_from_parent(parent_agent, model_name, budget, options, script_picks_model)
+        return got
     return dataclasses.replace(got, fields=_filled_keys(asked, got))
 
 
@@ -1040,6 +1069,16 @@ def dispatch_result(
     explicit = list(explicit_values(model_name, budget, options))
     if timeout_explicit:
         explicit.append("timeout")
+    # Inheritance is optional; the parent's billing constraint is mandatory.
+    if (getattr(parent_agent, "model_config", None) or {}).get("subscription_only") is True:
+        options = dataclasses.replace(
+            options,
+            model_config=dict(options.model_config or {})
+            | {
+                "subscription_only": True,
+                "cli_billing_mode": "subscription",
+            },
+        )
     inherited = inherit_from_parent(
         parent_agent if inherit else None, model_name, budget, options,
         # The script's model applies only when the call names none.

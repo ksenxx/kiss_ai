@@ -31,6 +31,7 @@ from kiss.core.kiss_error import (
     ContextWindowExceededError,
     KISSError,
 )
+from kiss.core.models.cli_connections import subscription_run
 from kiss.core.models.model import SYSTEM_CACHE_BREAK, Attachment
 from kiss.core.models.model_info import model_runs_task_to_completion
 from kiss.core.printer import Printer
@@ -317,6 +318,7 @@ def _ledger_totals(ledger: _UsageLedger) -> tuple[float, int, int]:
         steps += event.steps
     return budget, tokens, steps
 
+
 TASK_PROMPT = """
 {task_description}
 
@@ -370,6 +372,7 @@ def resolve_work_dir(work_dir: str | None) -> str:
     resolved = Path(work_dir or default_work_dir).resolve()
     return str(remap_vanished_worktree(resolved))
 
+
 #: Consecutive continuation sessions that made no progress — no tool
 #: call other than ``finish``, or a summary identical to the previous
 #: session's — after which :meth:`RelentlessAgent.perform_task` stops
@@ -380,7 +383,7 @@ MAX_ZERO_PROGRESS_SESSIONS = 2
 DEFAULT_MAX_BUDGET = 200.0
 
 #: Model a run falls back to when the caller states none.
-DEFAULT_MODEL_NAME = "claude-opus-4-6"
+DEFAULT_MODEL_NAME = "claude-opus-5-5"
 
 CONTINUATION_PROMPT = """
 # Task Progress (Continuation {continuation_number})
@@ -1663,6 +1666,7 @@ class RelentlessAgent(Base):
         budget, tokens, steps = snapshot if snapshot is not None else self.usage_snapshot()
         return budget - budget_offset, tokens - tokens_offset, steps - steps_offset
 
+    @subscription_run
     def run(
         self,
         model_name: str | None = None,
@@ -1679,15 +1683,13 @@ class RelentlessAgent(Base):
         verbose: bool | None = None,
         tools: list[Callable[..., Any]] | None = None,
         attachments: list[Attachment] | None = None,
-        llm_call_hook: (
-            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
-        ) = None,
+        llm_call_hook: (Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
     ) -> str:
         """Run the agent with the provided tools.
 
         Args:
-            model_name: LLM model to use. Defaults to "claude-opus-4-6".
+            model_name: LLM model to use. Defaults to the first usable configured model.
             prompt_template: Task prompt template with format placeholders.
             arguments: Dictionary of values to fill prompt_template placeholders.
             system_prompt: System-level instructions passed to the underlying LLM

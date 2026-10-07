@@ -1904,6 +1904,18 @@
     "use_responses_api": true,
     "alias_of": "gpt-6.1-sol"
   },
+  "gpt-6.1-sol-max": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "max",
+    "comment": "NEW",
+    "use_responses_api": true,
+    "alias_of": "gpt-6.1-sol"
+  },
   "gpt-6.1-sol-medium": {
     "context_length": 500000,
     "input_price_per_1M": 2.0,
@@ -4973,6 +4985,20 @@
     "emb": false,
     "gen": true,
     "thinking": "low",
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.1,
+    "cache_write_price_per_1M": 2.5,
+    "alias_of": "openrouter/openai/gpt-6.1-sol"
+  },
+  "openrouter/openai/gpt-6.1-sol-max": {
+    "context_length": 500000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "max",
     "comment": "NEW",
     "use_responses_api": true,
     "cache_read_price_per_1M": 0.1,

@@ -39,6 +39,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     auto_commit_changes,
 )
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.cli_connections import subscription_operation, subscription_run
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             return
         self.work_dir = str(wt.repo_root.resolve() / offset)
 
-
+    @subscription_operation
     def _auto_commit_worktree(self, force_commit: bool = False) -> bool:
         """Commit any uncommitted changes in the worktree.
 
@@ -466,7 +467,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             )
             return
         printer.broadcast({**event, "tabId": self._tab_id})
-
 
     def _commit_and_clean_worktree(
         self, wt: GitWorktree, force_commit: bool = False
@@ -948,7 +948,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             )
         return None
 
-
     def _preserve_pending_worktree_for_review(self) -> bool:
         """Commit pending worktree changes onto the branch, no merge.
 
@@ -1097,7 +1096,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self.add_warning(keep_warning)
         return False
 
-
     def new_chat(self) -> None:
         """Reset to a new chat session, retiring any pending worktree.
 
@@ -1123,7 +1121,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self._retire_previous_worktree()
         self._flush_warnings(getattr(self, "printer", None))
         super().new_chat()
-
 
     def _live_worktree_branches(self) -> set[str]:
         """Return the set of ``kiss/wt-*`` branches owned by live agents.
@@ -1465,7 +1462,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 logger.warning("Failed to link node_modules into worktree", exc_info=True)
             return wt_work_dir
 
-
     def _set_warnings(
         self,
         stash: str | None = None,
@@ -1583,7 +1579,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 logger.debug("merge warning broadcast failed", exc_info=True)
                 self.add_warning(merge_warning, prepend=True)
 
-
+    @subscription_run
     def run(  # type: ignore[override]
         self,
         prompt_template: str = "",
@@ -1747,7 +1743,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 # including this task's own, still pending, branch.
                 worktree_pool.prewarm_async(repo, self._live_worktree_branches)
 
-
+    @subscription_operation
     def merge(self, conflict_resolver: MergeConflictResolver | None = None) -> str:
         """Merge the task branch into the original branch.
 

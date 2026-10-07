@@ -84,6 +84,24 @@ os.environ["BROWSER"] = "true"
 # monkeypatch.setenv("KISS_MUSE_AUTH", "1").
 os.environ["KISS_MUSE_AUTH"] = "0"
 
+
+@pytest.fixture(autouse=True)
+def offline_cli_connections(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Never inspect a developer's real CLI authentication in automated tests."""
+    if request.node.get_closest_marker("live_cli") is not None:
+        yield
+        return
+    from kiss.core.models import cli_connections
+
+    cli_connections._CACHE.clear()
+    monkeypatch.setattr(cli_connections, "_executable", lambda provider: None)
+    yield
+    cli_connections._CACHE.clear()
+
+
 def _seed_voice_models(test_home: str, real_home: Path) -> None:
     """Link the developer's downloaded voice models into the test home.
 
@@ -788,6 +806,8 @@ requires_moonshot_api_key = pytest.mark.skipif(
     not has_moonshot_api_key(),
     reason="MOONSHOT_API_KEY environment variable not set",
 )
+
+
 @pytest.fixture(autouse=True)
 def _isolated_default_workdir(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Point ``VSCodeServer``'s default ``work_dir`` away from this repo.

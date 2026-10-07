@@ -68,6 +68,10 @@ export class SorcarApi {
     this._post({type: 'getInputHistory'});
   }
 
+  getCLIConnections(refresh = false): void {
+    this._post({type: 'getCLIConnections', refresh});
+  }
+
   getConfig(): void {
     this._post({type: 'getConfig'});
   }

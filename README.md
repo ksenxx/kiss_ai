@@ -71,7 +71,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 713 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 715 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -135,7 +135,20 @@ KISS Sorcar requires **Python 3.13+**.
 
 ### Configure model access
 
-Provide at least one model backend. You can use environment variables such as:
+You can connect a Claude Code or Codex subscription, configure API keys, or register a custom endpoint.
+
+**Subscription connection.** Use Claude Code 2.1.280+ or Codex 0.162.0+ for subscription isolation. Install the official CLI on the machine running the Sorcar daemon, then use **Settings → CLI Connections → Sign in** and **Refresh status**. Existing logins are reused. The fixed terminal commands are:
+
+```bash
+claude auth login
+codex login --device-auth
+```
+
+Choose **Subscription** and select `cc/opus` or `codex/gpt-6.1-sol`. Sorcar verifies the login before execution and isolates the child process from API credentials and alternate-provider overrides. Codex subscription runs refuse a configured `openai_base_url` or `openai` provider override. New connections use Subscription mode; detected API or enterprise configurations remain available under **Existing CLI configuration**, with their billing shown in Settings. Remote users sign in on the daemon machine; Windows web users can copy the command into a terminal there.
+
+Subscription tasks keep this billing constraint through retries, children, model switches, task updates, and commit helpers. Optional API classification is skipped. A task that requests an API model under that constraint fails with guidance; start a separate API task to use API credits. Fable is optional and requires the saved **Allow Fable usage credits** setting for any Claude subscription login, including one kept as the existing CLI configuration: noninteractive Claude requests can bill usage credits without prompting. Without that opt-in, native Claude child agents use the selected model, and Claude settings files cannot remap model aliases, add a fallback model, or call an advisor model for that run. Provider plan limits and extra-usage settings still apply.
+
+**API connection.** Configure keys in Settings or export them before starting the daemon:
 
 ```bash
 export ANTHROPIC_API_KEY=...
@@ -149,11 +162,32 @@ export GEMINI_API_KEY=...
 
 You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the VS Code extension or web app. The **Custom Models** section of the Settings panel registers your own models (a local vLLM/Ollama endpoint, or a provider model not in the bundled catalog); entries are stored in `~/.kiss/MY_MODELS.json` and appear in the model picker alongside the bundled catalog.
 
-The picker also lists two bundled router agents under the `Router` group: **`autorouter`** splits a task into units that have a mechanical acceptance check and dispatches those to the cheapest model tier (small, medium, frontier) that passes the check, escalating on failure, while planning, final acceptance and uncheckable work stay on the frontier model, and **`bestrouter`** runs every task on `claude-fable-5-1` and has `gpt-6-astra` review the result read-only. They are Sorcar Extension Agents (see below), not models.
+The picker also lists two bundled router agents under **Routers**: **`autorouter`** splits a task into units that have a mechanical acceptance check and dispatches those to the cheapest model tier (small, medium, frontier) that passes the check, escalating on failure, while planning, final acceptance and uncheckable work stay on the frontier model, and **`bestrouter`** runs every task on `claude-fable-5-1` and has `gpt-6-astra` review the result read-only. They are Sorcar Extension Agents (see below), not models.
+
+Automatic task selection prefers a verified Claude subscription, then a verified Codex subscription, then configured API providers. Explicit and valid saved choices are preserved. API defaults are `claude-opus-5-5`, `gpt-6.1-sol-medium`, and `gemini-3.8-flash`. Lightweight helpers, such as commit-message generation, keep using configured API keys first outside subscription tasks: Haiku 4.5, GPT-6 Luna, and Gemini 3.5 Flash-Lite. Inside a subscription task they use `cc/haiku` or `codex/gpt-6-luna`. GPT-6.1 Sol uses the Responses API and supports `low`, `medium`, `high`, `xhigh`, and `max` effort.
+
+The picker groups **CLI Models**, **API Models**, **Custom Models**, and **Routers**, then provider and family. **Frequently Used** is ordered by usage count. CLI entries show their billing mode; API prices are USD per million input/output tokens.
+
+Python subscription example:
+
+```python
+from kiss.server import sorcar
+
+sorcar.run("Summarize README.md", model="cc/opus",
+           model_config={"cli_billing_mode": "subscription"})
+```
+
+Python API example:
+
+```python
+from kiss.server import sorcar
+
+sorcar.run("Summarize README.md", model="gpt-6.1-sol-medium")
+```
 
 ### VS Code Extension Installation
 
-To install only the KISS Sorcar extension, open Visual Studio Code, search for **KISS Sorcar** in the extension marketplace, install it, and relaunch VS Code. Press ESC if you do not have a specific API key ready, but configure at least one model backend before running tasks.
+To install only the KISS Sorcar extension, open Visual Studio Code, search for **KISS Sorcar** in the extension marketplace, install it, and relaunch VS Code. You can dismiss the API-key prompt and connect a subscription in CLI Connections, or configure an API backend before running tasks.
 
 ## Using KISS Sorcar
 
@@ -294,7 +328,7 @@ The complete catalog, credentials, and 26 worked examples are in [src/kiss/agent
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **713 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); the per-provider counts and the full model list are in [MODELS.md](MODELS.md). Models are grouped by the provider that routes them, so the `cc/*` and `codex/*` namespaces (Claude Code CLI and Codex CLI) are categories of their own, and the open-weight `openai/gpt-oss-*` and `google/gemma-*` models count under Together AI, which serves them.
+KISS Sorcar ships a catalog of **715 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); the per-provider counts and the full model list are in [MODELS.md](MODELS.md). Models are grouped by the provider that routes them, so the `cc/*` and `codex/*` namespaces (Claude Code CLI and Codex CLI) are categories of their own, and the open-weight `openai/gpt-oss-*` and `google/gemma-*` models count under Together AI, which serves them.
 
 Cost and budget tracking use the catalog prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response is billed instead, since the same model id is priced differently per upstream route. A response the adapters reject after the provider has billed it, or the usage the provider has already reported for a streamed response that Stop interrupts, still count towards the task's cost and budget, and the task total shown in the UI includes the task classifier's spend, every earlier session of a task continued after a crash, the whole spend of the sub-tasks the task dispatches with `run_agent` and `run_parallel`, and the spend of the `/ask` answers and Task update runs on its tab, including answers given while the task was still setting up.
 

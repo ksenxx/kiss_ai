@@ -1082,7 +1082,32 @@ class VSCodeServer(
         usage = _load_model_usage()
         models_list: list[dict[str, Any]] = []
         catalog_names = ranked_function_calling_models()
-        for name in catalog_names:
+        from kiss.core.models.cli_connections import get_cli_connection, may_use_credits
+        from kiss.core.models.model_info import get_available_models, get_model_provider
+
+        connections = {p: get_cli_connection(p, cwd=self.work_dir or None)
+                       for p in ("claude", "codex")}
+        from kiss.core.vscode_config import load_config as cli_config
+
+        allow_fable = cli_config().get("allow_fable_usage_credits") is True
+        runnable = set(get_available_models())
+        picker_names = list(catalog_names)
+        picker_names.extend(
+            name
+            for name, info in MODEL_INFO.items()
+            if name.startswith(("cc/", "codex/"))
+            and info.is_generation_supported
+            and name not in catalog_names
+        )
+        # A valid saved API choice remains visible when its key is temporarily
+        # unavailable, just like a signed-out CLI connection.
+        for saved in (self._default_model, _load_last_model()):
+            if (
+                saved in MODEL_INFO and MODEL_INFO[saved].is_generation_supported
+                and saved not in picker_names
+            ):
+                picker_names.append(saved)
+        for name in picker_names:
             info = MODEL_INFO[name]
             models_list.append(
                 {
@@ -1091,7 +1116,42 @@ class VSCodeServer(
                     "out": info.output_price_per_1M,
                     "uses": usage.get(name, 0),
                     "vendor": model_vendor(name)[0],
+                    "provider": get_model_provider(name),
+                    "access_type": "cli" if name.startswith(("cc/", "codex/")) else "api",
+                    **({"available": False,
+                        "unavailable_reason": "Configure this provider's API key in Settings."}
+                       if name not in runnable and not name.startswith(("cc/", "codex/"))
+                       else {}),
                 }
+            )
+
+        for entry in models_list:
+            name = entry["name"]
+            if not name.startswith(("cc/", "codex/")):
+                continue
+            status = connections["claude" if name.startswith("cc/") else "codex"]
+            # Same gate as ``prepare_cli``: any Claude plan login can bill
+            # Fable to usage credits, whichever billing mode keeps it.
+            credit_model = may_use_credits(name) and (
+                status.billing_mode == "subscription"
+                or status.auth_method in {"claude.ai", "oauth_token"}
+            )
+            blocked_credit = credit_model and not allow_fable
+            entry.update(
+                available=status.status == "connected" and not blocked_credit,
+                unavailable_reason=(
+                    "Enable the Fable usage-credit opt-in in CLI Connections."
+                    if blocked_credit
+                    else status.message
+                ),
+                cost_label="Usage credits may apply"
+                if credit_model
+                else "Subscription"
+                if status.billing_mode == "subscription"
+                else {
+                    "api_key": "CLI API billing", "api_key_helper": "CLI API helper billing",
+                    "third_party": "CLI enterprise billing", "oauth_token": "CLI token billing",
+                }.get(status.auth_method, "Existing CLI billing"),
             )
 
         from kiss.core.vscode_config import (
@@ -1143,8 +1203,10 @@ class VSCodeServer(
                 refreshed = get_default_model()
                 if refreshed in available_names:
                     self._default_model = refreshed
-                elif models_list:
-                    self._default_model = str(models_list[0]["name"])
+                elif any(m.get("available", True) for m in models_list):
+                    self._default_model = str(
+                        next(m["name"] for m in models_list if m.get("available", True))
+                    )
                 else:
                     self._default_model = refreshed
             selected = self._default_model
