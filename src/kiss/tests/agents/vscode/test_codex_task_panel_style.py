@@ -313,10 +313,7 @@ _INJECT_PAGE_JS = r"""
   }
 
   out.insertAdjacentHTML('beforeend', `
-    <div class="ev think">
-      <div class="lbl"><span class="arrow">\u25BE</span> Thinking</div>
-      <div class="cnt">Reasoning about the task panel type.</div>
-    </div>
+    <div class="think">Reasoning about the task panel type.</div>
     <div class="ev txt md-body">Plain assistant text with
       <code>inline code</code> and a table.
       <pre><code class="hljs language-python">print("x")</code></pre>
@@ -493,12 +490,10 @@ _PROBE_STYLES_JS = r"""(() => {
     document.querySelector('#output .task-panel .task-panel-h'),
   );
 
-  // The thinking panel injected by _INJECT_TRANSCRIPT_JS: the task
-  // panel must paint the SAME background and foreground.
+  // The thinking text injected by _INJECT_TRANSCRIPT_JS: the task
+  // panel's header must paint the SAME foreground (var(--dim)).
   const think = document.querySelector('#output .think');
   const thinkCs = think ? getComputedStyle(think) : null;
-  const thinkCnt = think ? think.querySelector('.cnt') : null;
-  const thinkCntCs = thinkCnt ? getComputedStyle(thinkCnt) : null;
 
   // Resolve var(--accent) (the hue of the task panel's tint and
   // hairline) to rgb().
@@ -554,7 +549,7 @@ _PROBE_STYLES_JS = r"""(() => {
     taskPanelBorderStyle: tp.borderTopStyle,
     taskPanelBorderColor: tp.borderTopColor,
     thinkBg: thinkCs ? thinkCs.backgroundColor : 'MISSING',
-    thinkColor: thinkCntCs ? thinkCntCs.color : 'MISSING',
+    thinkColor: thinkCs ? thinkCs.color : 'MISSING',
     accentColor,
     fgColor,
     infoLineRects,
@@ -662,7 +657,7 @@ def test_live_task_panel_typography_and_history_rows(
     tmp_path: Path,
 ) -> None:
     """Served page + real Chromium: the pinned task panel keeps the
-    extension's look (the thinking panel's foreground over the accent
+    extension's look (the thinking text's foreground over the accent
     tint, 1px accent hairline) under the remote palette; chat headers
     are a faint neutral tint; history rows paint the per-chat color on
     the left border over a neutral background; all metadata flows as
@@ -1009,21 +1004,21 @@ def test_live_task_panel_typography_and_history_rows(
         "--vscode-editor-font-size: " + repr(probes)
     )
     assert probes["thinkColor"] != "MISSING", (
-        "the injected transcript must render a .think panel: " + repr(probes)
+        "the injected transcript must render a .think text block: " + repr(probes)
     )
     assert probes["taskPanelHeaderColor"] == probes["thinkColor"], (
         "the task panel header must use the SAME foreground as the "
-        "thinking panel (main.css .task-panel-h: var(--dim)): " + repr(probes)
+        "thinking text (main.css .task-panel-h: var(--dim)): " + repr(probes)
     )
     assert probes["taskPanelColor"] == probes["fgColor"], (
         "the task text reads like a user message, in the page foreground "
         "(main.css .task-panel-text: var(--fg)): " + repr(probes)
     )
-    # The thinking panel is neutral (main.css --panel-tint, 4% of --fg);
-    # the task panel alone sits on the accent tint (--accent-tint, 8%)
-    # behind a 1px accent hairline (--accent-line).
-    assert 0.03 <= _alpha_of(probes["thinkBg"]) <= 0.05, (
-        "the thinking panel is a faint neutral tint: " + repr(probes)
+    # The thinking text is plain text inside the Thoughts panel, with no
+    # tint of its own; the task panel alone sits on the accent tint
+    # (--accent-tint, 8%) behind a 1px accent hairline (--accent-line).
+    assert _alpha_of(probes["thinkBg"]) == 0, (
+        "the thinking text paints no background of its own: " + repr(probes)
     )
     assert _hue_of(probes["taskPanelBg"]) == pytest.approx(
         _hue_of(probes["accentColor"]), abs=2

@@ -198,7 +198,7 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         self.assertIn(".collapse-preview", page)  # main.css
         self.assertIn(".hljs", page)  # highlight theme
         self.assertIn("--vscode-editor-background: #1f1f1f", page)
-        self.assertIn("window.toggleThink", page)  # share.js
+        self.assertIn("renderShareTabBar", page)  # share.js
         # share.js's click delegation — a marker that appears in the
         # script only, never in this test's transcript body.
         self.assertIn(".closest('.collapse-header')", page)
