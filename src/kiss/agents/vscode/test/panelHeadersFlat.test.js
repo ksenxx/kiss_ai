@@ -7,10 +7,10 @@
 
 // Event panel headers are flat: no chevron in front of the title, no
 // background and no border of their own (the panel keeps its single
-// outer border), and the task panel sits a small gap away from the
-// transcript's left edge.  The panels are rendered by the real
-// media/main.js with media/main.css injected, so the assertions are on
-// the cascaded values the webview actually paints.
+// outer border).  The panels are rendered by the real media/main.js
+// with media/main.css injected, so the assertions are on the cascaded
+// values the webview actually paints.  Where the panels sit (the user's
+// on the right, the rest on the left) is transcriptPanelAlignment's.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -139,62 +139,14 @@ function testToolCallHeaderIsFlat() {
   console.log('  ok - the tool call header has no background and no border of its own');
 }
 
-function cssRules(win) {
-  const rules = [];
-  for (const sheet of win.document.styleSheets) {
-    for (const rule of sheet.cssRules) rules.push(rule);
-  }
-  return rules;
-}
-
-/** The left margin, in px, that the rule for *selector* declares. */
-function marginLeftPx(win, selector) {
-  const rules = cssRules(win);
-  // The rule may group several selectors (`.ev.task-panel, .ev.user-msg`).
-  const rule = rules.find(
-    r =>
-      typeof r.selectorText === 'string' &&
-      r.selectorText.split(',').some(s => s.trim() === selector),
-  );
-  assert.ok(rule, 'main.css declares ' + selector);
-  const m = /margin:\s*([^;]+);/.exec(rule.cssText);
-  assert.ok(m, selector + ' declares a margin: ' + rule.cssText);
-  const parts = m[1].trim().split(/\s+/);
-  const left = parts[3] || parts[1] || parts[0];
-  if (left === '0') return 0;
-  const v = /^var\((--[\w-]+)\)$/.exec(left);
-  assert.ok(v, selector + ' left margin is a spacing token or 0: ' + left);
-  const all = rules.map(r => r.cssText).join('\n');
-  const px = new RegExp(v[1] + ':\\s*(\\d+(?:\\.\\d+)?)px').exec(all);
-  assert.ok(px, v[1] + ' is defined in px');
-  return parseFloat(px[1]);
-}
-
-function testTaskPanelKeepsAGapFromTheLeftEdge() {
-  const win = makeWebview();
-  renderTranscript(win);
-  const out = win.document.getElementById('output');
-  const taskPanel = out.querySelector('.ev.task-panel');
-  assert.ok(taskPanel, 'the task panel rendered');
-  // JSDOM resolves no var() inside a margin shorthand, so the left
-  // margin is read from the parsed rules and its token looked up.
-  const gap = marginLeftPx(win, '.ev.task-panel');
-  const other = marginLeftPx(win, '.tc');
-  assert.ok(gap > 0 && gap <= 8, 'a small left gap: ' + gap);
-  assert.strictEqual(other, 0, 'the other panels stay flush: ' + other);
-  win.close();
-  console.log('  ok - the task panel sits a small gap away from the left edge');
-}
-
 function runTests() {
   testNoChevronInAnyHeader();
   testToolCallHeaderIsFlat();
-  testTaskPanelKeepsAGapFromTheLeftEdge();
 }
 
 try {
   runTests();
-  console.log('\n3 passed, 0 failed');
+  console.log('\n2 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);
