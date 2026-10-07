@@ -773,6 +773,33 @@ class JsonPrinter(Printer):
             state.task_thread = None
             agent_state.unregister(state.task_id, state)
 
+    def charge_task_usage(
+        self, task_agent: Any, task_id: str, budget: float, tokens: int, steps: int,
+        epoch: Any = None,
+    ) -> None:
+        """Charge a dispatched sub-task's spend to the task that dispatched it.
+
+        Duck-typed bridge called from
+        :func:`~kiss.agents.sorcar.agent_dispatch._attribute_dispatch_usage`
+        when the calling task has a persisted row; the policy is
+        :func:`~kiss.server.task_update.charge_side_channel_usage`
+        (live-ledger bank plus a ``usage_info`` while the row is
+        unfinished, row and ancestor updates once it is), which needs
+        this server's agent registry for a running ancestor.
+
+        Args:
+            task_agent: The live agent of *task_id*.
+            task_id: The calling task's persisted row id.
+            budget: Cost in USD to charge.
+            tokens: Tokens to charge.
+            steps: Steps to charge.
+            epoch: The ledger epoch the spend belongs to, or ``None``
+                for the agent's current one.
+        """
+        from kiss.server.task_update import charge_side_channel_usage
+
+        charge_side_channel_usage(self, task_agent, task_id, budget, tokens, steps, epoch=epoch)
+
     def drain_pending_user_messages(self) -> list[str]:
         """Return and clear the current task's queued follow-up prompts.
 

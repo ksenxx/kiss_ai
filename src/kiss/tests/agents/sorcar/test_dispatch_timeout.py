@@ -238,16 +238,21 @@ class _StopConfirmingDaemon(_LocalDaemon):
         confirm_delay: float = 0.0,
         initial_running: bool = True,
         stopped_result: dict[str, Any] | None = None,
+        confirm_gate: threading.Event | None = None,
     ) -> None:
         """Start serving.
 
         *stopped_result*, when given, is sent as the stopped task's
         ``result`` event just before the terminal status, like the
         daemon's failure result that carries the spend so far.
+        *confirm_gate*, when given, must be set by the test before the
+        stop is confirmed (after ``confirm_delay``), so the test can
+        order the confirmation after an observation of its own.
         """
         self.confirm_delay = confirm_delay
         self.initial_running = initial_running
         self.stopped_result = stopped_result
+        self.confirm_gate = confirm_gate
         self.commands: list[dict[str, Any]] = []
         super().__init__("kiss_dispatch_timeout_")
 
@@ -266,6 +271,10 @@ class _StopConfirmingDaemon(_LocalDaemon):
                 self.commands.append(cmd)
                 if cmd.get("type") == "stop":
                     await asyncio.sleep(self.confirm_delay)
+                    if self.confirm_gate is not None:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, self.confirm_gate.wait, 10.0,
+                        )
                     if self.stopped_result is not None:
                         await _send_event(ws, {**self.stopped_result, "tabId": tab_id})
                     await _send_event(ws, {
