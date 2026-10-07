@@ -1,5 +1,42 @@
 # Writing Sorcar Extension Agents (SEAs) for KISS Sorcar
 
+## What is a SEA?
+
+A **Sorcar Extension Agent (SEA)** is a small Python file that describes
+a specialised version of the Sorcar assistant.  Think of Sorcar as a
+capable general employee, and a SEA as a job description plus a rulebook
+you hand that employee before a particular kind of job.  The file can say:
+
+- **What the job is.**  `settings()` names a `kind` (an ordinary
+  `session`, or a lightweight `worker` with no git worktree, browser or
+  memory) and sets the run parameters the SEA cares about: the model,
+  the tool profile, the working directory, how long a caller waits for
+  it.  A caller may still ask for a different value unless the SEA
+  marks the key `locked`; whatever the SEA does not set keeps what the
+  caller asked for.
+- **How to phrase the task.**  `prompt(task)` rewrites the text the user
+  typed into the prompt the agent actually receives.
+- **What the agent knows and may do.**  `system_prompt()` adjusts the
+  standing instructions; `tools()` adds, removes or replaces the tools
+  the agent can call, so a SEA can bring its own tools (a weather
+  lookup, a task database) or lock the agent down to a bare shell.
+- **What to watch.**  `tool_call_hook` and `llm_call_hook` run before
+  each tool and model call the agent makes, so a SEA can guard, log or
+  veto actions.
+- **What it is for.**  `description()` is the one-sentence help text
+  shown for the SEA's chat command.
+
+A SEA only writes down what it changes; everything else is inherited
+from a base that already does the right thing, and one SEA can build on
+another the way one job description can extend another.  Users reach a
+SEA by typing `/<name>` in the chat, by picking it on a tab, by calling
+`sorcar.run()` with its path, or when an agent delegates to it with
+`run_agent`.  The file runs inside the Sorcar daemon and is re-read from
+source on every run, so editing it takes effect immediately.  The rest
+of this document is the precise contract behind that picture.
+
+## The contract
+
 A **Sorcar Extension Agent (SEA)** is a Python file that defines one
 class deriving from `kiss.agents.seas.base.base_sea.BaseSea`; you pass
 the file's path as `sea_path` to `kiss.server.sorcar.run()`.
