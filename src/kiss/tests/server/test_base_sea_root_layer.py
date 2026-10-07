@@ -26,7 +26,15 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.seas.base.base_sea import ALLOW, BaseSea, Verdict, refuse
+from kiss.agents.seas.base.base_sea import (
+    ALLOW,
+    FINISH_WITHOUT_SUMMARY_REFUSAL,
+    SUMMARY_DUE_REFUSAL,
+    SUMMARY_EVERY_STEPS,
+    BaseSea,
+    Verdict,
+    refuse,
+)
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
@@ -202,6 +210,57 @@ class BaseSeaRootLayerDaemonTest(DaemonRunApiHarness):
         assert call["tool_call_hook"]("Bash", {"command": "ls"}) == ALLOW
         assert "house_tool" not in call["tool_names"]
         assert HOUSE_RULE not in call["system_prompt"]
+        # The run's toolset holds ``summary``, so the stock base's own
+        # rule is armed: finish waits for a summary (the implicit-finish
+        # probe, with no arguments, passes).
+        assert "summary" in call["tool_names"]
+        assert call["tool_call_hook"]("finish", {}) == ALLOW
+        assert call["tool_call_hook"]("finish", {"success": True}) == refuse(
+            FINISH_WITHOUT_SUMMARY_REFUSAL
+        )
+        assert call["tool_call_hook"]("summary", {"description": "- did x"}) == ALLOW
+        assert call["tool_call_hook"]("finish", {"success": True}) == ALLOW
+
+
+def summary(description: str) -> str:
+    """Stand in for the run's ``summary`` tool (the root layer reads only its name)."""
+    return description
+
+
+def test_stock_base_requires_a_summary_at_every_tenth_step_and_before_finish() -> None:
+    """``finish`` runs only right after ``summary``; at a 10th step every other tool waits for one."""
+    sea = BaseSea()
+    sea.tools([summary, house_tool])
+    assert sea.has_summary_tool
+    due = SUMMARY_DUE_REFUSAL.format(step=10, every=SUMMARY_EVERY_STEPS, name="Bash")
+    without = refuse(FINISH_WITHOUT_SUMMARY_REFUSAL)
+    # Nothing ran yet: the probe passes, a real finish waits for a summary.
+    assert base_tool_call_hook([sea], "finish", {}) == ALLOW
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == without
+    for _ in range(9):
+        sea.llm_call_hook([])
+        assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
+    sea.llm_call_hook([])
+    assert sea.step == 10 and sea.summary_due
+    assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == refuse(due)
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == without
+    assert base_tool_call_hook([sea], "finish", {}) == ALLOW
+    assert base_tool_call_hook([sea], "summary", {"description": "- ran ls"}) == ALLOW
+    assert not sea.summary_due
+    assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
+    # The summary is no longer the latest tool: finish waits for a fresh one.
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == without
+    assert base_tool_call_hook([sea], "summary", {"description": "- ran ls again"}) == ALLOW
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
+    assert base_tool_call_hook([sea], "finish", {"success": True, "is_continue": True}) == ALLOW
+    # A toolset without ``summary`` (tool_profile "none", a SEA that
+    # drops it) is under no rule at all; ``tools`` restarts the count.
+    sea.tools([house_tool])
+    assert not sea.has_summary_tool and sea.step == 0
+    for _ in range(10):
+        sea.llm_call_hook([])
+    assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
 
 
 def test_a_plain_command_runs_the_bare_base_and_names_no_sea() -> None:

@@ -86,9 +86,12 @@ function clickTab(win, tabId) {
 }
 
 /** Top-level collapsible panels of the visible transcript, in order. */
+/** The task's event panels: on the transcript while the task runs,
+ * inside its Trajectory panel once it has ended. */
 function panels(win) {
   const out = win.document.getElementById('output');
-  return Array.from(out.children).filter(
+  const traj = out.querySelector(':scope > .trajectory > .trajectory-sub');
+  return Array.from((traj || out).children).filter(
     el => el.classList.contains('collapsible') && !el.classList.contains('rc'),
   );
 }
@@ -167,7 +170,8 @@ function testVisibleStreamKeepsNewestTwoOpen() {
       'newest two are open',
   );
 
-  // The result folds nothing: the same two panels stay open.
+  // The end of the task moves the panels into the Trajectory panel as
+  // they are: the same two stay open inside it.
   send(win, {
     type: 'result',
     text: 'summary: Done.\nsuccess: true\n',
@@ -180,7 +184,7 @@ function testVisibleStreamKeepsNewestTwoOpen() {
   assert.deepStrictEqual(
     panels(win).map(isCollapsed),
     [false, true, false, true, false, false, false],
-    'the result event leaves the open panels open',
+    'the end of the task leaves the open panels open inside the Trajectory',
   );
   win.close();
   console.log('  ok - a visible stream keeps its newest two panels open');

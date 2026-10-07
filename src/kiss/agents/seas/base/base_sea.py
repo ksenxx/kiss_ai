@@ -7,7 +7,7 @@
 A SEA is a Python file ``xxx/xxx_sea.py`` that defines exactly one
 subclass of :class:`BaseSea`.  The subclass overrides the methods it
 needs; every method here passes its input through (the root layer's
-one rule of its own is the ``summary`` cadence, see :class:`BaseSea`),
+own rules concern the ``summary`` tool, see :class:`BaseSea`),
 so a SEA defines only what it changes::
 
     from kiss.agents.seas.base.base_sea import WorkerSea
@@ -99,6 +99,12 @@ SUMMARY_DUE_REFUSAL = (
 )
 """The refusal a tool call other than ``summary`` or ``finish`` gets while a summary is due."""
 
+FINISH_WITHOUT_SUMMARY_REFUSAL = (
+    "Call summary(description=...) first, recapping your steps since the last "
+    "summary, then retry finish."
+)
+"""The refusal ``finish`` gets when a tool other than ``summary`` ran since the last summary."""
+
 
 def channel_work_dir() -> str:
     """Return the shared scratch directory a channel runs in: ``<home>/channel_work``.
@@ -111,13 +117,16 @@ def channel_work_dir() -> str:
 class BaseSea:
     """The SEA contract and the root layer of every run; each method returns its input unchanged.
 
-    The one rule the root layer enforces is the ``summary`` cadence: a
-    run whose toolset holds the ``summary`` tool must call it at every
-    :data:`SUMMARY_EVERY_STEPS`-th step (the system prompt's "Periodic
-    Activity Summaries" rule).  ``tools`` notes whether the tool is
-    there, ``llm_call_hook`` counts the steps (one LLM call each), and
-    ``tool_call_hook`` refuses every other tool call (``finish``
-    excepted) from the 10th, 20th, ... step on until ``summary`` runs.
+    The rules the root layer enforces concern the ``summary`` tool of a
+    run whose toolset holds it (the system prompt's "Periodic Activity
+    Summaries" rule).  ``tools`` notes whether the tool is there,
+    ``llm_call_hook`` counts the steps (one LLM call each), and
+    ``tool_call_hook`` applies two rules: the cadence — every other
+    tool call (``finish`` excepted) is refused from the
+    :data:`SUMMARY_EVERY_STEPS`-th, 20th, ... step on until ``summary``
+    runs — and the closing recap — ``finish`` is refused until
+    ``summary`` is the latest tool that ran, so the run's last summary
+    covers every step up to its end.
     """
 
     path: Path | None = None
@@ -131,6 +140,9 @@ class BaseSea:
 
     summary_due = False
     """Whether a ``summary`` call is owed: a 10th step began and none has run since."""
+
+    summary_is_latest = False
+    """Whether ``summary`` is the latest tool that ran (``finish`` may run only then)."""
 
     def __init__(self) -> None:
         module = sys.modules.get(type(self).__module__)
@@ -203,6 +215,7 @@ class BaseSea:
         """
         self.step = 0
         self.summary_due = False
+        self.summary_is_latest = False
         self.has_summary_tool = any(getattr(t, "__name__", "") == "summary" for t in tools)
         return tools
 
@@ -214,18 +227,31 @@ class BaseSea:
         ``refuse`` from this module).  A refusal's text is returned to
         the model as the tool's result.
 
-        The root layer's own rule: while a ``summary`` is due (see
-        :class:`BaseSea`), every call but ``summary`` and ``finish`` is
-        refused with :data:`SUMMARY_DUE_REFUSAL`; the ``summary`` call
-        clears the debt.  ``finish`` is exempt because its own summary
-        ends the run (and the agent probes it for an implicit finish).
+        The root layer's own rules, for a run that has the ``summary``
+        tool (see :class:`BaseSea`): while a ``summary`` is due, every
+        call but ``summary`` and ``finish`` is refused with
+        :data:`SUMMARY_DUE_REFUSAL`, and ``finish`` is refused with
+        :data:`FINISH_WITHOUT_SUMMARY_REFUSAL` unless ``summary`` is the
+        latest tool that ran.  A ``summary`` call clears the debt and
+        readies ``finish``; any other allowed call unreadies it.  The
+        agent's implicit-finish probe (``finish`` with no arguments, for
+        a model that stopped calling tools) is never refused: it is not
+        a call the model can amend.
         """
+        if not self.has_summary_tool:
+            return ALLOW
         if name == "summary":
             self.summary_due = False
-        elif self.summary_due and name != "finish":
+            self.summary_is_latest = True
+        elif name == "finish":
+            if args and not self.summary_is_latest:
+                return refuse(FINISH_WITHOUT_SUMMARY_REFUSAL)
+        elif self.summary_due:
             return refuse(
                 SUMMARY_DUE_REFUSAL.format(step=self.step, every=SUMMARY_EVERY_STEPS, name=name)
             )
+        else:
+            self.summary_is_latest = False
         return ALLOW
 
     def llm_call_hook(self, new_messages: list[Any]) -> list[Any]:

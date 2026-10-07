@@ -1052,6 +1052,22 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 }
 .tc-h:hover { color: var(--fg); }
 
+/* The Trajectory panel a finished task's event panels fold into
+   (foldTrajectory in main.js): the tool-call panel's frame and quiet
+   header around the task's panels (.trajectory-sub below). */
+.trajectory {
+  border: 1px solid var(--border); border-radius: var(--radius-lg); margin: var(--space-2) 0;
+  overflow: hidden; background: var(--surface);
+}
+
+.trajectory-h {
+  padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
+  font-weight: 400; letter-spacing: .04em;
+  color: var(--dim);
+}
+.trajectory-h:hover { color: var(--fg); }
+.trajectory.collapsed > :not(.trajectory-h, .panel-copy-btn) { display: none; }
+
 /* ask_user_question renders as the "Question" panel: translucent red
    header, the question as prose, the answer typed into the composer. */
 .tc-h.tc-h-question {
@@ -1120,7 +1136,11 @@ body.ask-answering #input-container {
   display: none;
 }
 
-.summary-sub {
+/* The panels a summary tool call adopted, and the event panels of a
+   finished task folded into its Trajectory panel: nested under the
+   adopting panel's header, shown when it is opened. */
+.summary-sub,
+.trajectory-sub {
   margin: var(--space-1) var(--space-2) var(--space-1-5) var(--space-4);
   padding-left: var(--space-2-5);
   border-left: 2px solid var(--panel-line);

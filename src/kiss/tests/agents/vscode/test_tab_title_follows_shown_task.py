@@ -114,12 +114,26 @@ def _last_panel_title(page) -> str:
 
 
 def _long_events(task: str, n: int = 40) -> list[dict]:
-    """A transcript tall enough to scroll in a 900px viewport."""
+    """A transcript tall enough to scroll in a 900px viewport once its
+    Trajectory panel is opened (a finished task replays folded)."""
     events: list[dict] = [{"type": "task_start", "task": task}]
     for i in range(n):
         events.append({"type": "system_output",
                        "text": f"{task}: line {i} of output\n"})
     return events
+
+
+def _open_trajectories(page) -> None:
+    """Open every folded Trajectory panel, as a reader of a finished
+    task does: its event panels then give the transcript its height."""
+    page.evaluate(
+        """() => {
+          for (const t of document.querySelectorAll('#output .trajectory.collapsed'))
+            t.querySelector(':scope > .trajectory-h').click();
+        }"""
+    )
+    assert page.evaluate(
+        "() => document.querySelectorAll('#output .trajectory.collapsed').length") == 0
 
 
 def _replay_own_task(page, tab_id: str) -> None:
@@ -128,6 +142,7 @@ def _replay_own_task(page, tab_id: str) -> None:
         "task_id": "42", "task": _OWN_TASK, "events": _long_events(_OWN_TASK),
     })
     assert _own_panel_text(page) == _OWN_TASK
+    _open_trajectories(page)
 
 
 def _splice_prev_task(page, tab_id: str) -> None:
@@ -140,6 +155,7 @@ def _splice_prev_task(page, tab_id: str) -> None:
     assert page.evaluate(
         "() => document.querySelector('.adjacent-task[data-task-id=\"41\"]')"
         " !== null")
+    _open_trajectories(page)
 
 
 def _scroll_output(page, where: str) -> None:

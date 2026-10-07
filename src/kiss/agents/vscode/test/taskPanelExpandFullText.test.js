@@ -303,6 +303,20 @@ function testChevronPassWorksWithoutButton() {
     !rc.classList.contains('collapsed'),
     'the result panel must stay open',
   );
+  // The end of the task folds every event panel into one collapsed
+  // Trajectory panel; the result stays outside it.
+  const traj = O.querySelector(':scope > .trajectory');
+  assert.ok(
+    traj && traj.classList.contains('collapsed'),
+    'the end folds the panels into a collapsed Trajectory panel',
+  );
+  assert.ok(
+    traj.contains(summaryPanel) &&
+      traj.contains(readPanel) &&
+      traj.contains(rpPanel) &&
+      !traj.contains(rc),
+    'the summary, Read and fan-out panels sit inside the Trajectory',
+  );
   assert.ok(
     summaryPanel.classList.contains('collapsed'),
     'the summary digest must fold',
@@ -312,13 +326,19 @@ function testChevronPassWorksWithoutButton() {
     'panels adopted inside the summary are left as they are',
   );
   assert.ok(
-    readPanel.classList.contains('collapsed') &&
-      isDisplayed(win, readPanel),
-    'a plain finished panel must fold but stay on screen',
+    readPanel.classList.contains('collapsed') && !isDisplayed(win, readPanel),
+    'a plain finished panel folds and hides behind the Trajectory',
   );
   assert.ok(
-    rpPanel.classList.contains('collapsed') && isDisplayed(win, rpPanel),
-    'the finished run_parallel panel must fold but stay on screen',
+    rpPanel.classList.contains('collapsed') && !isDisplayed(win, rpPanel),
+    'the finished run_parallel panel folds behind the Trajectory too',
+  );
+  traj.querySelector('.collapse-header').dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  assert.ok(
+    isDisplayed(win, readPanel) && isDisplayed(win, rpPanel),
+    'opening the Trajectory shows the folded panels, one click away',
   );
   assert.strictEqual(
     d.querySelectorAll('.tab.subagent-tab, .tab[data-subagent="1"]').length +
@@ -345,6 +365,17 @@ function testChevronPassWorksWithoutButton() {
     'the chevron pass must not re-fold a panel the user opened',
   );
 
+  // A panel that lands after the end (a late tool call) stands outside
+  // the Trajectory: the chevron pass that follows every rendered event
+  // folds it to its digest, and it stays on screen.
+  send(win, {type: 'tool_call', name: 'Bash', command: 'late', tabId: parentId});
+  const late = O.querySelector(':scope > .tc-bash');
+  assert.ok(late, 'the late panel renders outside the Trajectory');
+  assert.ok(
+    late.classList.contains('collapsed') && isDisplayed(win, late),
+    'the chevron pass folds a late finished panel but keeps it on screen',
+  );
+
   send(win, {
     type: 'adjacent_task_events',
     direction: 'prev',
@@ -358,19 +389,24 @@ function testChevronPassWorksWithoutButton() {
   });
   const adjacent = O.querySelector('.adjacent-task[data-task="Older task"]');
   assert.ok(adjacent, 'the adjacent task container must render');
-  const adjPanel = adjacent.querySelector('.collapsible:not(.rc):not(.task-panel)');
+  const adjTraj = adjacent.querySelector(':scope > .trajectory');
+  assert.ok(
+    adjTraj && adjTraj.classList.contains('collapsed'),
+    "the adjacent task's replay folds its panels into its own Trajectory",
+  );
+  const adjPanel = adjTraj.querySelector('.trajectory-sub .collapsible');
   assert.ok(adjPanel, 'the adjacent task must replay its tool panel');
   assert.ok(
-    adjPanel.classList.contains('collapsed') && isDisplayed(win, adjPanel),
-    "the adjacent task's finished panels fold but stay on screen too",
+    adjPanel.classList.contains('collapsed') && !isDisplayed(win, adjPanel),
+    "the adjacent task's finished panels fold behind its Trajectory",
   );
   win.close();
 }
 
-// A task that finishes ON SCREEN (a real task_done, not a replay)
-// stamps its panels, and the chevron pass leaves them exactly as the
-// stream left them: not collapsed.
-function testLiveFinishedPanelsSkipChevronPass() {
+// A task that finishes ON SCREEN folds its panels into the Trajectory
+// panel; the chevron pass a trailing event triggers leaves the panels
+// inside the Trajectory exactly as the fold left them.
+function testTrajectoryPanelsSkipChevronPass() {
   const {win, posted} = makeWebview();
   const d = win.document;
   const ready = posted.find(m => m.type === 'ready');
@@ -380,23 +416,33 @@ function testLiveFinishedPanelsSkipChevronPass() {
   send(win, {type: 'setTaskText', text: 'live task', tabId: parentId});
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: parentId});
   send(win, {type: 'tool_result', name: 'Bash', content: 'f', tabId: parentId});
-
-  const panels = Array.from(d.querySelectorAll('#output .collapsible'));
-  assert.ok(panels.length > 0, 'the stream must have rendered panels');
-  const before = panels.map(p => p.classList.contains('collapsed'));
-
   send(win, {type: 'result', tabId: parentId, summary: 'done', success: true});
   send(win, {type: 'task_done', tabId: parentId});
   send(win, {type: 'status', running: false, tabId: parentId});
-  send(win, {type: 'usage_info', tabId: parentId});
 
-  panels.forEach((p, i) => {
+  const traj = d.querySelector('#output > .trajectory');
+  assert.ok(traj, 'the finish folded the panels into a Trajectory panel');
+  const inner = Array.from(traj.querySelectorAll('.trajectory-sub .collapsible'));
+  assert.ok(inner.length > 0, 'the Trajectory holds the event panels');
+  // The user opens the Trajectory and one panel inside it.
+  traj.querySelector('.collapse-header').dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  inner[0].classList.remove('collapsed');
+  const before = inner.map(p => p.classList.contains('collapsed'));
+
+  send(win, {type: 'usage_info', tabId: parentId});
+  inner.forEach((p, i) => {
     assert.strictEqual(
       p.classList.contains('collapsed'),
       before[i],
-      'a live finish must not change the collapsed state of panel #' + i,
+      'the chevron pass must not touch Trajectory panel #' + i,
     );
   });
+  assert.ok(
+    !traj.classList.contains('collapsed'),
+    'the Trajectory the user opened stays open',
+  );
   win.close();
 }
 
@@ -406,14 +452,14 @@ function runTests() {
     () => testTaskPanelOpensTheTranscript(true),
     testTaskPanelFoldsLikeAnyPanel,
     testChevronPassWorksWithoutButton,
-    testLiveFinishedPanelsSkipChevronPass,
+    testTrajectoryPanelsSkipChevronPass,
   ];
   const names = [
     'testTaskPanelOpensTheTranscript(vscode)',
     'testTaskPanelOpensTheTranscript(remote)',
     'testTaskPanelFoldsLikeAnyPanel',
     'testChevronPassWorksWithoutButton',
-    'testLiveFinishedPanelsSkipChevronPass',
+    'testTrajectoryPanelsSkipChevronPass',
   ];
   for (let i = 0; i < tests.length; i++) {
     tests[i]();

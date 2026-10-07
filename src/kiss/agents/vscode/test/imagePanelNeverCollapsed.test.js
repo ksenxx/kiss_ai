@@ -88,8 +88,14 @@ function startTask(wv, chatId) {
   return ready.tabId;
 }
 
+/** The task's tool panels: on the transcript while it runs, inside its
+ * Trajectory panel once it has ended. */
 function toolPanels(win) {
-  return Array.from(win.document.querySelectorAll('#output > .ev.tc'));
+  return Array.from(
+    win.document.querySelectorAll(
+      '#output > .ev.tc, #output > .trajectory > .trajectory-sub > .ev.tc',
+    ),
+  );
 }
 
 const IMAGE = {path: '/w/shot.png', mime: 'image/png', b64: PNG_B64};
@@ -206,6 +212,12 @@ function testReplayKeepsImagePanelOpenAndVisible() {
 
   const panels = toolPanels(win);
   assert.strictEqual(panels.length, 5, 'five tool panels replay');
+  // The finished task's replay folds them all into the Trajectory panel.
+  const traj = win.document.querySelector('#output > .trajectory');
+  assert.ok(
+    traj && panels.every(p => traj.contains(p)),
+    'the replayed panels sit inside the Trajectory',
+  );
   const imagePanel = panels[3];
   assert.ok(
     imagePanel.querySelector('img.tr-img'),
