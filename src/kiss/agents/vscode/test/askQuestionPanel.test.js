@@ -7,7 +7,7 @@
 // as the "Question" transcript panel (translucent red header), the daemon's
 // live askUser event marks that panel pending and puts the composer into
 // answer mode, the text typed into the composer is posted as the userAnswer,
-// and the tool_result (the answer) is shown inside the same panel.
+// and the tool_result (the answer) is shown as a separate user message.
 
 'use strict';
 
@@ -236,7 +236,7 @@ test('Enter in the composer posts the text as the userAnswer, not a prompt', () 
   );
   assert.ok(!panel.querySelector('.tc-question-hint'), 'the hint is gone');
 
-  // The tool returns the answer: it is shown inside the Question panel.
+  // The tool returns the answer as a separate user message.
   send(win, {
     type: 'tool_result',
     tool_name: 'ask_user_question',
@@ -244,17 +244,11 @@ test('Enter in the composer posts the text as the userAnswer, not a prompt', () 
     tabId: tab,
     ts: Date.now(),
   });
-  const ans = panel.querySelector('.tc-question-answer');
-  assert.ok(ans, 'the answer block is inside the Question panel');
-  assert.strictEqual(
-    ans.querySelector('.tc-question-answer-label').textContent,
-    'Answer',
-  );
-  assert.strictEqual(
-    ans.querySelector('.tc-question-answer-text').textContent,
-    'main',
-  );
-  assert.strictEqual(ans.dataset.rawText, 'Answer: main');
+  const ans = panel.nextElementSibling;
+  assert.ok(ans.classList.contains('user-msg'), 'the response is a user message');
+  assert.ok(ans.querySelector('.task-panel-h').textContent.includes('Response'));
+  assert.strictEqual(ans.querySelector('.task-panel-text').textContent, 'main');
+  assert.strictEqual(ans.dataset.rawText, 'main');
   assert.ok(
     !panel.querySelector('.bash-panel'),
     'no generic tool output block is added for a question',
@@ -314,7 +308,7 @@ test('a replayed answered question shows question and answer, never pending', ()
       .textContent.includes('Which branch?'),
   );
   assert.strictEqual(
-    panel.querySelector('.tc-question-answer-text').textContent,
+    panel.nextElementSibling.querySelector('.task-panel-text').textContent,
     'release',
   );
   assert.ok(!panel.classList.contains('tc-question-pending'));

@@ -1091,21 +1091,6 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
   overflow-wrap: anywhere; word-break: break-word;
 }
 
-.tc-question-answer {
-  margin-top: var(--space-1-5); padding: var(--space-1-5) var(--space-2); border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--fg) 5%, transparent);
-  border-left: 3px solid color-mix(in srgb, var(--red) 55%, transparent);
-  overflow-wrap: anywhere; word-break: break-word;
-}
-
-.tc-question-answer-label {
-  display: block; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.4px;
-  text-transform: uppercase; color: color-mix(in srgb, var(--fg) 60%, transparent);
-  margin-bottom: var(--space-0-5);
-}
-
-.tc-question-answer-text { font-size: var(--fs-lg); line-height: 1.5; white-space: pre-wrap; }
-
 body.ask-answering #input-container {
   border-color: color-mix(in srgb, var(--red) 60%, transparent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 30%, transparent);

@@ -210,9 +210,9 @@ function testSummaryToolLeavesAnswerOnTranscript() {
   const panel = answerPanelIn(out);
   assertOpenAndOnScreen(panel, 'when a summary adopted its neighbours');
   assert.strictEqual(
-    panel.nextElementSibling,
+    panel.previousElementSibling,
     summary,
-    'the answer sits on the transcript right before the summary',
+    'the answer sits on the transcript right after the summary',
   );
   win.close();
   console.log('  ok - the summary tool leaves the answer on the transcript');
