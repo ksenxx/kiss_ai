@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import weakref
@@ -380,6 +381,7 @@ _GIT_TIMEOUT_SECONDS: float = 300.0
 def _git(
     *args: str,
     cwd: str | Path,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command, returning the CompletedProcess result.
 
@@ -387,6 +389,9 @@ def _git(
     enforces that every git invocation specifies a working directory
     (passed via ``git -C <cwd>``).  This prevents accidental git
     operations against the process's current working directory.
+    Repo-scoping variables inherited from the environment (``GIT_DIR``,
+    ``GIT_INDEX_FILE``, ...) are always dropped; *env* adds explicit
+    ones on top for the single call (e.g. a scratch ``GIT_INDEX_FILE``).
 
     Always passes a timeout so a hung git process (e.g. waiting on a
     credential-helper prompt or a network remote) cannot block the
@@ -398,6 +403,7 @@ def _git(
     Args:
         *args: Git sub-command and arguments (without the leading ``git``).
         cwd: Working directory for the git command (required).
+        env: Extra environment variables for this call only.
 
     Returns:
         The completed process with stdout/stderr captured as text.
@@ -410,7 +416,9 @@ def _git(
         str(cwd),
         *args,
     ]
-    env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
+    full_env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
+    if env:
+        full_env.update(env)
     proc = popen_process_group(
         cmd,
         stdout=subprocess.PIPE,
@@ -418,7 +426,7 @@ def _git(
         text=True,
         encoding="utf-8",
         errors="surrogateescape",
-        env=env,
+        env=full_env,
     )
     try:
         stdout, stderr = proc.communicate(timeout=_GIT_TIMEOUT_SECONDS)
@@ -2113,6 +2121,19 @@ class GitWorktreeOps:
         failed status counts as content: unenumerable state is
         preserved, never destroyed.
 
+        One state the status walk cannot be trusted on: a spare whose
+        gitdir has no ``index`` file.  The pool registers a spare with
+        ``--no-checkout`` and populates it with ``reset --hard`` (see
+        :func:`kiss.agents.sorcar.worktree_pool.prewarm`); a process
+        killed during that reset leaves the files partially written and
+        the index never created, so status lists every tracked file as
+        a staged deletion and the written ones as untracked.  That is
+        checkout debris, not external content — treating it as content
+        preserved such a spare on every reclaim pass forever — so
+        :meth:`_interrupted_checkout_has_content` filters it out and
+        counts only paths outside the ``HEAD`` tree and commits unique
+        to the branch.
+
         Args:
             repo: Git repo root path.
             branch: The spare's ``kiss/wt-*`` branch name.
@@ -2123,6 +2144,9 @@ class GitWorktreeOps:
             (or git could not enumerate them), or commits unique to its
             branch; False when it is contentless plumbing.
         """
+        index = _git("rev-parse", "--git-path", "index", cwd=wt_dir)
+        if index.returncode == 0 and not (wt_dir / index.stdout.strip()).is_file():
+            return GitWorktreeOps._interrupted_checkout_has_content(repo, branch, wt_dir)
         # ``--untracked-files`` is explicit: a repo-level
         # ``status.showUntrackedFiles=no`` would otherwise silence the
         # untracked AND ignored listing and make a written-to spare
@@ -2139,6 +2163,68 @@ class GitWorktreeOps:
         return bool(status.stdout.strip()) or not GitWorktreeOps._branch_is_expendable(
             repo, branch
         )
+
+    @staticmethod
+    def _interrupted_checkout_has_content(repo: Path, branch: str, wt_dir: Path) -> bool:
+        """:meth:`spare_has_content` for a spare whose index was never written.
+
+        Without an index ``git status`` cannot tell the half-written
+        checkout from external writes (every ``HEAD`` file is a staged
+        deletion, every written file untracked).  So the status walk
+        runs against a scratch index built from ``HEAD`` with
+        ``git read-tree`` (``GIT_INDEX_FILE`` in a temporary directory,
+        split-index disabled so no shared index lands in the spare's
+        gitdir; the spare's own index stays unwritten): git then
+        reports a file the killed checkout never wrote as an unstaged
+        deletion ``" D"`` — the only debris an interrupted checkout can
+        leave — and anything else as what it is: ``" M"`` for a tracked
+        file whose contents differ from ``HEAD``, ``??``/``!!`` for
+        paths outside the tree.  Git does the content and filename
+        comparison, so edited files and byte-distinct names are never
+        mistaken for debris.  ``--untracked-files=all`` lists every
+        file individually; the default would hide files written under a
+        directory that replaced a tracked file (reported only as
+        ``" D"`` for that file).  Blind spots of ``git status`` itself
+        (``core.ignorecase``, ``core.filemode=false``, files inside an
+        uninitialised submodule) are shared with the regular probe.
+
+        Args:
+            repo: Git repo root path.
+            branch: The spare's ``kiss/wt-*`` branch name.
+            wt_dir: The spare's worktree directory.
+
+        Returns:
+            True when the spare holds external files, edits or commits
+            (or git could not enumerate them); False when every
+            reported path is an unwritten ``HEAD`` file.
+        """
+        scratch = tempfile.mkdtemp(prefix="kiss-spare-index-")
+        try:
+            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+            no_split = ("-c", "core.splitIndex=false")
+            read_tree = _git(*no_split, "read-tree", "HEAD", cwd=wt_dir, env=env)
+            status = _git(
+                *no_split, "status", "--porcelain", "-z", "--ignored",
+                "--untracked-files=all", cwd=wt_dir, env=env,
+            )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        if read_tree.returncode != 0 or status.returncode != 0:
+            logger.warning(
+                "git failed in index-less spare %s (read-tree rc=%s, status rc=%s); "
+                "treating as content",
+                wt_dir, read_tree.returncode, status.returncode,
+            )
+            return True
+        for entry in status.stdout.split("\0"):
+            if entry and entry[:2] != " D":
+                return True
+        logger.info(
+            "Spare worktree %s has no index (interrupted checkout) and only "
+            "unwritten files; treating as contentless",
+            wt_dir,
+        )
+        return not GitWorktreeOps._branch_is_expendable(repo, branch)
 
     @staticmethod
     def rescue_ignored_files(wt_dir: Path, repo: Path) -> tuple[int, bool]:
