@@ -68,9 +68,9 @@ exactly what interactive authentication and write-approval flows need.
 Name the service in your prompt and Sorcar routes it. Internally the session calls its
 `run_agent` tool with the channel name and your request (`run_agent(agent="slack",
 task=...)`); your request goes through verbatim as the sub-session's task. The channel's
-SEA declares `settings()` returning `{"channel": True}`, so the sub-session runs in
+SEA class derives from `ChannelSea`, so the sub-session runs in
 the shared `~/.kiss/channel_work` directory with no worktree, auto-commit, classifier,
-fan-out, web tools or memory, inherits nothing from the calling task (model and budget
+web tools or memory, inherits nothing from the calling task (model and budget
 are the daemon defaults unless the caller passes them), and carries that channel's
 authenticated tools; the daemon appends the channel preamble to its system prompt,
 which tells it to use those tools directly, without exploring source code. The `agent`
@@ -125,13 +125,18 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
 - Every module defines one SEA class deriving from
-  `kiss.agents.seas.base.base_sea.BaseSea` (`SlackSea`, `GmailSea`, ...) with
-  `description(self)`, the one-sentence summary `/xxx help` prints;
-  `settings(self, settings)`, which returns `settings | {"channel": True}` (the
-  worker defaults — worktree, auto-commit, classifier, fan-out, web tools and memory
-  off — plus a run in `$KISS_HOME/channel_work` that inherits nothing from the calling
-  task); `tools(self, tools)`; and, when its agent class sets `channel_system_prompt`,
-  `system_prompt(self, system_prompt)` returning `system_prompt + "\n\n" +` that text.
+  `kiss.agents.seas.base.base_sea.ChannelSea` (`class SlackSea(ChannelSea)`,
+  `GmailSea`, ...) with `description(self)`, the one-sentence summary `/xxx help`
+  prints; `tools(self, tools)`; and, when its agent class sets
+  `channel_system_prompt`, `system_prompt(self, system_prompt)` returning
+  `system_prompt + "\n\n" +` that text. The base class is the whole channel
+  configuration, so the module defines no `settings()`: `ChannelSea` lays the worker
+  defaults (worktree, auto-commit, classifier, web tools and memory off) under a run in
+  `$KISS_HOME/channel_work` that inherits nothing from the calling task and locks
+  `work_dir` and the worker keys; the loader
+  recognizes a channel by `isinstance(sea, ChannelSea)` and the command registry by
+  the base-class name in the source, so the class must derive from `ChannelSea` by
+  name (every behaviour is listed in `sea_settings.CHANNEL_BEHAVIOURS`).
   The daemon calls `tools()` with the standard toolset and the method appends the
   channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
@@ -429,9 +434,9 @@ identity as a `{{IDENTITY}}` placeholder) followed by a no-internet, answer-quic
 directive and a playbook asking for two or three plain sentences drawn only from the
 context, and its `tools()` supplies the single `task_context` tool under
 `"tool_profile": "none"`, so no built-in tool (no shell, no
-file access) is offered; the `worker` kind turns off web tools, memory and parallel
-sub-agents, so there are no browser tools, no memory tools, and no fan-out either; it
-cannot touch the running task's working tree. Typed into a tab whose task is still running, the question
+file access) is offered; its `WorkerSea` base turns off web tools and memory, so there
+are no browser tools and no memory tools either; it cannot touch the running task's
+working tree. Typed into a tab whose task is still running, the question
 is instead dispatched directly to the daemon through a background side channel that does
 not interrupt the running agent:
 the answering session shows as a nested sub-agent tab under the running task's tab only
