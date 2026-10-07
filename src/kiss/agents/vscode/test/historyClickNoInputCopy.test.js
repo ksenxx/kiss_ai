@@ -9,7 +9,7 @@
 // there makes the user re-send an old task by accident and silently destroys
 // whatever they had typed.
 //
-// Writing the read-only task panel (#task-panel-text, via setTaskText) is the
+// The task panel that opens the transcript (and the tab's label) is the
 // correct place to echo the resumed task and must keep working.
 //
 // media/main.js is served both to the VS Code extension webview and — by
@@ -89,8 +89,17 @@ function input(win) {
   return win.document.getElementById('task-input');
 }
 
+/** The task text the transcript on screen opens with, '' when none. */
 function taskPanelText(win) {
-  return win.document.getElementById('task-panel-text').textContent;
+  const text = win.document.querySelector('#output .task-panel-text');
+  return text ? text.textContent : '';
+}
+
+/** The active tab's label: it names the task the user is looking at. */
+function activeTabLabel(win) {
+  return win.document.querySelector(
+    '.chat-tab[aria-selected="true"] .chat-tab-label',
+  ).textContent;
 }
 
 // The chat tabs on the main row (the strip under it only lists the
@@ -557,9 +566,9 @@ function testSetTaskTextMessageNeverWritesInput(mode) {
   send(win, {type: 'setTaskText', text: 'Backend announced task title'});
 
   assert.strictEqual(
-    taskPanelText(win),
+    activeTabLabel(win),
     'Backend announced task title',
-    `${mode.name}: setTaskText must fill the read-only task panel`,
+    `${mode.name}: setTaskText must name the task on the tab`,
   );
   assert.strictEqual(
     input(win).value,
@@ -569,7 +578,7 @@ function testSetTaskTextMessageNeverWritesInput(mode) {
   );
 
   win.close();
-  console.log(`  ok - ${mode.name}: setTaskText writes the panel, not the input`);
+  console.log(`  ok - ${mode.name}: setTaskText names the tab, not the input`);
 }
 
 const SCENARIOS = [

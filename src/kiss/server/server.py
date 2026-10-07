@@ -2169,11 +2169,11 @@ class VSCodeServer(
                 events_payload: dict[str, Any] = {
                     "type": "task_events",
                     # The run has no ``task_history`` row to read the
-                    # task text from yet, but the fixed task panel of
-                    # a (re)connecting client is repainted from this
-                    # field — use the prompt ``_cmd_run`` stamped on
-                    # the state at submit time so the panel is not
-                    # blanked for the whole setup window.
+                    # task text from yet, but the task panel heading
+                    # a (re)connecting client's transcript is built
+                    # from this field — use the prompt ``_cmd_run``
+                    # stamped on the state at submit time so the panel
+                    # is not blanked for the whole setup window.
                     "task": rebound_state.last_user_prompt,
                     "task_id": task_id,
                     "chat_id": chat_id,

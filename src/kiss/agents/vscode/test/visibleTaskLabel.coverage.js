@@ -12,7 +12,7 @@ const os = require('os');
 const path = require('path');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-const TEST_FILE = path.join(__dirname, 'staticTaskPanelVisibleTask.test.js');
+const TEST_FILE = path.join(__dirname, 'visibleTaskLabel.test.js');
 const START_MARK = '// visibletask-coverage:start';
 const END_MARK = '// visibletask-coverage:end';
 

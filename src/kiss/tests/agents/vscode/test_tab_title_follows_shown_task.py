@@ -3,13 +3,13 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""End-to-end check that a chat tab's title names what the static task
-panel names, on every surface.
+"""End-to-end check that a chat tab's title names the task the reader
+is looking at, on every surface.
 
-The static task panel (``#task-panel-text``, top of the chat webview)
-names the task the reader is looking at: the tab's own task, a
-neighbouring task scrolled into from history, or a history row's task
-shown read-only in a fresh tab. The tab's title must say the same
+Every task of the thread opens with its own task panel in the
+transcript, so the tab's title is what follows the reader: the tab's
+own task, a neighbouring task scrolled into from history, or a history
+row's task shown read-only in a fresh tab. The title must say the same
 thing, wherever the tab header is drawn:
 
 * the VS Code sidebar webview's internal tab strip (``.chat-tab-label``
@@ -20,7 +20,7 @@ thing, wherever the tab header is drawn:
   tab itself: the webview posts ``panelTitle {title}`` to the host
   (``SorcarPanelManager._onPanelEvent`` paints it on the editor tab).
 
-Only the ACTIVE top-level chat tab follows the panel: a background
+Only the ACTIVE top-level chat tab follows the reader: a background
 chat keeps its own task's title, and a sub-agent tab keeps its
 numbered description.
 """
@@ -75,9 +75,16 @@ def _active_tab_id(page) -> str:
     return str(page.evaluate("() => window._testApi.getActiveTabId()"))
 
 
-def _panel_text(page) -> str:
+def _own_panel_text(page) -> str:
+    """The task text the transcript on screen opens with."""
     return str(page.evaluate(
-        "() => document.getElementById('task-panel-text').textContent"))
+        "() => document.querySelector('#output .task-panel-text').textContent"))
+
+
+def _active_label(page) -> str:
+    return str(page.evaluate(
+        "() => document.querySelector("
+        "'.chat-tab[aria-selected=\"true\"] .chat-tab-label').textContent"))
 
 
 def _label(page, tab_id: str) -> str:
@@ -120,7 +127,7 @@ def _replay_own_task(page, tab_id: str) -> None:
         "type": "task_events", "tabId": tab_id, "chat_id": "chat-" + tab_id,
         "task_id": "42", "task": _OWN_TASK, "events": _long_events(_OWN_TASK),
     })
-    assert _panel_text(page) == _OWN_TASK
+    assert _own_panel_text(page) == _OWN_TASK
 
 
 def _splice_prev_task(page, tab_id: str) -> None:
@@ -137,7 +144,7 @@ def _splice_prev_task(page, tab_id: str) -> None:
 
 def _scroll_output(page, where: str) -> None:
     """Scroll the transcript to its ``top`` or ``bottom`` and let the
-    scroll handler re-derive the panel."""
+    scroll handler re-derive the shown task."""
     page.evaluate(
         """(where) => {
           const O = document.getElementById('output');
@@ -146,8 +153,9 @@ def _scroll_output(page, where: str) -> None:
         where,
     )
     page.wait_for_function(
-        "(t) => document.getElementById('task-panel-text').textContent === t",
-        arg=_PREV_TASK if where == "top" else _OWN_TASK,
+        "(t) => document.querySelector("
+        "'.chat-tab[aria-selected=\"true\"] .chat-tab-label').textContent === t",
+        arg=_clip(_PREV_TASK if where == "top" else _OWN_TASK),
         timeout=5000,
     )
 
@@ -176,20 +184,22 @@ def _open_page(_browser, body_class: str, extra_css: str = ""):
     return context, page
 
 
-def _check_strip_follows_panel(page) -> None:
+def _check_strip_follows_reader(page) -> None:
     """Shared by the sidebar and the remote webapp: the strip's label
-    for the active tab tracks the panel through a neighbour scroll."""
+    for the active tab tracks the reader through a neighbour scroll."""
     tab_id = _active_tab_id(page)
     _replay_own_task(page, tab_id)
     assert _label(page, tab_id) == _clip(_OWN_TASK)
 
     _splice_prev_task(page, tab_id)
+    # The neighbour opens with its own task panel, above the own task's.
+    assert page.evaluate(
+        "() => Array.from(document.querySelectorAll('#output .task-panel-text'))"
+        ".map(el => el.textContent)") == [_PREV_TASK, _OWN_TASK]
     _scroll_output(page, "top")
-    assert _panel_text(page) == _PREV_TASK
     assert _label(page, tab_id) == _clip(_PREV_TASK)
 
     _scroll_output(page, "bottom")
-    assert _panel_text(page) == _OWN_TASK
     assert _label(page, tab_id) == _clip(_OWN_TASK)
 
 
@@ -201,13 +211,13 @@ def test_sidebar_label_follows_neighbour_scroll(_browser) -> None:
     active tab to that task; scrolling back restores its own."""
     context, page = _open_history_page(_browser)
     try:
-        _check_strip_follows_panel(page)
+        _check_strip_follows_reader(page)
     finally:
         context.close()
 
 
 def test_sidebar_background_tab_keeps_own_title(_browser) -> None:
-    """Only the tab on screen follows the panel: a background chat's
+    """Only the tab on screen follows the reader: a background chat's
     label stays its own task while the active tab reads a neighbour,
     and the tab's OWN title is what comes back after a tab switch."""
     context, page = _open_history_page(_browser)
@@ -234,7 +244,11 @@ def test_sidebar_background_tab_keeps_own_title(_browser) -> None:
             first,
         )
         assert _active_tab_id(page) == first
-        assert _label(page, first) == _clip(_panel_text(page))
+        # Back on screen, the label names the task the restored
+        # transcript shows (one of the tab's own thread), never the
+        # other tab's.
+        assert _label(page, first) in (_clip(_OWN_TASK), _clip(_PREV_TASK))
+        assert _label(page, first) == _active_label(page)
         assert _label(page, second) == _clip(_PREVIEW_TASK)
     finally:
         context.close()
@@ -251,15 +265,15 @@ def test_sidebar_history_preview_tab_is_titled(_browser) -> None:
                      "chatId": "", "taskId": ""})
         tab_id = _active_tab_id(page)
         assert tab_id != before
-        assert _panel_text(page) == _PREVIEW_TASK
+        assert _own_panel_text(page) == _PREVIEW_TASK
         assert _label(page, tab_id) == _clip(_PREVIEW_TASK)
     finally:
         context.close()
 
 
 def test_sidebar_subagent_tab_keeps_numbered_title(_browser) -> None:
-    """A sub-agent tab's panel shows its description and its title the
-    numbered description: the index is kept."""
+    """A sub-agent tab's transcript opens with its description and its
+    title is the numbered description: the index is kept."""
     context, page = _open_history_page(_browser)
     try:
         parent = _active_tab_id(page)
@@ -274,7 +288,7 @@ def test_sidebar_subagent_tab_keeps_numbered_title(_browser) -> None:
             sub_id,
         )
         assert _active_tab_id(page) == sub_id
-        assert _panel_text(page) == _PREVIEW_TASK
+        assert _own_panel_text(page) == _PREVIEW_TASK
         label = _label(page, sub_id)
         assert label.endswith(_PREVIEW_TASK[:40]), label
         assert label != _clip(_PREVIEW_TASK), label
@@ -292,7 +306,7 @@ def test_remote_label_follows_neighbour_scroll(_browser) -> None:
     try:
         assert "remote-chat" in page.evaluate(
             "() => document.body.className").split()
-        _check_strip_follows_panel(page)
+        _check_strip_follows_reader(page)
     finally:
         context.close()
 
@@ -302,7 +316,7 @@ def test_remote_label_follows_neighbour_scroll(_browser) -> None:
 
 def test_editor_tab_title_follows_neighbour_scroll(_browser) -> None:
     """Editor-tabs mode: the ``panelTitle`` posted to the host (the
-    editor tab's title) follows the panel through a neighbour scroll."""
+    editor tab's title) follows the reader through a neighbour scroll."""
     context, page = _open_page(_browser, "editor-tab-mode")
     try:
         tab_id = _active_tab_id(page)
@@ -321,7 +335,7 @@ def test_editor_tab_title_follows_neighbour_scroll(_browser) -> None:
 
 def test_editor_tab_title_keeps_root_while_subagent_on_screen(_browser) -> None:
     """The editor tab is the ROOT chat's tab: while a sub-agent tab is
-    on screen (its description in the panel) the editor tab keeps the
+    on screen (its description opening the transcript) the editor tab keeps the
     root task's title."""
     context, page = _open_page(_browser, "editor-tab-mode")
     try:
@@ -337,7 +351,7 @@ def test_editor_tab_title_keeps_root_while_subagent_on_screen(_browser) -> None:
             sub_id,
         )
         assert _active_tab_id(page) == sub_id
-        assert _panel_text(page) == _PREVIEW_TASK
+        assert _own_panel_text(page) == _PREVIEW_TASK
         assert _last_panel_title(page) == _clip(_OWN_TASK)
     finally:
         context.close()

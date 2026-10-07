@@ -3779,7 +3779,7 @@ html, body { height: auto; overflow: auto; }
 #app { height: auto; display: block; }
 #output { overflow: visible; }
 /* Chrome that only works inside the live chat webview. */
-.panel-copy-btn, .panel-stop-btn, #task-panel-copy { display: none !important; }
+.panel-copy-btn, .panel-stop-btn { display: none !important; }
 /* The sub-agent tab strip (created and driven by share.js, styled by
    the inlined main.css's #tab-bar / .chat-tab rules). It rides along
    the top of the scrolling document, with room on the right for the
@@ -3817,20 +3817,6 @@ html, body { height: auto; overflow: auto; }
   margin-top: var(--space-3);
   border-top: 1px solid var(--border);
 }
-/* Each task's panel text carries a per-task unique id (its drawer's
-   aria-controls target), so main.css's #task-panel-text rules are
-   replicated here by id prefix. */
-[id^='task-panel-text'] {
-  max-height: 60vh;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-#task-panel.drawer-collapsed [id^='task-panel-text'] {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
 """
 """Layout overrides appended after main.css on a shared chat page."""
 
@@ -3865,7 +3851,7 @@ def _build_share_page(title: str, body_html: str) -> str:
     """Build one standalone, self-contained shared chat page.
 
     Wraps *body_html* — the chat webview's serialized chat, one
-    ``.share-task`` section (static task panel + transcript) per task
+    ``.share-task`` section (task panel + transcript) per task
     of the chat, plus one hidden ``.share-task.share-subagent``
     section per sub-agent the chat fanned out (see
     ``buildShareableHtml`` in ``media/main.js``) —
@@ -3874,7 +3860,7 @@ def _build_share_page(title: str, body_html: str) -> str:
     uses), both highlight.js themes, the VS Code palette variables
     (dark plus the light-mode overrides behind the page's theme
     toggle) and ``media/share.js`` (collapse / expand behaviour for
-    the event panels, the static task panel, the sub-agent tab strip
+    the event panels, the task panel, the sub-agent tab strip
     that opens and closes the sub-agent sections like the live
     webview's tabs, and the light/dark toggle) are all inlined.
 
@@ -7394,7 +7380,7 @@ class RemoteAccessServer:
 
         Handles the ``shareChat`` command sent by ``media/main.js``
         when the user clicks the share button next to the mic button:
-        the webview serialized the highlighted tab's static task panel
+        the webview serialized the highlighted tab's task panel
         and every event panel of its transcript, and this handler
         wraps them into a self-contained page
         (:func:`_build_share_page`) written to

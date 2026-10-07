@@ -81,11 +81,17 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Top-level collapsible panels of the visible transcript, in order. */
+/**
+ * Top-level collapsible panels of the visible transcript, in order
+ * (the task panel that opens the transcript is not an event panel).
+ */
 function panels(win) {
   const out = win.document.getElementById('output');
   return Array.from(out.children).filter(
-    el => el.classList.contains('collapsible') && !el.classList.contains('rc'),
+    el =>
+      el.classList.contains('collapsible') &&
+      !el.classList.contains('rc') &&
+      !el.classList.contains('task-panel'),
   );
 }
 

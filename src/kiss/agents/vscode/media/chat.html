@@ -47,8 +47,6 @@
       </div>
     </div>
 
-    <div id="task-panel"><div id="task-panel-text"></div><button id="task-panel-drawer-btn" type="button" aria-expanded="true" aria-controls="task-panel-text" aria-label="Collapse task panel"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg></button><button id="task-panel-copy" type="button" aria-label="Copy task to clipboard"><svg class="icon-copy" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><svg class="icon-check" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none;"><polyline points="20 6 9 17 4 12"/></svg></button></div>
-
     <!-- The one shared chat surface: every chat tab swaps its content
          into this element, so it is the single tabpanel that all tabs
          reference via aria-controls="output". -->
@@ -330,8 +328,7 @@
           <li class="meta-item"><span class="meta-label">Time:</span><span id="meta-time" class="meta-value">Ready</span></li>
           <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
-          <!-- The task's own settings (a task_settings event), which
-               used to sit at the bottom of the static task panel. -->
+          <!-- The task's own settings (a task_settings event). -->
           <li class="meta-item"><span class="meta-label">Date:</span><span id="meta-date" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Base model:</span><span id="meta-model" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Worktree mode:</span><span id="meta-worktree" class="meta-value">&mdash;</span></li>
