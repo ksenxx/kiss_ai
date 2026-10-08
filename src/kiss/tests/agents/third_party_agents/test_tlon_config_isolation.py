@@ -24,10 +24,11 @@ No mocks or test doubles: a real in-process HTTP server plays the Urbit ship.
 from __future__ import annotations
 
 import json
-import os
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonAgent, _config
 from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
@@ -57,28 +58,22 @@ class _ShipHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-def test_channel_config_path_honours_kiss_home_lazily(tmp_path: Path) -> None:
+def test_channel_config_path_honours_kiss_home_lazily(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """ChannelConfig.path follows $KISS_HOME changes made after import."""
-    saved = os.environ.get("KISS_HOME")
-    try:
-        os.environ["KISS_HOME"] = str(tmp_path / "kiss_home_a")
-        path_a = _config.path
-        assert path_a == (tmp_path / "kiss_home_a" / "third_party_agents" / "tlon" / "config.json")
-        _config.save({"ship_url": "http://127.0.0.1:1", "code": "c", "ship": "~zod"})
-        assert path_a.exists()
-        loaded = _config.load()
-        assert loaded is not None and loaded["ship_url"] == "http://127.0.0.1:1"
+    monkeypatch.setenv("KISS_HOME", str(tmp_path / "kiss_home_a"))
+    path_a = _config.path
+    assert path_a == (tmp_path / "kiss_home_a" / "third_party_agents" / "tlon" / "config.json")
+    _config.save({"ship_url": "http://127.0.0.1:1", "code": "c", "ship": "~zod"})
+    assert path_a.exists()
+    loaded = _config.load()
+    assert loaded is not None and loaded["ship_url"] == "http://127.0.0.1:1"
 
-        os.environ["KISS_HOME"] = str(tmp_path / "kiss_home_b")
-        assert _config.path == (
-            tmp_path / "kiss_home_b" / "third_party_agents" / "tlon" / "config.json"
-        )
-        assert _config.load() is None, "config must not leak across KISS_HOME dirs"
-    finally:
-        if saved is None:
-            os.environ.pop("KISS_HOME", None)
-        else:
-            os.environ["KISS_HOME"] = saved
+    monkeypatch.setenv("KISS_HOME", str(tmp_path / "kiss_home_b"))
+    path_b = tmp_path / "kiss_home_b" / "third_party_agents" / "tlon" / "config.json"
+    assert _config.path == path_b
+    assert _config.load() is None, "config must not leak across KISS_HOME dirs"
 
 
 def test_check_auth_unauthenticated_survives_leftover_ephemeral_config() -> None:

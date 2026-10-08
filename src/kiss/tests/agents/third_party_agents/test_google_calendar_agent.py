@@ -11,9 +11,8 @@ token — no mocks or patches.  The Calendar server asserts the
 ``Authorization: Bearer`` header on every call, returns canned JSON,
 and records every request for verification.
 
-State is isolated because the session conftest points ``KISS_HOME`` at
-a temporary directory; an autouse fixture additionally forgets the
-google_calendar Composio connection around every test.
+State is isolated per test: ``isolated_kiss_home`` points ``KISS_HOME`` at a
+fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 """
 
 from __future__ import annotations
@@ -35,8 +34,6 @@ from kiss.agents.third_party_agents.gcal.gcal_sea import (
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
     connect,
-    reset_state,
-    start_fake_composio,
 )
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
@@ -171,18 +168,7 @@ class _CalendarRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-@pytest.fixture(autouse=True)
-def _fresh_state():
-    """Start and end every test with no recorded google_calendar connection."""
-    reset_state(_SERVICE)
-    yield
-    reset_state(_SERVICE)
-
-
-@pytest.fixture()
-def composio(monkeypatch):
-    """Run the local Composio API emulator and point the SDK at it."""
-    yield from start_fake_composio(monkeypatch)
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 @pytest.fixture()

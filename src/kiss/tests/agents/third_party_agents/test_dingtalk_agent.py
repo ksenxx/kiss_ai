@@ -79,12 +79,7 @@ def _webhook_url(receiver: JsonWebhookServer) -> str:
     return receiver.base_url + "/robot/send?access_token=testtoken"
 
 
-@pytest.fixture(autouse=True)
-def _clean_config() -> Any:
-    """Start and finish every test with no persisted DingTalk config."""
-    dingtalk_mod._config.clear()
-    yield
-    dingtalk_mod._config.clear()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def test_agent_unauthenticated_exposes_only_auth_trio() -> None:

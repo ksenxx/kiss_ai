@@ -17,7 +17,6 @@ from __future__ import annotations
 import email
 import json
 from email.utils import parsedate_to_datetime
-from pathlib import Path
 
 import pytest
 
@@ -31,11 +30,7 @@ from kiss.agents.third_party_agents.email.email_sea import (
     _truncate_text,
 )
 
-
-@pytest.fixture(autouse=True)
-def _isolated_kiss_home(isolated_kiss_home: Path) -> Path:
-    """Apply the shared per-test ``KISS_HOME`` isolation to every test here."""
-    return isolated_kiss_home
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _raw_plain(**overrides: str) -> bytes:
