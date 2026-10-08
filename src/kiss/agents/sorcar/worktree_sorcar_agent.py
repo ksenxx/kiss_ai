@@ -238,6 +238,16 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self._last_merge_resolved_by_agent: bool = False
 
     @property
+    def worktree(self) -> GitWorktree | None:
+        """The worktree task pending merge/discard, or ``None``.
+
+        Its ``repo_root``, ``branch``, ``original_branch``, ``wt_dir``,
+        ``work_dir`` and ``baseline_commit`` are the facts the private
+        ``_wt_*`` properties below redirect to.
+        """
+        return self._wt
+
+    @property
     def _repo_root(self) -> Path | None:
         """Git repo root path, or ``None`` if not in a repo."""
         return self._wt.repo_root if self._wt else None
@@ -274,11 +284,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if self._wt is None:
             return None
         return self._wt.work_dir or self._wt.wt_dir
-
-    @property
-    def _baseline_commit(self) -> str | None:
-        """SHA of the baseline commit (user's dirty state), or ``None``."""
-        return self._wt.baseline_commit if self._wt else None
 
     def _restore_work_dir_after_teardown(self, wt: GitWorktree) -> None:
         """Point ``self.work_dir`` back at the parent repository once *wt* is gone.

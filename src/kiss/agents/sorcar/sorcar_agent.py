@@ -1117,7 +1117,7 @@ class SorcarAgent(RelentlessAgent):
         one every surface shows — and a sub-agent of such a chat is
         addressed as ``{new_tab}__sub_{task_id}``.  A sub-agent's own
         synthetic id is never a candidate (a ``run_agent`` dispatch
-        registers it as a subscriber too, see ``register_task_ui``).
+        registers it as a subscriber too, see ``subscribe_tab``).
 
         Returns:
             The tab id, or ``""`` when running headless.
