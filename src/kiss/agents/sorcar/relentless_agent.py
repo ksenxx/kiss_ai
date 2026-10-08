@@ -1027,18 +1027,25 @@ class RelentlessAgent(Base):
         then added only when the ledger prefix that produced the
         totals does not already contain the session
         (:func:`_ledger_totals_and_banked`), so every interleaving
-        counts the session exactly once.
+        counts the session exactly once.  A session handed off (or an
+        epoch reset by :meth:`reset_usage`) between the executor read
+        and the ledger read is detected by re-reading
+        ``_current_executor`` afterwards, and the read starts over, so
+        the live triple is never added to a ledger it does not belong
+        to.
         """
-        executor = self._current_executor
-        if executor is None:
-            return self.usage_snapshot()
-        live_budget, live_tokens, live_steps = _session_usage(executor)
-        budget, tokens, steps, banked = _ledger_totals_and_banked(
-            self._usage_ledger_object(), _session_key(executor)
-        )
-        if banked:
-            return budget, tokens, steps
-        return budget + live_budget, tokens + live_tokens, steps + live_steps
+        while True:
+            executor = self._current_executor
+            if executor is None:
+                return self.usage_snapshot()
+            live_budget, live_tokens, live_steps = _session_usage(executor)
+            budget, tokens, steps, banked = _ledger_totals_and_banked(
+                self._usage_ledger_object(), _session_key(executor)
+            )
+            if banked:
+                return budget, tokens, steps
+            if self._current_executor is executor:
+                return budget + live_budget, tokens + live_tokens, steps + live_steps
 
     def _attribute_usage(
         self,
@@ -1157,13 +1164,13 @@ class RelentlessAgent(Base):
         any spend attributed mid-session by sub-agents
         (``_attribute_sub_usage``); the live executor's own spend is
         added on top because it is only folded into ``self.budget_used``
-        when its session ends.
+        when its session ends (:meth:`live_usage_snapshot` counts a
+        session that is being banked at that moment once).
 
         Returns:
             Banked USD spend plus the in-flight session's.
         """
-        executor = self._current_executor
-        return self.budget_used + (executor.budget_used if executor is not None else 0.0)
+        return self.live_usage_snapshot()[0]
 
     def _check_total_budget(self) -> None:
         """Raise :class:`KISSError` when the task's cumulative spend exceeds max_budget.
