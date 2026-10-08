@@ -409,6 +409,38 @@ def _send_stop(ws: ClientConnection, tab_id: str, run_token: str) -> None:
     _send(ws, {"type": "stop", "tabId": tab_id, "taskId": run_token})
 
 
+def _stop_and_await_confirmation(
+    ws: ClientConnection, tab_id: str, run_token: str, what: str,
+) -> float:
+    """Send the stop for a *what* task and return the confirmation deadline.
+
+    Args:
+        ws: The connected daemon connection.
+        tab_id: The run's synthetic tab id.
+        run_token: The client-minted per-submission run token.
+        what: ``"cancelled"`` or ``"timed-out"``, for the error text.
+
+    Returns:
+        The ``time.monotonic()`` deadline by which the daemon's terminal
+        status must confirm the stop (:data:`_STOP_CONFIRM_GRACE_SECONDS`).
+
+    Raises:
+        ConnectionError: When the stop could not even be sent, so the
+            task was neither stopped nor confirmed dead — raising a
+            plain ``TimeoutError`` would let a caller claim "was
+            stopped"; the broken daemon connection is surfaced instead,
+            like every other mid-run connection failure.
+    """
+    try:
+        _send_stop(ws, tab_id, run_token)
+    except OSError as send_exc:
+        raise ConnectionError(
+            "The sorcar daemon connection failed while "
+            f"stopping the {what} task: {send_exc}"
+        ) from send_exc
+    return time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
+
+
 def run(
     prompt: str,
     *,
@@ -940,14 +972,7 @@ def run(
                 # as a stop-on-timeout, decided below in the
                 # ``stopping`` branches with ``cancelled`` set.
                 cancelled = stopping = True
-                deadline = time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
-                try:
-                    _send_stop(ws, tab_id, run_token)
-                except OSError as send_exc:
-                    raise ConnectionError(
-                        "The sorcar daemon connection failed while "
-                        f"stopping the cancelled task: {send_exc}"
-                    ) from send_exc
+                deadline = _stop_and_await_confirmation(ws, tab_id, run_token, "cancelled")
                 continue
             if deadline is None:
                 # No deadline: wake periodically so an injected
@@ -964,21 +989,9 @@ def run(
                         # caller must not resume while the child could
                         # still act (see _STOP_CONFIRM_GRACE_SECONDS).
                         stopping = True
-                        deadline = time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
-                        try:
-                            _send_stop(ws, tab_id, run_token)
-                        except OSError as send_exc:
-                            # The stop could not even be sent, so the
-                            # task was neither stopped nor confirmed
-                            # dead — raising the plain TimeoutError
-                            # here would let a caller (``_dispatch``)
-                            # claim "was stopped".  Surface the broken
-                            # daemon connection instead, like every
-                            # other mid-run connection failure.
-                            raise ConnectionError(
-                                "The sorcar daemon connection failed while "
-                                f"stopping the timed-out task: {send_exc}"
-                            ) from send_exc
+                        deadline = _stop_and_await_confirmation(
+                            ws, tab_id, run_token, "timed-out",
+                        )
                         continue
                     if stopping:
                         # The confirmation grace expired without a
