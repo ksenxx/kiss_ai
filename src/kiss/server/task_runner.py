@@ -111,6 +111,39 @@ def inject_keyboard_interrupt(tid: int) -> int:
     return tool_interrupt.inject_async_exception(tid, KeyboardInterrupt)
 
 
+def inject_if_owned(
+    thread: threading.Thread,
+    still_owns: Callable[[], bool] | None,
+) -> int | None:
+    """Inject ``KeyboardInterrupt`` into *thread* unless ownership was lost.
+
+    The one guarded-injection step shared by the Stop watchdog
+    (:meth:`_TaskRunnerMixin._force_stop_thread`) and the shutdown
+    sweep (``RemoteAccessServer._stop_active_agent_tasks``): the
+    ownership guard is evaluated and the interrupt injected under
+    :data:`agent_state.STATE_LOCK`, the same lock under which a
+    finishing run clears ``state.task_thread`` — so a recycled thread
+    ident can never route the interrupt into an unrelated thread, and
+    a run already inside its acknowledged-stop cleanup is left alone.
+
+    Args:
+        thread: The live worker thread to interrupt.
+        still_owns: Ownership guard (``None`` injects unconditionally).
+
+    Returns:
+        ``None`` when *still_owns* refused (nothing injected), else the
+        :func:`inject_keyboard_interrupt` count (``0`` when the thread
+        has already died).
+    """
+    tid = thread.ident
+    if tid is None:  # pragma: no cover — callers only pass started threads
+        return 0
+    with agent_state.STATE_LOCK:
+        if still_owns is not None and not still_owns():
+            return None
+        return inject_keyboard_interrupt(tid)
+
+
 def wait_for_thread_start(
     thread: threading.Thread,
     still_owns: Callable[[], bool] | None = None,
@@ -3424,14 +3457,8 @@ class _TaskRunnerMixin:
         for _ in range(2):  # pragma: no branch — thread always dies within 2 attempts
             if not task_thread.is_alive():
                 return
-            tid = task_thread.ident
-            if tid is not None:  # pragma: no branch — running thread always has ident
-                with agent_state.STATE_LOCK:
-                    if still_owns is not None and not still_owns():
-                        return
-                    rc = inject_keyboard_interrupt(tid)
-                if rc == 0:
-                    return
+            if inject_if_owned(task_thread, still_owns) in (None, 0):
+                return
             task_thread.join(timeout=5)
 
     def _await_user_response(
