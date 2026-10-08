@@ -22,6 +22,7 @@ from typing import Any
 
 import kiss.core.models.model_info as mi
 from kiss.server.commands import _CommandsMixin
+from kiss.server.server import broadcast_to_conn
 from kiss.server.sorcar import API
 from kiss.tests.conftest import is_root, posix_only
 
@@ -277,6 +278,9 @@ class _FakeServer(_CommandsMixin):
         self.printer: Any = _FakePrinter()
         self.work_dir = "/tmp"
         self._state_lock = threading.RLock()
+
+    def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
+        broadcast_to_conn(self.printer, event, conn_id)
 
     def last(self, event_type: str) -> dict[str, Any] | None:
         for msg in reversed(self.printer.messages):
