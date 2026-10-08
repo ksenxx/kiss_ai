@@ -34,10 +34,7 @@ _AUTH_TRIO = {"check_email_auth", "authenticate_email", "clear_email_auth"}
 _BACKEND_TOOLS = {"send_email", "list_unread_emails", "read_email", "mark_email_read"}
 
 
-@pytest.fixture(autouse=True)
-def _isolated_kiss_home(isolated_kiss_home: Path) -> Path:
-    """Apply the shared per-test ``KISS_HOME`` isolation to every test here."""
-    return isolated_kiss_home
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _tool(agent: EmailAgent, name: str):
@@ -105,13 +102,13 @@ class TestAuthFlow:
         assert agent._is_authenticated() is False
         assert {t.__name__ for t in agent._get_tools()} == _AUTH_TRIO
 
-    def test_authenticate_persists_config(self, _isolated_kiss_home: Path) -> None:
+    def test_authenticate_persists_config(self, isolated_kiss_home: Path) -> None:
         """authenticate_email persists a 0600 config with port/security defaults."""
         agent = EmailAgent()
         _authenticate(agent)
         path = _config.path
         assert path.exists()
-        assert path.is_relative_to(_isolated_kiss_home)
+        assert path.is_relative_to(isolated_kiss_home)
         if sys.platform != "win32":
             assert path.stat().st_mode & 0o777 == 0o600
         cfg = json.loads(path.read_text(encoding="utf-8"))

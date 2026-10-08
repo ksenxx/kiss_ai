@@ -63,7 +63,7 @@ from kiss.core.browser_handoff import (
     portal_handoff,
     set_browser_tab_opener,
 )
-from kiss.tests.agents.third_party_agents.composio_test_utils import start_fake_composio
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.test_muse_connect_flows import _FAKE_SIGNAL_CLI
 from kiss.tests.conftest import IS_WINDOWS, install_cli_script
 
@@ -90,6 +90,7 @@ if os.path.exists(os.path.join(here, "linger")):
     while os.path.exists(os.path.join(here, "linger")) and time.monotonic() < deadline:
         time.sleep(0.02)
 """
+
 
 @pytest.fixture()
 def fake_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -180,10 +181,6 @@ def _release_lingering_opener(home: Path) -> None:
 def _unique_url(path: str = "signin") -> str:
     """A URL no earlier test opened, so the reopen guard cannot interfere."""
     return f"https://example.test/{path}/{uuid.uuid4()}"
-
-
-def _auth_tools(agent: Any) -> dict[str, Any]:
-    return {tool.__name__: tool for tool in agent._get_auth_tools()}
 
 
 # --------------------------------------------------------------------------
@@ -353,9 +350,7 @@ def test_open_for_user_browser_tab_ignores_headless(
     assert browser_tab.urls == [url]
 
 
-def test_open_for_user_falls_back_when_the_tab_fails(
-    fake_browser: Path, browser_tab: Any
-) -> None:
+def test_open_for_user_falls_back_when_the_tab_fails(fake_browser: Path, browser_tab: Any) -> None:
     """A refused or crashing tab opener hands the page to the default browser."""
     browser_tab.result = False
     url = _unique_url("tab-refused")
@@ -391,9 +386,7 @@ def test_open_for_user_without_daemon_or_browser(
     assert open_for_user(_unique_url("nothing")) == NOT_OPENED
 
 
-def test_concurrent_callers_share_the_final_outcome(
-    fake_browser: Path, browser_tab: Any
-) -> None:
+def test_concurrent_callers_share_the_final_outcome(fake_browser: Path, browser_tab: Any) -> None:
     """A caller that finds the same page mid-launch waits for the real outcome."""
     import threading
 
@@ -546,7 +539,7 @@ def test_signal_link_opens_black_on_white_qr_page(
     """Signal opens its QR page (a file:// URL it wrote) in the Browser tab, else the browser."""
     cli = tmp_path / "signal-cli"
     install_cli_script(cli, _FAKE_SIGNAL_CLI)
-    tools = _auth_tools(SignalAgent())
+    tools = auth_tools(SignalAgent())
     try:
         started = json.loads(tools["authenticate_signal"](signal_cli_path=str(cli)))
         assert started["status"] == "consent_required"
@@ -604,17 +597,11 @@ def test_whatsapp_qr_handoff_all_outcomes(
 # --------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def composio(monkeypatch: pytest.MonkeyPatch):
-    """Run the local Composio API emulator and point the SDK at it."""
-    yield from start_fake_composio(monkeypatch)
-
-
 def test_google_connect_link_opens_in_the_browser_tab(
     isolated_kiss_home: Path, fake_browser: Path, composio: Any, browser_tab: Any
 ) -> None:
     """Under the daemon the Connect Link opens in the Browser tab; no URL is handed out."""
-    tools = _auth_tools(GoogleCalendarAgent())
+    tools = auth_tools(GoogleCalendarAgent())
     started = json.loads(tools["authenticate_google_calendar"]())
     assert started["status"] == "consent_required"
     assert started["opened_in"] == "browser_tab" and started["browser_opened"] is True
@@ -630,7 +617,7 @@ def test_google_connect_link_opens_in_default_browser(
     isolated_kiss_home: Path, fake_browser: Path, composio: Any
 ) -> None:
     """authenticate_google_calendar() opens the Connect Link and returns at once."""
-    tools = _auth_tools(GoogleCalendarAgent())
+    tools = auth_tools(GoogleCalendarAgent())
     started = json.loads(tools["authenticate_google_calendar"]())
     assert started["status"] == "consent_required" and started["browser_opened"] is True
     assert started["opened_in"] == "default_browser"
@@ -646,7 +633,7 @@ def test_google_connect_link_headless_is_handed_over(
 ) -> None:
     """Headless: nothing is launched and the link is handed to the user."""
     monkeypatch.setenv("KISS_HEADLESS", "1")
-    started = json.loads(_auth_tools(GoogleCalendarAgent())["authenticate_google_calendar"]())
+    started = json.loads(auth_tools(GoogleCalendarAgent())["authenticate_google_calendar"]())
     assert started["status"] == "consent_required" and started["browser_opened"] is False
     assert started["opened_in"] == ""
     assert started["verification_uri"] in started["instructions"]
@@ -663,20 +650,20 @@ def test_token_agents_open_their_developer_portals(
     """check_*_auth() of the API-key channels opens the portal and keeps the paste-back."""
     slack = SlackAgent()
     slack._backend._client = None
-    check = _auth_tools(slack)["check_slack_auth"]()
+    check = auth_tools(slack)["check_slack_auth"]()
     # Slack signs in through the KISS app now: no portal, no paste-back.
     assert "Not authenticated with Slack" in check and "authenticate_slack()" in check
     assert "api.slack.com/apps" not in check
 
     brave = BraveSearchAgent()
     brave._backend._api_key = ""
-    check = _auth_tools(brave)["check_brave_search_auth"]()
+    check = auth_tools(brave)["check_brave_search_auth"]()
     assert "Not configured for Brave Search" in check
     assert "https://api-dashboard.search.brave.com/ has just been opened" in check
 
     telegram = TelegramAgent()
     telegram._backend._bot = None
-    check = _auth_tools(telegram)["check_telegram_auth"]()
+    check = auth_tools(telegram)["check_telegram_auth"]()
     assert "@BotFather" in check and "https://t.me/BotFather has just been opened" in check
 
     assert [launch[0] for launch in _opened(fake_browser)] == [
@@ -691,7 +678,7 @@ def test_device_flow_prerequisite_portals_open(
     """Without an OAuth app ID, the registration portal opens for the user."""
     from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchAgent
 
-    twitch = _auth_tools(TwitchAgent())["authenticate_twitch"]("")
+    twitch = auth_tools(TwitchAgent())["authenticate_twitch"]("")
     assert twitch.startswith("client_id cannot be empty.")
     assert "https://dev.twitch.tv/console/apps has just been opened" in twitch
     assert len(_opened(fake_browser)) == 1

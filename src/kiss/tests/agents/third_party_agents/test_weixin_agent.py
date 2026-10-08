@@ -33,13 +33,7 @@ from kiss.agents.third_party_agents.weixin.weixin_sea import (
 )
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
-
-@pytest.fixture(autouse=True)
-def _fresh_config() -> Iterator[None]:
-    """Start and end every test with no persisted Weixin config."""
-    _config.clear()
-    yield
-    _config.clear()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _signed_params(ts: str = "1712345678", nonce: str = "n0nce") -> dict[str, str]:
