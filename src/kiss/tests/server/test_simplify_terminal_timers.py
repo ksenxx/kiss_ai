@@ -116,3 +116,45 @@ def test_shutdown_cancels_the_grace_timer_of_a_detached_shell(tmp_path: Path) ->
     # The 2 s hang-up kill timer runs out; the 60 s grace timer was
     # cancelled by the hang-up (before the fix it slept on for a minute).
     assert _settled_timers(svc) == []
+
+
+def test_stale_timer_firing_after_reattach_does_not_hang_up_a_later_disconnect(
+    tmp_path: Path,
+) -> None:
+    """A timer already past ``cancel()`` must not expire a NEWER disconnect.
+
+    ``Timer.cancel`` cannot stop a timer whose wait has elapsed and
+    which is blocked on the service lock.  If the page re-attaches and
+    drops again in that window, the stale timer finds ``detached_at``
+    set once more; guarding on ``detached_at`` alone (as the first
+    version of this fix did) then hung the shell up at once instead of
+    ``GRACE_SECONDS`` after the second disconnect.  The stale timer's
+    callback is run here directly, in the state it would observe.
+    """
+    printer = ConnPrinter()
+    svc = TerminalService(printer)
+    try:
+        svc.open("tab-stale", "conn-1", str(tmp_path), 80, 24)
+        printer.wait_for(lambda: printer.of_type("terminalOpened", "conn-1"))
+        svc.viewer_gone("conn-1")
+        with svc._lock:
+            session = svc._sessions["tab-stale"]
+            stale = session.grace_timer
+        assert stale is not None
+        svc.open("tab-stale", "conn-2", str(tmp_path), 80, 24)
+        svc.viewer_gone("conn-2")
+        with svc._lock:
+            assert session.grace_timer is not stale
+        # The stale timer's body, exactly as its thread would run it
+        # once it gets the lock: it must stand down.
+        stale_run = threading.Thread(target=svc._expire_detached, args=(session,))
+        stale_run.start()
+        stale_run.join(5)
+        assert svc.session_count() == 1
+        assert not session.hung_up
+        # The shell is still live for the next re-attach.
+        svc.open("tab-stale", "conn-3", str(tmp_path), 80, 24)
+        svc.input("tab-stale", "conn-3", "echo alive-$((40+2))\n")
+        printer.wait_for(lambda: "alive-42" in printer.output("tab-stale"))
+    finally:
+        svc.shutdown()

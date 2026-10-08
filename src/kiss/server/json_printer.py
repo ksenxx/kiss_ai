@@ -677,23 +677,6 @@ class JsonPrinter(Printer):
                 self.broadcast_model_pick(catch_up, "agent", tab_id)
         return recording
 
-    def register_task_ui(self, task_id: Any, tab_id: str) -> None:
-        """Attach the UI tab running *task_id*: the launcher's subscription.
-
-        Called by the server when a task is launched from a UI tab, so
-        the task's event stream is fanned out to that tab (via
-        :meth:`subscribe_tab`).  Viewer tabs of the same chat are
-        subscribed separately by the server; the launching tab is the
-        one whose subscription must exist before the first event.
-
-        Args:
-            task_id: The task identifier.
-            tab_id: The frontend tab id the task runs in.
-        """
-        if not self._coerce_task_id(task_id) or not tab_id:
-            return
-        self.subscribe_tab(task_id, tab_id)
-
     def agent_task_allocated(
         self,
         agent: Any,
@@ -928,7 +911,7 @@ class JsonPrinter(Printer):
 
         All tabs are treated uniformly — the tab a task was launched
         from is subscribed like any viewer (see
-        :meth:`register_task_ui`), so no owner/viewer distinction
+        :meth:`subscribe_tab`), so no owner/viewer distinction
         exists.  *tab_id* is simply one more uniform target, for
         callers whose printer never saw a subscription (plain
         recording printers in tests).

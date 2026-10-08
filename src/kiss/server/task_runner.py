@@ -780,9 +780,6 @@ class _TaskRunnerMixin:
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _cmd_run(self, cmd: dict[str, Any]) -> None: ...
         def _broadcast_run_notice(self, cmd: dict[str, Any], tab_id: str) -> None: ...
-        def _user_answer_clear_tabs(
-            self, ans_tab: str, answered_task_id: str,
-        ) -> list[str]: ...
         def _main_dirty_files(self, work_dir: str = "") -> list[str]: ...
         def _autocommit_changes(
             self,
@@ -1592,7 +1589,7 @@ class _TaskRunnerMixin:
             is_subagent: Whether the run was submitted with a
                 ``parentTaskId`` (a ``run_agent`` child).
         """
-        self.printer.register_task_ui(task_id, source_tab_id)
+        self.printer.subscribe_tab(task_id, source_tab_id)
         if is_subagent:
             return
         self._subscribe_chat_viewers(
@@ -3220,8 +3217,9 @@ class _TaskRunnerMixin:
             # answer wait is aborted, so the question prompt must close
             # on every tab showing it (an answer would do this through
             # _cmd_user_answer's askUserDone).
-            for clear_tab in self._user_answer_clear_tabs(tab_id, owner_task_id):
-                self.printer.broadcast({"type": "askUserDone", "tabId": clear_tab})
+            self.printer.broadcast_transient(
+                {"type": "askUserDone"}, owner_task_id, tab_id,
+            )
 
     def _stop_task(self, tab_id: str = "", run_token: str = "") -> None:
         """Signal the agent to stop.

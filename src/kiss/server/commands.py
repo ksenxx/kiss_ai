@@ -26,9 +26,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.persistence import (
+    _delete_frequent_task,
     _record_file_usage,
     _record_model_usage,
     _record_steer_input,
+    _set_task_favorite,
 )
 from kiss.agents.sorcar.sea_commands import (
     RESERVED_SUBCOMMANDS,
@@ -458,10 +460,6 @@ class _CommandsMixin:
             self, action: str, work_dir: str,
         ) -> dict[str, Any]: ...
         def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
-        def _handle_delete_frequent_task(self, task: str) -> None: ...
-        def _handle_set_favorite(
-            self, task_id: str, is_favorite: bool,
-        ) -> None: ...
 
 
     def _apply_new_work_dir(self, new_dir: str, if_unset: bool = False) -> None:
@@ -1008,16 +1006,23 @@ class _CommandsMixin:
     def _cmd_delete_frequent_task(self, cmd: dict[str, Any]) -> None:
         """Delete a row from the ``frequent_tasks`` table by task text."""
         task = cmd.get("task")
-        if isinstance(task, str) and task:
-            self._handle_delete_frequent_task(task)
+        if isinstance(task, str) and task and _delete_frequent_task(task):
+            # Re-emit the list so every other open webview rerenders
+            # without the row (the originating one removed it
+            # optimistically).
+            self._get_frequent_tasks()
 
     def _cmd_set_favorite(self, cmd: dict[str, Any]) -> None:
         """Persist the favourite flag on a task history row."""
         task_id = _opt_str(cmd.get("taskId"))
         if task_id is None:
             return
-        is_favorite = bool(cmd.get("isFavorite", False))
-        self._handle_set_favorite(task_id, is_favorite)
+        # Merges ``{"is_favorite": <bool>}`` into the row's ``extra``
+        # JSON, preserving its other keys.  No broadcast: the
+        # originating webview updates its star optimistically and the
+        # next ``getHistory`` refresh shows the persisted flag to
+        # every other client.
+        _set_task_favorite(task_id, bool(cmd.get("isFavorite", False)))
 
     def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
         """Send file list for autocomplete, scoped to the tab's work_dir.
@@ -1116,8 +1121,11 @@ class _CommandsMixin:
             owner: The state whose agent thread is waiting on *q*.
             q: The owner's live ``user_answer_queue``.
             answer: The user's answer text.
-            ans_tab: Frontend tab id the answer was typed into (see
-                :meth:`_user_answer_clear_tabs`).
+            ans_tab: Frontend tab id the answer was typed into; the
+                question closes there and on every tab subscribed to
+                the answered task (not on every historic subscriber
+                set containing *ans_tab*, which could dismiss an
+                unrelated tab's current question).
         """
         owner.pending_ask_question = ""
         while not q.empty():
@@ -1129,8 +1137,7 @@ class _CommandsMixin:
             q.put_nowait(answer)
         except queue.Full:  # pragma: no cover — drained immediately above
             pass
-        for tab_id in self._user_answer_clear_tabs(ans_tab, owner.task_id):
-            self.printer.broadcast({"type": "askUserDone", "tabId": tab_id})
+        self.printer.broadcast_transient({"type": "askUserDone"}, owner.task_id, ans_tab)
 
     def _route_prompt_to_owner(
         self, owner: AgentState, prompt: str, tab_id: str,
@@ -1266,45 +1273,6 @@ class _CommandsMixin:
             if state.pending_ask_question and state.user_answer_queue is not None:
                 return state
         return None
-
-    def _user_answer_clear_tabs(
-        self, ans_tab: str, answered_task_id: str,
-    ) -> list[str]:
-        """Return every tab whose pending ask-user question should close.
-
-        A submitted answer resolves one pending question for exactly one
-        running task/chat, regardless of which subscribed tab supplied it.
-        Completed-task subscriber sets are intentionally retained for
-        post-task broadcasts, so closing every historic subscriber set
-        that contains ``ans_tab`` can dismiss an unrelated tab's current
-        question.  The pending-question registry records the task id that
-        owns the queue which consumed this answer; only that task's
-        subscribers receive ``askUserDone``.
-
-        Args:
-            ans_tab: Frontend tab id carried by the ``userAnswer``
-                command.
-            answered_task_id: Task id associated with the live
-                ``ask_user_question`` that consumed the answer.
-
-        Returns:
-            Stable list of tab ids to receive ``askUserDone``.
-        """
-        if not ans_tab:
-            return []
-        if not answered_task_id:
-            return [ans_tab]
-        printer_lock = getattr(self.printer, "_lock", None)
-        subs_map = getattr(self.printer, "_subscribers", {})
-        if printer_lock is None:
-            return [ans_tab]
-        task_key = self.printer._coerce_task_id(answered_task_id)
-        with printer_lock:
-            viewers = list(subs_map.get(task_key, ()))
-        tabs = {str(v) for v in viewers if v}
-        if not tabs:
-            tabs.add(ans_tab)
-        return sorted(tabs)
 
     def _resolve_user_answer_state(
         self, ans_tab: str,
@@ -2173,10 +2141,12 @@ class _CommandsMixin:
         """Commit the tab's working tree and release the repository.
 
         The job :meth:`_cmd_autocommit_action` runs through
-        :meth:`_start_tab_job` (which re-arms the tab's commit button
-        on exit); the ``finally`` here releases the repository's
-        main-tree claim so tasks can start again even after a failed
-        commit.
+        :meth:`_start_tab_job`; the ``finally`` here releases the
+        repository's main-tree claim so tasks can start again even
+        after a failed commit, and re-arms the tab's commit button
+        BEFORE the deferred-worktree merges below (a second click
+        during those is a new request, refused by the busy guard,
+        not a duplicate).
 
         Args:
             tab_id: Frontend tab that requested the commit.
@@ -2194,6 +2164,7 @@ class _CommandsMixin:
             )
         finally:
             with self._state_lock:
+                self._autocommit_tabs.discard(tab_id)
                 for claim in dispatch_claims or []:
                     self._release_main_tree_claim(claim)
         # The main tree is committed (and its claim released): merge

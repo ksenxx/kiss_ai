@@ -37,7 +37,6 @@ from kiss.agents.sorcar.git_worktree import _WORKTREE_SUBDIR, GitWorktreeOps
 from kiss.agents.sorcar.persistence import (
     _chat_first_tasks,
     _chat_summaries,
-    _delete_frequent_task,
     _get_adjacent_task_by_chat_id,
     _history_date_range,
     _is_failed_result,
@@ -50,7 +49,6 @@ from kiss.agents.sorcar.persistence import (
     _load_subagent_rows_by_parent_task_id,
     _recover_orphaned_tasks,
     _search_history,
-    _set_task_favorite,
 )
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -1348,36 +1346,6 @@ class VSCodeServer(
             "dateRange": {"min": min_ts, "max": max_ts},
         }
         self._broadcast_to_conn(event, conn_id)
-
-    def _handle_set_favorite(self, task_id: str, is_favorite: bool) -> None:
-        """Persist the favourite flag on a task history row.
-
-        Merges ``{"is_favorite": <bool>}`` into the row's ``extra``
-        JSON column, preserving other keys (tokens, cost, steps,
-        subagent metadata).  No broadcast is emitted: the originating
-        webview updates its star icon optimistically on click, and
-        the next ``getHistory`` refresh will reflect the persisted
-        flag for all other clients.
-
-        Args:
-            task_id: Primary key of the ``task_history`` row.
-            is_favorite: New value for the ``is_favorite`` flag.
-        """
-        _set_task_favorite(task_id, is_favorite)
-
-    def _handle_delete_frequent_task(self, task: str) -> None:
-        """Delete a row from the ``frequent_tasks`` table and rebroadcast.
-
-        After deletion succeeds, re-emits the current frequent tasks
-        list so any other open webview rerenders without the deleted
-        row.  The originating webview removes the row optimistically.
-
-        Args:
-            task: The exact task description string identifying the row.
-        """
-        if not _delete_frequent_task(task):
-            return
-        self._get_frequent_tasks()
 
     def _get_frequent_tasks(self, limit: int = 50, conn_id: str = "") -> None:
         """Send the top *limit* most-frequent tasks (highest count first).

@@ -370,10 +370,14 @@ class TerminalService:
             session.grace_timer = None
 
     def _expire_detached(self, session: _Session) -> None:
-        # ``detached_at`` is still set only if no re-attach (which cancels
-        # the timer under the lock) got in before this ran.
+        # Only the timer of the latest disconnect may hang up: a timer
+        # that was already firing when the page re-attached (cancel()
+        # cannot stop it) must not expire a later disconnect's grace.
         with self._lock:
-            if session.detached_at is not None and session.tab_id in self._sessions:
+            if (
+                session.grace_timer is threading.current_thread()
+                and session.tab_id in self._sessions
+            ):
                 self._hang_up(session)
 
     def _write_loop(self, session: _Session) -> None:
