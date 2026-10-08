@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import tempfile
 import time
@@ -46,15 +47,18 @@ class _SnoozeTestBase(_UpdateCheckTestBase):
 
     async def asyncSetUp(self) -> None:
         self._home_tmp = tempfile.mkdtemp(prefix="kiss-snooze-home-")
-        self._saved_kiss_home = ws._KISS_HOME
-        ws._KISS_HOME = Path(self._home_tmp)
+        self._saved_kiss_home = os.environ.get("KISS_HOME")
+        os.environ["KISS_HOME"] = self._home_tmp
         await super().asyncSetUp()
 
     async def asyncTearDown(self) -> None:
         try:
             await super().asyncTearDown()
         finally:
-            ws._KISS_HOME = self._saved_kiss_home
+            if self._saved_kiss_home is None:
+                os.environ.pop("KISS_HOME", None)
+            else:
+                os.environ["KISS_HOME"] = self._saved_kiss_home
             shutil.rmtree(self._home_tmp, ignore_errors=True)
 
     def _cache_path(self) -> Path:

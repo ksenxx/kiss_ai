@@ -17,7 +17,7 @@ the single playback queue exists to prevent.
 The fix starts each playback child in its own session
 (``start_new_session`` on POSIX) and, on timeout, signals the whole
 process group: SIGTERM first, escalating to SIGKILL after a grace
-period (``voice_wake_control`` pattern).  ``KISS_SORCAR_PLAY_TIMEOUT``
+period.  ``KISS_SORCAR_PLAY_TIMEOUT``
 makes the 600 s timeout overridable so this test forces it with a
 REAL hung child — no mocks, real subprocesses, a real
 :class:`TalkPlayer` worker.
