@@ -22,12 +22,15 @@ injected into the thread — a test double — to reproduce.
 
 from __future__ import annotations
 
+import inspect
 import os
 import shlex
+import sys
 import threading
 import time
 import warnings
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -118,6 +121,52 @@ def test_run_now_forgets_its_registration_when_the_run_raises(tmp_path: Path) ->
     cron_agent._runs_dir().unlink()
     assert yaml.safe_load(cron_job("run_now", job_id=job_id))["ran"]["last_status"] == "ok"
     assert load_jobs()[0]["last_summary"] == "hi"
+
+
+def test_run_now_stopped_between_registration_and_run_is_unregistered(tmp_path: Path) -> None:
+    """A stop landing after the ``_running`` store but before the run leaves no stale entry.
+
+    The server's stop watchdog injects ``KeyboardInterrupt`` at an
+    arbitrary bytecode; this test delivers one at exactly the first
+    line after the registration block through ``sys.settrace`` (which
+    only traces this thread), then checks the job is not stuck as
+    "already running" for the next ``run_now``.
+    """
+    created = yaml.safe_load(
+        cron_job("create", name="x", command="echo hi", schedule="every 1h", deliver="local")
+    )
+    job_id = created["created"]["id"]
+    source_lines = inspect.getsource(cron_agent).splitlines()
+    first_line = inspect.getsourcelines(cron_job)[1]
+    with_line = next(
+        first_line + i
+        for i, line in enumerate(source_lines[first_line - 1 :])
+        if line.strip() == "with _jobs_lock(blocking=True), canonical._running_lock:"
+    )
+    me = threading.current_thread()
+
+    def interrupt_after_registration(frame: Any, event: str, _arg: Any) -> Any:
+        if frame.f_code is not cron_job.__code__:
+            return None
+        # The first statement after the registration block (the store
+        # is the block's last line, four lines below the ``with``), i.e.
+        # once both locks are released again.
+        if (
+            event == "line"
+            and frame.f_lineno > with_line + 4
+            and cron_agent._running.get(job_id) is me
+        ):
+            raise KeyboardInterrupt
+        return interrupt_after_registration
+
+    sys.settrace(interrupt_after_registration)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            cron_job("run_now", job_id=job_id)
+    finally:
+        sys.settrace(None)
+    assert job_id not in cron_agent.running_job_ids()
+    assert yaml.safe_load(cron_job("run_now", job_id=job_id))["ran"]["last_status"] == "ok"
 
 
 def test_run_now_from_a_dispatched_cron_session_registers_canonically(tmp_path: Path) -> None:

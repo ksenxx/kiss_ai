@@ -1577,12 +1577,16 @@ def cron_job(
         # run_now is refused.
         canonical = importlib.import_module("kiss.agents.sorcar.cron_agent")
         me = threading.current_thread()
-        with _jobs_lock(blocking=True), canonical._running_lock:
-            running = canonical._running.get(job_id)
-            if running is not None and running.is_alive():
-                return _dump({"error": f"job {job_id!r} is already running"})
-            canonical._running[job_id] = me
+        # The registration sits inside the ``try`` so a stop injected
+        # between the store and the run still unregisters this thread
+        # (a stale entry would refuse every later run_now while the
+        # thread lives on in its dispatcher).
         try:
+            with _jobs_lock(blocking=True), canonical._running_lock:
+                running = canonical._running.get(job_id)
+                if running is not None and running.is_alive():
+                    return _dump({"error": f"job {job_id!r} is already running"})
+                canonical._running[job_id] = me
             _execute_job(match[0])
         finally:
             with canonical._running_lock:

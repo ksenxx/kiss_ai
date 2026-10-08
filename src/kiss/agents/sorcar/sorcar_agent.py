@@ -754,7 +754,14 @@ def _executor_usage(agent: Any) -> tuple[float, int, int]:
 def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
     """Return live ``(budget, tokens, steps)`` for *agent*, including its
     in-flight executor session (see :func:`_executor_usage`).
+
+    A :class:`~kiss.agents.sorcar.relentless_agent.RelentlessAgent`
+    answers through ``live_usage_snapshot()``, which counts a session
+    that is being banked at this very moment exactly once; the
+    attribute-based sum serves agent-shaped objects.
     """
+    if isinstance(agent, RelentlessAgent):
+        return agent.live_usage_snapshot()
     budget, tokens, steps = _agent_usage(agent)
     live_budget, live_tokens, live_steps = _executor_usage(agent)
     return budget + live_budget, tokens + live_tokens, steps + live_steps
