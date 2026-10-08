@@ -1055,6 +1055,23 @@ def _discover_tunnel_url_from_metrics() -> str | None:
     return None
 
 
+def _reap_proc(proc: subprocess.Popen[str], kill: bool = False) -> None:
+    """Close *proc*'s stderr pipe and wait for it (killing it first if asked).
+
+    The tunnel spawn retains a failed ``cloudflared`` child between
+    attempts; releasing it here keeps its pipe from lingering until GC.
+
+    Args:
+        proc: The child process to reap.
+        kill: Kill a still-running child before waiting for it.
+    """
+    if kill:
+        proc.kill()
+    if proc.stderr is not None:
+        proc.stderr.close()
+    proc.wait()
+
+
 def _pick_free_local_port() -> int:
     """Return a currently free TCP port on 127.0.0.1.
 
@@ -5895,15 +5912,26 @@ class RemoteAccessServer:
         exactly when to retry.
         """
         now = time.monotonic()
-        fails = self._auth_failures.get(ip, [])
-        fails = [t for t in fails if now - t <= _AUTH_FAIL_WINDOW]
+        fails = self._prune_auth_failures(ip, now)
+        if len(fails) < _AUTH_FAIL_MAX:
+            return 0.0
+        return max(0.0, _AUTH_LOCKOUT - (now - fails[-1]))
+
+    def _prune_auth_failures(self, ip: str, now: float) -> list[float]:
+        """Drop *ip*'s failures older than the window; return the rest.
+
+        An IP with no recent failure loses its entry altogether, so
+        the dict stays bounded to IPs that failed recently.
+        """
+        fails = [
+            t for t in self._auth_failures.get(ip, ())
+            if now - t <= _AUTH_FAIL_WINDOW
+        ]
         if fails:
             self._auth_failures[ip] = fails
         else:
             self._auth_failures.pop(ip, None)
-        if len(fails) < _AUTH_FAIL_MAX:
-            return 0.0
-        return max(0.0, _AUTH_LOCKOUT - (now - fails[-1]))
+        return fails
 
     def _record_auth_failure(self, ip: str) -> None:
         """Record a failed authentication attempt from *ip*.
@@ -5917,14 +5945,7 @@ class RemoteAccessServer:
         """
         now = time.monotonic()
         for other_ip in list(self._auth_failures):
-            kept = [
-                t for t in self._auth_failures[other_ip]
-                if now - t <= _AUTH_FAIL_WINDOW
-            ]
-            if kept:
-                self._auth_failures[other_ip] = kept
-            else:
-                del self._auth_failures[other_ip]
+            self._prune_auth_failures(other_ip, now)
         self._auth_failures.setdefault(ip, []).append(now)
 
     async def _authenticate_ws(
@@ -7704,22 +7725,51 @@ class RemoteAccessServer:
         reply = await asyncio.to_thread(_list)
         await self._reply_direct(endpoint, reply, "listDir")
 
-    @staticmethod
-    def _git_provider_result(
-        provider: Any, work_dir: str, *args: Any,
-    ) -> dict[str, Any]:
-        """Run a ``kiss.server.explorer`` git provider, never raising.
+    async def _git_reply(
+        self,
+        cmd: dict[str, Any],
+        endpoint: Any,
+        reply_type: str,
+        provider: Callable[..., dict[str, Any]],
+        *args: Any,
+        **fields: Any,
+    ) -> None:
+        """Run a ``kiss.server.explorer`` git provider and reply to *endpoint*.
 
-        The provider returns either data or ``{"error": ...}``; an
-        unexpected exception (a path with a NUL byte, a broken git
-        install, ...) becomes an ``error`` reply too, so the client's
-        view never sits at "Loading..." for a command that was accepted.
+        The shared body of the Source Control handlers: every reply
+        carries ``type``, the command's ``workDir`` (falling back to
+        the daemon work dir), the echoed ``tabId`` / ``token`` and the
+        handler's extra *fields*, then either the provider's result
+        (data or ``{"error": ...}``) or an ``error`` when the work dir
+        does not exist or the provider raised (a path with a NUL byte,
+        a broken git install, ...), so the client's view never sits at
+        "Loading..." for a command that was accepted.
+
+        Args:
+            cmd: The parsed client command.
+            endpoint: The requesting WSS connection.
+            reply_type: The reply's ``type`` field.
+            provider: The git provider, called with the work dir
+                and *args* on a worker thread.
+            *args: Extra positional arguments for *provider*.
+            **fields: Extra fields echoed in the reply.
         """
-        try:
-            result: dict[str, Any] = provider(work_dir, *args)
-            return result
-        except Exception as exc:
-            return {"error": f"{type(exc).__name__}: {exc}"}
+        work_dir = self._cmd_work_dir(cmd)
+        reply: dict[str, Any] = {
+            "type": reply_type,
+            "workDir": work_dir,
+            "tabId": self._cmd_str(cmd, "tabId"),
+            "token": self._cmd_str(cmd, "token"),
+            **fields,
+        }
+        if not os.path.isdir(work_dir):
+            reply["error"] = f"Directory not found: {work_dir}"
+        else:
+            try:
+                reply.update(await asyncio.to_thread(provider, work_dir, *args))
+            except Exception as exc:
+                reply["error"] = f"{type(exc).__name__}: {exc}"
+        await self._reply_direct(endpoint, reply, reply_type)
 
     async def _handle_git_status(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -7747,22 +7797,7 @@ class RemoteAccessServer:
         """
         from kiss.server.explorer import git_status
 
-        work_dir = self._cmd_work_dir(cmd)
-        reply: dict[str, Any] = {
-            "type": "gitStatus",
-            "workDir": work_dir,
-            "tabId": self._cmd_str(cmd, "tabId"),
-            "token": self._cmd_str(cmd, "token"),
-        }
-        if not os.path.isdir(work_dir):
-            reply["error"] = f"Directory not found: {work_dir}"
-        else:
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_status, work_dir,
-                )
-            )
-        await self._reply_direct(endpoint, reply, "gitStatus")
+        await self._git_reply(cmd, endpoint, "gitStatus", git_status)
 
     async def _handle_git_log(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -7793,25 +7828,10 @@ class RemoteAccessServer:
         """
         from kiss.server.explorer import GIT_LOG_DEFAULT_LIMIT, git_log
 
-        work_dir = self._cmd_work_dir(cmd)
         limit = cmd.get("limit")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             limit = GIT_LOG_DEFAULT_LIMIT
-        reply: dict[str, Any] = {
-            "type": "gitLog",
-            "workDir": work_dir,
-            "tabId": self._cmd_str(cmd, "tabId"),
-            "token": self._cmd_str(cmd, "token"),
-        }
-        if not os.path.isdir(work_dir):
-            reply["error"] = f"Directory not found: {work_dir}"
-        else:
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_log, work_dir, limit,
-                )
-            )
-        await self._reply_direct(endpoint, reply, "gitLog")
+        await self._git_reply(cmd, endpoint, "gitLog", git_log, limit)
 
     async def _handle_git_show(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -7849,53 +7869,29 @@ class RemoteAccessServer:
             git_show,
         )
 
-        work_dir = self._cmd_work_dir(cmd)
         sha = self._cmd_str(cmd, "sha")
         path = self._cmd_str(cmd, "path")
         base = self._cmd_str(cmd, "base")
         mode = self._cmd_str(cmd, "mode") or "patch"
-        reply: dict[str, Any] = {
-            "type": "gitShow",
-            "workDir": work_dir,
-            "tabId": self._cmd_str(cmd, "tabId"),
-            "token": self._cmd_str(cmd, "token"),
-            "sha": sha,
-            "path": path,
-            "base": base,
-            "mode": mode,
-        }
-        if not os.path.isdir(work_dir):
-            reply["error"] = f"Directory not found: {work_dir}"
-        elif base:
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_compare, work_dir, base, sha,
-                )
-            )
+        provider: Callable[..., dict[str, Any]]
+        args: tuple[str, ...]
+        if base:
+            provider, args = git_compare, (base, sha)
         elif mode == "diff":
             # Both sides of one file's change (``mode: "diff"``): the
             # commit against its parent, or the working tree against
             # HEAD when ``sha`` is empty; ``origPath`` is the name
             # before a rename.
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_file_diff, work_dir, sha,
-                    path, self._cmd_str(cmd, "origPath"),
-                )
-            )
+            provider = git_file_diff
+            args = (sha, path, self._cmd_str(cmd, "origPath"))
         elif mode == "file":
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_file_at, work_dir, sha, path,
-                )
-            )
+            provider, args = git_file_at, (sha, path)
         else:
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_show, work_dir, sha, path,
-                )
-            )
-        await self._reply_direct(endpoint, reply, "gitShow")
+            provider, args = git_show, (sha, path)
+        await self._git_reply(
+            cmd, endpoint, "gitShow", provider, *args,
+            sha=sha, path=path, base=base, mode=mode,
+        )
 
     async def _handle_git_action(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -7919,32 +7915,13 @@ class RemoteAccessServer:
         """
         from kiss.server.explorer import git_action
 
-        work_dir = self._cmd_work_dir(cmd)
         action = self._cmd_str(cmd, "action")
         sha = self._cmd_str(cmd, "sha")
-        reply: dict[str, Any] = {
-            "type": "gitActionResult",
-            "workDir": work_dir,
-            "tabId": self._cmd_str(cmd, "tabId"),
-            "token": self._cmd_str(cmd, "token"),
-            "action": action,
-            "sha": sha,
-        }
-        if not os.path.isdir(work_dir):
-            reply["error"] = f"Directory not found: {work_dir}"
-        else:
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result,
-                    git_action,
-                    work_dir,
-                    action,
-                    sha,
-                    self._cmd_str(cmd, "name"),
-                    self._cmd_str(cmd, "message"),
-                )
-            )
-        await self._reply_direct(endpoint, reply, "gitAction")
+        await self._git_reply(
+            cmd, endpoint, "gitActionResult", git_action,
+            action, sha, self._cmd_str(cmd, "name"), self._cmd_str(cmd, "message"),
+            action=action, sha=sha,
+        )
 
     def _abs_cmd_path(self, raw: str, work_dir: str) -> str:
         """*raw* as an absolute LEXICAL path (``~`` expanded, relative to *work_dir*).
@@ -9054,9 +9031,7 @@ class RemoteAccessServer:
                     # Release any failed prefixed proc retained above
                     # so its stderr pipe does not linger until GC.
                     if last_proc is not None:
-                        if last_proc.stderr is not None:
-                            last_proc.stderr.close()
-                        last_proc.wait()
+                        _reap_proc(last_proc)
                     raise
                 logger.warning(
                     "%s not found; spawning cloudflared inside the "
@@ -9071,19 +9046,14 @@ class RemoteAccessServer:
                 pass
             if proc.poll() is None:
                 if last_proc is not None:
-                    if last_proc.stderr is not None:
-                        last_proc.stderr.close()
-                    last_proc.wait()
+                    _reap_proc(last_proc)
                 with self._tunnel_lock:
                     if self._tunnel_stopped:
                         # ``_stop_tunnel`` already ran (the watchdog
                         # tick that started us was cancelled by
                         # ``stop_async``); publishing now would leak
                         # a live cloudflared past shutdown.
-                        proc.kill()
-                        proc.wait()
-                        if proc.stderr is not None:
-                            proc.stderr.close()
+                        _reap_proc(proc, kill=True)
                         raise RuntimeError(
                             "tunnel stopped while cloudflared was starting",
                         )
@@ -9095,9 +9065,7 @@ class RemoteAccessServer:
                     )
                 return
             if last_proc is not None:
-                if last_proc.stderr is not None:
-                    last_proc.stderr.close()
-                last_proc.wait()
+                _reap_proc(last_proc)
             last_proc = proc
             if prefix:
                 # Bounded: at most two prefixed failures before the
@@ -9132,9 +9100,7 @@ class RemoteAccessServer:
         # whose stderr pipe would then outlive ``stop_async``.
         with self._tunnel_lock:
             if self._tunnel_stopped and last_proc is not None:
-                if last_proc.stderr is not None:
-                    last_proc.stderr.close()
-                last_proc.wait()
+                _reap_proc(last_proc)
                 raise RuntimeError(
                     "tunnel stopped while cloudflared was starting",
                 )
@@ -9302,10 +9268,10 @@ class RemoteAccessServer:
                 "Adopted cloudflared (pid=%d) is gone; restarting…",
                 adopted_pid,
             )
-            self._tunnel_adopted_pid = None
-            self._tunnel_metrics_port = None
-            self._tunnel_started_at = None
-            self._tunnel_unhealthy_ticks = 0
+            # An adopted tunnel never coexists with an own ``Popen``
+            # (adoption happens only at start-up, a spawn clears the
+            # adopted pid), so the full reset is exact here.
+            self._reset_tunnel_proc_state()
             adopted_pid = None
 
         cfg = await asyncio.to_thread(load_config)

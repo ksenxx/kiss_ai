@@ -448,13 +448,18 @@ class TaskUpdateRunner:
         upd = self._update_for(task_id, now)
         with self._lock:
             if (force or now >= upd.due_at) and not upd.running:
-                upd.running = True
+                # ``running`` is set only once the thread exists (a
+                # failed ``start()`` under thread exhaustion would
+                # otherwise pin the update on "running" for good);
+                # ``_run``'s finishing write waits for this lock, so
+                # it cannot be overtaken.
                 threading.Thread(
                     target=self._run,
                     args=(task_id, parent_agent),
                     name=f"task-update-{task_id[:8]}",
                     daemon=True,
                 ).start()
+                upd.running = True
             return dataclasses.replace(upd)
 
     def _update_for(self, task_id: str, now: float) -> TaskUpdate:
