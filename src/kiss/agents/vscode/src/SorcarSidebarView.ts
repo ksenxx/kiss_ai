@@ -150,7 +150,6 @@ function injectHtmlBase(html: string, dirUri: string): string {
   return base + html;
 }
 import {AgentClient, DroppedCommandReason} from './AgentClient';
-import {SorcarApi} from './SorcarApi';
 import {getGitApi} from './gitApi';
 import {
   provisionalDefaultModel,
@@ -455,7 +454,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // clearWebviewNotificationPoster).
   private _installedPoster?: (message: ToWebviewMessage) => void;
   private _client: AgentClient | null = null;
-  private _api: SorcarApi | null = null;
   private _daemonConnected: boolean = false;
   private _activeTabId: string = '';
   // Task Info view only (meta-panel-mode): the last relayed metaState,
@@ -708,13 +706,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  private _getApi(): SorcarApi {
-    if (this._api) return this._api;
-    const api = new SorcarApi(this._getClient());
-    // After terminal dispose() the wrapper must not be re-cached: it wraps
-    // an inert client and caching it would partially resurrect the view.
-    if (!this._terminated) this._api = api;
-    return api;
+  /** Send *cmd* to the daemon (a no-op after dispose, see _getClient). */
+  private _send(cmd: AgentCommand): void {
+    this._getClient().sendCommand(cmd);
   }
 
   private _getClient(): AgentClient {
@@ -755,12 +749,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._daemonConnected = true;
       this._sendToWebview({type: 'daemonStatus', connected: true});
       if (this._view) {
-        this._getApi().getModels();
-        this._getApi().getInputHistory();
-        this._getApi().getConfig();
+        this._send({type: 'getModels'});
+        this._send({type: 'getInputHistory'});
+        this._send({type: 'getConfig'});
         // The settings panel's Custom Models list would otherwise stay
         // empty/stale in a panel left open across a daemon outage.
-        this._getApi().forward({type: 'getMyModels'});
+        this._send({type: 'getMyModels'});
       }
     });
     client.on('disconnect', () => {
@@ -1175,7 +1169,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (this._view !== webviewView) return;
       // audit0903-coverage:start
       if (webviewView.visible) {
-        this._getApi().getInputHistory();
+        this._send({type: 'getInputHistory'});
         if (this._voiceWakeSuspendedByHide) {
           this._voiceWakeSuspendedByHide = false;
           this._voiceWake?.start(this._voiceSensitivity);
@@ -1290,7 +1284,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     const changed = pw !== this._lastSeenRemotePassword;
     this._lastSeenRemotePassword = pw;
     if ((changed && !first) || (first && pw !== '')) {
-      this._getApi().getConfig();
+      this._send({type: 'getConfig'});
     }
   }
 
@@ -1363,7 +1357,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       const src = message as unknown as Record<string, unknown>;
       const cmd: Record<string, unknown> = {type: message.type};
       for (const field of forwarded) cmd[field] = src[field];
-      this._getApi().forward(cmd as unknown as AgentCommand);
+      this._send(cmd as unknown as AgentCommand);
       return;
     }
     switch (message.type) {
@@ -1388,7 +1382,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // canonical `tabs_state` snapshot, and replays every
         // chat-bound tab's transcript to this connection (only the
         // `singleTabId` one for an editor-tab panel).
-        this._getApi().forward({
+        this._send({
           type: 'ready',
           tabId: message.tabId,
           restoredTabs: message.restoredTabs,
@@ -1409,7 +1403,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // The daemon owns the classification (path-only prompt, follow-up
         // or new run) and runs the task in the global working directory;
         // the host adds only its visible editor file.
-        this._getApi().submit({
+        this._send({
           ...message,
           activeFile:
             this._getVisibleEditorFile() || message.activeFile || undefined,
@@ -1419,10 +1413,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'stop': {
         const stopTabId = message.tabId;
         if (stopTabId !== undefined) {
-          this._getApi().stop(stopTabId);
+          this._send({type: 'stop', tabId: stopTabId});
         } else {
           for (const tab of this._runningTabs) {
-            this._getApi().stop(tab);
+            this._send({type: 'stop', tabId: tab});
           }
         }
         break;
@@ -1430,31 +1424,42 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'selectModel': {
         this._selectedModel = message.model;
-        const selTabId = message.tabId;
-        this._getApi().selectModel(message.model, selTabId);
+        this._send({
+          type: 'selectModel',
+          model: message.model,
+          tabId: message.tabId,
+        });
         break;
       }
 
       case 'userAnswer': {
         const ansTabId = message.tabId;
         if (ansTabId !== undefined) {
-          this._getApi().userAnswer(message.answer, ansTabId);
+          this._send({
+            type: 'userAnswer',
+            answer: message.answer,
+            tabId: ansTabId,
+          });
         }
         break;
       }
 
       case 'recordFileUsage':
         if (message.path) {
-          this._getApi().recordFileUsage(message.path, message.workDir);
+          this._send({
+            type: 'recordFileUsage',
+            path: message.path,
+            workDir: message.workDir,
+          });
         }
         break;
 
       case 'resumeSession': {
-        const resumeTabId = message.tabId;
-        this._getApi().resumeSession({
+        this._send({
+          type: 'resumeSession',
           chatId: message.chatId ?? message.id,
           taskId: message.taskId,
-          tabId: resumeTabId,
+          tabId: message.tabId,
         });
         break;
       }
@@ -1469,7 +1474,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
               d => d.uri.fsPath === editorFile,
             )
           : undefined;
-        this._getApi().complete({
+        this._send({
+          type: 'complete',
           query: message.query,
           tabId: message.tabId || this._activeTabId || undefined,
           activeFile: editorFile || message.activeFile || undefined,
@@ -1492,7 +1498,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             this._worktreeActionResolves,
           );
         }
-        this._getApi().worktreeAction(wtAction, wtTabId);
+        this._send({type: 'worktreeAction', action: wtAction, tabId: wtTabId});
         break;
       }
 
@@ -1502,11 +1508,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // a broadcast main_tree_result event that the webview renders on
       // its own. (The bar's Auto commit button sends autocommitAction.)
       case 'mainTreeAction':
-        this._getApi().mainTreeAction(
-          message.action,
-          message.tabId,
-          message.workDir || this._getWorkDir(),
-        );
+        this._send({
+          type: 'mainTreeAction',
+          action: message.action,
+          tabId: message.tabId,
+          workDir: message.workDir || this._getWorkDir(),
+        });
         break;
 
       // The settings panel's "Git Commit" button: the daemon commits
@@ -1514,10 +1521,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // through broadcast autocommit_progress/autocommit_done events
       // that the webview renders on its own.
       case 'autocommitAction':
-        this._getApi().autocommitAction(
-          message.tabId,
-          message.workDir || this._getWorkDir(),
-        );
+        this._send({
+          type: 'autocommitAction',
+          tabId: message.tabId,
+          workDir: message.workDir || this._getWorkDir(),
+        });
         break;
 
       case 'resolveDroppedPaths': {
@@ -1679,7 +1687,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
 
       case 'serverReset':
-        this._getApi().serverReset();
+        this._send({type: 'serverReset'});
         break;
 
       case 'notificationAction':
@@ -1690,7 +1698,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const closeTabId = message.tabId;
         if (closeTabId) {
           this._cleanupTabResources(closeTabId);
-          this._getApi().closeTab(closeTabId);
+          this._send({type: 'closeTab', tabId: closeTabId});
         }
         break;
       }
@@ -1815,7 +1823,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       return;
     }
     this._daemonWorkDir = real;
-    this._getApi().setWorkDir(real);
+    this._send({type: 'setWorkDir', workDir: real});
     this._sendToWebview({type: 'workDirPicked', path: real});
   }
 
@@ -1836,7 +1844,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   public closeChatTab(tabId: string): void {
     if (this._terminated || !tabId) return;
     this._cleanupTabResources(tabId);
-    this._getApi().closeTab(tabId);
+    this._send({type: 'closeTab', tabId});
   }
 
   /** Release every host-side resource owned by a closed tab. */
@@ -1929,7 +1937,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * shows the armed state ("Update now" / "Cancel").
    */
   public updateWhenIdle(): void {
-    this._getApi().forward({type: 'updateWhenIdle'});
+    this._send({type: 'updateWhenIdle'});
   }
 
   public runUpdate(): void {
@@ -2146,7 +2154,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
     // No resolved webview to relay through — stop running tasks directly.
     for (const tab of this._runningTabs) {
-      this._getApi().stop(tab);
+      this._send({type: 'stop', tabId: tab});
     }
   }
 
@@ -2305,11 +2313,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // The answer comes back stamped with this tab, and only messages
     // for tabs this window owns are forwarded on.
     if (tabId) this._ownTabs.add(tabId);
-    this._getApi().generateCommitMessage(
-      this._selectedModel,
+    this._send({
+      type: 'generateCommitMessage',
+      model: this._selectedModel,
       tabId,
-      workDir || this._getWorkDir(),
-    );
+      workDir: workDir || this._getWorkDir(),
+    });
 
     return new Promise<void>(resolve => {
       let resolved = false;
@@ -2527,7 +2536,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   public dispose(): void {
     // Terminal: set first so any concurrently queued webview message or
-    // late _getClient()/_getApi() call becomes a no-op and cannot
+    // late _getClient()/_send() call becomes a no-op and cannot
     // resurrect the daemon client or its listeners.
     this._terminated = true;
     this._disposed = true;
@@ -2553,10 +2562,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._client.dispose();
       this._client = null;
     }
-    // The API wrapper caches the client it was built around; keeping it
-    // would hand out an object bound to the disposed client if the view
-    // were ever used again, while a fresh _getClient() built a new one.
-    this._api = null;
     this._onCommitMessage.dispose();
     this._onRegistryTabsState.dispose();
     // Each panel's onDidDispose deletes its own map entry, so iterate a

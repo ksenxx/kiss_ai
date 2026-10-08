@@ -59,52 +59,94 @@ test('the real chat webview only sends API commands', async () => {
   );
 });
 
-test('SorcarApi (extension host) emits correct wire commands', () => {
-  const {SorcarApi} = require(path.join('..', 'out', 'SorcarApi.js'));
+// The extension host has no wrapper class: SorcarSidebarView sends the
+// wire command itself (`_send`).  Drive its webview message handler and
+// check the exact command each message turns into.
+test('SorcarSidebarView turns webview messages into wire commands', async () => {
+  const fs = require('fs');
+  const Module = require('module');
+  const origResolve = Module._resolveFilename;
+  Module._resolveFilename = function (request, parent, ...rest) {
+    if (request === 'vscode') return require.resolve('./_vscode-stub.js');
+    return origResolve.call(this, request, parent, ...rest);
+  };
+  global.__kissVscodeStub = {
+    Uri: {file: p => ({fsPath: p, scheme: 'file'})},
+    EventEmitter: class {
+      event = () => ({dispose() {}});
+      fire() {}
+      dispose() {}
+    },
+    TabInputText: class {},
+    window: {
+      visibleTextEditors: [],
+      activeTextEditor: undefined,
+      tabGroups: {all: []},
+      onDidChangeVisibleTextEditors: () => ({dispose() {}}),
+    },
+    workspace: {
+      isTrusted: true,
+      workspaceFolders: [{uri: {fsPath: '/w', scheme: 'file'}}],
+      getConfiguration: () => ({get: () => undefined}),
+      onDidChangeWorkspaceFolders: () => ({dispose() {}}),
+      textDocuments: [],
+    },
+    commands: {executeCommand: () => Promise.resolve()},
+  };
+  const outDir = path.join(__dirname, '..', 'out');
+  assert.ok(
+    fs.existsSync(path.join(outDir, 'SorcarSidebarView.js')),
+    'compiled extension missing — run `npm run compile` first',
+  );
+  const {SorcarSidebarView} = require(
+    path.join(outDir, 'SorcarSidebarView.js'),
+  );
+  const view = new SorcarSidebarView({fsPath: '/ext'});
   const sent = [];
-  const api = new SorcarApi({sendCommand: cmd => sent.push(cmd)});
+  view._send = cmd => sent.push(cmd);
+  view._getWorkDir = () => '/w';
+  view._selectedModel = 'm';
+  view._runningTabs.add('r1');
+  view._runningTabs.add('r2');
 
-  api.submit({prompt: 'p', model: 'm', workDir: '/w', attachments: [],
-              useWorktree: false, isParallel: true, autoCommit: false,
-              tabId: 't'});
-  api.stop('t');
-  api.appendUserMessage('more', 't');
-  api.userAnswer('yes', 't');
-  api.resumeSession({chatId: 'c1', taskId: 'task1', tabId: 't'});
-  api.setWorkDir('/w');
-  api.selectModel('m', 't');
-  api.getModels();
-  api.getInputHistory();
-  api.getConfig();
-  api.complete({query: 'q', tabId: 't'});
-  api.recordFileUsage('/f', '/w');
-  api.worktreeAction('merge', 't');
-  api.generateCommitMessage('m', 't', '/w');
-  api.autocommitAction('t', '/w');
-  api.closeTab('t');
-  api.serverReset();
-  api.forward({type: 'getHistory', query: 'x'});
+  const messages = [
+    {type: 'submit', prompt: 'p', model: 'm', attachments: [], tabId: 't'},
+    {type: 'stop', tabId: 't'},
+    {type: 'stop'},
+    {type: 'userAnswer', answer: 'yes', tabId: 't'},
+    {type: 'resumeSession', chatId: 'c1', taskId: 'task1', tabId: 't'},
+    {type: 'selectModel', model: 'm2', tabId: 't'},
+    {type: 'complete', query: 'q', tabId: 't'},
+    {type: 'recordFileUsage', path: '/f', workDir: '/w'},
+    {type: 'worktreeAction', action: 'discard', tabId: 't'},
+    {type: 'mainTreeAction', action: 'discard', tabId: 't'},
+    {type: 'autocommitAction', tabId: 't'},
+    {type: 'serverReset'},
+    {type: 'getHistory', query: 'x'},
+  ];
+  for (const m of messages) await view._handleMessage(m);
+  view.generateCommitMessage(undefined, 't', '/repo');
+  view.dispose();
 
-  const types = sent.map(c => c.type);
-  assert.deepStrictEqual(types, [
-    'submit', 'stop', 'appendUserMessage', 'userAnswer', 'resumeSession',
-    'setWorkDir', 'selectModel', 'getModels', 'getInputHistory',
-    'getConfig', 'complete', 'recordFileUsage', 'worktreeAction',
-    'generateCommitMessage', 'autocommitAction', 'closeTab', 'serverReset',
-    'getHistory',
+  assert.deepStrictEqual(sent, [
+    {type: 'submit', prompt: 'p', model: 'm', attachments: [], tabId: 't',
+     activeFile: undefined},
+    {type: 'stop', tabId: 't'},
+    {type: 'stop', tabId: 'r1'},
+    {type: 'stop', tabId: 'r2'},
+    {type: 'userAnswer', answer: 'yes', tabId: 't'},
+    {type: 'resumeSession', chatId: 'c1', taskId: 'task1', tabId: 't'},
+    {type: 'selectModel', model: 'm2', tabId: 't'},
+    {type: 'complete', query: 'q', tabId: 't', activeFile: undefined,
+     activeFileContent: undefined},
+    {type: 'recordFileUsage', path: '/f', workDir: '/w'},
+    {type: 'worktreeAction', action: 'discard', tabId: 't'},
+    {type: 'mainTreeAction', action: 'discard', tabId: 't', workDir: '/w'},
+    {type: 'autocommitAction', tabId: 't', workDir: '/w'},
+    {type: 'serverReset'},
+    {type: 'getHistory', query: 'x', tag: undefined, offset: undefined,
+     generation: undefined},
+    {type: 'generateCommitMessage', model: 'm2', tabId: 't', workDir: '/repo'},
   ]);
-  assert.deepStrictEqual(sent[0], {
-    type: 'submit', prompt: 'p', model: 'm', workDir: '/w', attachments: [],
-    useWorktree: false, isParallel: true, autoCommit: false, tabId: 't',
-  });
-  assert.deepStrictEqual(sent[1], {type: 'stop', tabId: 't'});
-  assert.deepStrictEqual(sent[4], {
-    type: 'resumeSession', chatId: 'c1', taskId: 'task1', tabId: 't',
-  });
-  assert.deepStrictEqual(sent[12], {
-    type: 'worktreeAction', action: 'merge', tabId: 't',
-  });
-  assert.deepStrictEqual(sent[14], {
-    type: 'autocommitAction', tabId: 't', workDir: '/w',
-  });
+  assert.strictEqual(view._selectedModel, 'm2', 'selectModel is remembered');
 });
