@@ -251,11 +251,9 @@ def _build_test_script(body_children_json: str, collapse: bool = True) -> str:
     sync_aria_fn = _extract_function(source, "syncCollapseAria")
     mkel_fn = _extract_function(source, "mkEl")
     brief_fn = _extract_function(source, "briefPreviewText")
-    # collapsePreview computes the text (collapsePreviewText) and renders
-    # it into the preview span (setHeaderText: plain text for a panel
-    # that is not running).
+    # collapsePreview computes the text (collapsePreviewText) and writes
+    # it into the preview span.
     preview_text_fn = _extract_function(source, "collapsePreviewText")
-    header_text_fn = _extract_function(source, "setHeaderText")
 
     script = _NODE_SHIM + "\n"
     script += "var document = { createElement: mkTestEl };\n"
@@ -263,7 +261,6 @@ def _build_test_script(body_children_json: str, collapse: bool = True) -> str:
     script += collect_fn + "\n"
     script += sync_aria_fn + "\n"
     script += brief_fn + "\n"
-    script += header_text_fn + "\n"
     script += preview_text_fn + "\n"
     script += collapse_fn + "\n"
     script += f"var bodyChildren = {body_children_json};\n"
