@@ -11,8 +11,9 @@ The two hooks are ``run()`` parameters:
   previous LLM call) and returns a possibly modified list that is sent to the
   LLM instead.
 * ``tool_call_hook`` is called before every tool call with the tool name and
-  its arguments. A return of ``"OK"`` lets the tool execute as usual; any
-  other string suppresses execution and becomes the tool's result.
+  its arguments. A return of ``None`` lets the tool execute as usual; any
+  string (``"OK"``, the allow spelling of older hooks, included)
+  suppresses execution and becomes the tool's result.
 
 Every test runs the real ``KISSAgent.run`` against a local HTTP server
 speaking the OpenAI chat-completions protocol — no mocks or patches.
@@ -27,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 from kiss.core.kiss_agent import KISSAgent
+from kiss.core.tool_verdict import ALLOW, Verdict, refuse
 
 _USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 
@@ -140,7 +142,7 @@ def _run_agent(
     tools: list[Callable[..., Any]],
     max_steps: int = 30,
     llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
-    tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
+    tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
 ) -> tuple[str, KISSAgent]:
     """Run a real KISSAgent against the local server and return (result, agent)."""
     agent = KISSAgent("test-run-hooks")
@@ -314,15 +316,15 @@ class TestLLMCallHook:
 
 
 class TestToolCallHook:
-    """``tool_call_hook`` gates every tool execution on returning ``"OK"``."""
+    """``tool_call_hook`` gates every tool execution on returning ``None``."""
 
-    def test_ok_verdict_executes_tool_as_before(self) -> None:
-        """A hook returning "OK" observes every call but changes nothing."""
+    def test_allow_verdict_executes_tool_as_before(self) -> None:
+        """A hook returning ALLOW observes every call but changes nothing."""
         hook_calls: list[tuple[str, dict[str, Any]]] = []
 
-        def tool_call_hook(name: str, args: dict[str, Any]) -> str:
+        def tool_call_hook(name: str, args: dict[str, Any]) -> Verdict:
             hook_calls.append((name, dict(args)))
-            return "OK"
+            return ALLOW
 
         def respond(turn: int, request: dict[str, Any]) -> dict[str, Any]:
             if turn == 0:
@@ -339,21 +341,25 @@ class TestToolCallHook:
             server.shutdown()
 
         assert result == "ALL_GREEN"
-        assert counter.executions == 1, "An OK verdict must let the tool run"
+        assert counter.executions == 1, "A None verdict must let the tool run"
         assert hook_calls == [
             ("check_build", {}),
             ("finish", {"result": "ALL_GREEN"}),
         ]
 
-    def test_non_ok_verdict_suppresses_tool_and_becomes_result(self) -> None:
-        """Any non-"OK" string blocks execution and is fed back to the model
-        as the tool's result — verified on the wire in the next request."""
-        rejection = "check_build denied: read-only mode"
+    def test_refuse_verdict_suppresses_tool_and_becomes_result(self) -> None:
+        """Any returned string blocks execution and is fed back to the model
+        as the tool's result — verified on the wire in the next request.
+        ``"ok"`` and ``"OK"`` (the allow spelling of older hooks, no longer
+        special) are such strings: only ``None`` allows."""
+        for rejection in ("check_build denied: read-only mode", "ok", "OK"):
+            self._check_refusal(rejection)
 
-        def tool_call_hook(name: str, args: dict[str, Any]) -> str:
+    def _check_refusal(self, rejection: str) -> None:
+        def tool_call_hook(name: str, args: dict[str, Any]) -> Verdict:
             if name == "check_build":
-                return rejection
-            return "OK"
+                return refuse(rejection)
+            return ALLOW
 
         requests_log: list[dict[str, Any]] = []
 
@@ -379,7 +385,7 @@ class TestToolCallHook:
             if m.get("role") == "tool"
         ]
         assert any(rejection in c for c in tool_messages), (
-            f"The rejection string must reach the model as the tool result, "
+            f"The rejection string {rejection!r} must reach the model as the tool result, "
             f"got tool messages {tool_messages}"
         )
 
@@ -387,12 +393,12 @@ class TestToolCallHook:
         """Blocking ``finish`` keeps the loop alive until the hook allows it."""
         finish_attempts = [0]
 
-        def tool_call_hook(name: str, args: dict[str, Any]) -> str:
+        def tool_call_hook(name: str, args: dict[str, Any]) -> Verdict:
             if name == "finish":
                 finish_attempts[0] += 1
                 if finish_attempts[0] <= 2:
-                    return "finish denied: task not yet verified"
-            return "OK"
+                    return refuse("finish denied: task not yet verified")
+            return ALLOW
 
         def respond(turn: int, request: dict[str, Any]) -> dict[str, Any]:
             return _tool_call_response("Done.", "finish", {"result": "HOOKED_DONE"})
@@ -409,13 +415,13 @@ class TestToolCallHook:
 
     def test_hook_called_before_every_call_even_when_guard_blocks(self) -> None:
         """The hook runs for every model-emitted tool call — including one the
-        pre-existing ``tool_call_guard`` blocks. With an "OK" verdict the
+        pre-existing ``tool_call_guard`` blocks. With a None verdict the
         guard's block still stands (the tool never executes)."""
         hook_calls: list[str] = []
 
-        def tool_call_hook(name: str, args: dict[str, Any]) -> str:
+        def tool_call_hook(name: str, args: dict[str, Any]) -> Verdict:
             hook_calls.append(name)
-            return "OK"
+            return ALLOW
 
         def guard(name: str, args: dict[str, Any]) -> str | None:
             if name == "check_build":
@@ -462,15 +468,15 @@ class TestToolCallHook:
         assert any("guard: check_build blocked" in c for c in tool_messages)
 
     def test_hook_rejection_takes_precedence_over_guard(self) -> None:
-        """A non-"OK" hook verdict is the tool result the model sees, even
+        """A string hook verdict is the tool result the model sees, even
         when the guard would also have blocked the call with its own string."""
         rejection = "hook: check_build denied"
         guard_calls: list[str] = []
 
-        def tool_call_hook(name: str, args: dict[str, Any]) -> str:
+        def tool_call_hook(name: str, args: dict[str, Any]) -> Verdict:
             if name == "check_build":
-                return rejection
-            return "OK"
+                return refuse(rejection)
+            return ALLOW
 
         def guard(name: str, args: dict[str, Any]) -> str | None:
             guard_calls.append(name)
@@ -525,11 +531,11 @@ class TestToolCallHook:
         rejection = "second call denied"
         hook_calls: list[tuple[str, dict[str, Any]]] = []
 
-        def tool_call_hook(name: str, args: dict[str, Any]) -> str:
+        def tool_call_hook(name: str, args: dict[str, Any]) -> Verdict:
             hook_calls.append((name, dict(args)))
             if args.get("target") == "flaky":
-                return rejection
-            return "OK"
+                return refuse(rejection)
+            return ALLOW
 
         def check_build(target: str) -> str:
             """Verification tool taking a target name, to distinguish the two calls."""

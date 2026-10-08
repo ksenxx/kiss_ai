@@ -56,6 +56,8 @@ import tempfile
 import threading
 from typing import Any
 
+from kiss.core.processes import kill_process_group, popen_process_group
+
 logger = logging.getLogger(__name__)
 
 _PLAY_CMD_ENV = "KISS_SORCAR_PLAY_CMD"
@@ -176,51 +178,31 @@ def _playback_timeout() -> float:
     return _PLAYBACK_TIMEOUT
 
 
-def _signal_group(pid: int, sig: signal.Signals) -> bool:
-    """Best-effort signal to *pid*'s whole process group.
-
-    Args:
-        pid: The group leader's pid (the child was spawned with
-            ``start_new_session=True`` on POSIX).
-        sig: The signal to deliver.
-
-    Returns:
-        ``True`` when the group was signalled; ``False`` when the
-        platform has no ``os.killpg`` (Windows) or the call failed —
-        the caller then falls back to killing the process alone.
-    """
-    killpg = getattr(os, "killpg", None)
-    if killpg is None:
-        return False
-    try:
-        killpg(pid, sig)
-        return True
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
-
-
 def _kill_playback(proc: subprocess.Popen[bytes]) -> None:
     """Kill a hung playback child and every process it spawned.
 
-    The child was started in its own session (POSIX), so signalling
-    its process group reaches grandchildren too — a
-    ``KISS_SORCAR_PLAY_CMD`` wrapper script's real player must die
-    with the wrapper, or it would keep the audio device and play over
-    the next clip.  SIGTERM first (players flush and release the
-    device), escalating to SIGKILL after ``_KILL_GRACE`` seconds.  On
-    platforms without process groups (Windows) the direct child alone
-    is killed, as before.
+    The child was started in its own process group, so signalling
+    the group (:func:`kiss.core.processes.kill_process_group`) reaches
+    grandchildren too — a ``KISS_SORCAR_PLAY_CMD`` wrapper script's
+    real player must die with the wrapper, or it would keep the audio
+    device and play over the next clip.  SIGTERM first (players flush
+    and release the device), escalating to SIGKILL after
+    ``_KILL_GRACE`` seconds.
     """
-    if not _signal_group(proc.pid, signal.SIGTERM):
-        proc.kill()
-        return
     try:
+        kill_process_group(proc.pid, signal.SIGTERM)
         proc.wait(timeout=_KILL_GRACE)
     except subprocess.TimeoutExpired:
         pass
-    if not _signal_group(proc.pid, signal.SIGKILL):
-        # Honour ``_signal_group``'s contract: the caller's unbounded
-        # ``proc.wait()`` would otherwise hang the sole talk worker.
+    except OSError:
+        # The group could not be signalled (or is already gone): kill
+        # the child alone, or the caller's unbounded ``proc.wait()``
+        # would hang the sole talk worker.
+        proc.kill()
+        return
+    try:
+        kill_process_group(proc.pid, signal.SIGKILL)
+    except OSError:
         proc.kill()
 
 
@@ -233,12 +215,11 @@ def _run_playback(argv: list[str]) -> bool:
     process group on POSIX (see :func:`_kill_playback`).
     """
     try:
-        proc = subprocess.Popen(
+        proc: subprocess.Popen[bytes] = popen_process_group(
             argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=(os.name == "posix"),
         )
     except OSError:
         return False
@@ -271,16 +252,10 @@ class TalkPlayer:
 
         Blank events (no clip and no text) and already-spoken
         ``talkId`` values are dropped, matching the webview client.
-        Copies stamped ``muted`` by the daemon are dropped too: the
-        daemon mutes a talk copy when another player on THIS machine
-        (a local webview) already owns the playback, so honouring the
-        flag is what keeps each utterance to one playback per device.
 
         Args:
             event: The broadcast ``talk`` event dictionary.
         """
-        if event.get("muted"):
-            return
         text = str(event.get("text") or "").strip()
         if not text and not event.get("audioB64"):
             return

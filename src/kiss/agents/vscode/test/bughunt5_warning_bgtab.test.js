@@ -84,11 +84,12 @@ function testBackgroundTabWarningSurvivesTabSwitch() {
     'background-tab events must not render in the active tab',
   );
 
-  const tabEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="' + tab1 + '"]',
+  assert.ok(
+    api.openTabs().some(t => t.id === tab1),
+    'tab1 must still be open in the background',
   );
-  assert.ok(tabEl, 'tab1 element must exist in the tab bar');
-  tabEl.click();
+  // The Chats-panel pick brings tab1 back on screen.
+  api.switchToTab(tab1);
   assert.strictEqual(api.getActiveTabId(), tab1, 'tab1 must be active now');
 
   const text = win.document.getElementById('output').textContent;

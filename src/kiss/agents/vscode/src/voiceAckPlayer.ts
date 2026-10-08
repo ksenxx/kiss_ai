@@ -3,13 +3,8 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-import {spawn, spawnSync} from 'child_process';
-
-// Synchronous PATH probes run on the extension host's event loop (the
-// webview's voiceAck message handler calls ackPlayerCommand), so they
-// must never wait on a hung child (e.g. a PATH entry on a stalled
-// network mount).  Twin of DependencyInstaller's SYNC_PROBE_TIMEOUT_MS.
-const PROBE_TIMEOUT_MS = 5_000;
+import {spawn} from 'child_process';
+import {commandExists} from './kissPaths';
 
 function shellSplit(command: string): string[] {
   const parts: string[] = [];
@@ -19,24 +14,6 @@ function shellSplit(command: string): string[] {
     parts.push(m[1] ?? m[2] ?? m[3]);
   }
   return parts;
-}
-
-function commandExists(cmd: string): boolean {
-  try {
-    const probe = process.platform === 'win32' ? 'where' : 'which';
-    // killSignal SIGKILL: Node's default timeout kill is SIGTERM, which
-    // a stalled probe (e.g. blocked on a dead network mount) can ignore,
-    // leaving spawnSync blocked past its timeout.
-    return (
-      spawnSync(probe, [cmd], {
-        stdio: 'ignore',
-        timeout: PROBE_TIMEOUT_MS,
-        killSignal: 'SIGKILL',
-      }).status === 0
-    );
-  } catch {
-    return false;
-  }
 }
 
 const FALLBACK_PLAYERS: string[][] = [

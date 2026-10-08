@@ -153,7 +153,9 @@ test("a copy stamped for another window's tab stays silent", () => {
 
 test('a copy for an own BACKGROUND tab still plays', () => {
   const {win, posted, played, spoken} = makeWebview();
-  win.document.querySelector('#new-chat-btn').click();
+  // Open a second chat without "+": "+" retires the idle chat it
+  // leaves, and a closed tab's talk is rightly silent.
+  win._testApi.createNewTab();
   const newChat = posted.filter(m => m.type === 'newChat').pop();
   assert.ok(newChat && newChat.tabId, 'new tab must post newChat');
   const firstTabId = posted.find(m => m.type === 'ready').tabId;

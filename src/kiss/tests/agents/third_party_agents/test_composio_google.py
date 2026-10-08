@@ -23,7 +23,7 @@ import os
 import threading
 from collections import defaultdict
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -33,6 +33,7 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents import _composio_google as cg
+from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.tests.conftest import IS_WINDOWS
 
 _API = "/api/v3.1"
@@ -74,10 +75,8 @@ class _ComposioHandler(BaseHTTPRequestHandler):
         """Silence per-request logging."""
 
 
-class _FakeComposio(ThreadingHTTPServer):
+class _FakeComposio(ThreadedHTTPServer):
     """In-memory Composio project: auth configs, connected accounts, proxy."""
-
-    daemon_threads = True
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _ComposioHandler)
@@ -165,8 +164,7 @@ def composio(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     try:
         yield server
     finally:
-        server.shutdown()
-        server.server_close()
+        stop_http_server(server, thread)
 
 
 def _state(service: str) -> dict[str, Any]:
@@ -626,10 +624,15 @@ def test_session_sends_non_json_bodies_as_binary(composio: _FakeComposio) -> Non
     bodies = _proxy_bodies(composio)
     assert [b.get("body") for b in bodies] == [None, None, None, None]
     assert [base64.b64decode(b["binary_body"]["base64"]) for b in bodies] == [
-        b"--boundary\r\nmultipart", b"\xff\xfe\x00binary", b'{"a": 1}', b"not json"
+        b"--boundary\r\nmultipart",
+        b"\xff\xfe\x00binary",
+        b'{"a": 1}',
+        b"not json",
     ]
     assert [b["binary_body"]["content_type"] for b in bodies] == [
-        "multipart/related; boundary=boundary", "application/octet-stream", "text/plain",
+        "multipart/related; boundary=boundary",
+        "application/octet-stream",
+        "text/plain",
         "application/json",
     ]
 

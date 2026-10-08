@@ -20,8 +20,8 @@ Experiments:
 
 * **E1 read-hygiene** — a Read-heavy exploration task with the Read
   outline/dedupe and tool-output compaction off vs on.
-* **E2 review-profile** — one reviewer sub-agent spawned through the fan-out
-  engine with the ``full`` toolset vs the ``review`` profile.
+* **E2 review-profile** — one reviewer agent on the review task with the
+  ``full`` toolset vs the ``review`` profile.
 * **E3 system-prompt** — a trivial task with the previous ``SYSTEM.md``
   (mandatory first ``Read("./AGENTS.md")``) vs the current one.
 * **E4 chat-digest** — a trivial follow-up in a chat whose earlier tasks have
@@ -48,7 +48,6 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar import sorcar_agent as sa
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task, _save_task_result
 from kiss.core.base import SYSTEM_PROMPT
@@ -191,20 +190,13 @@ def e1_read_hygiene(model: str, repeat: int) -> list[Run]:
 
 
 def e2_review_profile(model: str, repeat: int) -> list[Run]:
-    """One reviewer child through the fan-out engine: full vs review toolset."""
+    """One reviewer agent on the review task: full vs review toolset."""
     runs = []
     for variant in ("full", "review"):
-        totals: dict[str, float] = {}
-        printer = _UsagePrinter()
-        start = time.time()
-        sa.run_tasks_parallel(
-            [REVIEW_TASK], model_name=model, work_dir=str(REPO), max_budget=2.0,
-            totals_out=totals, web_tools=False, use_memory=False, tool_profile=variant,
-            printer=printer,
-        )
+        agent, seconds, printer = _run_agent(REVIEW_TASK, model, tool_profile=variant)
+        tokens, cost, steps = _usage(agent)
         runs.append(Run(
-            "E2 review-profile", variant, repeat, int(totals["total_tokens_used"]),
-            float(totals["budget_used"]), int(totals["total_steps"]), time.time() - start,
+            "E2 review-profile", variant, repeat, tokens, cost, steps, seconds,
             _first(printer.contexts), note=" ".join(printer.calls),
         ))
     return runs

@@ -12,16 +12,12 @@ End-to-end reproductions for the confirmed findings in
 * F-01: ``finish`` accepted while a queued user follow-up is undrained.
 * F-02: a raising ``broadcast`` in the pending-message drain loses the
   already-dequeued steering input.
-* F-03: a parent stop unwinding ``run_tasks_parallel`` loses the
-  sub-agents' usage accounting entirely.
 * F-04: auto-commit failure leaves the sticky "Generating commit
   message" toast with no terminal update.
 * F-05: ``set_model`` silently drops a task-specific ``api_key`` when
   the old model used a registered provider's DEFAULT endpoint.
 * F-06: provider-specific model_config keys leak across provider
   switches.
-* F-08: the live-usage monitor emits regressing totals during the
-  session-handoff torn-read window.
 * F-10: ABBA deadlock between two agents switching worktrees across
   two repositories in opposite directions.
 * F-11: a raising ``broadcast`` in ``_flush_warnings`` permanently
@@ -56,12 +52,7 @@ import pytest
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, MergeResult
-from kiss.agents.sorcar.sorcar_agent import (
-    SorcarAgent,
-    _LiveUsageMonitor,
-    auto_commit_changes,
-    run_tasks_parallel,
-)
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, auto_commit_changes
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _merge_fix_steps,
@@ -257,37 +248,6 @@ class TestF02DrainRobustness(_TempDbTestBase):
             agent_state.unregister("task-f02", state)
 
 
-class TestF03InterruptUsageAccounting(_TempDbTestBase):
-    """A parent stop must not erase sub-agent usage accounting."""
-
-    def test_totals_out_filled_when_parent_stop_unwinds_pool(self) -> None:
-        printer = JsonPrinter()
-        stop = threading.Event()
-        stop.set()
-        printer._thread_local.stop_event = stop
-        totals: dict[str, Any] = {}
-
-        time.sleep(random.random() * 0.05)
-        with pytest.raises(KeyboardInterrupt):
-            run_tasks_parallel(
-                ["say hi"],
-                model_name="gpt-4o",
-                work_dir=self.tmpdir,
-                printer=printer,
-                totals_out=totals,
-            )
-
-        # Before the fix, the interrupt skipped the aggregation entirely
-        # and totals_out stayed empty — the parent lost all accounting.
-        assert set(totals) == {
-            "budget_used", "total_tokens_used", "total_steps",
-        }
-        # No sub-agent registry entry may leak either.
-        assert all(
-            not state.is_subagent for state in agent_state.snapshot()
-        )
-
-
 class TestF04CommitFailureNotification(_TempDbTestBase):
     """A rejected auto-commit must terminate the sticky toast."""
 
@@ -399,48 +359,6 @@ class TestF07GeminiThoughtSignatures(_SetModelHarness):
 
         assert "gemini-2.5-pro" in msg
         assert agent.model._thought_signatures.get("call-1") == b"sig-bytes"
-
-
-class TestF08MonotonicLiveUsage(_TempDbTestBase):
-    """The live-usage monitor must never emit regressing totals."""
-
-    def test_torn_read_window_is_not_emitted(self) -> None:
-        parent: Any = SorcarAgent("f08-parent")
-        printer = _CollectingPrinter()
-        monitor = _LiveUsageMonitor(parent, printer)
-        child: Any = SorcarAgent("f08-child")
-        child.budget_used = 0.5
-        child.total_tokens_used = 100
-        child.total_steps = 3
-        monitor.track(child)
-
-        monitor._emit()
-        assert len(printer.printed) == 1
-
-        # Session-handoff torn-read window: executor detached, spend not
-        # yet folded — the poll sees zeros.  Must NOT be emitted.
-        child.budget_used = 0.0
-        child.total_tokens_used = 0
-        child.total_steps = 0
-        monitor._emit()
-        assert len(printer.printed) == 1
-
-        # Budget-only regression (tokens/steps rise while cost falls,
-        # e.g. an expensive child's handoff dip offset by a cheap
-        # sibling's growth) must not be emitted either (review-1 issue 5).
-        child.budget_used = 0.1
-        child.total_tokens_used = 110
-        child.total_steps = 3
-        monitor._emit()
-        assert len(printer.printed) == 1
-
-        # Fold completes; totals grow past the last emission — emitted.
-        child.budget_used = 0.6
-        child.total_tokens_used = 120
-        child.total_steps = 4
-        monitor._emit()
-        assert len(printer.printed) == 2
-        assert printer.printed[-1][1]["total_tokens"] == 120
 
 
 class TestF10CrossRepoDeadlock(_TempDbTestBase):

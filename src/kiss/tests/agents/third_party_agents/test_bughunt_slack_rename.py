@@ -18,14 +18,16 @@ into a real ``SlackChannelBackend`` (same injection pattern as
 from __future__ import annotations
 
 import json
-import threading
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, ClassVar
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler
+from typing import Any
 
+import pytest
 from slack_sdk import WebClient
 
 from kiss.agents.third_party_agents.slack.slack_sea import SlackChannelBackend
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _CHANNELS_JSON = {
     "ok": True,
@@ -45,15 +47,13 @@ _CHANNELS_JSON = {
 class _SlackHandler(BaseHTTPRequestHandler):
     """Minimal Slack Web API emulator that records every request."""
 
-    server: Any
+    server: RecordingServer  # type: ignore[assignment]
 
     def _record_and_respond(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
         parsed = urllib.parse.urlparse(self.path)
-        self.server.requests.append(
-            {"path": parsed.path, "query": parsed.query, "body": body}
-        )
+        self.server.requests.append({"path": parsed.path, "query": parsed.query, "body": body})
         port = self.server.server_address[1]
         if parsed.path.endswith("/auth.test"):
             payload: dict[str, Any] = {
@@ -113,36 +113,30 @@ def _all_sent_params(requests: list[dict[str, str]]) -> set[str]:
     return names
 
 
+@pytest.fixture(scope="module")
+def slack_server() -> Iterator[RecordingServer]:
+    """The Slack Web API emulator, shared by the module."""
+    yield from serve_recording(_SlackHandler)
+
+
 class TestSlackRenameBugs:
     """Reproduce the rename-corruption bugs against a local Slack emulator."""
 
-    server: ClassVar[ThreadingHTTPServer]
-    thread: ClassVar[threading.Thread]
-
-    @classmethod
-    def setup_class(cls) -> None:
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _SlackHandler)
-        cls.server.requests = []  # type: ignore[attr-defined]
-        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
-
-    @classmethod
-    def teardown_class(cls) -> None:
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.thread.join(timeout=5)
-
-    def setup_method(self) -> None:
-        self.server.requests.clear()  # type: ignore[attr-defined]
-        port = self.server.server_address[1]
+    @pytest.fixture(autouse=True)
+    def _backend(self, slack_server: RecordingServer) -> None:
+        """A backend whose client talks to *slack_server*; the request log starts empty."""
+        slack_server.requests.clear()
+        self.server = slack_server
         self.backend = SlackChannelBackend()
         self.backend._client = WebClient(
-            token="xoxb-test", base_url=f"http://127.0.0.1:{port}/", retry_handlers=[]
+            token="xoxb-test",
+            base_url=f"http://127.0.0.1:{slack_server.server_address[1]}/",
+            retry_handlers=[],
         )
         self.backend._bot_user_id = "UBOT"
 
     def _requests(self) -> list[dict[str, str]]:
-        return list(self.server.requests)  # type: ignore[attr-defined]
+        return list(self.server.requests)
 
     def test_find_channel_reads_channels_key(self) -> None:
         """find_channel must read the 'channels' key of conversations.list."""
@@ -175,9 +169,7 @@ class TestSlackRenameBugs:
         assert out["ok"] is True, out
         assert out["file_id"] == "F1"
         requests = self._requests()
-        complete = [
-            r for r in requests if r["path"].endswith("/files.completeUploadExternal")
-        ]
+        complete = [r for r in requests if r["path"].endswith("/files.completeUploadExternal")]
         assert len(complete) == 1
         params = urllib.parse.parse_qs(complete[0]["body"])
         assert "third_party_agents" not in params

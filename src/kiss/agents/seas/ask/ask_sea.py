@@ -42,7 +42,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.core.brand import render_brand
 
 # The /ask base prompt: the SYSTEM_LITE ablation prompt with the brand
@@ -94,7 +94,7 @@ instruction must be typed into the running task's chat without /ask, and \
 answer what you can."""
 
 
-class AskSea(BaseSea):
+class AskSea(WorkerSea):
     """The ``/ask`` SEA."""
 
     def description(self) -> str:
@@ -109,7 +109,7 @@ class AskSea(BaseSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Configure the answering session: a worker with no built-in tools.
 
-        ``worker``: no worktree, auto-commit, classifier, fan-out, browser or
+        A ``WorkerSea``: no worktree, auto-commit, classifier, browser or
         memory — the answer comes from ``task_context`` alone, quickly.
         ``tool_profile: "none"`` keeps even the built-in toolset out, so the
         answerer (which shares the running task's tree) cannot run commands
@@ -117,7 +117,7 @@ class AskSea(BaseSea):
         tool_profile=...)`` that asks for tools is refused instead of
         running an answerer with them.
         """
-        return settings | {"kind": "worker", "tool_profile": "none", "locked": ["tool_profile"]}
+        return settings | {"tool_profile": "none", "locked": ["tool_profile"]}
 
     def prompt(self, task: str) -> str:
         """Return the question followed by :data:`ADD_TO_PROMPT`.

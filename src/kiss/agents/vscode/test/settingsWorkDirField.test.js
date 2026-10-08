@@ -120,13 +120,15 @@ function assertNoDirectoryFields(win) {
   );
 }
 
+// The chat tabs mirrored from the registry, in tab order. There is no
+// row of chat tabs any more (the Chats panel lists them), so the
+// internal tab list is the subject.
 function tabBarIds(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; count each tab once.
-  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
-    .filter(el => !!el.dataset.tabId)
-    .map(el => el.dataset.tabId);
-  return ids.filter((id, i) => ids.indexOf(id) === i);
+  // Array.from: the list comes from the JSDOM realm; deepStrictEqual
+  // compares prototypes too.
+  return Array.from(win._testApi.openTabs())
+    .filter(t => !t.isSubagentTab && !t.isContentTab)
+    .map(t => t.id);
 }
 
 function tabEntry(tabId, workDir) {

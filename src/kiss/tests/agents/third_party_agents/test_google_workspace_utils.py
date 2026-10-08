@@ -6,9 +6,8 @@
 
 Drives ``make_google_auth_tools`` through the real Composio SDK against
 a real local Composio API emulator (``composio_test_utils``) — no mocks
-or patches.  The session conftest points ``KISS_HOME`` at a temporary
-directory; an autouse fixture forgets the connection and any saved API
-key around every test.
+or patches.  ``isolated_kiss_home`` points ``KISS_HOME`` at a fresh temporary
+directory for every test.
 """
 
 from __future__ import annotations
@@ -28,23 +27,10 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     API_KEY,
     connect,
     reset_state,
-    start_fake_composio,
 )
 from kiss.tests.conftest import IS_WINDOWS
 
-
-@pytest.fixture(autouse=True)
-def _fresh_state():
-    """Start and end every test with no connection and no saved API key."""
-    reset_state(_SERVICE)
-    yield
-    reset_state(_SERVICE)
-
-
-@pytest.fixture()
-def composio(monkeypatch):
-    """Run the local Composio API emulator and point the SDK at it."""
-    yield from start_fake_composio(monkeypatch)
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _tools(calls: list[str]) -> dict:
@@ -131,7 +117,8 @@ def test_finish_connects_and_calls_on_connected(composio) -> None:
     assert result["ok"] is True
     assert calls == ["connected"]
     assert json.loads(tools["check_google_calendar_auth"]()) == {
-        "ok": True, "message": "Google Calendar is connected."
+        "ok": True,
+        "message": "Google Calendar is connected.",
     }
 
 

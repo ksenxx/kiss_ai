@@ -181,6 +181,23 @@ def _collapse_progress(output: str) -> str:
     return "\n".join(lines)
 
 
+def _timeout_message(timeout_seconds: float, output: str) -> str:
+    """Return the error text for a command killed at *timeout_seconds*.
+
+    The output produced before the deadline is what tells the model
+    whether the command was hung or merely slow, so it is returned
+    with the error (progress lines collapsed) instead of discarded.
+
+    Args:
+        timeout_seconds: The deadline that expired.
+        output: Everything the command printed before it was killed.
+    """
+    message = f"Error: command timed out after {timeout_seconds}s"
+    if output:
+        message += " and was killed. Output before the timeout:\n" + _collapse_progress(output)
+    return message
+
+
 def _with_exit_code(output: str, exit_code: int) -> str:
     """Append the ``[exit code: N]`` marker for a failed command.
 
@@ -401,10 +418,7 @@ class DockerManager:
             )
         exit_code, output = self._exec(container, command, timeout_seconds)
         if exit_code is None:
-            msg = f"Error: command timed out after {timeout_seconds}s"
-            if output:
-                msg += " and was killed. Output before the timeout:\n" + _collapse_progress(output)
-            return _truncate_output(msg, max_output_chars)
+            return _truncate_output(_timeout_message(timeout_seconds, output), max_output_chars)
         return _truncate_output(
             _with_exit_code(output, exit_code), max_output_chars,
         )
@@ -692,14 +706,7 @@ class DockerManager:
         )
         if not eof:
             self._kill_exec(token)
-            # The output produced before the deadline is what tells the
-            # model whether the command was hung or merely slow, so it is
-            # returned with the error instead of being discarded.
-            message = f"Error: command timed out after {timeout_seconds}s"
-            if output:
-                message += " and was killed. Output before the timeout:\n"
-                message += _collapse_progress(output)
-            return _truncate_output(message, max_output_chars)
+            return _truncate_output(_timeout_message(timeout_seconds, output), max_output_chars)
 
         exit_code = self.client.api.exec_inspect(exec_id).get("ExitCode", 0)
         return _truncate_output(_with_exit_code(output, exit_code), max_output_chars)

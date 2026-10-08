@@ -39,7 +39,6 @@ def fresh_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     for name in ("CONFIG_DIR", "CONFIG_PATH"):
         if name in vars(vscode_config):
             monkeypatch.delattr(vscode_config, name, raising=False)
-    monkeypatch.setattr(web_server, "_KISS_HOME", None)
     monkeypatch.setattr(web_server, "_TLS_DIR", None)
     monkeypatch.setattr(web_server, "_CLOUDFLARED_PIDFILE", None)
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
@@ -88,7 +87,6 @@ def test_vscode_config_test_override_pin_wins(fresh_home: Path) -> None:
 
 
 def test_web_server_paths_resolve_lazily(fresh_home: Path) -> None:
-    assert web_server._kiss_home_dir() == fresh_home
     assert web_server._tls_dir() == fresh_home / "tls"
     assert web_server._url_file_path() == fresh_home / "remote-url.json"
     assert web_server._URL_FILE == fresh_home / "remote-url.json"

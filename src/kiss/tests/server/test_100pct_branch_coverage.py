@@ -154,6 +154,14 @@ class TestVSCodeServerUncoveredBranches:
                 assert server._check_merge_conflict("0") is True
             finally:
                 agent_state.unregister(state.task_id, state)
+                # The server's orphan sweep commits on the redirected
+                # database from its own thread; ``_restore_db`` closes
+                # that very connection, and closing a sqlite3 handle
+                # another thread is mid-commit on crashes the process.
+                sweep = server._orphan_sweep_thread
+                if sweep is not None:
+                    sweep.join(timeout=30)
+                    assert not sweep.is_alive(), "orphan sweep did not finish"
         finally:
             _restore_db(saved)
 

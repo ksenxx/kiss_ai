@@ -4,18 +4,19 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for keyboard and screen-reader access to
-// the chat tab bar: the add-tab, theme, and settings controls, the
-// chat tabs themselves, and each tab's close control must be reachable
-// from the keyboard, expose an accessible role and name, and activate
-// on Enter/Space exactly like a click -- exactly once, with the
-// default Space scroll suppressed.  The tabs implement the WAI-ARIA
-// tabs pattern with a roving tabindex: only the active tab is a Tab
-// stop, ArrowLeft/ArrowRight/Home/End move focus between tabs, and
-// each tab points at the shared chat surface via aria-controls.
-// Without this, keyboard-only and screen-reader users cannot switch
-// tabs, close tabs, open settings, or create a new chat in the remote
-// web app, and UI automation via the accessibility tree cannot reach
-// them.
+// the tab strip: the add-tab, theme, and settings controls, the tabs
+// on the group strip (#tab-list: the chat on screen and its sub-agent
+// tabs -- there is no row of chat tabs, the Chats panel lists those),
+// and each tab's close control must be reachable from the keyboard,
+// expose an accessible role and name, and activate on Enter/Space
+// exactly like a click -- exactly once, with the default Space scroll
+// suppressed.  The tabs implement the WAI-ARIA tabs pattern with a
+// roving tabindex: only the active tab is a Tab stop,
+// ArrowLeft/ArrowRight/Home/End move focus between tabs, and each tab
+// points at the shared chat surface via aria-controls.  Without this,
+// keyboard-only and screen-reader users cannot switch tabs, close
+// tabs, open settings, or create a new chat in the remote web app, and
+// UI automation via the accessibility tree cannot reach them.
 
 'use strict';
 
@@ -81,29 +82,60 @@ function snapshotEntry(tabId, title, chatId) {
   };
 }
 
+// The ids on the group strip, in order: the chat on screen and its
+// sub-agent tabs.
 function tabBarIds(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; count each tab once.
-  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
+  return Array.from(win.document.querySelectorAll('#tab-list .chat-tab'))
     .filter(el => !!el.dataset.tabId)
     .map(el => el.dataset.tabId);
-  return ids.filter((id, i) => ids.indexOf(id) === i);
+}
+
+// Every open chat tab (the Chats panel's subject), in tab order.
+function openChatIds(win) {
+  return Array.from(win._testApi.openTabs())
+    .filter(t => !t.isSubagentTab && !t.isContentTab)
+    .map(t => t.id);
 }
 
 function activeTabId(win) {
-  // The strip's active entry is the tab on screen (the main row only
-  // highlights the group it belongs to).
+  // The strip's active entry is the tab on screen.
   const el = win.document.querySelector('#tab-list .chat-tab.active');
   return el ? el.dataset.tabId : null;
 }
 
-// A tab's entry on the row that lists it: the main row for a chat, the
-// group strip for a sub-agent or file of the chat on screen.
+// A tab's entry on the group strip.
 function tabEl(win, tabId) {
-  const sel = `.chat-tab[data-tab-id="${tabId}"]`;
-  return (
-    win.document.querySelector('#main-tab-list ' + sel) ||
-    win.document.querySelector('#tab-list ' + sel)
+  return win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
+  );
+}
+
+// A chat "parent" on screen with one sub-agent tab per *subIds* entry,
+// which is what fills the group strip with several keyboard-reachable
+// tabs.  The chat comes from the registry and its sub-agents from the
+// daemon's replay announcements; none of them is activated.
+function openGroup(win, subIds) {
+  send(win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('parent', 'parent chat', 'chat-A')],
+  });
+  win._testApi.switchToTab('parent');
+  subIds.forEach((id, i) => {
+    send(win, {
+      type: 'openSubagentTab',
+      tab_id: id,
+      parent_tab_id: 'parent',
+      description: `sub-agent ${id}`,
+      task_id: `task-${id}`,
+      taskIndex: i,
+      isSubagentTab: true,
+    });
+  });
+  assert.strictEqual(activeTabId(win), 'parent', 'the chat stays on screen');
+  assert.deepStrictEqual(
+    tabBarIds(win),
+    ['parent'].concat(subIds),
+    'the strip lists the chat and its sub-agents in order',
   );
 }
 
@@ -143,11 +175,9 @@ function assertFocusable(el, what) {
   return role;
 }
 
-// The chat tabs on the main row, the row the keyboard tests drive.
+// The tabs on the group strip, the row the keyboard tests drive.
 function tabEls(win) {
-  return Array.from(
-    win.document.querySelectorAll('#main-tab-list [role="tab"]'),
-  );
+  return Array.from(win.document.querySelectorAll('#tab-list [role="tab"]'));
 }
 
 function testAddTabControlIsAccessibleButton() {
@@ -174,12 +204,27 @@ function testAddTabControlIsAccessibleButton() {
     'new-chat control must be named "New chat" for screen readers',
   );
 
-  const before = tabBarIds(win).length;
+  // "+" opens one fresh chat and retires the idle one it leaves (no
+  // task, no question, no draft), so the count does not grow: the set
+  // of open chats gains exactly one id.
+  const left = win._testApi.getActiveTabId();
+  const before = openChatIds(win);
   addBtn.click();
+  const after = openChatIds(win);
+  const added = after.filter(id => before.indexOf(id) === -1);
   assert.strictEqual(
-    tabBarIds(win).length,
-    before + 1,
+    added.length,
+    1,
     'a click on + must create exactly one tab (no double-fire)',
+  );
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    added[0],
+    'the new chat is the one on screen',
+  );
+  assert.ok(
+    after.indexOf(left) === -1,
+    'the idle chat left behind is retired',
   );
 }
 
@@ -257,65 +302,63 @@ function testSettingsControlIsAccessibleButton() {
 }
 
 function testChatTabIsKeyboardActivatable() {
-  // Each chat tab must expose its title as accessible name and switch
-  // on Enter/Space exactly like a click.  Under the roving-tabindex
-  // pattern only the ACTIVE tab is a Tab stop; other tabs are reached
-  // with the arrow keys (covered separately below), so activation is
-  // exercised from the roving focus position.
+  // Each tab on the strip must expose its title as accessible name and
+  // switch on Enter/Space exactly like a click.  Under the
+  // roving-tabindex pattern only the ACTIVE tab is a Tab stop; other
+  // tabs are reached with the arrow keys (covered separately below),
+  // so activation is exercised from the roving focus position.
   const {win} = makeWebview(undefined);
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      snapshotEntry('t1', 'first tab', 'chat-A'),
-      snapshotEntry('t2', 'second tab', 'chat-B'),
-    ],
-  });
+  openGroup(win, ['sub-1']);
 
-  const t1 = tabEl(win, 't1');
-  const t2 = tabEl(win, 't2');
-  assert.ok(t1 && t2, 'both tabs must render');
+  const parent = tabEl(win, 'parent');
+  const sub = tabEl(win, 'sub-1');
+  assert.ok(parent && sub, 'both tabs must render');
 
-  assert.strictEqual(t2.getAttribute('role'), 'tab');
+  assert.strictEqual(parent.getAttribute('role'), 'tab');
   const name =
-    t2.getAttribute('aria-label') ||
-    (t2.querySelector('.chat-tab-label') || t2).textContent;
+    parent.getAttribute('aria-label') ||
+    (parent.querySelector('.chat-tab-label') || parent).textContent;
   assert.ok(
-    name && name.indexOf('second tab') !== -1,
+    name && name.indexOf('parent chat') !== -1,
     `a chat tab must expose its title as accessible name, got "${name}"`,
   );
 
   // Click baseline: activates the tab.
-  t2.click();
-  assert.strictEqual(activeTabId(win), 't2', 'click must activate (baseline)');
+  sub.click();
+  assert.strictEqual(
+    activeTabId(win),
+    'sub-1',
+    'click must activate (baseline)',
+  );
 
   // Arrow to the other tab, then Enter activates like the click did.
-  let active = win.document.querySelector('#main-tab-list .chat-tab.active');
+  let active = win.document.querySelector('#tab-list .chat-tab.active');
   pressKey(win, active, 'ArrowLeft');
   const focused = win.document.activeElement;
   assert.strictEqual(
     focused.dataset.tabId,
-    't1',
+    'parent',
     'ArrowLeft must move focus to the previous tab',
   );
   pressKey(win, focused, 'Enter');
   assert.strictEqual(
     activeTabId(win),
-    't1',
-    'Enter on a focused chat tab must activate it like a click',
+    'parent',
+    'Enter on a focused tab must activate it like a click',
   );
 
   // Space activates too, and must suppress the default page scroll.
-  active = win.document.querySelector('#main-tab-list .chat-tab.active');
+  active = win.document.querySelector('#tab-list .chat-tab.active');
   pressKey(win, active, 'ArrowRight');
   const spaceEv = pressKey(win, win.document.activeElement, ' ');
   assert.strictEqual(
     activeTabId(win),
-    't2',
-    'Space on a focused chat tab must activate it like a click',
+    'sub-1',
+    'Space on a focused tab must activate it like a click',
   );
   assert.ok(
     spaceEv.defaultPrevented,
-    'Space on a chat tab must preventDefault (or the page scrolls)',
+    'Space on a tab must preventDefault (or the page scrolls)',
   );
 }
 
@@ -325,15 +368,7 @@ function testRovingTabindexFollowsActiveTab() {
   // tabindex=-1, and the stop follows activation.  Close controls keep
   // tabindex=0 so they stay directly Tab-reachable.
   const {win} = makeWebview(undefined);
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      snapshotEntry('t1', 'first tab', 'chat-A'),
-      snapshotEntry('t2', 'second tab', 'chat-B'),
-      snapshotEntry('t3', 'third tab', 'chat-C'),
-    ],
-  });
-  tabEl(win, 't1').click();
+  openGroup(win, ['sub-1', 'sub-2']);
 
   const stops = () =>
     tabEls(win).map(
@@ -341,18 +376,20 @@ function testRovingTabindexFollowsActiveTab() {
     );
   assert.deepStrictEqual(
     stops(),
-    ['t1:0', 't2:-1', 't3:-1'],
+    ['parent:0', 'sub-1:-1', 'sub-2:-1'],
     'only the active tab may be a Tab stop (roving tabindex)',
   );
 
-  tabEl(win, 't3').click();
+  tabEl(win, 'sub-2').click();
   assert.deepStrictEqual(
     stops(),
-    ['t1:-1', 't2:-1', 't3:0'],
+    ['parent:-1', 'sub-1:-1', 'sub-2:0'],
     'the Tab stop must follow the active tab',
   );
 
-  for (const closeEl of win.document.querySelectorAll('.chat-tab-close')) {
+  const closers = win.document.querySelectorAll('#tab-list .chat-tab-close');
+  assert.strictEqual(closers.length, 3, 'every strip entry has a close');
+  for (const closeEl of closers) {
     assert.strictEqual(
       closeEl.getAttribute('tabindex'),
       '0',
@@ -367,52 +404,49 @@ function testArrowKeysMoveFocusBetweenTabs() {
   // preventDefault-ed (no page scroll), and focus movement alone does
   // NOT activate (manual-activation tabs pattern).
   const {win} = makeWebview(undefined);
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      snapshotEntry('t1', 'first tab', 'chat-A'),
-      snapshotEntry('t2', 'second tab', 'chat-B'),
-      snapshotEntry('t3', 'third tab', 'chat-C'),
-    ],
-  });
-  tabEl(win, 't2').click();
+  openGroup(win, ['sub-1', 'sub-2']);
+  tabEl(win, 'sub-1').click();
 
   const focusedTab = () => {
     const el = win.document.activeElement;
     return el && el.dataset ? el.dataset.tabId || null : null;
   };
 
-  let el = tabEl(win, 't2');
+  let el = tabEl(win, 'sub-1');
   let ev = pressKey(win, el, 'ArrowRight');
-  assert.strictEqual(focusedTab(), 't3', 'ArrowRight must focus the next tab');
+  assert.strictEqual(
+    focusedTab(),
+    'sub-2',
+    'ArrowRight must focus the next tab',
+  );
   assert.ok(ev.defaultPrevented, 'ArrowRight must preventDefault');
 
   ev = pressKey(win, win.document.activeElement, 'ArrowRight');
   assert.strictEqual(
     focusedTab(),
-    't1',
+    'parent',
     'ArrowRight on the last tab must wrap to the first',
   );
 
   pressKey(win, win.document.activeElement, 'ArrowLeft');
   assert.strictEqual(
     focusedTab(),
-    't3',
+    'sub-2',
     'ArrowLeft on the first tab must wrap to the last',
   );
 
   ev = pressKey(win, win.document.activeElement, 'Home');
-  assert.strictEqual(focusedTab(), 't1', 'Home must focus the first tab');
+  assert.strictEqual(focusedTab(), 'parent', 'Home must focus the first tab');
   assert.ok(ev.defaultPrevented, 'Home must preventDefault');
 
   ev = pressKey(win, win.document.activeElement, 'End');
-  assert.strictEqual(focusedTab(), 't3', 'End must focus the last tab');
+  assert.strictEqual(focusedTab(), 'sub-2', 'End must focus the last tab');
   assert.ok(ev.defaultPrevented, 'End must preventDefault');
 
-  // Moving focus must not activate: t2 is still the active tab.
+  // Moving focus must not activate: sub-1 is still the active tab.
   assert.strictEqual(
     activeTabId(win),
-    't2',
+    'sub-1',
     'arrow navigation must move focus without activating (manual activation)',
   );
 
@@ -430,19 +464,12 @@ function testCloseControlIsAccessibleAndDoesNotSwitchTabs() {
   // name, close exactly one tab on Enter/Space exactly like a click,
   // and must NOT also activate a tab switch.
   const {win} = makeWebview(undefined);
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      snapshotEntry('t1', 'first tab', 'chat-A'),
-      snapshotEntry('t2', 'second tab', 'chat-B'),
-      snapshotEntry('t3', 'third tab', 'chat-C'),
-    ],
-  });
+  openGroup(win, ['sub-1', 'sub-2', 'sub-3']);
 
-  tabEl(win, 't3').click();
-  assert.strictEqual(activeTabId(win), 't3');
+  tabEl(win, 'sub-3').click();
+  assert.strictEqual(activeTabId(win), 'sub-3');
 
-  const close1 = tabEl(win, 't1').querySelector('.chat-tab-close');
+  const close1 = tabEl(win, 'sub-1').querySelector('.chat-tab-close');
   assert.ok(close1, 'close control missing');
   const role = assertFocusable(close1, 'the tab close control');
   assert.strictEqual(role, 'button', 'close control must be a button');
@@ -453,28 +480,28 @@ function testCloseControlIsAccessibleAndDoesNotSwitchTabs() {
   );
 
   // Enter on a background tab's close: closes exactly that tab, does
-  // NOT switch to it first (active tab must stay t3).
+  // NOT switch to it first (active tab must stay sub-3).
   pressKey(win, close1, 'Enter');
   assert.deepStrictEqual(
     tabBarIds(win),
-    ['t2', 't3'],
+    ['parent', 'sub-2', 'sub-3'],
     'Enter on the close control must close exactly one tab like a click',
   );
   assert.strictEqual(
     activeTabId(win),
-    't3',
+    'sub-3',
     'closing a background tab via keyboard must not switch to it',
   );
 
   // Space works too, and must suppress the default page scroll.
-  const close2 = tabEl(win, 't2').querySelector('.chat-tab-close');
+  const close2 = tabEl(win, 'sub-2').querySelector('.chat-tab-close');
   const spaceEv = pressKey(win, close2, ' ');
   assert.deepStrictEqual(
     tabBarIds(win),
-    ['t3'],
+    ['parent', 'sub-3'],
     'Space on the close control must close exactly one tab like a click',
   );
-  assert.strictEqual(activeTabId(win), 't3');
+  assert.strictEqual(activeTabId(win), 'sub-3');
   assert.ok(
     spaceEv.defaultPrevented,
     'Space on the close control must preventDefault (or the page scrolls)',
@@ -487,14 +514,7 @@ function testTabListExposesTabSemantics() {
   // chat surface via aria-controls -> role=tabpanel so assistive tech
   // can announce "tab 2 of 3, selected" and jump to the panel.
   const {win} = makeWebview(undefined);
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      snapshotEntry('t1', 'first tab', 'chat-A'),
-      snapshotEntry('t2', 'second tab', 'chat-B'),
-    ],
-  });
-  tabEl(win, 't1').click();
+  openGroup(win, ['sub-1']);
 
   const tabList = win.document.getElementById('tab-list');
   assert.strictEqual(
@@ -502,22 +522,22 @@ function testTabListExposesTabSemantics() {
     'tablist',
     'the tab container must be a tablist',
   );
-  const t1 = tabEl(win, 't1');
-  const t2 = tabEl(win, 't2');
-  assert.strictEqual(t1.getAttribute('role'), 'tab');
-  assert.strictEqual(t2.getAttribute('role'), 'tab');
-  assert.strictEqual(t1.getAttribute('aria-selected'), 'true');
-  assert.strictEqual(t2.getAttribute('aria-selected'), 'false');
+  const parent = tabEl(win, 'parent');
+  const sub = tabEl(win, 'sub-1');
+  assert.strictEqual(parent.getAttribute('role'), 'tab');
+  assert.strictEqual(sub.getAttribute('role'), 'tab');
+  assert.strictEqual(parent.getAttribute('aria-selected'), 'true');
+  assert.strictEqual(sub.getAttribute('aria-selected'), 'false');
 
-  t2.click();
+  sub.click();
   assert.strictEqual(
-    tabEl(win, 't2').getAttribute('aria-selected'),
+    tabEl(win, 'sub-1').getAttribute('aria-selected'),
     'true',
     'aria-selected must follow the active tab',
   );
 
-  // FINDING 2c: tab -> tabpanel association.  All chat tabs swap the
-  // one shared chat surface, so a single shared panel is correct.
+  // FINDING 2c: tab -> tabpanel association.  All tabs swap the one
+  // shared chat surface, so a single shared panel is correct.
   for (const el of tabEls(win)) {
     const controls = el.getAttribute('aria-controls');
     assert.ok(
@@ -631,10 +651,11 @@ function testSubagentTabsGetTabSemantics() {
 }
 
 function testRemoteControlOrderAndThemeAccessibility() {
-  // The footer must read, in order: burger menu, New chat (+), inject,
-  // then the "..." overflow control on the left; model picker, spinner,
-  // send, stop on the right.  The theme toggle lives in the "..." menu
-  // and must be a named, keyboard-activatable native button.
+  // The footer must read, in order: burger menu, Task info drawer
+  // toggle, New chat (+), inject, then the "..." overflow control on
+  // the left; model picker, spinner, send, stop on the right.  The
+  // theme toggle lives in the "..." menu and must be a named,
+  // keyboard-activatable native button.
   const {win} = makeWebview(undefined, {remote: true});
 
   const tools = Array.from(
@@ -642,8 +663,14 @@ function testRemoteControlOrderAndThemeAccessibility() {
   ).map(el => el.id);
   assert.deepStrictEqual(
     tools,
-    ['menu-btn', 'new-chat-btn', 'tricks-btn', 'more-menu-wrap'],
-    'footer tools must keep the order burger, +, inject, "..."',
+    [
+      'menu-btn',
+      'meta-drawer-btn',
+      'new-chat-btn',
+      'tricks-btn',
+      'more-menu-wrap',
+    ],
+    'footer tools must keep the order burger, Task info, +, inject, "..."',
   );
 
   const actions = Array.from(

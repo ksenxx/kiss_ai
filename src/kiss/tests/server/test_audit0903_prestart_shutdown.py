@@ -36,7 +36,7 @@ endpoint, TWO independent client connections, real ``run`` /
 held open deterministically by parking the production registry
 publication (:class:`TabRegistry` subclass whose ``update_tab`` parks
 then delegates) — the disk write that keeps the window open in
-production.  The agent script's getter writes a marker file on entry,
+production.  The SEA's getter writes a marker file on entry,
 so "user setup never executed" is directly observable.  No LLM is ever
 invoked: a run that does slip through blocks in the getter and raises
 when the test releases it.
@@ -278,7 +278,7 @@ class TestPrestartShutdownAndStopHandshake(TestCase):
             "useWorktree": False,
             "isParallel": False,
             "autoCommit": False,
-            "agentPath": str(self.script),
+            "seaPath": str(self.script),
         })
 
     def test_shutdown_sweep_prestart_run_never_starts(self) -> None:
@@ -368,7 +368,7 @@ class TestPrestartShutdownAndStopHandshake(TestCase):
                 "useWorktree": False,
                 "isParallel": False,
                 "autoCommit": False,
-                "agentPath": str(self.script),
+                "seaPath": str(self.script),
             })
         with agent_state.STATE_LOCK:
             state = agent_state.find_by_tab(tab_id)

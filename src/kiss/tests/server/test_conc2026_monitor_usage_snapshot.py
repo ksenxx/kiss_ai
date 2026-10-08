@@ -42,10 +42,12 @@ import shutil
 import tempfile
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.core.kiss_agent import KISSAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
@@ -137,3 +139,48 @@ class TestMonitorUsageSnapshot:
         assert session["tokens"] == _WRITES * 100
         assert session["cost"] == _WRITES * 0.5
         assert session["steps"] == _WRITES
+
+
+class TestRunningRowIncludesExecutorSpend:
+    """The History row of a running task shows banked PLUS in-flight spend.
+
+    ``usage_snapshot()`` on a ``RelentlessAgent`` covers only the banked
+    ledger (previous sessions, folded sub-tasks); the session in flight
+    lives on ``_current_executor`` until it is banked at session end.
+    The overlay used to add that executor's steps but not its cost and
+    tokens, so a task's row sat at the previous sessions' total (zero
+    for a first session) while its chat header showed the live spend.
+    """
+
+    def setup_method(self) -> None:
+        TestMonitorUsageSnapshot.setup_method(self)  # type: ignore[arg-type]
+
+    def teardown_method(self) -> None:
+        TestMonitorUsageSnapshot.teardown_method(self)  # type: ignore[arg-type]
+
+    def test_overlay_adds_the_in_flight_executor(self) -> None:
+        server = VSCodeServer()
+        agent = WorktreeSorcarAgent("running row agent")
+        agent._attribute_usage(0.5, 20, 1)  # banked by an earlier session
+        executor = KISSAgent("session executor")
+        executor._reset(
+            "gpt-6-astra", True, 10, 100.0,
+            {"api_key": "sk-test", "base_url": "http://127.0.0.1:9/v1"}, verbose=False,
+        )
+        executor._update_tokens_and_budget_from_response(SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=1_000, completion_tokens=100,
+                prompt_tokens_details=None, completion_tokens_details=None,
+            ),
+        ))
+        assert executor.budget_used == (1_000 * 10.0 + 100 * 50.0) / 1e6
+        agent._current_executor = executor
+        agent_state.register(agent_state.AgentState(
+            "8", agent=agent, tab_id="tab-running-row", server_owned=True,
+        ))
+
+        session: dict[str, Any] = {"tokens": 0, "cost": 0.0, "steps": 0}
+        server._overlay_live_metrics(session, "8")
+        assert session["cost"] == 0.5 + 0.015
+        assert session["tokens"] == 20 + 1_100
+        assert session["steps"] == 1

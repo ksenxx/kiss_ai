@@ -21,12 +21,14 @@ function statusColor(win) {
   return win.document.getElementById('status-text').style.color;
 }
 
+// Bring a background chat on screen the way the Chats panel's pick does
+// (a background chat has no entry on the group strip).
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
   );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  win._testApi.switchToTab(tabId);
 }
 
 function testFreshTabIsDimAndRunningIsAccent() {

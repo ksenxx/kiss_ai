@@ -116,7 +116,7 @@ class TestSubagentNewTabHandlerSource(unittest.TestCase):
             i += 1
         return block[start:i]
 
-    def test_subagent_path_calls_background_helper(self) -> None:
+    def test_subsea_path_calls_background_helper(self) -> None:
         """The sub-agent branch must materialise the tab via the
         background helper.  Use a word-boundary regex so the
         assertion does not give a false positive for a stray
@@ -130,7 +130,7 @@ class TestSubagentNewTabHandlerSource(unittest.TestCase):
             "createBackgroundSubagentTab(parent_id)."
         )
 
-    def test_subagent_path_does_not_call_create_new_tab(self) -> None:
+    def test_subsea_path_does_not_call_create_new_tab(self) -> None:
         """The sub-agent branch must NOT call ``createNewTab()`` —
         that helper flips ``activeTabId`` and posts ``newChat``,
         both of which are wrong for a background sub-agent tab.
@@ -141,7 +141,7 @@ class TestSubagentNewTabHandlerSource(unittest.TestCase):
             "createNewTab — it flips activeTabId as a side effect."
         )
 
-    def test_subagent_path_does_not_call_switch_to_tab(self) -> None:
+    def test_subsea_path_does_not_call_switch_to_tab(self) -> None:
         """No ``switchToTab(parent)`` follow-up either: if the tab
         was never activated, there is nothing to switch back from.
         """
@@ -152,7 +152,7 @@ class TestSubagentNewTabHandlerSource(unittest.TestCase):
             "return-switch is needed."
         )
 
-    def test_subagent_path_does_not_post_newchat(self) -> None:
+    def test_subsea_path_does_not_post_newchat(self) -> None:
         """The sub-agent branch must not post ``newChat`` — that
         message tells the backend to mint a fresh ``chat_id`` for
         the tab, but a sub-agent run shares its parent's chat
@@ -165,7 +165,7 @@ class TestSubagentNewTabHandlerSource(unittest.TestCase):
             "'newChat' — it would mint a duplicate chat_id."
         )
 
-    def test_subagent_path_does_not_post_welcome_info(
+    def test_subsea_path_does_not_post_welcome_info(
         self,
     ) -> None:
         """The sub-agent branch must not post

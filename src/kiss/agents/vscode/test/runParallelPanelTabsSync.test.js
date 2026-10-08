@@ -595,7 +595,7 @@ function testSpawnWhileCollapsedDefersTabs() {
   console.log('  ok - spawns while collapsed open their tab immediately');
 }
 
-function testTaskEndPassKeepsUserOpenedFanOut() {
+function testTaskEndFoldsUserOpenedFanOutIntoTrajectory() {
   const {win, panel, parentId, taskIds, subTabIds} = bootParallelRun(2);
 
   // The children finish and the user reopens their history tabs.
@@ -612,15 +612,34 @@ function testTaskEndPassKeepsUserOpenedFanOut() {
   send(win, {type: 'result', tabId: parentId, summary: 'done', success: true});
   send(win, {type: 'status', running: false, tabId: parentId});
   send(win, {type: 'usage_info', tabId: parentId});
+  // The end of the task folds every event panel, the fan-out the user
+  // had opened included, into the collapsed Trajectory panel; a folded
+  // fan-out hands its sub-agent tabs in like under any collapsed panel.
+  const traj = win.document.querySelector('#output > .trajectory');
   assert.ok(
-    !panel.classList.contains('collapsed'),
-    'the task-end pass must leave a run_parallel panel the user opened ' +
-      'open',
+    traj && traj.classList.contains('collapsed') && traj.contains(panel),
+    'the task end folds the fan-out panel into the Trajectory',
+  );
+  assert.ok(
+    panel.classList.contains('collapsed'),
+    'the fan-out panel folds with the Trajectory',
   );
   assert.strictEqual(
     subagentTabEls(win).length,
+    0,
+    'a fan-out folded behind the Trajectory closes its sub-agent tabs',
+  );
+  // Opening the Trajectory, then the fan-out panel, brings the finished
+  // children's tabs back.
+  traj
+    .querySelector(':scope > .trajectory-h')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  togglePanel(win, panel);
+  assert.ok(!panel.classList.contains('collapsed'), 'the fan-out reopens');
+  assert.strictEqual(
+    subagentTabEls(win).length,
     2,
-    'a fan-out panel the user keeps open keeps its sub-agent tabs',
+    'expanding the fan-out inside the Trajectory reopens its tabs',
   );
   assert.strictEqual(
     win.document.getElementById('task-panel-collapse-btn'),
@@ -628,7 +647,7 @@ function testTaskEndPassKeepsUserOpenedFanOut() {
     'the removed Collapse/Uncollapse Chats button must not exist',
   );
   win.close();
-  console.log('  ok - task-end pass keeps a user-opened fan-out and its tabs');
+  console.log('  ok - task end folds a user-opened fan-out into the Trajectory');
 }
 
 function testRunParallelFinishAutoCollapseClosesSubTabs() {
@@ -857,7 +876,7 @@ async function main() {
     testDelayedOpenSubagentTabDoesNotReopenCollapsedPanel,
     testOpenSubagentTabOnlyPathIsAssociated,
     testSpawnWhileCollapsedDefersTabs,
-    testTaskEndPassKeepsUserOpenedFanOut,
+    testTaskEndFoldsUserOpenedFanOutIntoTrajectory,
     testRunParallelFinishAutoCollapseClosesSubTabs,
     testRunningFanOutStaysExemptFromAutoCollapse,
     testParentReplayAdoptsOpenSubTabsBeforeFinishedCollapse,

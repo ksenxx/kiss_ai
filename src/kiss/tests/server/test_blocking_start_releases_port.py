@@ -56,18 +56,31 @@ def _run_start(server: RemoteAccessServer) -> None:
 
 
 def _start_on_thread(server: RemoteAccessServer) -> threading.Thread:
-    """Run ``server.start()`` on a daemon thread and wait until it accepts TCP."""
+    """Run ``server.start()`` on a daemon thread and wait until it is up.
+
+    ``start()`` binds the WSS listener first and publishes the endpoint
+    file only after the loopback alias is bound, so accepting TCP alone
+    does not mean the startup is complete: wait for the file as well.
+    """
     thread = threading.Thread(target=_run_start, args=(server,), daemon=True)
     thread.start()
     deadline = time.monotonic() + 30
+    accepted = False
     while time.monotonic() < deadline:
         time.sleep(0.1)
-        try:
-            with socket.create_connection(("127.0.0.1", server.port), timeout=1):
-                return thread
-        except OSError:
-            continue
-    raise AssertionError("server.start() never opened its TCP port")
+        if not accepted:
+            try:
+                with socket.create_connection(("127.0.0.1", server.port), timeout=1):
+                    accepted = True
+            except OSError:
+                continue
+        if server._local_endpoint_file.exists():
+            return thread
+    raise AssertionError(
+        "server.start() never opened its TCP port"
+        if not accepted
+        else "server.start() never published its endpoint file"
+    )
 
 
 def _stop_thread(server: RemoteAccessServer, thread: threading.Thread) -> None:

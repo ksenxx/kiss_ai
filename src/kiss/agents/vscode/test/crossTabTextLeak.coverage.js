@@ -33,7 +33,9 @@ const TARGETS = [
   {
     file: path.join(__dirname, '..', 'media', 'main.js'),
     sourceUrl: 'tableak-main.js',
-    regions: 24,
+    // The error / notice / warning cases share one fenced
+    // routedToBackgroundTab helper instead of three fenced copies.
+    regions: 22,
   },
   {
     file: path.join(__dirname, '..', 'media', 'voice.js'),

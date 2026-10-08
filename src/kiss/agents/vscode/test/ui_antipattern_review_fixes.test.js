@@ -234,7 +234,7 @@ async function main() {
     win.close();
   });
 
-  await test('R1-4 a replaced same-id question keeps the original opener', () => {
+  await test('R1-4 two overwrite questions are asked one per destination', () => {
     const {win, posted} = h.makeWebview();
     h.openExplorer(win, posted, FILE_ENTRIES);
     const inp = h.byId(win, 'task-input');
@@ -257,7 +257,7 @@ async function main() {
       error: 'exists',
       exists: true,
     });
-    const first = h.toast(win, 'fs-overwrite');
+    const first = h.toast(win, 'fs-overwrite:' + actions[0].dest + '|' + actions[0].dest.split('/').pop());
     assert.ok(first, 'first question open');
     h.send(win, {
       type: 'fsResult',
@@ -265,20 +265,70 @@ async function main() {
       error: 'exists',
       exists: true,
     });
-    const second = h.toast(win, 'fs-overwrite');
+    const second = h.toast(win, 'fs-overwrite:' + actions[1].dest + '|' + actions[1].dest.split('/').pop());
     assert.ok(
       second
         .querySelector('.kiss-notification-message')
         .textContent.includes("'lib'"),
-      'the latest request is shown',
+      'the second clash asks its own question',
+    );
+    assert.ok(
+      first.isConnected &&
+        first
+          .querySelector('.kiss-notification-message')
+          .textContent.includes("'bar.py'"),
+      'the first question is still open, not replaced by the second',
     );
     h.key(win, win.document.activeElement, 'Escape');
-    assert.strictEqual(h.toast(win, 'fs-overwrite'), null);
-    assert.strictEqual(
-      win.document.activeElement,
-      inp,
-      'focus returns to the composer that opened the first question',
+    assert.strictEqual(h.toast(win, 'fs-overwrite:' + actions[1].dest + '|' + actions[1].dest.split('/').pop()), null);
+    assert.ok(first.isConnected, 'Escape only dismissed the focused question');
+    // Replacing on the first question re-sends that rename, and only it.
+    h.click(win, h.toastButton(first, 'Replace'));
+    const resent = h.ofType(posted, 'fsAction').slice(2);
+    assert.strictEqual(resent.length, 1);
+    assert.strictEqual(resent[0].dest, actions[0].dest);
+    assert.strictEqual(resent[0].overwrite, true);
+    assert.strictEqual(h.toast(win, 'fs-overwrite:' + actions[0].dest + '|' + actions[0].dest.split('/').pop()), null);
+    win.close();
+  });
+
+  await test('two pastes into one folder ask one overwrite question each', () => {
+    const {win, posted} = h.makeWebview();
+    h.openExplorer(win, posted, [
+      ...FILE_ENTRIES,
+      {name: 'bar.py', path: h.WD + '/bar.py', isDir: false},
+    ]);
+    // Copy foo.py and bar.py into src: both requests carry the same
+    // destination folder, so the question must be keyed by entry name.
+    for (const name of ['foo.py', 'bar.py']) {
+      h.runMenuItem(win, h.explorerRow(win, h.WD + '/' + name), 'Copy');
+      h.runMenuItem(win, h.explorerRow(win, h.WD + '/src'), 'Paste');
+    }
+    const actions = h.ofType(posted, 'fsAction');
+    assert.strictEqual(actions.length, 2, 'two copies pending');
+    assert.strictEqual(actions[0].dest, actions[1].dest, 'same folder');
+    for (const action of actions) {
+      h.send(win, {
+        type: 'fsResult',
+        token: action.token,
+        error: 'exists',
+        exists: true,
+      });
+    }
+    const first = h.toast(win, 'fs-overwrite:' + actions[0].dest + '|foo.py');
+    const second = h.toast(win, 'fs-overwrite:' + actions[0].dest + '|bar.py');
+    assert.ok(first && second, 'both questions are open at once');
+    assert.ok(
+      first.querySelector('.kiss-notification-message').textContent.includes("'foo.py'") &&
+        second.querySelector('.kiss-notification-message').textContent.includes("'bar.py'"),
+      'each question names its own entry',
     );
+    h.click(win, h.toastButton(second, 'Replace'));
+    const resent = h.ofType(posted, 'fsAction').slice(2);
+    assert.strictEqual(resent.length, 1, 'only the answered copy is re-sent');
+    assert.strictEqual(resent[0].path, h.WD + '/bar.py');
+    assert.strictEqual(resent[0].overwrite, true);
+    assert.ok(first.isConnected, 'the other question is still open');
     win.close();
   });
 
@@ -301,9 +351,11 @@ async function main() {
   });
 
   await test('R1-4 a dialog whose opener is gone hands focus to the visible tab', async () => {
-    // A file tab hides the composer (body.content-tab-open), so the
-    // fallback is the active tab-strip entry, never the hidden textarea.
-    const ctx = h.makeWebview();
+    // On the mobile remote a file tab replaces the chat and hides the
+    // composer (body.content-tab-open), so the fallback is the active
+    // tab-strip entry, never the hidden textarea.  (The desktop remote
+    // splits the window instead and keeps the composer on screen.)
+    const ctx = h.makeWebview({narrow: true});
     const {win, posted} = ctx;
     await h.openDirtyContentTab(ctx);
     const control = closeControl(win);

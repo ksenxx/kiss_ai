@@ -106,24 +106,38 @@ def unlock(target: int | IO[str] | IO[bytes]) -> None:
 
 
 @contextmanager
-def exclusive_file_lock(lock_path: Path) -> Iterator[None]:
+def exclusive_file_lock(lock_path: Path, blocking: bool = True) -> Iterator[bool]:
     """Hold an exclusive lock on the file at *lock_path* for the block.
 
-    Creates the file (and its parent directories) when missing, locks
-    it, and releases and closes it afterwards.  The lock file is never
-    deleted: unlinking it would let a later opener lock a different
-    inode and defeat the exclusion.
+    Serializes check-then-use sequences on resources shared by every
+    kiss process on the machine (config files, MCP and OAuth token
+    stores, the cron job store, the Chromium profile directory) across
+    daemons, CLI runs, channel-agent processes and event loops; a
+    ``threading`` lock cannot, since the resources live on disk.
+    Creates the file (mode ``0600``, with its parent directories) when
+    missing, locks it, and releases and closes it afterwards.  The lock
+    file is never deleted: unlinking it would let a later opener lock a
+    different inode and defeat the exclusion.
 
     Args:
         lock_path: The lock file to hold.
+        blocking: Whether to wait for the lock.  ``False`` gives up
+            immediately when another process holds it (the cron
+            scheduler's overlapping-tick skip) instead of waiting.
 
     Yields:
-        None while the lock is held.
+        ``True`` while the lock is held; ``False`` only when *blocking*
+        is ``False`` and another process holds the lock.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+b") as lock_file:
-        lock_exclusive(lock_file)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    locked = False
+    try:
+        locked = lock_exclusive(descriptor, blocking=blocking)
+        yield locked
+    finally:
         try:
-            yield
+            if locked:
+                unlock(descriptor)
         finally:
-            unlock(lock_file)
+            os.close(descriptor)

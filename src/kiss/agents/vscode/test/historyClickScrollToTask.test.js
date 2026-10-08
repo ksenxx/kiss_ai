@@ -6,7 +6,7 @@
 // Clicking a task in the Task History sidebar must land the reader ON that
 // task: after switching to (or loading) the tab that shows the task's chat,
 // the transcript is scrolled so the clicked task's region is what the reader
-// sees, the static task panel (#task-panel-text) names the clicked task, and
+// sees, the tab's label names the clicked task, and
 // the chat shows the clicked task's events.
 //
 // Three scenarios:
@@ -76,8 +76,11 @@ function chatTabs(win) {
   return Array.from(win.document.querySelectorAll('#tab-list .chat-tab'));
 }
 
-function taskPanelText(win) {
-  const el = win.document.getElementById('task-panel-text');
+/** The active tab's label: it names the task the reader is looking at. */
+function shownTask(win) {
+  const el = win.document.querySelector(
+    '.chat-tab[aria-selected="true"] .chat-tab-label',
+  );
   return el ? el.textContent : '';
 }
 
@@ -174,7 +177,7 @@ function setupTabWithNeighbour() {
   O.scrollTop = 1200;
   O.dispatchEvent(new win.Event('scroll'));
   assert.strictEqual(
-    taskPanelText(win),
+    shownTask(win),
     'Task B',
     'sanity: the panel names the tab own task before the history click',
   );
@@ -214,9 +217,9 @@ function testClickScrollsToSplicedNeighbour() {
     'the transcript must scroll the clicked task region to the top',
   );
   assert.strictEqual(
-    taskPanelText(win),
+    shownTask(win),
     'Task A',
-    'the static task panel must name the clicked task after the scroll',
+    'the tab label must name the clicked task after the scroll',
   );
   win.close();
   console.log('PASS history click scrolls to the spliced neighbour task');
@@ -235,7 +238,7 @@ function testClickScrollsBackToOwnTask() {
     ],
   });
   historyRow(win, 0).click();
-  assert.strictEqual(taskPanelText(win), 'Task A', 'sanity: parked on Task A');
+  assert.strictEqual(shownTask(win), 'Task A', 'sanity: parked on Task A');
   const resumeBefore = resumeMessages(posted).length;
 
   historyRow(win, 1).click();
@@ -256,7 +259,7 @@ function testClickScrollsBackToOwnTask() {
     'the transcript must scroll the own task region to the top',
   );
   assert.strictEqual(
-    taskPanelText(win),
+    shownTask(win),
     'Task B',
     'clicking the tab own task must scroll back and rename the panel',
   );
@@ -310,9 +313,9 @@ function testClickLoadsTaskNotInTranscript() {
     ],
   });
   assert.strictEqual(
-    taskPanelText(win),
+    shownTask(win),
     'Task Z',
-    'the static task panel must name the loaded task',
+    'the tab label must name the loaded task',
   );
   const out = win.document.getElementById('output').textContent;
   assert.ok(
@@ -400,7 +403,7 @@ function testClickOwnTaskWithoutRegionReclaimsPanel() {
   O.scrollTop = 100;
   O.dispatchEvent(new win.Event('scroll'));
   assert.strictEqual(
-    taskPanelText(win),
+    shownTask(win),
     'Task A',
     'sanity: the panel names the neighbour once the reader scrolls into it',
   );
@@ -436,9 +439,9 @@ function testClickOwnTaskWithoutRegionReclaimsPanel() {
     'the tab own task is already loaded: no resumeSession',
   );
   assert.strictEqual(
-    taskPanelText(win),
+    shownTask(win),
     'Task B',
-    'the static task panel must be reclaimed for the clicked own task',
+    'the tab label must be reclaimed for the clicked own task',
   );
   assert.strictEqual(
     statusTokens.textContent,
@@ -446,7 +449,7 @@ function testClickOwnTaskWithoutRegionReclaimsPanel() {
     'the status row must show the own task metrics again after the click',
   );
   win.close();
-  console.log('PASS history click reclaims the panel for a region-less task');
+  console.log('PASS history click reclaims the label for a region-less task');
 }
 
 testClickScrollsToSplicedNeighbour();

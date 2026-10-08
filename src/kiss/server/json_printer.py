@@ -88,7 +88,7 @@ _DISPLAY_EVENT_TYPES = frozenset(
         # events table and replays show the cost under each thoughts
         # panel.
         "llm_call",
-        # Persisted so replays repopulate the static task panel's
+        # Persisted so replays repopulate the shared task panel's
         # settings info (model, worktree / parallel modes, budget,
         # start time, chat / task / parent ids); broadcast once per
         # run by ``ChatSorcarAgent.run``.
@@ -368,7 +368,6 @@ class _BashState:
     __slots__ = (
         "buffer",
         "timer",
-        "generation",
         "last_flush",
         "streamed",
         "flush_lock",
@@ -377,7 +376,6 @@ class _BashState:
     def __init__(self) -> None:
         self.buffer: list[str] = []
         self.timer: threading.Timer | None = None
-        self.generation: int = 0
         self.last_flush: float = 0.0
         self.streamed: bool = False
         self.flush_lock = threading.Lock()
@@ -440,7 +438,7 @@ class JsonPrinter(Printer):
 
         Each task gets its own ``_BashState`` so concurrent tasks
         cannot corrupt each other's bash buffer, ``streamed`` flag,
-        generation counter, or flush timer.  The caller must hold
+        or flush timer.  The caller must hold
         ``_bash_lock`` when accessing this in multi-threaded code.
         """
         key = self._task_key()
@@ -679,23 +677,6 @@ class JsonPrinter(Printer):
                 self.broadcast_model_pick(catch_up, "agent", tab_id)
         return recording
 
-    def register_task_ui(self, task_id: Any, tab_id: str) -> None:
-        """Attach the UI tab running *task_id*: the launcher's subscription.
-
-        Called by the server when a task is launched from a UI tab, so
-        the task's event stream is fanned out to that tab (via
-        :meth:`subscribe_tab`).  Viewer tabs of the same chat are
-        subscribed separately by the server; the launching tab is the
-        one whose subscription must exist before the first event.
-
-        Args:
-            task_id: The task identifier.
-            tab_id: The frontend tab id the task runs in.
-        """
-        if not self._coerce_task_id(task_id) or not tab_id:
-            return
-        self.subscribe_tab(task_id, tab_id)
-
     def agent_task_allocated(
         self,
         agent: Any,
@@ -773,6 +754,33 @@ class JsonPrinter(Printer):
             state.task_thread = None
             agent_state.unregister(state.task_id, state)
 
+    def charge_task_usage(
+        self, task_agent: Any, task_id: str, budget: float, tokens: int, steps: int,
+        epoch: Any = None,
+    ) -> None:
+        """Charge a dispatched sub-task's spend to the task that dispatched it.
+
+        Duck-typed bridge called from
+        :func:`~kiss.agents.sorcar.agent_dispatch._attribute_dispatch_usage`
+        when the calling task has a persisted row; the policy is
+        :func:`~kiss.server.task_update.charge_side_channel_usage`
+        (live-ledger bank plus a ``usage_info`` while the row is
+        unfinished, row and ancestor updates once it is), which needs
+        this server's agent registry for a running ancestor.
+
+        Args:
+            task_agent: The live agent of *task_id*.
+            task_id: The calling task's persisted row id.
+            budget: Cost in USD to charge.
+            tokens: Tokens to charge.
+            steps: Steps to charge.
+            epoch: The ledger epoch the spend belongs to, or ``None``
+                for the agent's current one.
+        """
+        from kiss.server.task_update import charge_side_channel_usage
+
+        charge_side_channel_usage(self, task_agent, task_id, budget, tokens, steps, epoch=epoch)
+
     def drain_pending_user_messages(self) -> list[str]:
         """Return and clear the current task's queued follow-up prompts.
 
@@ -796,7 +804,12 @@ class JsonPrinter(Printer):
         for msg in deferred:
             try:
                 self.broadcast(
-                    {"type": "prompt", "text": msg, "recordOnly": True},
+                    {
+                        "type": "prompt",
+                        "text": msg,
+                        "steer": True,
+                        "recordOnly": True,
+                    },
                 )
             except Exception:
                 # Requeue so the durable echo is retried on the next
@@ -898,7 +911,7 @@ class JsonPrinter(Printer):
 
         All tabs are treated uniformly — the tab a task was launched
         from is subscribed like any viewer (see
-        :meth:`register_task_ui`), so no owner/viewer distinction
+        :meth:`subscribe_tab`), so no owner/viewer distinction
         exists.  *tab_id* is simply one more uniform target, for
         callers whose printer never saw a subscription (plain
         recording printers in tests).
@@ -1365,13 +1378,12 @@ class JsonPrinter(Printer):
         recording, persist-agent, and usage-offset entries.
 
         Bash-state teardown synchronizes with in-flight flushes in two
-        steps: the popped state's generation is bumped (under
-        ``_bash_lock``, where every flush path re-checks it), so a
-        flush that copied text but has not yet passed the generation
-        re-check discards it; then the state's ``flush_lock`` is
+        steps: the popped state's buffer is cleared (under
+        ``_bash_lock``), so a flush that has not yet captured the text
+        finds nothing to send; then the state's ``flush_lock`` is
         acquired and released (after ``_bash_lock`` is dropped, so the
-        lock order matches the flush paths), so a flush that already
-        passed its re-check and is broadcasting finishes BEFORE this
+        lock order matches :meth:`_flush_bash`), so a flush that
+        already captured and is broadcasting finishes BEFORE this
         method returns.  After ``cleanup_task`` returns, no stale
         ``system_output`` for the task can be broadcast.  The
         ``_closed_tasks`` mark (under ``_lock``) lands BEFORE the bash
@@ -1441,13 +1453,12 @@ class JsonPrinter(Printer):
             if bs is not None:
                 if bs.timer is not None:
                     bs.timer.cancel()
-                bs.generation += 1
                 bs.buffer.clear()
         if bs is not None:
-            # Wait out a flush that passed its generation re-check
-            # before the bump and is still broadcasting under
-            # ``flush_lock`` — its output belongs to the task's
-            # lifetime and must land before cleanup completes.
+            # Wait out a flush that captured its text before the clear
+            # and is still broadcasting under ``flush_lock`` — its
+            # output belongs to the task's lifetime and must land
+            # before cleanup completes.
             with bs.flush_lock:
                 pass
 
@@ -1470,11 +1481,11 @@ class JsonPrinter(Printer):
     def reset(self) -> None:
         """Reset internal streaming state for a new turn.
 
-        Holds the per-task ``flush_lock`` across the generation bump so
-        an in-flight flush that already passed its generation re-check
-        (and is broadcasting under ``flush_lock``) finishes before the
-        new turn starts — after ``reset()`` returns, no stale bash text
-        from the previous turn can be broadcast.
+        Clears the buffer under the per-task ``flush_lock`` so an
+        in-flight flush either captured its text before this (and is
+        broadcasting, which finishes before ``reset()`` returns) or
+        finds an empty buffer after it — after ``reset()`` returns, no
+        stale bash text from the previous turn can be broadcast.
         """
         self._current_block_type = ""
         with self._bash_lock:
@@ -1488,7 +1499,6 @@ class JsonPrinter(Printer):
             return
         with bs.flush_lock:
             with self._bash_lock:
-                bs.generation += 1
                 bs.buffer.clear()
                 bs.streamed = False
                 if bs.timer is not None:
@@ -1513,18 +1523,21 @@ class JsonPrinter(Printer):
     def _flush_bash(self) -> None:
         """Flush the bash buffer.
 
-        Captures the generation counter inside ``_bash_lock`` along with
-        the buffered text.  After releasing the lock, re-checks the
-        generation (inside a second ``_bash_lock`` acquisition) while
-        holding the state's per-task ``flush_lock``: if ``reset()`` ran
-        in between (incrementing the generation), the captured text is
-        stale and is discarded.  W2-F5: the ``broadcast()`` itself
-        happens under ``flush_lock`` but NOT under the printer-global
-        ``_bash_lock`` — ``reset()`` also takes ``flush_lock`` before
-        bumping the generation, so the reset-vs-flush TOCTOU stays
-        closed while a slow transport ``broadcast`` (socket sends in
-        ``WebPrinter``) no longer blocks every other task's
-        ``print(type="bash_stream")`` behind ``_bash_lock``.
+        Capturing the buffered text and broadcasting it is ONE critical
+        section under the state's per-task ``flush_lock`` (the text
+        copy itself additionally under ``_bash_lock``, the order
+        ``reset()`` uses).  Two consequences: a concurrent ``reset()``
+        or ``cleanup_task`` — both clear the buffer under
+        ``flush_lock`` / ``_bash_lock`` — either waits for an in-flight
+        broadcast or leaves nothing to capture, so stale text from a
+        previous turn is never sent; and the agent thread's own flush
+        before a ``tool_result`` / ``tool_call`` / ``result`` waits for
+        a timer flush that is mid-broadcast, so the trailing
+        ``system_output`` of a command can never land AFTER the event
+        that ends it.  W2-F5: the ``broadcast()`` is NOT under the
+        printer-global ``_bash_lock``, so a slow transport send (socket
+        writes in ``WebPrinter``) does not block other tasks'
+        ``print(type="bash_stream")``.
 
         Uses a NON-creating state lookup: a straggler flush (e.g. a
         timer callback that fired before ``cleanup_task`` could cancel
@@ -1536,20 +1549,17 @@ class JsonPrinter(Printer):
         """
         with self._bash_lock:
             bs = self._bash_states.get(self._task_key())
-            if bs is None:
-                return
-            gen = bs.generation
-            if bs.timer is not None:
-                bs.timer.cancel()
-                bs.timer = None
-            text = "".join(bs.buffer) if bs.buffer else ""
-            bs.buffer.clear()
-            bs.last_flush = time.monotonic()
-        if text:
-            with bs.flush_lock:
-                with self._bash_lock:
-                    if bs.generation != gen:
-                        return
+        if bs is None:
+            return
+        with bs.flush_lock:
+            with self._bash_lock:
+                if bs.timer is not None:
+                    bs.timer.cancel()
+                    bs.timer = None
+                text = "".join(bs.buffer)
+                bs.buffer.clear()
+                bs.last_flush = time.monotonic()
+            if text:
                 self.broadcast({"type": "system_output", "text": text})
 
     def start_recording(self) -> None:
@@ -1758,6 +1768,22 @@ class JsonPrinter(Printer):
         self._replay_slot.future = None
         return slot
 
+    def _record_task_event(self, event: dict[str, Any]) -> None:
+        """Record a task-id-injected event and any file path it changed.
+
+        The recording step every ``broadcast`` implementation performs
+        for an event filed under a task: the event joins the task's
+        in-memory recording and, for a mutating ``tool_call``, its path
+        is remembered for the end-of-task cross-repo auto-commit
+        (:meth:`pop_changed_paths`).
+
+        Args:
+            event: A broadcast event, already task-id-injected.
+        """
+        with self._lock:
+            self._record_event(event)
+            self._track_changed_path(event)
+
     def _record_event(self, event: dict[str, Any]) -> None:
         """Append *event* to the active recording for its task.
 
@@ -1842,9 +1868,7 @@ class JsonPrinter(Printer):
                 self._keep_tab_stamped_task_event(*kept)
             return
         event = self._inject_task_id(event)
-        with self._lock:
-            self._record_event(event)
-            self._track_changed_path(event)
+        self._record_task_event(event)
         self._persist_event(event)
 
     def _cost_with_offset(self, cost: Any) -> Any:
@@ -1932,8 +1956,7 @@ class JsonPrinter(Printer):
             self._handle_message(content, **kwargs)
             return ""
         if type == "bash_stream":
-            text = ""
-            gen = 0
+            flush_now = False
             with self._lock:
                 # No-resurrection guard, closing the one straggler
                 # path the sibling guards (_flush_bash,
@@ -1968,15 +1991,8 @@ class JsonPrinter(Printer):
                         return ""
                     bs = self._bash_state
                     bs.buffer.append(str(content))
-                    gen = bs.generation
-                    if time.monotonic() - bs.last_flush >= 0.1:
-                        if bs.timer is not None:
-                            bs.timer.cancel()
-                            bs.timer = None
-                        text = "".join(bs.buffer)
-                        bs.buffer.clear()
-                        bs.last_flush = time.monotonic()
-                    elif bs.timer is None:
+                    flush_now = time.monotonic() - bs.last_flush >= 0.1
+                    if not flush_now and bs.timer is None:
                         owner_task = getattr(self._thread_local, "task_id", None)
                         bs.timer = threading.Timer(
                             0.1,
@@ -1984,15 +2000,12 @@ class JsonPrinter(Printer):
                         )
                         bs.timer.daemon = True
                         bs.timer.start()
-            if text:
-                with bs.flush_lock:
-                    stale = False
-                    with self._bash_lock:
-                        stale = bs.generation != gen
-                    if not stale:
-                        self.broadcast(
-                            {"type": "system_output", "text": text},
-                        )
+            if flush_now:
+                # Outside ``_lock``: _flush_bash broadcasts under the
+                # state's ``flush_lock``, and broadcast() takes
+                # ``_lock`` — holding ``_lock`` here would close a
+                # ``_lock`` → ``flush_lock`` → ``_lock`` cycle.
+                self._flush_bash()
             with self._bash_lock:
                 # Use the state captured above — the creating
                 # ``_bash_state`` property would resurrect a state

@@ -113,7 +113,7 @@ def seed_preregistered_client(storage: FileTokenStorage, server: str) -> bool:
         "client_secret": secret or None,
         "token_endpoint_auth_method": "client_secret_basic" if secret else "none",
     })
-    storage._locked_update("client_info", info.model_dump(mode="json", exclude_none=True))
+    storage.put("client_info", info.model_dump(mode="json", exclude_none=True))
     return True
 
 
@@ -163,8 +163,7 @@ def drop_stale_registration(storage: FileTokenStorage) -> bool:
         return False
     if MCP_REDIRECT_URI in [str(uri) for uri in (info.redirect_uris or [])]:
         return False
-    storage._locked_update("client_info", None)
-    storage._locked_update("tokens", None)
+    storage.clear()
     return True
 
 
@@ -198,6 +197,9 @@ class _RedirectServer(HTTPServer):
     """Loopback server receiving the authorization redirect."""
 
     allow_reuse_address = True
+    # Poll interval of ``handle_request``: how quickly the login thread
+    # notices a cancel.
+    timeout = 0.25
 
     def __init__(self) -> None:
         self.query: dict[str, str] | None = None
@@ -215,14 +217,17 @@ class MCPLoginSession:
     """
 
     _active: MCPLoginSession | None = None
+    # ``_lock`` guards ``_active`` only and is never held across a wait,
+    # so ``active()`` answers at once; ``_start_lock`` serialises whole
+    # ``start()`` calls (cancel the previous session, bind the port).
     _lock = threading.Lock()
+    _start_lock = threading.Lock()
 
     def __init__(self, cfg: MCPServerConfig) -> None:
         self.cfg = cfg
         self.auth_url = ""
         self.opened_in = ""  # where open_for_user() put the sign-in page
         self.url_shown = False
-        self._open_task: asyncio.Task[None] | None = None
         self.done = False
         self.error = ""
         self._cancelled = False
@@ -246,15 +251,19 @@ class MCPLoginSession:
         storage = FileTokenStorage(cfg.name)
         if not seed_preregistered_client(storage, cfg.name):
             drop_stale_registration(storage)
-        with cls._lock:
-            previous = cls._active
+        with cls._start_lock:
+            with cls._lock:
+                previous = cls._active
             if previous is not None:
+                # Outside ``_lock``: the previous login thread may sit in
+                # a network call for a while, and ``active()`` must not
+                # stall behind that wait.
                 previous.cancel()
                 previous._finished.wait(timeout=5.0)
             session = cls(cfg)
             session._server = _RedirectServer()
-            session._server.timeout = 0.25
-            cls._active = session
+            with cls._lock:
+                cls._active = session
             session._thread.start()
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline and not session._finished.is_set():
@@ -313,7 +322,7 @@ class MCPLoginSession:
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
         if auth.context.oauth_metadata is not None:
-            FileTokenStorage(self.cfg.name).set_oauth_metadata(auth.context.oauth_metadata)
+            auth.context.storage.set_oauth_metadata(auth.context.oauth_metadata)
 
     @property
     def ready(self) -> bool:
@@ -328,22 +337,24 @@ class MCPLoginSession:
     async def _on_redirect(self, url: str) -> None:
         """Publish the authorization URL and open it for the user.
 
-        The opening runs as a concurrent task: the loopback callback is
-        only served once this returns, and a provider that approves at
-        once redirects there before the page finishes loading (which the
-        Browser tab waits for), so opening inline would deadlock.
-        ``ready`` turns true when the opening outcome is known, so the
-        first tool answer is worded right.
+        The opening runs on its own daemon thread: the loopback callback
+        is only served once this returns, and a provider that approves
+        at once redirects there before the page finishes loading (which
+        the Browser tab waits for), so opening inline would deadlock.
+        A plain thread rather than ``asyncio.to_thread``, because
+        ``asyncio.run`` joins its default executor on exit: the flow
+        would otherwise not count as finished until the opener returned
+        (up to its page-load wait), even though the sign-in had already
+        succeeded.  ``ready`` turns true when the opening outcome is
+        known, so the first tool answer is worded right; ``done`` and
+        ``error`` take precedence over it in the answer, so an opener
+        that outlives the flow changes nothing.
         """
         self.auth_url = url
-        self._open_task = asyncio.create_task(self._open_for_user(url))
+        threading.Thread(target=self._open_for_user, args=(url,), daemon=True).start()
 
-    async def _open_for_user(self, url: str) -> None:
-        # Cancelled only when the flow already ended (asyncio.run tears the
-        # loop down): ``done`` / ``error`` then speak for the session, and
-        # an unknown hand-off must not be published as a settled one, so
-        # ``ready`` stays false on cancellation.
-        self.opened_in = await asyncio.to_thread(open_for_user, url)
+    def _open_for_user(self, url: str) -> None:
+        self.opened_in = open_for_user(url)
         self._url_ready.set()
 
     async def _await_callback(self) -> tuple[str, str | None]:

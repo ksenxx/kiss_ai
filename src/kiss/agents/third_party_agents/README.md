@@ -68,9 +68,9 @@ exactly what interactive authentication and write-approval flows need.
 Name the service in your prompt and Sorcar routes it. Internally the session calls its
 `run_agent` tool with the channel name and your request (`run_agent(agent="slack",
 task=...)`); your request goes through verbatim as the sub-session's task. The channel's
-SEA declares `settings()` returning `{"kind": "channel"}`, so the sub-session runs in
+SEA class derives from `ChannelSea`, so the sub-session runs in
 the shared `~/.kiss/channel_work` directory with no worktree, auto-commit, classifier,
-fan-out, web tools or memory, inherits nothing from the calling task (model and budget
+web tools or memory, inherits nothing from the calling task (model and budget
 are the daemon defaults unless the caller passes them), and carries that channel's
 authenticated tools; the daemon appends the channel preamble to its system prompt,
 which tells it to use those tools directly, without exploring source code. The `agent`
@@ -79,7 +79,7 @@ argument is optional: omitting it (or passing it blank, or a generic label such 
 a plain Sorcar sub-session with the standard toolset, on the task in the caller's work
 directory (`"reviewer"` is refused with a pointer to `tool_profile="review"`: a reviewer
 is a plain sub-agent with the read-only toolset, not an agent of its own). The same
-argument also takes `"cron"`, a path to an agent script, or the name of a registered
+argument also takes `"cron"`, a path to a SEA, or the name of a registered
 slash command; the call waits for the SEA's `timeout` setting, else 3600 s, unless
 `timeout` is passed, and when the wait expires the sub-task keeps running as an
 `agent_job` whose id the call returns.
@@ -95,8 +95,12 @@ ignored, so "Home Assistant", "home-assistant", and "HOMEASSISTANT" all resolve 
 `homeassistant` channel. For multi-account
 channels, name the workspace in the prompt ("using the acme Slack workspace, ...") and
 Sorcar passes it through; you can likewise ask for a specific model or budget for the
-sub-task. Two modules are hidden from this channel dispatch: the infrastructure
-modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on.
+sub-task. Two modules are not channels (`agent_dispatch.available_channels` lists only
+the SEAs that derive from `ChannelSea` and do not declare `hidden`): the infrastructure
+modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on. Their SEAs
+derive from plain `BaseSea`; `a2a` is a session SEA whose tools call peer agents and
+stays reachable as `/a2a` or `run_agent(agent="a2a", ...)`, while `oai` declares
+`hidden: True` and is set up from a terminal only.
 
 Prompts that span several services also work in a single message: the top-level
 session orchestrates, dispatching one channel at a time and passing results between
@@ -107,12 +111,16 @@ it does by default.
 
 When you want a specific channel with no routing guesswork, start the prompt with its
 slash command: `/slack post "deploy done" to #eng`. Every SEA folder `xxx/xxx_sea.py`
-in this package is registered as `/xxx` (the command is the folder name), the chat box
+in this package is registered as `/xxx` (the command is the folder name; `oai`, whose
+settings declare `hidden: True`, is the one exception), the chat box
 autocompletes the names, and the daemon runs that file directly in the tab with the rest
 of the prompt as the task: no relay turn by the chat agent and no nested sub-agent tab,
 the channel's settings, system prompt and tools apply to that very run, and the tab
-keeps showing `/xxx ...` as you typed it. `/xxx help` runs nothing and prints the module's `description()`, one
-sentence saying what the agent does and how to use it. Folders of your own SEAs
+keeps showing `/xxx ...` as you typed it. Two sub-tasks are reserved
+(`sea_commands.RESERVED_SUBCOMMANDS`) and run nothing: `/xxx help` prints the module's
+`description()`, one sentence saying what the agent does and how to use it, and
+`/xxx check` loads the SEA and reports its effective settings, model, tools and a
+sample prompt — or the first error. Folders of your own SEAs
 listed in `~/.kiss/SEAS.md` are registered the same way; the file syntax and the
 dispatch flow are in
 [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md).
@@ -124,19 +132,25 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 (bash, file editing, browser automation). The channel agent instance is the *carrier*
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
-- Every module defines one SEA class deriving from
-  `kiss.agents.seas.base.base_sea.BaseSea` (`SlackSea`, `GmailSea`, ...) with
-  `description(self)`, the one-sentence summary `/xxx help` prints;
-  `settings(self, settings)`, which returns `settings | {"kind": "channel"}` (the
-  worker defaults — worktree, auto-commit, classifier, fan-out, web tools and memory
-  off — plus a run in `$KISS_HOME/channel_work` that inherits nothing from the calling
-  task); `tools(self, tools)`; and, when its agent class sets `channel_system_prompt`,
-  `system_prompt(self, system_prompt)` returning `system_prompt + "\n\n" +` that text.
+- Every channel module (all but the two infrastructure modules, see above) defines
+  one SEA class deriving from
+  `kiss.agents.seas.base.base_sea.ChannelSea` (`class SlackSea(ChannelSea)`,
+  `GmailSea`, ...) with `description(self)`, the one-sentence summary `/xxx help`
+  prints; `tools(self, tools)`; and, when its agent class sets
+  `channel_system_prompt`, `system_prompt(self, system_prompt)` returning
+  `system_prompt + "\n\n" +` that text. The base class is the whole channel
+  configuration, so the module defines no `settings()`: `ChannelSea` lays the worker
+  defaults (worktree, auto-commit, classifier, web tools and memory off) under a run in
+  `$KISS_HOME/channel_work` that inherits nothing from the calling task and locks
+  `work_dir` and the worker keys; the loader
+  recognizes a channel by `isinstance(sea, ChannelSea)` and the command registry by
+  the base-class name in the source, so the class must derive from `ChannelSea` by
+  name (every behaviour is listed in `sea_settings.CHANNEL_BEHAVIOURS`).
   The daemon calls `tools()` with the standard toolset and the method appends the
   channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
-  The daemon appends the channel preamble (`agent_file.CHANNEL_PREAMBLE`: use the
+  The daemon appends the channel preamble (`sea_apply.CHANNEL_PREAMBLE`: use the
   channel tools directly, never call `run_agent`, never edit source or run tests) to
   the run's **system** prompt before `system_prompt()` adds the channel guidance; the
   task text itself is not modified (the `kiss-<channel>` CLI launcher no longer appends
@@ -387,8 +401,9 @@ mode only) has none. GitHub's `read_only: "true"` config key blocks every mutati
 
 ### Infrastructure: two extra surfaces
 
-These two modules are hidden from prompt dispatch — they are not services you ask
-Sorcar to act on, but ways for *other software* to send prompts to your daemon.
+Neither of these two modules is listed as a channel (their SEAs derive from `BaseSea`,
+not `ChannelSea`, and `oai` is `hidden`) — they are not services you ask Sorcar to act
+on, but ways for *other software* to send prompts to your daemon.
 
 - **OpenAI-compatible server** (`oai/oai_sea.py`). Turns kiss-web into an
   OpenAI-style backend: unauthenticated `GET /v1/models` and `POST
@@ -429,9 +444,9 @@ identity as a `{{IDENTITY}}` placeholder) followed by a no-internet, answer-quic
 directive and a playbook asking for two or three plain sentences drawn only from the
 context, and its `tools()` supplies the single `task_context` tool under
 `"tool_profile": "none"`, so no built-in tool (no shell, no
-file access) is offered; the `worker` kind turns off web tools, memory and parallel
-sub-agents, so there are no browser tools, no memory tools, and no fan-out either; it
-cannot touch the running task's working tree. Typed into a tab whose task is still running, the question
+file access) is offered; its `WorkerSea` base turns off web tools and memory, so there
+are no browser tools and no memory tools either; it cannot touch the running task's
+working tree. Typed into a tab whose task is still running, the question
 is instead dispatched directly to the daemon through a background side channel that does
 not interrupt the running agent:
 the answering session shows as a nested sub-agent tab under the running task's tab only
@@ -647,9 +662,17 @@ job that must work inside a specific project ("run the tests in ~/proj every nig
 fix them") names that directory instead; a prompt job in a Git repository can
 additionally ask for a worktree and auto-commit like a chat task. A run is stopped
 once it exceeds the job's timeout (default one hour for a prompt job, ten minutes for a
-command). Creating a job whose prompt or command, directory, schedule, and delivery
-targets match a scheduled or paused one is refused with a pointer to the existing job.
-Prompt jobs are unattended: every `run_agent` or `run_parallel` child they start
+command). A poll that should stop once it has fired ("tell me *when* X happens") is
+stored with `until_delivered` (`--until-delivered` on the CLI): the job disables itself
+after its first successfully delivered non-silent result, also when `run_now` triggered
+it, instead of repeating the same news every tick; `run_now` on a job whose run is
+still in progress in the same `kiss-cron` process is refused (the running-job registry
+is process-local, so a `kiss-cron --tick` or `--run` in another process can still
+overlap it). Creating a job whose prompt or command, directory,
+schedule, and delivery targets match a scheduled or paused one is refused with a
+pointer to the existing job (a job that has finished for good — a one-shot that ran or
+an `until_delivered` poll that fired — is not a duplicate, so it can be scheduled
+again). Prompt jobs are unattended: every `run_agent` or `run_parallel` child they start
 inherits the rule never to ask questions or wait for approval; when blocked, the child
 reports the blocker in its summary and finishes.
 

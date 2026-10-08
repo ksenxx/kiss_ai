@@ -4,26 +4,17 @@
 # add your name here
 """Bug-hunt integration tests for the sorcar agent modules.
 
-Covers two real bugs (no mocks/patches/fakes; no paid LLM calls):
-
-1. ``ChatSorcarAgent.run`` read ``use_worktree`` from ``**kwargs`` via
-   ``kwargs.get`` (for the early "extra" persistence payload) but did
-   not remove it before forwarding ``**kwargs`` to
-   ``SorcarAgent.run()``, whose explicit signature has no
-   ``use_worktree`` parameter — so any direct caller passing the
-   anticipated kwarg got ``TypeError``.
-
-2. The module-level ``run_tasks_parallel`` in ``sorcar_agent.py``
-   resolved the parent's thread-local ``task_id`` INSIDE the worker
-   thread (where ``threading.local`` never carries the parent thread's
-   value, and where ``ChatSorcarAgent.run`` clears its own id before
-   the ``finally`` runs), so the ``subagentDone`` broadcast — needed by
-   the frontend to stop the running indicator — never fired.
+Covers a real bug (no mocks/patches/fakes; no paid LLM calls):
+``ChatSorcarAgent.run`` read ``use_worktree`` from ``**kwargs`` via
+``kwargs.get`` (for the early "extra" persistence payload) but did
+not remove it before forwarding ``**kwargs`` to
+``SorcarAgent.run()``, whose explicit signature has no
+``use_worktree`` parameter — so any direct caller passing the
+anticipated kwarg got ``TypeError``.
 
 Uses a real local HTTP server returning OpenAI-format ``finish`` tool
-calls, a real ``JsonPrinter`` subclass that records broadcasts, and a
-temp-dir-redirected persistence DB (same patterns as
-``test_chat_parallel_integration.py`` / ``test_run_parallel_integration.py``).
+calls and a temp-dir-redirected persistence DB (same patterns as
+``test_chat_parallel_integration.py``).
 """
 
 from __future__ import annotations

@@ -11,13 +11,13 @@ the ``run_agent`` tool against it.  The only replaced boundary is the
 LLM itself: the per-session executor's
 :meth:`kiss.core.kiss_agent.KISSAgent.run` is swapped for a stub that
 records the tools it was handed, so the daemon's full run pipeline —
-wire ``toolProfile`` field → ``apply_agent_overrides`` (the SEA's
+wire ``toolProfile`` field → ``apply_sea`` (the SEA's
 ``settings()["tool_profile"]``) → ``task_runner`` validation →
 ``SorcarAgent.run(tool_profile=...)`` → ``_get_tools`` filtering —
 executes for real without any model API calls.
 
 Contract under test: ``tool_profile`` (the parameter, the wire field
-and the agent-script setting) cuts the built-in toolset down to the
+and the SEA setting) cuts the built-in toolset down to the
 named ``TOOL_PROFILES`` entry; the bundled ``sh_sea.py`` therefore
 runs with ``Bash`` + ``finish`` only, in the caller's work directory
 (no worktree), with its own system prompt; an unknown name fails the
@@ -148,7 +148,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
 
         ``/boom anything`` runs the SEA directly in the tab's own run,
         so the loader imports it on the task thread; whatever the script
-        raises is normalised into ``AgentFileError`` (with the original
+        raises is normalised into ``SeaError`` (with the original
         raise as the cause), so the runner reports a failed task with
         the diagnostic naming the file rather than "stopped by user".
         """
@@ -177,7 +177,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             seas_md.unlink()
             sea_commands._reset_for_tests()
         assert result.success is False, result
-        assert "Task failed: AgentFileError" in result.text, result
+        assert "Task failed: SeaError" in result.text, result
         assert "boom_sea.py' failed to import" in result.text, result
         assert "KeyboardInterrupt: boom at import" in result.text, result
         assert "stopped" not in result.text.lower(), result
@@ -205,7 +205,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         """The bundled ``/sh`` agent: Bash + finish, its own prompt, no worktree.
 
         The run is dispatched exactly as the ``/sh`` slash command
-        dispatches it — the SEA path as ``extension_agent_path`` with
+        dispatches it — the SEA path as ``sea_path`` with
         the daemon defaults (``use_worktree=True``) that the script's
         ``settings()`` must override.
         """
@@ -214,7 +214,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         result = sorcar.run(
             "printf 'hello from sh'",
             work_dir=self.repo,
-            extension_agent_path=_SH_SEA_PATH,
+            sea_path=_SH_SEA_PATH,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -300,10 +300,10 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
 
     def test_agent_script_profile_setting_wins_over_the_wire_value(self) -> None:
         """A script's ``settings()["tool_profile"]`` overrides the client's ``tool_profile``."""
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "shell_profile_agent.py",
             '''
-            """Agent script choosing the shell profile."""
+            """SEA choosing the shell profile."""
 
             from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -321,7 +321,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task whose script picks the profile",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             tool_profile="bash",
             use_worktree=False,
             endpoint_file=self.endpoint_file,
@@ -332,10 +332,10 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
 
     def test_wrong_typed_profile_setting_fails_task(self) -> None:
         """A non-string ``settings()["tool_profile"]`` stops the task."""
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "bad_profile_agent.py",
             '''
-            """Agent script with a wrong-typed profile setting."""
+            """SEA with a wrong-typed profile setting."""
 
             from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -353,16 +353,16 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with a broken profile setting",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False
-        # The diagnostic is the SettingsError text naming the key; the
+        # The diagnostic is the SeaError text naming the key; the
         # path is quoted with repr (Windows backslashes come doubled).
         assert (
-            f"agent script {agent_path!r}: settings()['tool_profile'] must be str, got int"
+            f"SEA {sea_path!r}: settings()['tool_profile'] must be str, got int"
         ) in result.text, result.text
         assert calls == []
 

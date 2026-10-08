@@ -110,7 +110,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ALLOW, Verdict, WorkerSea
 from kiss.agents.sorcar.sea_settings import SeaError
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.kiss_agent import KISSAgent
@@ -120,7 +120,7 @@ from kiss.core.utils import substitute_prompt_args
 logger = logging.getLogger(__name__)
 
 
-class SkilloptSea(BaseSea):
+class SkilloptSea(WorkerSea):
     """The ``/skillopt`` SEA."""
 
     def description(self) -> str:
@@ -141,7 +141,6 @@ class SkilloptSea(BaseSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """A worker with the shell tools, on the real checkout, running :data:`SYSTEM_PROMPT`."""
         return settings | {
-            "kind": "worker",
             "tool_profile": "shell",
         }
 
@@ -398,7 +397,6 @@ class SeaTarget(Target):
         }
         for setting, key in (
             ("tool_profile", "tool_profile"),
-            ("allow_fan_out", "is_parallel"),
             ("use_web_tools", "web_tools"),
             ("use_memory", "use_memory"),
             ("docker_image", "docker_image"),
@@ -726,13 +724,13 @@ class _TrajectoryRecorder:
                 self.trajectory.append(_message_summary(message, self.limit))
         return self.inner_llm_hook(messages) if self.inner_llm_hook is not None else messages
 
-    def tool_call(self, name: str, args: dict[str, Any]) -> str:
+    def tool_call(self, name: str, args: dict[str, Any]) -> Verdict:
         """Record a tool call (the ``tool_call_hook``), then defer to the target's hook."""
         rendered = json.dumps(args, ensure_ascii=False, default=str)
         self.trajectory.append(
             {"role": "assistant", "text": f"[call {name}] {rendered}"[: self.limit]}
         )
-        return self.inner_tool_hook(name, args) if self.inner_tool_hook is not None else "OK"
+        return self.inner_tool_hook(name, args) if self.inner_tool_hook is not None else ALLOW
 
 
 def run_rollout(

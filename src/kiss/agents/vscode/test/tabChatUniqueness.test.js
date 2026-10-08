@@ -60,12 +60,11 @@ function send(win, data) {
 }
 
 function tabBarIds(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; count each tab once.
-  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
-    .filter(el => !!el.dataset.tabId)
-    .map(el => el.dataset.tabId);
-  return ids.filter((id, i) => ids.indexOf(id) === i);
+  // Every open tab, in tab order.  Chat tabs have no row of their own
+  // any more (the Chats panel picks them), so the tab records are the
+  // source; Array.from re-creates the list in this realm so that
+  // deepStrictEqual's prototype check passes.
+  return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
 function snapshotEntry(tabId, title, chatId) {

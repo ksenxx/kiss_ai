@@ -119,10 +119,10 @@ class TestSubagentRowsExcludedFromChatContext:
     def _insert_subagent_row(
         self, parent_task_id: str, chat_id: str, task: str, result: str,
     ) -> str:
-        """Persist a row that simulates one ``_run_tasks_parallel`` worker.
+        """Persist a row that simulates one ``run_parallel`` sub-task.
 
-        Matches the ``extra`` payload written by
-        :meth:`ChatSorcarAgent._run_tasks_parallel`'s worker thread:
+        Matches the ``extra`` payload a :class:`ChatSorcarAgent` with
+        ``_subagent_info`` set writes:
         ``{"subagent": {"parent_task_id": <id>}, ...}``.
         """
         sub_id, _ = _add_task(
@@ -192,10 +192,10 @@ class TestSubagentRowsExcludedFromChatContext:
     def test_run_parallel_end_to_end_excludes_subagent_rows(self) -> None:
         """End-to-end: parent agent + 3 real sub-agents → context has 1 entry.
 
-        Simulates the exact flow ``_run_tasks_parallel`` uses (without the
-        thread pool / printer) by spawning sub-agents that
-        :meth:`resume_chat_by_id` the parent's chat and set the same
-        ``_subagent_info`` field the production worker sets.
+        Simulates the flow a ``run_parallel`` child goes through (without
+        the daemon) by spawning sub-agents that :meth:`resume_chat_by_id`
+        the parent's chat and set the same ``_subagent_info`` field the
+        production sub-task sets.
         """
         model_config: dict[str, Any] = {
             "base_url": self.url, "api_key": "test-key",

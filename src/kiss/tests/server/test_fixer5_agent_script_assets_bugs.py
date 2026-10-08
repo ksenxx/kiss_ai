@@ -2,14 +2,14 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Fixer-5 agent-script / user-asset bugs (findings F5-07, F5-08).
+"""Fixer-5 SEA / user-asset bugs (findings F5-07, F5-08).
 
-F5-07 — ``apply_agent_overrides`` treats the agent script (the only
+F5-07 — ``apply_sea`` treats the SEA (the only
 loader of caller-supplied tool code) as untrusted; a broken script
 must stop the task with a DIAGNOSTIC error.  Every import-time
 failure — including ``KeyboardInterrupt`` and ``SystemExit``, which
 are not ``Exception`` subclasses — must surface as
-:exc:`~kiss.agents.sorcar.agent_file.AgentFileError`: the loader's production
+:exc:`~kiss.agents.sorcar.sea_apply.SeaError`: the loader's production
 caller sits inside an ``except KeyboardInterrupt`` branch that cancels
 the whole agent task, so letting either escape unwrapped would report
 a broken script as a task cancellation (or kill the thread) instead of
@@ -28,30 +28,30 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from kiss.agents.sorcar.agent_file import AgentFileError, apply_agent_overrides
-from kiss.agents.sorcar.sea_commands import SeaScriptError
+from kiss.agents.sorcar.sea_apply import apply_sea
+from kiss.agents.sorcar.sea_settings import SeaError
 from kiss.server.user_assets import ensure_user_asset_from_default
 
 
-def _load_tools(agent_path: Any) -> list:
-    """Apply *agent_path*'s overrides and return what its staged ``tools`` hook yields.
+def _load_tools(sea_path: Any) -> list:
+    """Apply *sea_path*'s overrides and return what its staged ``tools`` hook yields.
 
     The hook (the SEA's ``tools`` method) is applied to an empty
     toolset, as the daemon applies it to the run's own; a SEA without
     the method stages no hook and yields no tools.
     """
-    cmd: dict[str, Any] = {"agentPath": agent_path}
-    apply_agent_overrides(cmd)
+    cmd: dict[str, Any] = {"seaPath": sea_path}
+    apply_sea(cmd)
     hook = cmd.get("toolsHook")
     return list(hook([])) if hook is not None else []
 
 
 class TestBrokenAgentScriptRaisesDiagnostic(unittest.TestCase):
-    """F5-07: every broken agent script raises a diagnostic error, only that.
+    """F5-07: every broken SEA raises a diagnostic error, only that.
 
-    Loading and staging the script raises ``AgentFileError``; the
+    Loading and staging the script raises ``SeaError``; the
     staged ``tools`` hook, run later by the agent, raises
-    ``SeaScriptError`` (an ``Exception``, never the raw
+    ``SeaError`` (an ``Exception``, never the raw
     ``BaseException`` the script threw).
     """
 
@@ -71,10 +71,10 @@ class TestBrokenAgentScriptRaisesDiagnostic(unittest.TestCase):
         path = self._write("raise KeyboardInterrupt('module interrupt')\n")
         try:
             _load_tools(path)
-        except AgentFileError as err:
+        except SeaError as err:
             self.assertIn("failed to import", str(err))
             self.assertIn("KeyboardInterrupt", str(err))
-            # The loader's SeaScriptError sits between the diagnostic and
+            # The loader's SeaError sits between the diagnostic and
             # the original raise; ``task_runner._stop_interrupt_wrapped``
             # walks the whole cause chain, so the interrupt must be in it.
             causes: list[BaseException] = []
@@ -88,37 +88,37 @@ class TestBrokenAgentScriptRaisesDiagnostic(unittest.TestCase):
             )
         except BaseException as err:  # noqa: BLE001 — the bug under test
             self.fail(
-                f"apply_agent_overrides let {type(err).__name__} escape "
+                f"apply_sea let {type(err).__name__} escape "
                 "unwrapped; the task runner would treat it as a task "
                 "cancellation instead of a diagnostic task error",
             )
         else:
-            self.fail("broken agent script must raise AgentFileError")
+            self.fail("broken SEA must raise SeaError")
 
     def test_system_exit_in_script_raises_agent_file_error(self) -> None:
         path = self._write("raise SystemExit(3)\n")
-        with self.assertRaisesRegex(AgentFileError, "SystemExit"):
+        with self.assertRaisesRegex(SeaError, "SystemExit"):
             _load_tools(path)
 
     def test_plain_exception_in_script_raises_agent_file_error(self) -> None:
         path = self._write("raise RuntimeError('boom')\n")
-        with self.assertRaisesRegex(AgentFileError, "RuntimeError: boom"):
+        with self.assertRaisesRegex(SeaError, "RuntimeError: boom"):
             _load_tools(path)
 
     def test_syntax_error_in_script_raises_agent_file_error(self) -> None:
         path = self._write("def broken(:\n")
-        with self.assertRaisesRegex(AgentFileError, "SyntaxError"):
+        with self.assertRaisesRegex(SeaError, "SyntaxError"):
             _load_tools(path)
 
     def test_missing_script_raises_agent_file_error(self) -> None:
-        with self.assertRaisesRegex(AgentFileError, "not an existing"):
+        with self.assertRaisesRegex(SeaError, "not an existing"):
             _load_tools(str(self.root / "nowhere.py"))
 
-    def test_non_string_agent_path_field_raises_agent_file_error(self) -> None:
-        with self.assertRaisesRegex(AgentFileError, "path string"):
+    def test_non_string_sea_path_field_raises_agent_file_error(self) -> None:
+        with self.assertRaisesRegex(SeaError, "path string"):
             _load_tools(42)
 
-    def test_empty_agent_path_field_yields_no_tools(self) -> None:
+    def test_empty_sea_path_field_yields_no_tools(self) -> None:
         self.assertEqual(_load_tools(None), [])
         self.assertEqual(_load_tools(""), [])
 
@@ -141,8 +141,8 @@ class Sea(BaseSea):
         # ``toolsHook`` callable (hooks are always staged, so they are not
         # listed as overrides); the caller's tool profile is left alone (no
         # ``toolProfile`` override, no legacy ``appendBasicTools`` field).
-        cmd: dict[str, Any] = {"agentPath": path}
-        self.assertEqual(apply_agent_overrides(cmd), set())
+        cmd: dict[str, Any] = {"seaPath": path}
+        self.assertEqual(apply_sea(cmd), set())
         staged = cmd["toolsHook"]([])
         self.assertEqual([t.__name__ for t in staged], ["greet"])
         self.assertEqual(staged[0](name="bob"), "hi bob")
@@ -162,8 +162,8 @@ class Sea(BaseSea):
             "    \"\"\"Say hi.\"\"\"\n"
             "    return f'hi {name}'\n"
         )
-        cmd: dict[str, Any] = {"agentPath": path}
-        self.assertEqual(apply_agent_overrides(cmd), set())
+        cmd: dict[str, Any] = {"seaPath": path}
+        self.assertEqual(apply_sea(cmd), set())
         # No ``tools()`` method: the staged hook hands the toolset back
         # unchanged (the module-level ``greet`` is not picked up).
         self.assertEqual(cmd["toolsHook"]([]), [])
@@ -177,7 +177,7 @@ class Sea(BaseSea):
     ) -> None:
         # Validating the returned entries must never run user code
         # (e.g. a raising ``__repr__``) unguarded: any escape from the
-        # validation must surface as SeaScriptError, not as the raw
+        # validation must surface as SeaError, not as the raw
         # BaseException (which the task runner may misread as a
         # cancellation).
         path = self._write(
@@ -194,13 +194,13 @@ class Sea(BaseSea):
         return tools + [_EvilRepr()]
 '''
         )
-        with self.assertRaisesRegex(SeaScriptError, "list of tool callables"):
+        with self.assertRaisesRegex(SeaError, "list of tool callables"):
             _load_tools(path)
 
     def test_raising_exception_str_still_yields_agent_file_error(self) -> None:
         # Building the diagnostic itself must not run raising untrusted
         # code: an exception whose ``__str__`` raises (here a
-        # KeyboardInterrupt) must still surface as AgentFileError with
+        # KeyboardInterrupt) must still surface as SeaError with
         # the type-name-only fallback message.
         path = self._write(
             "class _EvilStr(Exception):\n"
@@ -209,14 +209,14 @@ class Sea(BaseSea):
             "\n"
             "raise _EvilStr()\n"
         )
-        with self.assertRaisesRegex(AgentFileError, "_EvilStr"):
+        with self.assertRaisesRegex(SeaError, "_EvilStr"):
             _load_tools(path)
 
     def test_nul_byte_path_raises_agent_file_error(self) -> None:
         # ``Path.is_file`` raises ValueError on an embedded NUL byte;
         # the loader must report the standard diagnostic instead of
         # leaking the ValueError.
-        with self.assertRaisesRegex(AgentFileError, "not an existing"):
+        with self.assertRaisesRegex(SeaError, "not an existing"):
             _load_tools("bad\x00tools.py")
 
     def test_raising_iter_in_tools_result_raises_sea_script_error(
@@ -240,7 +240,7 @@ class Sea(BaseSea):
         return _EvilList(tools + [ok])
 '''
         )
-        with self.assertRaisesRegex(SeaScriptError, r"tools\(\).*broken list.*SystemExit"):
+        with self.assertRaisesRegex(SeaError, r"tools\(\).*broken list.*SystemExit"):
             _load_tools(path)
 
 

@@ -50,25 +50,25 @@ class TestGetAvailableModels:
             os.environ["OPENROUTER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             selected = get_default_model()
-            assert selected == "openrouter/anthropic/claude-opus-4.7"
+            assert selected == "openrouter/anthropic/claude-opus-5.5"
             assert selected in MODEL_INFO
 
             os.environ["GEMINI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             selected = get_default_model()
-            assert selected == "gemini-3.6-flash"
+            assert selected == "gemini-3.8-flash"
             assert selected in MODEL_INFO
 
             os.environ["OPENAI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             selected = get_default_model()
-            assert selected == "gpt-5.6-sol-medium"
+            assert selected == "gpt-6.1-sol-medium"
             assert selected in MODEL_INFO
 
             os.environ["ANTHROPIC_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             selected = get_default_model()
-            assert selected == "claude-opus-4-7"
+            assert selected == "claude-opus-5-5"
             assert selected in MODEL_INFO
         finally:
             for k in env_keys:

@@ -134,12 +134,14 @@ function clickSend(win) {
   click(win, win.document.getElementById('send-btn'));
 }
 
+// Put chat *tabId* on screen: the Chats-panel pick (there is no row of
+// chat tabs any more), which retires nothing.
 function activateTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} is open`,
   );
-  assert.ok(el, `tab ${tabId} is in the tab bar`);
-  click(win, el);
+  win._testApi.switchToTab(tabId);
   assert.strictEqual(win._testApi.getActiveTabId(), tabId);
 }
 

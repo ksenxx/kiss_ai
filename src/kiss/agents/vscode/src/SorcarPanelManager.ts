@@ -241,9 +241,7 @@ export class SorcarPanelManager {
         // revival); take the chat binding from it — see
         // _boundRegistryTabs.
         const bound = this._boundRegistryTabs.get(tabId);
-        const dup = bound
-          ? [...this._panels.values()].find(cp => cp.chatId === bound.chatId)
-          : undefined;
+        const dup = bound ? this._panelForChat(bound.chatId) : undefined;
         if (bound && dup) {
           // A history open of this tab's chat raced the revival: it
           // found no panel yet and opened one resuming the chat. One
@@ -272,6 +270,15 @@ export class SorcarPanelManager {
         return Promise.resolve();
       },
     });
+  }
+
+  /** The open panel showing chat *chatId* (one chat, one panel), if any. */
+  private _panelForChat(chatId: string): ChatPanel | undefined {
+    if (!chatId) return undefined;
+    for (const cp of this._panels.values()) {
+      if (cp.chatId === chatId) return cp;
+    }
+    return undefined;
   }
 
   /** How many chat panels are open. */
@@ -552,9 +559,7 @@ export class SorcarPanelManager {
     }
     for (const entry of entries) {
       if (this._panels.has(entry.tabId)) continue;
-      const dup = entry.chatId
-        ? [...this._panels.values()].find(cp => cp.chatId === entry.chatId)
-        : undefined;
+      const dup = this._panelForChat(entry.chatId);
       // Skip a chat some open panel already shows — UNLESS the
       // registry DISPLACED that panel's tab (one tab per chat, the
       // newest bind wins: the panel's registry-confirmed tab is no
@@ -635,20 +640,14 @@ export class SorcarPanelManager {
     }
   }
 
-  /**
-   * Mark terminal teardown: panel disposals from here on (deactivate,
-   * window reload) are not user closes and keep the chats registered.
-   */
-  public markShutdown(): void {
-    this._shuttingDown = true;
-  }
-
   public dispose(): void {
     // Terminal teardown (deactivate / window reload): dispose the
     // controllers but LEAVE the panels standing. Disposing them here
     // would close the editor tabs the workbench is about to persist,
-    // defeating the serializer's revival on the next load.
-    this.markShutdown();
+    // defeating the serializer's revival on the next load.  Panel
+    // disposals from here on are not user closes and keep the chats
+    // registered.
+    this._shuttingDown = true;
     for (const cp of [...this._panels.values()]) {
       cp.suppressCloseTab = true;
       cp.controller.dispose();
@@ -904,9 +903,10 @@ export class SorcarPanelManager {
    * panel's clicks.
    *
    * @param event The chat to open — backend chat id ('' or absent for
-   *     a fresh one), the task to scroll to, the panel title, and (for
+   *     a fresh one), the task to scroll to, the panel title, (for
    *     fresh chats) the opener's composer draft to seed the new
-   *     panel's textarea with.
+   *     panel's textarea with, and onlyIfMissing to leave a panel
+   *     already bound to the chat untouched.
    */
   public openChat(event: {
     chatId?: string;
@@ -914,6 +914,7 @@ export class SorcarPanelManager {
     title?: string;
     pendingText?: string;
     autoSubmit?: boolean;
+    onlyIfMissing?: boolean;
   }): void {
     const chatId = event.chatId ? String(event.chatId) : '';
     if (chatId) {
@@ -921,19 +922,20 @@ export class SorcarPanelManager {
       // has an editor tab reveals that tab (the daemon registry
       // enforces the same one-tab-per-chat invariant) and brings the
       // clicked task on screen instead of leaving the panel parked on
-      // whatever task it was showing.
-      for (const other of this._panels.values()) {
-        if (other.chatId === chatId) {
-          other.panel.reveal();
-          if (
-            event.taskId !== undefined &&
-            event.taskId !== null &&
-            event.taskId !== ''
-          ) {
-            other.controller.showTask(String(event.taskId));
-          }
-          return;
+      // whatever task it was showing. An expanded history panel only
+      // wants the chat on screen somewhere: it leaves the tab alone.
+      const other = this._panelForChat(chatId);
+      if (other) {
+        if (event.onlyIfMissing) return;
+        other.panel.reveal();
+        if (
+          event.taskId !== undefined &&
+          event.taskId !== null &&
+          event.taskId !== ''
+        ) {
+          other.controller.showTask(String(event.taskId));
         }
+        return;
       }
     }
     // The Apps subpanel's connect launch: a fresh chat whose first

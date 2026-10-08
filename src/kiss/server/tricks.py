@@ -48,9 +48,7 @@ from kiss.server.user_assets import ensure_user_asset_from_default
 _SENTENCE_BOUNDARY = re.compile(r"[.!?]\s+")
 
 # CommonMark §2.4 backslash escapes: only ASCII punctuation may be
-# escaped.  Byte-for-byte the character class of ``unescapeMarkdown``
-# in ``SorcarTab.ts``, so the two parsers can never disagree on which
-# ``\X`` sequences are decoration and which are literal text.
+# escaped; a backslash before anything else is literal text.
 _MARKDOWN_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>|~\"'$%&,/:;=?@^])")
 # The inverse for writing: a backslash that *would* be read as an
 # escape is doubled so the body round-trips through the parser above.
@@ -83,10 +81,9 @@ def _parse_trick_sections(text: str) -> list[str]:
     Bodies are trimmed and backslash-unescaped (``mdformat`` writes
     ``<<x>>`` as ``\\<<x>>`` and ``snake_case`` as ``snake\\_case``;
     the trick the author wrote is what every surface must show);
-    empty bodies are skipped.  Mirrors the TypeScript
-    ``readMarkdownSections`` parser used by ``SorcarTab.ts`` — the VS
-    Code webview's Trick panel — so the remote webapp's panel and the
-    daemon's ghost-text ``trick`` completions offer the same text.
+    empty bodies are skipped.  The panel and the daemon's ghost-text
+    ``trick`` completions both read through this parser, so they
+    offer the same text.
     """
     tricks: list[str] = []
     sections = re.split(r"^##\s+", text, flags=re.MULTILINE)
@@ -186,6 +183,27 @@ def read_tricks() -> list[str]:
     return read_tricks_data()["tricks"]
 
 
+class _TrickError(Exception):
+    """User-facing refusal of a ``MY_INJECTION.md`` edit; ``str(e)`` is the message."""
+
+
+def _read_my_injection(verb: str) -> tuple[Path, str]:
+    """Seed ``~/.kiss/MY_INJECTION.md`` if missing and return ``(path, text)``.
+
+    The shared prologue of the add/delete/edit helpers, called under
+    :data:`_APPEND_LOCK`.  Raises :class:`_TrickError` when ``~/.kiss/``
+    is not writable (the message says the caller could not *verb* the
+    file) or when the file is not UTF-8 text.
+    """
+    user_path = ensure_user_asset_from_default("MY_INJECTION.md", DEFAULT_MY_INJECTION)
+    if user_path is None:
+        raise _TrickError(f"Could not {verb} ~/{HOME_DIR}/MY_INJECTION.md")
+    try:
+        return user_path, user_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise _TrickError(f"~/{HOME_DIR}/MY_INJECTION.md is not UTF-8 text") from None
+
+
 def delete_my_injection_trick(text: str) -> str | None:
     """Remove the ``## Trick`` section(s) whose body is *text* from ``~/.kiss/MY_INJECTION.md``.
 
@@ -203,9 +221,7 @@ def delete_my_injection_trick(text: str) -> str | None:
 
     Args:
         text: The promptlet body as shown in the panel.  Surrounding
-            whitespace is trimmed and CRLF line breaks are read as LF
-            (the VS Code page lists a CRLF file's bodies verbatim, this
-            module's parser normalises them).
+            whitespace is trimmed and CRLF line breaks are read as LF.
 
     Returns:
         ``None`` on success, else a user-facing error message: an
@@ -216,15 +232,10 @@ def delete_my_injection_trick(text: str) -> str | None:
     """
     body = text.replace("\r\n", "\n").strip()
     with _APPEND_LOCK:
-        user_path = ensure_user_asset_from_default(
-            "MY_INJECTION.md", DEFAULT_MY_INJECTION,
-        )
-        if user_path is None:
-            return f"Could not read ~/{HOME_DIR}/MY_INJECTION.md"
         try:
-            existing = user_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return f"~/{HOME_DIR}/MY_INJECTION.md is not UTF-8 text"
+            user_path, existing = _read_my_injection("read")
+        except _TrickError as e:
+            return str(e)
         preamble, sections = _split_sections(existing)
         kept = [preamble]
         removed = 0
@@ -305,15 +316,10 @@ def edit_my_injection_trick(text: str, new_text: str) -> str | None:
     if (error := _reject_new_body(new_body)) is not None:
         return error
     with _APPEND_LOCK:
-        user_path = ensure_user_asset_from_default(
-            "MY_INJECTION.md", DEFAULT_MY_INJECTION,
-        )
-        if user_path is None:
-            return f"Could not read ~/{HOME_DIR}/MY_INJECTION.md"
         try:
-            existing = user_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return f"~/{HOME_DIR}/MY_INJECTION.md is not UTF-8 text"
+            user_path, existing = _read_my_injection("read")
+        except _TrickError as e:
+            return str(e)
         preamble, sections = _split_sections(existing)
         bodies = [_parse_trick_sections(s) for s in sections]
         if [body] not in bodies:
@@ -362,15 +368,10 @@ def append_my_injection_trick(text: str) -> str | None:
     if (error := _reject_new_body(body)) is not None:
         return error
     with _APPEND_LOCK:
-        user_path = ensure_user_asset_from_default(
-            "MY_INJECTION.md", DEFAULT_MY_INJECTION,
-        )
-        if user_path is None:
-            return f"Could not write ~/{HOME_DIR}/MY_INJECTION.md"
         try:
-            existing = user_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return f"~/{HOME_DIR}/MY_INJECTION.md is not UTF-8 text"
+            user_path, existing = _read_my_injection("write")
+        except _TrickError as e:
+            return str(e)
         if body in _parse_trick_sections(existing):
             return f"That promptlet is already in ~/{HOME_DIR}/MY_INJECTION.md"
         escaped = _MARKDOWN_ESCAPABLE_BACKSLASH.sub(r"\\\\", body)

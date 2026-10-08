@@ -555,7 +555,7 @@ class TestBashBufferIsolation(unittest.TestCase):
         bs = printer._bash_state
         assert bs.buffer == []
         assert bs.timer is None
-        assert bs.generation == 0
+        assert bs.streamed is False
 
     def test_offsets_default_to_zero(self) -> None:
         """tokens_offset, budget_offset, steps_offset default to 0."""

@@ -39,6 +39,8 @@ function makePage(clipboardImpl) {
   // The real vendored markdown renderer: tips only get a copy button
   // when marked turns ```blocks``` into <pre><code>.
   win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
+  // tips.js copies through PanelCopy.copyText (panelCopy.js).
+  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(
     fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf8') +
       '\n//# sourceURL=audit0903-tips.js',
