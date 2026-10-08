@@ -185,7 +185,9 @@ def test_user_response_is_a_right_aligned_user_message(chat_page: Page) -> None:
         gap: p.left + parent.clientWidth - parseFloat(s.paddingRight) - r.right,
       };
     }""")
-    assert geometry["width"] == pytest.approx(0.8, abs=0.01), geometry
+    # User panels leave a tenth of the chat's width clear on their left
+    # (`.ev.user-msg { width: 90% }` in main.css).
+    assert geometry["width"] == pytest.approx(0.9, abs=0.01), geometry
     assert geometry["gap"] == pytest.approx(0, abs=1), geometry
     # The user can still explicitly fold their response.
     response.locator(".task-panel-h").click()
