@@ -68,6 +68,7 @@ import time
 from pathlib import Path
 
 GATE = Path({gate!r})
+GATE.with_name("started").touch()  # proves THIS revision is the one executing
 deadline = time.monotonic() + 10
 while not GATE.exists() and time.monotonic() < deadline:
     time.sleep(0.01)
@@ -115,10 +116,10 @@ def test_concurrent_executions_of_one_file_keep_the_good_module(tmp_path: Path) 
 
     broken = threading.Thread(target=_run_broken)
     broken.start()
-    _wait_for(
-        lambda: any(n.startswith("_kiss_sea_flaky_sea_") for n in list(sys.modules)),
-        "the broken revision to register its module",
-    )
+    # The module is registered before its source is read, so wait for
+    # the broken revision's own marker: only then is the rewrite below
+    # certain to be read by the second thread, not the first.
+    _wait_for(gate.with_name("started").exists, "the broken revision to start executing")
     sea.write_text(_GOOD_REVISION, encoding="utf-8")
     good = threading.Thread(target=_run_good)
     good.start()
