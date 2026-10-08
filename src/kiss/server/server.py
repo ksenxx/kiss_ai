@@ -267,30 +267,6 @@ def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
     return _coalesce_events(evs)
 
 
-def broadcast_to_conn(
-    printer: Any,
-    event: dict[str, Any],
-    conn_id: str,
-) -> None:
-    """Broadcast *event* on *printer*, stamped with *conn_id* when non-empty.
-
-    Stamping ``connId`` makes the printer deliver the event ONLY to the
-    requesting connection (the VS Code window / browser tab whose user
-    triggered the command), so one window's request never repaints — or
-    pops a banner in — another window's UI; ``""`` broadcasts to all.
-    Shared by :meth:`VSCodeServer._broadcast_to_conn` and
-    ``RemoteAccessServer._broadcast_to_conn`` (web_server.py).
-
-    Args:
-        printer: Any printer exposing ``broadcast(event)``.
-        event: The event payload to broadcast (mutated in place).
-        conn_id: Requesting connection id (``""`` reaches all).
-    """
-    if conn_id:
-        event["connId"] = conn_id
-    printer.broadcast(event)
-
-
 def _subagent_is_done(sub_task_id: Any) -> bool:
     """True when the sub-agent owning *sub_task_id* is no longer running.
 
@@ -996,19 +972,6 @@ class VSCodeServer(
             if tab_id is not None:
                 event["tabId"] = tab_id
             self._broadcast_to_conn(event, cmd.get("connId", ""))
-
-    def _broadcast_to_conn(
-        self,
-        event: dict[str, Any],
-        conn_id: str,
-    ) -> None:
-        """Broadcast *event*, stamped with *conn_id* when non-empty.
-
-        Args:
-            event: The event payload to broadcast (mutated in place).
-            conn_id: Requesting connection id (``""`` reaches all).
-        """
-        broadcast_to_conn(self.printer, event, conn_id)
 
     def _refresh_default_model(self, valid: set[str] | None = None) -> None:
         """Re-read the persisted last model and adopt it as the default.

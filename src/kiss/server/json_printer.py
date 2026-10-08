@@ -1768,6 +1768,22 @@ class JsonPrinter(Printer):
         self._replay_slot.future = None
         return slot
 
+    def _record_task_event(self, event: dict[str, Any]) -> None:
+        """Record a task-id-injected event and any file path it changed.
+
+        The recording step every ``broadcast`` implementation performs
+        for an event filed under a task: the event joins the task's
+        in-memory recording and, for a mutating ``tool_call``, its path
+        is remembered for the end-of-task cross-repo auto-commit
+        (:meth:`pop_changed_paths`).
+
+        Args:
+            event: A broadcast event, already task-id-injected.
+        """
+        with self._lock:
+            self._record_event(event)
+            self._track_changed_path(event)
+
     def _record_event(self, event: dict[str, Any]) -> None:
         """Append *event* to the active recording for its task.
 
@@ -1852,9 +1868,7 @@ class JsonPrinter(Printer):
                 self._keep_tab_stamped_task_event(*kept)
             return
         event = self._inject_task_id(event)
-        with self._lock:
-            self._record_event(event)
-            self._track_changed_path(event)
+        self._record_task_event(event)
         self._persist_event(event)
 
     def _cost_with_offset(self, cost: Any) -> Any:

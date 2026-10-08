@@ -323,6 +323,30 @@ def _opt_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def broadcast_to_conn(
+    printer: Any,
+    event: dict[str, Any],
+    conn_id: str,
+) -> None:
+    """Broadcast *event* on *printer*, stamped with *conn_id* when non-empty.
+
+    Stamping ``connId`` makes the printer deliver the event ONLY to the
+    requesting connection (the VS Code window / browser tab whose user
+    triggered the command), so one window's request never repaints — or
+    pops a banner in — another window's UI; ``""`` broadcasts to all.
+    Shared by :meth:`_CommandsMixin._broadcast_to_conn` and
+    ``RemoteAccessServer._broadcast_to_conn`` (web_server.py).
+
+    Args:
+        printer: Any printer exposing ``broadcast(event)``.
+        event: The event payload to broadcast (mutated in place).
+        conn_id: Requesting connection id (``""`` reaches all).
+    """
+    if conn_id:
+        event["connId"] = conn_id
+    printer.broadcast(event)
+
+
 class _CommandsMixin:
     """Methods that implement frontend command handlers."""
 
@@ -418,9 +442,6 @@ class _CommandsMixin:
             task_id: str | None = None,
             create: bool = False,
         ) -> int: ...
-        def _broadcast_to_conn(
-            self, event: dict[str, Any], conn_id: str,
-        ) -> None: ...
         def _ensure_complete_worker(self) -> None: ...
         def _get_input_history(self, conn_id: str = "") -> None: ...
         def _get_adjacent_task(
@@ -462,6 +483,14 @@ class _CommandsMixin:
         ) -> dict[str, Any]: ...
         def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
 
+    def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
+        """Broadcast *event*, stamped with *conn_id* when non-empty.
+
+        Args:
+            event: The event payload to broadcast (mutated in place).
+            conn_id: Requesting connection id (``""`` reaches all).
+        """
+        broadcast_to_conn(self.printer, event, conn_id)
 
     def _apply_new_work_dir(self, new_dir: str, if_unset: bool = False) -> None:
         """Adopt *new_dir* as the one global working directory.
