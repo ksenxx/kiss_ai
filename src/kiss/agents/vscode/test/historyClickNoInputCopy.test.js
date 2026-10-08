@@ -95,23 +95,19 @@ function taskPanelText(win) {
   return text ? text.textContent : '';
 }
 
+// The open chat tabs (no row renders them any more: the chat on
+// screen is the one picked in the Chats panel, the others are hidden).
+function chatTabs(win) {
+  return win._testApi
+    .openTabs()
+    .filter(t => !t.isSubagentTab && !t.isContentTab);
+}
+
 /** The active tab's label: it names the task the user is looking at. */
 function activeTabLabel(win) {
-  return win.document.querySelector(
-    '.chat-tab[aria-selected="true"] .chat-tab-label',
-  ).textContent;
-}
-
-// The chat tabs on the main row (the strip under it only lists the
-// group of the chat on screen).
-function chatTabs(win) {
-  return Array.from(win.document.querySelectorAll('#main-tab-list .chat-tab'));
-}
-
-function activeTabLabel(win) {
-  const tab = win.document.querySelector('#tab-list .chat-tab.active');
-  const label = tab && tab.querySelector('.chat-tab-label');
-  return label ? label.textContent : '';
+  const active = win._testApi.getActiveTabId();
+  const tab = win._testApi.openTabs().find(t => t.id === active);
+  return tab ? tab.title : '';
 }
 
 function historyRows(win) {
@@ -187,6 +183,24 @@ function clickOnlyRow(win) {
   rows[0].click();
 }
 
+// A history row for a chat that is not open lands in a FRESH tab, and
+// the idle new chat the user left behind is retired at the same time
+// (nothing was running in it and nothing was typed), so it is the only
+// chat tab left.
+function assertOpenedInFreshTab(win, mode, tabBefore, what) {
+  const active = win._testApi.getActiveTabId();
+  assert.notStrictEqual(
+    active,
+    tabBefore,
+    `${mode.name}: ${what} must create a new tab`,
+  );
+  assert.strictEqual(
+    chatTabs(win).map(t => t.id).join(','),
+    active,
+    `${mode.name}: the idle chat left behind is retired`,
+  );
+}
+
 // --- scenarios -------------------------------------------------------------
 
 // Branch 1: has_events -> resume.  The task text belongs in the read-only task
@@ -196,7 +210,7 @@ function testResumeBranchLeavesInputEmpty(mode) {
   disableWorkspaceFilter(win);
   openSidebar(win);
 
-  const tabsBefore = chatTabs(win).length;
+  const tabBefore = win._testApi.getActiveTabId();
   const s = session({id: 'chat-resume', task_id: 7});
   sendHistory(win, posted, [s]);
   clickOnlyRow(win);
@@ -213,11 +227,7 @@ function testResumeBranchLeavesInputEmpty(mode) {
     s.preview,
     `${mode.name}: the read-only task panel must still show the resumed task`,
   );
-  assert.strictEqual(
-    chatTabs(win).length,
-    tabsBefore + 1,
-    `${mode.name}: resuming an unopened chat must create a new tab`,
-  );
+  assertOpenedInFreshTab(win, mode, tabBefore, 'resuming an unopened chat');
   const resume = lastMessage(posted, 'resumeSession');
   assert.ok(
     resume,
@@ -225,6 +235,11 @@ function testResumeBranchLeavesInputEmpty(mode) {
   );
   assert.strictEqual(resume.id, 'chat-resume');
   assert.strictEqual(resume.taskId, 7);
+  assert.strictEqual(
+    resume.tabId,
+    win._testApi.getActiveTabId(),
+    `${mode.name}: the resume targets the fresh tab`,
+  );
   assert.ok(!sidebarOpen(win), `${mode.name}: the sidebar must close on click`);
 
   win.close();
@@ -239,7 +254,7 @@ function testFallbackBranchLeavesInputEmpty(mode) {
   disableWorkspaceFilter(win);
   openSidebar(win);
 
-  const tabsBefore = chatTabs(win).length;
+  const tabBefore = win._testApi.getActiveTabId();
   const resumeBefore = countMessages(posted, 'resumeSession');
   sendHistory(win, posted, [
     session({
@@ -265,11 +280,7 @@ function testFallbackBranchLeavesInputEmpty(mode) {
     `${mode.name}: the row still knows the task text, so the read-only task ` +
       `panel must show it even when there is nothing to resume`,
   );
-  assert.strictEqual(
-    chatTabs(win).length,
-    tabsBefore + 1,
-    `${mode.name}: the fallback branch must still open a new tab`,
-  );
+  assertOpenedInFreshTab(win, mode, tabBefore, 'the fallback branch');
   assert.strictEqual(
     countMessages(posted, 'resumeSession'),
     resumeBefore,
@@ -296,6 +307,9 @@ function testSwitchBranchLeavesInputEmpty(mode) {
     task: 'Already open task',
     events: [],
   });
+  // The chat's task is still running: "+" leaves it open in the
+  // background (an idle chat would be retired on leaving it).
+  send(win, {type: 'status', running: true, tabId: ready.tabId});
   win.document.querySelector('#new-chat-btn').click();
   assert.strictEqual(chatTabs(win).length, 2, 'sanity: two tabs are open');
   assert.strictEqual(activeTabLabel(win), 'new chat', 'sanity: new tab active');
@@ -320,14 +334,21 @@ function testSwitchBranchLeavesInputEmpty(mode) {
       `${JSON.stringify(input(win).value)}`,
   );
   assert.strictEqual(
-    chatTabs(win).length,
-    2,
-    `${mode.name}: switching must not create a duplicate tab`,
+    win._testApi.getActiveTabId(),
+    ready.tabId,
+    `${mode.name}: the already-open chat tab must become active`,
   );
   assert.strictEqual(
     activeTabLabel(win),
     'Already open task',
     `${mode.name}: the already-open chat tab must become active`,
+  );
+  // No duplicate tab for the chat; the empty new chat left behind is
+  // retired, so the running chat is the only one open.
+  assert.strictEqual(
+    chatTabs(win).map(t => t.id).join(','),
+    ready.tabId,
+    `${mode.name}: switching must not create a duplicate tab`,
   );
   assert.strictEqual(
     countMessages(posted, 'resumeSession'),
@@ -410,7 +431,7 @@ function testRunningRowWithoutEventsResumes(mode) {
   disableWorkspaceFilter(win);
   openSidebar(win);
 
-  const tabsBefore = chatTabs(win).length;
+  const tabBefore = win._testApi.getActiveTabId();
   const s = session({
     id: 'chat-running',
     task_id: 21,
@@ -442,11 +463,7 @@ function testRunningRowWithoutEventsResumes(mode) {
       `the chat input textbox (#task-input) — got ` +
       `${JSON.stringify(input(win).value)}`,
   );
-  assert.strictEqual(
-    chatTabs(win).length,
-    tabsBefore + 1,
-    `${mode.name}: resuming a running row must open a new tab`,
-  );
+  assertOpenedInFreshTab(win, mode, tabBefore, 'resuming a running row');
   assert.ok(!sidebarOpen(win), `${mode.name}: the sidebar must close on click`);
 
   win.close();

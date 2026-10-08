@@ -218,11 +218,9 @@ class BrowserTabAllSurfacesTest(DaemonLocalHarness):
         _wait(lambda: self._info("sidebar", tab_id)["hasFrame"], "a frame on the sidebar")
         time.sleep(0.5)
         self.assertEqual(self._info("remote1", tab_id)["frames"], 0)
-        # The browser tab belongs to no chat, so it is a top-level entry
-        # on the main tab row.
-        reply = bridge.call(
-            "click", name="remote1", selector=f'#main-tab-list [data-tab-id="{tab_id}"]'
-        )
+        # The browser tab belongs to no chat; on a stacked surface (jsdom)
+        # every content tab is listed on the group strip.
+        reply = bridge.call("click", name="remote1", selector=f'#tab-list [data-tab-id="{tab_id}"]')
         self.assertTrue(reply["found"])
         _wait(partial(self._has_frame, "remote1", tab_id), "a frame on remote1")
 

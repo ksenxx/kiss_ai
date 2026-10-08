@@ -422,11 +422,13 @@ async function runTest() {
     !toastText(win).includes('TOAST_A_COMMIT'),
     "a background tab's commit toast must not show over the tab on screen",
   );
-  const firstTabEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(first)}]`,
+  // Chats have no tab row of their own any more: switch as a Chats-panel
+  // pick would.
+  assert.ok(
+    api.openTabs().some(t => t.id === first),
+    'the first chat must still be open',
   );
-  assert.ok(firstTabEl, 'the first tab must be in the tab bar');
-  firstTabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  api.switchToTab(first);
   assert.strictEqual(api.getActiveTabId(), first);
   send(win, {...hostToast, id: hostToast.id + '-again'});
   assert.ok(
@@ -447,10 +449,7 @@ async function runTest() {
     sticky: true,
   });
   assert.ok(toastText(win).includes('TOAST_FIRST_PROGRESS'));
-  const secondTabEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(second)}]`,
-  );
-  secondTabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  api.switchToTab(second);
   assert.strictEqual(api.getActiveTabId(), second);
   send(win, {type: 'notification', id: 'progress-first', tabId: first, close: true});
   assert.ok(

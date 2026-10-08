@@ -45,7 +45,9 @@ def test_history_task_text_matches_chat_header(
                 )
                 goto_retrying_network_change(page, harness.base_url + "/")
                 page.wait_for_selector("#task-input", state="visible")
-                page.wait_for_selector(".chat-tab")
+                page.wait_for_function(
+                    "window._testApi && window._testApi.getActiveTabId()"
+                )
                 page.click("#activity-tasks")
                 page.evaluate(
                     """([surface, theme]) => {

@@ -751,20 +751,19 @@ async function main() {
         {tabId: 'other-1', chatId: 'c2', title: 'other', workDir: '/ws/other'},
       ],
     });
-    const otherStrip = win.document.querySelector(
-      '.chat-tab[data-tab-id="other-1"]',
+    assert.ok(
+      win._testApi.openTabs().some(t => t.id === 'other-1'),
+      'the adopted tab is listed',
     );
-    assert.ok(otherStrip, 'the adopted tab has a strip');
-    click(win, otherStrip);
+    // Chat tabs have no row of their own: the Chats panel's pick is
+    // switchToTab.
+    win._testApi.switchToTab('other-1');
     const last = ofType(posted, 'listDir').pop();
     assert.ok(last, 'switching tabs re-roots the tree');
     assert.strictEqual(last.path, '/ws/other');
     assert.strictEqual(last.workDir, '/ws/other');
     // Back on the first tab the tree follows again.
-    click(
-      win,
-      win.document.querySelector('.chat-tab[data-tab-id="' + mine + '"]'),
-    );
+    win._testApi.switchToTab(mine);
     assert.strictEqual(
       byId(win, 'explorer-tree').textContent.trim(),
       'No workspace folder',

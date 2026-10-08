@@ -58,12 +58,14 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// The Chats-panel pick: chats have no row of tabs to click any more.
 function clickTab(win, tabId) {
-  const tabEl = win.document.querySelector(
-    `.chat-tab[data-tab-id="${tabId}"]`,
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
   );
-  assert.ok(tabEl, `tab ${tabId} must exist in the tab bar`);
-  tabEl.click();
+  win._testApi.switchToTab(tabId);
+  assert.strictEqual(win._testApi.getActiveTabId(), tabId);
 }
 
 function pickerText(win) {

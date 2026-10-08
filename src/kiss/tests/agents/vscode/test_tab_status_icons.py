@@ -28,6 +28,12 @@ regression in the class wiring (``main.js``) or in the shared
   through ``openSubagentTab {isDone: true}`` as the daemon sends it on
   replay.
 
+There is no row of chat tabs any more: the group strip ``#tab-list``
+lists the chat on screen plus its sub-agent tabs and is displayed only
+when it has more than one entry.  A lone chat's entry is rendered but
+hidden, so the root-tab tests first attach a finished sub-agent (as the
+daemon replays one) to make the chat's header visible on the strip.
+
 The harness page is shared with ``test_history_failed_red_cross.py``.
 """
 
@@ -62,7 +68,7 @@ _PURPLE = "rgb(197, 134, 192)"
 _ICON_PROBE = """
 (tabId) => {
   const tab = document.querySelector(
-    '.chat-tab[data-tab-id=' + JSON.stringify(tabId) + ']');
+    '#tab-list .chat-tab[data-tab-id=' + JSON.stringify(tabId) + ']');
   if (!tab) return {error: 'no tab ' + tabId};
   const icon = tab.querySelector(
     '.chat-tab-spinner, .chat-tab-status, .subagent-indicator');
@@ -96,6 +102,19 @@ def _icon(page, tab_id: str) -> dict:
 
 def _root_tab_id(page) -> str:
     return str(page.evaluate("() => window._testApi.getActiveTabId()"))
+
+
+def _show_strip(page, root_id: str) -> None:
+    """Attach a finished sub-agent to *root_id* so the group strip (the
+    chat's header) is displayed; the chat stays the active tab."""
+    _post(page, {"type": "openSubagentTab", "tab_id": root_id + "__sub_done",
+                 "parent_tab_id": root_id, "description": "finished child",
+                 "task_id": "task-finished-child", "isSubagentTab": True,
+                 "isDone": True})
+    assert _root_tab_id(page) == root_id
+    assert page.evaluate(
+        "() => getComputedStyle(document.getElementById('tab-bar')).display"
+    ) != "none", "the strip must be displayed once the chat has a sub-agent"
 
 
 def _run_task(page, tab_id: str, task_id: str, success: bool) -> None:
@@ -153,6 +172,7 @@ def test_root_tab_spinner_then_green_tick(_browser) -> None:
     context, page = _open_history_page(_browser)
     try:
         tab_id = _root_tab_id(page)
+        _show_strip(page, tab_id)
         assert _icon(page, tab_id)["icon"] is None, "no icon before any task"
 
         _run_task(page, tab_id, "task-ok", success=True)
@@ -177,6 +197,7 @@ def test_root_tab_failed_task_shows_red_cross(_browser) -> None:
     context, page = _open_history_page(_browser)
     try:
         tab_id = _root_tab_id(page)
+        _show_strip(page, tab_id)
         _run_task(page, tab_id, "task-fail", success=False)
         _assert_spinner(_icon(page, tab_id), _GREEN, "chat-tab-spinner")
         _finish_task(page, tab_id, "task-fail")
