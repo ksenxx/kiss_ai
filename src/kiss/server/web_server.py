@@ -10520,7 +10520,7 @@ class RemoteAccessServer:
         from kiss.server.agent_state import AgentState
         from kiss.server.task_runner import (
             _state_owns_thread,
-            inject_keyboard_interrupt,
+            inject_if_owned,
             wait_for_thread_start,
         )
 
@@ -10592,27 +10592,21 @@ class RemoteAccessServer:
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(timeout=min(1.0, remaining))
             if thread.is_alive():
-                # Re-check ownership under STATE_LOCK immediately
-                # before injecting, exactly like the Stop watchdog
-                # (``_force_stop_thread``).  "Still alive" does not
-                # mean "still ignoring the stop": the worker may have
-                # honoured the cooperative event already and be inside
-                # its legitimate cleanup ``finally`` (persisting the
-                # interrupted row can wait out SQLite's busy timeout),
-                # which this sweep exists to let finish — injecting
-                # there aborted the very persistence/broadcast it
-                # wants.  The predicate also refuses while the thread
-                # performs the state's own post-task worktree merge (a
-                # merge is awaited, never stopped) and, because
-                # ``task_thread`` is cleared under the same lock when a
-                # run finishes, closes the window where a recycled
-                # thread ident would route the interrupt into an
-                # unrelated freshly spawned thread.
-                with agent_state.STATE_LOCK:
-                    if _state_owns_thread(state, thread):
-                        tid = thread.ident
-                        if tid is not None:  # pragma: no branch — live thread has ident
-                            inject_keyboard_interrupt(tid)
+                # Ownership is re-checked under STATE_LOCK immediately
+                # before injecting, exactly like the Stop watchdog.
+                # "Still alive" does not mean "still ignoring the
+                # stop": the worker may have honoured the cooperative
+                # event already and be inside its legitimate cleanup
+                # ``finally`` (persisting the interrupted row can wait
+                # out SQLite's busy timeout), which this sweep exists
+                # to let finish — injecting there aborted the very
+                # persistence/broadcast it wants.  The predicate also
+                # refuses while the thread performs the state's own
+                # post-task worktree merge (a merge is awaited, never
+                # stopped).  Unlike the watchdog, the sweep keeps
+                # joining after a refusal: the cleanup must finish
+                # before the process exits.
+                inject_if_owned(thread, partial(_state_owns_thread, state, thread))
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
                 logger.warning(
