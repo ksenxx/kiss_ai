@@ -113,15 +113,25 @@ function testNoCollapsibleHeaderIsBold() {
     '.llm-panel-hdr',
     '.ask-answer-label',
   ];
+  // The headers share one rule block (its selector list names them all),
+  // so a header's declarations are those of the block whose selector
+  // list contains every selector of `sel`.
+  const blocks = [];
+  const blockRe = /([^{}]+)\{([^}]*)\}/g;
+  let bm;
+  while ((bm = blockRe.exec(css))) {
+    blocks.push({
+      selectors: bm[1].split(',').map(x => x.trim().split('\n').pop().trim()),
+      body: bm[2],
+    });
+  }
   for (const sel of headerSelectors) {
-    const re = new RegExp(
-      '\\n' + sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{([^}]*)\\}',
-    );
-    const m = re.exec(css);
+    const wanted = sel.split(',').map(x => x.trim());
+    const m = blocks.find(b => wanted.every(w => b.selectors.includes(w)));
     assert.ok(m, `main.css declares ${sel}`);
     assert.ok(
-      /font-weight:\s*400/.test(m[1]),
-      `${sel} is font-weight 400, got: ${m[1].trim()}`,
+      /font-weight:\s*400/.test(m.body),
+      `${sel} is font-weight 400, got: ${m.body.trim()}`,
     );
   }
   assert.ok(

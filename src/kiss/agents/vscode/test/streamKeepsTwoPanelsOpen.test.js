@@ -180,7 +180,10 @@ function testVisibleStreamKeepsNewestTwoOpen() {
   );
 
   // The end of the task moves the panels into the Trajectory panel as
-  // they are: the same two stay open inside it.
+  // they are: the same open panels stay open inside it.  The seventh,
+  // the empty Thoughts panel opened on spec after the last tool result,
+  // is withdrawn by the result (nothing was ever said into it), as
+  // task_stopped would withdraw it.
   send(win, {
     type: 'result',
     text: 'summary: Done.\nsuccess: true\n',
@@ -192,7 +195,7 @@ function testVisibleStreamKeepsNewestTwoOpen() {
   send(win, {type: 'status', running: false, tabId: tab});
   assert.deepStrictEqual(
     panels(win).map(isCollapsed),
-    [false, true, false, true, false, true, false],
+    [false, true, false, true, false, true],
     'the end of the task leaves the open panels open inside the Trajectory',
   );
   win.close();
