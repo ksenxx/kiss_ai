@@ -16,10 +16,10 @@ KISS Sorcar ships a catalog of **776 models** across **9 provider categories**, 
 
 Current catalog capability totals:
 
-- **751** generation-capable models
+- **750** generation-capable models
 - **588** function-calling-capable models
 - **7** embedding models
-- **10** decision models
+- **11** decision models
 
 Full model list:
 
@@ -420,7 +420,6 @@ Full model list:
 - `openrouter/anthropic/claude-sonnet-5`
 - `openrouter/anthropic/claude-sonnet-5.5`
 - `openrouter/arcee-ai/trinity-large-thinking`
-- `openrouter/baidu/ernie-4.5-vl-424b-a47b`
 - `openrouter/bytedance-seed/seed-1.6`
 - `openrouter/bytedance-seed/seed-1.6-flash`
 - `openrouter/bytedance-seed/seed-2-1-turbo`
@@ -643,7 +642,7 @@ Full model list:
 - `openrouter/openai/o4-mini-high`
 - `openrouter/perceptron/perceptron-mk1`
 - `openrouter/perceptron/perceptron-mk1.5`
-- `openrouter/perplexity/pplx-decider-v1-27b`
+- `openrouter/perplexity/pplx-decider-v1.1-27b`
 - `openrouter/perplexity/sonar`
 - `openrouter/perplexity/sonar-deep-research`
 - `openrouter/perplexity/sonar-pro`
@@ -675,7 +674,6 @@ Full model list:
 - `openrouter/qwen/qwen3-coder-plus`
 - `openrouter/qwen/qwen3-max`
 - `openrouter/qwen/qwen3-max-thinking`
-- `openrouter/qwen/qwen3-next-80b-a3b-instruct`
 - `openrouter/qwen/qwen3-next-80b-a3b-thinking`
 - `openrouter/qwen/qwen3-vl-235b-a22b-instruct`
 - `openrouter/qwen/qwen3-vl-235b-a22b-thinking`
@@ -718,6 +716,7 @@ Full model list:
 - `openrouter/sao10k/l3.3-euryale-70b`
 - `openrouter/stepfun/step-3.5-flash`
 - `openrouter/stepfun/step-3.7-flash`
+- `openrouter/stepfun/step-5-preview`
 - `openrouter/tencent/hunyuan-a13b-instruct`
 - `openrouter/tencent/hy-mt2-1.8b`
 - `openrouter/tencent/hy-mt2-30b-a3b`
@@ -736,6 +735,7 @@ Full model list:
 - `openrouter/unbiased/pareto-26.10-preview`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-decide`
+- `openrouter/upstage/solar-decide-flash`
 - `openrouter/upstage/solar-mini4`
 - `openrouter/upstage/solar-pro-3`
 - `openrouter/upstage/solar-pro4`
