@@ -136,7 +136,7 @@ class TestLocalChannelOnEveryPlatform(IsolatedAsyncioTestCase):
         reader, writer = await open_local_connection(self.server)
         try:
             writer.write(
-                json.dumps({"type": "getDefaultModel"}).encode() + b"\n",
+                json.dumps({"type": "ping"}).encode() + b"\n",
             )
             await writer.drain()
             line = await asyncio.wait_for(reader.readline(), 30)
