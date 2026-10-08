@@ -4395,20 +4395,10 @@ def _record_update_snooze(latest: str) -> None:
         "snoozedLatest": latest
         or (last_latest if isinstance(last_latest, str) else ""),
     }
-    cache_path = _update_check_cache_path()
-    tmp = cache_path.with_name(
-        f"{cache_path.name}.{os.getpid()}.{time.time_ns()}.tmp",
-    )
     try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(cache_path)
+        _atomic_write_text(_update_check_cache_path(), json.dumps(payload))
     except Exception:
         logger.debug("Failed to record update snooze", exc_info=True)
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
 
 
 _ASSET_LOAD_GUARD_JS = r"""
