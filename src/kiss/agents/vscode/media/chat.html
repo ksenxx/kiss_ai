@@ -629,7 +629,8 @@
       <!--
         Floating confirmation box for the "Reset Server" button.  Lives
         inside #settings-panel (so it floats above the settings content
-        without leaving the panel) and replaces the native VS Code
+        without leaving the panel); a webview has no native confirm()
+        dialog to ask with.
       -->
       <div id="server-reset-confirm-modal"
            role="dialog"
