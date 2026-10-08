@@ -34,7 +34,7 @@ import weakref
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, cast
 
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.chat_summary import upsert_chat_summary
@@ -719,6 +719,106 @@ _db_conn: sqlite3.Connection | None = None
 _thread_local = threading.local()
 _db_generation: int = 0
 
+
+class _LockedCursor(sqlite3.Cursor):
+    """Cursor of a :class:`_LockedConnection`.
+
+    Every call that steps the statement (``execute``, the ``fetch*``
+    family, iteration) runs under the connection's lock, so the
+    connection is never closed from another thread while this cursor
+    is inside ``sqlite3_step``.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        super().__init__(connection)
+        self.lock = cast(_LockedConnection, connection).lock
+
+    def execute(self, sql: str, parameters: Any = (), /) -> _LockedCursor:
+        """Run *sql* with *parameters* under the connection's lock."""
+        with self.lock:
+            super().execute(sql, parameters)
+        return self
+
+    def executemany(self, sql: str, seq_of_parameters: Any, /) -> _LockedCursor:
+        """Run *sql* once per parameter set under the connection's lock."""
+        with self.lock:
+            super().executemany(sql, seq_of_parameters)
+        return self
+
+    def fetchone(self) -> Any:
+        """Return the next row, or ``None``, stepping under the lock."""
+        with self.lock:
+            return super().fetchone()
+
+    def fetchmany(self, size: int | None = None) -> list[Any]:
+        """Return up to *size* (default ``arraysize``) rows, stepping under the lock."""
+        with self.lock:
+            return super().fetchmany(self.arraysize if size is None else size)
+
+    def fetchall(self) -> list[Any]:
+        """Return every remaining row, stepping under the lock."""
+        with self.lock:
+            return super().fetchall()
+
+    def __next__(self) -> Any:
+        with self.lock:
+            return super().__next__()
+
+
+class _LockedConnection(sqlite3.Connection):
+    """``sqlite3.Connection`` whose statement steps run under ``self.lock``.
+
+    Connections are opened with ``check_same_thread=False`` and cached
+    per thread, and :func:`_recover_orphaned_sidecars` has to close
+    handles that belong to OTHER threads (SQLite drops a dead ``-shm``
+    mapping only when the last connection using it closes).  Closing a
+    ``sqlite3.Connection`` while its owner is inside ``sqlite3_step``
+    is a use-after-free in CPython, so every step on the connection —
+    and :meth:`close` — holds a reentrant lock: a handle whose lock can
+    be taken is idle and safe to close from any thread (its owner's
+    next statement raises ``ProgrammingError`` instead of crashing);
+    one whose lock is held is left to its owner.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.lock = threading.RLock()
+
+    def cursor(self, factory: Any = None) -> Any:
+        """Return a :class:`_LockedCursor` (or a *factory* cursor)."""
+        return super().cursor(_LockedCursor if factory is None else factory)
+
+    def execute(self, sql: str, parameters: Any = (), /) -> _LockedCursor:
+        """Run *sql* on a new locked cursor and return it."""
+        cursor: _LockedCursor = self.cursor()
+        return cursor.execute(sql, parameters)
+
+    def executemany(self, sql: str, seq_of_parameters: Any, /) -> _LockedCursor:
+        """Run *sql* once per parameter set on a new locked cursor."""
+        cursor: _LockedCursor = self.cursor()
+        return cursor.executemany(sql, seq_of_parameters)
+
+    def executescript(self, sql_script: str, /) -> Any:
+        """Run *sql_script* under the lock."""
+        with self.lock:
+            return super().executescript(sql_script)
+
+    def commit(self) -> None:
+        """Commit the open transaction under the lock."""
+        with self.lock:
+            super().commit()
+
+    def rollback(self) -> None:
+        """Roll back the open transaction under the lock."""
+        with self.lock:
+            super().rollback()
+
+    def close(self) -> None:
+        """Close the connection; waits for a statement in flight on it."""
+        with self.lock:
+            super().close()
+
+
 #: Every connection :func:`_get_db` has opened in this process and not
 #: yet closed, keyed by ``id(conn)`` -> ``(conn, owning thread, db
 #: path)``.  ``sqlite3.Connection`` cannot be weakly referenced, so a
@@ -728,7 +828,12 @@ _db_generation: int = 0
 #: for one purpose: the orphaned-sidecar recovery in
 #: :func:`_recover_orphaned_sidecars` has to close ALL connections to a
 #: database — see :func:`_sidecars_orphaned`.
-_open_conns: dict[int, tuple[sqlite3.Connection, threading.Thread, str]] = {}
+_open_conns: dict[int, tuple[_LockedConnection, threading.Thread, str]] = {}
+
+#: How long :func:`_recover_orphaned_sidecars` waits, in total, for
+#: other threads' statements in flight to finish (they are interrupted
+#: first, so this is normally instant).
+_RECOVERY_IDLE_WAIT_S = 5.0
 
 #: Per database path: ``(db_file_id, shm_file_id)`` of the ``-shm``
 #: sidecar the connections in this process are mapped to.  An entry
@@ -823,15 +928,22 @@ def _recover_orphaned_sidecars(current_path: str) -> None:
     when a brand-new connection failed with ``SQLITE_IOERR``.  While the
     old mapping is still valid, the frames this process committed into
     the deleted ``-wal`` are folded into the main file with a passive
-    checkpoint (so they survive), then EVERY open connection to
+    checkpoint (so they survive), then every open connection to
     *current_path* in the process is interrupted and closed — SQLite
     releases the shared ``-shm`` mapping only when the last connection
     using it closes, so closing just the calling thread's connection
-    would leave every new connection failing.  The generation counter
-    is bumped so each other thread's next ``_get_db()`` reconnects (its
-    cached handle is already closed); a statement in flight on another
-    thread fails once with ``ProgrammingError`` instead of that thread
-    keeping the dead mapping alive for the life of the process.
+    would leave every new connection failing.  A handle is closed only
+    once its :class:`_LockedConnection` lock is held, i.e. while no
+    other thread is inside a statement on it (the interrupt makes a
+    statement in flight abort promptly): closing it under its owner's
+    feet would crash the process.  A handle whose owner keeps it busy
+    beyond :data:`_RECOVERY_IDLE_WAIT_S` stays open and the owner
+    retires it on its next ``_get_db()`` — the generation counter is
+    bumped so every thread's next ``_get_db()`` reconnects.  Until that
+    last old handle is gone, new connections keep failing with
+    ``SQLITE_IOERR`` (:func:`_get_db` re-raises; the retry recovers).
+    A thread whose idle handle was closed here fails once with
+    ``ProgrammingError`` on a statement it runs on the old handle.
 
     Idempotent under ``_init_tables_lock``: a racing thread that finds
     the mapping already dropped returns without doing anything.
@@ -853,21 +965,31 @@ def _recover_orphaned_sidecars(current_path: str) -> None:
             current_path,
             len(doomed),
         )
-        for _key, conn in doomed:
-            try:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                break
-            except sqlite3.Error:
-                continue
+        deadline = time.monotonic() + _RECOVERY_IDLE_WAIT_S
+        checkpointed = False
         for key, conn in doomed:
+            # Thread-safe by SQLite's contract; a statement another
+            # thread is stepping on this handle aborts with
+            # "interrupted", which releases the handle's lock.
             try:
                 conn.interrupt()
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error:  # already closed behind the registry's back
+                logger.debug("Exception caught", exc_info=True)
+            if not conn.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                continue  # busy: its owner closes it on its next _get_db()
             try:
-                conn.close()
-            except sqlite3.Error:
-                pass
+                if not checkpointed:
+                    try:
+                        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                        checkpointed = True
+                    except sqlite3.Error:
+                        logger.debug("Exception caught", exc_info=True)
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    logger.debug("Exception caught", exc_info=True)
+            finally:
+                conn.lock.release()
             _drop_open_conn_locked(key)
         _attached_shm.pop(current_path, None)
         _db_conn = None
@@ -879,6 +1001,19 @@ def _forget_open_conn(conn: sqlite3.Connection) -> None:
     """Remove *conn* from :data:`_open_conns` (no-op if absent)."""
     with _init_tables_lock:
         _drop_open_conn_locked(id(conn))
+
+
+def _retire_conn(conn: sqlite3.Connection) -> None:
+    """Forget and close *conn*, the calling thread's own handle (best effort).
+
+    The registry entry goes BEFORE the close so a close that raises
+    cannot leave a dead handle registered.
+    """
+    _forget_open_conn(conn)
+    try:
+        conn.close()
+    except Exception:
+        logger.debug("Exception caught", exc_info=True)
 
 
 def _close_cached_thread_conn() -> sqlite3.Connection | None:
@@ -896,11 +1031,7 @@ def _close_cached_thread_conn() -> sqlite3.Connection | None:
     """
     tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
     if tl_conn is not None:
-        _forget_open_conn(tl_conn)
-        try:
-            tl_conn.close()
-        except Exception:
-            pass
+        _retire_conn(tl_conn)
     _thread_local.conn = None
     _thread_local.gen = -1
     _thread_local.path = None
@@ -1685,11 +1816,7 @@ def _get_db() -> sqlite3.Connection:
         # later call would hand out as valid.
         tl.conn = None
         tl.file_id = None
-        _forget_open_conn(tl_conn)
-        try:
-            tl_conn.close()
-        except Exception:
-            pass
+        _retire_conn(tl_conn)
 
     _ensure_kiss_dir()
     _adopt_legacy_db_name(current_path)
@@ -1787,7 +1914,7 @@ def _adopt_legacy_journal_snapshots(conn: sqlite3.Connection, current_path: str)
         conn.execute("DELETE FROM replayed_journals WHERE snapshot = ?", (name,))
 
 
-def _open_db_connection(current_path: str) -> sqlite3.Connection:
+def _open_db_connection(current_path: str) -> _LockedConnection:
     """Open, configure and register one new connection to *current_path*.
 
     Runs the WAL pragma (retried while another connection holds the
@@ -1815,7 +1942,7 @@ def _open_db_connection(current_path: str) -> sqlite3.Connection:
     # leftover sidecar of a deleted-and-recreated database safely: a
     # WAL whose salt/checksums do not match is ignored and reset on
     # the first write, so no cleanup is needed for correctness.
-    conn = sqlite3.connect(
+    conn = _LockedConnection(
         current_path,
         check_same_thread=False,
         timeout=10,
