@@ -9,8 +9,8 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as https from 'https';
 import * as crypto from 'crypto';
-import {exec, execFile, execSync, execFileSync, spawn} from 'child_process';
-import {findKissProject, findUvPath} from './kissPaths';
+import {exec, execFile, execSync, spawn} from 'child_process';
+import {commandExists, findKissProject, findUvPath} from './kissPaths';
 import {
   probeDaemonHealth,
   daemonHasActiveTasks,
@@ -2087,18 +2087,6 @@ function isChromiumInstalled(): boolean {
     const cacheDir = playwrightBrowsersPath();
     if (!fs.existsSync(cacheDir)) return false;
     return fs.readdirSync(cacheDir).some(e => e.startsWith('chromium-'));
-  } catch {
-    return false;
-  }
-}
-
-function commandExists(cmd: string): boolean {
-  try {
-    execFileSync(process.platform === 'win32' ? 'where' : 'which', [cmd], {
-      stdio: 'ignore',
-      timeout: SYNC_PROBE_TIMEOUT_MS,
-    });
-    return true;
   } catch {
     return false;
   }
