@@ -2822,8 +2822,8 @@ class WebPrinter(JsonPrinter):
           ``update_available``, etc.) and are broadcast verbatim to
           every connected client.
         * Events stamped with a non-empty ``connId`` are request/reply
-          events (``models``, ``history``, ``frequentTasks``,
-          ``inputHistory``, ``files``, ``ghost``, ``configData``,
+          events (``models``, ``history``, ``inputHistory``,
+          ``files``, ``ghost``, ``configData``,
           unknown-command ``error``): the stamp is stripped and the
           event is sent ONLY to the connection (= VS Code window /
           browser tab) that issued the request, so one window's

@@ -336,27 +336,10 @@
     );
   }
 
-  function copyViaExecCommand(text) {
+  function copyTextToClipboard(text) {
     // Looked up at call time: panelCopy.js loads after tips.js.
     const pc = window.PanelCopy;
-    return !!(pc && pc.fallbackCopyText && pc.fallbackCopyText(text));
-  }
-
-  function copyTextToClipboard(text) {
-    const clip = navigator.clipboard;
-    if (clip && typeof clip.writeText === 'function') {
-      let written;
-      try {
-        written = clip.writeText(text);
-      } catch (_err) {
-        return Promise.resolve(copyViaExecCommand(text));
-      }
-      return written.then(
-        () => true,
-        () => copyViaExecCommand(text),
-      );
-    }
-    return Promise.resolve(copyViaExecCommand(text));
+    return pc ? pc.copyText(text) : Promise.resolve(false);
   }
 
   // tipsflash0903-coverage:start

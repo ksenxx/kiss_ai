@@ -101,7 +101,7 @@ def test_get_sea_commands_conn_id_stamping() -> None:
     An empty ``connId`` broadcasts to all clients; a non-empty
     ``connId`` scopes the event to the requesting connection.  This
     mirrors the same contract every other read command follows
-    (``getFrequentTasks``, ``getInputHistory``, ``getModels``).
+    (``getInputHistory``, ``getModels``).
     """
     server, printer = _make_server()
     sea_commands.refresh_registry()

@@ -33,7 +33,7 @@ _THUMB = 4
 
 # Elements that scroll their own content.  The bottom-sheet lists are
 # hidden until their sheet opens, so each is shown and overfilled.
-_SCROLLERS = ["#history-list", "#frequent-list", "#tricks-list", "#workdir-list"]
+_SCROLLERS = ["#history-list", "#tricks-list", "#workdir-list"]
 
 
 @pytest.fixture(scope="module")
