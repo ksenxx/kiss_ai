@@ -172,14 +172,11 @@ def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> Non
         context.close()
 
 
-# The chat panels' edges against the history panel's boundaries: the
-# left boundary is the activity bar's right edge where the bar shows
-# (remote webapp), else the panel's inner left edge.
+# The chat panels' edges against the history panel's boundaries: its
+# inner left and right edges.
 _PANEL_EDGES_JS = r"""() => {
   const sb = document.getElementById('sidebar');
   const sr = sb.getBoundingClientRect();
-  const bar = document.getElementById('activity-bar');
-  const barShown = getComputedStyle(bar).display !== 'none';
   const inner = sr.left + sb.clientLeft;
   const search = document.querySelector('.history-search-row')
     .getBoundingClientRect();
@@ -188,7 +185,7 @@ _PANEL_EDGES_JS = r"""() => {
   const groups = [...document.querySelectorAll(
     '#history-list > .history-chat-group')];
   const rects = groups.map(g => g.getBoundingClientRect());
-  const leftBoundary = barShown ? bar.getBoundingClientRect().right : inner;
+  const leftBoundary = inner;
   const rightBoundary = inner + sb.clientWidth;
   // Rects alone miss clipping by an ancestor: probe what is painted
   // 1px inside each boundary, halfway down every header (looking
@@ -289,7 +286,7 @@ def test_chat_panels_are_seamless_in_history_panel_mode(_browser) -> None:
 @pytest.mark.parametrize("desktop", [False, True])
 def test_chat_panels_are_seamless_on_the_remote_page(_browser, desktop: bool) -> None:
     """The remote webapp: the phone drawer and the docked desktop panel
-    (collapsing padding), both beside the activity bar."""
+    (collapsing padding)."""
     context, page = _open_history_page(_browser, width=1200 if desktop else 480)
     try:
         _use_remote_surface(page)
@@ -550,7 +547,7 @@ def test_remote_scrollbar_and_resize_handle_do_not_overlap(_browser) -> None:
             ".getBoundingClientRect().width"
         ) == pytest.approx(geo["width"] + 60, abs=2)
         # Dragged down to its 10px minimum, the panel's content (the
-        # 40px activity bar, the history rows) stays clipped at the
+        # search row, the history rows) stays clipped at the
         # panel's edge: nothing of it shows or takes clicks beside it.
         page.mouse.move(hx + 60, 250)
         page.mouse.down()

@@ -155,6 +155,17 @@ function byId(win, id) {
   return win.document.getElementById(id);
 }
 
+/**
+ * Bring a workspace section of the task-info panel (meta-explorer /
+ * meta-scm) on screen: expand it if it is collapsed.  An expanded
+ * section is already live (the workspace pin loads it).
+ */
+function showSection(win, id) {
+  const section = byId(win, id);
+  if (section.classList.contains('collapsed'))
+    click(win, section.querySelector('.meta-section-toggle'));
+}
+
 function ofType(posted, type) {
   return posted.filter(m => m.type === type);
 }
@@ -207,7 +218,7 @@ function answer(win, posted, p, entries, workDir) {
 /** Open the Explorer on WD with *entries* at its root. */
 function openExplorer(win, posted, entries) {
   send(win, {type: 'configData', config: {work_dir: WD}});
-  click(win, byId(win, 'activity-explorer'));
+  showSection(win, 'meta-explorer');
   return answer(win, posted, WD, entries || []);
 }
 
@@ -1562,6 +1573,9 @@ async function main() {
       session('B', 'b1', todayNoon - 600),
     ]);
     const rowBefore = firstRow(win);
+    // Fold the Source Control section: its own task-news debounce
+    // timer is not the one under test.
+    click(win, byId(win, 'meta-scm').querySelector('.meta-section-toggle'));
     const timers = [];
     const origSetTimeout = win.setTimeout;
     const realNow = win.Date.now;
@@ -2562,7 +2576,7 @@ async function main() {
     const A = '/tmp/lit\\name/one';
     const B = '/tmp/lit\\name/two';
     send(win, {type: 'configData', config: {work_dir: A}});
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     answer(
       win,
       posted,
@@ -2636,7 +2650,7 @@ async function main() {
     });
     const WWD = 'C:\\Repo';
     send(win, {type: 'configData', config: {work_dir: WWD}});
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     assert.deepStrictEqual(
       rootRows(win).map(r => r.dataset.explorerPath),
       [WWD, 'C:\\Other'],
@@ -2682,7 +2696,7 @@ async function main() {
     const {win, posted, copied} = makeWebview();
     const A = '/tmp/lit\\name';
     send(win, {type: 'configData', config: {work_dir: A}});
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     answer(
       win,
       posted,

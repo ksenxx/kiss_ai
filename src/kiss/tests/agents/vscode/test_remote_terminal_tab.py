@@ -34,7 +34,7 @@ import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from kiss.tests.agents.vscode.test_activity_bar import (
+from kiss.tests.agents.vscode.test_workspace_sections import (
     _dismiss_update_toast,
     _set_work_dir,
 )

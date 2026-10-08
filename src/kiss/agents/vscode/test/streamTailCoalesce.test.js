@@ -523,7 +523,10 @@ async function testTaskEndFlushesPendingSweepWhileRunning() {
   send(win, {type: 'tool_call', name: 'Bash', command: 'make one'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make two'});
   const panels = O.querySelectorAll('.ev.tc');
-  panels[0].classList.remove('collapsed');
+  // Tool panels start folded: open all three by hand (not pinned), so
+  // the sweep's own rule — fold all but the newest two — is what is
+  // under test.
+  for (const p of panels) p.classList.remove('collapsed');
   send(win, {type: 'system_output', text: 'late output\n'});
   assert.ok(!panels[0].classList.contains('collapsed'), 'tail must defer');
 

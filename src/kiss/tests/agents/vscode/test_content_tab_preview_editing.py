@@ -35,6 +35,7 @@ import pytest
 
 from kiss.tests.agents.vscode.test_content_tab_editing import (
     _dismiss_toasts,
+    _uncover_pane,
     _wait_for_disk,
 )
 from kiss.tests.agents.vscode.test_content_tab_file_links import (
@@ -83,6 +84,7 @@ def _open_preview(page, path: str, link_id: str) -> None:
     page.click("#" + link_id)
     page.wait_for_selector(_CONTENT_TAB, timeout=30000)
     page.wait_for_selector(_FRAME, timeout=30000)
+    _uncover_pane(page)
 
 
 def _enter_source_mode(page) -> None:
@@ -96,6 +98,7 @@ def _enter_source_mode(page) -> None:
 
 
 def _type_at_end(page, text: str) -> None:
+    _uncover_pane(page)
     page.click(_MONACO + " .view-lines")
     # Monaco binds "go to end of document" per platform: Ctrl+End on
     # Linux/Windows, Cmd+Down on macOS (Ctrl+End is unbound there, so

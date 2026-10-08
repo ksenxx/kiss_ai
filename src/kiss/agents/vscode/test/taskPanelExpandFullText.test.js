@@ -287,6 +287,10 @@ function testChevronPassWorksWithoutButton() {
     !rpPanel.classList.contains('collapsed'),
     'precondition: the fan-out panel is open while the task runs',
   );
+  // A tool-call panel starts folded; the user opens the adopted one.
+  assert.ok(adopted.classList.contains('collapsed'), 'adopted: folded at birth');
+  adopted.querySelector(':scope > .collapse-header').click();
+  assert.ok(!adopted.classList.contains('collapsed'), 'the user opened it');
 
   send(win, {
     type: 'result',
@@ -374,6 +378,20 @@ function testChevronPassWorksWithoutButton() {
   assert.ok(
     late.classList.contains('collapsed') && isDisplayed(win, late),
     'the chevron pass folds a late finished panel but keeps it on screen',
+  );
+  // A late fan-out is born OPEN (its open panel is what keeps the
+  // sub-agent tabs up); with the task over, the chevron pass folds it.
+  send(win, {
+    type: 'tool_call',
+    name: 'run_parallel',
+    tabId: parentId,
+    extras: {tasks: JSON.stringify(['late sub'])},
+  });
+  const lateRp = O.querySelector(':scope > .tc-run-parallel');
+  assert.ok(lateRp, 'the late fan-out renders outside the Trajectory');
+  assert.ok(
+    lateRp.classList.contains('collapsed') && isDisplayed(win, lateRp),
+    'the chevron pass folds a late fan-out once the task is over',
   );
 
   send(win, {

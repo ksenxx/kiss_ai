@@ -292,8 +292,12 @@ class TestContentTabFileLinks:
             )
             page.wait_for_selector("#task-input", state="visible")
             assert page.input_value("#task-input") == "still here"
-            # The content pane is empty again; the chat is untouched.
-            assert page.locator("#content-pane-empty").is_visible()
+            # The content pane went away with its last tab; the chat is
+            # untouched.
+            assert not page.locator("#content-tab-area").is_visible()
+            assert page.evaluate(
+                "() => !document.body.classList.contains('content-pane-open')"
+            )
             remaining = page.evaluate("() => window._testApi.openTabs()")
             assert [t["id"] for t in remaining if not t["isContentTab"]] == [chat_tab_id]
             assert not any(t["isContentTab"] for t in remaining)

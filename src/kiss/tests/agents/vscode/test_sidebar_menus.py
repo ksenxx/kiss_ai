@@ -33,7 +33,7 @@ from collections import Counter
 import pytest
 from playwright.sync_api import sync_playwright
 
-from kiss.tests.agents.vscode.test_activity_bar import (
+from kiss.tests.agents.vscode.test_workspace_sections import (
     _explorer_row,
     _explorer_row_sel,
     _sent,
@@ -140,14 +140,21 @@ def _settle(page) -> None:
     page.wait_for_timeout(400)
 
 
+def _show_section(page, section_id: str) -> None:
+    """Expand the Explorer / Source Control section of the task-info
+    panel if it is collapsed (an expanded one is live already)."""
+    if page.locator(f"#{section_id}.collapsed").count():
+        page.click(f"#{section_id} .meta-section-toggle")
+
+
 def _open_explorer(page):
-    page.click("#activity-explorer")
+    _show_section(page, "meta-explorer")
     page.wait_for_selector(".explorer-row.is-file", timeout=15000)
     _settle(page)
 
 
 def _open_scm(page):
-    page.click("#activity-scm")
+    _show_section(page, "meta-scm")
     page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
     _settle(page)
 
@@ -1257,13 +1264,13 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         # reports no repository.
         assert _sent(frames, "setWorkDir")[-1]["workDir"] == str(harness.plain_dir)
         assert not _sent(frames, "saveConfig")
-        page.click("#activity-scm")
+        _show_section(page, "meta-scm")
         page.wait_for_function(
             "document.getElementById('scm-changes').innerText.includes('Not a git repository')",
             timeout=15000,
         )
         # Escape closes a reopened picker without changing anything.
-        page.click("#activity-explorer")
+        _show_section(page, "meta-explorer")
         page.click("#explorer-pick-folder")
         page.wait_for_selector("#folder-picker:not([hidden])", timeout=5000)
         page.keyboard.press("Escape")
@@ -1384,8 +1391,10 @@ _PDF_PAGE_WIDTH = 2000
 def _widen_content_pane(page) -> None:
     """Shrink the chat pane to its 20% minimum with the real resizer
     (ArrowLeft steps of 2% from the 50% default), giving the content
-    pane the rest of the window."""
+    pane the rest of the window.  The resizer exists only once a
+    content tab is open (the chat alone fills the window before)."""
     resizer = page.locator("#pane-resizer")
+    resizer.wait_for(state="visible", timeout=15000)
     # The composer grabs focus once the page has settled, which may land
     # between two key presses: re-focus the handle before each one.
     for _ in range(40):
@@ -1395,6 +1404,30 @@ def _widen_content_pane(page) -> None:
             return
     raise AssertionError(
         "chat pane share stuck at " + str(resizer.get_attribute("aria-valuenow"))
+    )
+
+
+def _hide_panel(page) -> None:
+    """Desktop: the task-info panel lies over the content pane's right
+    edge, where the PDF toolbar sits; press in the pane to slide the
+    panel away (a phone stacks the surfaces, nothing to hide)."""
+    if not page.evaluate("document.body.classList.contains('remote-desktop')"):
+        return
+    page.dispatch_event("#content-tab-area", "pointerdown")
+    page.wait_for_selector("body.meta-hidden", state="attached", timeout=5000)
+
+
+def _show_panel(page) -> None:
+    """Bring the task-info panel (and the Explorer in it) back from its
+    drawer after a press in the content pane slid it off screen."""
+    if not page.evaluate("document.body.classList.contains('meta-hidden')"):
+        return
+    page.click("#meta-drawer")
+    page.wait_for_function(
+        "() => !document.body.classList.contains('meta-hidden')"
+        " && document.getElementById('meta-panel').getBoundingClientRect().right"
+        "    <= window.innerWidth + 1",
+        timeout=5000,
     )
 
 
@@ -1408,6 +1441,7 @@ def _wait_pdf_rendered(page) -> None:
         timeout=60000,
     )
     if page.locator(_PDF_PAGE + " canvas").count() > 0:
+        _hide_panel(page)
         return
     note = page.locator(".content-tab-view .content-binary-note").first.inner_text()
     cdn_ok = page.evaluate(
@@ -1570,6 +1604,7 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         )
         # Clicking the open PDF again reloads it in the same tab: the old
         # viewer (and its worker) go, a fresh one draws the page.
+        _show_panel(page)
         _explorer_row(page, "report.pdf").click()
         page.wait_for_function(
             f"""() => {{
@@ -1582,6 +1617,7 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         )
         _wait_tab_count(page, tabs_before + 1)
         # An image opens as a picture.
+        _show_panel(page)
         _explorer_row(page, "dot.png").click()
         _wait_tab_count(page, tabs_before + 2)
         img = page.locator(".content-tab-view img.content-image")
@@ -1788,10 +1824,10 @@ def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
     pdf.write_bytes(_pdf_bytes(8))
     context, page, frames = _open_page(browser, harness, width=_PDF_PAGE_WIDTH)
     try:
-        _widen_content_pane(page)
         _inject_file_link(page, str(pdf), "lnk-pdf8")
         page.click("#lnk-pdf8")
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _widen_content_pane(page)
         _wait_pdf_rendered(page)
         assert page.locator(_PDF_PAGE).count() == 8
         assert _pdf_status(page) == "Page 1 of 8"
@@ -1899,10 +1935,10 @@ def test_pdf_page_field_jumps_to_the_typed_page(browser, harness, worktree):
     pdf.write_bytes(_pdf_bytes(8))
     context, page, frames = _open_page(browser, harness, width=_PDF_PAGE_WIDTH)
     try:
-        _widen_content_pane(page)
         _inject_file_link(page, str(pdf), "lnk-pdf8")
         page.click("#lnk-pdf8")
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _widen_content_pane(page)
         _wait_pdf_rendered(page)
         field = page.locator(_PDF_VIEWER + " .pdf-page-input")
         assert _pdf_status(page) == "Page 1 of 8"
@@ -2020,10 +2056,10 @@ def test_pdf_keyboard_shortcuts_move_pages_and_zoom(browser, harness, worktree):
     errors: list[str] = []
     page.on("pageerror", lambda err: errors.append(str(err)))
     try:
-        _widen_content_pane(page)
         _inject_file_link(page, str(pdf), "lnk-pdf8")
         page.click("#lnk-pdf8")
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _widen_content_pane(page)
         _wait_pdf_rendered(page)
         assert _pdf_status(page) == "Page 1 of 8"
         # No click into the viewer first: the keys work as soon as the
@@ -2318,7 +2354,6 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
         )
     context, page, frames = _open_page(browser, harness)
     try:
-        page.click("#activity-tasks")
         page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
         assert (
             page.locator(f".history-chat-group[data-chat-id='{chat_b}'] .history-chat-title")
@@ -2459,7 +2494,6 @@ def test_history_click_survives_mid_press_refresh(browser, harness, worktree):
             ),
         )
         cdp.send("Network.enable")
-        page.click("#activity-tasks")
         page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
         # Open the collapsed chat panel so its row can be pressed; the
         # explicit expand survives the parked rebuild below.
