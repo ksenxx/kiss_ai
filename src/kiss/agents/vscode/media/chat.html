@@ -648,9 +648,11 @@
   <script {{NONCE_ATTR}}>window.__TRICKS__ = {{TRICKS_JSON}};</script>
   <script {{NONCE_ATTR}}>window.__MY_TRICKS_COUNT__ = {{MY_TRICKS_COUNT}};</script>
   <script {{NONCE_ATTR}}>window.__TIPS__ = {{TIPS_JSON}};</script>
+  <!-- panelCopy.js before tips.js: the tips sheet's Copy button uses
+       PanelCopy.copyText and may be clicked as soon as the sheet opens. -->
+  <script {{NONCE_ATTR}} src="{{PANEL_COPY_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{TIPS_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{API_SRC}}"></script>
-  <script {{NONCE_ATTR}} src="{{PANEL_COPY_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{CTX_MENU_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{TREE_MENU_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{BROWSER_TAB_SRC}}"></script>
