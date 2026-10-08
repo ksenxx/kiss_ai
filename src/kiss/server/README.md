@@ -53,9 +53,11 @@ into the prompt,
 `system_prompt(system_prompt)` and `tools(tools)` receive the run's
 assembled system prompt and toolset and return the ones to use, and
 `tool_call_hook(name, args)` / `llm_call_hook(new_messages)` are
-called around every tool and LLM call.  Every method has an identity
-default on `BaseSea`, so a SEA defines only what it changes.  A SEA
-builds on another by Python inheritance.  `BaseSea` is also the root
+called around every tool and LLM call.  Every method on `BaseSea`
+passes its input through (the root layer's one rule of its own is the
+`summary` cadence, see
+[Customizing every run](#customizing-every-run)), so a SEA defines
+only what it changes.  A SEA builds on another by Python inheritance.  `BaseSea` is also the root
 layer of every run made from the chat: a plain prompt runs the bare
 `BaseSea`, a `/xxx` command or a picker tab runs its SEA on top of it,
 and `run_agent` / `run_parallel` children go through it too — so
@@ -299,8 +301,9 @@ value stands (a `WorkerSea` subclass returning `settings |
 leave the key out to keep the default).  A `bool` key given a
 non-`bool`, an `int`/`float` key given a `bool`, an unknown, renamed or
 removed key (`kind`, `channel` and `allow_fan_out` among the removed
-ones), or a non-finite `max_budget` / `timeout` stops the task with a
-diagnostic (see [Error handling](#error-handling)).
+ones), a non-finite `max_budget` / `timeout`, or a `timeout` of zero
+or less stops the task with a diagnostic (see
+[Error handling](#error-handling)).
 
 The prompt itself is not a setting: `settings()` is data, text and
 code come from the other methods.  Two optional methods are the only
@@ -429,8 +432,18 @@ run when the subclass's receives the dict.  Per method:
   ordinary Python inheritance; the most derived definition is the one
   called.
 
-`BaseSea` heads every chain, so its methods run first on every run
-(identities until you edit them).  `system_prompt` is folded exactly
+`BaseSea` heads every chain, so its methods run first on every run.
+They pass their input through, with one rule of the root layer's own,
+the `summary` cadence (`base_sea.SUMMARY_EVERY_STEPS`, 10): `tools()`
+resets the run's step count and records whether the toolset holds the
+`summary` tool (`self.has_summary_tool`), `llm_call_hook` counts one
+step per LLM call and marks a summary due at every 10th step of a run
+that has the tool, and `tool_call_hook` then refuses every call but
+`summary` and `finish` with `base_sea.SUMMARY_DUE_REFUSAL` ("Step 10
+is a multiple of 10: call summary(description=...) first, ...") until
+`summary` runs.  A SEA whose own `tools()` drops `summary` should set
+`self.has_summary_tool = False` there (every bundled SEA only appends
+tools).  `system_prompt` is folded exactly
 like `prompt`: each class receives the text so far and what it returns
 is the text, whether it appended to it or replaced it; the run uses
 the last return verbatim.  Neither method's return reaches a
@@ -465,6 +478,9 @@ class BaseSea:
         return ALLOW
 ```
 
+(The file's real `tools`, `llm_call_hook` and `tool_call_hook` bodies
+carry the summary-cadence guardrail described above; add to them
+rather than replacing them, or the guardrail is gone for every run.)
 A plain chat prompt still names no SEA and runs the bare `BaseSea`; a
 `run_agent` or `run_parallel` call with an empty `agent` runs the
 hidden `seas/sorcar/sorcar_sea.py` and is reported as `sorcar`.
@@ -885,6 +901,12 @@ The `run()` parameters without a `settings()` key (the allowlist is
   additions; the SEA's `system_prompt()` receives the system prompt
   with the caller's suffix already in it, and the caller's
   `add_to_prompt` is appended after what `prompt(task)` returned.
+- **`is_parallel`** — whether the run's built-in toolset includes
+  `run_parallel` and `number_of_cores` (the user's parallel-mode
+  toggle, wire field `isParallel`, default `True`); a client/UI
+  choice with no SEA key (`is_parallel` is a removed settings key):
+  a SEA that wants no fan-out picks a `tool_profile` without the
+  `agents` group.
 
 ### Setting semantics
 
@@ -1076,13 +1098,17 @@ Per `KISSAgent.run()`'s contract:
 - **`llm_call_hook(new_messages)`** — called before every LLM call
   with the list of new messages (those added to the conversation
   since the previous LLM call) about to be sent; its return value
-  replaces those messages.  The `BaseSea` default returns them unchanged.
+  replaces those messages.  The `BaseSea` method returns them
+  unchanged after counting the step (`self.step`).
 - **`tool_call_hook(name, args)`** — called before every tool call
   with the tool's name and arguments dict and returns a typed verdict
   (`kiss.core.tool_verdict.Verdict`, re-exported by `base_sea`):
   `ALLOW` lets the tool execute; `refuse(text)` suppresses the call
   and *text* is given to the model as the tool's result.  The
-  `BaseSea` default returns `ALLOW`.  A literal `None` or string (the
+  `BaseSea` method returns `ALLOW`, except that while a `summary` is
+  due it refuses every tool but `summary` and `finish` (see
+  [Customizing every run](#customizing-every-run)).  A literal `None`
+  or string (the
   allow / refuse spellings of older hooks) is the `verdict` finding of
   `uv run sea lint`, and `--fix` rewrites it.
 
@@ -1209,9 +1235,13 @@ built-in KISS Sorcar toolset — `Bash` (with
 kill a background job), `run_commands_parallel` (several shell
 commands at once, no LLM sub-agents), `Read`, `Edit`, `Write`,
 `ask_user_question`, `talk`, `set_model`, `summary`, `run_agent`,
-`run_parallel`, `number_of_cores`,
+`agent_job`, `run_parallel` and `number_of_cores` (the last two only
+when the run's `is_parallel` is on, the user's parallel-mode toggle),
 browser tools (when `use_web_tools`), `decide` (when
-`OPENROUTER_API_KEY` is configured), the `memory_*` tools (when
+`OPENROUTER_API_KEY` is configured, the settings panel's "Use Jev
+(decisions model)" checkbox, persisted as `classify_with_decisions`,
+is on and the decisions model is in the catalog,
+`decide_tool.decisions_tool_available`), the `memory_*` tools (when
 memory is enabled), and any configured skill and MCP-server tools —
 **plus** your extension tools.  A restricted tool profile (a reviewer
 sub-agent dispatched with `run_parallel(..., tool_profile="review")`)
@@ -1274,8 +1304,12 @@ prefixes the message below with `Task failed: SeaError: `):
 | renamed key | `SEA '...': settings() key 'classify_tasks' was renamed to 'auto_classify'; run `uv run sea lint --fix` to rewrite the script` |
 | removed key (`kind`, `preset`, `channel`) | `SEA '...': settings() key 'kind' was removed: what a SEA is became its base class: derive from `WorkerSea` (a tool-bound run on the caller's tree) or `ChannelSea` (an external-service agent) instead of `BaseSea` ...; run `uv run sea lint --fix` to rewrite the script` |
 | removed key (`allow_fan_out`, `is_parallel`) | `SEA '...': settings() key 'allow_fan_out' was removed: `run_parallel` is N `run_agent` calls, so there is nothing to allow or forbid separately; `tool_profile` chooses the toolset` |
+| removed key (`inherit`, `add_to_prompt` / `append_to_prompt`, `add_to_system_prompt` / `append_to_system_prompt`, `append_basic_tools`, `extends`) | `SEA '...': settings() key 'inherit' was removed: a channel never inherits from the calling task and every other SEA always does; the caller's `inherit` option opts out of inheriting`, `... key 'add_to_prompt' was removed: a SEA shapes the task text in its `prompt(task)` method; `add_to_prompt` is a `run_agent` option, not a setting`, ... (`sea_settings.REMOVED_SETTINGS` holds every entry and its explanation) |
 | wrong-typed value (`bool` for a number, `int` for a `str`, ...) | `SEA '...': settings()['max_budget'] must be int or float, got bool` |
 | non-finite `max_budget` / `timeout` | `SEA '...': settings()['max_budget'] must return a finite number or None` |
+| `timeout` of zero or less | `SEA '...': settings()['timeout'] must be a positive number of seconds, got 0` |
+| `locked` naming something other than a run setting (`locked`, `hidden`, an unknown name) | `SEA '...': settings()['locked'] may only name settings keys (work_dir, model, chat_id, ...); got ['hidden']` |
+| `description()` of a `/<name>` command returns an empty or blank string (a non-string is the `must return a string` row above) | `SEA '...': description() must return a non-empty string` (raised by `/<name> help`, `sea_commands.sea_description`; `/<name> check` reports it as its text) |
 | `prompt()` returns an empty string | `prompt() of SEA '...' must return a non-empty string` |
 | a method `X` raises | `X() of SEA '...' raised: ...` |
 | a method returns the wrong type | `system_prompt() of SEA '...' must return a string, got ...`, `tools() of SEA '...' must return a list of tool callables (not a file path), got ...`, `llm_call_hook() of SEA '...' must return a list, got ...`, `tool_call_hook() of SEA '...' must return a Verdict (ALLOW, or refuse(text), from kiss.agents.seas.base.base_sea), got ...` |
@@ -1598,8 +1632,9 @@ class TaskResult:
   an exact tool set.
 - The SEA is **re-imported from source** on every run.
   Edits take effect immediately without restarting the daemon.
-- `max_budget` and `timeout` must be **finite** numbers.  `NaN`,
-  `±inf`, or an overflowing value raises `SeaError`.
+- `max_budget` and `timeout` must be **finite** numbers, and `timeout`
+  **positive**.  `NaN`, `±inf`, an overflowing value, or a `timeout`
+  of zero or less raises `SeaError`.
 - The file must define **exactly one** subclass of `BaseSea` of its
   own; an imported base class (`from ...sh_sea import ShSea`) does not
   count, and helper classes that do not derive from `BaseSea` are

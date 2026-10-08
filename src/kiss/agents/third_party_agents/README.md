@@ -95,8 +95,12 @@ ignored, so "Home Assistant", "home-assistant", and "HOMEASSISTANT" all resolve 
 `homeassistant` channel. For multi-account
 channels, name the workspace in the prompt ("using the acme Slack workspace, ...") and
 Sorcar passes it through; you can likewise ask for a specific model or budget for the
-sub-task. Two modules are hidden from this channel dispatch: the infrastructure
-modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on.
+sub-task. Two modules are not channels (`agent_dispatch.available_channels` lists only
+the SEAs that derive from `ChannelSea` and do not declare `hidden`): the infrastructure
+modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on. Their SEAs
+derive from plain `BaseSea`; `a2a` is a session SEA whose tools call peer agents and
+stays reachable as `/a2a` or `run_agent(agent="a2a", ...)`, while `oai` declares
+`hidden: True` and is set up from a terminal only.
 
 Prompts that span several services also work in a single message: the top-level
 session orchestrates, dispatching one channel at a time and passing results between
@@ -107,12 +111,16 @@ it does by default.
 
 When you want a specific channel with no routing guesswork, start the prompt with its
 slash command: `/slack post "deploy done" to #eng`. Every SEA folder `xxx/xxx_sea.py`
-in this package is registered as `/xxx` (the command is the folder name), the chat box
+in this package is registered as `/xxx` (the command is the folder name; `oai`, whose
+settings declare `hidden: True`, is the one exception), the chat box
 autocompletes the names, and the daemon runs that file directly in the tab with the rest
 of the prompt as the task: no relay turn by the chat agent and no nested sub-agent tab,
 the channel's settings, system prompt and tools apply to that very run, and the tab
-keeps showing `/xxx ...` as you typed it. `/xxx help` runs nothing and prints the module's `description()`, one
-sentence saying what the agent does and how to use it. Folders of your own SEAs
+keeps showing `/xxx ...` as you typed it. Two sub-tasks are reserved
+(`sea_commands.RESERVED_SUBCOMMANDS`) and run nothing: `/xxx help` prints the module's
+`description()`, one sentence saying what the agent does and how to use it, and
+`/xxx check` loads the SEA and reports its effective settings, model, tools and a
+sample prompt — or the first error. Folders of your own SEAs
 listed in `~/.kiss/SEAS.md` are registered the same way; the file syntax and the
 dispatch flow are in
 [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md).
@@ -124,7 +132,8 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 (bash, file editing, browser automation). The channel agent instance is the *carrier*
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
-- Every module defines one SEA class deriving from
+- Every channel module (all but the two infrastructure modules, see above) defines
+  one SEA class deriving from
   `kiss.agents.seas.base.base_sea.ChannelSea` (`class SlackSea(ChannelSea)`,
   `GmailSea`, ...) with `description(self)`, the one-sentence summary `/xxx help`
   prints; `tools(self, tools)`; and, when its agent class sets
@@ -392,8 +401,9 @@ mode only) has none. GitHub's `read_only: "true"` config key blocks every mutati
 
 ### Infrastructure: two extra surfaces
 
-These two modules are hidden from prompt dispatch — they are not services you ask
-Sorcar to act on, but ways for *other software* to send prompts to your daemon.
+Neither of these two modules is listed as a channel (their SEAs derive from `BaseSea`,
+not `ChannelSea`, and `oai` is `hidden`) — they are not services you ask Sorcar to act
+on, but ways for *other software* to send prompts to your daemon.
 
 - **OpenAI-compatible server** (`oai/oai_sea.py`). Turns kiss-web into an
   OpenAI-style backend: unauthenticated `GET /v1/models` and `POST
@@ -652,9 +662,17 @@ job that must work inside a specific project ("run the tests in ~/proj every nig
 fix them") names that directory instead; a prompt job in a Git repository can
 additionally ask for a worktree and auto-commit like a chat task. A run is stopped
 once it exceeds the job's timeout (default one hour for a prompt job, ten minutes for a
-command). Creating a job whose prompt or command, directory, schedule, and delivery
-targets match a scheduled or paused one is refused with a pointer to the existing job.
-Prompt jobs are unattended: every `run_agent` or `run_parallel` child they start
+command). A poll that should stop once it has fired ("tell me *when* X happens") is
+stored with `until_delivered` (`--until-delivered` on the CLI): the job disables itself
+after its first successfully delivered non-silent result, also when `run_now` triggered
+it, instead of repeating the same news every tick; `run_now` on a job whose run is
+still in progress in the same `kiss-cron` process is refused (the running-job registry
+is process-local, so a `kiss-cron --tick` or `--run` in another process can still
+overlap it). Creating a job whose prompt or command, directory,
+schedule, and delivery targets match a scheduled or paused one is refused with a
+pointer to the existing job (a job that has finished for good — a one-shot that ran or
+an `until_delivered` poll that fired — is not a duplicate, so it can be scheduled
+again). Prompt jobs are unattended: every `run_agent` or `run_parallel` child they start
 inherits the rule never to ask questions or wait for approval; when blocked, the child
 reports the blocker in its summary and finishes.
 
