@@ -112,11 +112,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kiss.core.file_lock import lock_exclusive
-from kiss.core.speech_synthesis import (  # noqa: F401 — re-exported
-    DEFAULT_AUDIO_TIMEOUT_SECONDS,
-    _env_timeout_seconds,
-    audio_timeout_seconds,
-)
+from kiss.core.speech_synthesis import _env_timeout_seconds, audio_timeout_seconds
 
 if TYPE_CHECKING:
     import sounddevice
@@ -151,17 +147,6 @@ def default_models_dir() -> Path:
     return kiss_home() / "models"
 
 
-def __getattr__(name: str) -> Path:
-    """Resolve the legacy ``DEFAULT_MODELS_DIR`` module constant lazily.
-
-    Kept as a PEP 562 attribute so existing importers (e.g.
-    ``web_server.py``) still work while the value now respects
-    ``$KISS_HOME`` at access time instead of being frozen to the real
-    home directory at import time.
-    """
-    if name == "DEFAULT_MODELS_DIR":
-        return default_models_dir()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 4000
 COOLDOWN_SECONDS = 2.0
@@ -507,23 +492,19 @@ TRAILING_SILENCE_KEEP_SECONDS = 1.0
 RETRY_EXTRA_TAIL_SECONDS = 1.0
 
 
-def trim_trailing_silence(
-    pcm: bytes, keep_seconds: float = TRAILING_SILENCE_KEEP_SECONDS
-) -> bytes:
+def trim_trailing_silence(pcm: bytes) -> bytes:
     """Drop trailing silence from s16le PCM, keeping a short tail.
 
     The endpointed post-wake capture carries the full trailing-silence
     window (~2s) that ended it; utterances are trimmed to the last loud
-    block plus *keep_seconds* of tail before they are sent to the
-    transcription agent, which bounds the audio tokens billed per
-    utterance.  Very short tails make gpt-audio more likely to deny
-    hearing any audio (see :data:`TRAILING_SILENCE_KEEP_SECONDS`), so
-    the kept tail is a full second.  Leading and mid-utterance silence
-    are preserved.
+    block plus :data:`TRAILING_SILENCE_KEEP_SECONDS` of tail before they
+    are sent to the transcription agent, which bounds the audio tokens
+    billed per utterance.  Very short tails make gpt-audio more likely
+    to deny hearing any audio, so the kept tail is a full second.
+    Leading and mid-utterance silence are preserved.
 
     Args:
         pcm: Raw 16kHz mono s16le PCM.
-        keep_seconds: Seconds of audio kept after the last loud block.
 
     Returns:
         The trimmed PCM, or ``b""`` when no block was loud at all.
@@ -536,7 +517,7 @@ def trim_trailing_silence(
             last_loud_end = start + len(block)
     if last_loud_end == 0:
         return b""
-    keep = last_loud_end + 2 * int(keep_seconds * SAMPLE_RATE)
+    keep = last_loud_end + 2 * int(TRAILING_SILENCE_KEEP_SECONDS * SAMPLE_RATE)
     return pcm[:min(keep, len(pcm))]
 
 
@@ -1505,24 +1486,18 @@ class WakeDetector:
         """
         text = result.get("text", "")
         words = result.get("result", [])
-        if not (
-            (
-                matches_wake(text, self._allow_trailing)
-                or wake_with_leading_noise(words)
-            )
-            and words_confident(words, self._min_word_conf)
-        ):
-            if forced:
-                self._recognizer.Reset()
-                self._quiet_seconds = 0.0
+        matched = (
+            matches_wake(text, self._allow_trailing)
+            or wake_with_leading_noise(words)
+        ) and words_confident(words, self._min_word_conf)
+        if not matched and not forced:
+            # Vosk's ``Result()`` already closed this utterance.
             return False
-        if self._audio_seconds - self._last_wake < COOLDOWN_SECONDS:
-            self._recognizer.Reset()
-            self._quiet_seconds = 0.0
-            return False
-        self._last_wake = self._audio_seconds
         self._recognizer.Reset()
         self._quiet_seconds = 0.0
+        if not matched or self._audio_seconds - self._last_wake < COOLDOWN_SECONDS:
+            return False
+        self._last_wake = self._audio_seconds
         return True
 
 
@@ -1656,6 +1631,16 @@ def run_mic(
     silent on stdout.  After MIC_MAX_REOPEN_ATTEMPTS consecutive
     reopens that still produce no audio, the listener gives up.
 
+    The listener runs in its own session with stdin on /dev/null, so a
+    spawner that dies without stopping it (SIGKILL, OOM, a hard crash
+    of the daemon or the extension host) leaves it neither a SIGHUP
+    nor a stdin EOF; it would hold the microphone until the next wake
+    word made the first write to the dead pipe fail.  Every loop
+    iteration (one block, or one watchdog period while the stream is
+    silent) therefore checks whether the process has been reparented
+    and exits when it has.  Windows keeps reporting the dead parent's
+    pid, so the check never fires there.
+
     Returns:
         Process exit code: nonzero when the stream died and could not
         be revived (the supervisor shows the error instead of a
@@ -1664,12 +1649,15 @@ def run_mic(
     if not math.isfinite(watchdog_timeout) or watchdog_timeout <= 0:
         raise ValueError("watchdog_timeout must be a positive finite number")
 
+    parent = os.getppid()
     blocks: queue.Queue[bytes] = queue.Queue()
     stream: sounddevice.RawInputStream | None = open_mic_stream(blocks)
     emit("READY")
     failed_reopens = 0
     try:
         while True:
+            if os.getppid() != parent:
+                return 0
             try:
                 data = blocks.get(timeout=watchdog_timeout)
             except queue.Empty:

@@ -137,13 +137,13 @@ class TestThreadAliveSites(unittest.TestCase):
         )
         agent_state.register(state)
         # By task id.
-        assert self.server._reattach_running_chat(
+        assert self.server._attach_viewer_to_running_chat(
             "", "viewer-1", task_id="startup-task",
-        ), "BUG C-R4: startup-window task not reattachable by task id"
+        )[0] is not None, "BUG C-R4: startup-window task not reattachable by task id"
         # By chat id.
-        assert self.server._reattach_running_chat(
+        assert self.server._attach_viewer_to_running_chat(
             "chat-r4", "viewer-2",
-        ), "BUG C-R4: startup-window task not reattachable by chat id"
+        )[0] is not None, "BUG C-R4: startup-window task not reattachable by chat id"
         with self.server.printer._lock:
             viewers = self.server.printer._subscribers.get(
                 "startup-task", set(),
@@ -157,12 +157,12 @@ class TestThreadAliveSites(unittest.TestCase):
             server_owned=True,
         )
         agent_state.register(state)
-        assert not self.server._reattach_running_chat(
+        assert self.server._attach_viewer_to_running_chat(
             "", "viewer-3", task_id="done-task",
-        )
-        assert not self.server._reattach_running_chat(
+        )[0] is None
+        assert self.server._attach_viewer_to_running_chat(
             "chat-done", "viewer-4",
-        )
+        )[0] is None
 
 
 class TestSingleFailureResultBroadcast(unittest.TestCase):

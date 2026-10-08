@@ -165,7 +165,7 @@ class BrowserTabService:
         self._by_page: dict[int, _PageRecord] = {}
         self._next_id = 1
         self._closed = False
-        self._launch_lock: asyncio.Lock | None = None
+        self._launch_lock = asyncio.Lock()
         # Pages being created by _open (not popups) - see _on_page.
         self._creating = 0
 
@@ -202,9 +202,11 @@ class BrowserTabService:
                 be launched.
         """
         loop = self._ensure_loop()
-        future = asyncio.run_coroutine_threadsafe(self._open_for_agent(), loop)
+        future = asyncio.run_coroutine_threadsafe(
+            asyncio.wait_for(self._open_for_agent(), _OPEN_TIMEOUT), loop
+        )
         try:
-            return future.result(_OPEN_TIMEOUT)
+            return future.result(_OPEN_TIMEOUT + _CALL_TIMEOUT)
         except Exception as exc:
             raise RuntimeError(f"Cannot open a Browser tab: {exc}") from exc
 
@@ -228,8 +230,10 @@ class BrowserTabService:
         """
         try:
             loop = self._ensure_loop()
-            future = asyncio.run_coroutine_threadsafe(self._open_for_user(url), loop)
-            future.result(_OPEN_TIMEOUT)
+            future = asyncio.run_coroutine_threadsafe(
+                asyncio.wait_for(self._open_for_user(url), _OPEN_TIMEOUT), loop
+            )
+            future.result(_OPEN_TIMEOUT + _CALL_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — the caller falls back to another browser
             logger.warning("browser tab: cannot open %s for the user: %s", url, exc)
             return False
@@ -307,6 +311,11 @@ class BrowserTabService:
             logger.debug("browser tab: shutdown error: %s", exc)
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=10)
+        if thread.is_alive():
+            # A callback is wedged on the loop: closing a running loop
+            # raises, and the rest of the daemon's shutdown must go on.
+            logger.warning("browser tab: the loop thread did not stop; leaving it behind")
+            return
         loop.close()
 
     # ------------------------------------------------------------------
@@ -355,8 +364,6 @@ class BrowserTabService:
         Serialised: two opens racing (a double-click on "Browser") must
         not start two browsers on one profile.
         """
-        if self._launch_lock is None:
-            self._launch_lock = asyncio.Lock()
         async with self._launch_lock:
             if self._context is None:
                 self._context = await self._launch_new()
@@ -372,10 +379,11 @@ class BrowserTabService:
         self._playwright = playwright
         try:
             context = await self._launch_browser(playwright)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             # The driver (a node process) must not outlive the failed
-            # launch: the next open starts a fresh one.  A shutdown that
-            # ran meanwhile has already taken and stopped it.
+            # (or, past ``_OPEN_TIMEOUT``, abandoned) launch: the next
+            # open starts a fresh one.  A shutdown that ran meanwhile
+            # has already taken and stopped it.
             if self._playwright is playwright:
                 self._playwright = None
                 await playwright.stop()

@@ -26,7 +26,6 @@ import logging
 import math
 import os
 import queue
-import shutil
 import threading
 import time
 from pathlib import Path
@@ -38,7 +37,6 @@ from kiss.agents.sorcar.git_worktree import _WORKTREE_SUBDIR, GitWorktreeOps
 from kiss.agents.sorcar.persistence import (
     _chat_first_tasks,
     _chat_summaries,
-    _delete_frequent_task,
     _get_adjacent_task_by_chat_id,
     _history_date_range,
     _is_failed_result,
@@ -51,9 +49,7 @@ from kiss.agents.sorcar.persistence import (
     _load_subagent_rows_by_parent_task_id,
     _recover_orphaned_tasks,
     _search_history,
-    _set_task_favorite,
 )
-from kiss.core import config as config_module
 from kiss.core.models.model_info import (
     MODEL_INFO,
     get_default_model,
@@ -142,6 +138,29 @@ def _extra_for_replay(extra: object) -> str:
     )
 
 
+def _extra_dict(extra: object) -> dict[str, Any]:
+    """Parse a task row's ``extra`` JSON into a dict.
+
+    Args:
+        extra: The persisted ``extra`` value (a JSON string), an
+            already parsed dict, or anything else.
+
+    Returns:
+        The parsed object (or *extra* itself when it already is a
+        dict); ``{}`` when *extra* is missing, not a string, not JSON,
+        or not a JSON object.
+    """
+    if isinstance(extra, dict):
+        return extra
+    if not isinstance(extra, str) or not extra:
+        return {}
+    try:
+        parsed = json.loads(extra)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _start_ts_from_extra(extra: object) -> int:
     """Return the ``startTs`` (ms since the epoch) persisted in *extra*.
 
@@ -161,21 +180,11 @@ def _start_ts_from_extra(extra: object) -> int:
         The start stamp, or ``0`` when *extra* has none or is
         malformed.
     """
-    parsed: object = extra
-    if isinstance(extra, str):
-        if not extra:
-            return 0
-        try:
-            parsed = json.loads(extra)
-        except (json.JSONDecodeError, TypeError):
-            return 0
-    if not isinstance(parsed, dict):
-        return 0
     try:
-        start_ts = int(parsed.get("startTs", 0) or 0)
+        start_ts = int(_extra_dict(extra).get("startTs", 0) or 0)
     except (TypeError, ValueError, OverflowError):
         return 0
-    return start_ts if start_ts > 0 else 0
+    return max(start_ts, 0)
 
 
 def _coerce_id(value: object) -> str | None:
@@ -320,33 +329,8 @@ def _is_side_channel_row(row: dict[str, object]) -> bool:
         True when the row's ``subagent`` extra carries
         ``side_channel: true``.
     """
-    try:
-        extra = json.loads(str(row.get("extra", "") or "") or "{}")
-    except (json.JSONDecodeError, TypeError):
-        return False
-    sub = extra.get("subagent") if isinstance(extra, dict) else None
+    sub = _extra_dict(row.get("extra")).get("subagent")
     return isinstance(sub, dict) and bool(sub.get("side_channel"))
-
-
-def _cleanup_legacy_merge_artifacts() -> None:
-    """Delete review snapshots left behind by the removed diff review.
-
-    Prior releases snapshotted dirty and untracked files (up to 2 MB
-    each) under ``{artifact_root}/merge_dir/<tab>/`` while preparing
-    the interactive diff/merge review, and deleted them when each
-    review ended.  With the review workflow removed, nothing writes —
-    or would ever delete — that tree, so an upgrade (or a restart
-    mid-review) would strand potentially sensitive file copies
-    forever.  Removing the whole directory once at server construction
-    retires the legacy data.
-    """
-    legacy = config_module._artifact_root() / "merge_dir"
-    try:
-        shutil.rmtree(legacy)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        logger.debug("Legacy merge_dir cleanup failed", exc_info=True)
 
 
 def _prewarm_task_dependencies() -> None:
@@ -414,7 +398,6 @@ class VSCodeServer(
 
     def __init__(self, printer: JsonPrinter | None = None) -> None:
         self.printer: JsonPrinter = printer or JsonPrinter()
-        _cleanup_legacy_merge_artifacts()
         boot_ts = time.time()
         still_running: set[str] = set()
         # ``agent_states`` is process-global, so this constructor must
@@ -1293,56 +1276,51 @@ class VSCodeServer(
                 "startTs": _safe_start_ms(entry.get("timestamp", 0)),
                 "endTs": 0,
             }
-            extra_raw = str(entry.get("extra", "") or "")
-            if extra_raw:
+            extra_obj = _extra_dict(entry.get("extra"))
+            if extra_obj:
+                sub = extra_obj.get("subagent")
+                if isinstance(sub, dict):
+                    session["is_subagent"] = True
+                    pid = _coerce_id(sub.get("parent_task_id"))
+                    if pid is not None:
+                        session["parent_task_id"] = pid
+                # ``OverflowError`` must be caught alongside the
+                # usual coercion errors: Python's JSON parser
+                # accepts ``Infinity``/huge numbers in hand-edited
+                # ``extra`` payloads and one corrupt row must not
+                # abort the entire history response (S3-13/R7).
+                for key, cast, default in (
+                    ("tokens", int, 0),
+                    ("cost", float, 0.0),
+                    ("steps", int, 0),
+                ):
+                    try:
+                        session[key] = cast(extra_obj.get(key, default) or default)
+                    except (TypeError, ValueError, OverflowError):
+                        session[key] = default
                 try:
-                    extra_obj = json.loads(extra_raw)
-                except (json.JSONDecodeError, TypeError):
-                    extra_obj = None
-                if isinstance(extra_obj, dict):
-                    sub = extra_obj.get("subagent")
-                    if isinstance(sub, dict):
-                        session["is_subagent"] = True
-                        pid = _coerce_id(sub.get("parent_task_id"))
-                        if pid is not None:
-                            session["parent_task_id"] = pid
-                    # ``OverflowError`` must be caught alongside the
-                    # usual coercion errors: Python's JSON parser
-                    # accepts ``Infinity``/huge numbers in hand-edited
-                    # ``extra`` payloads and one corrupt row must not
-                    # abort the entire history response (S3-13/R7).
-                    for key, cast, default in (
-                        ("tokens", int, 0),
-                        ("cost", float, 0.0),
-                        ("steps", int, 0),
-                    ):
-                        try:
-                            session[key] = cast(extra_obj.get(key, default) or default)
-                        except (TypeError, ValueError, OverflowError):
-                            session[key] = default
-                    try:
-                        session["endTs"] = int(extra_obj.get("endTs", 0) or 0)
-                    except (TypeError, ValueError, OverflowError):
-                        session["endTs"] = 0
-                    session["is_favorite"] = bool(extra_obj.get("is_favorite", False))
-                    wd_raw = extra_obj.get("work_dir", "")
-                    if isinstance(wd_raw, str):
-                        session["work_dir"] = wd_raw
-                    mdl_raw = extra_obj.get("model", "")
-                    if isinstance(mdl_raw, str):
-                        session["model"] = mdl_raw
-                    session["is_worktree"] = bool(extra_obj.get("is_worktree", False))
-                    session["is_parallel"] = bool(extra_obj.get("is_parallel", False))
-                    session["auto_commit_mode"] = bool(extra_obj.get("auto_commit_mode", False))
-                    for key in ("tags", "sea"):
-                        raw = extra_obj.get(key, "")
-                        session[key] = raw if isinstance(raw, str) else ""
-                    try:
-                        start_ts_raw = extra_obj.get("startTs", 0)
-                        if start_ts_raw:
-                            session["startTs"] = int(start_ts_raw)
-                    except (TypeError, ValueError, OverflowError):
-                        pass
+                    session["endTs"] = int(extra_obj.get("endTs", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    session["endTs"] = 0
+                session["is_favorite"] = bool(extra_obj.get("is_favorite", False))
+                wd_raw = extra_obj.get("work_dir", "")
+                if isinstance(wd_raw, str):
+                    session["work_dir"] = wd_raw
+                mdl_raw = extra_obj.get("model", "")
+                if isinstance(mdl_raw, str):
+                    session["model"] = mdl_raw
+                session["is_worktree"] = bool(extra_obj.get("is_worktree", False))
+                session["is_parallel"] = bool(extra_obj.get("is_parallel", False))
+                session["auto_commit_mode"] = bool(extra_obj.get("auto_commit_mode", False))
+                for key in ("tags", "sea"):
+                    raw = extra_obj.get(key, "")
+                    session[key] = raw if isinstance(raw, str) else ""
+                try:
+                    start_ts_raw = extra_obj.get("startTs", 0)
+                    if start_ts_raw:
+                        session["startTs"] = int(start_ts_raw)
+                except (TypeError, ValueError, OverflowError):
+                    pass
             if session.get("is_running") and entry_id is not None:
                 self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
@@ -1368,36 +1346,6 @@ class VSCodeServer(
             "dateRange": {"min": min_ts, "max": max_ts},
         }
         self._broadcast_to_conn(event, conn_id)
-
-    def _handle_set_favorite(self, task_id: str, is_favorite: bool) -> None:
-        """Persist the favourite flag on a task history row.
-
-        Merges ``{"is_favorite": <bool>}`` into the row's ``extra``
-        JSON column, preserving other keys (tokens, cost, steps,
-        subagent metadata).  No broadcast is emitted: the originating
-        webview updates its star icon optimistically on click, and
-        the next ``getHistory`` refresh will reflect the persisted
-        flag for all other clients.
-
-        Args:
-            task_id: Primary key of the ``task_history`` row.
-            is_favorite: New value for the ``is_favorite`` flag.
-        """
-        _set_task_favorite(task_id, is_favorite)
-
-    def _handle_delete_frequent_task(self, task: str) -> None:
-        """Delete a row from the ``frequent_tasks`` table and rebroadcast.
-
-        After deletion succeeds, re-emits the current frequent tasks
-        list so any other open webview rerenders without the deleted
-        row.  The originating webview removes the row optimistically.
-
-        Args:
-            task: The exact task description string identifying the row.
-        """
-        if not _delete_frequent_task(task):
-            return
-        self._get_frequent_tasks()
 
     def _get_frequent_tasks(self, limit: int = 50, conn_id: str = "") -> None:
         """Send the top *limit* most-frequent tasks (highest count first).
@@ -2137,107 +2085,26 @@ class VSCodeServer(
                 self._tab_opened_task_ids[tab_id] = str(task_id)
             else:
                 self._tab_opened_task_ids.pop(tab_id, None)
-        result = None
+        row = None
         if task_id is not None:
-            result = _load_chat_events_by_task_id(task_id)
-            if result:
-                chat_id = str(result.get("chat_id", "") or chat_id)
-        if not result:
-            result = _load_latest_chat_events_by_chat_id(chat_id)
-        if not result:
-            rebound_state, _, recording = self._attach_viewer_to_running_chat(
-                chat_id,
-                tab_id,
-                task_id=task_id,
-                is_subagent=False,
-                replace_subscriptions=True,
-            )
-            if rebound_state is not None:
-                start_ts = self._live_task_start_ms(task_id, chat_id)
-                self._broadcast_viewer_running(tab_id, rebound_state, start_ts)
-                # The task runs but has no history row yet: the live
-                # in-memory recording is the only copy of what it has
-                # already broadcast (the events table is written
-                # asynchronously).  Snapshot by the LIVE state's task
-                # id — the caller's *task_id* is None for a plain chat
-                # resume, and a pre-history-row run's recording (e.g.
-                # its setup-failure result) is keyed by the
-                # provisional id the state carries (audit0903 F4).
-                events_payload: dict[str, Any] = {
-                    "type": "task_events",
-                    # The run has no ``task_history`` row to read the
-                    # task text from yet, but the task panel heading
-                    # a (re)connecting client's transcript is built
-                    # from this field — use the prompt ``_cmd_run``
-                    # stamped on the state at submit time so the panel
-                    # is not blanked for the whole setup window.
-                    "task": rebound_state.last_user_prompt,
-                    "task_id": task_id,
-                    "chat_id": chat_id,
-                    "extra": "",
-                    "tabId": tab_id,
-                    **replay_scope,
-                }
-                # Each live event is either in the snapshot or sent
-                # after the replay (see ``JsonPrinter.replay_snapshot``).
-                with self.printer.replay_snapshot(
-                    rebound_state.task_id, conn_id, recording,
-                ) as live_events:
-                    self.printer.broadcast(
-                        {**events_payload, "events": live_events},
-                    )
-                self._finalize_viewer_attach(
-                    tab_id, rebound_state, live_events, events_payload,
-                )
-            with self._state_lock:
-                state = agent_state.find_by_tab(tab_id)
-                is_sub_view = state is not None and state.is_subagent
-            # Publish the reopen BEFORE clearing ``frontend_closed``:
-            # a stale duplicate close's cleanup tail orders itself on
-            # the registry clock (``republished_since``), so with
-            # publish-first it either sees this publication and stands
-            # down, or runs entirely before it — in which case the
-            # commit below lands last and the reopened tab does not
-            # end up marked closed.  The commit itself is qualified by
-            # THIS publication's generation (see
-            # ``_commit_replay_publication``): a close that removed
-            # the publication, or a newer publication, owns the tab
-            # from here on.
-            if chat_id and not is_sub_view:
-                self._publish_replay_reopen(
-                    tab_id, chat_id, task_id, rebound_state,
-                )
-            else:
-                with self._state_lock:
-                    state = agent_state.find_by_tab(tab_id)
-                    if state is not None:
-                        state.frontend_closed = False
-            if rebound_state is None:
-                # Nothing to replay and nothing running: say so, or the
-                # client keeps waiting for a replay that never comes
-                # (the webview holds a registry chat open until its
-                # state is known, see ``statusKnown`` in main.js).
-                self.printer.broadcast({
-                    "type": "status", "running": False, "tabId": tab_id,
-                    **replay_scope,
-                })
-            self._emit_pending_ask(tab_id)
-            return
+            row = _load_chat_events_by_task_id(task_id)
+            if row:
+                chat_id = str(row.get("chat_id", "") or chat_id)
+        if not row:
+            row = _load_latest_chat_events_by_chat_id(chat_id)
+        no_row = not row
+        # A run allocates its history row after setup, so the chat can
+        # be live without a row: replay it as an empty row whose
+        # transcript is the live recording snapshot below.
+        result: dict[str, Any] = row or {
+            "task": "", "task_id": task_id, "chat_id": chat_id,
+            "extra": "", "events": [],
+        }
+        extra_raw = _extra_dict(result.get("extra"))
+        sub = extra_raw.get("subagent")
+        subagent_info: dict[str, object] | None = sub if isinstance(sub, dict) else None
 
-        extra_str = str(result.get("extra", "") or "")
-        subagent_info: dict[str, object] | None = None
-        extra_raw: object = None
-        if extra_str:
-            try:
-                extra_raw = json.loads(extra_str)
-                if isinstance(extra_raw, dict):
-                    sub = extra_raw.get("subagent")
-                    if isinstance(sub, dict):
-                        subagent_info = sub
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        rebound_task_id = _coerce_id(result.get("task_id") if result else None)
+        rebound_task_id = _coerce_id(result.get("task_id"))
         rebound_state, attached_task_id, recording = (
             self._attach_viewer_to_running_chat(
                 chat_id,
@@ -2247,7 +2114,26 @@ class VSCodeServer(
                 replace_subscriptions=True,
             )
         )
-        if subagent_info is None and chat_id:
+        publish_tab = subagent_info is None and bool(chat_id)
+        if no_row:
+            # Without a row the live recording is the only copy of what
+            # the run has broadcast (the events table is written
+            # asynchronously), and a pre-row run's recording (e.g. its
+            # setup-failure result) is keyed by the provisional id the
+            # state carries — not by the caller's *task_id*, which is
+            # None for a plain chat resume (audit0903 F4).  The task
+            # panel heading comes from the prompt ``_cmd_run`` stamped
+            # on the state, so it is not blanked for the whole setup
+            # window.  A sub-agent view tab is not a viewer of the
+            # (parent) chat, matching the ``subagent_info`` guard a
+            # row provides.
+            rebound_task_id = attached_task_id or None
+            with self._state_lock:
+                state = agent_state.find_by_tab(tab_id)
+                publish_tab = publish_tab and not (state is not None and state.is_subagent)
+            if rebound_state is not None:
+                result["task"] = rebound_state.last_user_prompt
+        if publish_tab:
             # A resumed chat binds + titles the tab for EVERY client:
             # the shared registry is what makes a history click on one
             # client rename the same tab everywhere.  The selected
@@ -2263,9 +2149,12 @@ class VSCodeServer(
             # qualified by THIS publication's generation (see
             # ``_commit_replay_publication``): a close that removed
             # the publication, or a newer publication, owns the tab.
+            # Published before the status and transcript broadcasts
+            # below, so a mirroring client never receives events for
+            # a tab it has not yet seen in ``tabs_state``.
             self._publish_replay_reopen(
                 tab_id, chat_id, task_id, rebound_state,
-                title=str(result.get("task", "") or ""),
+                title=None if no_row else str(result.get("task", "") or ""),
             )
         else:
             with self._state_lock:
@@ -2273,6 +2162,17 @@ class VSCodeServer(
                 if state is not None:
                     state.frontend_closed = False
                 self._tab_chat_views.pop(tab_id, None)
+        if no_row and rebound_state is None:
+            # Nothing to replay and nothing running: say so, or the
+            # client keeps waiting for a replay that never comes
+            # (the webview holds a registry chat open until its
+            # state is known, see ``statusKnown`` in main.js).
+            self.printer.broadcast({
+                "type": "status", "running": False, "tabId": tab_id,
+                **replay_scope,
+            })
+            self._emit_pending_ask(tab_id)
+            return
 
         if subagent_info is not None:
             # A client asked for this sub-agent's tab by name: a tab the
@@ -2312,13 +2212,14 @@ class VSCodeServer(
             )
 
         if rebound_state is not None:
-            # The live agent's stamp (``_cmd_run``'s start) is what
-            # the originating client's ``status running:true`` carried,
-            # so a viewer attaching mid-run counts from the same
-            # instant; the row's ``startTs`` covers a live state
-            # without a stamp (a sub-agent).
-            start_ts_for_resume = self._live_task_start_ms(
-                rebound_task_id, chat_id,
+            # The live agent's stamp (``_cmd_run``'s start, stamped by
+            # ``_run_task_inner``) is what the originating client's
+            # ``status running:true`` carried, so a viewer attaching
+            # mid-run counts from the same instant; the row's
+            # ``startTs`` covers a live state without a stamp (a
+            # sub-agent).
+            start_ts_for_resume = int(
+                getattr(rebound_state.agent, "_task_start_ms", 0) or 0,
             ) or _start_ts_from_extra(extra_raw)
             self._broadcast_viewer_running(
                 tab_id, rebound_state, start_ts_for_resume,
@@ -2725,76 +2626,6 @@ class VSCodeServer(
                 ancestors=ancestors,
             )
 
-    def _live_task_start_ms(
-        self,
-        task_id: str | None,
-        chat_id: str,
-    ) -> int:
-        """Return the start timestamp (ms since epoch) of a live task.
-
-        Scans the agent-state registry for the state owning the running task and reads the
-        ``_task_start_ms`` attribute that
-        :meth:`_TaskRunnerMixin._run_task_inner` stamps on the live
-        agent at run start.  Matching mirrors
-        :meth:`_reattach_running_chat`: an exact ``task_history`` row
-        id match when *task_id* is given, otherwise a non-subagent
-        ``chat_id`` match.
-
-        Args:
-            task_id: The ``task_history`` row id of the task, or
-                ``None`` to match by chat id only.
-            chat_id: The chat id of the task (used when *task_id* is
-                ``None``).
-
-        Returns:
-            The agent's start timestamp in ms since epoch, or ``0``
-            when no live agent (or no stamped timestamp) is found.
-        """
-        with self._state_lock:
-            for state in agent_state.agent_states.values():
-                if task_id is not None:
-                    if state.task_id != task_id:
-                        continue
-                elif not chat_id or state.chat_id != chat_id or state.is_subagent:
-                    continue
-                start_ms = int(getattr(state.agent, "_task_start_ms", 0) or 0)
-                if start_ms > 0:
-                    return start_ms
-        return 0
-
-    def _reattach_running_chat(
-        self,
-        chat_id: str,
-        new_tab_id: str,
-        *,
-        task_id: str | None = None,
-        is_subagent: bool = False,
-    ) -> bool:
-        """Boolean facade over :meth:`_attach_viewer_to_running_chat`.
-
-        Kept for the callers (and tests) that only need to know
-        WHETHER a live task was attached; ``_replay_session`` uses the
-        state-returning method directly because its post-broadcast
-        liveness re-check needs the state object itself.
-
-        Args:
-            chat_id: The chat id of the task the user clicked in
-                history.
-            new_tab_id: The freshly allocated frontend tab id.
-            task_id: When provided, only states whose task id equals
-                this are eligible.
-            is_subagent: Skip the chat-id fallback pass (sub-agent
-                views must match by task id alone).
-
-        Returns:
-            ``True`` when a matching live agent exists and
-            *new_tab_id* is now subscribed to its event stream.
-        """
-        source, _, _ = self._attach_viewer_to_running_chat(
-            chat_id, new_tab_id, task_id=task_id, is_subagent=is_subagent,
-        )
-        return source is not None
-
     def _attach_viewer_to_running_chat(
         self,
         chat_id: str,
@@ -3130,8 +2961,6 @@ class VSCodeServer(
         """
         work_dir = work_dir or self.work_dir
         try:
-            from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-
             if GitWorktreeOps.discover_repo(Path(work_dir)) is None:
                 self.printer.broadcast(
                     {

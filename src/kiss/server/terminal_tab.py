@@ -105,9 +105,9 @@ class _Session:
     # ``time.monotonic()`` when the owning connection dropped; ``None``
     # while a connection is attached.
     detached_at: float | None = None
-    # Counts the disconnects, so the grace timer of an earlier one
-    # cannot expire a later one (the page re-attached in between).
-    detach_seq: int = 0
+    # Hangs the shell up ``GRACE_SECONDS`` after the disconnect;
+    # cancelled when the page re-attaches or the shell is hung up.
+    grace_timer: threading.Timer | None = None
     hung_up: bool = False
     # Set under the service lock in the same step as the ``waitpid``
     # that collected the shell, so no signal is ever sent to a pid the
@@ -153,7 +153,7 @@ class TerminalService:
                 # A page that reconnected within the grace period (or
                 # re-sent its open): the shell carries on where it was.
                 session.conn_id = conn_id
-                session.detached_at = None
+                self._cancel_grace(session)
                 self._set_winsize(session, cols, rows)
                 self._emit_opened(session, attached=True)
                 return
@@ -257,16 +257,16 @@ class TerminalService:
         """
         now = time.monotonic()
         with self._lock:
-            orphans = [s for s in self._sessions.values() if s.conn_id == conn_id]
-            for session in orphans:
+            for session in self._sessions.values():
+                if session.conn_id != conn_id:
+                    continue
+                self._cancel_grace(session)
                 session.detached_at = now
-                session.detach_seq += 1
-        for session in orphans:
-            timer = threading.Timer(
-                GRACE_SECONDS, self._expire_detached, [session, session.detach_seq],
-            )
-            timer.daemon = True
-            timer.start()
+                session.grace_timer = threading.Timer(
+                    GRACE_SECONDS, self._expire_detached, [session],
+                )
+                session.grace_timer.daemon = True
+                session.grace_timer.start()
 
     def shutdown(self) -> None:
         """Hang up every shell (the daemon is stopping)."""
@@ -340,7 +340,7 @@ class TerminalService:
         if session.hung_up or session.reaped:
             return
         session.hung_up = True
-        session.detached_at = None
+        self._cancel_grace(session)
         try:
             os.killpg(os.getpgid(session.pid), signal.SIGHUP)
         except OSError:
@@ -362,11 +362,20 @@ class TerminalService:
         except OSError:
             pass
 
-    def _expire_detached(self, session: _Session, detach_seq: int) -> None:
+    def _cancel_grace(self, session: _Session) -> None:
+        """Mark *session* attached and stop its grace timer (caller holds the lock)."""
+        session.detached_at = None
+        if session.grace_timer is not None:
+            session.grace_timer.cancel()
+            session.grace_timer = None
+
+    def _expire_detached(self, session: _Session) -> None:
+        # Only the timer of the latest disconnect may hang up: a timer
+        # that was already firing when the page re-attached (cancel()
+        # cannot stop it) must not expire a later disconnect's grace.
         with self._lock:
             if (
-                session.detached_at is not None
-                and session.detach_seq == detach_seq
+                session.grace_timer is threading.current_thread()
                 and session.tab_id in self._sessions
             ):
                 self._hang_up(session)

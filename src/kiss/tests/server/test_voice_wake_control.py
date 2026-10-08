@@ -118,17 +118,11 @@ class TestParseProtocolLine(unittest.TestCase):
             "text": "hi", "speaker": 3, "language": "fr",
         })
 
-    def test_speech_string_payload(self) -> None:
-        event = parse_protocol_line('SPEECH "just text"')
-        self.assertEqual(event, {
-            "type": "voiceWakeEvent", "event": "speech",
-            "text": "just text", "speaker": None, "language": None,
-        })
-
     def test_speech_junk_payloads_degrade_gracefully(self) -> None:
         for line in (
             "SPEECH {broken json",
             "SPEECH 42",
+            'SPEECH "just text"',
             'SPEECH {"text": 7}',
             'SPEECH {"text": "x", "speaker": 0, "language": ""}',
             'SPEECH {"text": "x", "speaker": true, "language": 5}',
