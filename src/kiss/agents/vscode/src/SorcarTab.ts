@@ -323,10 +323,7 @@ const ATTR_STRING_KEYS: ReadonlySet<string> = new Set([
  * untouched. Mirrors `_build_html` in `kiss/server/web_server.py`, which
  * renders the same `media/chat.html` for the remote web app.
  */
-function substituteTemplate(
-  tpl: string,
-  subs: Record<string, string>,
-): string {
+function substituteTemplate(tpl: string, subs: Record<string, string>): string {
   return tpl.replace(
     /( ?)\{\{([A-Z_]+)\}\}/g,
     (match, space: string, key: string) => {
