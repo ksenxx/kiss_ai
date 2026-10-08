@@ -5,10 +5,10 @@
 
 // Regression test: terminal SorcarSidebarView.dispose() must be final.
 //
-// dispose() nulls the cached SorcarApi wrapper, but before the fix the
-// webview onDidReceiveMessage registration was never disposed and _view was
+// dispose() nulls the daemon client, but before the fix the webview
+// onDidReceiveMessage registration was never disposed and _view was
 // never cleared, so one late queued webview message (e.g. 'getConfig')
-// reached _handleMessage(), whose _getApi()/_getClient() then built and
+// reached _handleMessage(), whose _send()/_getClient() then built and
 // connected a brand-new AgentClient and registered a fresh
 // workspace-folders listener AFTER teardown: daemon connections went 1 -> 2
 // and workspace subscriptions 0 -> 1.
