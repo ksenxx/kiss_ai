@@ -10,9 +10,8 @@ server asserts the ``X-Subscription-Token`` header on every call,
 returns canned JSON, and records requests (method, path, parsed query
 params, headers) for verification.
 
-Config state is isolated per pytest process because the session
-conftest points ``KISS_HOME`` at a temporary directory and
-``ChannelConfig.path`` resolves ``$KISS_HOME`` lazily.
+State is isolated per test: ``isolated_kiss_home`` points ``KISS_HOME`` at a
+fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 
 Branch-coverage note: ``main()`` and the ``__main__`` guard delegate
 straight to ``channel_main`` (a CLI entry point that parses

@@ -7,8 +7,7 @@
 No mocks or test doubles: a real in-process HTTP server emulates the
 WeChat API (token + custom-send + user-info endpoints), and the
 backend's own callback server is exercised with real HTTP requests.
-Config state is isolated by the session-wide temp ``KISS_HOME`` set in
-``src/kiss/tests/conftest.py``.
+Config state is isolated per test by ``isolated_kiss_home``.
 """
 
 from __future__ import annotations

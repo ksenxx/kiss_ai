@@ -613,7 +613,7 @@ class TestAgentAndAuthTools:
     def teardown_method(self) -> None:
         self._state.restore()
 
-    def test_unauthenticated_agent_exposes_onlyauth_tools(self, tmp_path: Path) -> None:
+    def test_unauthenticated_agent_exposes_only_auth_tools(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path / "nowhere")})
         agent = WhatsAppAgent()
         assert agent._is_authenticated() is False

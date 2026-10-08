@@ -12,9 +12,8 @@ The server checks the ``overleaf_session2`` cookie on every request and
 ``x-csrf-token`` on mutating ones, and records every request for
 verification.
 
-Config state is isolated per pytest process because the session
-conftest points ``KISS_HOME`` at a temporary directory and
-``ChannelConfig.path`` resolves ``$KISS_HOME`` lazily.
+State is isolated per test: ``isolated_kiss_home`` points ``KISS_HOME`` at a
+fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 """
 
 from __future__ import annotations

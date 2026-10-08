@@ -12,9 +12,8 @@ emulator (``composio_test_utils``) whose proxy injects the bearer token
 metadata and file content (``alt=media`` and ``/export``), and records
 every request for verification.
 
-State is isolated because the session conftest points ``KISS_HOME`` at
-a temporary directory; an autouse fixture additionally forgets the
-google_drive Composio connection around every test.
+State is isolated per test: ``isolated_kiss_home`` points ``KISS_HOME`` at a
+fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 """
 
 from __future__ import annotations
