@@ -515,18 +515,12 @@ _TLS_LOCK_TIMEOUT_S = 30.0
 
 _MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 
-_KISS_HOME: Path | None = None
 _TLS_DIR: Path | None = None
-
-
-def _kiss_home_dir() -> Path:
-    """Return the KISS home dir ($KISS_HOME or ~/.kiss), resolved lazily."""
-    return _KISS_HOME if _KISS_HOME is not None else kiss_home()
 
 
 def _tls_dir() -> Path:
     """Return the directory holding the self-signed TLS cert/key pair."""
-    return _TLS_DIR if _TLS_DIR is not None else _kiss_home_dir() / "tls"
+    return _TLS_DIR if _TLS_DIR is not None else kiss_home() / "tls"
 
 
 def _url_file_path() -> Path:
@@ -540,7 +534,7 @@ def _url_file_path() -> Path:
     call this accessor directly.
     """
     override = globals().get("_URL_FILE")
-    return override if override is not None else _kiss_home_dir() / "remote-url.json"
+    return override if override is not None else kiss_home() / "remote-url.json"
 
 
 if TYPE_CHECKING:
@@ -1092,7 +1086,7 @@ def _cloudflared_pidfile() -> Path:
     """Return the path of the persisted cloudflared PID file."""
     if _CLOUDFLARED_PIDFILE is not None:
         return _CLOUDFLARED_PIDFILE
-    return _kiss_home_dir() / "cloudflared.pid"
+    return kiss_home() / "cloudflared.pid"
 
 
 _SYSTEMD_RUN_SCOPE_PREFIX = (
@@ -1975,7 +1969,7 @@ def _get_machine_topic() -> str:
     Returns:
         A hex string suitable for use as an ntfy.sh topic name.
     """
-    kiss_home_path = _kiss_home_dir()
+    kiss_home_path = kiss_home()
     topic_file = kiss_home_path / "ntfy_topic"
     try:
         stored = topic_file.read_text(encoding="utf-8").strip()
@@ -4319,7 +4313,7 @@ def _update_check_cache_path() -> Path:
     popup — the extension host's native notification, the sidebar
     webview toast, and the remote webapp toast.
     """
-    return _kiss_home_dir() / ".update-check.json"
+    return kiss_home() / ".update-check.json"
 
 
 def _read_update_check_cache() -> dict[str, Any]:
@@ -5648,7 +5642,7 @@ class RemoteAccessServer:
         self._pending_ip_change_count: int = 0
         self._auth_failures: dict[str, list[float]] = {}
         self._install_root: Path = _KISS_AI_ROOT
-        self._update_log_path: Path = _kiss_home_dir() / "update.log"
+        self._update_log_path: Path = kiss_home() / "update.log"
         self._update_proc: subprocess.Popen[bytes] | None = None
         self._update_starting = False
         self._update_watch_task: asyncio.Task[None] | None = None
@@ -5660,14 +5654,14 @@ class RemoteAccessServer:
         self._update_when_idle_task: asyncio.Task[None] | None = None
         self._update_when_idle_armed = False
         self._update_models_log_path: Path = (
-            _kiss_home_dir() / "update_models.log"
+            kiss_home() / "update_models.log"
         )
         self._update_models_argv: list[str] = [
             sys.executable,
             "-m",
             "kiss.scripts.update_models",
             "--model-info",
-            str(_kiss_home_dir() / "MODEL_INFO.json"),
+            str(kiss_home() / "MODEL_INFO.json"),
         ]
         self._update_models_proc: subprocess.Popen[bytes] | None = None
         self._update_models_starting = False
@@ -6442,7 +6436,7 @@ class RemoteAccessServer:
         # $KISS_HOME, and defaults to the stock ``~/.kiss`` otherwise —
         # which a white-label brand's daemon never reads.
         env = dict(os.environ)
-        env["KISS_HOME"] = str(_kiss_home_dir())
+        env["KISS_HOME"] = str(kiss_home())
         if script is not None:
             bootstrap = script.parent / "scripts" / "install.sh"
             # os.path.isfile, not Path.is_file: an unreadable ``scripts``
