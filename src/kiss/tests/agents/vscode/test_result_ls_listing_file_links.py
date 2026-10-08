@@ -31,7 +31,7 @@ import json
 import pytest
 from playwright.sync_api import sync_playwright
 
-from kiss.tests.agents.vscode.test_content_tab_file_links import _open_page
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_content_tab_file_links import (
     harness,  # noqa: F401  (module fixture used by param name)
 )
@@ -44,6 +44,38 @@ def browser():
         b = p.chromium.launch(headless=True)
         yield b
         b.close()
+
+
+def _open_page(browser, harness):
+    """Open the desktop webapp (split layout), wait until the chat is
+    ready, and record every sent WS frame.
+
+    Returns ``(context, page, sent_frames)`` where *sent_frames* is a
+    live list of JSON-decoded frames the page sent over the WebSocket.
+    A lone chat has no visible tab strip, so readiness is the composer
+    being visible and ``_testApi`` reporting an active chat.
+    """
+    context = browser.new_context(ignore_https_errors=True)
+    page = context.new_page()
+    sent_frames: list[dict] = []
+
+    def _on_ws(ws) -> None:
+        def _on_sent(payload) -> None:
+            try:
+                sent_frames.append(json.loads(payload))
+            except Exception:
+                pass
+
+        ws.on("framesent", _on_sent)
+
+    page.on("websocket", _on_ws)
+    goto_retrying_network_change(page, harness.base_url + "/")
+    page.wait_for_selector("#task-input", state="visible", timeout=30000)
+    page.wait_for_function(
+        "() => window._testApi && window._testApi.getActiveTabId()",
+        timeout=30000,
+    )
+    return context, page, sent_frames
 
 
 def _ls_listing(harness) -> str:
@@ -126,16 +158,21 @@ class TestResultLsListingFileLinks:
             )
             assert missing_state == missing
 
-            # The whole-path link opens the real file in a content tab.
-            real_tabs = page.locator(
-                ".chat-tab:not(.chat-tab-add):not(.chat-tab-settings)",
-            )
-            n_before = real_tabs.count()
+            # The whole-path link opens the real file in a content tab on
+            # the desktop split layout's content pane; the chat stays.
+            chat_id = page.evaluate("window._testApi.getActiveTabId()")
+            content_tabs = page.locator("#content-tab-list .chat-tab.content-tab")
+            assert content_tabs.count() == 0
             page.click(_path_sel(notes))
-            page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
-            assert real_tabs.count() == n_before + 1
-            label = page.locator(".chat-tab.content-tab .chat-tab-label")
+            page.wait_for_selector(
+                "#content-tab-list .chat-tab.content-tab.active", timeout=30000,
+            )
+            assert content_tabs.count() == 1
+            label = content_tabs.locator(".chat-tab-label")
             assert label.inner_text() == "notes.md"
+            assert page.evaluate("window._testApi.getActiveTabId()") == chat_id
+            assert page.locator("#task-input").is_visible()
+            assert page.locator("#output").is_visible()
             opens = [f for f in sent if f.get("type") == "openFile"]
             assert [f["path"] for f in opens] == [notes], json.dumps(opens)
         finally:

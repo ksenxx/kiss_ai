@@ -83,23 +83,20 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-// The tab's entry on the group strip when its group is on screen, else
-// its main-row entry.
+// The tab's entry on the group strip (#tab-list).  The strip renders the
+// chat on screen, its sub-agents and, on this stacked surface, every
+// content tab; a background chat has no entry (it is picked from the
+// Chats panel, see clickTab).
 function tabEl(win, tabId) {
-  const sel = `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`;
-  return (
-    win.document.querySelector('#tab-list ' + sel) ||
-    win.document.querySelector('#main-tab-list ' + sel)
+  return win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
   );
 }
 
+// Every open tab, chat or content, in tab order (copied into this realm's
+// Array so deepStrictEqual compares values, not realms' prototypes).
 function tabIds(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; count each tab once.
-  const ids = Array.from(
-    win.document.querySelectorAll('.chat-tab[data-tab-id]'),
-  ).map(el => el.getAttribute('data-tab-id'));
-  return ids.filter((id, i) => ids.indexOf(id) === i);
+  return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
 function click(win, el, what) {
@@ -107,18 +104,37 @@ function click(win, el, what) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
+// A tab on the strip is clicked there; a background chat is picked the
+// way the Chats panel does it.
 function clickTab(win, tabId) {
-  click(win, tabEl(win, tabId), `tab ${tabId}`);
+  const el = tabEl(win, tabId);
+  if (el) click(win, el, `tab ${tabId}`);
+  else win._testApi.switchToTab(tabId);
 }
 
 function clickNewTabButton(win) {
   click(win, win.document.querySelector('#new-chat-btn'), 'new-tab button');
 }
 
+// Close a tab the way the user can: the close button of its strip entry
+// when its group is on screen.  A background chat has no entry since the
+// main row went; it is closed the way another surface's close reaches
+// this one, by a registry snapshot that no longer lists it (the first
+// snapshot confirms the registrations, as a locally opened chat is
+// shielded from reconciliation until the daemon has listed it once).
 function closeTabByButton(win, tabId) {
+  assert.ok(tabIds(win).indexOf(tabId) >= 0, `tab ${tabId} must exist to be closed`);
   const el = tabEl(win, tabId);
-  assert.ok(el, `tab ${tabId} must exist to be closed`);
-  click(win, el.querySelector('.chat-tab-close'), `close button of ${tabId}`);
+  if (el) {
+    click(win, el.querySelector('.chat-tab-close'), `close button of ${tabId}`);
+    return;
+  }
+  const entries = win._testApi
+    .openTabs()
+    .filter(t => !t.isContentTab && !t.isSubagentTab)
+    .map(t => ({tabId: t.id, title: t.title}));
+  send(win, {type: 'tabs_state', tabs: entries});
+  send(win, {type: 'tabs_state', tabs: entries.filter(e => e.tabId !== tabId)});
 }
 
 function openContentTab(win, name) {
@@ -439,7 +455,7 @@ function testClosingTheOnlyChatTabClearsTheHostsChatTab() {
 // of the on-screen chat tab must never name a tab that has been deleted.
 function testTheHostNeverNamesADeadTabDuringAMixedSession() {
   const win = makeWebview();
-  const first = win._testApi.getActiveTabId();
+  const boot = win._testApi.getActiveTabId();
 
   const alive = () => {
     assert.ok(
@@ -448,7 +464,14 @@ function testTheHostNeverNamesADeadTabDuringAMixedSession() {
     );
   };
 
+  // `+` retires the idle chat it leaves behind, so the session goes on
+  // with the chat it opened and one more opened without leaving.
   clickNewTabButton(win);
+  alive();
+  const first = win._testApi.getActiveTabId();
+  assert.deepStrictEqual(tabIds(win), [first], '+ retired the idle boot chat');
+  assert.notStrictEqual(first, boot);
+  win._testApi.createNewTab();
   alive();
   const second = win._testApi.getActiveTabId();
   openContentTab(win, 'mixed.html');
@@ -457,16 +480,19 @@ function testTheHostNeverNamesADeadTabDuringAMixedSession() {
   clickTab(win, first);
   alive();
   assertHostIsUpToDate(win, 'mixed session: back on the first tab');
-  // The file belongs to the second chat's group and was that group's
-  // last viewed tab, so the chat's main-row entry brings the file back.
   clickTab(win, second);
+  alive();
+  assertHostIsUpToDate(win, 'mixed session: on the second tab');
+  // The file belongs to the second chat's group, so it is on the strip
+  // while that chat is on screen.
+  clickTab(win, content);
   assert.strictEqual(
     win._testApi.getActiveTabId(),
     content,
-    'the main-row entry returns to the tab last viewed in its group',
+    'the strip entry shows the file',
   );
   alive();
-  assertHostKeepsChatTab(win, first, 'mixed session: viewing the file');
+  assertHostKeepsChatTab(win, second, 'mixed session: viewing the file');
   clickTab(win, second);
   alive();
   assertHostIsUpToDate(win, 'mixed session: on the second tab');

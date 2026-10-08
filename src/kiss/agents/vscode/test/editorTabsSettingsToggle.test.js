@@ -74,20 +74,25 @@ function testSidebarWebview() {
   assert.strictEqual(msgs.length, 1);
   assert.strictEqual(msgs[0].enabled, true);
 
-  // Sidebar mode keeps its own main tab row (the group strip under it
-  // only appears once a chat has sub-agents or opened files) and the
-  // footer's new-chat and settings controls (the latter inside the
-  // "..." menu).
-  assert.strictEqual(
-    win.document.getElementById('main-tab-bar').style.display,
-    '',
-  );
+  // Sidebar mode has no row of chat tabs (the chat on screen is picked
+  // in the Chats panel); the group strip only appears once a chat has
+  // sub-agents or opened files.  The footer keeps the new-chat and
+  // settings controls (the latter inside the "..." menu) and the Task
+  // info drawer toggle.
+  assert.strictEqual(win.document.getElementById('main-tab-bar'), null);
   assert.strictEqual(
     win.document.getElementById('tab-bar').style.display,
     'none',
   );
   assert.ok(win.document.getElementById('new-chat-btn'));
   assert.ok(win.document.getElementById('settings-btn'));
+  const drawerBtn = win.document.getElementById('meta-drawer-btn');
+  assert.ok(drawerBtn, 'the Task info toggle exists');
+  assert.strictEqual(
+    drawerBtn.parentElement.id,
+    'footer-tools',
+    'the Task info toggle lives in the composer footer',
+  );
 
   // No stray panel-title reports outside editor-tabs mode.
   assert.strictEqual(
