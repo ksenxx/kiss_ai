@@ -3594,7 +3594,7 @@
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.2,
+    "cache_read_price_per_1M": 0.1,
     "cache_write_price_per_1M": 2.5
   },
   "openrouter/arcee-ai/trinity-large-thinking": {
@@ -7364,7 +7364,7 @@
     "emb": false,
     "gen": true,
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.2,
+    "cache_read_price_per_1M": 0.1,
     "cache_write_price_per_1M": 2.5
   },
   "openrouter/~deepseek/deepseek-flash-latest": {

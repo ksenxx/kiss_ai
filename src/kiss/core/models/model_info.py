@@ -1056,19 +1056,28 @@ def _decisions_model(
 
 MODEL_INFO: dict[str, ModelInfo] = _load_model_info()
 
-_ANTHROPIC_CACHE_PREFIXES = (
-    "claude-",
-    "openrouter/anthropic/",
-    "openrouter/~anthropic/",
-)
+_ANTHROPIC_OPENROUTER_PREFIXES = ("openrouter/anthropic/", "openrouter/~anthropic/")
+_ANTHROPIC_CACHE_PREFIXES = ("claude-",) + _ANTHROPIC_OPENROUTER_PREFIXES
 # Anthropic bills cache hits at 0.1x the base input price, except on the
 # families below: Fable 5.1 / Mythos 5.1 read at 0.025x ($0.25/MTok on a
-# $10 base) and Opus 5.5 at 0.05x ($0.20/MTok on a $4 base).  Fable 5
-# (without the .1) is a plain 0.1x model, so the prefixes carry the minor
-# version: https://platform.claude.com/docs/en/about-claude/pricing
+# $10 base), Opus 5.5 at 0.05x ($0.20/MTok on a $4 base) and Sonnet 5.5
+# at 0.05x ($0.10/MTok on a $2 base).  Fable 5 / Opus 5 / Sonnet 5
+# (without the .5 or .1) are plain 0.1x models, so the prefixes carry the
+# minor version: https://platform.claude.com/docs/en/about-claude/pricing
 _ANTHROPIC_CACHE_READ_MULTIPLIERS = (
     (("claude-fable-5-1", "claude-fable-5.1", "claude-mythos-5-1", "claude-mythos-5.1"), 0.025),
-    (("claude-opus-5-5", "claude-opus-5.5"), 0.05),
+    (("claude-opus-5-5", "claude-opus-5.5", "claude-sonnet-5-5", "claude-sonnet-5.5"), 0.05),
+)
+# Claude Haiku 5.5 is the one Claude model priced by prompt length: prompts
+# over 100K tokens (input + cache read + cache write) bill the whole request
+# at 5x every rate ($0.10/$0.50 -> $0.50/$2.50; 5m write $0.125 -> $0.625;
+# 1h write $0.20 -> $1; read $0.01 -> $0.05).  Every other 1M-context Claude
+# model bills long prompts at standard rates:
+# https://platform.claude.com/docs/en/models/haiku-5-5/overview
+_ANTHROPIC_LONG_CONTEXT_FAMILIES = (
+    "claude-haiku-5-5",
+    "claude-haiku-5.5",
+    "claude-haiku-latest",
 )
 _OPENAI_OPENROUTER_PREFIXES = ("openrouter/openai/", "openrouter/~openai/")
 _GOOGLE_OPENROUTER_PREFIXES = ("openrouter/google/", "openrouter/~google/")
@@ -1395,13 +1404,19 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     if info is not None:
         return info
     my_models = _read_my_models()
-    entry = my_models.get(model_name) or my_models.get(bare)
+    key = model_name if model_name in my_models else bare
+    entry = my_models.get(key)
     if entry is None:
         return None
     try:
-        return _build_model_info_entry(entry)
+        info = _build_model_info_entry(entry)
     except (KeyError, TypeError, ValueError):
         return None
+    # Same normalization the import-time catalog gets, so a hot-added
+    # custom model bills cache hits at the provider's discount instead
+    # of the full input price until the next restart.
+    _apply_cache_pricing(key, info)
+    return info
 
 
 def model_runs_task_to_completion(model_name: str) -> bool:
@@ -1806,6 +1821,13 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     ``gpt-mini-latest`` tracks gpt-5.4-mini, which has no long-context
     tier.
 
+    Anthropic prices only Claude Haiku 5.5 by prompt length
+    (:data:`_ANTHROPIC_LONG_CONTEXT_FAMILIES`): prompts over 100K tokens
+    bill at 5x every rate, $0.10/$0.50 -> $0.50/$2.50 with cache
+    read/write scaled the same way (OpenRouter publishes the same
+    ``min_prompt_tokens: 100000`` override).  Every other 1M-context
+    Claude model bills long prompts at its standard rates.
+
     Multipliers (not absolute prices) are returned so OpenRouter
     passthrough entries, whose base prices follow OpenRouter's own
     listings rather than the provider's direct rates, scale from their
@@ -1821,8 +1843,12 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
         tier.
     """
     bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
-    if bare.startswith(_OPENAI_OPENROUTER_PREFIXES + _GOOGLE_OPENROUTER_PREFIXES):
+    if bare.startswith(
+        _OPENAI_OPENROUTER_PREFIXES + _GOOGLE_OPENROUTER_PREFIXES + _ANTHROPIC_OPENROUTER_PREFIXES
+    ):
         bare = bare.split("/", 2)[2]
+    if bare.startswith(_ANTHROPIC_LONG_CONTEXT_FAMILIES):
+        return 100_000, 5.0, 5.0
     if bare.startswith(
         ("gpt-6-", "gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
         + _OPENAI_ROLLING_LATEST

@@ -1293,6 +1293,25 @@ class Model(ABC):
         """
         return None
 
+    def cost_multiplier_for_response(self, response: Any) -> float:
+        """Return the factor the served processing tier applies to catalog rates.
+
+        Some providers price the same tokens differently by processing
+        tier and state in the response which tier served the call
+        (OpenAI's ``service_tier``: Flex at half the Standard rate, Fast
+        at twice, Ultrafast at six times).  The agent multiplies the
+        :func:`~kiss.core.models.model_info.calculate_cost` estimate by
+        this factor; it is not applied to a provider-reported cost.  The
+        base implementation knows of no tiers.
+
+        Args:
+            response: The raw API response object.
+
+        Returns:
+            ``1.0`` unless the provider served a differently priced tier.
+        """
+        return 1.0
+
     def take_partial_usage_response(self) -> Any:
         """Return (and consume) usage for a generation that raised, if known.
 

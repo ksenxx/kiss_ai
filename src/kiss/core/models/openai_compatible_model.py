@@ -10,6 +10,7 @@ import logging
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import httpx
 from openai import APIConnectionError, APITimeoutError, BadRequestError, OpenAI
@@ -53,6 +54,50 @@ _CHAT_REQUEST_PARAMS = accepted_request_params(Completions.create)
 # One retry keeps resilience against one-off connect failures while
 # bounding the duplication, matching ``anthropic_model._MAX_RETRIES``.
 _MAX_RETRIES = 1
+
+# OpenAI processing tiers as a factor on the Standard rate the catalog
+# holds (https://developers.openai.com/api/docs/pricing, tier switcher).
+# Flex bills Batch rates (half of Standard) and Ultrafast six times
+# (gpt-6-astra $60/$6/$75/$300 on $10/$1/$12.50/$50) for every model
+# offering the tier; ``default``/``auto``/``scale`` bill Standard.  Fast
+# (formerly Priority) is twice Standard on the GPT-5.x/GPT-6 line
+# (gpt-6-astra $20/$2/$25/$100, gpt-5.4 $5/$0.50/$30, gpt-5.2
+# $3.50/$0.35/$28, gpt-5 $2.50/$0.25/$20) but not uniformly so on older
+# or smaller models; the exceptions below are the published Fast rate
+# over the Standard rate, longest prefix first.
+_OPENAI_FLEX_MULTIPLIER = 0.5
+_OPENAI_ULTRAFAST_MULTIPLIER = 6.0
+_OPENAI_FAST_MULTIPLIER = 2.0
+_OPENAI_FAST_EXCEPTIONS = (
+    ("gpt-5.5", 2.5),  # $12.50/$1.25/$75 on $5/$0.50/$30
+    ("gpt-5-mini", 1.8),  # $0.45/$0.045/$3.60 on $0.25/$0.025/$2
+    ("gpt-4.1-nano", 2.0),  # $0.20/$0.05/$0.80 on $0.10/$0.025/$0.40
+    ("gpt-4.1", 1.75),  # $3.50/$0.875/$14 on $2/$0.50/$8; -mini $0.70/$0.175/$2.80
+    ("gpt-4o-mini", 0.25 / 0.15),  # $0.25/$0.125/$1 on $0.15/$0.075/$0.60
+    ("gpt-4o", 1.7),  # $4.25/$2.125/$17 on $2.50/$1.25/$10
+    ("o4-mini", 2.0 / 1.1),  # $2/$0.50/$8 on $1.10/$0.275/$4.40
+    ("o3", 1.75),  # $3.50/$0.875/$14 on $2/$0.50/$8
+)
+
+
+def _openai_fast_multiplier(model_name: str) -> float:
+    """Return the Fast-tier factor over Standard for *model_name*.
+
+    Args:
+        model_name: The catalog model name (thinking aliases and
+            provider prefixes are ignored).
+
+    Returns:
+        The published Fast/Standard ratio from
+        :data:`_OPENAI_FAST_EXCEPTIONS`, else :data:`_OPENAI_FAST_MULTIPLIER`.
+    """
+    from kiss.core.models.model_info import _strip_provider_prefix, _strip_thinking_alias
+
+    bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
+    for prefix, factor in _OPENAI_FAST_EXCEPTIONS:
+        if bare.startswith(prefix):
+            return factor
+    return _OPENAI_FAST_MULTIPLIER
 
 # Streaming requests get a per-request ``httpx.Timeout`` instead of the
 # client's scalar 1800 s, so the wait for the response headers is bounded
@@ -607,6 +652,40 @@ class OpenAICompatibleBase(Model):
         """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
         return self.model_name.startswith("openrouter/anthropic/")
 
+    def _base_url_is_openrouter(self) -> bool:
+        """Whether this adapter's endpoint host is OpenRouter (any ``openrouter.ai`` host)."""
+        host = urlparse(self.base_url or "").hostname or ""
+        return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+    def cost_multiplier_for_response(self, response: Any) -> float:
+        """Return OpenAI's processing-tier factor for the tier that served *response*.
+
+        OpenAI prices every token rate of a model by processing tier
+        (https://developers.openai.com/api/docs/pricing, tier switcher):
+        Flex at half the Standard rate, Fast (``service_tier`` ``fast``,
+        or ``priority`` as GPT-5.6 and earlier still report it) at the
+        model's published Fast ratio (see :func:`_openai_fast_multiplier`),
+        and Ultrafast at six times.  The response's ``service_tier``
+        names the tier actually used, so a Fast request downgraded under
+        the ramp-rate limit comes back ``default`` and bills Standard.
+        Endpoints without tiers never send the field and bill Standard.
+
+        Args:
+            response: A chat completion, Responses object, final stream
+                chunk, or the dict form of any of them.
+
+        Returns:
+            The factor to apply to the Standard-rate catalog estimate.
+        """
+        tier = _get_attr_or_key(response, "service_tier")
+        if tier == "flex":
+            return _OPENAI_FLEX_MULTIPLIER
+        if tier in ("fast", "priority"):
+            return _openai_fast_multiplier(self.model_name)
+        if tier == "ultrafast":
+            return _OPENAI_ULTRAFAST_MULTIPLIER
+        return 1.0
+
     def extract_cost_from_response(self, response: Any) -> float | None:
         """Return the USD amount OpenRouter reports it charged for *response*.
 
@@ -631,11 +710,13 @@ class OpenAICompatibleBase(Model):
 
         Returns:
             ``cost`` (plus ``upstream_inference_cost`` when
-            ``usage.is_byok`` is true) for an ``openrouter/`` model whose
-            response carries a numeric ``usage.cost``, else
-            ``None`` so the agent falls back to ``calculate_cost``.
+            ``usage.is_byok`` is true) for a model served by OpenRouter
+            (an ``openrouter/`` name or a custom endpoint whose base URL
+            is openrouter.ai) whose response carries a numeric
+            ``usage.cost``, else ``None`` so the agent falls back to
+            ``calculate_cost``.
         """
-        if not self.model_name.startswith("openrouter/"):
+        if not self.model_name.startswith("openrouter/") and not self._base_url_is_openrouter():
             return None
         usage = _get_attr_or_key(response, "usage")
         cost = _get_attr_or_key(usage, "cost")
