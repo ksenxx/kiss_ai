@@ -22,7 +22,7 @@ Covers, over REAL objects (no mocks, patches, or fakes):
   the fish branch dumped unconditionally.  Exercised with a real
   ``/bin/bash`` and a temp ``$HOME`` whose ``.bashrc`` exports a key
   and then ends with ``false``.
-* D3: ``vscode_config.save_config`` and ``_atomic_write_text_secure``
+* D3: ``vscode_config.save_config`` and the secure RC-file writer
   leaked their ``mkstemp`` staging files (``.kiss-config-*`` in
   ``~/.kiss/``, ``.kiss-rc-*`` in ``$HOME``) whenever the write or the
   ``os.replace`` raised.  Exercised by making the destination a

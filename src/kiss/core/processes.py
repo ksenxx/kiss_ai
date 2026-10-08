@@ -143,29 +143,14 @@ def _windows_enrol_in_job(proc: subprocess.Popen[Any]) -> None:  # pragma: no co
         _WINDOWS_JOBS[proc.pid] = job
 
 
-def new_process_group_kwargs() -> dict[str, Any]:
-    """Return the ``Popen``/``create_subprocess_exec`` kwargs that put a child in its own group.
-
-    ``start_new_session=True`` on POSIX, ``CREATE_NEW_PROCESS_GROUP`` on
-    Windows.  Synchronous callers should prefer :func:`popen_process_group`,
-    which also enrols the Windows child in a Job Object so
-    :func:`kill_process_group` reaches every descendant; asyncio callers
-    (``asyncio.create_subprocess_exec``) splat this dict instead.
-
-    Returns:
-        A dict to splat into the process constructor.
-    """
-    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
-    return {"start_new_session": True}
-
-
 def popen_process_group(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
     """Start a child that :func:`kill_process_group` can stop with all its descendants.
 
-    ``subprocess.Popen`` plus :func:`new_process_group_kwargs`; on Windows
-    the child is additionally placed in its own Job Object right after it
-    starts (descendants inherit the job automatically).
+    ``subprocess.Popen`` with the child in its own group
+    (``start_new_session=True`` on POSIX, ``CREATE_NEW_PROCESS_GROUP`` on
+    Windows); on Windows the child is additionally placed in its own Job
+    Object right after it starts (descendants inherit the job
+    automatically).
 
     Args:
         *args: Positional arguments for :class:`subprocess.Popen`.
@@ -174,7 +159,10 @@ def popen_process_group(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
     Returns:
         The started process.
     """
-    kwargs.update(new_process_group_kwargs())
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+    else:
+        kwargs["start_new_session"] = True
     proc: subprocess.Popen[Any] = subprocess.Popen(*args, **kwargs)
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
         _windows_enrol_in_job(proc)
