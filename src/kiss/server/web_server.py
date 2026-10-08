@@ -8385,10 +8385,10 @@ class RemoteAccessServer:
     def _sanitized_restored_tabs(cmd: dict[str, Any]) -> list[dict[str, str]]:
         """Sanitize the ``restoredTabs`` field of a ``ready`` command.
 
-        Single source of the M7 hardening shared by the ``ready``
-        handler of the server API
-        (:meth:`kiss.server.sorcar.ServerApi.ready`) and
-        :meth:`_handle_ready`:
+        The M7 hardening, applied ONCE by the ``ready`` handler of the
+        server API (:meth:`kiss.server.sorcar.ServerApi.ready`), which
+        writes the cleaned list back into the command before
+        :meth:`_handle_ready` reads it:
 
         * caps the list at ``_MAX_RESTORED_TABS`` so an
           authenticated-but-malicious or buggy client cannot flood the
@@ -8400,11 +8400,7 @@ class RemoteAccessServer:
           ``chatId`` would flow into backend handlers that assume
           strings.
 
-        Every rejection is logged with a ``warning``.  The dispatch
-        path writes the cleaned list back into ``cmd`` so the second
-        pass inside :meth:`_handle_ready` is a no-op (no duplicate
-        warnings); direct callers of :meth:`_handle_ready` (replays,
-        tests) still get the full sanitize.
+        Every rejection is logged with a ``warning``.
 
         Args:
             cmd: The ``ready`` command dict.
@@ -8478,7 +8474,9 @@ class RemoteAccessServer:
         Args:
             cmd: The ``ready`` message from the client (already
                 stamped with the connection's ``connId`` by
-                :meth:`kiss.server.sorcar.ServerApi.dispatch`).
+                :meth:`kiss.server.sorcar.ServerApi.dispatch`, its
+                ``restoredTabs`` already sanitized by
+                :meth:`kiss.server.sorcar.ServerApi.ready`).
             websocket: The client connection (for direct replies).
         """
         tab_id = self._cmd_str(cmd, "tabId")
@@ -8518,10 +8516,9 @@ class RemoteAccessServer:
             )
         except Exception:
             pass
-        restored = self._sanitized_restored_tabs(cmd)
         try:
             bound, adopted = await asyncio.to_thread(
-                self._vscode_server.ready_tab_sync, restored,
+                self._vscode_server.ready_tab_sync, cmd["restoredTabs"],
             )
         except Exception:
             logger.exception("ready tab-registry sync failed")
