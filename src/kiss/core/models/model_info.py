@@ -1428,12 +1428,12 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     Returns:
         The matching :class:`ModelInfo`, or ``None``.
     """
-    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    bare = _strip_provider_prefix(model_name)
+    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(bare)
     if info is not None:
         return info
-    entry = _read_my_models().get(model_name) or _read_my_models().get(
-        _strip_provider_prefix(model_name)
-    )
+    my_models = _read_my_models()
+    entry = my_models.get(model_name) or my_models.get(bare)
     if entry is None:
         return None
     try:
@@ -2068,9 +2068,6 @@ def openrouter_twin(model_name: str) -> str | None:
     Used as the automatic fallback when the direct provider rejects the
     request for a billing or availability reason: the same model keeps
     running, only the billing route changes.
-
-    Args:
-        model_name: A model name from the catalog.
 
     A generated ``-{level}`` effort alias (``claude-opus-5-5-medium``,
     ``gpt-6.1-sol-medium``) is matched by its base id; the twin keeps the
