@@ -23,6 +23,12 @@ thing, wherever the tab header is drawn:
 Only the ACTIVE top-level chat tab follows the reader: a background
 chat keeps its own task's title, and a sub-agent tab keeps its
 numbered description.
+
+There is no row of chat tabs any more: the strip ``#tab-list`` draws
+the chat on screen and its sub-agents only, so a background chat's
+title is read from ``window._testApi.openTabs()`` (what the Chats
+panel's pick restores) and chats are switched with
+``window._testApi.switchToTab``.
 """
 
 from __future__ import annotations
@@ -88,20 +94,39 @@ def _active_label(page) -> str:
 
 
 def _label(page, tab_id: str) -> str:
-    """The text the tab strip shows for *tab_id* (also its aria-label)."""
+    """The text the tab strip shows for *tab_id* (also its aria-label),
+    or, for a chat not in the group on screen (no strip entry), the
+    title ``openTabs()`` records for it."""
     out = page.evaluate(
         """(tabId) => {
           const tab = document.querySelector(
-            '.chat-tab[data-tab-id=' + JSON.stringify(tabId) + ']');
-          if (!tab) return {error: 'no tab ' + tabId};
-          return {label: tab.querySelector('.chat-tab-label').textContent,
-                  aria: tab.getAttribute('aria-label')};
+            '#tab-list .chat-tab[data-tab-id=' + JSON.stringify(tabId) + ']');
+          if (tab)
+            return {label: tab.querySelector('.chat-tab-label').textContent,
+                    aria: tab.getAttribute('aria-label')};
+          const rec = window._testApi.openTabs().find(t => t.id === tabId);
+          if (!rec) return {error: 'no tab ' + tabId};
+          return {label: rec.title, aria: rec.title};
         }""",
         tab_id,
     )
     assert "error" not in out, out
     assert out["aria"] == out["label"], out
     return str(out["label"])
+
+
+def _click_tab(page, tab_id: str) -> None:
+    """Bring *tab_id* on screen: a click on its strip entry when it is
+    in the shown group (a sub-agent), else the Chats panel's pick."""
+    page.evaluate(
+        """(id) => {
+          const el = document.querySelector(
+            '#tab-list .chat-tab[data-tab-id=' + JSON.stringify(id) + ']');
+          if (el) el.click(); else window._testApi.switchToTab(id);
+        }""",
+        tab_id,
+    )
+    assert _active_tab_id(page) == tab_id
 
 
 def _last_panel_title(page) -> str:
@@ -254,12 +279,7 @@ def test_sidebar_background_tab_keeps_own_title(_browser) -> None:
         # neighbour it was parked on.
         assert _label(page, first) == _clip(_OWN_TASK)
 
-        page.evaluate(
-            "(id) => document.querySelector("
-            "'.chat-tab[data-tab-id=' + JSON.stringify(id) + ']').click()",
-            first,
-        )
-        assert _active_tab_id(page) == first
+        _click_tab(page, first)
         # Back on screen, the label names the task the restored
         # transcript shows (one of the tab's own thread), never the
         # other tab's.
@@ -298,12 +318,7 @@ def test_sidebar_subagent_tab_keeps_numbered_title(_browser) -> None:
         _post(page, {"type": "openSubagentTab", "tab_id": sub_id,
                      "parent_tab_id": parent, "task_id": "7",
                      "description": _PREVIEW_TASK, "isDone": False})
-        page.evaluate(
-            "(id) => document.querySelector("
-            "'.chat-tab[data-tab-id=' + JSON.stringify(id) + ']').click()",
-            sub_id,
-        )
-        assert _active_tab_id(page) == sub_id
+        _click_tab(page, sub_id)
         assert _own_panel_text(page) == _PREVIEW_TASK
         label = _label(page, sub_id)
         assert label.endswith(_PREVIEW_TASK[:40]), label
@@ -361,12 +376,7 @@ def test_editor_tab_title_keeps_root_while_subagent_on_screen(_browser) -> None:
         _post(page, {"type": "openSubagentTab", "tab_id": sub_id,
                      "parent_tab_id": root, "task_id": "7",
                      "description": _PREVIEW_TASK, "isDone": False})
-        page.evaluate(
-            "(id) => document.querySelector("
-            "'.chat-tab[data-tab-id=' + JSON.stringify(id) + ']').click()",
-            sub_id,
-        )
-        assert _active_tab_id(page) == sub_id
+        _click_tab(page, sub_id)
         assert _own_panel_text(page) == _PREVIEW_TASK
         assert _last_panel_title(page) == _clip(_OWN_TASK)
     finally:

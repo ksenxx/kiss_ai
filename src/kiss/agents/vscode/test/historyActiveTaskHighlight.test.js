@@ -459,10 +459,8 @@ function testRemoteWebappPaintsFromOwnTabs() {
   assert.ok(scrolled.includes(own), 'the row is scrolled into view');
   assert.ok(!collapsed(win, 'chat-1') && collapsed(win, 'chat-2'));
 
-  // Switching to the other tab follows that chat.
-  win.document
-    .querySelector('.chat-tab[data-tab-id="other-1"]')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  // Switching to the other chat (the Chats panel's pick) follows it.
+  win._testApi.switchToTab('other-1');
   assert.deepStrictEqual(highlighted(win), [rowFor(win, 'chat-2', 3)]);
   assert.ok(!collapsed(win, 'chat-2') && collapsed(win, 'chat-1'));
 

@@ -433,13 +433,16 @@ body {
 #status-text { color: var(--dim); }
 
 
-/* Two tab rows (renderTabBar): #main-tab-bar lists the chats (and the
-   ownerless daemon browser tab); #tab-bar, the group strip under it,
-   lists the chat on screen with its sub-agents and the files its task
-   opened, and only appears when that group has more than one tab.  In
-   editor-tabs mode VS Code's editor tabs stand in for the main row. */
-#main-tab-bar,
-#tab-bar {
+/* The tab rows (renderTabBar).  There is no row of chat tabs: the
+   chat on screen is the one picked in the Chats panel.  #tab-bar, the
+   group strip, lists the chat on screen with its sub-agents (and, on a
+   stacked surface, every open file, browser and terminal tab) and only
+   appears when it has more than one tab.  #content-tab-bar is the
+   content pane's own row in the desktop remote webapp's split layout
+   (remote-codex.css); hidden everywhere else.  #pane-resizer is the
+   handle between the two panes of that layout. */
+#tab-bar,
+#content-tab-bar {
   display: flex;
   align-items: center;
   flex-shrink: 0;
@@ -448,8 +451,10 @@ body {
   overflow: hidden;
 }
 
-/* The strip reads as the main row's sub-row: slightly shorter tabs on
-   the chat background, indented under the chat tab they belong to. */
+#content-tab-bar,
+#pane-resizer { display: none; }
+
+/* The strip: slightly shorter tabs on the chat background. */
 #tab-bar {
   background: var(--bg);
   padding-left: var(--space-3);
@@ -461,8 +466,8 @@ body {
   font-size: var(--fs-sm);
 }
 
-#main-tab-list,
-#tab-list {
+#tab-list,
+#content-tab-list {
   display: flex;
   flex: 1;
   min-width: 0;
@@ -924,6 +929,13 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
   flex: 1; overflow-y: auto; overflow-x: hidden;
   overscroll-behavior-y: none;
   padding: var(--space-3) var(--space-3) var(--space-3);
+}
+
+/* The desktop remote webapp's split layout (the #app grid in
+   remote-codex.css): the transcript fills the chat pane's `chat` area. */
+body.remote-chat.remote-desktop #output {
+  grid-area: chat;
+  min-height: 0;
 }
 
 /* The welcome page is the same on the VS Code webview and the remote
@@ -1621,6 +1633,7 @@ body.content-tab-open #send-btn { display: none !important; }
    soft square that every other icon button in the app shows (tab
    close, panel close, password toggle, custom-model actions). */
 #menu-btn,
+#meta-drawer-btn,
 #new-chat-btn,
 #more-btn,
 .toggle-btn {
@@ -1631,6 +1644,7 @@ body.content-tab-open #send-btn { display: none !important; }
 }
 
 #menu-btn:hover:not(:disabled),
+#meta-drawer-btn:hover:not(:disabled),
 #new-chat-btn:hover:not(:disabled),
 #more-btn:hover:not(:disabled),
 .toggle-btn:hover:not(:disabled) {
@@ -1639,6 +1653,7 @@ body.content-tab-open #send-btn { display: none !important; }
 }
 
 #menu-btn:disabled,
+#meta-drawer-btn:disabled,
 #new-chat-btn:disabled,
 #more-btn:disabled,
 .toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
@@ -2489,33 +2504,12 @@ body.meta-panel-mode #meta-info-content {
 
 /* Sidebar-chat mode (the secondary-sidebar chat view, editor-tabs
    mode OFF): the task-info panel is a DRAWER sliding in from the
-   right over the chat, toggled by #meta-drawer-btn at the tab bar's
-   right edge and dismissed by its close button, the backdrop or
-   Escape — the mobile remote webapp's drawer, restated with the
-   webview's own variables. The top status bar it replaces is hidden
-   above. */
-body.sidebar-chat-mode #meta-drawer-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  margin-left: var(--space-1);
-  padding: 0;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-round);
-  color: color-mix(in srgb, var(--fg) 65%, transparent);
-  font-size: var(--fs-xl);
-  cursor: pointer;
-  transition: background var(--dur-base);
-}
-
-body.sidebar-chat-mode #meta-drawer-btn:hover {
-  background: color-mix(in srgb, var(--fg) 12%, transparent);
-  color: var(--fg);
-}
+   right over the chat, toggled by #meta-drawer-btn among the
+   composer's footer icons (styled with them above) and dismissed by
+   its close button, the backdrop or Escape — the mobile remote
+   webapp's drawer, restated with the webview's own variables. The top
+   status bar it replaces is hidden above. */
+body.sidebar-chat-mode #meta-drawer-btn { display: flex; }
 
 body.sidebar-chat-mode #meta-panel {
   display: flex;

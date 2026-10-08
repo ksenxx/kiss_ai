@@ -78,16 +78,26 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// The tab's entry on the group strip (#tab-list): rendered for the chat
+// on screen and its group only, so a background chat has none.
 function tabElement(win, tabId) {
   return win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
   );
 }
 
+// The record of an open tab, or null once it is closed.
+function tabRecord(win, tabId) {
+  return win._testApi.openTabs().find(t => t.id === tabId) || null;
+}
+
+// A tab on the strip is clicked there; a background chat is picked the
+// way the Chats panel does it.
 function clickTab(win, tabId) {
+  assert.ok(tabRecord(win, tabId), `tab ${tabId} must exist`);
   const el = tabElement(win, tabId);
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  else win._testApi.switchToTab(tabId);
 }
 
 // The composer is in answer mode while the tab on screen has a question.
@@ -95,11 +105,12 @@ function answering(win) {
   return win.document.body.classList.contains('ask-answering');
 }
 
-function attentionGlyph(win, tabId) {
-  const el = tabElement(win, tabId);
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  const marker = el.querySelector('.chat-tab-attention');
-  return marker ? marker.textContent : '';
+// Whether the tab is flagged as waiting for an answer (the strip's "?"
+// mark when the tab is rendered there).
+function askPending(win, tabId) {
+  const rec = tabRecord(win, tabId);
+  assert.ok(rec, `tab ${tabId} must exist`);
+  return rec.askPending;
 }
 
 // Every toast on screen: a question must never raise one.
@@ -140,12 +151,8 @@ function testNewQuestionSwitchesTabWithoutToast() {
     questionTab,
     'a new question switches to its tab, user activity notwithstanding',
   );
-  assert.strictEqual(
-    win.document.querySelector('.chat-tab.active').dataset.tabId,
-    questionTab,
-  );
   assert.ok(answering(win), 'the composer answers the question at once');
-  assert.strictEqual(attentionGlyph(win, questionTab), '');
+  assert.ok(askPending(win, questionTab));
   assertNoToast(win, 'when the question arrives');
   assert.deepStrictEqual(hostMessages(posted, 'revealForQuestion'), [
     {type: 'revealForQuestion'},
@@ -155,12 +162,12 @@ function testNewQuestionSwitchesTabWithoutToast() {
     'the retired waiting-notice messages are never posted',
   );
 
-  // The user goes back to their own tab: the waiting tab is flagged in
-  // the tab bar and nothing else nags them.
+  // The user goes back to their own tab: the waiting tab stays flagged
+  // and nothing else nags them.
   clickTab(win, otherTab);
   assert.strictEqual(api.getActiveTabId(), otherTab);
   assert.ok(!answering(win));
-  assert.strictEqual(attentionGlyph(win, questionTab), '?');
+  assert.ok(askPending(win, questionTab));
   assertNoToast(win, 'after leaving the asking tab');
 
   // A replay of the same pending question (another client reloaded)
@@ -188,6 +195,7 @@ function testNewQuestionSwitchesTabWithoutToast() {
     ),
   );
   assert.ok(!answering(win));
+  assert.ok(!askPending(win, questionTab), 'the flag goes with the answer');
   assertNoToast(win, 'after answering');
 
   win.close();
@@ -230,7 +238,7 @@ function testClosingTheAskingTabPostsNothingExtra() {
   const closeBtn = tabElement(win, askTab).querySelector('.chat-tab-close');
   assert.ok(closeBtn, 'the tab has a close button');
   closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.strictEqual(tabElement(win, askTab), null, 'the tab is gone');
+  assert.strictEqual(tabRecord(win, askTab), null, 'the tab is gone');
   assert.ok(!answering(win));
   assertNoToast(win, 'after closing the asking tab');
   assert.ok(!posted.some(m => m.type === 'askWaitingDone'));
@@ -361,7 +369,7 @@ function testMirroredCloseRemovesTheTab() {
     type: 'tabs_state',
     tabs: [{tabId: 't2', chatId: 'c2', title: 't2', workDir: ''}],
   });
-  assert.strictEqual(tabElement(win, 't1'), null, 'the tab was removed');
+  assert.strictEqual(tabRecord(win, 't1'), null, 'the tab was removed');
   assert.ok(!answering(win), 'and its question with it');
   assertNoToast(win, 'after a mirrored close');
   assert.ok(!posted.some(m => m.type === 'askWaitingDone'));

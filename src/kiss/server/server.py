@@ -2212,6 +2212,15 @@ class VSCodeServer(
                     state = agent_state.find_by_tab(tab_id)
                     if state is not None:
                         state.frontend_closed = False
+            if rebound_state is None:
+                # Nothing to replay and nothing running: say so, or the
+                # client keeps waiting for a replay that never comes
+                # (the webview holds a registry chat open until its
+                # state is known, see ``statusKnown`` in main.js).
+                self.printer.broadcast({
+                    "type": "status", "running": False, "tabId": tab_id,
+                    **replay_scope,
+                })
             self._emit_pending_ask(tab_id)
             return
 

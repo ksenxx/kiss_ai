@@ -496,17 +496,15 @@ function testTerminalEventsForOtherTabsAreNoOps() {
     m => m.type === 'resumeSession' && m.taskId === 'idle-task',
   );
   // The stop names a background tab with no streamed fragment; its
-  // focusFinishedTab switch is undone by clicking home again.
+  // focusFinishedTab switch is undone by picking home again in the
+  // Chats panel (switchToTab), which retires nothing.
   send(win, {type: 'task_stopped', tabId: resume.tabId});
-  const homeTabEl =
-    win.document.querySelector(
-      '#tab-list .chat-tab[data-tab-id="' + tabId + '"]',
-    ) ||
-    win.document.querySelector(
-      '#main-tab-list .chat-tab[data-tab-id="' + tabId + '"]',
-    );
-  assert.ok(homeTabEl, 'the original tab is still listed');
-  homeTabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    'the original tab is still open',
+  );
+  win._testApi.switchToTab(tabId);
+  assert.strictEqual(win._testApi.getActiveTabId(), tabId, 'home is on screen');
   assert.ok(
     !O.querySelector('.trajectory'),
     "other tabs' terminal events must not fold the visible transcript",

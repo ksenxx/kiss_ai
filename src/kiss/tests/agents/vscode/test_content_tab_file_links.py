@@ -20,9 +20,16 @@ Content tabs must never interfere with the chat tabs of agents:
 
 * opening/closing a content tab never sends ``closeTab``/``newTab``
   (or any other message) about a chat tab to the backend;
-* the chat tab's input text, output DOM, and tab-bar entry survive
-  switching to and from content tabs;
+* the chat tab's input text and output DOM survive opening, switching
+  and closing content tabs;
 * closing a content tab leaves every chat tab intact.
+
+The desktop remote page (the 1400px-wide default here) is the SPLIT
+layout: the chat pane on the left stays on screen, and every content
+tab is listed on the content pane's own row ``#content-tab-list`` on
+the right, the shown one marked ``.active``.  The chat has no visible
+tab of its own (a lone chat's group strip ``#tab-bar`` is hidden), so
+readiness is waited for through the composer and ``window._testApi``.
 
 These tests drive a REAL browser (Playwright Chromium) against a REAL
 :class:`RemoteAccessServer` over real ``wss://`` — no mocks.
@@ -40,18 +47,12 @@ from kiss.tests.server.test_content_tab_file_links import (
     harness,  # noqa: F401  (module fixture used by param name)
 )
 
-# The tab bar has two rows: the main row (one entry per chat) and the
-# group strip under it (the chat on screen plus its sub-agents and the
-# files it opened).  The chat therefore appears on BOTH rows, so open
-# tabs are counted by unique id ...
-_OPEN_TAB_COUNT_JS = (
-    "new Set(Array.from(document.querySelectorAll('.chat-tab[data-tab-id]'))"
-    ".map(e => e.dataset.tabId)).size"
-)
-# ... and "back to the chat" clicks the chat's entry on the GROUP
-# STRIP: the main-row entry returns to the tab last viewed in the
-# group, which would be the content tab itself.
-_CHAT_TAB_LABEL = "#tab-list .chat-tab:not(.content-tab) .chat-tab-label"
+# Every open tab (chats, sub-agents, content tabs), as the webview
+# tracks them: chat tabs have no DOM entry unless their group strip is
+# shown, so the DOM cannot be counted.
+_OPEN_TAB_COUNT_JS = "window._testApi.openTabs().length"
+# The content tab the content pane shows (split layout).
+_ACTIVE_CONTENT_TAB = "#content-tab-list .chat-tab.content-tab.active"
 
 
 @pytest.fixture(scope="module")
@@ -84,9 +85,20 @@ def _open_page(browser, harness):
 
     page.on("websocket", _on_ws)
     goto_retrying_network_change(page, harness.base_url + "/")
-    page.wait_for_selector("#task-input", state="visible", timeout=30000)
-    page.wait_for_selector(".chat-tab", timeout=30000)
+    _wait_ready(page)
     return context, page, sent_frames
+
+
+def _wait_ready(page) -> None:
+    """Wait until the webview has a chat on screen: the composer is
+    visible and the test API reports an active (chat) tab.  A lone
+    chat's group strip is hidden, so its ``.chat-tab`` entry cannot be
+    waited for."""
+    page.wait_for_selector("#task-input", state="visible", timeout=30000)
+    page.wait_for_function(
+        "() => !!(window._testApi && window._testApi.getActiveTabId())",
+        timeout=30000,
+    )
 
 
 def _inject_file_link(page, path: str, link_id: str) -> None:
@@ -115,38 +127,42 @@ class TestContentTabFileLinks:
     ) -> None:
         """Clicking a .py link opens a new content tab showing the code
         (Monaco, or the pre/code fallback when the CDN is unreachable)
-        while the chat tab and its input text stay intact."""
+        in the content pane while the chat, its composer and its draft
+        stay on screen (split layout)."""
         context, page, sent = _open_page(browser, harness)
         try:
             page.fill("#task-input", "my precious draft")
+            chat_tab_id = page.evaluate("() => window._testApi.getActiveTabId()")
             n_tabs_before = page.evaluate(_OPEN_TAB_COUNT_JS)
             _inject_file_link(
                 page, str(harness.work_dir / "sample.py"), "lnk-code",
             )
             page.click("#lnk-code")
-            page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
+            page.wait_for_selector(_ACTIVE_CONTENT_TAB, timeout=30000)
             n_tabs_after = page.evaluate(_OPEN_TAB_COUNT_JS)
             assert n_tabs_after == n_tabs_before + 1
-            label = page.locator(".chat-tab.content-tab .chat-tab-label")
+            label = page.locator(_ACTIVE_CONTENT_TAB + " .chat-tab-label")
             assert label.inner_text() == "sample.py"
-            assert "active" in (
-                page.locator(".chat-tab.content-tab").get_attribute("class")
+            # The content tab is the content pane's, not the chat pane's:
+            # the chat stays the active tab and nothing of it hides.
+            assert page.evaluate("() => window._testApi.getActiveTabId()") == chat_tab_id
+            assert page.locator("#tab-list .chat-tab.content-tab").count() == 0
+            assert not page.evaluate(
+                "() => document.body.classList.contains('content-tab-open')",
             )
             page.wait_for_selector(
                 "#content-tab-area .content-tab-view", timeout=30000,
             )
-            assert page.locator("#output").is_hidden()
-            # The composer's BUTTON ROW stays: + and ... remain
-            # reachable on a content tab; the text box and the
-            # chat-only controls (Inject promptlet, model picker,
-            # Send) hide with it.
+            assert page.locator("#content-tab-area").is_visible()
+            assert page.locator("#output").is_visible()
             assert page.locator("#input-area").is_visible()
             assert page.locator("#new-chat-btn").is_visible()
             assert page.locator("#more-btn").is_visible()
-            assert page.locator("#task-input").is_hidden()
-            assert page.locator("#tricks-btn").is_hidden()
-            assert page.locator("#model-picker").is_hidden()
-            assert page.locator("#send-btn").is_hidden()
+            assert page.locator("#task-input").is_visible()
+            assert page.locator("#tricks-btn").is_visible()
+            assert page.locator("#model-picker").is_visible()
+            assert page.locator("#send-btn").is_visible()
+            assert page.input_value("#task-input") == "my precious draft"
             page.wait_for_function(
                 """() => {
                      const area = document.getElementById('content-tab-area');
@@ -164,13 +180,31 @@ class TestContentTabFileLinks:
                 "#content-tab-area .content-code-fallback",
             ).count() > 0
             assert monaco_used or fallback_used
-            page.click(_CHAT_TAB_LABEL)
-            page.wait_for_selector("#task-input", state="visible")
+            # A second file takes the content pane; clicking the first
+            # tab's entry on the content row brings it back, and the
+            # chat draft is untouched throughout.
+            _inject_file_link(
+                page, str(harness.work_dir / "page.html"), "lnk-code-2",
+            )
+            page.click("#lnk-code-2")
+            page.wait_for_selector(
+                "#content-tab-area .content-html-frame", timeout=30000,
+            )
+            assert page.locator(
+                _ACTIVE_CONTENT_TAB + " .chat-tab-label",
+            ).inner_text() == "page.html"
+            assert page.locator("#content-tab-list .chat-tab.content-tab").count() == 2
+            page.click("#content-tab-list .chat-tab.content-tab:has-text('sample.py')")
+            page.wait_for_function(
+                """() => document.querySelector(
+                     '#content-tab-list .chat-tab.content-tab.active .chat-tab-label'
+                   ).textContent === 'sample.py'""",
+                timeout=10000,
+            )
+            assert page.locator("#content-tab-area .content-html-frame").is_hidden()
+            assert page.evaluate("() => window._testApi.getActiveTabId()") == chat_tab_id
             assert page.input_value("#task-input") == "my precious draft"
             assert page.locator("#output").is_visible()
-            assert page.locator("#content-tab-area").is_hidden()
-            page.click(".chat-tab.content-tab .chat-tab-label")
-            page.wait_for_selector("#content-tab-area", state="visible")
         finally:
             context.close()
 
@@ -242,29 +276,28 @@ class TestContentTabFileLinks:
         context, page, sent = _open_page(browser, harness)
         try:
             page.fill("#task-input", "still here")
-            chat_tab_id = page.locator(
-                ".chat-tab:not(.chat-tab-add):not(.chat-tab-settings)",
-            ).first.get_attribute("data-tab-id")
+            chat_tab_id = page.evaluate("() => window._testApi.getActiveTabId()")
             _inject_file_link(
                 page, str(harness.work_dir / "sample.py"), "lnk-close",
             )
             page.click("#lnk-close")
-            page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
+            page.wait_for_selector(_ACTIVE_CONTENT_TAB, timeout=30000)
             content_tab_id = page.locator(
-                ".chat-tab.content-tab",
+                _ACTIVE_CONTENT_TAB,
             ).get_attribute("data-tab-id")
             sent.clear()
-            page.click(".chat-tab.content-tab .chat-tab-close")
+            page.click(_ACTIVE_CONTENT_TAB + " .chat-tab-close")
             page.wait_for_selector(
                 ".chat-tab.content-tab", state="detached", timeout=30000,
             )
             page.wait_for_selector("#task-input", state="visible")
             assert page.input_value("#task-input") == "still here"
-            remaining = page.locator(
-                ".chat-tab:not(.chat-tab-add):not(.chat-tab-settings)",
-            )
-            assert remaining.count() >= 1
-            assert remaining.first.get_attribute("data-tab-id") == chat_tab_id
+            # The content pane is empty again; the chat is untouched.
+            assert page.locator("#content-pane-empty").is_visible()
+            remaining = page.evaluate("() => window._testApi.openTabs()")
+            assert [t["id"] for t in remaining if not t["isContentTab"]] == [chat_tab_id]
+            assert not any(t["isContentTab"] for t in remaining)
+            assert page.evaluate("() => window._testApi.getActiveTabId()") == chat_tab_id
             page.wait_for_timeout(500)
             for frame in sent:
                 assert frame.get("type") != "closeTab"
@@ -409,10 +442,7 @@ class TestContentTabFileLinks:
         page = context.new_page()
         try:
             goto_retrying_network_change(page, harness.base_url + "/")
-            page.wait_for_selector(
-                "#task-input", state="visible", timeout=30000,
-            )
-            page.wait_for_selector(".chat-tab", timeout=30000)
+            _wait_ready(page)
             path = self._write_long_file(harness)
             _inject_file_link(page, path + ":250", "lnk-fb")
             page.click("#lnk-fb")
@@ -431,21 +461,31 @@ class TestContentTabFileLinks:
             context.close()
 
     def test_hidden_open_jumps_when_tab_shown(self, browser, harness) -> None:
-        """Switching to the chat tab while the code is still loading
-        must not lose the jump: the pending line is revealed when the
-        content tab becomes visible again."""
+        """Hiding the content tab while the code is still loading must
+        not lose the jump: the pending line is revealed when the tab
+        becomes visible again."""
         context, page, sent = _open_page(browser, harness)
         try:
             path = self._write_long_file(harness)
             _inject_file_link(page, path + ":250", "lnk-bg")
             page.click("#lnk-bg")
-            page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
-            # Hide the content tab immediately — the editor then loads
-            # (or already loaded) behind a display:none surface.
-            page.click(_CHAT_TAB_LABEL)
-            page.wait_for_selector("#task-input", state="visible")
+            page.wait_for_selector(_ACTIVE_CONTENT_TAB, timeout=30000)
+            # Hide the content tab immediately by opening another file
+            # over it in the content pane (the chat pane stays; a
+            # content tab is never swapped out for the chat in the
+            # split layout) — the editor then loads (or already loaded)
+            # behind a display:none surface.
+            _inject_file_link(page, str(harness.work_dir / "page.html"), "lnk-bg-2")
+            page.click("#lnk-bg-2")
+            page.wait_for_selector(
+                "#content-tab-list .chat-tab.content-tab.active:has-text('page.html')",
+                timeout=30000,
+            )
             page.wait_for_timeout(2000)
-            page.click(".chat-tab.content-tab .chat-tab-label")
+            page.click(
+                "#content-tab-list .chat-tab.content-tab:has-text('longcode.py')"
+                " .chat-tab-label",
+            )
             page.wait_for_function(
                 self._JUMPED_TO_LINE_JS, arg=["x250 =", True], timeout=30000,
             )
@@ -462,13 +502,25 @@ class TestContentTabFileLinks:
                 page, str(harness.work_dir / "sample.py"), "lnk-dup",
             )
             page.click("#lnk-dup")
-            page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
-            page.click(_CHAT_TAB_LABEL)
+            page.wait_for_selector(_ACTIVE_CONTENT_TAB, timeout=30000)
+            # Another file takes the content pane first, so the second
+            # click has to bring the existing tab back, not just leave
+            # the shown one alone.
+            _inject_file_link(page, str(harness.work_dir / "page.html"), "lnk-dup-2")
+            page.click("#lnk-dup-2")
+            page.wait_for_selector(
+                "#content-tab-list .chat-tab.content-tab.active:has-text('page.html')",
+                timeout=30000,
+            )
+            # The chat (and so the link) stays on screen in the split layout.
             page.wait_for_selector("#lnk-dup", state="visible")
             page.click("#lnk-dup")
             page.wait_for_selector(
-                ".chat-tab.content-tab.active", timeout=30000,
+                _ACTIVE_CONTENT_TAB + ":has-text('sample.py')", timeout=30000,
             )
-            assert page.locator(".chat-tab.content-tab").count() == 1
+            assert page.locator("#content-tab-list .chat-tab.content-tab").count() == 2
+            assert page.locator(
+                "#content-tab-list .chat-tab.content-tab:has-text('sample.py')",
+            ).count() == 1
         finally:
             context.close()
