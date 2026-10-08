@@ -13,7 +13,6 @@ import contextlib
 import json
 import logging
 import os
-import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -27,6 +26,7 @@ from kiss.core.brand import HOME_DIR
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, ThinkingCallback, TokenCallback
+from kiss.core.utils import seed_file_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -206,44 +206,6 @@ MY_MODELS_DEFAULT_CONTENT = json.dumps(
 ) + "\n"
 
 
-def _seed_file_atomically(path: Path, content: str) -> None:
-    """Create *path* holding *content*, if it does not exist yet.
-
-    The seed is **atomic and non-clobbering**: *content* is staged in a
-    sibling temp file and hard-linked into place, so a concurrent reader
-    never observes the empty file that a plain ``write_text`` exposes
-    between creating the target and writing to it.  If the target
-    appears between the existence check and the link (a concurrent
-    seeder, or a user edit), the existing file wins.
-
-    Same guarantee and same technique as
-    :func:`kiss.server.user_assets.ensure_user_asset_from_default`, which
-    documents the torn read a plain ``write_text`` seed caused there.
-
-    Args:
-        path: The file to create.
-        content: UTF-8 text written on first creation only.
-
-    Raises:
-        OSError: When the directory cannot be created or written.
-    """
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, staged = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
-    try:
-        # A buffered file object (rather than a bare os.write, whose
-        # partial-write count would have to be handled) guarantees the
-        # whole payload is on disk before the link publishes it.
-        with os.fdopen(fd, "wb") as f:
-            f.write(content.encode("utf-8"))
-        os.link(staged, path)
-    except FileExistsError:
-        logger.debug("Exception caught", exc_info=True)
-    finally:
-        Path(staged).unlink(missing_ok=True)
-
-
 def _seed_my_models_file() -> None:
     """Create ``~/.kiss/MY_MODELS.json`` from the inline default if absent.
 
@@ -256,7 +218,7 @@ def _seed_my_models_file() -> None:
     silently missing for the life of that process.
     """
     try:
-        _seed_file_atomically(USER_MY_MODELS_PATH, MY_MODELS_DEFAULT_CONTENT)
+        seed_file_atomically(USER_MY_MODELS_PATH, MY_MODELS_DEFAULT_CONTENT)
     except OSError:
         logger.debug("Exception caught", exc_info=True)
 
