@@ -29,6 +29,7 @@ from kiss.core.models.model import (
     Model,
     ThinkingCallback,
     TokenCallback,
+    _get_attr_or_key,
     accepted_request_params,
     merge_system_texts,
     responses_items_to_chat_messages,
@@ -36,12 +37,7 @@ from kiss.core.models.model import (
     strip_system_cache_break,
     transcribe_audio,
 )
-from kiss.core.models.stream_abort import (
-    CONNECT_TIMEOUT,
-    stall_error,
-    stop_aware_events,
-    stop_error,
-)
+from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error, stop_error
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +142,7 @@ def _last_assistant_blocks(messages: list[Any]) -> list[dict[str, Any]]:
     return []
 
 
-def cache_creation_tokens(usage: Any, get: Callable[[Any, str], Any]) -> tuple[int, int]:
+def cache_creation_tokens(usage: Any) -> tuple[int, int]:
     """Return the 5-minute and 1-hour cache-creation token counts.
 
     Anthropic reports cache writes either split by TTL under
@@ -154,30 +150,23 @@ def cache_creation_tokens(usage: Any, get: Callable[[Any, str], Any]) -> tuple[i
     attributed to the one-hour bucket, the more expensive of the two, so
     an unknown TTL is never under-billed.  The Claude Code CLI re-emits
     exactly this shape as JSON, so :mod:`kiss.core.models.claude_code_model`
-    shares this parser and differs only in *get* — otherwise a change to
-    Anthropic's cache tiers would have to be made twice.
+    shares this parser — otherwise a change to Anthropic's cache tiers
+    would have to be made twice.
 
     Args:
         usage: The provider's usage record — an SDK object for the API
             transport, a decoded JSON dict for the CLI transport.
-        get: Reads a named field off *usage* or a nested record,
-            returning ``None`` when the field is absent.
 
     Returns:
         ``(cache_write_5m_tokens, cache_write_1h_tokens)``.
     """
-    cache_creation = get(usage, "cache_creation")
+    cache_creation = _get_attr_or_key(usage, "cache_creation")
     if cache_creation is not None:
         return (
-            get(cache_creation, "ephemeral_5m_input_tokens") or 0,
-            get(cache_creation, "ephemeral_1h_input_tokens") or 0,
+            _get_attr_or_key(cache_creation, "ephemeral_5m_input_tokens") or 0,
+            _get_attr_or_key(cache_creation, "ephemeral_1h_input_tokens") or 0,
         )
-    return 0, get(usage, "cache_creation_input_tokens") or 0
-
-
-def _attribute_field(record: Any, name: str) -> Any:
-    """Return attribute *name* of *record*, or ``None`` when it is absent."""
-    return getattr(record, name, None)
+    return 0, _get_attr_or_key(usage, "cache_creation_input_tokens") or 0
 
 
 _THINKING_FAMILIES = ("opus", "sonnet", "haiku", "fable")
@@ -993,69 +982,40 @@ class AnthropicModel(Model):
             TimeoutError: When the streaming connection delivers no data
                 (or no events) for ``stream_stall_timeout`` seconds.
         """
-        try:
-            return self._stream_message(kwargs)
-        finally:
-            self._close_thinking_if_open()
-
-    def _stream_message(self, kwargs: dict[str, Any]) -> Any:
-        """Run the watched stream behind :meth:`_create_message`.
-
-        The thinking bracket is tracked on the base class's
-        :attr:`Model._thinking_open` (set by ``_invoke_thinking_callback``)
-        rather than on a local flag, so the caller's ``finally`` and the
-        stop/stall paths all close the same bracket.
-
-        Args:
-            kwargs: Keyword arguments for the Anthropic API call.
-
-        Returns:
-            The raw Anthropic response message.
-        """
         in_thinking = False
         try:
-            with self.client.messages.stream(**kwargs) as stream:
-                # `events` is closed in `finally` like the other
-                # transports: a token callback can raise out of the loop
-                # body, and an abandoned generator would keep its watchdog
-                # thread armed until the traceback is released.
-                # `get_final_message()` only drains the already-exhausted
-                # iterator and returns the in-memory snapshot, so it is
-                # safe after the wrapper has closed the response.
-                events = stop_aware_events(
-                    stream,
-                    stall_timeout=self._stream_stall_timeout,
-                    name="anthropic-stream-abort-watchdog",
-                )
-                try:
-                    for event in events:
-                        # The SDK accumulates message_start / message_delta
-                        # usage here; kept for take_partial_usage_response
-                        # if the stream fails before message_stop.
-                        self._rejected_response = stream.current_message_snapshot
-                        if self.token_callback is None:
-                            continue
-                        if event.type == "content_block_start":
-                            block = getattr(event, "content_block", None)
-                            if block and getattr(block, "type", "") == "thinking":
-                                in_thinking = True
-                        elif event.type == "content_block_delta":
-                            delta = event.delta
-                            delta_type = getattr(delta, "type", "")
-                            if delta_type == "thinking_delta":
-                                text = getattr(delta, "thinking", "")
-                                if text:
-                                    if in_thinking:
-                                        self._open_thinking_if_closed()
-                                    self._invoke_token_callback(text)
-                            elif delta_type == "text_delta":
-                                self._invoke_token_callback(getattr(delta, "text", ""))
-                        elif event.type == "content_block_stop":
-                            if in_thinking:
-                                in_thinking = False
-                                self._close_thinking_if_open()
-                finally:
-                    events.close()
+            # `get_final_message()` only drains the already-exhausted
+            # iterator and returns the in-memory snapshot, so it is safe
+            # after the watchdog wrapper has closed the response.
+            with (
+                self.client.messages.stream(**kwargs) as stream,
+                self._watched_events(stream, "anthropic-stream-abort-watchdog") as events,
+            ):
+                for event in events:
+                    # The SDK accumulates message_start / message_delta
+                    # usage here; kept for take_partial_usage_response
+                    # if the stream fails before message_stop.
+                    self._rejected_response = stream.current_message_snapshot
+                    if self.token_callback is None:
+                        continue
+                    if event.type == "content_block_start":
+                        block = getattr(event, "content_block", None)
+                        if block and getattr(block, "type", "") == "thinking":
+                            in_thinking = True
+                    elif event.type == "content_block_delta":
+                        delta = event.delta
+                        delta_type = getattr(delta, "type", "")
+                        if delta_type == "thinking_delta":
+                            text = getattr(delta, "thinking", "")
+                            if text:
+                                if in_thinking:
+                                    self._open_thinking_if_closed()
+                                self._invoke_token_callback(text)
+                        elif delta_type == "text_delta":
+                            self._invoke_token_callback(getattr(delta, "text", ""))
+                    elif event.type == "content_block_stop" and in_thinking:
+                        in_thinking = False
+                        self._close_thinking_if_open()
                 self._rejected_response = None
                 return stream.get_final_message()
         except (httpx2.TimeoutException, APITimeoutError, TimeoutError) as exc:
@@ -1293,7 +1253,7 @@ class AnthropicModel(Model):
         """
         if hasattr(response, "usage") and response.usage:
             cache_write_5m, cache_write_1h = cache_creation_tokens(
-                response.usage, _attribute_field
+                response.usage
             )
             return (
                 getattr(response.usage, "input_tokens", 0) or 0,

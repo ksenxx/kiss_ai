@@ -29,7 +29,7 @@ import types as types_module
 import typing
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
@@ -41,7 +41,11 @@ from kiss.core.models.heif import (
     heif_to_jpeg,
     is_heif,
 )
-from kiss.core.models.stream_abort import DEFAULT_STREAM_STALL_TIMEOUT, stop_error
+from kiss.core.models.stream_abort import (
+    DEFAULT_STREAM_STALL_TIMEOUT,
+    stop_aware_events,
+    stop_error,
+)
 from kiss.core.processes import IS_WINDOWS, kill_process_group
 
 logger = logging.getLogger(__name__)
@@ -505,6 +509,52 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
     return str(transcript).strip()
 
 
+def _get_attr_or_key(obj: Any, key: str, default: Any = None) -> Any:
+    """Return ``obj.key`` or ``obj[key]``, falling back to *default*.
+
+    Provider responses arrive either as pydantic SDK objects (attribute
+    access; OpenRouter's extra usage fields such as ``cost`` are pydantic
+    extras readable the same way) or as plain dicts (gateway payloads,
+    recorded JSON, the Responses-delegate path).
+
+    Args:
+        obj: A pydantic object, a dict, or ``None``.
+        key: The attribute or mapping key to read.
+        default: Returned when *obj* is ``None`` or lacks *key*.
+
+    Returns:
+        The field value, or *default*.
+    """
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _iter_jsonl(lines: Iterable[str]) -> Iterator[Any]:
+    """Yield the decoded JSON values of a JSONL event stream, one per line.
+
+    Blank lines and lines that are not valid JSON are skipped: the CLI
+    transports interleave their ``--json`` event stream with progress
+    noise, and one undecodable line must not end the turn.
+
+    Args:
+        lines: The stream's lines (one event per line).
+
+    Yields:
+        Each decoded line — an event dict in a well-formed stream.
+    """
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+
 def flatten_content_to_text(content: Any) -> str:
     """Flatten a message ``content`` value into plain text.
 
@@ -825,6 +875,47 @@ class Model(ABC):
         """
         if not self._thinking_open:
             self._invoke_thinking_callback(True)
+
+    @contextlib.contextmanager
+    def _watched_events(self, stream: Any, name: str) -> Iterator[Iterator[Any]]:
+        """Iterate *stream* under the stop/stall watchdog for one turn.
+
+        Yields the :func:`~kiss.core.models.stream_abort.stop_aware_events`
+        generator over *stream* (stall tolerance ``stream_stall_timeout``),
+        and however the block ends — normally, by a stop, a stall, a
+        transport error or a token callback that raised — closes that
+        generator and then any open thinking bracket.
+
+        Closing the generator explicitly is what makes the watchdog safe:
+        an abandoned generator runs its cleanup only when the traceback
+        holding its frame is released, and until then its daemon thread
+        stays armed over a connection that never returns to the pool.
+
+        The bracket is closed here, not after the loop, because
+        ``stop_aware_events`` closes it only for a stop and a stall and
+        re-raises every other transport failure untouched, while
+        ``KISSAgent`` retries those in the SAME run without resetting the
+        printer — which would otherwise render the retry's answer as
+        reasoning.  A no-op when the turn ended outside a reasoning block.
+
+        Args:
+            stream: The SDK stream object to iterate and, if needed, abort.
+            name: Watchdog thread name, for readable stack dumps.
+
+        Yields:
+            The events of *stream*.
+        """
+        events = stop_aware_events(
+            stream,
+            stall_timeout=self._stream_stall_timeout,
+            on_abort=self._close_thinking_if_open,
+            name=name,
+        )
+        try:
+            yield events
+        finally:
+            events.close()
+            self._close_thinking_if_open()
 
     def reset_conversation(self) -> None:
         """Reset conversation state for reuse across sub-sessions.
