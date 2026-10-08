@@ -131,7 +131,7 @@ class TestSubagentResultNotInParentWebview:
         def _on_alloc(task_id: Any, chat_id: str) -> None:
             # Mirror task_runner._on_run_task_id_allocated: attach the
             # launching UI tab to the task (also subscribes the tab).
-            printer.register_task_ui(str(task_id), parent_tab_id)
+            printer.subscribe_tab(str(task_id), parent_tab_id)
 
         parent.run(
             prompt_template=(

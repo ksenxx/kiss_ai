@@ -32,13 +32,12 @@ import asyncio
 import functools
 import json
 import logging
-import os
 import signal
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
-from kiss.server.talk_player import _signal_group
+from kiss.core.processes import kill_process_group, new_process_group_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -123,11 +122,7 @@ def parse_protocol_line(line: str) -> dict[str, Any] | None:
             payload = json.loads(line[len("SPEECH "):])
         except json.JSONDecodeError:
             payload = None
-        if isinstance(payload, str):
-            text = payload
-        elif isinstance(payload, dict) and isinstance(
-            payload.get("text"), str
-        ):
+        if isinstance(payload, dict) and isinstance(payload.get("text"), str):
             text = payload["text"]
             spk = payload.get("speaker")
             if isinstance(spk, int) and not isinstance(spk, bool) and spk >= 1:
@@ -143,6 +138,56 @@ def parse_protocol_line(line: str) -> dict[str, Any] | None:
             "language": language,
         }
     return None
+
+
+def _signal_listener(proc: asyncio.subprocess.Process, sig: int) -> bool:
+    """Deliver *sig* to the listener child's whole process group.
+
+    Falls back to killing the child alone when the group could not be
+    signalled (a Windows ``taskkill`` failure, see
+    :func:`kiss.core.processes.kill_process_group`).
+
+    Args:
+        proc: The listener child, spawned with
+            :func:`kiss.core.processes.new_process_group_kwargs`.
+        sig: The signal to deliver.
+
+    Returns:
+        ``False`` when the child was already gone, ``True`` otherwise.
+    """
+    try:
+        kill_process_group(proc.pid, sig)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return False
+    return True
+
+
+_CANCEL_GRACE_SECONDS = 1.0
+"""Bound on joining pump tasks after cancelling them."""
+
+
+async def _cancel_and_join(
+    tasks: Iterable[asyncio.Task[None]], timeout: float = _CANCEL_GRACE_SECONDS
+) -> None:
+    """Cancel every task in *tasks* and wait, bounded, for them to unwind.
+
+    Cancellation is cooperative: a pump whose send callback resists it
+    stays pending past *timeout*, and the caller decides what to do
+    with it (retain it in ``_retiring``, or log it at shutdown).
+
+    Args:
+        tasks: Unfinished pump tasks; must be non-empty.
+        timeout: Seconds to wait after cancelling.
+    """
+    tasks = list(tasks)
+    for task in tasks:
+        task.cancel()
+    await asyncio.wait(tasks, timeout=timeout)
 
 
 class _Listener:
@@ -619,9 +664,7 @@ class VoiceWakeController:
                 # delivery gate before the old pump's stale report is
                 # even visible (gpt-5.6-sol round-3 review, finding 2).
                 self._retire_pumps(conn_id, still_pending)
-                for task in still_pending:
-                    task.cancel()
-                await asyncio.wait(still_pending, timeout=1.0)
+                await _cancel_and_join(still_pending)
             if self._listeners.get(conn_id) is existing:
                 del self._listeners[conn_id]
         current = self._listeners.get(conn_id)
@@ -658,10 +701,8 @@ class VoiceWakeController:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                # POSIX only: gives the child its own process group so
-                # _terminate can reap grandchildren too.  Windows has
-                # no setsid; there _terminate signals the child alone.
-                start_new_session=(os.name == "posix"),
+                # Own process group so _terminate reaps grandchildren too.
+                **new_process_group_kwargs(),
             ))
         )
         try:
@@ -848,11 +889,11 @@ class VoiceWakeController:
         try:
             await self._terminate(proc)
             if pumps:
-                _, still_pending = await asyncio.wait(pumps, timeout=5.0)
-                for task in still_pending:
-                    task.cancel()
+                _, still_pending = await asyncio.wait(
+                    pumps, timeout=_EXIT_REPORT_JOIN_SECONDS,
+                )
                 if still_pending:
-                    await asyncio.wait(still_pending, timeout=1.0)
+                    await _cancel_and_join(still_pending)
         finally:
             self._maybe_drop_generation(conn_id)
 
@@ -947,11 +988,7 @@ class VoiceWakeController:
                 if not task.done()
             ]
             if retired:
-                for task in retired:
-                    task.cancel()
-                await asyncio.wait(
-                    retired, timeout=_RETIREMENT_GATE_SECONDS,
-                )
+                await _cancel_and_join(retired, _RETIREMENT_GATE_SECONDS)
             # Make the post-shutdown state deterministic: completed
             # retired pumps normally clean up through their done
             # callbacks, but those run via ``call_soon`` and may not
@@ -1088,22 +1125,13 @@ class VoiceWakeController:
         finding 4) — past ``_KILL_REAP_SECONDS`` the wait is abandoned
         with a log line, the kill already delivered.
         """
-        if proc.returncode is not None:
+        if proc.returncode is not None or not _signal_listener(proc, signal.SIGTERM):
             return
-        pid = proc.pid
-        if not _signal_group(pid, signal.SIGTERM):
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                return
         try:
             await asyncio.wait_for(proc.wait(), _TERM_GRACE_SECONDS)
         except TimeoutError:
-            if not _signal_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM)):
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    return
+            if not _signal_listener(proc, getattr(signal, "SIGKILL", signal.SIGTERM)):
+                return
             try:
                 await asyncio.wait_for(proc.wait(), _KILL_REAP_SECONDS)
             except TimeoutError:
@@ -1111,7 +1139,7 @@ class VoiceWakeController:
                     "voice listener pid %s still unreaped %.0fs after "
                     "SIGKILL (an escaped descendant may hold its "
                     "pipes); abandoning the wait",
-                    pid, _KILL_REAP_SECONDS,
+                    proc.pid, _KILL_REAP_SECONDS,
                 )
 
     @staticmethod

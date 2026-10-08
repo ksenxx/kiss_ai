@@ -51,6 +51,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -81,30 +82,31 @@ def _host_label() -> str:
 
 
 def _write_private_key(path: Path, key: ec.EllipticCurvePrivateKey) -> None:
-    """Write *key* as PEM to *path*, mode 0600, replacing any old file."""
+    """Write *key* as PEM to *path*, mode 0600, atomically replacing any old file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(path.parent, 0o700)
     except OSError:
         logger.debug("Could not chmod 0700 on %s", path.parent, exc_info=True)
-    key_bytes = key.private_bytes(
+    pem = key.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-    if path.exists():
-        path.unlink()
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        os.write(fd, key_bytes)
-    finally:
-        os.close(fd)
-    os.chmod(path, 0o600)
+    atomic_write_text(path, pem.decode("ascii"), mode=0o600)
 
 
 def _write_certificate(path: Path, cert: x509.Certificate) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    """Write *cert* as PEM to *path*, atomically replacing any old file.
+
+    ``ca.pem`` is read without the TLS lock by the ``/ca.crt`` handler
+    and by every local client building its trust store, so the file is
+    staged and renamed into place rather than truncated and refilled.
+    """
+    atomic_write_text(
+        path, cert.public_bytes(serialization.Encoding.PEM).decode("ascii"),
+        create_mode=0o644,
+    )
 
 
 def _load_certificate(path: Path) -> x509.Certificate:

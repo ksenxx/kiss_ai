@@ -269,19 +269,19 @@ class TestSpeakerIdFromWav(unittest.TestCase):
 
     def test_broken_speaker_model_degrades_to_null_speaker(self) -> None:
         from kiss.server.voice_wake import (
-            DEFAULT_MODELS_DIR,
             MODEL_NAME,
             SPK_MODEL_NAME,
+            default_models_dir,
             ensure_model,
         )
 
-        ensure_model(DEFAULT_MODELS_DIR)
+        ensure_model(default_models_dir())
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             models_dir = tmpdir / "models"
             models_dir.mkdir()
             (models_dir / MODEL_NAME).symlink_to(
-                DEFAULT_MODELS_DIR / MODEL_NAME
+                default_models_dir() / MODEL_NAME
             )
             (models_dir / SPK_MODEL_NAME).mkdir()
             wake = _tts_wav(tmpdir, "wake", "Hey Sorcar")
@@ -305,12 +305,9 @@ class TestSpeakerIdentifierLocal(unittest.TestCase):
     """The real x-vector extractor, driven directly (local models only)."""
 
     def test_empty_pcm_yields_no_speaker(self) -> None:
-        from kiss.server.voice_wake import (
-            DEFAULT_MODELS_DIR,
-            SpeakerIdentifier,
-        )
+        from kiss.server.voice_wake import SpeakerIdentifier, default_models_dir
 
-        identifier = SpeakerIdentifier(DEFAULT_MODELS_DIR)
+        identifier = SpeakerIdentifier(default_models_dir())
         self.assertIsNone(identifier.speaker_of(b""))
 
 

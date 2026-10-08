@@ -309,7 +309,7 @@ class TestTransientBroadcastNearTeardown:
     def _teardown_printer(self, task_id: str) -> _CapturePrinter:
         """A printer in the near-teardown state for *task_id*."""
         printer = _CapturePrinter()
-        printer.register_task_ui(task_id, "tab-launch")
+        printer.subscribe_tab(task_id, "tab-launch")
         printer.subscribe_tab(task_id, "tab-viewer")
         printer._thread_local.task_id = task_id
         printer.cleanup_task(task_id)  # subscribers linger

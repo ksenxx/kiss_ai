@@ -157,8 +157,8 @@ class TestD1DownloadTimeout:
 
 
 
-_WAKE_DIR = voice_wake.DEFAULT_MODELS_DIR / voice_wake.MODEL_NAME
-_SPK_DIR = voice_wake.DEFAULT_MODELS_DIR / voice_wake.SPK_MODEL_NAME
+_WAKE_DIR = voice_wake.default_models_dir() / voice_wake.MODEL_NAME
+_SPK_DIR = voice_wake.default_models_dir() / voice_wake.SPK_MODEL_NAME
 
 
 @pytest.mark.skipif(
@@ -176,7 +176,7 @@ class TestD5SharedVoskModel:
         shared = voice_wake.load_shared_vosk_model(_WAKE_DIR)
 
         identifier = voice_wake.SpeakerIdentifier(
-            voice_wake.DEFAULT_MODELS_DIR
+            voice_wake.default_models_dir()
         )
         assert len(voice_wake._VOSK_MODEL_CACHE) == 1
         assert voice_wake.load_shared_vosk_model(_WAKE_DIR) is shared

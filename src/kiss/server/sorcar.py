@@ -107,19 +107,7 @@ from typing import Any, Literal, Protocol
 # re-exported here unchanged: ``kiss.server.sorcar.run`` and
 # ``kiss.server.sorcar.TaskResult`` stay the public client API.
 from kiss.agents.sorcar.daemon_client import (
-    _MAX_LINE_BYTES as _MAX_LINE_BYTES,
-)
-from kiss.agents.sorcar.daemon_client import (
     TaskResult as TaskResult,
-)
-from kiss.agents.sorcar.daemon_client import (
-    _parse_cost as _parse_cost,
-)
-from kiss.agents.sorcar.daemon_client import (
-    _resolve_endpoint_file as _resolve_endpoint_file,
-)
-from kiss.agents.sorcar.daemon_client import (
-    _to_task_result as _to_task_result,
 )
 from kiss.agents.sorcar.daemon_client import (
     run as run,
@@ -460,6 +448,29 @@ def passwords_equal(a: str, b: str) -> bool:
 
 AuthKind = Literal["local", "remote"]
 """How a connection authenticated: local token or remote password."""
+
+_NO_PASSWORD_LOG = (
+    "Refusing non-localhost auth handshake from %s: remote_password is empty"
+)
+_NO_PASSWORD_REFUSAL: dict[str, Any] = {
+    "type": "error",
+    "code": "localhost_only",
+    "text": "Remote access is turned off: no remote password is set, so "
+            "only this computer may connect. On it, open Settings and "
+            "set a Remote password.",
+}
+
+
+def _auth_locked(lock_remaining: float) -> dict[str, Any]:
+    """Return the ``auth_locked`` event for a rate-limited peer.
+
+    Args:
+        lock_remaining: Seconds left on the peer's brute-force lockout.
+
+    Returns:
+        The event, with ``retry_after`` rounded up to whole seconds.
+    """
+    return {"type": "auth_locked", "retry_after": math.ceil(lock_remaining)}
 
 
 @dataclass(frozen=True)
@@ -803,32 +814,21 @@ class ServerApi:
             and passwords_equal(self._backend.local_token, token)
         )
 
-    async def _refuse_no_password_remote(
-        self, websocket: Any, ip: str,
-    ) -> None:
-        """Refuse a non-loopback peer while no password is configured.
+    async def _refuse(self, websocket: Any, payload: dict[str, Any]) -> None:
+        """Send *payload* and close *websocket*, both best-effort.
 
-        Sends the explanatory ``error`` event and closes the socket
-        (both best-effort).  Shared by :meth:`authenticate`'s
-        pre-handshake gate and its per-attempt re-check.
+        Every refusal :meth:`authenticate` issues ends the handshake
+        this way: the client learns WHY (instead of a bare close that
+        leaves its loading overlay spinning) and the socket is closed.
+        A send or close that fails is ignored; the peer is gone
+        either way.
 
         Args:
-            websocket: The remote client's WebSocket connection.
-            ip: The client's rate-limit key, for the log line only.
+            websocket: The client's WebSocket connection.
+            payload: The ``auth_locked`` or ``error`` event to send.
         """
-        logger.warning(
-            "Refusing non-localhost auth handshake from %s: "
-            "remote_password is empty", ip,
-        )
         try:
-            await websocket.send(json.dumps({
-                "type": "error",
-                "code": "localhost_only",
-                "text": "Remote access is turned off: no remote "
-                        "password is set, so only this computer may "
-                        "connect. On it, open Settings and set a "
-                        "Remote password.",
-            }))
+            await websocket.send(json.dumps(payload))
             await websocket.close()
         except Exception:
             pass
@@ -908,14 +908,7 @@ class ServerApi:
                     return "local"
             except Exception:
                 logger.debug("Locked peer %s sent no usable frame", ip, exc_info=True)
-            try:
-                await websocket.send(json.dumps({
-                    "type": "auth_locked",
-                    "retry_after": math.ceil(lock_remaining),
-                }))
-                await websocket.close()
-            except Exception:
-                pass
+            await self._refuse(websocket, _auth_locked(lock_remaining))
             return None
         password = (await asyncio.to_thread(load_config)).get("remote_password", "")
         if not password and not backend._peer_is_loopback(websocket):
@@ -925,7 +918,8 @@ class ServerApi:
             # before the WS upgrade).  Re-applied per attempt below,
             # so clearing the password at ANY point before a frame is
             # examined refuses an already-admitted non-loopback peer.
-            await self._refuse_no_password_remote(websocket, ip)
+            logger.warning(_NO_PASSWORD_LOG, ip)
+            await self._refuse(websocket, _NO_PASSWORD_REFUSAL)
             return None
         try:
             for is_retry, timeout in ((False, 30), (True, 60)):
@@ -942,12 +936,11 @@ class ServerApi:
                     return "local"
                 if backend.local_only:
                     # The private daemon admits no password at all.
-                    await websocket.send(json.dumps({
+                    await self._refuse(websocket, {
                         "type": "error",
                         "code": "auth_failed",
                         "text": "This daemon accepts local clients only.",
-                    }))
-                    await websocket.close()
+                    })
                     return None
                 # Re-load the configured password before every compare
                 # so a change made while this connection awaited
@@ -962,7 +955,8 @@ class ServerApi:
                 if not password and not backend._peer_is_loopback(
                     websocket,
                 ):
-                    await self._refuse_no_password_remote(websocket, ip)
+                    logger.warning(_NO_PASSWORD_LOG, ip)
+                    await self._refuse(websocket, _NO_PASSWORD_REFUSAL)
                     return None
                 # Re-check the lockout BEFORE comparing or accepting the
                 # submitted credential, with no await between this check
@@ -979,11 +973,7 @@ class ServerApi:
                         "Auth rate-limit engaged while %s awaited "
                         "credentials; closing socket", ip,
                     )
-                    await websocket.send(json.dumps({
-                        "type": "auth_locked",
-                        "retry_after": math.ceil(lock_remaining),
-                    }))
-                    await websocket.close()
+                    await self._refuse(websocket, _auth_locked(lock_remaining))
                     return None
                 client_pw = msg.get("password", "")
                 if not isinstance(client_pw, str):
@@ -1017,23 +1007,18 @@ class ServerApi:
                         "Auth rate-limit tripped mid-handshake for %s; "
                         "closing socket", ip,
                     )
-                    await websocket.send(json.dumps({
-                        "type": "auth_locked",
-                        "retry_after": math.ceil(lock_remaining),
-                    }))
-                    await websocket.close()
+                    await self._refuse(websocket, _auth_locked(lock_remaining))
                     return None
                 if not is_retry:
                     await websocket.send(json.dumps({"type": "auth_required"}))
             # ``code`` lets the webapp shim tell this apart from other
             # pre-auth errors (it shows the text inside the password
             # dialog and keeps the dialog open across the close below).
-            await websocket.send(json.dumps({
+            await self._refuse(websocket, {
                 "type": "error",
                 "code": "auth_failed",
                 "text": "That password is not correct. Try again.",
-            }))
-            await websocket.close()
+            })
             return None
         except Exception:
             logger.debug("WS auth failed", exc_info=True)
@@ -1335,7 +1320,11 @@ class ServerApi:
         """
         if ctx.is_local:
             return
-        self._backend._vscode_server.terminals.open(
+        # Off the event loop: opening forks the shell (a fork of the
+        # whole daemon process), during which nothing else would be
+        # served — no fan-out to any connection, no other dispatch.
+        await asyncio.to_thread(
+            self._backend._vscode_server.terminals.open,
             str(cmd["tab_id"]),
             ctx.conn_state["conn_id"],
             self._backend._cmd_work_dir(cmd),

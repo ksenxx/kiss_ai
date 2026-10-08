@@ -87,34 +87,46 @@ def _effective_commit_repo(work_dir: str) -> Path | None:
     return GitWorktreeOps.discover_repo(_resolved_commit_dir(work_dir))
 
 
-def _commit_message_or_fallback(
-    diff_text: str, *, user_prompt: str | None, task_result: str | None,
-) -> str:
-    """Return the LLM-generated commit message for *diff_text*, or a fallback.
+def _task_commit_message(diff_text: str, tab_id: str, *, manual: bool) -> str:
+    """Return the commit message for *diff_text* staged by a task on *tab_id*.
 
     Both auto-commit passes (the work_dir repository and the sibling
-    repositories touched by sub-agents) commit with a fixed message
-    when the model call fails or returns nothing, instead of leaving
-    the verified-non-empty staged changes uncommitted.
+    repositories touched by sub-agents) describe the diff in the
+    context of the tab's last user prompt and task result, which
+    :func:`generate_commit_message_from_diff` appends as ``User
+    prompt:`` / ``Result:`` sections.  A *manual* commit (the Git
+    Commit button) describes the DIFF alone, without those sections.
+    The generator never raises and always returns a non-empty message
+    (it falls back to a fixed subject itself).
 
     Args:
         diff_text: The staged diff to describe.
-        user_prompt: The task's prompt, or ``None`` for a manual commit.
-        task_result: The task's result summary, or ``None``.
+        tab_id: The tab whose task produced the diff.
+        manual: ``True`` for a user-invoked commit.
 
     Returns:
         The commit message.
     """
-    try:
-        return (
-            generate_commit_message_from_diff(
-                diff_text, user_prompt=user_prompt, task_result=task_result,
-            )
-            or "Auto-commit"
-        )
-    except Exception:
-        logger.debug("Commit message generation failed; using fallback", exc_info=True)
-        return "kiss: auto-commit agent changes"
+    state = None if manual else agent_state.find_by_tab(tab_id)
+    return generate_commit_message_from_diff(
+        diff_text,
+        user_prompt=(state.last_user_prompt if state else "") or None,
+        task_result=(state.last_result_summary if state else "") or None,
+    )
+
+
+def _git_error_line(result: Any, default: str) -> str:
+    """Return the first line of a failed git call's stderr (or stdout).
+
+    Args:
+        result: The completed git process.
+        default: Returned when git printed nothing at all.
+
+    Returns:
+        The first line of the error output, or *default*.
+    """
+    err = (result.stderr or "").strip() or (result.stdout or "").strip()
+    return err.splitlines()[0] if err else default
 
 
 def _same_repo(repo: Path, claimed: Path | None) -> bool:
@@ -440,9 +452,6 @@ class _MergeFlowMixin:
             De-duplicated list of file paths (relative to ``work_dir``).
         """
         work_dir = work_dir or self.work_dir
-        repo = GitWorktreeOps.discover_repo(Path(work_dir))
-        if repo is None:
-            return []
         result = _git("status", "--porcelain", "-uall", cwd=work_dir)
         if result.returncode != 0:
             return []
@@ -653,11 +662,12 @@ class _MergeFlowMixin:
                     })
                 add_result = _git("add", "-A", cwd=work_dir)
                 if add_result.returncode != 0:
-                    err = (add_result.stderr or "").strip()
-                    first_line = err.splitlines()[0] if err else "git add failed"
                     self._broadcast_autocommit_done(
                         tab_id, success=False, committed=False,
-                        message=f"Staging failed: {first_line}",
+                        message=(
+                            "Staging failed: "
+                            + _git_error_line(add_result, "git add failed")
+                        ),
                         manual=manual, work_dir=requested_dir,
                     )
                     return
@@ -682,22 +692,7 @@ class _MergeFlowMixin:
                         "message": "Generating commit message…",
                         "tabId": tab_id,
                     })
-                if manual:
-                    # A user-invoked commit describes the DIFF, not the
-                    # last task: no User prompt: / Result: sections.
-                    user_prompt = None
-                    task_result = None
-                else:
-                    prompt_state = agent_state.find_by_tab(tab_id)
-                    user_prompt = (
-                        prompt_state.last_user_prompt if prompt_state else ""
-                    ) or None
-                    task_result = (
-                        prompt_state.last_result_summary if prompt_state else ""
-                    ) or None
-                msg = _commit_message_or_fallback(
-                    diff_text, user_prompt=user_prompt, task_result=task_result,
-                )
+                msg = _task_commit_message(diff_text, tab_id, manual=manual)
                 if not manual:
                     self.printer.broadcast({
                         "type": "autocommit_progress",
@@ -712,11 +707,9 @@ class _MergeFlowMixin:
                 commit_result = _git("commit", "-m", msg, cwd=work_dir)
                 ok = commit_result.returncode == 0
             if ok:
-                msg_lines = msg.splitlines()
-                subject = msg_lines[0] if msg_lines else msg
                 done_event = self._broadcast_autocommit_done(
                     tab_id, success=True, committed=True,
-                    message=f"Committed: {subject}",
+                    message=f"Committed: {_commit_subject(msg)}",
                     commit_message=msg, manual=manual, work_dir=requested_dir,
                 )
                 if tab_id and not manual:
@@ -724,14 +717,12 @@ class _MergeFlowMixin:
                     if task_id is not None:
                         _append_chat_event(done_event, task_id=task_id)
             else:
-                err = (
-                    (commit_result.stderr or "").strip()
-                    or (commit_result.stdout or "").strip()
-                )
-                reason = err.splitlines()[0] if err else "pre-commit hook?"
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
-                    message=f"git commit failed: {reason}",
+                    message=(
+                        "git commit failed: "
+                        + _git_error_line(commit_result, "pre-commit hook?")
+                    ),
                     manual=manual, work_dir=requested_dir,
                 )
         except Exception as e:  # pragma: no cover — unexpected git/LLM error
@@ -976,11 +967,12 @@ class _MergeFlowMixin:
                 return
             add_result = _git(lit, "add", "-A", "--", *changed, cwd=str(repo))
             if add_result.returncode != 0:
-                err = (add_result.stderr or "").strip()
-                first_line = err.splitlines()[0] if err else "git add failed"
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
-                    message=f"Staging failed in {repo.name}: {first_line}",
+                    message=(
+                        f"Staging failed in {repo.name}: "
+                        + _git_error_line(add_result, "git add failed")
+                    ),
                 )
                 return
             # ``--quiet`` exits 1 when the paths differ, 0 when they do
@@ -1000,16 +992,7 @@ class _MergeFlowMixin:
                 "message": f"Committing changes in {repo.name}…",
                 "tabId": tab_id,
             })
-            prompt_state = agent_state.find_by_tab(tab_id)
-            user_prompt = (
-                prompt_state.last_user_prompt if prompt_state else ""
-            ) or None
-            task_result = (
-                prompt_state.last_result_summary if prompt_state else ""
-            ) or None
-            msg = _commit_message_or_fallback(
-                diff_text, user_prompt=user_prompt, task_result=task_result,
-            )
+            msg = _task_commit_message(diff_text, tab_id, manual=False)
             # Pathspec-limited commit: takes the listed paths from the
             # working tree / index and leaves every OTHER staged entry
             # in the user's index exactly as it was.  A plain
@@ -1025,18 +1008,15 @@ class _MergeFlowMixin:
                 commit_message=msg,
             )
             if tab_id:
-                with self._state_lock:
-                    task_key = _state_task_key(
-                        agent_state.find_by_tab(tab_id),
-                    )
+                task_key = _state_task_key(agent_state.find_by_tab(tab_id))
                 if task_key is not None:
                     _append_chat_event(done_event, task_id=task_key)
         else:
             self._broadcast_autocommit_done(
                 tab_id, success=False, committed=False,
                 message=(
-                    f"git commit failed in {repo.name} "
-                    "(pre-commit hook?)."
+                    f"git commit failed in {repo.name}: "
+                    + _git_error_line(commit, "pre-commit hook?")
                 ),
             )
 
@@ -1386,34 +1366,19 @@ class _MergeFlowMixin:
         if not wt_dir.exists():
             return False
 
-        baseline_valid = bool(
-            wt.baseline_commit
-            and _is_valid_baseline(str(wt_dir), wt.baseline_commit)
+        wt_fork = self._resolve_base_ref(
+            str(wt_dir), wt.baseline_commit, wt.original_branch,
         )
-        if baseline_valid:
-            assert wt.baseline_commit is not None
-            orig_fork = f"{wt.baseline_commit}^"
-            wt_fork: str = wt.baseline_commit
-        else:
-            mb = _git("merge-base", "HEAD", wt.original_branch, cwd=str(wt_dir))
-            if mb.returncode != 0 or not mb.stdout.strip():
-                return False
-            orig_fork = wt_fork = mb.stdout.strip()
+        if wt_fork is None:
+            return False
+        # The baseline is the worktree's own first commit, so the
+        # original branch forked from its parent.
+        orig_fork = f"{wt_fork}^" if wt_fork == wt.baseline_commit else wt_fork
 
-        orig_diff = _git(
-            "diff", "--name-only", "--no-renames", orig_fork, wt.original_branch,
-            cwd=str(wt.repo_root),
-        )
-        orig_files = (
-            set(_unquoted_name_lines(orig_diff.stdout))
-            if orig_diff.returncode == 0 else set()
-        )
-
-        wt_diff = _git("diff", "--name-only", "--no-renames", wt_fork, cwd=str(wt_dir))
-        wt_files = (
-            set(_unquoted_name_lines(wt_diff.stdout))
-            if wt_diff.returncode == 0 else set()
-        )
+        orig_files = set(GitWorktreeOps._diff_name_only(
+            wt.repo_root, "--no-renames", orig_fork, wt.original_branch,
+        ))
+        wt_files = set(GitWorktreeOps._diff_name_only(wt_dir, "--no-renames", wt_fork))
         wt_files.update(_capture_untracked(str(wt_dir)))
 
         if orig_files & wt_files:
@@ -1436,7 +1401,7 @@ class _MergeFlowMixin:
     def _resolve_base_ref(
         git_dir: str, baseline: str | None, original_branch: str,
         tip: str = "HEAD",
-    ) -> str:
+    ) -> str | None:
         """Resolve the base ref for worktree diff operations.
 
         Uses the baseline commit when available **and valid** (i.e. the
@@ -1455,14 +1420,16 @@ class _MergeFlowMixin:
             tip: The tip ref to compute merge-base against (default ``HEAD``).
 
         Returns:
-            A git ref string suitable for ``git diff``.
+            A git ref string suitable for ``git diff``, or ``None`` when
+            the baseline is unusable and no merge base exists (e.g. the
+            original branch was renamed or deleted).
         """
         if baseline and _is_valid_baseline(git_dir, baseline):
             return baseline
         mb = _git("merge-base", tip, original_branch, cwd=git_dir)
         if mb.returncode == 0 and mb.stdout.strip():
             return mb.stdout.strip()
-        return original_branch
+        return None
 
     def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]:
         """List files changed in the worktree vs the original branch.
@@ -1489,20 +1456,18 @@ class _MergeFlowMixin:
             Sorted deduplicated list of relative file paths.
         """
         state = agent_state.find_by_tab(tab_id)
-        if state is None:
+        if state is None or state.agent is None:
             return []
-        wt_agent = state.agent
-        if wt_agent is None or not wt_agent._original_branch:
+        wt = state.agent._wt
+        if wt is None or not wt.original_branch:
             return []
-        wt = wt_agent
-        original_branch = wt._original_branch
-        assert original_branch is not None
-        wt_dir = wt._wt_dir
-        if wt_dir and wt_dir.exists():
+        if wt.wt_dir.exists():
             base_ref = self._resolve_base_ref(
-                str(wt_dir), wt._baseline_commit, original_branch,
+                str(wt.wt_dir), wt.baseline_commit, wt.original_branch,
+            ) or wt.original_branch
+            tracked = _git(
+                "diff", "--name-only", "--no-renames", base_ref, cwd=str(wt.wt_dir),
             )
-            tracked = _git("diff", "--name-only", "--no-renames", base_ref, cwd=str(wt_dir))
             if tracked.returncode == 0:
                 files = _unquoted_name_lines(tracked.stdout)
             else:
@@ -1515,34 +1480,25 @@ class _MergeFlowMixin:
                 # commits unique to this worktree (not reachable from
                 # any other branch) so committed work is never
                 # mistaken for a clean worktree.
-                status = _git("status", "--porcelain", cwd=str(wt_dir))
+                status = _git("status", "--porcelain", cwd=str(wt.wt_dir))
                 files = _porcelain_paths(
                     status.stdout, rename_both_sides=True,
                 )
-                unique_args = ["log", "--pretty=format:", "--name-only",
-                               "--no-renames", "HEAD", "--not"]
-                if wt._wt_branch:
-                    unique_args.append(f"--exclude={wt._wt_branch}")
-                unique_args.append("--branches")
-                unique = _git(*unique_args, cwd=str(wt_dir))
+                unique = _git(
+                    "log", "--pretty=format:", "--name-only", "--no-renames",
+                    "HEAD", "--not", f"--exclude={wt.branch}", "--branches",
+                    cwd=str(wt.wt_dir),
+                )
                 if unique.returncode == 0:
                     files.extend(_unquoted_name_lines(unique.stdout))
-            files.extend(_capture_untracked(str(wt_dir)))
+            files.extend(_capture_untracked(str(wt.wt_dir)))
             return sorted(set(files))
-        if not wt._wt_branch:
-            return []
-        repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
         base_ref = self._resolve_base_ref(
-            repo_root, wt._baseline_commit, original_branch,
-            tip=wt._wt_branch,
-        )
-        result = _git(
-            "diff", "--name-only", "--no-renames", base_ref, wt._wt_branch,
-            cwd=repo_root,
-        )
-        return (
-            _unquoted_name_lines(result.stdout)
-            if result.returncode == 0 else []
+            str(wt.repo_root), wt.baseline_commit, wt.original_branch,
+            tip=wt.branch,
+        ) or wt.original_branch
+        return GitWorktreeOps._diff_name_only(
+            wt.repo_root, "--no-renames", base_ref, wt.branch,
         )
 
     def _check_worktree_busy(
@@ -1551,6 +1507,8 @@ class _MergeFlowMixin:
         verb: str,
         repo_root: Path | None = None,
         wt_dir: Path | None = None,
+        *,
+        internal: bool = False,
     ) -> dict[str, Any] | None:
         """Return an error dict if a worktree action should be refused, else None.
 
@@ -1560,6 +1518,22 @@ class _MergeFlowMixin:
         the main-tree occupant only blocks while a tracked file of that
         tree is modified (:meth:`_main_tree_blocks_merge`); the other
         verbs are refused by any occupant.
+
+        With *internal* set (the post-task auto-finalize, which runs
+        on the task thread that owns this tab's own
+        ``is_task_active`` / ``is_merging`` flags) the tab's own flags
+        are not checked.  The occupant guards still apply: a task on
+        another tab running INSIDE the pending worktree blocks every
+        action, since both merge and discard delete the directory out
+        from under it; and a merge still stashes/checkouts/merges the
+        main working tree while a direct task on another tab may be
+        writing it (F4-19).  A DISCARD or detach is exempt from the
+        main-tree guard in internal mode: it only removes
+        ``.kiss-worktrees/<slug>`` and the unmerged branch, touching
+        neither the main tree's files nor its HEAD, and refusing it
+        would leak the worktree forever (nothing ever retries).  A
+        refused MERGE is retried by :meth:`_merge_deferred_worktrees`
+        once the other task's changes are committed.
 
         Must be called with ``_state_lock`` already held (RACE-1 fix)
         so the caller can atomically set ``state.is_merging = True``
@@ -1598,7 +1572,7 @@ class _MergeFlowMixin:
         # about to run in (the worker then sees ``is_merging`` and
         # refuses the run).  Same predicate ``AgentState.busy`` and
         # ``_finalize_pending_worktree`` use.
-        if state.is_task_active or state.thread_alive():
+        if not internal and (state.is_task_active or state.thread_alive()):
             return {
                 "success": False,
                 "message": (
@@ -1606,7 +1580,7 @@ class _MergeFlowMixin:
                     f"Wait for it to finish (or stop it) before {verb}."
                 ),
             }
-        if state.merge_in_progress():
+        if not internal and state.merge_in_progress():
             return {
                 "success": False,
                 "message": (
@@ -1633,7 +1607,7 @@ class _MergeFlowMixin:
                         + self._defer_worktree_merge(state)
                     ),
                 }
-        elif self._any_non_wt_running(repo_root):
+        elif not internal and self._any_non_wt_running(repo_root):
             return {
                 "success": False,
                 "message": (
@@ -1812,15 +1786,16 @@ class _MergeFlowMixin:
                 leaving its branch, directory, and any uncommitted
                 changes untouched on disk).
             tab_id: The tab whose worktree to act on.
-            internal: When True, bypass the ``_check_worktree_busy``
-                guard.  Used by ``_run_task_inner``'s post-task
-                auto-merge / auto-discard block (RACE-3 fix), which
-                runs on the same task thread that owns
-                ``state.is_task_active = True`` and therefore would
-                otherwise be refused by its own guard.  A concurrent
-                non-worktree task on the main tree still blocks a
-                ``"merge"`` — but never a ``"discard"``, which does
-                not touch the main working tree.
+            internal: When True, skip the tab's own flags in the
+                ``_check_worktree_busy`` guard.  Used by
+                ``_run_task_inner``'s post-task auto-merge /
+                auto-discard block (RACE-3 fix), which runs on the
+                same task thread that owns ``state.is_task_active =
+                True`` and therefore would otherwise be refused by its
+                own guard.  A concurrent non-worktree task on the main
+                tree still blocks a ``"merge"`` — but never a
+                ``"discard"``, which does not touch the main working
+                tree.
             already_claimed: When True, the caller has already set
                 ``state.is_merging`` under ``_state_lock`` after checking
                 the busy conditions itself, and will clear it (and call
@@ -1892,56 +1867,11 @@ class _MergeFlowMixin:
                     "success": False,
                     "message": "No pending worktree changes to act on",
                 })
-            if not internal:
-                busy = self._check_worktree_busy(state, verb, repo_root, wt._wt_dir)
-                if busy:
-                    return _refused(deferred_branch, busy)
-            elif wt._wt_dir is not None and self._any_non_wt_running(
-                wt._wt_dir,
-            ):
-                # A task on ANOTHER tab is running INSIDE this pending
-                # worktree (its work_dir's toplevel is the linked
-                # worktree).  Both merge and discard delete the
-                # directory out from under it, so — unlike the
-                # main-tree guard below — the discard exemption does
-                # NOT apply here (gpt-5.6-sol review finding: the
-                # internal auto-discard used to remove an occupied
-                # worktree).
-                return _refused(deferred_branch, {
-                    "success": False,
-                    "message": (
-                        "Another tab is running a task inside this "
-                        "task's worktree. Wait for it to finish "
-                        f"before {verb}."
-                    ),
-                })
-            elif action == "merge" and self._main_tree_blocks_merge(repo_root):
-                # internal=True only bypasses this tab's OWN
-                # is_task_active/is_merging flags (the post-task
-                # auto-finalize runs on the task thread that owns
-                # them).  It must NOT bypass the main-tree guard
-                # (F4-19): merging stashes/checkouts/merges the
-                # main working tree while a direct task on another
-                # tab is still writing it.  The guard only bites once
-                # that task has changed a tracked file, though — an
-                # occupant that has left every tracked file untouched
-                # does not block the merge.  A DISCARD is exempt from
-                # THIS guard: it only removes .kiss-worktrees/<slug>
-                # and deletes the unmerged branch, touching neither
-                # the main working tree's files nor its HEAD, so
-                # refusing it would leak the worktree forever
-                # (nothing ever retries).  The refused MERGE is
-                # retried by ``_merge_deferred_worktrees`` once the
-                # other task's changes are committed.
-                return _refused(deferred_branch, {
-                    "success": False,
-                    "message": (
-                        "Another tab is running a task on the main "
-                        "working tree and has uncommitted changes to "
-                        f"tracked files. Wait for it to finish before "
-                        f"{verb}. " + self._defer_worktree_merge(state)
-                    ),
-                })
+            busy = self._check_worktree_busy(
+                state, verb, repo_root, wt._wt_dir, internal=internal,
+            )
+            if busy:
+                return _refused(deferred_branch, busy)
             # From here on this call owns the worktree's fate, so a
             # merge deferred to "once the main tree is committed" is
             # no longer outstanding.
