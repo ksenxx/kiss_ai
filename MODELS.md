@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **776 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **775 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -10,16 +10,16 @@ KISS Sorcar ships a catalog of **776 models** across **9 provider categories**, 
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 421 |
+| OpenRouter | 420 |
 | Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **751** generation-capable models
-- **588** function-calling-capable models
+- **749** generation-capable models
+- **587** function-calling-capable models
 - **7** embedding models
-- **10** decision models
+- **11** decision models
 
 Full model list:
 
@@ -388,7 +388,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (421)</strong></summary>
+<summary><strong>OpenRouter (420)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -420,7 +420,6 @@ Full model list:
 - `openrouter/anthropic/claude-sonnet-5`
 - `openrouter/anthropic/claude-sonnet-5.5`
 - `openrouter/arcee-ai/trinity-large-thinking`
-- `openrouter/baidu/ernie-4.5-vl-424b-a47b`
 - `openrouter/bytedance-seed/seed-1.6`
 - `openrouter/bytedance-seed/seed-1.6-flash`
 - `openrouter/bytedance-seed/seed-2-1-turbo`
@@ -643,7 +642,7 @@ Full model list:
 - `openrouter/openai/o4-mini-high`
 - `openrouter/perceptron/perceptron-mk1`
 - `openrouter/perceptron/perceptron-mk1.5`
-- `openrouter/perplexity/pplx-decider-v1-27b`
+- `openrouter/perplexity/pplx-decider-v1.1-27b`
 - `openrouter/perplexity/sonar`
 - `openrouter/perplexity/sonar-deep-research`
 - `openrouter/perplexity/sonar-pro`
@@ -675,7 +674,6 @@ Full model list:
 - `openrouter/qwen/qwen3-coder-plus`
 - `openrouter/qwen/qwen3-max`
 - `openrouter/qwen/qwen3-max-thinking`
-- `openrouter/qwen/qwen3-next-80b-a3b-instruct`
 - `openrouter/qwen/qwen3-next-80b-a3b-thinking`
 - `openrouter/qwen/qwen3-vl-235b-a22b-instruct`
 - `openrouter/qwen/qwen3-vl-235b-a22b-thinking`
@@ -736,6 +734,7 @@ Full model list:
 - `openrouter/unbiased/pareto-26.10-preview`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-decide`
+- `openrouter/upstage/solar-decide-flash`
 - `openrouter/upstage/solar-mini4`
 - `openrouter/upstage/solar-pro-3`
 - `openrouter/upstage/solar-pro4`
