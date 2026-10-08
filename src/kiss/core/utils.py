@@ -487,7 +487,7 @@ def config_to_dict() -> dict[Any, Any]:
     return cast(dict[Any, Any], convert_to_json(config_module.DEFAULT_CONFIG))
 
 
-def _coerce_bool(value: bool | str) -> bool:
+def coerce_bool(value: bool | str) -> bool:
     """Coerce a string or bool tool argument to a Python bool.
 
     Args:
@@ -608,8 +608,8 @@ def finish(
         non-empty suggestion was given.
     """
     result: dict[str, Any] = {
-        "success": _coerce_bool(success),
-        "is_continue": _coerce_bool(is_continue),
+        "success": coerce_bool(success),
+        "is_continue": coerce_bool(is_continue),
         "summary": ensure_html(summary_in_html),
     }
     suggestion = str(suggested_next_task).strip() if suggested_next_task else ""
