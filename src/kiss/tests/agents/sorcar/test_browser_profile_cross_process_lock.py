@@ -57,14 +57,14 @@ _LOCK_DRIVER = """
 import sys, time
 from pathlib import Path
 
-from kiss.agents.sorcar.useful_tools import _file_lock
+from kiss.core.file_lock import exclusive_file_lock
 
 lock_path, out_path, barrier = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 Path(str(barrier) + "." + out_path.name).write_text("ready")
 while not barrier.exists():
     time.sleep(0.02)
 
-with _file_lock(lock_path):
+with exclusive_file_lock(lock_path):
     start = time.time()
     time.sleep(1.0)
     out_path.write_text(f"{start} {time.time()}")

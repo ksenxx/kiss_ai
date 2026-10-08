@@ -1117,7 +1117,7 @@ class SorcarAgent(RelentlessAgent):
         one every surface shows — and a sub-agent of such a chat is
         addressed as ``{new_tab}__sub_{task_id}``.  A sub-agent's own
         synthetic id is never a candidate (a ``run_agent`` dispatch
-        registers it as a subscriber too, see ``register_task_ui``).
+        registers it as a subscriber too, see ``subscribe_tab``).
 
         Returns:
             The tab id, or ``""`` when running headless.
@@ -1820,14 +1820,14 @@ class SorcarAgent(RelentlessAgent):
         self._classification_preseeded = False
         self._reset_task_classification()
         verdict = self._classify_task_once(
-            model_name, task, model_config, enabled_override=enabled,
+            self._resolve_model_name(model_name), task, model_config, enabled_override=enabled,
         )
         self._classification_preseeded = True
         return verdict
 
     def _classify_task_once(
         self,
-        model_name: str | None,
+        model_name: str,
         task: str,
         model_config: dict[str, Any] | None,
         arguments: dict[str, str] | None = None,
@@ -1846,9 +1846,8 @@ class SorcarAgent(RelentlessAgent):
         (system prompt selection) share one classification.
 
         Args:
-            model_name: The model name, possibly None or unresolved
-                (:meth:`run` passes the run's resolved model, which
-                :meth:`_resolve_model_name` returns unchanged).
+            model_name: The run's resolved model name (see
+                :meth:`_resolve_model_name`).
             task: The task prompt template about to run.
             model_config: The caller-supplied model configuration.
             arguments: The caller-supplied prompt-template arguments;
@@ -1872,7 +1871,7 @@ class SorcarAgent(RelentlessAgent):
             return None
         outcome = classify_task(
             task=substitute_prompt_args(task, arguments),
-            model_name=self._resolve_model_name(model_name),
+            model_name=model_name,
             model_config=model_config,
         )
         # ONE immutable publication: the retry-stable fold key and the

@@ -36,8 +36,12 @@ from kiss.core.models.model_info import model_runs_task_to_completion
 from kiss.core.printer import Printer
 from kiss.core.stop_signal import get_thread_stop_event
 from kiss.core.tool_verdict import Verdict
-from kiss.core.utils import _coerce_bool as _str_to_bool
-from kiss.core.utils import finish, read_text_waiting_for_writer, substitute_prompt_args
+from kiss.core.utils import (
+    coerce_bool,
+    finish,
+    read_text_waiting_for_writer,
+    substitute_prompt_args,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1388,8 +1392,8 @@ class RelentlessAgent(Base):
             if not isinstance(payload, dict):  # pragma: no cover
                 payload = {}
 
-            success = _str_to_bool(payload.get("success", False))
-            is_continue = _str_to_bool(payload.get("is_continue", False))
+            success = coerce_bool(payload.get("success", False))
+            is_continue = coerce_bool(payload.get("is_continue", False))
 
             if not is_continue or success:
                 if summaries:

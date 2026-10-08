@@ -67,7 +67,7 @@ from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
-from kiss.agents.sorcar.useful_tools import _file_lock
+from kiss.core.file_lock import exclusive_file_lock
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +261,7 @@ def save_mcp_server(cfg: MCPServerConfig, scope: str, work_dir: str) -> Path:
         else project_mcp_config_path(work_dir)
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _file_lock(path.with_suffix(".lock")):
+    with exclusive_file_lock(path.with_suffix(".lock")):
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -295,7 +295,7 @@ def remove_mcp_server(name: str, work_dir: str) -> list[Path]:
     ):
         if not path.exists():
             continue
-        with _file_lock(path.with_suffix(".lock")):
+        with exclusive_file_lock(path.with_suffix(".lock")):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -451,7 +451,7 @@ class FileTokenStorage:
                 ``"oauth_metadata"``).
             value: Its already-serialized JSON value, or ``None`` to forget it.
         """
-        with _file_lock(self._lock_path):
+        with exclusive_file_lock(self._lock_path):
             data = self._read()
             data[key] = value
             if key == "tokens":
