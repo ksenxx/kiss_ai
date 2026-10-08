@@ -332,11 +332,15 @@ function testBurgerAndChromeHiddenByCss() {
     'utf8',
   );
   const desktopBlock = remoteCss.slice(remoteCss.indexOf('@media (width >= 900px)'));
+  // The Task info toggle (#meta-drawer-btn) sits with the burger in the
+  // composer footer and goes with it: the desktop remote has the split
+  // layout instead of a drawer.
   assert.ok(
-    /body\.remote-chat\.remote-desktop #menu-btn,\s*body\.remote-chat\.remote-desktop #sidebar-close \{\s*display: none;/.test(
+    /body\.remote-chat\.remote-desktop #menu-btn,\s*body\.remote-chat\.remote-desktop #meta-drawer-btn,\s*body\.remote-chat\.remote-desktop #sidebar-close \{\s*display: none;/.test(
       desktopBlock,
     ),
-    'non-mobile remote hides the burger and the drawer close button',
+    'non-mobile remote hides the burger, the Task info toggle and the ' +
+      'drawer close button',
   );
   console.log('PASS burger and drawer chrome are hidden where required');
 }

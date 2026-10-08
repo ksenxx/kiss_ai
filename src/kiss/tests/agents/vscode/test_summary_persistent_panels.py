@@ -293,13 +293,17 @@ def test_background_summary_does_not_leak_panels(chat_page: Page) -> None:
     page.locator("#new-chat-btn").click()
     second = page.evaluate("window._testApi.getActiveTabId()")
     assert first != second
+    # The running first chat survives the "+": only an idle chat is
+    # retired when the user leaves it.
+    assert first in {t["id"] for t in page.evaluate("window._testApi.openTabs()")}
     _send(page, _events(), tab=first)
     expect(
         page.locator("#output .tc-summary, #output .tc-question, #output .tc-question-answer")
     ).to_have_count(0)
-    page.locator(f'.chat-tab[data-tab-id="{first}"]').click()
+    # Chats have no tab row: the Chats-panel pick is switchToTab.
+    page.evaluate("id => window._testApi.switchToTab(id)", first)
     _assert_preserved(page)
-    page.locator(f'.chat-tab[data-tab-id="{second}"]').click()
+    page.evaluate("id => window._testApi.switchToTab(id)", second)
     expect(
         page.locator("#output .tc-summary, #output .tc-question, #output .tc-question-answer")
     ).to_have_count(0)

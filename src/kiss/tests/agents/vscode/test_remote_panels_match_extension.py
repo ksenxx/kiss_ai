@@ -442,16 +442,32 @@ _PROBE_STYLES_JS = (
     styles,
     taskPanelCollapsedTextDisplay: collapsedTextDisplay,
     taskPanelTextMaxHeight: tpText.maxHeight,
-    taskPanelGapLeft: tpRect.left - outRect.left,
-    // The task panel is 4/5 of the chat's content width, so its right
-    // gap is a share of that width (the two pages' viewports differ).
+    // The task panel sits against the right edge at 4/5 of the chat's
+    // content width, so its width and its left gap are shares of that
+    // width (the two pages' chat widths differ: the desktop remote page
+    // splits the window between the chat and the content pane).
+    taskPanelGapLeftShare:
+      (tpRect.left -
+        outRect.left -
+        parseFloat(getComputedStyle(out).paddingLeft)) /
+      (outRect.width -
+        parseFloat(getComputedStyle(out).paddingLeft) -
+        parseFloat(getComputedStyle(out).paddingRight)),
     taskPanelWidthShare:
       tpRect.width /
       (outRect.width -
         parseFloat(getComputedStyle(out).paddingLeft) -
         parseFloat(getComputedStyle(out).paddingRight)),
     eventGapLeft: tcRect.left - outRect.left,
-    eventGapRight: outRect.right - tcRect.right,
+    // An agent panel sits against the left edge at 7/8 of the content
+    // width: its right gap is a share of that width too.
+    eventGapRightShare:
+      (outRect.right -
+        parseFloat(getComputedStyle(out).paddingRight) -
+        tcRect.right) /
+      (outRect.width -
+        parseFloat(getComputedStyle(out).paddingLeft) -
+        parseFloat(getComputedStyle(out).paddingRight)),
   };
 })()"""
 )
@@ -663,11 +679,7 @@ def _assert_probe_parity(
             f"extension's value: {ext_probes[scalar]!r} != "
             f"{rem_probes[scalar]!r}"
         )
-    for key in (
-        "taskPanelGapLeft",
-        "eventGapLeft",
-        "eventGapRight",
-    ):
+    for key in ("eventGapLeft",):
         ext_gap = float(ext_probes[key])
         rem_gap = float(rem_probes[key])
         assert abs(ext_gap - rem_gap) <= 2.0, (
@@ -680,6 +692,19 @@ def _assert_probe_parity(
         f"[{label}] the task panel is 4/5 of the chat wide on both surfaces "
         f"(extension={ext_share:.3f}, remote={rem_share:.3f})"
     )
+    for key, share, what in (
+        ("taskPanelGapLeftShare", 0.2, "the task panel leaves 1/5 free on its left"),
+        ("eventGapRightShare", 0.125, "an agent panel leaves 1/8 free on its right"),
+    ):
+        ext_gap_share = float(ext_probes[key])
+        rem_gap_share = float(rem_probes[key])
+        assert (
+            abs(ext_gap_share - share) <= 0.01
+            and abs(rem_gap_share - share) <= 0.01
+        ), (
+            f"[{label}] {what} on both surfaces "
+            f"(extension={ext_gap_share:.3f}, remote={rem_gap_share:.3f})"
+        )
 
 
 @pytest.mark.timeout(240)

@@ -69,20 +69,25 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+function isOpen(win, tabId) {
+  return win._testApi.openTabs().some(t => t.id === tabId);
 }
 
-function closeTabButton(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}] .chat-tab-close`,
-  );
-  assert.ok(el, `tab ${tabId} must have a close button`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+// There is no row of chat tabs: the user picks a chat in the Chats
+// panel, which is what switchToTab stands in for.
+function clickTab(win, tabId) {
+  assert.ok(isOpen(win, tabId), `tab ${tabId} must be open`);
+  win._testApi.switchToTab(tabId);
+}
+
+// Without a row of chat tabs there is no close button for a chat; an
+// idle chat is closed by leaving it. Pressing "+" opens a fresh chat and
+// retires the one on screen (no task running, no question, no draft).
+function leaveAndRetire(win, tabId) {
+  assert.strictEqual(win._testApi.getActiveTabId(), tabId);
+  win.document.getElementById('new-chat-btn').click();
+  assert.notStrictEqual(win._testApi.getActiveTabId(), tabId);
+  assert.ok(!isOpen(win, tabId), `tab ${tabId} must have been retired`);
 }
 
 // A tool_result whose body mentions a file path: the ordinary way a
@@ -177,12 +182,10 @@ function testLostReplyDoesNotWedgeThePathForEver() {
 
 function testClosingATabReleasesItsPendingSpans() {
   const {win} = makeWebview();
-  const tabA = win._testApi.getActiveTabId();
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();
-  clickTab(win, tabA);
 
-  // Twenty panels in the background tab, none of them ever answered.
+  // Twenty panels in the tab, none of them ever answered.
   for (let i = 0; i < 20; i += 1) {
     sendToolResult(win, tabB, `touched ./src/gen${i}.py`);
   }
@@ -190,7 +193,9 @@ function testClosingATabReleasesItsPendingSpans() {
   assert.strictEqual(before.spans, 20, 'twenty spans must be waiting');
   assert.strictEqual(before.checks, 20, 'twenty checks must be in flight');
 
-  closeTabButton(win, tabB);
+  // "+" moves the user to a fresh chat (the transcript of B detaches
+  // into its fragment) and closes the idle chat B behind them.
+  leaveAndRetire(win, tabB);
   const after = counts(win);
   assert.strictEqual(
     after.spans,

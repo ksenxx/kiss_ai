@@ -409,12 +409,14 @@ class TestReattachStatusEndRace(TestCase):
             f"through the end fan-out: {self._statuses(viewer)}",
         )
 
-    def test_replaying_unknown_idle_chat_emits_no_status(self) -> None:
-        """No history row and no live task: nothing to attach or flip."""
+    def test_replaying_unknown_idle_chat_reports_idle(self) -> None:
+        """No history row and no live task: nothing to attach, so the
+        tab is told once that it is idle (the webview holds a registry
+        chat open until its state is known) and never flipped again."""
         from uuid import uuid4
 
         self.server._replay_session(f"chat-none-{uuid4().hex}", "lonely-tab")
-        self.assertEqual(self._statuses("lonely-tab"), [])
+        self.assertEqual(self._statuses("lonely-tab"), [False])
 
     def test_viewer_attaching_to_live_task_is_not_flipped_back(self) -> None:
         """The still-running re-check must not undo a valid attach.

@@ -295,8 +295,9 @@ def test_explorer_file_click_opens_a_content_tab(browser, harness):
             f"{_OPEN_TAB_COUNT_JS} === {tabs_before + 1}",
             timeout=15000,
         )
+        # Desktop split layout: content tabs sit on the content pane's row.
         titles = page.eval_on_selector_all(
-            "#tab-list .chat-tab", "els => els.map(e => e.textContent)",
+            "#content-tab-list .chat-tab", "els => els.map(e => e.textContent)",
         )
         assert any("feature.txt" in t for t in titles)
         opened = _sent(frames, "openFile")
@@ -663,16 +664,28 @@ def test_orphaned_content_tab_keeps_browsing_its_folder(browser, harness):
         page.wait_for_function(
             f"{_OPEN_TAB_COUNT_JS} === 2", timeout=15000,
         )
-        # Close the chat tab (its group-strip entry) while the content
-        # tab shows.
+        chat_id = page.evaluate("window._testApi.getActiveTabId()")
+        # Close the chat tab (its group-strip entry; the strip itself is
+        # hidden for a lone chat, so the click is dispatched by script)
+        # while the content tab shows in the content pane.  With no chat
+        # left, the split layout opens a fresh one beside the orphaned
+        # file tab.
         page.evaluate(
             """() => {
-              const chat = document.querySelector('#tab-list .chat-tab:not(.active)');
+              const chat = document.querySelector('#tab-list .chat-tab:not(.content-tab)');
               chat.querySelector('.chat-tab-close').click();
             }"""
         )
         page.wait_for_function(
-            f"{_OPEN_TAB_COUNT_JS} === 1", timeout=15000,
+            "prev => window._testApi.openTabs().filter(t => !t.isContentTab)"
+            ".every(t => t.id !== prev)",
+            arg=chat_id,
+            timeout=15000,
+        )
+        assert [f["tabId"] for f in _sent(frames, "closeTab")] == [chat_id]
+        assert (
+            page.locator("#content-tab-list .chat-tab.active .chat-tab-label").inner_text()
+            == "README.md"
         )
         page.wait_for_timeout(300)
         assert page.locator(".explorer-row[aria-level='1']").inner_text().strip() == "repo"

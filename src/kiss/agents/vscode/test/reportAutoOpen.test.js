@@ -120,19 +120,12 @@ function finishTask(win, extra) {
   send(win, Object.assign({type: 'task_done', success: true}, extra || {}));
 }
 
-// Content tabs on either row: a file sits on the group strip of the
-// chat that opened it, or on the main row once that chat is gone.
+// Content tabs: on this stacked surface every one sits on the group
+// strip (#tab-list), whichever chat opened it.
 function contentTabs(win) {
-  const seen = new Set();
   return Array.from(
-    win.document.querySelectorAll(
-      '#main-tab-list .chat-tab.content-tab, #tab-list .chat-tab.content-tab',
-    ),
-  ).filter(el => {
-    if (seen.has(el.dataset.tabId)) return false;
-    seen.add(el.dataset.tabId);
-    return true;
-  });
+    win.document.querySelectorAll('#tab-list .chat-tab.content-tab'),
+  );
 }
 
 function reportFrames(win) {
@@ -474,20 +467,24 @@ function testCloseTabDiscardsQueuedReport() {
   // task's pending report; it must not pop open later and must not
   // leak in the queue.
   const {win} = makeWebview({withMarked: true});
-  const firstTabEl = win.document.querySelector('#tab-list .chat-tab');
-  const firstTabId = firstTabEl.dataset.tabId;
-  const addBtn = win.document.querySelector('#new-chat-btn');
-  addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  // The (now background) first tab confirms a report...
+  const firstTabId = win._testApi.getActiveTabId();
+  // The first tab confirms a report while the user works in another
+  // chat (opened without leaving: "+" would retire the idle first one)...
+  win._testApi.createNewTab();
+  assert.notStrictEqual(win._testApi.getActiveTabId(), firstTabId);
   writeReport(win, 'reports/closed.md', '# never shown', {tabId: firstTabId});
-  // ...then the user closes that tab.
+  // ...then the user comes back to that tab and closes it (only the
+  // chat on screen has a strip entry with a close button).
+  win._testApi.switchToTab(firstTabId);
   const closeBtn = win.document.querySelector(
-    '#main-tab-list .chat-tab[data-tab-id="' +
-      firstTabId +
-      '"] .chat-tab-close',
+    '#tab-list .chat-tab[data-tab-id="' + firstTabId + '"] .chat-tab-close',
   );
   assert.ok(closeBtn, 'expected a close button on the first chat tab');
   closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    !win._testApi.openTabs().some(t => t.id === firstTabId),
+    'the first chat is closed',
+  );
   finishTask(win, {tabId: firstTabId});
   assertNoReportTab(win, 'report of a closed tab');
   win.close();
@@ -686,17 +683,22 @@ function testReportsSegmentVariants() {
 
 function testBackgroundTabReportOpensAtItsTaskDone() {
   const {win} = makeWebview({withMarked: true});
-  const firstTabEl = win.document.querySelector('#tab-list .chat-tab');
-  assert.ok(firstTabEl, 'expected an initial chat tab');
-  const firstTabId = firstTabEl.dataset.tabId;
+  const firstTabId = win._testApi.getActiveTabId();
+  // The first tab's task is running, so "+" leaves it open (an idle
+  // chat left behind is retired).
+  send(win, {type: 'status', running: true, tabId: firstTabId});
   const addBtn = win.document.querySelector('#new-chat-btn');
   assert.ok(addBtn, 'expected the add-tab button');
   addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  const activeChat = win.document.querySelector('#tab-list .chat-tab.active');
+  const activeChat = {dataset: {tabId: win._testApi.getActiveTabId()}};
   assert.notStrictEqual(
     activeChat.dataset.tabId,
     firstTabId,
     'precondition: a second chat tab must now be active',
+  );
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === firstTabId),
+    'precondition: the running first chat stays open',
   );
   // The agent running in the (now background) first tab writes a report.
   send(win, {
@@ -734,10 +736,24 @@ function testBackgroundTabReportOpensAtItsTaskDone() {
 // was standing on the sub-agent tab that is now being closed.
 function testSubagentDoneOpensReportInTheBackground() {
   const {win} = makeWebview({withMarked: true});
-  const addBtn = win.document.querySelector('#new-chat-btn');
-  addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  const subTabId = win.document.querySelector('#tab-list .chat-tab.active')
-    .dataset.tabId;
+  const parentId = win._testApi.getActiveTabId();
+  send(win, {type: 'status', running: true, tabId: parentId});
+  const subTabId = 'sub-1';
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: subTabId,
+    parent_tab_id: parentId,
+    description: 'sub 1',
+    task_id: 'sub-task-1',
+    taskIndex: 0,
+  });
+  // The user stands on the sub-agent's tab (on the strip of its parent).
+  const subEl = win.document.querySelector(
+    '#tab-list .chat-tab.subagent-tab[data-tab-id="' + subTabId + '"]',
+  );
+  assert.ok(subEl, 'the sub-agent has a strip entry');
+  subEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.strictEqual(win._testApi.getActiveTabId(), subTabId);
   writeReport(win, 'reports/sub.md', '# from subagent', {tabId: subTabId});
   assertNoReportTab(win, 'subagent report before subagentDone');
   send(win, {type: 'subagentDone', tab_id: subTabId});

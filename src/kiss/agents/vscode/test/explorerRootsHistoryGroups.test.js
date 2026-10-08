@@ -769,6 +769,40 @@ async function main() {
     return all(win, '#history-list > .history-chat-group');
   }
 
+  /**
+   * A history row click opens its task in a fresh chat tab and asks
+   * the daemon to resume it there.  The chat that was on screen (an
+   * idle new chat) is retired at the same time, so the tab count does
+   * not grow: the new active tab and the resumeSession it posts are the
+   * evidence that the click was honoured.
+   */
+  function assertRowOpenedTask(
+    win,
+    posted,
+    activeBefore,
+    resumesBefore,
+    taskId,
+  ) {
+    const active = win._testApi.getActiveTabId();
+    assert.notStrictEqual(
+      active,
+      activeBefore,
+      'the click opens a new chat tab',
+    );
+    assert.ok(
+      win._testApi.openTabs().some(t => t.id === active),
+      'the new chat tab is open',
+    );
+    const resumes = ofType(posted, 'resumeSession');
+    assert.strictEqual(
+      resumes.length,
+      resumesBefore + 1,
+      'one resume is asked',
+    );
+    assert.strictEqual(resumes[resumes.length - 1].taskId, taskId);
+    assert.strictEqual(resumes[resumes.length - 1].tabId, active);
+  }
+
   /** Deliver a history page stamped with the generation the panel last asked for. */
   function sendHistory(win, posted, offset, sessions) {
     const asked = ofType(posted, 'getHistory');
@@ -1116,9 +1150,10 @@ async function main() {
     );
     // The KEPT row's handler is alive: clicking it opens its task in a
     // tab (this is the click the old wipe-and-rebuild used to swallow).
-    const tabsBefore = all(win, '.chat-tab').length;
+    const activeBefore = win._testApi.getActiveTabId();
+    const resumesBefore = ofType(posted, 'resumeSession').length;
     click(win, rowBefore);
-    assert.strictEqual(all(win, '.chat-tab').length, tabsBefore + 1);
+    assertRowOpenedTask(win, posted, activeBefore, resumesBefore, 'a1');
     win.close();
   });
 
@@ -1276,13 +1311,10 @@ async function main() {
       rowBefore,
       'no rebuild during the mouseup dispatch',
     );
-    const tabsBefore = all(win, '.chat-tab').length;
+    const activeBefore = win._testApi.getActiveTabId();
+    const resumesBefore = ofType(posted, 'resumeSession').length;
     click(win, rowBefore);
-    assert.strictEqual(
-      all(win, '.chat-tab').length,
-      tabsBefore + 1,
-      'the click that was in flight still opens the task',
-    );
+    assertRowOpenedTask(win, posted, activeBefore, resumesBefore, 'a1');
     await sleep(20);
     assert.notStrictEqual(
       firstRow(win),
@@ -1337,13 +1369,10 @@ async function main() {
       rowBefore,
       'the parked page must wait out the compatibility-event gap',
     );
-    const tabsBefore = all(win, '.chat-tab').length;
+    const activeBefore = win._testApi.getActiveTabId();
+    const resumesBefore = ofType(posted, 'resumeSession').length;
     click(win, rowBefore);
-    assert.strictEqual(
-      all(win, '.chat-tab').length,
-      tabsBefore + 1,
-      'the tap still opens the pressed task',
-    );
+    assertRowOpenedTask(win, posted, activeBefore, resumesBefore, 'a1');
     assert.ok(
       await firstRowReplaced(win, rowBefore),
       'the deferred rebuild lands after the grace period',

@@ -186,9 +186,12 @@ function reply(win, poll, fields) {
 }
 
 function chatTabs(win) {
-  // The chat tabs on the main row (the strip under it only lists the
-  // group of the chat on screen).
-  return Array.from(win.document.querySelectorAll('#main-tab-list .chat-tab'));
+  // The chat tabs the window holds.  They have no row of their own
+  // (the Chats panel picks them; the strip only lists the group of the
+  // chat on screen), so the tab records are the source.
+  return Array.from(win._testApi.openTabs()).filter(
+    t => !t.isContentTab && !t.isSubagentTab,
+  );
 }
 
 function activeTabLabel(win) {
@@ -233,8 +236,8 @@ async function main() {
       injectMainCss(win);
       assert.strictEqual(
         display(win, 'meta-drawer-btn'),
-        'inline-flex',
-        'the task-info toggle rides the tab bar',
+        'flex',
+        'the task-info toggle is a composer footer icon',
       );
       assert.strictEqual(
         display(win, 'meta-close'),
@@ -446,6 +449,9 @@ async function main() {
         events: [],
         extra: '{}',
       });
+      // The task is still going, so "+" leaves the chat open behind the
+      // new one (an idle chat would be retired on leaving it).
+      send(win, {type: 'status', running: true, tabId: ready.tabId});
       win.document.querySelector('#new-chat-btn').click();
       assert.strictEqual(chatTabs(win).length, 2);
       assert.strictEqual(activeTabLabel(win), 'new chat');
@@ -460,7 +466,14 @@ async function main() {
         'Existing task opened already',
         'the click lands on the existing tab',
       );
-      assert.strictEqual(chatTabs(win).length, 2, 'no extra tab');
+      assert.strictEqual(win._testApi.getActiveTabId(), ready.tabId);
+      // The host-relayed pick leaves an idle chat behind exactly like
+      // the in-webview one: the empty "new chat" is retired.
+      assert.strictEqual(chatTabs(win).length, 1, 'no extra tab');
+      assert.ok(
+        posted.some(m => m.type === 'closeTab' && m.tabId !== ready.tabId),
+        'the idle chat left behind is closed in the registry',
+      );
     },
   );
 
@@ -468,14 +481,20 @@ async function main() {
     'openChatFromHistory resumes an unopened chat in a fresh tab',
     () => {
       const {win, posted} = makeWebview('');
-      const tabsBefore = chatTabs(win).length;
+      const bootTab = win._testApi.getActiveTabId();
       send(win, {
         type: 'openChatFromHistory',
         chatId: 'chat-far',
         taskId: 7,
         title: 'A chat from another day',
       });
-      assert.strictEqual(chatTabs(win).length, tabsBefore + 1);
+      const fresh = win._testApi.getActiveTabId();
+      assert.notStrictEqual(fresh, bootTab, 'the chat opens in a fresh tab');
+      assert.strictEqual(
+        chatTabs(win).length,
+        1,
+        'the idle boot chat left behind is retired',
+      );
       const resume = posted.filter(m => m.type === 'resumeSession').pop();
       assert.ok(resume, 'the fresh tab resumes the chat');
       assert.strictEqual(resume.id, 'chat-far');

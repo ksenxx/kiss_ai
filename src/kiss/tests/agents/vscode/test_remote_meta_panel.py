@@ -32,9 +32,9 @@ Covered behavior:
   mirrored live into the panel.
 * The top status bar is hidden at EVERY width — below the 900px
   breakpoint the panel becomes a right-slide drawer toggled by a
-  button at the tab bar's right edge (so it steals no chat space and
-  stays clear of the composer's button row), dismissed by its close
-  button, the backdrop or Escape.
+  composer footer icon (``#meta-drawer-btn`` in ``#footer-tools``,
+  right after the burger, so it steals no chat space), dismissed by
+  its close button, the backdrop or Escape.
 
 No mocks, patches or fakes: a real HTTP server serves the real assets
 to a real browser.
@@ -316,15 +316,13 @@ _MOBILE_LAYOUT_JS = """
   const rect = panel.getBoundingClientRect();
   const btn = document.getElementById('meta-drawer-btn');
   const btnRect = btn.getBoundingClientRect();
-  // The toggle rides the main tab row (#main-tab-bar, one entry per
-  // chat, always shown on the remote page); the group strip #tab-bar
-  // under it is hidden while the chat has no sub-agent or file tabs.
-  const tabBar = document
-    .getElementById('main-tab-bar')
+  // The toggle is a composer footer icon: it sits in #footer-tools
+  // right after the burger (#menu-btn), sized like it.
+  const footerTools = document.getElementById('footer-tools');
+  const menuRect = document
+    .getElementById('menu-btn')
     .getBoundingClientRect();
-  const inputArea = document
-    .getElementById('input-area')
-    .getBoundingClientRect();
+  const output = document.getElementById('output').getBoundingClientRect();
   const app = document.getElementById('app').getBoundingClientRect();
   return {
     open: panel.classList.contains('open'),
@@ -338,9 +336,13 @@ _MOBILE_LAYOUT_JS = """
       document.getElementById('tab-status-bar').offsetParent === null,
     btnVisible: btn.offsetParent !== null,
     btnExpanded: btn.getAttribute('aria-expanded'),
-    btnInTabBar:
-      btnRect.top >= tabBar.top - 1 && btnRect.bottom <= tabBar.bottom + 1,
-    btnAboveComposer: btnRect.bottom <= inputArea.top,
+    btnInFooterTools: btn.parentElement === footerTools,
+    btnAfterMenuBtn: btn.previousElementSibling === document.getElementById('menu-btn'),
+    btnBelowTranscript: btnRect.top >= output.bottom - 1,
+    btnSameRowAsMenuBtn:
+      Math.abs(btnRect.top - menuRect.top) <= 1 && btnRect.left >= menuRect.right,
+    btnSize: [btnRect.width, btnRect.height],
+    menuBtnSize: [menuRect.width, menuRect.height],
     appWidth: app.width,
     overlayOpen: document
       .getElementById('meta-overlay')
@@ -371,9 +373,9 @@ def test_mobile_hides_status_bar_and_parks_the_drawer_offscreen(
 ) -> None:
     """Below the 900px breakpoint the status bar STAYS hidden (the
     drawer carries its values) and the panel waits off-screen right,
-    inert, behind a toggle that lives in the main tab row — above the
-    chat transcript and clear of the composer's button row — so it
-    never shrinks the chat area."""
+    inert, behind a toggle that lives among the composer's footer icons
+    (in #footer-tools right after the burger, on its row and sized like
+    it, below the chat transcript) so it never shrinks the chat area."""
     page = _open_mobile_page(browser, remote_url)
     try:
         layout = page.evaluate(_MOBILE_LAYOUT_JS)
@@ -390,11 +392,17 @@ def test_mobile_hides_status_bar_and_parks_the_drawer_offscreen(
         )
         assert layout["btnVisible"] is True, layout
         assert layout["btnExpanded"] == "false", layout
-        assert layout["btnInTabBar"] is True, (
-            f"the toggle must ride the existing tab-bar row: {layout}"
+        assert layout["btnInFooterTools"] and layout["btnAfterMenuBtn"], (
+            f"the toggle must sit in #footer-tools right after #menu-btn: {layout}"
         )
-        assert layout["btnAboveComposer"] is True, (
-            f"the toggle must not crowd the composer buttons: {layout}"
+        assert layout["btnSameRowAsMenuBtn"] is True, (
+            f"the toggle must share the burger's footer row: {layout}"
+        )
+        assert layout["btnSize"] == layout["menuBtnSize"] == [36, 36], (
+            f"the toggle must be a 36px footer icon like the burger: {layout}"
+        )
+        assert layout["btnBelowTranscript"] is True, (
+            f"the toggle must not steal space from the chat transcript: {layout}"
         )
         assert layout["appWidth"] == pytest.approx(
             layout["viewport"], abs=1,
@@ -407,7 +415,7 @@ def test_mobile_drawer_slides_in_from_the_right_and_dismisses(
     browser: Browser,
     remote_url: str,
 ) -> None:
-    """The tab-bar button slides the drawer in over the chat (backdrop
+    """The footer button slides the drawer in over the chat (backdrop
     up, focus on the close button); close button, Escape and backdrop
     each dismiss it, handing focus back to the toggle."""
     page = _open_mobile_page(browser, remote_url)
