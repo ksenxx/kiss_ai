@@ -59,15 +59,11 @@ from kiss.agents.sorcar.sea_apply import (
 from kiss.agents.sorcar.sea_commands import (
     SeaError,
     base_settings,
+    help_text_if_command,
     model_sea,
     run_picked_hook,
     sea_layers,
-)
-from kiss.agents.sorcar.sea_commands import (
-    help_text_if_command as _sea_help_text,
-)
-from kiss.agents.sorcar.sea_commands import (
-    slash_command_task as _slash_command_task,
+    slash_command_task,
 )
 from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, canonical_tool_profile
 from kiss.agents.sorcar.task_classifier import classification_enabled
@@ -909,7 +905,7 @@ class _TaskRunnerMixin:
             SeaError: When a script is broken.
         """
         overridden: set[str] = set()
-        _slash = _slash_command_task(cmd.get("prompt", ""))
+        _slash = slash_command_task(cmd.get("prompt", ""))
         if _slash is not None:
             cmd["displayPrompt"] = cmd["prompt"]
             cmd["prompt"], cmd["seaPath"] = _slash[0], str(_slash[1])
@@ -1753,7 +1749,7 @@ class _TaskRunnerMixin:
         # broadcasts ``status running:False``.
         if isinstance(display_prompt, str) and display_prompt:
             try:
-                help_text = _sea_help_text(display_prompt)
+                help_text = help_text_if_command(display_prompt)
                 help_ok = True
             except SeaError as exc:
                 help_text, help_ok = str(exc), False

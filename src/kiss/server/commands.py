@@ -35,13 +35,9 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.sea_commands import (
     RESERVED_SUBCOMMANDS,
     SeaError,
+    help_text_if_command,
+    list_commands,
     run_picked_hook,
-)
-from kiss.agents.sorcar.sea_commands import (
-    help_text_if_command as sea_help_text,
-)
-from kiss.agents.sorcar.sea_commands import (
-    list_commands as list_sea_commands,
 )
 from kiss.core.brand import HOME_DIR
 from kiss.core.utils import is_root_dir
@@ -164,14 +160,13 @@ def _task_accepts_input(state: AgentState | None) -> bool:
     ``server.py``.  MUST be called while holding
     :data:`agent_state.STATE_LOCK`.
 
-    Delegates the thread-liveness half to
-    :meth:`AgentState.thread_alive`, which deliberately counts a
-    created-but-not-yet-started thread (``ident is None``,
-    ``is_alive()`` False) as alive: ``_cmd_run`` installs
-    ``task_thread`` and broadcasts before ``thread.start()``, so an
-    ``appendUserMessage`` from another connection in that window must
-    still be accepted — a raw ``is_alive()`` check here reopened the
-    exact S3-05 drop this predicate exists to close.
+    Delegates to :meth:`AgentState.running`, whose thread-liveness
+    half deliberately counts a created-but-not-yet-started thread
+    (``ident is None``, ``is_alive()`` False) as alive: ``_cmd_run``
+    installs ``task_thread`` and broadcasts before ``thread.start()``,
+    so an ``appendUserMessage`` from another connection in that window
+    must still be accepted — a raw ``is_alive()`` check here reopened
+    the exact S3-05 drop this predicate exists to close.
 
     Args:
         state: The agent state to inspect (``None`` accepted).
@@ -180,9 +175,7 @@ def _task_accepts_input(state: AgentState | None) -> bool:
         True when the state's task is active or its worker thread is
         still alive.
     """
-    if state is None:
-        return False
-    return state.is_task_active or state.thread_alive()
+    return state is not None and state.running()
 
 
 # Prefix that flags an ``appendUserMessage`` as a live-side-channel
@@ -1690,7 +1683,7 @@ class _CommandsMixin:
                 # ``/xxx help`` / ``/xxx check`` — answered here, no
                 # dispatch.
                 try:
-                    help_text, help_ok = sea_help_text(prompt), True
+                    help_text, help_ok = help_text_if_command(prompt), True
                 except SeaError as exc:
                     help_text, help_ok = str(exc), False
                 if help_text is not None:
@@ -1931,7 +1924,7 @@ class _CommandsMixin:
         chat webview uses the list to render the autocomplete popup
         when the user types ``/`` at the start of the composer.
         """
-        commands = list_sea_commands()
+        commands = list_commands()
         event: dict[str, Any] = {
             "type": "seaCommands",
             "commands": commands,
