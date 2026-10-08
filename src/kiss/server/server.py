@@ -285,7 +285,7 @@ def _subagent_is_done(sub_task_id: Any) -> bool:
         return True
     with agent_state.STATE_LOCK:
         state = agent_state.get(sub_task_id)
-        return state is None or not (state.is_task_active or state.thread_alive())
+        return state is None or not state.running()
 
 
 def _is_side_channel_row(row: dict[str, object]) -> bool:
@@ -1550,9 +1550,7 @@ class VSCodeServer(
                     # publication (which performs its own commit)
                     # superseded it: this stale commit owns nothing.
                     return
-            if source is not None and (
-                source.is_task_active or source.thread_alive()
-            ):
+            if source is not None and source.running():
                 self.printer.subscribe_tab(source.task_id, tab_id)
             state = agent_state.find_by_tab(tab_id)
             if state is not None:
@@ -2693,15 +2691,13 @@ class VSCodeServer(
                 # run-startup window is real, and a viewer resuming
                 # its chat must attach to it rather than be treated
                 # as opening a finished session.
-                if candidate is not None and (
-                    candidate.is_task_active or candidate.thread_alive()
-                ):
+                if candidate is not None and candidate.running():
                     source = candidate
             if source is None and chat_id and not is_subagent:
                 for t in agent_state.agent_states.values():
                     if t.chat_id != chat_id or t.is_subagent:
                         continue
-                    if t.thread_alive() or t.is_task_active:
+                    if t.running():
                         source = t
                         break
             source_task_id = source.task_id if source is not None else ""
@@ -2835,7 +2831,7 @@ class VSCodeServer(
                 ``connId``-scoped replay stays scoped).
         """
         with self._state_lock:
-            if source.is_task_active or source.thread_alive():
+            if source.running():
                 return
             if self._viewer_owns_other_busy_run(tab_id, source):
                 return
