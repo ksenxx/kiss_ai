@@ -9,8 +9,8 @@
 // The host keeps the last reported id in `_activeTabId` and uses it to
 // attribute tab-scoped requests to the chat tab the user is looking at —
 // e.g. routing ghost-text completions (SorcarSidebarView.ts:
-// `this._getApi().complete({..., tabId: message.tabId || this._activeTabId
-// ...})`).  So the invariant this file pins down is simple and absolute:
+// `this._send({type: 'complete', ..., tabId: message.tabId ||
+// this._activeTabId ...})`).  So the invariant this file pins down is simple and absolute:
 //
 //   after ANY tab activation, the last `activeTabChanged` the host received
 //   must name the chat tab that is actually on screen, and that tab must
