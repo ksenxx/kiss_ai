@@ -234,7 +234,7 @@ async function main() {
     win.close();
   });
 
-  await test('R1-4 a replaced same-id question keeps the original opener', () => {
+  await test('R1-4 two overwrite questions are asked one per destination', () => {
     const {win, posted} = h.makeWebview();
     h.openExplorer(win, posted, FILE_ENTRIES);
     const inp = h.byId(win, 'task-input');
@@ -257,7 +257,7 @@ async function main() {
       error: 'exists',
       exists: true,
     });
-    const first = h.toast(win, 'fs-overwrite');
+    const first = h.toast(win, 'fs-overwrite:' + actions[0].dest);
     assert.ok(first, 'first question open');
     h.send(win, {
       type: 'fsResult',
@@ -265,20 +265,30 @@ async function main() {
       error: 'exists',
       exists: true,
     });
-    const second = h.toast(win, 'fs-overwrite');
+    const second = h.toast(win, 'fs-overwrite:' + actions[1].dest);
     assert.ok(
       second
         .querySelector('.kiss-notification-message')
         .textContent.includes("'lib'"),
-      'the latest request is shown',
+      'the second clash asks its own question',
+    );
+    assert.ok(
+      first.isConnected &&
+        first
+          .querySelector('.kiss-notification-message')
+          .textContent.includes("'bar.py'"),
+      'the first question is still open, not replaced by the second',
     );
     h.key(win, win.document.activeElement, 'Escape');
-    assert.strictEqual(h.toast(win, 'fs-overwrite'), null);
-    assert.strictEqual(
-      win.document.activeElement,
-      inp,
-      'focus returns to the composer that opened the first question',
-    );
+    assert.strictEqual(h.toast(win, 'fs-overwrite:' + actions[1].dest), null);
+    assert.ok(first.isConnected, 'Escape only dismissed the focused question');
+    // Replacing on the first question re-sends that rename, and only it.
+    h.click(win, h.toastButton(first, 'Replace'));
+    const resent = h.ofType(posted, 'fsAction').slice(2);
+    assert.strictEqual(resent.length, 1);
+    assert.strictEqual(resent[0].dest, actions[0].dest);
+    assert.strictEqual(resent[0].overwrite, true);
+    assert.strictEqual(h.toast(win, 'fs-overwrite:' + actions[0].dest), null);
     win.close();
   });
 
