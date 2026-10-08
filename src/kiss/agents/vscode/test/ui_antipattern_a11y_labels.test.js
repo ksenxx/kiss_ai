@@ -95,7 +95,8 @@ test('#menu-btn has both a tooltip and an accessible name that say what it does'
   const tip = btn.getAttribute('data-tooltip') || '';
   assert.ok(tip.length > 0, 'data-tooltip must be set');
   assert.strictEqual(btn.getAttribute('aria-label'), tip);
-  assert.ok(/history/i.test(tip), `must mention history, got: ${tip}`);
+  // The panel it toggles is the Chats panel (formerly "History").
+  assert.ok(/chats/i.test(tip), `must mention chats, got: ${tip}`);
   assert.notStrictEqual(
     tip,
     doc.getElementById('more-btn').getAttribute('aria-label'),
@@ -128,7 +129,7 @@ test('every data-tooltip-only button carries a matching aria-label', () => {
 
 test('search inputs are named by aria-label, not only by placeholder', () => {
   assert.strictEqual(label('model-search'), 'Search models');
-  assert.strictEqual(label('history-search'), 'Search history');
+  assert.strictEqual(label('history-search'), 'Search chats');
 });
 
 test('restart-server confirm names the outcome and keeps Cancel first', () => {

@@ -311,10 +311,15 @@ _INJECT_PAGE_JS = r"""
   // Open the transcript with its task panel (the typography
   // reference), exactly as the daemon's setTaskText + clear pair
   // starts a task.
+  // The chat is marked running like a real task's chat: a Chats-panel
+  // click below opens another chat, and the chat left behind is
+  // retired unless it is busy -- an idle transcript would vanish
+  // with its injected panels.
   const tabId = window._testApi.getActiveTabId();
   for (const ev of [
     {type: 'setTaskText', tabId, text: 'Fix the flux capacitor'},
     {type: 'clear', tabId},
+    {type: 'status', tabId, running: true},
   ]) {
     window.dispatchEvent(new MessageEvent('message', {data: ev}));
   }
@@ -476,15 +481,13 @@ _EXPAND_GROUP_JS = r"""
   if (g && g.classList.contains('collapsed')) {
     // Expanding a panel also opens the chat's last task in a tab when
     // no tab shows the chat yet; the injected transcript lives in the
-    // original tab, so come back to it (its output is saved and
-    // restored across the switch).
+    // original (running, so not retired) tab, so come back to it
+    // (its output is saved and restored across the switch).  Chats
+    // have no tab row: the switch is the Chats-panel pick itself.
     const before = window.kissActiveTabId();
     g.querySelector('.history-chat-header').click();
     if (window.kissActiveTabId() !== before) {
-      const tab = document.querySelector(
-        '#main-tab-list .chat-tab[data-tab-id="' + before + '"]',
-      );
-      if (tab) tab.click();
+      window._testApi.switchToTab(before);
     }
   }
   return g ? !g.classList.contains('collapsed') : false;

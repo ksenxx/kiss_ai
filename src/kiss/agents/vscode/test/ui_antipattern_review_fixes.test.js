@@ -301,9 +301,11 @@ async function main() {
   });
 
   await test('R1-4 a dialog whose opener is gone hands focus to the visible tab', async () => {
-    // A file tab hides the composer (body.content-tab-open), so the
-    // fallback is the active tab-strip entry, never the hidden textarea.
-    const ctx = h.makeWebview();
+    // On the mobile remote a file tab replaces the chat and hides the
+    // composer (body.content-tab-open), so the fallback is the active
+    // tab-strip entry, never the hidden textarea.  (The desktop remote
+    // splits the window instead and keeps the composer on screen.)
+    const ctx = h.makeWebview({narrow: true});
     const {win, posted} = ctx;
     await h.openDirtyContentTab(ctx);
     const control = closeControl(win);

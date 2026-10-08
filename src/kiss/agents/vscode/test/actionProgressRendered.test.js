@@ -66,12 +66,19 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// The Chats-panel pick: chat tabs have no row of their own any more, so a
+// chat is brought on screen through the test API (sub-agent and content
+// tabs on the group strip are still clicked).
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
   );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  const el = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  );
+  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  else win._testApi.switchToTab(tabId);
 }
 
 function progressLines(root) {
