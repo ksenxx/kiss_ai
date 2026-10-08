@@ -3,10 +3,13 @@
 Curated, privacy-first MCP connectors for KISS Sorcar. Every connector here
 follows one rule: **credentials and data go only to the service that already
 holds them** — local open-source servers with your own keys, or no-auth remote
-endpoints. No hosted gateway, aggregator, or third-party runtime ever sits in
-the path.
+endpoints. No hosted gateway, aggregator, or third-party runtime sits in the
+path, with one declared exception: `firecrawl` fetches the pages you scrape
+through Firecrawl's cloud with your own API key.
 
-Sorcar discovers servers from `~/.kiss/mcp.json` (all projects),
+Sorcar discovers servers from `~/.kiss/mcp.json` (all projects; `~/.kiss` is the
+stock brand home, replaced by `$KISS_HOME` or a white-label brand's `home_dir`
+such as `~/.s10s`),
 `<project>/.mcp.json` (Claude-Code compatible), and `<project>/.kiss/mcp.json`,
 in that order of increasing precedence (on a name clash the later file wins).
 The files are re-read at the start of each task, and the servers' tools are
