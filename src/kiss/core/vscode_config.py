@@ -657,7 +657,9 @@ def _edit_api_keys_env_file_locked(mutations: dict[str, str | None]) -> None:
             if new_lines and not new_lines[-1].endswith("\n"):
                 new_lines[-1] += "\n"
             new_lines.append(f"export {name}={shlex.quote(value)}\n")
-    _atomic_write_text_secure(env_path, "".join(new_lines))
+    # The store holds API keys: never world-readable, never observed
+    # half-written by a shell that is sourcing it.
+    atomic_write_text(env_path, "".join(new_lines), mode=0o600)
     _remove_systemd_mirror()
 
 
@@ -844,19 +846,10 @@ def _update_rc_for_key(
             kept.append(RC_HOOK_END + "\n")
         changed = True
     if changed:
-        _atomic_write_text_secure(rc, "".join(kept))
-
-
-def _atomic_write_text_secure(target: Path, content: str) -> None:
-    """Write *content* to *target* atomically with mode 0600.
-
-    The RC file holds API keys, so it must never be world-readable and
-    must never be observed half-written by a shell that is sourcing it.
-
-    On Windows ``os.chmod`` honours only the read-only bit, but the
-    atomic-replace pattern still applies.
-    """
-    atomic_write_text(target, content, mode=0o600)
+        # The RC may hold API keys: never world-readable, never observed
+        # half-written by a shell that is sourcing it.  (On Windows
+        # ``os.chmod`` honours only the read-only bit.)
+        atomic_write_text(rc, "".join(kept), mode=0o600)
 
 
 def _refresh_config() -> None:

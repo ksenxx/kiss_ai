@@ -17,6 +17,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from kiss.core.brand import HOME_DIR
+from kiss.core.context_compaction import COMPACTION_START_TOKENS, COMPACTION_STEP_TOKENS
 from kiss.core.file_lock import exclusive_file_lock
 
 _PROJECT_DIR = Path(__file__).resolve().parents[3]
@@ -361,7 +362,7 @@ class Config(BaseModel):
         ),
     )
     compaction_start_tokens: int = Field(
-        default_factory=lambda: _env_int("KISS_COMPACTION_START_TOKENS", 100_000),
+        default_factory=lambda: _env_int("KISS_COMPACTION_START_TOKENS", COMPACTION_START_TOKENS),
         description=(
             "Context size (tokens) at which the first tool-output compaction is "
             "considered; later ones follow every compaction_step_tokens "
@@ -369,7 +370,7 @@ class Config(BaseModel):
         ),
     )
     compaction_step_tokens: int = Field(
-        default_factory=lambda: _env_int("KISS_COMPACTION_STEP_TOKENS", 100_000),
+        default_factory=lambda: _env_int("KISS_COMPACTION_STEP_TOKENS", COMPACTION_STEP_TOKENS),
         description=(
             "Context growth (tokens) after a compaction before the next one is "
             "considered (KISS_COMPACTION_STEP_TOKENS)."

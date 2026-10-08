@@ -932,21 +932,23 @@ class KISSAgent(Base):
         for fc in function_calls:
             if fc["name"] != "finish":
                 self.tool_calls_made += 1
+            args = _call_args(fc)
             blocked: str | None = None
             # The hook is called before EVERY tool call (its contract), so it
             # runs first; a refusal is the result the model sees.  Allowing
             # means "no objection", not "must execute": the framework's
             # tool_call_guard may still block the call.
-            if self.tool_call_hook is not None:
-                verdict = self.tool_call_hook(fc["name"], _call_args(fc))
+            hook = self.tool_call_hook
+            if hook is not None:
+                verdict = hook(fc["name"], args)
                 blocked = None if verdict.allowed else verdict.text
             if blocked is None and self.tool_call_guard is not None:
-                blocked = self.tool_call_guard(fc["name"], _call_args(fc))
-            if blocked is None and is_long_running_call(fc["name"], _call_args(fc)):
+                blocked = self.tool_call_guard(fc["name"], args)
+            if blocked is None and is_long_running_call(fc["name"], args):
                 name, response_str = self._execute_tool_keeping_cache_warm(fc)
             else:
                 name, response_str = self._execute_tool(fc, blocked=blocked)
-            args_str = ", ".join(f"{k}={v!r}" for k, v in _call_args(fc).items())
+            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
             call_reprs.append(f"```python\n{name}({args_str})\n```")
             function_results.append((name, {"result": response_str}))
             if name == "finish" and blocked is None:
