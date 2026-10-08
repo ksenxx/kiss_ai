@@ -3,7 +3,7 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// End-to-end (jsdom) tests for the remote webapp's activity bar views
+// End-to-end (jsdom) tests for the remote webapp's workspace views
 // (media/chat.html + media/main.js): the Explorer (listDir /
 // dirListing) and Source Control (gitStatus / gitLog) protocol
 // handling that a browser test cannot steer as precisely —
@@ -42,7 +42,7 @@ async function test(name, fn) {
 }
 
 function makeWebview(opts) {
-  const {remote = true, savedView = null} = opts || {};
+  const {remote = true, collapsed = null} = opts || {};
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
@@ -54,7 +54,8 @@ function makeWebview(opts) {
     url: 'https://localhost/',
   });
   const win = dom.window;
-  if (savedView) win.localStorage.setItem('kiss-sidebar-view', savedView);
+  if (collapsed)
+    win.localStorage.setItem('kiss-meta-section-collapsed:' + collapsed, '1');
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
@@ -117,6 +118,17 @@ function byId(win, id) {
   return win.document.getElementById(id);
 }
 
+/**
+ * Bring a workspace section of the task-info panel (meta-explorer /
+ * meta-scm) on screen: expand it if it is collapsed.  An expanded
+ * section is already live (the workspace pin loads it).
+ */
+function showSection(win, id) {
+  const section = byId(win, id);
+  if (section.classList.contains('collapsed'))
+    click(win, section.querySelector('.meta-section-toggle'));
+}
+
 function ofType(posted, type) {
   return posted.filter(m => m.type === type);
 }
@@ -129,7 +141,7 @@ async function main() {
   await test('Explorer: root listing, stale-token replies ignored, errors in place', async () => {
     const {win, posted} = makeWebview();
     pinWorkspace(win);
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     const list = ofType(posted, 'listDir');
     assert.strictEqual(list.length, 1);
     assert.strictEqual(list[0].path, WD);
@@ -222,7 +234,7 @@ async function main() {
   await test('Explorer: task news re-lists loaded folders only; empty folder note', async () => {
     const {win, posted} = makeWebview();
     pinWorkspace(win);
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     const first = ofType(posted, 'listDir')[0];
     send(win, {
       type: 'dirListing',
@@ -283,7 +295,7 @@ async function main() {
   await test('Source Control: stale tokens ignored; diamond history on two lanes', async () => {
     const {win, posted} = makeWebview();
     pinWorkspace(win);
-    click(win, byId(win, 'activity-scm'));
+    showSection(win, 'meta-scm');
     const st = ofType(posted, 'gitStatus');
     const lg = ofType(posted, 'gitLog');
     assert.strictEqual(st.length, 1);
@@ -437,10 +449,13 @@ async function main() {
     assert.strictEqual(ofType(posted, 'gitStatus').length, nSt);
     await sleep(600);
     assert.strictEqual(ofType(posted, 'gitStatus').length, nSt + 1);
+    // The Explorer, on screen beside it, listed the root once at the
+    // workspace pin; task news re-lists loaded folders only and that
+    // listing was never answered.
     assert.strictEqual(
       ofType(posted, 'listDir').length,
-      0,
-      'Explorer hidden: no listDir',
+      1,
+      'Explorer shown: the pin listing only',
     );
     // Expansion state survives the re-render.
     send(win, {
@@ -461,7 +476,7 @@ async function main() {
   await test('Source Control: error replies and empty repo', async () => {
     const {win, posted} = makeWebview();
     pinWorkspace(win);
-    click(win, byId(win, 'activity-scm'));
+    showSection(win, 'meta-scm');
     const tok = ofType(posted, 'gitStatus')[0].token;
     send(win, {
       type: 'gitStatus',
@@ -514,38 +529,53 @@ async function main() {
     win.close();
   });
 
-  await test('view choice is remembered and restored (remote only)', async () => {
-    const {win, posted} = makeWebview({savedView: 'explorer'});
+  await test('Explorer and Source Control are collapsible sections of the task-info panel (remote only)', async () => {
+    const {win, posted} = makeWebview({collapsed: 'meta-explorer'});
+    const explorer = byId(win, 'meta-explorer');
+    const scm = byId(win, 'meta-scm');
+    assert.ok(!explorer.hidden && !scm.hidden);
+    assert.ok(explorer.closest('#meta-panel') && scm.closest('#meta-panel'));
+    // The activity bar is gone: the history panel holds the Chats view only.
+    assert.strictEqual(byId(win, 'activity-bar'), null);
+    assert.strictEqual(byId(win, 'activity-explorer'), null);
+    assert.ok(!byId(win, 'sidebar-tab-history-panel').hidden);
+    // The Explorer section came back collapsed from the last visit.
+    assert.ok(explorer.classList.contains('collapsed'));
     assert.strictEqual(
-      byId(win, 'activity-explorer').getAttribute('aria-selected'),
-      'true',
+      explorer.querySelector('.meta-section-toggle').getAttribute('aria-expanded'),
+      'false',
     );
-    assert.ok(byId(win, 'sidebar-tab-history-panel').hidden);
-    assert.ok(!byId(win, 'sidebar-explorer-panel').hidden);
     // No workspace yet: nothing was asked, the tree says so.
     assert.strictEqual(ofType(posted, 'listDir').length, 0);
     assert.strictEqual(
       byId(win, 'explorer-tree').textContent.trim(),
       'No workspace folder',
     );
-    // The config reply pins the workspace and the tree loads.
+    // The config reply pins the workspace: the expanded Source Control
+    // section loads, the collapsed Explorer does not.
     pinWorkspace(win);
+    assert.strictEqual(ofType(posted, 'gitStatus').length, 1);
+    assert.strictEqual(ofType(posted, 'listDir').length, 0);
+    // Expanding the Explorer loads it for the pinned workspace.
+    showSection(win, 'meta-explorer');
+    assert.ok(!explorer.classList.contains('collapsed'));
     assert.strictEqual(ofType(posted, 'listDir').length, 1);
-    click(win, byId(win, 'activity-tasks'));
-    assert.strictEqual(win.localStorage.getItem('kiss-sidebar-view'), 'tasks');
-    assert.ok(!byId(win, 'sidebar-tab-history-panel').hidden);
+    assert.strictEqual(ofType(posted, 'listDir')[0].path, WD);
+    // Collapsing is remembered for the next visit.
+    click(win, explorer.querySelector('.meta-section-toggle'));
+    assert.strictEqual(
+      win.localStorage.getItem('kiss-meta-section-collapsed:meta-explorer'),
+      '1',
+    );
     win.close();
   });
 
-  await test('VS Code webview: bar inert, Tasks view stays, no commands', async () => {
-    const {win, posted} = makeWebview({remote: false, savedView: 'scm'});
+  await test('VS Code webview: sections stay hidden, no commands', async () => {
+    const {win, posted} = makeWebview({remote: false});
     pinWorkspace(win);
-    assert.strictEqual(
-      byId(win, 'activity-tasks').getAttribute('aria-selected'),
-      'true',
-    );
+    assert.ok(byId(win, 'meta-explorer').hidden);
+    assert.ok(byId(win, 'meta-scm').hidden);
     assert.ok(!byId(win, 'sidebar-tab-history-panel').hidden);
-    assert.ok(byId(win, 'sidebar-scm-panel').hidden);
     send(win, {type: 'tasks_updated'});
     await sleep(500);
     assert.strictEqual(ofType(posted, 'listDir').length, 0);
@@ -567,7 +597,7 @@ async function main() {
   await test('Source Control: graph waits for the matching log during a refresh', async () => {
     const {win, posted} = makeWebview();
     pinWorkspace(win);
-    click(win, byId(win, 'activity-scm'));
+    showSection(win, 'meta-scm');
     const tok = ofType(posted, 'gitStatus')[0].token;
     const H1 = '1'.repeat(40);
     const H2 = '2'.repeat(40);
@@ -645,7 +675,7 @@ async function main() {
   await test('Explorer: an entry that turned from file into folder is a live folder', async () => {
     const {win, posted} = makeWebview();
     pinWorkspace(win);
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     const first = ofType(posted, 'listDir')[0];
     send(win, {
       type: 'dirListing',
@@ -687,7 +717,7 @@ async function main() {
   await test('Explorer: two folders resolving to one target stay separate nodes', async () => {
     const {win, posted} = makeWebview();
     pinWorkspace(win);
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     const first = ofType(posted, 'listDir')[0];
     // The daemon canonicalizes symlinks: both aliases report the SAME
     // path for their children; the tree keys rows by the path it
@@ -737,7 +767,7 @@ async function main() {
     // folder it runs in.
     const {win, posted} = makeWebview();
     send(win, {type: 'configData', config: {work_dir: ''}});
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     assert.strictEqual(ofType(posted, 'listDir').length, 0);
     assert.strictEqual(
       byId(win, 'explorer-tree').textContent.trim(),

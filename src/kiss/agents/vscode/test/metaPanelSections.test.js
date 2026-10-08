@@ -244,11 +244,14 @@ function showTaskUpdate(wv, html) {
 }
 
 /**
- * Take the global Schedule, Apps and Spend sections out of the stack
- * (the `hidden` attribute, then a Task Info toggle round trip
- * re-applies the layout), leaving only the two per-task sections.
+ * Take the workspace (Explorer, Source Control) and global (Schedule,
+ * Apps, Spend) sections out of the stack (the `hidden` attribute, then
+ * a Task Info toggle round trip re-applies the layout), leaving only
+ * the two per-task sections.
  */
 function hideGlobalSections(win) {
+  el(win, 'meta-explorer').hidden = true;
+  el(win, 'meta-scm').hidden = true;
   el(win, 'meta-schedule').hidden = true;
   el(win, 'meta-apps').hidden = true;
   el(win, 'meta-spend').hidden = true;
@@ -277,23 +280,32 @@ async function main() {
   ]) {
     await test(`${label}: every section starts expanded, the Task update one hidden`, () => {
       const {win} = makeWebview(attrs);
-      const [info, update, schedule, apps, spend] = sections(win);
+      const [info, update, explorer, scm, schedule, apps, spend] =
+        sections(win);
       assert.strictEqual(info.id, 'meta-section-info');
       assert.strictEqual(update.id, 'meta-info');
+      assert.strictEqual(explorer.id, 'meta-explorer');
+      assert.strictEqual(scm.id, 'meta-scm');
       assert.strictEqual(schedule.id, 'meta-schedule');
       assert.strictEqual(apps.id, 'meta-apps');
       assert.strictEqual(spend.id, 'meta-spend');
       assert.strictEqual(toggleOf(info).textContent, 'Task Info');
       assert.strictEqual(toggleOf(update).textContent, 'Task update');
+      assert.strictEqual(toggleOf(explorer).textContent, 'Explorer');
+      assert.strictEqual(toggleOf(scm).textContent, 'Source Control');
       assert.strictEqual(toggleOf(schedule).textContent, 'Schedule');
       assert.strictEqual(toggleOf(apps).textContent, 'Apps');
       assert.strictEqual(toggleOf(spend).textContent, 'Spend');
-      for (const section of [info, update, schedule, apps, spend])
-        assertExpanded(section, true);
+      for (const section of sections(win)) assertExpanded(section, true);
       assert.ok(
         !update.classList.contains('visible'),
         'no task: Task update section hidden',
       );
+      // The workspace sections exist on the remote page only: a VS
+      // Code window has the real Explorer and Source Control views.
+      const remote = attrs === REMOTE;
+      assert.strictEqual(explorer.hidden, !remote, 'Explorer shown on remote only');
+      assert.strictEqual(scm.hidden, !remote, 'Source Control shown on remote only');
       // Nothing is dragged: every expanded body takes an equal share
       // and no separator follows Spend, the last shown section.
       assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
@@ -497,7 +509,7 @@ async function main() {
     const wv = makeWebview(REMOTE, {extraSection: true});
     const win = wv.win;
     hideGlobalSections(win);
-    const [info, update, , , , extra] = sections(win);
+    const [info, update, , , , , , extra] = sections(win);
     assert.strictEqual(extra.id, 'meta-section-extra');
     assertExpanded(extra, true);
     // No task: Task Info and Extra are shown, sharing equally.

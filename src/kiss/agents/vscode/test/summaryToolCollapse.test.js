@@ -471,9 +471,11 @@ function testNonSummaryToolCallUnaffected() {
     !last.querySelector('.summary-sub'),
     'non-summary tools must never adopt preceding panels',
   );
+  // Every tool call's panel starts folded (the header shows the call);
+  // what sets the summary apart is the adoption above, not the fold.
   assert.ok(
-    !last.classList.contains('collapsed'),
-    'non-summary tools are not auto-collapsed on render',
+    last.classList.contains('collapsed'),
+    'a tool-call panel starts folded',
   );
   assert.strictEqual(summaryPanels(win).length, 0);
   win.close();
@@ -649,20 +651,16 @@ function testAdoptedPanelKeepsOwnCollapsePreview() {
   hdr.dispatchEvent(
     new win.MouseEvent('click', {bubbles: true, cancelable: true}),
   );
-  // The newest adopted tool panel: the streaming sweep folded the
-  // older ones, this one is still open when the user folds it below.
+  // The newest adopted tool panel: every tool panel starts folded,
+  // and this one keeps its own header preview inside the summary.
   const nestedPanel = p.querySelector(
     ':scope > .summary-sub > .tc:last-of-type',
   );
   assert.ok(
-    !nestedPanel.classList.contains('collapsed'),
-    'precondition: the adopted panel is open',
+    nestedPanel.classList.contains('collapsed'),
+    'precondition: the adopted panel starts folded',
   );
   const nestedHdr = nestedPanel.querySelector(':scope > .tc-h');
-  nestedHdr.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
-  assert.ok(nestedPanel.classList.contains('collapsed'));
   const nestedPrev = nestedHdr.querySelector('.collapse-preview');
   assert.ok(
     (nestedPrev.textContent || '').length > 0,

@@ -64,10 +64,12 @@ function injectMainCss(win) {
   win.document.head.appendChild(styleEl);
 }
 
+/** The .tc-h header whose tool name (its .tc-h-name span) is *name*. */
 function headerNamed(win, name) {
   const headers = win.document.querySelectorAll('#output .tc-h');
   for (const h of headers) {
-    const txt = (h.textContent || '').replace(/^[^A-Za-z]+/, '').trim();
+    const nameEl = h.querySelector('.tc-h-name');
+    const txt = ((nameEl || h).textContent || '').replace(/^[^A-Za-z]+/, '').trim();
     if (txt === name) return h;
   }
   return null;

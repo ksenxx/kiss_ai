@@ -145,7 +145,6 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
             page.on("pageerror", partial(_record_error, errors))
             try:
                 # Wait for the task runner's actual persisted history row.
-                page.click("#activity-tasks")
                 # This test covers all history, not the current workspace filter.
                 page.click("#history-filters-toggle")
                 page.locator("label:has(#hf-workspace)").click()

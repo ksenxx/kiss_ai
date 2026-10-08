@@ -799,12 +799,12 @@ function testOrphanedFileTabBrowsesTheGlobalDir() {
     ),
   );
   assert.ok(!openTabIds(win).includes(owner), 'the owning chat is closed');
+  // The Explorer and Source Control sections of the task-info panel
+  // follow the new workspace on their own.
   send(win, {type: 'workDirChanged', workDir: '/new'});
-  click(win, byId(win, 'activity-explorer'));
   const listing = msgs(posted, 'listDir').pop();
   assert.strictEqual(listing.path, '/new');
   assert.strictEqual(listing.workDir, '/new');
-  click(win, byId(win, 'activity-scm'));
   const status = msgs(posted, 'gitStatus').pop();
   assert.strictEqual(status.workDir, '/new');
   // The desktop layout polls the task info every 5 s for as long as the

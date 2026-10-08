@@ -294,7 +294,9 @@ function cssRule(selector) {
 }
 
 async function testGridFitsBetweenDockedPanels() {
-  const app = cssRule('body.remote-chat.remote-desktop #app');
+  // The split grid (two panes) applies while a content tab is open;
+  // without one #app is the chat column alone.
+  const app = cssRule('body.remote-chat.remote-desktop.content-pane-open #app');
   const columns = /grid-template-columns:\s*([^;]+);/.exec(app);
   assert.ok(columns, 'the split grid declares its columns');
   const mins = columns[1].match(/minmax\(\s*min\(280px, 30%\)/g) || [];

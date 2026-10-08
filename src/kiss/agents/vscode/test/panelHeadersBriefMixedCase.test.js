@@ -256,6 +256,10 @@ function testBashCollapsedHeaderIsDescription() {
     description: 'List the temp dir',
   });
   const panel = output(win).querySelector('.tc-bash');
+  // A tool call's panel starts folded; a header click unfolds it.
+  assert.ok(panel.classList.contains('collapsed'), 'folded at birth');
+  panel.querySelector('.tc-h').click();
+  assert.ok(!panel.classList.contains('collapsed'), 'a header click unfolds it');
   const expanded = headerText(panel.querySelector('.tc-h'));
   assert.strictEqual(expanded, 'Bash', 'expanded: the header is the tool name');
   assert.ok(

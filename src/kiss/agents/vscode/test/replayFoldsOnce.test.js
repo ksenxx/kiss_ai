@@ -183,23 +183,24 @@ function testLiveStreamAfterReplayKeepsNewestTwoOpen() {
   const before = panels(win).length;
 
   // The task keeps streaming after the replay: the live collapse pass
-  // must run again (the replay flag is cleared) and keep the newest two
-  // panels open while folding the rest.
+  // must run again (the replay flag is cleared) and fold the rest.  The
+  // newest two are the last step's tool panel (a tool call starts
+  // folded) and the Thoughts panel its result armed (never folded).
   for (const ev of [...step(3), ...step(4)]) send(win, {...ev, tabId: tab});
   const ps = panels(win);
   assert.strictEqual(ps.length, before + 4, 'two more steps, four panels');
   const folded = ps.map(isCollapsed);
   assert.deepStrictEqual(
     folded.slice(-2),
-    [false, false],
-    'the newest two panels of the live stream are open',
+    [true, false],
+    'the newest tool panel starts folded, the armed Thoughts panel is open',
   );
   assert.ok(
     ps.slice(0, -2).every(isFoldedOrThoughts),
     'every older tool panel is folded once the stream resumes',
   );
   win.close();
-  console.log('  ok - live streaming after a replay keeps the newest two open');
+  console.log('  ok - live streaming after a replay keeps folding tool panels');
 }
 
 function testReadyNamesSingleTabOnlyInEditorMode() {

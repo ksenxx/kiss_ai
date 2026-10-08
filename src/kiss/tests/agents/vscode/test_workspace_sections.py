@@ -5,18 +5,20 @@
 # ruff: noqa: F811  (the `harness` module fixture is imported from
 #   kiss.tests.server.test_explorer_scm_commands and is intentionally
 #   shadowed by test parameters of the same name)
-"""End-to-end browser tests for the remote webapp's activity bar.
+"""End-to-end browser tests for the remote webapp's workspace sections.
 
-The task-history panel of the remote webapp carries a VS Code-like
-activity bar on its left edge with three views:
+The task-info panel on the right of the remote webapp carries two
+collapsible sections for the workspace, beside Task Info, Schedule,
+Apps and Spend:
 
-* **Tasks** — the history panel contents;
 * **Explorer** — the workspace folder tree (``listDir`` →
   ``dirListing``); a folder click lists it in place, a file click opens
   the file as a content tab (``openFile`` → ``fileContent``);
 * **Source Control** — the working tree's changes (``gitStatus``) and
   a graph of the recent commits (``gitLog``), each expandable to the
   files it modified.
+
+The history panel on the left holds the Chats view alone.
 
 Every test drives a REAL headless Chromium (Playwright) against a REAL
 :class:`RemoteAccessServer` over ``wss://`` whose work dir is a REAL
@@ -168,75 +170,103 @@ def _sent(frames: list[dict], kind: str) -> list[dict]:
     return [f for f in frames if f.get("type") == kind]
 
 
-def test_activity_bar_shows_three_views_with_tasks_first(browser, harness):
-    """The bar sits flush with the panel's left edge and offers Tasks,
-    Explorer and Source Control; Tasks (the history panel) is up."""
+def _toggle_sel(section_id: str) -> str:
+    return f"#{section_id} .meta-section-toggle"
+
+
+def _show_section(page, section_id: str) -> None:
+    """Expand the Explorer / Source Control section if it is collapsed
+    (an expanded section is live already)."""
+    if page.locator(f"#{section_id}.collapsed").count():
+        page.click(_toggle_sel(section_id))
+    page.wait_for_selector(f"#{section_id}:not(.collapsed)", state="attached")
+
+
+def _fold_section(page, section_id: str) -> None:
+    """Collapse the section if it is expanded."""
+    if not page.locator(f"#{section_id}.collapsed").count():
+        page.click(_toggle_sel(section_id))
+    page.wait_for_selector(f"#{section_id}.collapsed", state="attached")
+
+
+def test_workspace_sections_sit_in_the_task_info_panel(browser, harness):
+    """The task-info panel stacks Task Info, (Task update,) Explorer,
+    Source Control, Schedule, Apps and Spend; the history panel on the
+    left holds the Chats view alone, with no activity bar."""
     context, page, _ = _open_page(browser, harness)
     try:
-        bar = page.locator("#activity-bar")
-        assert bar.is_visible()
+        assert page.locator("#activity-bar").count() == 0
+        ids = page.eval_on_selector_all(
+            "#meta-panel > .meta-section:not([hidden])",
+            "els => els.map(e => e.id)",
+        )
+        assert ids == [
+            "meta-section-info", "meta-info", "meta-explorer", "meta-scm",
+            "meta-schedule", "meta-apps", "meta-spend",
+        ]
         labels = page.eval_on_selector_all(
-            "#activity-bar .activity-btn",
-            "els => els.map(e => e.getAttribute('aria-label'))",
+            "#meta-explorer .meta-section-toggle, #meta-scm .meta-section-toggle",
+            "els => els.map(e => e.textContent.trim())",
         )
-        assert labels == ["Tasks", "Explorer", "Source Control"]
-        box = bar.bounding_box()
-        assert box is not None
+        assert labels == ["Explorer", "Source Control"]
+        assert page.locator("#meta-explorer").is_visible()
+        assert page.locator("#meta-scm").is_visible()
+        # Both sections are inside the docked panel on the right.
+        panel_box = page.locator("#meta-panel").bounding_box()
+        tree_box = page.locator("#explorer-tree").bounding_box()
+        assert panel_box is not None and tree_box is not None
+        assert tree_box["x"] >= panel_box["x"]
+        assert tree_box["x"] + tree_box["width"] <= panel_box["x"] + panel_box["width"] + 1
+        # The history panel's views start at its own left edge.
         sidebar_box = page.locator("#sidebar").bounding_box()
-        assert sidebar_box is not None
-        assert box["x"] == pytest.approx(sidebar_box["x"], abs=1)
-        assert box["y"] == pytest.approx(sidebar_box["y"], abs=1)
-        assert box["height"] == pytest.approx(sidebar_box["height"], abs=1)
-        assert box["width"] == pytest.approx(40, abs=1)
-        # The bar is the leftmost thing in the panel: the views start
-        # to its right.
         views_box = page.locator("#sidebar-views").bounding_box()
-        assert views_box is not None
-        assert views_box["x"] >= box["x"] + box["width"]
-        assert page.locator("#activity-tasks").get_attribute("aria-selected") == "true"
+        assert sidebar_box is not None and views_box is not None
+        assert views_box["x"] < sidebar_box["x"] + 40
         assert page.locator("#sidebar-tab-history-panel").is_visible()
         assert page.locator("#history-list").is_visible()
-        assert page.locator("#sidebar-explorer-panel").is_hidden()
-        assert page.locator("#sidebar-scm-panel").is_hidden()
+        # Both load for the workspace without any click.
+        page.wait_for_selector(".explorer-row.is-file", timeout=15000)
+        page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
     finally:
         context.close()
 
 
-def test_activity_bar_is_a_remote_only_surface(browser, harness):
-    """Without body.remote-chat (the VS Code webview) the bar is not
-    rendered and the history panel keeps the whole width."""
+def test_workspace_sections_are_a_remote_only_surface(browser, harness):
+    """The served markup carries both sections ``hidden``: only the
+    remote page (body.remote-chat) lifts that, a VS Code window has the
+    real Explorer and Source Control views."""
     context, page, _ = _open_page(browser, harness)
     try:
-        display = page.evaluate(
-            """() => {
-              document.body.classList.remove('remote-chat');
-              return getComputedStyle(
-                document.getElementById('activity-bar')).display;
-            }"""
+        html = context.request.get(harness.base_url + "/").text()
+        assert 'id="meta-explorer" aria-label="Explorer" hidden' in html
+        assert 'id="meta-scm" aria-label="Source Control" hidden' in html
+        assert page.evaluate(
+            "() => !document.getElementById('meta-explorer').hidden"
+            " && !document.getElementById('meta-scm').hidden"
         )
-        assert display == "none"
-        assert page.locator("#sidebar-tab-history-panel").is_visible()
     finally:
         context.close()
 
 
-def test_switching_views_shows_one_panel_at_a_time(browser, harness):
+def test_sections_collapse_and_expand_independently(browser, harness):
     context, page, _ = _open_page(browser, harness)
     try:
-        page.click("#activity-explorer")
-        assert page.locator("#sidebar-explorer-panel").is_visible()
-        assert page.locator("#sidebar-tab-history-panel").is_hidden()
-        assert page.locator("#sidebar-scm-panel").is_hidden()
-        assert page.locator("#activity-explorer").get_attribute("aria-selected") == "true"
-        assert page.locator("#activity-tasks").get_attribute("aria-selected") == "false"
-        page.click("#activity-scm")
-        assert page.locator("#sidebar-scm-panel").is_visible()
-        assert page.locator("#sidebar-explorer-panel").is_hidden()
-        page.click("#activity-tasks")
+        page.wait_for_selector(".explorer-row.is-file", timeout=15000)
+        _fold_section(page, "meta-explorer")
+        assert page.locator("#explorer-tree").is_hidden()
+        assert page.locator("#scm-body").is_visible()
+        assert page.locator(_toggle_sel("meta-explorer")).get_attribute("aria-expanded") == "false"
+        _fold_section(page, "meta-scm")
+        assert page.locator("#scm-body").is_hidden()
+        # The Chats view is unaffected.
         assert page.locator("#sidebar-tab-history-panel").is_visible()
         assert page.locator("#history-list").is_visible()
-        assert page.locator("#sidebar-scm-panel").is_hidden()
-        assert page.locator("#activity-tasks").get_attribute("aria-selected") == "true"
+        _show_section(page, "meta-explorer")
+        assert page.locator("#explorer-tree").is_visible()
+        assert page.locator(_toggle_sel("meta-explorer")).get_attribute("aria-expanded") == "true"
+        assert page.locator("#scm-body").is_hidden()
+        _show_section(page, "meta-scm")
+        assert page.locator("#scm-body").is_visible()
     finally:
         context.close()
 
@@ -244,7 +274,7 @@ def test_switching_views_shows_one_panel_at_a_time(browser, harness):
 def test_explorer_lists_the_workspace_and_expands_folders(browser, harness):
     context, page, frames = _open_page(browser, harness)
     try:
-        page.click("#activity-explorer")
+        _show_section(page, "meta-explorer")
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         root = page.locator(".explorer-row[aria-level='1']")
         assert root.inner_text().strip() == "repo"
@@ -287,7 +317,7 @@ def test_explorer_lists_the_workspace_and_expands_folders(browser, harness):
 def test_explorer_file_click_opens_a_content_tab(browser, harness):
     context, page, frames = _open_page(browser, harness)
     try:
-        page.click("#activity-explorer")
+        _show_section(page, "meta-explorer")
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         tabs_before = page.evaluate(_OPEN_TAB_COUNT_JS)
         _explorer_row(page, "feature.txt").click()
@@ -327,7 +357,7 @@ def test_explorer_file_click_opens_a_content_tab(browser, harness):
 def test_source_control_shows_changes_and_commit_graph(browser, harness):
     context, page, frames = _open_page(browser, harness)
     try:
-        page.click("#activity-scm")
+        _show_section(page, "meta-scm")
         page.wait_for_selector("#scm-changes .scm-row", timeout=15000)
         page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
         assert page.locator("#scm-branch").inner_text() == "main"
@@ -397,7 +427,7 @@ def test_source_control_shows_changes_and_commit_graph(browser, harness):
 def test_commit_click_lists_modified_files_and_opens_them(browser, harness):
     context, page, frames = _open_page(browser, harness)
     try:
-        page.click("#activity-scm")
+        _show_section(page, "meta-scm")
         page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
         second = page.locator(
             f"#scm-graph .scm-commit[data-scm-sha='{harness.shas['second']}']"
@@ -474,7 +504,7 @@ def test_commit_click_lists_modified_files_and_opens_them(browser, harness):
 def test_uncommitted_row_lists_the_working_tree_changes(browser, harness):
     context, page, _ = _open_page(browser, harness)
     try:
-        page.click("#activity-scm")
+        _show_section(page, "meta-scm")
         page.wait_for_selector("#scm-graph .scm-commit.is-worktree", timeout=15000)
         row = page.locator("#scm-graph .scm-commit.is-worktree")
         assert row.locator(".scm-commit-meta").inner_text() == "4 files"
@@ -489,17 +519,19 @@ def test_uncommitted_row_lists_the_working_tree_changes(browser, harness):
         context.close()
 
 
-def test_view_choice_survives_a_reload(browser, harness):
+def test_collapsed_section_survives_a_reload(browser, harness):
     context, page, _ = _open_page(browser, harness)
     try:
-        page.click("#activity-scm")
         page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
+        _fold_section(page, "meta-scm")
         reload_retrying_network_change(page)
         page.wait_for_selector("#task-input", state="visible", timeout=30000)
+        page.wait_for_selector(".explorer-row.is-file", timeout=15000)
+        assert page.locator("#meta-scm.collapsed").count() == 1
+        assert page.locator("#scm-body").is_hidden()
+        # Expanding it loads the graph for the workspace.
+        _show_section(page, "meta-scm")
         page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
-        assert page.locator("#activity-scm").get_attribute("aria-selected") == "true"
-        assert page.locator("#sidebar-scm-panel").is_visible()
-        assert page.locator("#sidebar-tab-history-panel").is_hidden()
     finally:
         context.close()
 
@@ -508,7 +540,7 @@ def test_refresh_relists_folders_keeping_them_expanded(browser, harness):
     context, page, _ = _open_page(browser, harness)
     extra = harness.work_dir / "dir" / "later.txt"
     try:
-        page.click("#activity-explorer")
+        _show_section(page, "meta-explorer")
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         _explorer_row(page, "dir").click()
         page.wait_for_selector(
@@ -522,7 +554,7 @@ def test_refresh_relists_folders_keeping_them_expanded(browser, harness):
         assert _explorer_row(page, "dir").get_attribute("aria-expanded") == "true"
         assert _explorer_row(page, "dir/nested.py").is_visible()
         # Source Control picks the new file up as untracked on refresh.
-        page.click("#activity-scm")
+        _show_section(page, "meta-scm")
         page.wait_for_function(
             "document.getElementById('scm-changes-count').textContent === '5'",
             timeout=15000,
@@ -534,7 +566,7 @@ def test_refresh_relists_folders_keeping_them_expanded(browser, harness):
             timeout=15000,
         )
         # And the Explorer drops the vanished file on its next refresh.
-        page.click("#activity-explorer")
+        _show_section(page, "meta-explorer")
         page.click("#explorer-refresh")
         page.wait_for_function(
             "sel => !document.querySelector(sel)",
@@ -554,7 +586,7 @@ def test_symlink_cycle_is_not_expandable(browser, harness):
     link = harness.work_dir / "dir" / "up"
     link.symlink_to(harness.work_dir, target_is_directory=True)
     try:
-        page.click("#activity-explorer")
+        _show_section(page, "meta-explorer")
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         _explorer_row(page, "dir").click()
         page.wait_for_selector(
@@ -580,26 +612,13 @@ def test_symlink_cycle_is_not_expandable(browser, harness):
 
 
 def test_keyboard_model_roving_tabindex_and_arrows(browser, harness):
-    """One tab stop per composite: the selected activity tab and one
-    tree row; arrows move within, Right/Left step into/out of folders."""
+    """One tab stop per composite: one tree row; arrows move within,
+    Right/Left step into/out of folders."""
     context, page, frames = _open_page(browser, harness)
     try:
-        stops = page.eval_on_selector_all(
-            "#activity-bar .activity-btn", "els => els.map(e => e.tabIndex)",
-        )
-        assert stops == [0, -1, -1]
         # The composer re-grabs focus for ~300ms after a tab activation
-        # (focusInputWithRetry); wait it out before driving the bar.
+        # (focusInputWithRetry); wait it out before driving the tree.
         page.wait_for_timeout(500)
-        page.focus("#activity-tasks")
-        assert page.evaluate("document.activeElement.id") == "activity-tasks"
-        page.keyboard.press("ArrowDown")
-        assert page.locator("#activity-explorer").get_attribute("aria-selected") == "true"
-        assert page.evaluate("document.activeElement.id") == "activity-explorer"
-        stops = page.eval_on_selector_all(
-            "#activity-bar .activity-btn", "els => els.map(e => e.tabIndex)",
-        )
-        assert stops == [-1, 0, -1]
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         # Exactly one row is in the tab order: the first (the root).
         row_stops = page.eval_on_selector_all(
@@ -642,7 +661,7 @@ def test_keyboard_model_roving_tabindex_and_arrows(browser, harness):
         )
         assert len(_sent(frames, "openFile")) == n_open + 1
         # Source Control rows: one tab stop as well.
-        page.click("#activity-scm")
+        _show_section(page, "meta-scm")
         page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
         scm_stops = page.eval_on_selector_all(
             "#scm-body .scm-commit, #scm-body .scm-row",
@@ -658,7 +677,7 @@ def test_orphaned_content_tab_keeps_browsing_its_folder(browser, harness):
     folder even after the chat tab is closed."""
     context, page, frames = _open_page(browser, harness)
     try:
-        page.click("#activity-explorer")
+        _show_section(page, "meta-explorer")
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         _explorer_row(page, "README.md").click()
         page.wait_for_function(
@@ -694,26 +713,25 @@ def test_orphaned_content_tab_keeps_browsing_its_folder(browser, harness):
         context.close()
 
 
-def test_hidden_views_catch_up_when_shown(browser, harness):
-    """Task news while Tasks is selected marks the other views dirty:
-    the Explorer / Source Control view reloads the moment it is shown
-    instead of showing what it listed before."""
+def test_collapsed_sections_catch_up_when_expanded(browser, harness):
+    """Task news while a section is collapsed marks it dirty: the
+    Explorer / Source Control section reloads the moment it is
+    expanded instead of showing what it listed before."""
     context, page, frames = _open_page(browser, harness)
     extra = harness.work_dir / "arrived-later.txt"
     try:
-        # Prime both data views, then go back to Tasks.
-        page.click("#activity-explorer")
+        # Both sections are live; fold them.
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
-        page.click("#activity-scm")
         page.wait_for_selector("#scm-changes .scm-row", timeout=15000)
-        page.click("#activity-tasks")
+        _fold_section(page, "meta-explorer")
+        _fold_section(page, "meta-scm")
         n_list = len(_sent(frames, "listDir"))
         n_status = len(_sent(frames, "gitStatus"))
         extra.write_text("late\n")
         # The daemon's task news (a tasks_updated broadcast, here
         # delivered through the page's own message channel exactly as
-        # the WebSocket layer would) arrives while Tasks is up: no
-        # request goes out for the hidden views...
+        # the WebSocket layer would) arrives while both are folded: no
+        # request goes out...
         page.evaluate(
             "window.dispatchEvent(new MessageEvent('message', "
             "{data: {type: 'tasks_updated'}}))"
@@ -721,12 +739,12 @@ def test_hidden_views_catch_up_when_shown(browser, harness):
         page.wait_for_timeout(700)
         assert len(_sent(frames, "listDir")) == n_list
         assert len(_sent(frames, "gitStatus")) == n_status
-        # ...but each view reloads as soon as it is shown.
-        page.click("#activity-explorer")
+        # ...but each section reloads as soon as it is expanded.
+        _show_section(page, "meta-explorer")
         page.wait_for_selector(
             _explorer_row_sel("/arrived-later.txt"), timeout=15000,
         )
-        page.click("#activity-scm")
+        _show_section(page, "meta-scm")
         page.wait_for_function(
             "document.getElementById('scm-changes-count').textContent === '5'",
             timeout=15000,
@@ -737,19 +755,24 @@ def test_hidden_views_catch_up_when_shown(browser, harness):
         context.close()
 
 
-def test_phone_drawer_refresh_button_is_clickable(browser, harness):
-    """On the phone layout the drawer's close button must not sit on
-    top of the Explorer / Source Control refresh buttons."""
+def test_phone_drawer_holds_the_sections_and_closes_on_file_open(browser, harness):
+    """On the phone layout the sections live in the task-info drawer:
+    its close button must not sit on top of the Explorer / Source
+    Control refresh buttons, and opening a file closes the drawer so
+    the tab shows."""
     context, page, frames = _open_page_mobile(browser, harness)
     try:
-        page.click("#menu-btn")
-        page.wait_for_selector("#sidebar.open", timeout=15000)
-        # At phone width the notification container spans the whole
-        # top of the page, over the drawer's activity bar; the daemon's
-        # PyPI check raises a sticky update toast there whenever a
-        # newer release exists.
+        # At phone width the daemon's PyPI check may raise a sticky
+        # update toast at the top of the page; dismissing it once the
+        # drawer is open would land on the drawer's backdrop (which
+        # closes it), so it goes first.
         _dismiss_update_toast(page, harness)
-        page.click("#activity-explorer")
+        page.click("#meta-drawer-btn")
+        page.wait_for_selector("#meta-panel.open", timeout=15000)
+        # Let the drawer's slide-in transition finish before probing
+        # what is painted at the buttons' positions.
+        page.wait_for_timeout(500)
+        _show_section(page, "meta-explorer")
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         n_list = len(_sent(frames, "listDir"))
         hit = page.evaluate(
@@ -764,9 +787,9 @@ def test_phone_drawer_refresh_button_is_clickable(browser, harness):
         assert hit == "explorer-refresh"
         page.locator("#explorer-refresh").click()
         page.wait_for_timeout(300)
-        assert page.locator("#sidebar").evaluate("el => el.classList.contains('open')")
+        assert page.locator("#meta-panel").evaluate("el => el.classList.contains('open')")
         assert len(_sent(frames, "listDir")) == n_list + 1
-        page.click("#activity-scm")
+        _show_section(page, "meta-scm")
         hit = page.evaluate(
             """() => {
               const b = document.getElementById('scm-refresh')
@@ -778,10 +801,9 @@ def test_phone_drawer_refresh_button_is_clickable(browser, harness):
         )
         assert hit == "scm-refresh"
         # Opening a file from the drawer closes it so the tab shows.
-        page.click("#activity-explorer")
         _explorer_row(page, "README.md").click()
         page.wait_for_function(
-            "!document.getElementById('sidebar').classList.contains('open')",
+            "!document.getElementById('meta-panel').classList.contains('open')",
             timeout=15000,
         )
     finally:
@@ -830,12 +852,12 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
         # Re-point the workspace through the "Working directory" panel,
         # the way a user does: opening a folder saves it and re-scopes.
         _set_work_dir(page, harness, str(harness.plain_dir))
-        page.click("#activity-explorer")
+        _show_section(page, "meta-explorer")
         page.wait_for_selector(
             _explorer_row_sel("/plain/only.txt"), timeout=15000,
         )
         assert page.locator(".explorer-row[aria-level='1']").inner_text().strip() == "plain"
-        page.click("#activity-scm")
+        _show_section(page, "meta-scm")
         page.wait_for_function(
             "document.querySelector('#scm-changes .sidebar-empty') && "
             "document.querySelector('#scm-changes .sidebar-empty').textContent"
@@ -856,7 +878,7 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
         _set_work_dir(page, harness, str(harness.work_dir))
         page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
         assert page.locator("#scm-branch").inner_text() == "main"
-        page.click("#activity-explorer")
+        _show_section(page, "meta-explorer")
         page.wait_for_function(
             "document.querySelector(\".explorer-row[aria-level='1']\") && "
             "document.querySelector(\".explorer-row[aria-level='1']\")"

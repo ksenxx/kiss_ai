@@ -48,7 +48,6 @@ def test_history_task_text_matches_chat_header(
                 page.wait_for_function(
                     "window._testApi && window._testApi.getActiveTabId()"
                 )
-                page.click("#activity-tasks")
                 page.evaluate(
                     """([surface, theme]) => {
                         document.body.classList.toggle('light-theme', theme === 'light');

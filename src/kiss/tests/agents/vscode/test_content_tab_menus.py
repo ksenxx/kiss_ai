@@ -33,6 +33,7 @@ from kiss.tests.agents.vscode.test_content_tab_editing import (
     _dismiss_toasts,
     _fresh_file,
     _open_editor,
+    _uncover_pane,
     _wait_for_disk,
 )
 from kiss.tests.agents.vscode.test_content_tab_file_links import (
@@ -324,6 +325,7 @@ class TestContentTabMenuBar:
             page.click("#lnk-m7")
             page.wait_for_selector(_VIEW + ".content-html-frame", timeout=30000)
             assert page.locator(_MENUBAR).count() == 0
+            _uncover_pane(page)
             _dismiss_toasts(page)
             page.click(_MODE_BTN)
             page.wait_for_selector(_MONACO + ", " + _FALLBACK, timeout=30000)

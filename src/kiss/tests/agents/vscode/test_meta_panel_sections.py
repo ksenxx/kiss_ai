@@ -125,11 +125,12 @@ _GEOMETRY_JS = """
   const pad = parseFloat(getComputedStyle(panel).paddingBottom);
   const list = document.getElementById('meta-list');
   const content = document.getElementById('meta-info-content');
-  // The per-task sections only: the global Schedule, Apps and Spend
-  // sections (hidden by _open_page unless asked for) are measured
-  // separately.
+  // The per-task sections only: the workspace (Explorer, Source
+  // Control) and global (Schedule, Apps, Spend) sections (hidden by
+  // _open_page unless asked for) are measured separately.
   const isGlobal = el =>
-    el && ['meta-schedule', 'meta-apps', 'meta-spend'].includes(el.id);
+    el && ['meta-explorer', 'meta-scm', 'meta-schedule', 'meta-apps',
+           'meta-spend'].includes(el.id);
   const resizers = Array.from(
     document.querySelectorAll('#meta-panel > .meta-section-resizer'))
     .filter(r => !isGlobal(r.previousElementSibling));
@@ -222,11 +223,24 @@ def browser() -> Iterator[Browser]:
             chromium.close()
 
 
-# Takes the global Schedule, Apps and Spend sections out of the stack
-# (the `hidden` attribute; a Task Info toggle round trip re-applies the
-# layout), leaving the per-task sections these geometry tests measure.
+# Takes the workspace (Explorer, Source Control) and global (Schedule,
+# Apps, Spend) sections out of the stack (the `hidden` attribute; a Task
+# Info toggle round trip re-applies the layout), leaving the per-task
+# sections these geometry tests measure.
+_HIDE_WORKSPACE_SECTIONS_JS = """
+() => {
+  document.getElementById('meta-explorer').hidden = true;
+  document.getElementById('meta-scm').hidden = true;
+  const toggle = document.querySelector('#meta-section-info .meta-section-toggle');
+  toggle.click();
+  toggle.click();
+}
+"""
+
 _HIDE_GLOBAL_SECTIONS_JS = """
 () => {
+  document.getElementById('meta-explorer').hidden = true;
+  document.getElementById('meta-scm').hidden = true;
   document.getElementById('meta-schedule').hidden = true;
   document.getElementById('meta-apps').hidden = true;
   document.getElementById('meta-spend').hidden = true;
@@ -247,10 +261,12 @@ def _open_page(
 ) -> Page:
     """Open the remote page at the given viewport with post recording.
 
-    Unless ``global_sections``, the Schedule, Apps and Spend sections
-    are hidden so only the per-task sections share the panel.
-    ``storage`` entries land in localStorage before the page's scripts
-    run, the way a previous visit would have left them."""
+    The workspace sections (Explorer, Source Control) are always hidden:
+    they browse a daemon this page has none of.  Unless
+    ``global_sections``, the Schedule, Apps and Spend sections are hidden
+    too, so only the per-task sections share the panel.  ``storage``
+    entries land in localStorage before the page's scripts run, the way
+    a previous visit would have left them."""
     page = browser.new_page(viewport={"width": width, "height": height})
     page.add_init_script(_RECORD_POSTS_JS)
     if storage:
@@ -261,8 +277,9 @@ def _open_page(
     goto_retrying_network_change(page, url)
     page.wait_for_selector("body.remote-chat", state="attached")
     page.evaluate(_PREPARE_JS)
-    if not global_sections:
-        page.evaluate(_HIDE_GLOBAL_SECTIONS_JS)
+    page.evaluate(
+        _HIDE_GLOBAL_SECTIONS_JS if not global_sections else _HIDE_WORKSPACE_SECTIONS_JS
+    )
     return page
 
 
@@ -1181,7 +1198,10 @@ _MINIMUM_GEOMETRY_JS = """
       && row.getBoundingClientRect().top >= list.getBoundingClientRect().top - 0.5
       && row.getBoundingClientRect().bottom <= list.getBoundingClientRect().bottom + 0.5,
     panelOverflows: panel.scrollHeight > panel.clientHeight + 1,
-    headerBottoms: Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'))
+    // The shown sections' headers (the hidden workspace sections have
+    // none on screen).
+    headerBottoms: Array.from(document.querySelectorAll(
+        '#meta-panel > .meta-section:not([hidden]) > .meta-section-hdr'))
       .map(h => h.getBoundingClientRect().bottom),
   };
 }

@@ -77,9 +77,11 @@ def _open_editor(page, path: str, link_id: str) -> None:
            }""",
         timeout=30000,
     )
+    _uncover_pane(page)
 
 
 def _type_at_end(page, text: str) -> None:
+    _uncover_pane(page)
     page.click(_MONACO + " .view-lines")
     # Monaco binds "go to end of document" per platform: Ctrl+End on
     # Linux/Windows, Cmd+Down on macOS (Ctrl+End is unbound there, so
@@ -93,6 +95,17 @@ def _editor_text(page) -> str:
         "() => document.querySelector('#content-tab-area')"
         ".innerText.replace(/\\u00a0/g, ' ')",
     ))
+
+
+def _uncover_pane(page) -> None:
+    """Press in the content pane so the task-info panel (which lies on
+    top of the pane's right edge) slides away and the pane's own
+    controls become clickable, as a user does before using them.  Only
+    the desktop layout overlays the pane; a phone stacks the surfaces."""
+    if not page.evaluate("document.body.classList.contains('remote-desktop')"):
+        return
+    page.dispatch_event("#content-tab-area", "pointerdown")
+    page.wait_for_selector("body.meta-hidden", state="attached", timeout=5000)
 
 
 def _dismiss_toasts(page) -> None:

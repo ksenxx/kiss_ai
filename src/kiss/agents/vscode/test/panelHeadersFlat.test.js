@@ -94,18 +94,21 @@ function testNoChevronInAnyHeader() {
       'the header title starts with its text, not a glyph: ' + JSON.stringify(h.textContent),
     );
   }
-  // Folding still works without the chevron: the header is the control.
+  // Folding works without the chevron: the header is the control.  A
+  // tool panel starts folded; a click unfolds it, the next folds it.
   const bash = out.querySelector('.tc.collapsible');
   const hdr = bash.querySelector('.collapse-header');
-  hdr.click();
-  assert.ok(bash.classList.contains('collapsed'), 'a header click folds the panel');
+  assert.ok(bash.classList.contains('collapsed'), 'a tool panel starts folded');
   assert.strictEqual(hdr.getAttribute('aria-expanded'), 'false');
   assert.ok(
     !/Bash/.test(hdr.querySelector('.collapse-preview').textContent),
     'the collapsed preview summarizes the body, not the header itself',
   );
   hdr.click();
-  assert.ok(!bash.classList.contains('collapsed'), 'a second click unfolds it');
+  assert.ok(!bash.classList.contains('collapsed'), 'a header click unfolds it');
+  assert.strictEqual(hdr.getAttribute('aria-expanded'), 'true');
+  hdr.click();
+  assert.ok(bash.classList.contains('collapsed'), 'a second click folds it');
   win.close();
   console.log('  ok - no event panel header starts with a chevron');
 }

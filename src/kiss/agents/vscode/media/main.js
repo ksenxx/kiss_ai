@@ -133,6 +133,65 @@
   const _activePanels = new Set();
   let _activePanelTickIv = null;
 
+  // How many leading characters of a running tool panel's header get a
+  // .wave-ch span of their own (main.css ripples them); the rest of a
+  // long preview stays plain text.
+  const WAVE_MAX_CHARS = 80;
+
+  /**
+   * Set *el*'s text: one `.wave-ch` span per character (its index in
+   * `--i`) while *wavy*, so main.css can send a wave along a running
+   * tool call's header; plain text otherwise.
+   *
+   * @param {Element} el The header's name or preview span.
+   * @param {string} text The text to show.
+   * @param {boolean} wavy Whether to split it into animated spans.
+   */
+  function setHeaderText(el, text, wavy) {
+    el.textContent = '';
+    // Copy reads the text, not the one-span-per-character markup
+    // (PanelCopy.getRawText breaks lines between element children).
+    if (wavy) el.dataset.rawText = text;
+    else delete el.dataset.rawText;
+    if (!wavy) {
+      el.textContent = text;
+      return;
+    }
+    const chars = Array.from(text);
+    for (let i = 0; i < chars.length && i < WAVE_MAX_CHARS; i++) {
+      const ch = document.createElement('span');
+      ch.className = 'wave-ch';
+      ch.style.setProperty('--i', String(i));
+      ch.textContent = chars[i];
+      el.appendChild(ch);
+    }
+    if (chars.length > WAVE_MAX_CHARS)
+      el.appendChild(
+        document.createTextNode(chars.slice(WAVE_MAX_CHARS).join('')),
+      );
+  }
+
+  /**
+   * Mark a tool-call panel as running — from its tool_call until its
+   * tool_result or the task's end (finalizePanelTime) — or not.  The
+   * header's tool name and folded preview are re-rendered for the
+   * state: wavy while running, plain text after.
+   *
+   * @param {Element} panel A `.tc` panel (anything else is left alone).
+   * @param {boolean} running Whether the call is still running.
+   */
+  function setToolPanelRunning(panel, running) {
+    if (!panel || !panel.classList || !panel.classList.contains('tc')) return;
+    if (panel.classList.contains('tc-running') === running) return;
+    panel.classList.toggle('tc-running', running);
+    const hdr = panel.querySelector(':scope > .tc-h');
+    if (!hdr) return;
+    for (const sel of ['.tc-h-name', '.collapse-preview']) {
+      const el = hdr.querySelector(':scope > ' + sel);
+      if (el) setHeaderText(el, el.textContent, running);
+    }
+  }
+
   function stampPanelStart(el, ts) {
     if (!el) return;
     if (_deferHighlight) {
@@ -196,6 +255,7 @@
 
   function finalizePanelTime(el, endTs) {
     if (!el) return;
+    setToolPanelRunning(el, false);
     // Idempotent: a panel already sealed keeps its frozen duration. A
     // second close (a `result` sweeping the last tool panel it already
     // sealed, a terminal event after the tool_result) must not
@@ -268,6 +328,19 @@
         '[data-start-ts]:not([data-time-done])',
     );
     for (let i = 0; i < open.length; i++) finalizePanelTime(open[i], endTs);
+    stopToolWaves(root);
+  }
+
+  /**
+   * Stop the wave of every tool-call header under *root*: the task
+   * ended (sealPanelTimes, or a bare `status running: false`), so no
+   * tool of it runs any more, tool_result or not.
+   */
+  function stopToolWaves(root) {
+    if (!root || !root.querySelectorAll) return;
+    const running = root.querySelectorAll('.tc.tc-running');
+    for (let i = 0; i < running.length; i++)
+      setToolPanelRunning(running[i], false);
   }
 
   /**
@@ -2052,8 +2125,9 @@
     list.setAttribute('role', 'tablist');
     list.setAttribute('aria-label', 'Open files');
     list.innerHTML = '';
-    if (!split) return;
     const contentTabs = tabs.filter(t => t.isContentTab);
+    syncContentPaneOpen(split && contentTabs.length > 0);
+    if (!split) return;
     const rovingStopId = contentTabs.some(t => t.id === activeContentTabId)
       ? activeContentTabId
       : contentTabs.length > 0
@@ -2071,6 +2145,26 @@
     if (activeEl && activeContentTabId !== lastScrolledContentTabId)
       activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
     lastScrolledContentTabId = activeContentTabId;
+  }
+
+  /**
+   * Keep body.content-pane-open true to the split layout's content
+   * pane: set while a file, browser or terminal tab is open, so the
+   * pane (its tab row, area and handle) shows and #app runs under the
+   * docked task-info panel; clear otherwise, so the chat alone fills
+   * #app beside the panel (remote-codex.css).  The pane going away
+   * brings a panel hidden behind the drawer back: docked beside the
+   * chat, it is always on screen.
+   *
+   * @param {boolean} open Whether the split layout has a content tab.
+   */
+  function syncContentPaneOpen(open) {
+    open = !!open;
+    if (document.body.classList.contains('content-pane-open') === open) return;
+    document.body.classList.toggle('content-pane-open', open);
+    if (!open) setMetaPanelHidden(false);
+    // The pane's editor sized itself to a cell that just changed.
+    layoutShownContentEditor();
   }
 
   /**
@@ -2401,10 +2495,43 @@
       '<p>Files the agent opens, files picked in the Explorer, the ' +
       'browser and the terminal (from the \u2026 menu) show here.</p>';
     contentArea.appendChild(empty);
+    // Capture phase: the Monaco editor stops the press's propagation.
+    contentArea.addEventListener('pointerdown', onContentPanePointerDown, true);
+    // A press inside a sandboxed frame (the Markdown / HTML preview)
+    // never reaches this document, but the focus it takes does: the
+    // window blurs with the frame as the active element.
+    window.addEventListener('blur', onWindowBlurIntoContentFrame);
     const app = document.getElementById('app');
     const inputArea = document.getElementById('input-area');
     if (app) app.insertBefore(contentArea, inputArea || null);
     return contentArea;
+  }
+
+  /**
+   * A press anywhere in the content pane (its tab row or the file,
+   * browser or terminal on show) slides the docked task-info panel
+   * off the pane; the drawer tab brings it back (see setMetaPanelHidden).
+   */
+  function onContentPanePointerDown() {
+    if (splitLayout()) setMetaPanelHidden(true);
+  }
+
+  /** The panel's close button: hides the docked panel, closes the drawer. */
+  function onMetaCloseClick() {
+    if (splitLayout()) setMetaPanelHidden(true);
+    else setMetaDrawerOpen(false);
+  }
+
+  /** The window lost focus to a frame of the content pane: a press there. */
+  function onWindowBlurIntoContentFrame() {
+    const ae = document.activeElement;
+    if (
+      ae &&
+      ae.tagName === 'IFRAME' &&
+      contentArea &&
+      contentArea.contains(ae)
+    )
+      onContentPanePointerDown();
   }
 
   /**
@@ -6400,6 +6527,41 @@
       // Focus is best-effort (detached nodes, jsdom quirks).
     }
     syncMetaInfoPolling();
+    // The Explorer and Source Control sections in the drawer load (or
+    // catch up on task news) once the drawer shows them.
+    if (open && !wasOpen) refreshSidebarDataViews(false);
+  }
+
+  /**
+   * Desktop remote page, content pane open: slide the task-info panel
+   * off the window's right edge (a click in the content pane) or bring
+   * it back (the drawer tab).  `hidden` is a no-op without a content
+   * pane: the panel is docked beside the chat then, never hidden.
+   *
+   * @param {boolean} hidden True to slide the panel away.
+   */
+  function setMetaPanelHidden(hidden) {
+    const panel = document.getElementById('meta-panel');
+    if (!panel) return;
+    hidden = !!hidden && document.body.classList.contains('content-pane-open');
+    // Unchanged: leave `inert` alone (the phone drawer sets its own).
+    if (document.body.classList.contains('meta-hidden') === hidden) return;
+    document.body.classList.toggle('meta-hidden', hidden);
+    // Off screen, the panel's controls leave the keyboard tab order.
+    if (typeof panel.toggleAttribute === 'function') {
+      panel.toggleAttribute('inert', hidden);
+    }
+    const drawer = document.getElementById('meta-drawer');
+    if (drawer) {
+      drawer.setAttribute('aria-expanded', hidden ? 'false' : 'true');
+      // Keyboard focus follows the control that is left: the drawer
+      // once the panel (and its close button) is inert, the panel's
+      // close button once the drawer has faded out.
+      const ae = document.activeElement;
+      if (hidden && ae && panel.contains(ae)) drawer.focus();
+      else if (!hidden && ae === drawer && metaCloseBtn) metaCloseBtn.focus();
+    }
+    if (!hidden) refreshSidebarDataViews(false);
   }
   // metainfo-coverage:end
 
@@ -7335,18 +7497,17 @@
   }
   // sidebarpanels-coverage:end
 
-  // activitybar-coverage:start
-  // ---- Activity bar: Tasks / Explorer / Source Control views ----
+  // workspaceviews-coverage:start
+  // ---- Workspace views: the Explorer and Source Control sections ----
   //
-  // The remote webapp's history panel carries a VS Code-like activity
-  // bar (#activity-bar, shown by remote-codex.css) switching between
-  // three stacked .sidebar-view panels: Tasks (the history list),
-  // Explorer (the workspace file tree, listDir -> dirListing) and
-  // Source Control (gitStatus -> "Changes", gitLog -> commit "Graph").
-  // The VS Code webview keeps the bar hidden and the Tasks view up.
-  const SIDEBAR_VIEWS = ['tasks', 'explorer', 'scm'];
-  const SIDEBAR_VIEW_KEY = 'kiss-sidebar-view';
-  const activityBar = document.getElementById('activity-bar');
+  // The remote webapp's task-info panel carries two collapsible
+  // sections for the workspace: Explorer (the file tree, listDir ->
+  // dirListing) and Source Control (gitStatus -> "Changes", gitLog ->
+  // commit "Graph").  Both start `hidden` in chat.html; the remote page
+  // lifts that (setupWorkspaceViews).  The VS Code webview has the real
+  // Explorer and Source Control views and never shows them.
+  const explorerSection = document.getElementById('meta-explorer');
+  const scmSection = document.getElementById('meta-scm');
   const explorerTree = document.getElementById('explorer-tree');
   const scmChangesList = document.getElementById('scm-changes');
   const scmChangesCount = document.getElementById('scm-changes-count');
@@ -7354,8 +7515,8 @@
   const scmGraphCount = document.getElementById('scm-graph-count');
   const scmBranchEl = document.getElementById('scm-branch');
   const scmBodyEl = document.getElementById('scm-body');
-  let activeSidebarView = 'tasks';
-  // Task news that arrived while a data view was hidden (or the drawer
+  // Task news that arrived while a view was out of sight (its section
+  // collapsed, the panel hidden behind the drawer or the phone drawer
   // closed) is remembered here, so the view reloads when it next shows.
   let explorerDirty = false;
   let scmDirty = false;
@@ -7383,78 +7544,64 @@
     return workDirForTab(tab ? tab.id : activeTabId);
   }
 
-  function sidebarIsOpen() {
-    return HISTORY_PANEL_MODE || sidebar.classList.contains('open');
+  /**
+   * Whether the task-info panel is on screen: docked and not slid
+   * behind the drawer on the desktop remote page, the open drawer on
+   * the phone remote page.
+   */
+  function metaPanelIsOpen() {
+    if (!metaPanel) return false;
+    if (document.body.classList.contains('remote-desktop'))
+      return !document.body.classList.contains('meta-hidden');
+    return metaPanel.classList.contains('open');
   }
 
   /**
-   * Show one side view and hide the others, VS Code activity-bar
-   * style.  Showing the Explorer or Source Control view (re)loads it
-   * for the current workspace.  The choice is remembered in
-   * localStorage so a reload comes back to the same view.
+   * Whether a workspace section (Explorer or Source Control) is on
+   * screen: the panel is open and the section is shown and expanded.
    *
-   * @param {string} view 'tasks' | 'explorer' | 'scm'
+   * @param {Element|null} section #meta-explorer or #meta-scm.
    */
-  function setSidebarView(view) {
-    if (!activityBar) return;
-    if (SIDEBAR_VIEWS.indexOf(view) < 0) view = 'tasks';
-    activeSidebarView = view;
-    activityBar.querySelectorAll('.activity-btn').forEach(btn => {
-      const on = btn.dataset.view === view;
-      btn.classList.toggle('active', on);
-      btn.setAttribute('aria-selected', on ? 'true' : 'false');
-      // Roving tabindex: only the selected tab is in the tab order.
-      btn.tabIndex = on ? 0 : -1;
-    });
-    document.querySelectorAll('#sidebar-views .sidebar-view').forEach(p => {
-      p.hidden = p.dataset.view !== view;
-    });
-    try {
-      window.localStorage.setItem(SIDEBAR_VIEW_KEY, view);
-    } catch {}
-    refreshSidebarDataViews(false);
+  function workspaceViewShown(section) {
+    return (
+      !!section &&
+      !section.hidden &&
+      !section.classList.contains('collapsed') &&
+      document.body.classList.contains('remote-chat') &&
+      metaPanelIsOpen()
+    );
   }
 
   /**
    * Bring the Explorer / Source Control views up to date with the
-   * current workspace.  Called when a view is shown, when the active
-   * tab or the workspace scope changes (restoreTab, showContentTab,
-   * applyWorkspaceScope), and — with `force` — whenever the daemon
-   * reports task news (refreshHistory), since a finished task may have
-   * written files or committed.
+   * current workspace.  Called when a section expands or the panel
+   * comes back on screen, when the active tab or the workspace scope
+   * changes (restoreTab, showContentTab, applyWorkspaceScope), and —
+   * with `force` — whenever the daemon reports task news
+   * (refreshHistory), since a finished task may have written files or
+   * committed.
    *
-   * Only the view on screen reloads right away.  Task news marks BOTH
-   * views dirty first, so a hidden view (or one behind a closed phone
-   * drawer) reloads the moment it is shown instead of staying stale.
+   * Only a view on screen reloads right away.  Task news marks BOTH
+   * views dirty first, so a view out of sight (its section collapsed,
+   * the panel hidden) reloads the moment it shows instead of staying
+   * stale.
    *
    * @param {boolean} force Reload even if the workspace is unchanged.
    */
   function refreshSidebarDataViews(force) {
-    if (!activityBar || !document.body.classList.contains('remote-chat'))
-      return;
+    if (!document.body.classList.contains('remote-chat')) return;
     if (force) {
       explorerDirty = true;
       scmDirty = true;
     }
-    if (!sidebarIsOpen()) return;
-    if (activeSidebarView === 'explorer') {
+    if (workspaceViewShown(explorerSection)) {
       refreshExplorer(explorerDirty);
       explorerDirty = false;
-    } else if (activeSidebarView === 'scm') {
+    }
+    if (workspaceViewShown(scmSection)) {
       refreshSourceControl(scmDirty);
       scmDirty = false;
     }
-  }
-
-  /** Re-apply the view remembered from the last visit (remote only). */
-  function restoreSidebarView() {
-    if (!activityBar || !document.body.classList.contains('remote-chat'))
-      return;
-    let saved = null;
-    try {
-      saved = window.localStorage.getItem(SIDEBAR_VIEW_KEY);
-    } catch {}
-    setSidebarView(saved || activeSidebarView);
   }
 
   /** Last path segment of a file system path ('' for a bare root). */
@@ -7487,8 +7634,10 @@
 
   /**
    * Ask the daemon to open a file as a content tab (fileContent).  On
-   * the phone layout the drawer closes so the tab is visible, exactly
-   * as after a history-row click; the docked desktop panel stays.
+   * the phone layout the task-info drawer (which holds the Explorer
+   * and Source Control) closes so the tab is visible, exactly as the
+   * history drawer does after a history-row click; the docked desktop
+   * panel stays.
    */
   function openWorkspaceFile(path, workDir) {
     api.send({
@@ -7497,7 +7646,8 @@
       workDir: workDir || sidebarWorkDir(),
       tabId: activeTabId,
     });
-    closeSidebar();
+    if (!document.body.classList.contains('remote-desktop'))
+      setMetaDrawerOpen(false);
   }
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -8404,7 +8554,7 @@
       scmRefreshTimer = null;
       // The view may have gone off screen meanwhile: leave it dirty
       // so it reloads when shown instead of asking git for nothing.
-      if (activeSidebarView === 'scm' && sidebarIsOpen()) {
+      if (workspaceViewShown(scmSection)) {
         requestSourceControl(sidebarWorkDir());
       } else {
         scmDirty = true;
@@ -9477,7 +9627,7 @@
     }
     refreshExplorer(true);
     scmDirty = true;
-    if (activeSidebarView === 'scm') refreshSidebarDataViews(false);
+    refreshSidebarDataViews(false);
     // The folder that received the entry opens so the result is seen
     // (VS Code reveals a pasted / created entry the same way).
     const target =
@@ -10115,7 +10265,7 @@
     scmDirty = false;
     requestSourceControl(sidebarWorkDir());
     explorerDirty = true;
-    if (activeSidebarView === 'explorer') refreshSidebarDataViews(false);
+    refreshSidebarDataViews(false);
   }
 
   function handleGitShow(ev) {
@@ -11064,30 +11214,25 @@
     }
   }
 
-  /** Wire the activity bar, the Explorer and the Source Control view. */
-  function setupActivityBar() {
-    if (!activityBar) return;
-    activityBar.addEventListener('click', e => {
-      const btn = e.target.closest('.activity-btn');
-      if (btn && btn.dataset.view) setSidebarView(btn.dataset.view);
-    });
-    // Vertical tablist keyboard model: Up / Down (and Home / End) move
-    // between the buttons and select the view they land on.
-    activityBar.addEventListener('keydown', e => {
-      const btns = Array.from(activityBar.querySelectorAll('.activity-btn'));
-      const idx = btns.indexOf(e.target.closest('.activity-btn'));
-      if (idx < 0) return;
-      let next = -1;
-      if (e.key === 'ArrowDown') next = (idx + 1) % btns.length;
-      else if (e.key === 'ArrowUp')
-        next = (idx + btns.length - 1) % btns.length;
-      else if (e.key === 'Home') next = 0;
-      else if (e.key === 'End') next = btns.length - 1;
-      if (next < 0) return;
-      e.preventDefault();
-      btns[next].focus();
-      setSidebarView(btns[next].dataset.view);
-    });
+  /**
+   * Wire the Explorer and Source Control sections of the task-info
+   * panel (remote page only: the VS Code webview keeps them hidden).
+   * A section (re)loads its view when it is expanded; the loads that
+   * follow the panel coming back on screen are triggered by
+   * setMetaPanelHidden and setMetaDrawerOpen.
+   */
+  function setupWorkspaceViews() {
+    if (!document.body.classList.contains('remote-chat')) return;
+    for (const section of [explorerSection, scmSection]) {
+      if (!section) continue;
+      section.hidden = false;
+      const toggle = section.querySelector('.meta-section-toggle');
+      // Runs after the metasections block's own click listener, which
+      // toggled the section: an expanded view loads now.
+      if (toggle)
+        toggle.addEventListener('click', () => refreshSidebarDataViews(false));
+    }
+    applyMetaSectionLayout();
     const explorerRefresh = document.getElementById('explorer-refresh');
     if (explorerRefresh) {
       explorerRefresh.addEventListener('click', () => refreshExplorer(true));
@@ -11241,9 +11386,9 @@
         onScmActivate(item);
       });
     }
-    restoreSidebarView();
+    refreshSidebarDataViews(false);
   }
-  // activitybar-coverage:end
+  // workspaceviews-coverage:end
 
   // The welcome screen lives inside the scrolling chat container, so
   // whatever scroll offset the previous content left behind (a finished
@@ -12793,23 +12938,22 @@
     syncCollapseAria(panelEl);
     const prev = panelEl.querySelector('.collapse-preview');
     if (!prev) return;
-    if (panelEl.classList.contains('tc-summary')) {
-      prev.textContent = '';
-      return;
-    }
-    if (!panelEl.classList.contains('collapsed')) {
-      prev.textContent = '';
-      return;
-    }
-    if (panelEl.classList.contains('trajectory')) {
-      prev.textContent = trajectoryPreviewText(panelEl);
-      return;
-    }
+    // A running tool call's preview waves with its name (main.css).
+    setHeaderText(
+      prev,
+      collapsePreviewText(panelEl),
+      panelEl.classList.contains('tc-running'),
+    );
+  }
+
+  /** The text a folded panel's header shows after its title ('' when open). */
+  function collapsePreviewText(panelEl) {
+    if (panelEl.classList.contains('tc-summary')) return '';
+    if (!panelEl.classList.contains('collapsed')) return '';
+    if (panelEl.classList.contains('trajectory'))
+      return trajectoryPreviewText(panelEl);
     const brief = briefPreviewText(panelEl);
-    if (brief !== null) {
-      prev.textContent = brief;
-      return;
-    }
+    if (brief !== null) return brief;
     let txt = '';
     for (let i = 0; i < panelEl.children.length; i++) {
       const ch = panelEl.children[i];
@@ -12822,8 +12966,7 @@
         continue;
       txt += collectText(ch) + ' ';
     }
-    txt = txt.replace(/\s+/g, ' ').trim();
-    prev.textContent = txt;
+    return txt.replace(/\s+/g, ' ').trim();
   }
 
   /**
@@ -14219,7 +14362,11 @@
         // report-coverage:end
         const c = mkEl('div', 'ev tc');
         const hdr = mkEl('div', 'tc-h');
-        hdr.textContent = ev.name || 'Tool';
+        // The tool name in its own span: setToolPanelRunning re-renders
+        // it (and the folded preview) wavy while the call runs.
+        const hdrName = mkEl('span', 'tc-h-name');
+        hdrName.textContent = ev.name || 'Tool';
+        hdr.appendChild(hdrName);
         if (ev.name === 'Bash') {
           hdr.classList.add('tc-h-bash');
           c.classList.add('tc-bash');
@@ -14231,7 +14378,7 @@
         // while the composer is in answer mode.
         const isQuestion = ev.name === 'ask_user_question';
         if (isQuestion) {
-          hdr.textContent = 'Question';
+          hdrName.textContent = 'Question';
           hdr.classList.add('tc-h-question');
           c.classList.add('tc-question');
         }
@@ -14371,7 +14518,16 @@
           c.appendChild(tcBody);
           verifyFileLinkCandidates(tcBody, evWorkDir, evOwnerTab);
         }
+        // A tool call's panel starts folded: its header (the tool name
+        // and, through collapsePreview, its one-line argument) is what
+        // the transcript shows while the call runs; a click unfolds it.
+        // A Question must be read, and a fan-out's open panel is what
+        // keeps its sub-agent tabs open (collapseNestedRunParallel), so
+        // those two start open.
+        if (!isQuestion && !c.classList.contains('tc-run-parallel'))
+          c.classList.add('collapsed');
         addCollapse(c, hdr, ev.ts);
+        collapsePreview(c);
         // toolstop-coverage:start
         // The panel's own Stop: interrupts just this tool call on the
         // task that owns this transcript (a sub-agent tab names the
@@ -14440,6 +14596,8 @@
         }
         tState.lastToolCallEl = c;
         stampPanelStart(c, ev.ts);
+        // The header waves until the tool_result (finalizePanelTime).
+        setToolPanelRunning(c, true);
         if (ev.command) {
           const bp = mkEl('div', 'bash-panel');
           const bpContent = mkEl('div', 'bash-panel-content');
@@ -16310,8 +16468,8 @@
       case 'pathsExist':
         handlePathsExist(ev);
         return;
-      // Replies of the activity bar's Explorer / Source Control views
-      // (remote webapp only).  They are matched to the request by token,
+      // Replies of the task-info panel's Explorer / Source Control
+      // sections (remote webapp only).  They are matched to the request by token,
       // so no tab check is needed: a reply for a tree or workspace that
       // is no longer shown simply finds no taker.
       case 'dirListing':
@@ -16419,7 +16577,12 @@
           if (evTab)
             phaseHome = evTab.id === activeTabId ? O : evTab.outputFragment;
           else if (!isAddressed(ev)) phaseHome = O;
-          if (phaseHome) setLaunchPhase(phaseHome, '');
+          if (phaseHome) {
+            setLaunchPhase(phaseHome, '');
+            // No tool of a stopped task is running: its headers stop
+            // waving even when no tool_result or task_done arrives.
+            stopToolWaves(phaseHome);
+          }
         }
         if (evTab) {
           evTab.statusKnown = true;
@@ -16556,6 +16719,9 @@
         if (typeof ev.machine === 'string') {
           const statusMachine = document.getElementById('status-machine');
           if (statusMachine) statusMachine.textContent = ev.machine;
+          // ...and, in bold green, at the top of the chat pane itself.
+          const chatMachine = document.getElementById('chat-machine');
+          if (chatMachine) chatMachine.textContent = ev.machine;
         }
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
         if (ev.config && Array.isArray(ev.config.recent_work_dirs)) {
@@ -19068,6 +19234,9 @@
     // task's replay keeps its panels in the open: they are still the
     // live stream's, and the terminal event folds them when it ends.
     if (isAdjacentReplay || !(replayOwnerTab && replayOwnerTab.isRunning)) {
+      // Replay skips the terminal event that stops the header waves of
+      // a call that never got its result: nothing runs any more.
+      stopToolWaves(container);
       foldTrajectory(container);
     }
     // trajectory-coverage:end
@@ -20197,10 +20366,29 @@
       });
     }
     if (metaCloseBtn) {
-      metaCloseBtn.addEventListener('click', () => setMetaDrawerOpen(false));
+      // The phone drawer's close button doubles as the docked desktop
+      // panel's "hide" control while the panel lies over the content
+      // pane: a wide panel may cover the whole pane, leaving no pane to
+      // press (the drawer tab brings the panel back either way).
+      metaCloseBtn.addEventListener('click', onMetaCloseClick);
     }
     if (metaOverlay) {
       metaOverlay.addEventListener('click', () => setMetaDrawerOpen(false));
+    }
+    // Desktop remote, content pane open: the pane's tab row hides the
+    // task-info panel like the pane itself (ensureContentArea), and
+    // the drawer tab on the right edge brings the panel back.
+    const contentTabBar = document.getElementById('content-tab-bar');
+    if (contentTabBar) {
+      contentTabBar.addEventListener(
+        'pointerdown',
+        onContentPanePointerDown,
+        true,
+      );
+    }
+    const metaDrawer = document.getElementById('meta-drawer');
+    if (metaDrawer) {
+      metaDrawer.addEventListener('click', () => setMetaPanelHidden(false));
     }
     if (metaPanel && metaDrawerBtn) {
       // Escape dismisses the open mobile drawer like any dialog; the
@@ -20214,7 +20402,7 @@
         setMetaDrawerOpen(false);
       });
     }
-    setupActivityBar();
+    setupWorkspaceViews();
     setupWorkDirPanel();
     applyRemoteTheme(getSavedRemoteTheme());
     followVscodeTheme();
@@ -20241,16 +20429,19 @@
             sidebar.classList.add('open');
             resetHistoryPagination();
             requestHistory();
-            refreshSidebarDataViews(false);
           }
           sidebarOverlay.classList.remove('open');
+          // The docked panel's Explorer and Source Control load now.
+          refreshSidebarDataViews(false);
         } else {
           document.body.classList.remove('remote-desktop');
           sidebar.classList.remove('open');
           sidebarOverlay.classList.remove('open');
           // The task-info panel is a drawer again: it starts closed
           // (and inert, so its off-screen close button leaves the tab
-          // order — setMetaDrawerOpen re-checks the body class).
+          // order — setMetaDrawerOpen re-checks the body class), and
+          // a desktop "hidden behind the drawer tab" state is over.
+          setMetaPanelHidden(false);
           setMetaDrawerOpen(false);
         }
         // Desktop splits the window into the chat and content panes;

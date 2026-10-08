@@ -176,6 +176,17 @@ function byId(win, id) {
   return win.document.getElementById(id);
 }
 
+/**
+ * Bring a workspace section of the task-info panel (meta-explorer /
+ * meta-scm) on screen: expand it if it is collapsed.  An expanded
+ * section is already live (the workspace pin loads it).
+ */
+function showSection(win, id) {
+  const section = byId(win, id);
+  if (section.classList.contains('collapsed'))
+    click(win, section.querySelector('.meta-section-toggle'));
+}
+
 function ofType(posted, type) {
   return posted.filter(m => m.type === type);
 }
@@ -213,7 +224,7 @@ function pinWorkspace(win) {
 /** Open the Explorer on WD and answer its root listing with *entries*. */
 function openExplorer(win, posted, entries) {
   pinWorkspace(win);
-  click(win, byId(win, 'activity-explorer'));
+  showSection(win, 'meta-explorer');
   const list = ofType(posted, 'listDir');
   const req = list[list.length - 1];
   send(win, {
@@ -248,7 +259,7 @@ function commit(sha, parents, subject, message) {
 /** Open Source Control on WD with one commit and return its graph row. */
 function openScm(win, posted) {
   pinWorkspace(win);
-  click(win, byId(win, 'activity-scm'));
+  showSection(win, 'meta-scm');
   const st = ofType(posted, 'gitStatus');
   const lg = ofType(posted, 'gitLog');
   const worktrees = [

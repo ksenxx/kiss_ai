@@ -388,6 +388,26 @@ body {
   }
 }
 
+/* The server's machine name, centred at the top of the chat pane in
+   bold green on every chat surface (main.js fills it from
+   configData.machine); the strip takes no room until it has a name. */
+#chat-machine {
+  flex-shrink: 0;
+  padding: var(--space-0-5) var(--space-3);
+  text-align: center;
+  font-size: var(--fs-base);
+  font-weight: 700;
+  color: var(--green);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#chat-machine:empty { display: none; }
+
+/* A stacked surface showing a content tab in place of the chat. */
+body.content-tab-open #chat-machine { display: none; }
+
 #tab-status-bar {
   display: flex;
   justify-content: flex-start;
@@ -1068,6 +1088,26 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
   color: var(--dim);
 }
 .tc-h:hover { color: var(--fg); }
+
+/* While a tool call runs (panel.tc-running, from its tool_call to its
+   tool_result), main.js renders the header's text — the tool name and
+   the folded preview — one character per .wave-ch span, and the
+   characters bob in turn: a wave travelling along the line. */
+.tc.tc-running > .tc-h .wave-ch {
+  display: inline-block;
+  white-space: pre;
+  animation: tc-wave 1.4s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * 60ms);
+}
+
+@keyframes tc-wave {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tc.tc-running > .tc-h .wave-ch { animation: none; }
+}
 
 /* The Trajectory panel a finished task's event panels fold into
    (foldTrajectory in main.js): the tool-call panel's frame and quiet
@@ -1900,8 +1940,8 @@ body.remote-chat #terminal-btn { display: flex; }
   z-index: var(--z-drawer);
   padding: var(--space-4);
 
-  /* The horizontal padding, for children that span it (#activity-bar,
-     #history-list); every rule that changes it resets this too. */
+  /* The horizontal padding, for children that span it (#history-list);
+     every rule that changes it resets this too. */
   --sidebar-pad-x: var(--space-4);
 
   overflow: hidden;
@@ -1923,6 +1963,11 @@ body.remote-chat #terminal-btn { display: flex; }
 
 #meta-drawer-btn,
 #meta-close { display: none; }
+
+/* The drawer tab that brings the hidden task-info panel back exists
+   only on the desktop remote page with a content tab open
+   (remote-codex.css shows it). */
+#meta-drawer { display: none; }
 
 /* Task-info panel sections (every surface).  #meta-panel is a flex
    column; each <section class="meta-section"> is `display: contents`,
@@ -2904,8 +2949,7 @@ body.sidebar-chat-mode #meta-info-content {
 /* The history list spans the whole panel width so the chat panels
    (.history-chat-group) run edge to edge: negative margins cancel the
    gap to the panel's left and right boundaries (--history-bleed-l /
-   -r; remote-codex.css overrides the left one where the activity bar
-   is that boundary).  The Tasks view bleeds too, padding its header
+   -r).  The Tasks view bleeds too, padding its header
    and search rows back in: it clips its overflow, so a list wider
    than the view would be cut back to the old inset.  Everything else
    in the list keeps the panel's usual inset. */
@@ -2931,10 +2975,9 @@ body.sidebar-chat-mode #meta-info-content {
   margin-right: var(--history-bleed-r);
 }
 
-/* The history panel's inner layout: an activity bar (remote webapp
-   only, see body.remote-chat rules in remote-codex.css) beside the
-   stacked views.  Exactly one .sidebar-view is shown at a time; the
-   others carry the hidden attribute. */
+/* The history panel's inner layout: #sidebar-body clips the panel's
+   content (remote-codex.css) around the stacked #sidebar-views column
+   that holds the Chats view. */
 #sidebar-body {
   flex: 1;
   display: flex;
@@ -2951,84 +2994,12 @@ body.sidebar-chat-mode #meta-info-content {
   min-width: 0;
 }
 
-.sidebar-view[hidden] { display: none !important; }
-
-/* VS Code-like activity bar: a narrow vertical strip of icon buttons
-   on the panel's left edge.  Hidden by default (the VS Code webview
-   and its history-panel mode never show it); the negative margins
-   undo the panel's own padding so the strip runs flush with the
-   panel's top, bottom and left edges like VS Code's does.
-   --sidebar-pad-x mirrors the panel's horizontal padding (see #sidebar;
-   remote-codex.css sets the collapsing desktop value). */
-#activity-bar {
-  display: none;
-  flex: 0 0 40px;
-  width: 40px;
-  flex-direction: column;
+/* The Explorer header's action buttons (open folder, add folder,
+   refresh), grouped at the right of the section toggle. */
+.meta-hdr-actions {
+  display: inline-flex;
   align-items: center;
-  gap: var(--space-0-5);
-  padding: var(--space-1-5) 0;
-  margin: calc(-1 * var(--space-4)) var(--space-2-5) calc(-1 * var(--space-4))
-    calc(-1 * var(--sidebar-pad-x));
-  background: color-mix(in srgb, var(--fg) 4%, var(--bg2));
-  border-right: 1px solid var(--border);
-  box-sizing: border-box;
-}
-
-.activity-btn {
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  border-left: 2px solid transparent;
-  border-right: 2px solid transparent;
-  color: color-mix(in srgb, var(--fg) 55%, transparent);
-  font-size: var(--fs-2xl);
-  cursor: pointer;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-.activity-btn:hover { color: var(--fg); }
-
-.activity-btn.active {
-  color: var(--fg);
-  border-left-color: var(--fg);
-}
-
-.activity-btn:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
-}
-
-/* Header rows of the Explorer / Source Control views: the label on
-   the left, a refresh button (and the branch name) on the right. */
-.sidebar-hdr-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.sidebar-hdr-row > span:first-child { flex: 1; }
-
-.sidebar-hdr-btn {
-  background: none;
-  border: none;
-  color: color-mix(in srgb, var(--fg) 55%, transparent);
-  cursor: pointer;
-  padding: var(--space-0-5);
-  border-radius: var(--radius-sm);
-  display: flex;
-  align-items: center;
-  font-size: var(--fs-md);
-}
-
-.sidebar-hdr-btn:hover {
-  color: var(--fg);
-  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  flex: 0 0 auto;
 }
 
 .scm-branch {
@@ -3047,11 +3018,10 @@ body.sidebar-chat-mode #meta-info-content {
    the --depth custom property (VS Code's 8px per level plus the
    chevron column).  A folder row carries a chevron that rotates when
    expanded; the folder's children live in the following .explorer-kids
-   container. */
+   container.  The tree is its section's .meta-section-body, which
+   sizes and scrolls it. */
 .explorer-tree {
-  flex: 1;
-  overflow: auto;
-  min-height: 0;
+  overflow-x: auto;
   font-size: var(--fs-base);
   user-select: none;
 }
@@ -3193,11 +3163,9 @@ body.sidebar-chat-mode #meta-info-content {
    "Graph") stacked in a scrolling body.  Rows reuse the Explorer row
    geometry; the status letter sits at the right edge, colored like
    VS Code's decorations (M yellow-ish, A green, D red, U green,
-   R/C blue-ish, ! red). */
+   R/C blue-ish, ! red).  The body is its section's .meta-section-body,
+   which sizes and scrolls it. */
 .scm-body {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
   display: flex;
   flex-direction: column;
   font-size: var(--fs-base);
