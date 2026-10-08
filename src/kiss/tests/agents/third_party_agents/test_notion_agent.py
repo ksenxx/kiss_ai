@@ -10,9 +10,8 @@ server asserts the ``Authorization: Bearer`` header on every call,
 returns canned JSON, and records methods, paths, headers, and bodies
 for verification.
 
-Config state is isolated per pytest process because the session
-conftest points ``KISS_HOME`` at a temporary directory and
-``ChannelConfig.path`` resolves ``$KISS_HOME`` lazily.
+State is isolated per test: ``isolated_kiss_home`` points ``KISS_HOME`` at a
+fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 
 ``main()`` is not exercised here: it only forwards to the shared
 ``channel_main`` CLI (covered by the shared CLI tests) and its body has

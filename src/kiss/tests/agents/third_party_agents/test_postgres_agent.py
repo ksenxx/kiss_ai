@@ -8,9 +8,8 @@ Runs against a REAL PostgreSQL server in Docker — no mocks, patches,
 or fakes.  The Docker-backed tests are skipped when ``docker info``
 fails at collection time; the no-server tests always run.
 
-Config state is isolated per pytest process because the session
-conftest points ``KISS_HOME`` at a temporary directory and
-``ChannelConfig.path`` resolves ``$KISS_HOME`` lazily.
+State is isolated per test: ``isolated_kiss_home`` points ``KISS_HOME`` at a
+fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 """
 
 from __future__ import annotations

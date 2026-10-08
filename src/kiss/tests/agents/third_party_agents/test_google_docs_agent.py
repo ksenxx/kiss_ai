@@ -12,8 +12,8 @@ the ``Authorization: Bearer`` header on every call, returns canned
 JSON, and records requests (method, path, query, body) for
 verification.
 
-Connection state is isolated per pytest process because the session
-conftest points ``KISS_HOME`` at a temporary directory.
+State is isolated per test: ``isolated_kiss_home`` points ``KISS_HOME`` at a
+fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 """
 
 from __future__ import annotations

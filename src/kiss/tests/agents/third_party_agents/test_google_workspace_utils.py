@@ -6,9 +6,8 @@
 
 Drives ``make_google_auth_tools`` through the real Composio SDK against
 a real local Composio API emulator (``composio_test_utils``) — no mocks
-or patches.  The session conftest points ``KISS_HOME`` at a temporary
-directory; an autouse fixture forgets the connection and any saved API
-key around every test.
+or patches.  ``isolated_kiss_home`` points ``KISS_HOME`` at a fresh temporary
+directory for every test.
 """
 
 from __future__ import annotations
