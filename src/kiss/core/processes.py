@@ -144,7 +144,7 @@ def _windows_enrol_in_job(proc: subprocess.Popen[Any]) -> None:  # pragma: no co
 
 
 def new_process_group_kwargs() -> dict[str, Any]:
-    """Return the ``Popen``/``create_subprocess_exec`` keyword arguments that put a child in its own group.
+    """Return the ``Popen``/``create_subprocess_exec`` kwargs that put a child in its own group.
 
     ``start_new_session=True`` on POSIX, ``CREATE_NEW_PROCESS_GROUP`` on
     Windows.  Synchronous callers should prefer :func:`popen_process_group`,
