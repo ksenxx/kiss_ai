@@ -28,15 +28,12 @@ from kiss.core.models.model import (
     TokenCallback,
     _audio_mime_to_format,
     _build_text_based_tools_prompt,
+    _get_attr_or_key,
     _parse_text_based_tool_calls,
     accepted_request_params,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import (
-    CONNECT_TIMEOUT,
-    stop_aware_events,
-    stop_or_stall_error,
-)
+from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_or_stall_error
 
 logger = logging.getLogger(__name__)
 
@@ -233,28 +230,6 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
         return "", content
     answer_parts.append(content[cursor:])
     return reasoning, "".join(answer_parts).strip()
-
-
-def _usage_field(obj: Any, name: str) -> Any:
-    """Read field *name* from a usage-like object or its dict form.
-
-    OpenRouter's extra usage fields (``cost``, ``cost_details``) are not
-    declared on the SDK's ``CompletionUsage`` / ``ResponseUsage`` models,
-    which keep them as pydantic extras readable by attribute; the
-    Responses-delegate path hands over plain dicts instead.
-
-    Args:
-        obj: A pydantic response/usage object, a dict, or ``None``.
-        name: The field to read.
-
-    Returns:
-        The field value, or ``None`` when *obj* is ``None`` or lacks it.
-    """
-    if obj is None:
-        return None
-    if isinstance(obj, dict):
-        return obj.get(name)
-    return getattr(obj, name, None)
 
 
 def _delta_reasoning_text(delta: Any) -> str | None:
@@ -662,13 +637,15 @@ class OpenAICompatibleBase(Model):
         """
         if not self.model_name.startswith("openrouter/"):
             return None
-        usage = _usage_field(response, "usage")
-        cost = _usage_field(usage, "cost")
+        usage = _get_attr_or_key(response, "usage")
+        cost = _get_attr_or_key(usage, "cost")
         if isinstance(cost, bool) or not isinstance(cost, int | float):
             return None
-        upstream = _usage_field(_usage_field(usage, "cost_details"), "upstream_inference_cost")
+        upstream = _get_attr_or_key(
+            _get_attr_or_key(usage, "cost_details"), "upstream_inference_cost"
+        )
         if (
-            _usage_field(usage, "is_byok") is not True
+            _get_attr_or_key(usage, "is_byok") is not True
             or isinstance(upstream, bool)
             or not isinstance(upstream, int | float)
         ):
@@ -1226,66 +1203,46 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         response = None
         last_chunk = None
         finish_reason: str | None = None
-        events = None
-        # The bracket is closed in `finally`, not after the loop:
-        # `stop_aware_events` runs `on_abort` for a stop and for a stall
-        # but re-raises every other transport failure untouched, and
-        # KISSAgent retries those in the SAME run without resetting the
-        # model — so a provider that drops the connection mid-reasoning
-        # would leave the printer rendering the retry's answer as
-        # thinking.  `_close_thinking_if_open` is a no-op when the turn
-        # ended outside a reasoning block.
-        #
-        # `events` is closed in the same `finally`, mirroring v2's
-        # `_consume_stream`: the loop body can raise (a token callback
-        # propagating Stop, most commonly), and an abandoned generator
-        # runs its cleanup only when the traceback holding its frame is
-        # released — until then a daemon watchdog thread stays alive and
-        # armed over a connection that never returns to the pool.
+        watchdog_name = (
+            "openai-tools-stream-abort-watchdog"
+            if adaptive
+            else "openai-stream-abort-watchdog"
+        )
         try:
             stream = (
                 self._create_chat_completion_adaptive(kwargs)
                 if adaptive
                 else self.client.chat.completions.create(**kwargs)
             )
-            events = stop_aware_events(
-                stream,
-                stall_timeout=self._stream_stall_timeout,
-                on_abort=self._close_thinking_if_open,
-                name=(
-                    "openai-tools-stream-abort-watchdog"
-                    if adaptive
-                    else "openai-stream-abort-watchdog"
-                ),
-            )
-            for chunk in events:
-                last_chunk = chunk
-                if chunk.usage is not None:
-                    # Billed already: kept for take_partial_usage_response
-                    # if the stream fails before it ends.  Recorded before
-                    # the callbacks below run, since a provider may put the
-                    # usage on a chunk that also carries content and a
-                    # callback may raise (Stop) on that content.
-                    response = self._rejected_response = chunk
-                if chunk.choices:
+            with self._watched_events(stream, watchdog_name) as events:
+                for chunk in events:
+                    last_chunk = chunk
+                    if chunk.usage is not None:
+                        # Billed already: kept for take_partial_usage_response
+                        # if the stream fails before it ends.  Recorded
+                        # before the callbacks below run, since a provider
+                        # may put the usage on a chunk that also carries
+                        # content and a callback may raise (Stop) on it.
+                        response = self._rejected_response = chunk
+                    if not chunk.choices:
+                        continue
                     choice = chunk.choices[0]
                     if getattr(choice, "finish_reason", None):
                         finish_reason = choice.finish_reason
                     delta = choice.delta
-                    if delta:
-                        reasoning = _delta_reasoning_text(delta)
-                        if reasoning:
-                            self._open_thinking_if_closed()
-                            self._invoke_token_callback(reasoning)
-                        if delta.content:
-                            self._close_thinking_if_open()
-                            content += delta.content
-                            self._invoke_token_callback(delta.content)
-                        if delta.tool_calls:
-                            self._close_thinking_if_open()
-                            _accumulate_tool_call_deltas(
-                                tool_calls_accum, delta.tool_calls
-                            )
+                    if not delta:
+                        continue
+                    reasoning = _delta_reasoning_text(delta)
+                    if reasoning:
+                        self._open_thinking_if_closed()
+                        self._invoke_token_callback(reasoning)
+                    if delta.content:
+                        self._close_thinking_if_open()
+                        content += delta.content
+                        self._invoke_token_callback(delta.content)
+                    if delta.tool_calls:
+                        self._close_thinking_if_open()
+                        _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
         except (httpx.TimeoutException, APITimeoutError) as err:
             # The per-request clock fired (no headers, or no bytes between
             # events) before the watchdog did.  A Stop pressed while the
@@ -1313,10 +1270,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 finish_reason,
                 err,
             )
-        finally:
-            if events is not None:
-                events.close()
-            self._close_thinking_if_open()
         self._rejected_response = None
         response = self._finalize_stream_response(response, last_chunk)
         return content, tool_calls_accum, response, finish_reason
@@ -1951,17 +1904,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             instead; those are routed to the delegate's extractor.
         """
         if self._responses_delegate is not None:
-            response_alias: Any = response
-            usage_obj: Any = (
-                response_alias.get("usage")
-                if isinstance(response_alias, dict)
-                else getattr(response_alias, "usage", None)
-            )
-            has_responses_usage = (
-                usage_obj.get("input_tokens") if isinstance(usage_obj, dict)
-                else getattr(usage_obj, "input_tokens", None)
-            ) is not None
-            if has_responses_usage:
+            usage_obj = _get_attr_or_key(response, "usage")
+            if _get_attr_or_key(usage_obj, "input_tokens") is not None:
                 return (
                     self._responses_delegate
                     .extract_input_output_token_counts_from_response(response)
