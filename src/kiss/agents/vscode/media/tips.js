@@ -471,26 +471,20 @@
       panel.appendChild(footer);
       overlay.appendChild(panel);
       root.appendChild(overlay);
-      this._overlay = overlay;
       this._panel = panel;
       this._opener = null;
 
-      const self = this;
-      this._prev.addEventListener('click', () => self._step(-1));
-      this._next.addEventListener('click', () => self._step(1));
-      this._close.addEventListener('click', () => {
-        self.remove();
-      });
+      this._prev.addEventListener('click', () => this._step(-1));
+      this._next.addEventListener('click', () => this._step(1));
+      this._close.addEventListener('click', () => this.remove());
       this._optOut.addEventListener('change', () => {
-        writeOptOut(self._optOut.checked);
+        writeOptOut(this._optOut.checked);
       });
       // A click on the dimmed backdrop (not inside the panel) closes.
       overlay.addEventListener('click', event => {
-        if (event.target === overlay) self.remove();
+        if (event.target === overlay) this.remove();
       });
-      this._onKeyDown = function (event) {
-        self._handleKeyDown(event);
-      };
+      this._onKeyDown = event => this._handleKeyDown(event);
     }
 
     /** Move `delta` tips (-1 / +1), clamped to the list. */

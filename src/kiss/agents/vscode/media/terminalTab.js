@@ -184,14 +184,6 @@
       else pending.push(line);
     }
 
-    // Refit the terminal to its surface; the onResize handler below
-    // forwards a changed size to the pty.  fit() is a no-op until xterm
-    // has measured a cell size, and Terminal.resize() ignores an
-    // unchanged grid, so nothing is sent unless the grid really changed.
-    function sendSize() {
-      if (fit) fit.fit();
-    }
-
     function openShell() {
       lastSize = {cols: term ? term.cols : 80, rows: term ? term.rows : 24};
       openRequested = true;
@@ -269,10 +261,15 @@
               rows: size.rows,
             });
           });
+          // Refit the terminal to its surface; the onResize handler
+          // above forwards a changed size to the pty.  fit() is a no-op
+          // until xterm has measured a cell size, and Terminal.resize()
+          // ignores an unchanged grid, so nothing is sent unless the
+          // grid really changed.
           observer = new ResizeObserver(() => {
             clearTimeout(resizeTimer);
             resizeTimer = setTimeout(() => {
-              if (visible && !view.disposed) sendSize();
+              if (visible && !view.disposed) fit.fit();
             }, RESIZE_DEBOUNCE_MS);
           });
           observer.observe(el);
@@ -308,7 +305,7 @@
       term.focus();
       requestAnimationFrame(() => {
         if (view.disposed || !visible) return;
-        sendSize();
+        fit.fit();
       });
     };
 
