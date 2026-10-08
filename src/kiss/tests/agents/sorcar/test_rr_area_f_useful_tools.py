@@ -19,9 +19,10 @@ Covers:
 * F-R1 — ``Bash`` has one uniform error contract whether or not a
   ``stream_callback`` is installed (the redundant pre-``try`` branch
   that bypassed the ``except`` is gone).
-* F-R4 — ``_file_lock`` supports ``blocking=False`` (yields ``None``
-  when the lock is held elsewhere, a truthy value when acquired) and
-  creates the lock file mode ``0600``; ``flock`` treats separate
+* F-R4 — ``kiss.core.file_lock.exclusive_file_lock`` (which replaced
+  the ``useful_tools._file_lock`` copy) supports ``blocking=False``
+  (yields ``False`` when the lock is held elsewhere, ``True`` when
+  acquired) and creates the lock file mode ``0600``; ``flock`` treats separate
   descriptors of one file as independent lockers, so contention is
   exercised for real without a second process.
 """
@@ -36,10 +37,10 @@ from pathlib import Path
 
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
-    _file_lock,
     _kill_process_group,
     _popen_kwargs,
 )
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import popen_process_group
 from kiss.tests.conftest import IS_WINDOWS
 
@@ -91,30 +92,30 @@ class TestBashUniformErrorContract:
 
 
 class TestFileLockNonBlocking:
-    """F-R4: ``_file_lock``'s non-blocking mode and lock-file mode."""
+    """F-R4: ``exclusive_file_lock``'s non-blocking mode and lock-file mode."""
 
     def test_blocking_acquire_yields_truthy_and_sets_mode(
         self, tmp_path: Path,
     ) -> None:
         lock_path = tmp_path / "locks" / "probe.lock"
-        with _file_lock(lock_path) as held:
-            assert held
+        with exclusive_file_lock(lock_path) as held:
+            assert held is True
         if not IS_WINDOWS:  # Windows has no POSIX mode bits to tighten
             assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o600
 
-    def test_nonblocking_yields_none_while_held_elsewhere(
+    def test_nonblocking_yields_false_while_held_elsewhere(
         self, tmp_path: Path,
     ) -> None:
         lock_path = tmp_path / "probe.lock"
-        with _file_lock(lock_path) as outer:
-            assert outer
+        with exclusive_file_lock(lock_path) as outer:
+            assert outer is True
             # A second descriptor of the same file is an independent
             # flock holder: this is real contention, not a double.
-            with _file_lock(lock_path, blocking=False) as inner:
-                assert inner is None, (
+            with exclusive_file_lock(lock_path, blocking=False) as inner:
+                assert inner is False, (
                     "non-blocking acquire must report contention, "
                     "not wait"
                 )
         # Released: the non-blocking path must acquire immediately.
-        with _file_lock(lock_path, blocking=False) as held:
-            assert held
+        with exclusive_file_lock(lock_path, blocking=False) as held:
+            assert held is True

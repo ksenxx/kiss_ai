@@ -46,9 +46,9 @@ from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.useful_tools import (
     _absolutize,
     _active_worktree_remap,
-    _file_lock,
     _stale_worktree_fallback,
 )
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import SIGKILL
 from kiss.core.processes import pid_alive as _pid_alive
 from kiss.core.processes import process_identity as _process_identity
@@ -1027,7 +1027,7 @@ class WebUseTool:
         """
         if not self.user_data_dir or self._ephemeral:
             return nullcontext()
-        return _file_lock(Path(f"{self.user_data_dir}.lock"))
+        return exclusive_file_lock(Path(f"{self.user_data_dir}.lock"))
 
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
         if self._ephemeral and self._ephemeral_dir is None:

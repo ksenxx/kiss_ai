@@ -80,10 +80,10 @@ _LOCK_HOLDER = '''
 import sys, time
 from pathlib import Path
 
-from kiss.agents.sorcar.useful_tools import _file_lock
+from kiss.core.file_lock import exclusive_file_lock
 
 lock_path, ready = Path(sys.argv[1]), Path(sys.argv[2])
-with _file_lock(lock_path):
+with exclusive_file_lock(lock_path):
     ready.write_text("held")
     time.sleep(5)
 '''
