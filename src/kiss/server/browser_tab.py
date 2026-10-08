@@ -102,8 +102,9 @@ class AgentTab:
         tab_id: The KISS tab id (``browser__N``) shown on every surface.
         target_id: Chromium's target id of the page, so a second CDP
             client can tell this page from the user's other tabs.
-        cdp_url: ``http://127.0.0.1:<port>`` of the browser's DevTools
-            endpoint (``connect_over_cdp`` accepts it).
+        cdp_url: ``ws://127.0.0.1:<port>/devtools/browser/<id>``, the
+            browser's DevTools endpoint (``connect_over_cdp`` accepts it);
+            the id is minted at launch, so it names this browser instance.
     """
 
     tab_id: str
@@ -465,9 +466,13 @@ class BrowserTabService:
             logger.debug("browser tab: could not mask the headless user agent", exc_info=True)
 
     def _cdp_url(self) -> str:
-        """The browser's DevTools HTTP endpoint, from the profile's ``DevToolsActivePort``."""
-        port = (self._profile_dir / "DevToolsActivePort").read_text().split()[0]
-        return f"http://127.0.0.1:{port}"
+        """The browser's DevTools websocket endpoint, from the profile's ``DevToolsActivePort``.
+
+        The path carries an id minted at launch, so the URL also tells
+        one browser instance from the next on the same port.
+        """
+        port, path = (self._profile_dir / "DevToolsActivePort").read_text().split()[:2]
+        return f"ws://127.0.0.1:{port}{path}"
 
     async def _open_reporting(self, url: str, conn_id: str) -> None:
         try:
