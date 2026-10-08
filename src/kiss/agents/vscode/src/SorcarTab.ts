@@ -41,8 +41,8 @@ export function mediaAssetVersion(
   return crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16);
 }
 
-/** Escape a string for interpolation into an HTML text position. */
-function escapeHtml(text: string): string {
+/** Escape a string for interpolation into an HTML text or attribute position. */
+export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
