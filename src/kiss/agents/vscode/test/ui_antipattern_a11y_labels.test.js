@@ -81,11 +81,7 @@ test('icon-only buttons have an accessible name', () => {
   for (const id of Object.keys(expected)) {
     assert.strictEqual(label(id), expected[id], `#${id} aria-label`);
   }
-  for (const id of [
-    'frequent-panel-close',
-    'tricks-panel-close',
-    'settings-panel-close',
-  ]) {
+  for (const id of ['tricks-panel-close', 'settings-panel-close']) {
     assert.ok(/^Close /.test(label(id)), `#${id} must be named "Close ..."`);
   }
 });

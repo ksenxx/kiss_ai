@@ -5660,11 +5660,6 @@
   const settingsPanel = document.getElementById('settings-panel');
   const settingsOverlay = document.getElementById('settings-overlay');
   const settingsPanelClose = document.getElementById('settings-panel-close');
-  const frequentPanel = document.getElementById('frequent-panel');
-  const frequentOverlay = document.getElementById('frequent-overlay');
-  const frequentPanelClose = document.getElementById('frequent-panel-close');
-  const frequentTasksBtn = document.getElementById('frequent-tasks-btn');
-  const frequentList = document.getElementById('frequent-list');
   const tricksPanel = document.getElementById('tricks-panel');
   const tricksOverlay = document.getElementById('tricks-overlay');
   const tricksPanelClose = document.getElementById('tricks-panel-close');
@@ -9382,16 +9377,9 @@
     return IS_LINUX && linux ? linux : win;
   }
 
-  /** Put *text* on the clipboard (the content menu's robust copy). */
+  /** Put *text* on the clipboard (Explorer / Git context menus). */
   function copyTextToClipboard(text) {
-    const ctx = window.ContentContextMenu;
-    if (ctx && typeof ctx.copyText === 'function') {
-      ctx.copyText(document, text);
-      return;
-    }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).catch(() => {});
-    }
+    window.PanelCopy.copyText(text);
   }
 
   /**
@@ -11861,10 +11849,6 @@
     if (best && best.id !== activeTabId) switchToTab(best.id);
   }
   // launchswitch-coverage:end
-
-  function fallbackCopyText(text) {
-    return window.PanelCopy.fallbackCopyText(text);
-  }
 
   function syncClearBtn() {
     if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
@@ -15814,8 +15798,8 @@
   /**
    * Whether focusing the composer now would take the keyboard away
    * from something the user is using: another text field, or an open
-   * sheet / overlay (settings, promptlets, frequent tasks, working
-   * directory, server-reset confirm, a notification with a textbox).
+   * sheet / overlay (settings, promptlets, working directory,
+   * server-reset confirm, a notification with a textbox).
    */
   function composerFocusWouldSteal() {
     const active = document.activeElement;
@@ -16830,9 +16814,6 @@
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         autofillHistoryDateRange(ev.dateRange);
-        break;
-      case 'frequentTasks':
-        renderFrequentTasks(ev.tasks || []);
         break;
       case 'files': {
         // tableak-coverage:start
@@ -18847,19 +18828,17 @@
     let urlFlashTimer = null;
     copyBtn.addEventListener('click', e => {
       e.preventDefault();
-      // A rejected write (webview unfocused) just skips the flash; an
-      // unhandled rejection would be the only other outcome.
-      navigator.clipboard.writeText(displayUrl).then(
-        () => {
-          copyBtn.innerHTML = checkSvg;
-          if (urlFlashTimer) clearTimeout(urlFlashTimer);
-          urlFlashTimer = setTimeout(() => {
-            urlFlashTimer = null;
-            copyBtn.innerHTML = copySvg;
-          }, 1500);
-        },
-        () => {},
-      );
+      // A failed copy (webview unfocused and no execCommand) just
+      // skips the flash.
+      window.PanelCopy.copyText(displayUrl).then(ok => {
+        if (!ok) return;
+        copyBtn.innerHTML = checkSvg;
+        if (urlFlashTimer) clearTimeout(urlFlashTimer);
+        urlFlashTimer = setTimeout(() => {
+          urlFlashTimer = null;
+          copyBtn.innerHTML = copySvg;
+        }, 1500);
+      });
     });
     // urlflash0903-coverage:end
     row.appendChild(link);
@@ -20645,21 +20624,6 @@
       });
     }
     setupPaneResizer();
-    if (frequentTasksBtn) {
-      frequentTasksBtn.addEventListener('click', () => {
-        if (frequentPanel && frequentPanel.classList.contains('open')) {
-          closeFrequentPanel();
-        } else {
-          openFrequentPanel();
-        }
-      });
-    }
-    if (frequentPanelClose) {
-      frequentPanelClose.addEventListener('click', closeFrequentPanel);
-    }
-    if (frequentOverlay) {
-      frequentOverlay.addEventListener('click', closeFrequentPanel);
-    }
     if (tricksBtn) {
       tricksBtn.addEventListener('click', () => {
         if (tricksPanel && tricksPanel.classList.contains('open')) {
@@ -21879,7 +21843,6 @@
       e.stopPropagation();
       delBtn.style.display = 'none';
       confirmWrap.style.display = '';
-      if (opts.onShowConfirm) opts.onShowConfirm();
       // The safe choice holds focus, so Enter keeps and Escape cancels.
       cancelBtn.focus();
     });
@@ -21891,7 +21854,6 @@
       e.stopPropagation();
       confirmWrap.style.display = 'none';
       delBtn.style.display = '';
-      if (opts.onCancel) opts.onCancel();
       if (delBtn.isConnected) delBtn.focus();
     });
     return {delBtn: delBtn, confirmWrap: confirmWrap};
@@ -22129,11 +22091,12 @@
     btn.type = 'button';
     btn.className = 'sidebar-item-copy';
     btn.setAttribute('aria-label', ariaLabel || 'Copy task to clipboard');
-    wireCopyButton(btn, text, false);
+    wireCopyButton(btn, text);
     return btn;
   }
 
-  function wireCopyButton(btn, text, retryFallback) {
+  /** Make *btn* copy *text* on click and flash a check mark on success. */
+  function wireCopyButton(btn, text) {
     btn.innerHTML = PANEL_COPY_SVG;
 
     // sidebarflash0903-coverage:start
@@ -22156,14 +22119,9 @@
     btn.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
-      const payload = String(text == null ? '' : text);
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(payload).then(flash, () => {
-          if (retryFallback && fallbackCopyText(payload)) flash();
-        });
-      } else if (fallbackCopyText(payload)) {
-        flash();
-      }
+      window.PanelCopy.copyText(String(text == null ? '' : text)).then(ok => {
+        if (ok) flash();
+      });
     });
   }
 
@@ -22173,7 +22131,7 @@
     btn.className = 'ids-copy-btn ids-copy-' + kind;
     btn.dataset.tooltip = 'Copy ' + kind + ' id';
     btn.setAttribute('aria-label', 'Copy ' + kind + ' id to clipboard');
-    wireCopyButton(btn, idText, true);
+    wireCopyButton(btn, idText);
     return btn;
   }
 
@@ -23883,8 +23841,8 @@
   }
 
   /**
-   * Sheets (settings / promptlets / frequent tasks) in the order they
-   * were opened; the last entry is the topmost one Escape closes.
+   * Sheets (settings / promptlets) in the order they were opened; the
+   * last entry is the topmost one Escape closes.
    * Each entry remembers the control that opened the sheet so closing
    * it can hand keyboard focus back instead of dropping it on <body>.
    */
@@ -23987,7 +23945,6 @@
     // panel) keep their own Escape handling.
     if (panel === settingsPanel) closeSettingsPanel();
     else if (panel === tricksPanel) closeTricksPanel();
-    else if (panel === frequentPanel) closeFrequentPanel();
     else return;
     e.preventDefault();
   }
@@ -24081,16 +24038,6 @@
     settingsEditedFields.clear();
     setSettingsUpdateStatus('', false);
     setPanelOpen(settingsPanel, settingsOverlay, false);
-  }
-
-  function openFrequentPanel() {
-    if (!frequentPanel) return;
-    setPanelOpen(frequentPanel, frequentOverlay, true, frequentTasksBtn);
-    api.getFrequentTasks({limit: 50});
-  }
-
-  function closeFrequentPanel() {
-    setPanelOpen(frequentPanel, frequentOverlay, false);
   }
 
   function openTricksPanel() {
@@ -24395,8 +24342,8 @@
           openTrickEditor(index);
         });
         div.appendChild(editBtn);
-        // Same two-step inline confirm as a frequent task's delete: the
-        // trash icon only reveals Delete / Cancel, nothing is posted yet.
+        // Two-step inline confirm: the trash icon only reveals
+        // Delete / Cancel, nothing is posted yet.
         const del = makeSidebarDeleteConfirm({
           ariaLabel: 'Delete promptlet',
           onConfirm: () => deleteTrick(index),
@@ -24439,77 +24386,6 @@
     }
   }
 
-  function renderFrequentTasks(tasks) {
-    if (!frequentList) return;
-    if (!tasks || tasks.length === 0) {
-      frequentList.innerHTML = '<div class="sidebar-empty">No tasks yet</div>';
-      return;
-    }
-    frequentList.innerHTML = '';
-    tasks.forEach(t => {
-      const div = document.createElement('div');
-      div.className = 'sidebar-item frequent-item';
-      const text = String(t.task || '');
-      div.dataset.tooltip = text;
-
-      const textSpan = document.createElement('span');
-      textSpan.className = 'sidebar-item-text';
-      textSpan.textContent = text;
-      div.appendChild(textSpan);
-
-      const cnt = document.createElement('span');
-      cnt.className = 'frequent-item-count';
-      cnt.textContent = String(t.count);
-      div.appendChild(cnt);
-
-      const copyBtn = makeSidebarCopyButton(text);
-      div.appendChild(copyBtn);
-
-      const {delBtn, confirmWrap} = makeSidebarDeleteConfirm({
-        ariaLabel: 'Delete frequent task',
-        onShowConfirm: () => {
-          cnt.style.display = 'none';
-        },
-        onCancel: () => {
-          cnt.style.display = '';
-        },
-        onConfirm: () => {
-          api.deleteFrequentTask({task: text});
-          div.remove();
-        },
-      });
-
-      div.appendChild(delBtn);
-      div.appendChild(confirmWrap);
-
-      div.addEventListener('click', () => {
-        // A draft the user is composing is not overwritten silently:
-        // ask whether the frequent task replaces it.
-        if (inp.value.trim() && inp.value.trim() !== text) {
-          confirmAction({
-            id: 'frequent-replace-draft',
-            message:
-              'Replace the text in the composer with this frequent task?',
-            confirmLabel: 'Replace draft',
-            cancelLabel: 'Keep draft',
-            onConfirm: () => useFrequentTask(text),
-          });
-          return;
-        }
-        useFrequentTask(text);
-      });
-      frequentList.appendChild(div);
-    });
-  }
-
-  /** Put frequent task *text* in the composer and close the sheet. */
-  function useFrequentTask(text) {
-    inp.value = text;
-    syncClearBtn();
-    autosizeComposer();
-    closeFrequentPanel();
-    inp.focus();
-  }
   function setupPasswordToggle(toggleId, inputId, secretName) {
     const btn = document.getElementById(toggleId);
     const inp = document.getElementById(inputId);
@@ -24863,8 +24739,8 @@
     editBtn.addEventListener('click', () => startCustomModelEdit(model));
     row.appendChild(editBtn);
 
-    // Two-step inline confirm (as for frequent tasks and promptlets):
-    // the trash icon reveals Delete / Cancel, nothing is posted yet.
+    // Two-step inline confirm (as for promptlets): the trash icon
+    // reveals Delete / Cancel, nothing is posted yet.
     const del = makeSidebarDeleteConfirm({
       ariaLabel: 'Delete ' + model.name,
       onConfirm: () => {

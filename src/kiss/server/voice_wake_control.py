@@ -33,11 +33,12 @@ import functools
 import json
 import logging
 import signal
+import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
-from kiss.core.processes import kill_process_group, new_process_group_kwargs
+from kiss.core.processes import IS_WINDOWS, kill_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -148,8 +149,8 @@ def _signal_listener(proc: asyncio.subprocess.Process, sig: int) -> bool:
     :func:`kiss.core.processes.kill_process_group`).
 
     Args:
-        proc: The listener child, spawned with
-            :func:`kiss.core.processes.new_process_group_kwargs`.
+        proc: The listener child, spawned in its own process group
+            (``start_new_session`` / ``CREATE_NEW_PROCESS_GROUP``).
         sig: The signal to deliver.
 
     Returns:
@@ -702,7 +703,12 @@ class VoiceWakeController:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 # Own process group so _terminate reaps grandchildren too.
-                **new_process_group_kwargs(),
+                start_new_session=not IS_WINDOWS,
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+                    if IS_WINDOWS
+                    else 0
+                ),
             ))
         )
         try:

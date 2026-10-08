@@ -352,7 +352,8 @@ function testIconSizeSurvivesStateChanges(remote) {
     },
   };
   copy.click();
-  return Promise.resolve().then(() => {
+  // The flash follows PanelCopy.copyText's promise chain: wait a macrotask.
+  return new Promise(r => setTimeout(r, 0)).then(() => {
     assert.strictEqual(
       copied,
       'refactor the parser',
@@ -453,43 +454,37 @@ function testBehaviourUnchanged(remote) {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Only the *history* task panels change - the frequent-tasks and
-//    inject lists keep their compact inline buttons.
+// 6. Only the *history* task panels change - the promptlets list keeps
+//    its compact inline buttons.
 // ---------------------------------------------------------------------------
 
-function testFrequentListUnaffected() {
+function testTricksListUnaffected() {
   const {win} = makeWebview(false);
-  win.dispatchEvent(
-    new win.MessageEvent('message', {
-      data: {
-        type: 'frequentTasks',
-        tasks: [{task: 'run the tests', count: 3}],
-      },
-    }),
-  );
-  const item = win.document.querySelector('#frequent-list .sidebar-item');
-  assert.ok(item, 'frequent-task row rendered');
+  win.__TRICKS__ = ['run the tests'];
+  win.document.getElementById('tricks-btn').click();
+  const item = win.document.querySelector('#tricks-list .sidebar-item');
+  assert.ok(item, 'promptlet row rendered');
   assert.ok(
     !item.classList.contains('running-item'),
-    'frequent-task rows are not history task panels',
+    'promptlet rows are not history task panels',
   );
   const copy = item.querySelector('.sidebar-item-copy');
-  assert.ok(copy, 'frequent-task row has a copy button');
+  assert.ok(copy, 'promptlet row has a copy button');
   const svg = copy.querySelector('svg');
-  assertCompactIcon(win, svg, 'frequent-task copy');
+  assertCompactIcon(win, svg, 'promptlet copy');
   const btnStyle = win.getComputedStyle(copy);
   assert.strictEqual(
     px(btnStyle.minWidth),
     0,
-    'frequent-task buttons keep their compact intrinsic box',
+    'promptlet buttons keep their compact intrinsic box',
   );
   assert.strictEqual(
     px(btnStyle.paddingLeft),
     0,
-    'frequent-task buttons keep the compact "2px 0" padding',
+    'promptlet buttons keep the compact "2px 0" padding',
   );
   win.close();
-  console.log('  ok - frequent-task rows keep their compact buttons');
+  console.log('  ok - promptlet rows keep their compact buttons');
 }
 
 async function main() {
@@ -501,7 +496,7 @@ async function main() {
   });
   await testIconSizeSurvivesStateChanges(false);
   await testIconSizeSurvivesStateChanges(true);
-  testFrequentListUnaffected();
+  testTricksListUnaffected();
   console.log('All historyTaskActionsRow tests passed');
 }
 

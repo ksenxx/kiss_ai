@@ -8,8 +8,7 @@
 // popup and hand focus back to the control that opened them; an inner
 // popup (promptlet editor, server-reset confirm) consumes Escape first;
 // the promptlet toggle exposes its state through aria-expanded.  Each
-// test fails on the old code.  (The frequent-tasks sheet has no opener
-// in chat.html, so it cannot be exercised end to end.)
+// test fails on the old code.
 'use strict';
 
 const assert = require('assert');

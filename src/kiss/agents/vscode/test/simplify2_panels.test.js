@@ -12,13 +12,7 @@ function isOpen(win, id) {
 }
 
 function run() {
-  const {win, posted} = makeWebview({
-    beforeScripts(w) {
-      const btn = w.document.createElement('button');
-      btn.id = 'frequent-tasks-btn';
-      w.document.body.appendChild(btn);
-    },
-  });
+  const {win, posted} = makeWebview();
   const doc = win.document;
 
   win.__TRICKS__ = ['do the thing'];
@@ -37,18 +31,6 @@ function run() {
   assert.ok(isOpen(win, 'tricks-panel'), 'tricks re-opens');
   tricksBtn.click();
   assert.ok(!isOpen(win, 'tricks-panel'), 'toggle button closes tricks panel');
-
-  const frequentBtn = doc.getElementById('frequent-tasks-btn');
-  frequentBtn.click();
-  assert.ok(isOpen(win, 'frequent-panel'), 'frequent panel opens');
-  assert.ok(isOpen(win, 'frequent-overlay'), 'frequent overlay opens');
-  assert.ok(
-    posted.some(m => m.type === 'getFrequentTasks' && m.limit === 50),
-    'opening the frequent panel requests {getFrequentTasks, limit: 50}',
-  );
-  doc.getElementById('frequent-panel-close').click();
-  assert.ok(!isOpen(win, 'frequent-panel'), 'close button closes panel');
-  assert.ok(!isOpen(win, 'frequent-overlay'), 'frequent overlay closes');
 
   const gear = doc.querySelector('#settings-btn');
   assert.ok(gear, 'tab bar renders the settings gear button');
@@ -69,7 +51,7 @@ function run() {
   );
 
   win.close();
-  console.log('  ok - settings/frequent/tricks panels open and close');
+  console.log('  ok - settings/tricks panels open and close');
 }
 
 run();

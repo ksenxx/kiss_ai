@@ -65,11 +65,6 @@ function makeWebview(opts) {
     },
   });
 
-  if (remote) {
-    const btn = win.document.createElement('button');
-    btn.id = 'frequent-tasks-btn';
-    win.document.body.appendChild(btn);
-  }
   win.acquireVsCodeApi = function () {
     let state;
     return {
