@@ -54,16 +54,12 @@ from kiss.core.models.model import (
     ThinkingCallback,
     TokenCallback,
     _iter_balanced_json_objects,
+    _iter_jsonl,
     _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _dict_field(record: Any, name: str) -> Any:
-    """Return key *name* of the dict *record*, or ``None`` when absent."""
-    return record.get(name) if isinstance(record, dict) else None
 
 
 
@@ -97,14 +93,7 @@ def _iter_stream_json_events(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
         The parsed event dicts, with ``stream_event`` wrappers replaced by
         their inner event.
     """
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for event in _iter_jsonl(lines):
         if event.get("type") == "stream_event":
             event = event.get("event", {})
         yield event
@@ -479,9 +468,7 @@ class ClaudeCodeModel(CLITextModel):
                         thinking_text = block.get("thinking", "")
                         if thinking_text:
                             thinking_content += thinking_text
-                            self._invoke_thinking_callback(True)
-                            self._invoke_token_callback(thinking_text)
-                            self._invoke_thinking_callback(False)
+                            self._emit_as_thinking(thinking_text)
                     elif block_type == "text":
                         text = block.get("text", "")
                         if text:
@@ -656,7 +643,7 @@ class ClaudeCodeModel(CLITextModel):
         if not isinstance(response, dict):
             return 0, 0, 0, 0, 0
         usage = response.get("usage") or {}
-        cache_write_5m, cache_write_1h = cache_creation_tokens(usage, _dict_field)
+        cache_write_5m, cache_write_1h = cache_creation_tokens(usage)
         return (
             usage.get("input_tokens") or 0,
             usage.get("output_tokens") or 0,
