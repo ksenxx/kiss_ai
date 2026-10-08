@@ -16,11 +16,10 @@ writable so the caller can skip silently.
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
 from kiss.core.config import kiss_home
+from kiss.core.utils import seed_file_atomically
 
 
 def kiss_home_dir() -> Path:
@@ -37,14 +36,11 @@ def ensure_user_asset_from_default(
     truth is the user's local copy — there is no bundled package
     file, only a tiny inline default written on first read.
 
-    The seed is **atomic and non-clobbering**: the default is staged
-    in a sibling temp file and hard-linked into place, so a concurrent
-    reader (e.g. the autocomplete worker calling ``read_tricks`` while
-    a command-handler thread seeds ``MY_INJECTION.md``) never observes
-    an empty or partially-written file — a plain ``write_text`` seed
-    truncates first and exposed a torn read.  If the file appears
-    between the existence check and the link (a concurrent seeder or a
-    user edit), the existing file wins.
+    The seed is :func:`kiss.core.utils.seed_file_atomically`: atomic and
+    non-clobbering, so a concurrent reader (e.g. the autocomplete worker
+    calling ``read_tricks`` while a command-handler thread seeds
+    ``MY_INJECTION.md``) never observes an empty or partially-written
+    file, and an existing file always wins.
 
     Args:
         name: Asset file name (e.g. ``"MY_INJECTION.md"``).
@@ -58,23 +54,7 @@ def ensure_user_asset_from_default(
     """
     user_path = kiss_home_dir() / name
     try:
-        if user_path.exists():
-            return user_path
-        user_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{name}-", dir=str(user_path.parent),
-        )
-        try:
-            # A buffered file object (unlike a bare ``os.write``, whose
-            # partial-write return count was ignored) guarantees the
-            # whole default is written before the link publishes it.
-            with os.fdopen(fd, "wb") as f:
-                f.write(default_content.encode("utf-8"))
-            os.link(tmp, user_path)
-        except FileExistsError:
-            return user_path
-        finally:
-            Path(tmp).unlink(missing_ok=True)
-        return user_path
+        seed_file_atomically(user_path, default_content)
     except OSError:
         return None
+    return user_path
