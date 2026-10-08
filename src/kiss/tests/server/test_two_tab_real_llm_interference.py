@@ -286,6 +286,19 @@ def _redirect_persistence(tmpdir: str) -> tuple:
 
 
 def _restore_persistence(saved: tuple) -> None:
+    """Close the redirected DB and restore the saved persistence state.
+
+    Every still-running task thread is joined first and the DB is closed
+    through :func:`ps._close_db` (which stops the ``kiss-event-writer``
+    thread before closing).  A raw ``ps._db_conn.close()`` closes whichever
+    connection was created last by ANY thread, so it segfaulted the
+    writer thread mid-batch when a task overran its join timeout.
+    """
+    for state in agent_state.snapshot():
+        thread = state.task_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=60)
+    ps._close_db()
     ps._DB_PATH, ps._db_conn, ps._KISS_DIR = saved
 
 
@@ -362,17 +375,9 @@ class _TwoTabFixture(unittest.TestCase):
         self.server = VSCodeServer(printer=self.printer)
 
     def tearDown(self) -> None:
-        try:
-            self.srv.shutdown()
-        except Exception:
-            pass
-        if ps._db_conn is not None:
-            try:
-                ps._db_conn.close()
-            except Exception:
-                pass
-            ps._db_conn = None
         _restore_persistence(self.saved_persistence)
+        self.srv.shutdown()
+        self.srv.server_close()
         _restore_config(self.saved_config)
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
@@ -630,17 +635,9 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
         self.server = VSCodeServer(printer=self.printer)
 
     def tearDown(self) -> None:
-        try:
-            self.srv.shutdown()
-        except Exception:
-            pass
-        if ps._db_conn is not None:
-            try:
-                ps._db_conn.close()
-            except Exception:
-                pass
-            ps._db_conn = None
         _restore_persistence(self.saved_persistence)
+        self.srv.shutdown()
+        self.srv.server_close()
         _restore_config(self.saved_config)
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
