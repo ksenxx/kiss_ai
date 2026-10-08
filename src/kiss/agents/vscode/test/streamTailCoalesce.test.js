@@ -478,12 +478,12 @@ async function testChunkAfterSwitchRetargetsSweep() {
   send(win, {type: 'text_delta', text: 'hi ', tabId: tab2});
 
   // Back on tab 1, leave a sweep pending WITH collapse debt...
-  win.document.querySelector('[data-tab-id="' + tab1 + '"]').click();
+  win._testApi.switchToTab(tab1);
   send(win, {type: 'system_output', text: 'one\n', tabId: tab1});
 
   // ...switch to tab 2 and make its FIRST event a buffered chunk: the
   // pending sweep is retargeted, dropping tab 1's debt.
-  win.document.querySelector('[data-tab-id="' + tab2 + '"]').click();
+  win._testApi.switchToTab(tab2);
   const t2panel = O.querySelector('.ev.tc');
   t2panel.classList.remove('collapsed');
   send(win, {type: 'text_delta', text: 'there', tabId: tab2});

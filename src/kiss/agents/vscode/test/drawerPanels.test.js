@@ -716,13 +716,22 @@ async function testMobileRemoteNeverFocusesComposerByCode() {
         {tabId: 'tab-c', chatId: 'chat-c', title: 'c', workDir: ''},
       ],
     });
-    const tabEl = id => d.querySelector(`.chat-tab[data-tab-id="${id}"]`);
+    // Chats have no tab row of their own: a chat is shown through the
+    // Chats-panel pick (switchToTab) and a lone chat is closed from
+    // another surface, which the daemon mirrors as a snapshot without it.
+    const snapshot = ids =>
+      send(win, {
+        type: 'tabs_state',
+        tabs: ids.map(id => ({
+          tabId: id,
+          chatId: id === bootTab ? 'chat-a' : `chat-${id.slice(-1)}`,
+          title: id.slice(-1),
+          workDir: '',
+        })),
+      });
     const steps = [
-      ['touching a tab', () => click(win, null, tabEl('tab-b'))],
-      [
-        'closing the active tab',
-        () => click(win, null, tabEl('tab-b').querySelector('.chat-tab-close')),
-      ],
+      ['touching a tab', () => win._testApi.switchToTab('tab-b')],
+      ['closing the active tab', () => snapshot([bootTab, 'tab-c'])],
       // A background tab whose agent is asking a question: touching it
       // (and landing on it after closing its neighbour) puts the
       // composer in answer mode, which is another focus path.
@@ -730,14 +739,14 @@ async function testMobileRemoteNeverFocusesComposerByCode() {
         'touching a tab with a pending question',
         () => {
           send(win, {type: 'askUser', tabId: 'tab-c', question: 'Which one?'});
-          click(win, null, tabEl('tab-c'));
+          win._testApi.switchToTab('tab-c');
         },
       ],
       [
         'closing a tab next to an asking tab',
         () => {
-          click(win, null, tabEl(bootTab));
-          click(win, null, tabEl(bootTab).querySelector('.chat-tab-close'));
+          win._testApi.switchToTab(bootTab);
+          snapshot(['tab-c']);
           assert.strictEqual(
             win._testApi.getActiveTabId(),
             'tab-c',

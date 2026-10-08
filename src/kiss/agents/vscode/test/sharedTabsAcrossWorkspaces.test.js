@@ -3,13 +3,15 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (JSDOM) tests for the shared tab bar: every client of the
+// End-to-end (JSDOM) tests for the shared tabs: every client of the
 // daemon (VS Code webview or remote web app — both run this same
-// main.js) shows the SAME registry tabs, whatever folder each tab runs
+// main.js) holds the SAME registry tabs, whatever folder each tab runs
 // in and whatever the client's own workspace directory (configWorkDir)
 // is. The workspace still scopes the history filter and the Explorer
-// views, never the tab bar: a task running anywhere stays visible on
-// every surface until the user closes its tab.
+// views, never the tabs: a task running anywhere stays open on every
+// surface until the user closes its tab. Chats are picked in the Chats
+// panel (`_testApi.switchToTab`); only the group on screen is rendered,
+// on the strip #tab-list.
 
 'use strict';
 
@@ -69,19 +71,23 @@ function setWorkspace(win, dir) {
 }
 
 function tabBarIds(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; count each tab once.
-  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
-    .filter(el => !!el.dataset.tabId)
-    .map(el => el.dataset.tabId);
-  return ids.filter((id, i) => ids.indexOf(id) === i);
+  // Every open tab, in tab order. There is no row of chat tabs: a chat
+  // is picked in the Chats panel and only the group on screen is
+  // rendered (on #tab-list), so the tab records are the shared state.
+  // (Copied into this realm: deepStrictEqual compares prototypes too.)
+  return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
 function activeTabId(win) {
-  // The strip's active entry is the tab on screen (the main row only
-  // highlights the group it belongs to).
+  // The strip's active entry is the tab on screen.
   const el = win.document.querySelector('#tab-list .chat-tab.active');
   return el ? el.dataset.tabId : null;
+}
+
+function stripIds(win) {
+  return Array.from(win.document.querySelectorAll('#tab-list .chat-tab'))
+    .filter(el => !!el.dataset.tabId)
+    .map(el => el.dataset.tabId);
 }
 
 function entry(tabId, workDir, chatId, scopeWorkDir) {
@@ -119,8 +125,9 @@ function testEveryRegistryTabIsShownWhateverTheWorkspace() {
       tabBarIds(win),
       ['a1', 'wt', 'b1', 'un', 'api'],
       (remote ? 'remote' : 'vscode') +
-        ': every registry tab gets a strip, whatever folder it runs in',
+        ': every registry tab is open, whatever folder it runs in',
     );
+    assert.strictEqual(activeTabId(win), 'a1', 'the first registry tab is on screen');
     assert.strictEqual(
       posted.filter(m => m && m.type === 'closeTab').length,
       0,
@@ -137,7 +144,7 @@ function testWorkspaceChangeLeavesTheTabBarAlone() {
   const {win} = makeWebview();
   setWorkspace(win, '/ws/a');
   send(win, MIXED_SNAPSHOT);
-  clickEl(win, win.document.querySelector('.chat-tab[data-tab-id="b1"]'));
+  win._testApi.switchToTab('b1'); // the Chats-panel pick
   assert.strictEqual(activeTabId(win), 'b1');
   const input = win.document.getElementById('task-input');
   input.value = 'draft on b1';
@@ -205,8 +212,10 @@ function testHistoryClickOnAnotherWorkspaceChatActivatesItsTab() {
 function testFileFromAnotherWorkspaceTabOpensAsBackgroundContentTab() {
   // A file/report produced by a tab that runs in another folder opens
   // like any other background tab's file: its content tab joins that
-  // tab's group (shown on the group strip once the user is on that
-  // chat) and waits without pulling the user off the tab they read.
+  // tab's group and waits without pulling the user off the tab they
+  // read. On a stacked surface (this jsdom page) the group strip lists
+  // every content tab whoever opened it, so it is reachable from the
+  // chat on screen as well as from its owner.
   const {win} = makeWebview();
   setWorkspace(win, '/ws/a');
   send(win, {
@@ -221,12 +230,17 @@ function testFileFromAnotherWorkspaceTabOpensAsBackgroundContentTab() {
     content: '<p>report</p>',
   });
   assert.strictEqual(activeTabId(win), 'a1', 'a background file never steals focus');
+  const open = Array.from(win._testApi.openTabs());
+  assert.deepStrictEqual(tabBarIds(win).slice(0, 2), ['a1', 'b1'], 'both chats stay open');
+  assert.strictEqual(open.length, 3, 'three tabs are open in all');
+  assert.ok(open[2].isContentTab, 'the third is the content tab');
+  assert.strictEqual(open[2].rootId, 'b1', "the file belongs to its opener's group");
   assert.deepStrictEqual(
-    tabBarIds(win),
-    ['a1', 'b1'],
-    "the other chat's file stays in that chat's group, off the strip of this one",
+    stripIds(win),
+    ['a1', open[2].id],
+    'a stacked surface lists the content tab under the chat on screen too',
   );
-  clickEl(win, win.document.querySelector('.chat-tab[data-tab-id="b1"]'));
+  win._testApi.switchToTab('b1'); // the Chats-panel pick
   const strip = Array.from(win.document.querySelectorAll('#tab-list .chat-tab'));
   assert.strictEqual(strip.length, 2, "the content tab gets a strip in its owner's group");
   assert.strictEqual(strip[0].dataset.tabId, 'b1');

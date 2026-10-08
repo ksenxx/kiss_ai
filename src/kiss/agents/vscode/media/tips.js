@@ -116,7 +116,6 @@
     '  padding: var(--space-4, 16px) var(--space-5, 20px);' +
     '  overflow: auto;' +
     '  overflow-wrap: anywhere;' +
-    '  scrollbar-width: thin;' +
     '}' +
     '.tips-body > :first-child { margin-top: 0; }' +
     '.tips-body > :last-child { margin-bottom: 0; }' +

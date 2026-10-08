@@ -1017,9 +1017,12 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         assert "getSpendReport" in posted
 
         # Clicking an app that is not connected submits a connect task
-        # in a NEW tab.  A new chat is a root tab: it lands on the main
-        # row (#main-tab-list), not in the active chat's group strip.
-        tabs_before = page.locator("#main-tab-list .chat-tab").count()
+        # in a NEW chat, which takes the screen; the idle chat left
+        # behind (no task, no draft) is retired, so the open-tab records
+        # end up with the new root chat in place of the old one.
+        tabs_before = page.evaluate("() => window._testApi.openTabs()")
+        chat_before = page.evaluate("() => window._testApi.getActiveTabId()")
+        assert [t["id"] for t in tabs_before] == [chat_before], tabs_before
         # The shim keeps retrying the websocket and reports the daemon
         # down again after every failed attempt (sendMessage then holds
         # the prompt back), so the "connected" report and the click run
@@ -1036,7 +1039,13 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         assert submit is not None
         assert submit["prompt"].startswith('Connect my Slack app: authenticate the "slack"')
         assert 'run_agent with agent "slack"' in submit["prompt"]
-        assert page.locator("#main-tab-list .chat-tab").count() == tabs_before + 1
+        chat_after = page.evaluate("() => window._testApi.getActiveTabId()")
+        assert chat_after != chat_before, "the connect task runs in a new chat"
+        tabs_after = page.evaluate("() => window._testApi.openTabs()")
+        assert [t["id"] for t in tabs_after] == [chat_after], (
+            f"the new root chat replaces the retired idle one: {tabs_after}"
+        )
+        assert not tabs_after[0]["isSubagentTab"] and not tabs_after[0]["isContentTab"]
     finally:
         page.close()
 
@@ -1071,7 +1080,7 @@ def test_a_long_task_update_leaves_the_apps_list_a_usable_share(
 
 # Each surface that shows the task-info panel, as (viewport width, JS
 # run after boot).  The remote page boots as the desktop dock (wide) or
-# the mobile drawer (narrow, opened from its tab-bar button); the VS
+# the mobile drawer (narrow, opened from its footer button); the VS
 # Code surfaces are the same markup under the extension's body classes
 # (remote-codex.css only styles body.remote-chat, so dropping it leaves
 # main.css's own rules for that mode).

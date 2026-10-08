@@ -128,21 +128,27 @@ function wheel(win, el, deltaY) {
   );
 }
 
+// Bring a tab on screen the way the user does: a click on the group strip
+// when the tab is listed there, else the Chats-panel pick (chat tabs have
+// no row of their own any more).
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    '.chat-tab[data-tab-id=' + JSON.stringify(tabId) + ']',
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    'tab ' + tabId + ' must be open',
   );
-  assert.ok(el, 'tab ' + tabId + ' must be in the tab bar');
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  const el = win.document.querySelector(
+    '#tab-list .chat-tab[data-tab-id=' + JSON.stringify(tabId) + ']',
+  );
+  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  else win._testApi.switchToTab(tabId);
 }
 
 /** The active tab's label: the task the reader is looking at. */
 function shownTask(win) {
-  const label = win.document.querySelector(
-    '.chat-tab[aria-selected="true"] .chat-tab-label',
-  );
-  assert.ok(label, 'the active tab must be in the tab bar');
-  return label.textContent;
+  const active = win._testApi.getActiveTabId();
+  const rec = win._testApi.openTabs().find(t => t.id === active);
+  assert.ok(rec, 'the active tab must be open');
+  return rec.title;
 }
 
 /** The task panel that opens the transcript region of *name*. */
@@ -557,6 +563,10 @@ function testHistoryClickPinsTheClickedTask() {
 // the tab is active nor after the reader has moved to another tab).
 function testHistoryTabSurvivesTheWelcomeReset() {
   const {win, O, posted, tabId} = setup({});
+  // The boot tab holds an unsent draft, so opening the history row
+  // leaves it open behind the fresh tab (an idle, empty chat would be
+  // retired) and the round trip below has a tab to come back from.
+  win.document.getElementById('task-input').value = 'draft kept';
   send(win, {
     type: 'openChatFromHistory',
     chatId: 'chat-other',

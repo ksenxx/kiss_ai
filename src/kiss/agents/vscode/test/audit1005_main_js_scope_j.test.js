@@ -64,21 +64,22 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// Every open tab, in tab order (copied into this realm's Array so
+// deepStrictEqual compares values, not realms' prototypes).
 function tabIds(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; count each tab once.
-  const ids = Array.from(
-    win.document.querySelectorAll('.chat-tab[data-tab-id]'),
-  ).map(el => el.getAttribute('data-tab-id'));
-  return ids.filter((id, i) => ids.indexOf(id) === i);
+  return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
+// A tab on the group strip (#tab-list: the chat on screen, its
+// sub-agents and every content tab) is clicked there; a background chat
+// is picked the way the Chats panel does it.
 function clickTab(win, tabId) {
+  assert.ok(tabIds(win).includes(tabId), `tab ${tabId} must be open`);
   const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
   );
-  assert.ok(el, `tab ${tabId} must be in the strip`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  else win._testApi.switchToTab(tabId);
 }
 
 // One event-loop turn: lets the theme MutationObserver callbacks a class
