@@ -1600,10 +1600,14 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # ``use_worktree`` value.  The reset guards against stale state
         # from an earlier run that crashed before ``SorcarAgent.run``'s
         # cleanup; the verdict computed here is reused there for the
-        # system prompt selection.
+        # system prompt selection.  The model is resolved ONCE here and
+        # handed down resolved, so the classifier and the run (the
+        # ``ChatSorcarAgent.run`` fallback re-reads the user's
+        # last-selected model otherwise, racing the model picker) agree.
+        kwargs["model_name"] = self._resolve_model_name(kwargs.get("model_name"))
         self._reset_task_classification()
         classification = self._classify_task_once(
-            kwargs.get("model_name"),
+            kwargs["model_name"],
             prompt_template,
             kwargs.get("model_config"),
             arguments=kwargs.get("arguments"),
