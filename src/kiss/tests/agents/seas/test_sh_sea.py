@@ -28,7 +28,7 @@ from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -42,11 +42,6 @@ _SEA_PATH = Path(sh_sea.__file__).resolve()
 def _tool_requests(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return the agentic requests (those carrying a tool list)."""
     return [r for r in requests if r.get("tools")]
-
-
-def _system_message(request: dict[str, Any]) -> str:
-    """Return the system message text of one chat-completions request."""
-    return str(next(m for m in request["messages"] if m["role"] == "system")["content"])
 
 
 def test_sea_methods_follow_the_user_contract() -> None:
@@ -65,7 +60,9 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert isinstance(sea, WorkerSea)
     assert sea.settings({}) == {"tool_profile": "bash", "locked": ["tool_profile"]}
     assert sea.settings({"model": "m"}) == {
-        "model": "m", "tool_profile": "bash", "locked": ["tool_profile"],
+        "model": "m",
+        "tool_profile": "bash",
+        "locked": ["tool_profile"],
     }
     assert TOOL_PROFILES["bash"] == frozenset({"Bash"})
     # ``WorkerSea`` turns worktree, auto-commit, classifier, browser and
@@ -107,7 +104,8 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
     command = "printf 'sh-sea-output %s' 42"
     script = [
         tool_call_body(
-            "Bash", {"command": command, "description": "run the user's command"},
+            "Bash",
+            {"command": command, "description": "run the user's command"},
             prompt_tokens=500,
         ),
         finish_body("<pre>sh-sea-output 42</pre>", prompt_tokens=600),
@@ -141,7 +139,7 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"Bash", "finish"}, names
-        system = _system_message(request)
+        system = system_message(request)
         assert system.startswith(sh_sea.SYSTEM_PROMPT), system[:200]
         assert "# Restricted tool profile: bash" in system
         assert "Bash" in system.split("# Restricted tool profile: bash", 1)[1]
@@ -171,7 +169,7 @@ def test_explicit_full_profile_offers_the_whole_toolset(tmp_path: Path) -> None:
     assert yaml.safe_load(result)["success"] is True
     names = {t["function"]["name"] for t in _tool_requests(requests)[0]["tools"]}
     assert {"Bash", "Read", "Edit", "Write", "finish"} <= names
-    assert "# Restricted tool profile" not in _system_message(_tool_requests(requests)[0])
+    assert "# Restricted tool profile" not in system_message(_tool_requests(requests)[0])
 
 
 def test_unknown_profile_is_rejected_before_the_model_is_called(tmp_path: Path) -> None:
@@ -204,20 +202,28 @@ def test_profile_does_not_leak_into_the_next_run_of_the_same_agent(tmp_path: Pat
     script = [finish_body("<p>done</p>", prompt_tokens=500)]
     agent = ChatSorcarAgent("profile-reset-test")
     common: dict[str, Any] = {
-        "model_name": MODEL, "work_dir": str(tmp_path), "max_steps": 3,
-        "max_budget": 1.0, "web_tools": False, "use_memory": False, "verbose": False,
+        "model_name": MODEL,
+        "work_dir": str(tmp_path),
+        "max_steps": 3,
+        "max_budget": 1.0,
+        "web_tools": False,
+        "use_memory": False,
+        "verbose": False,
     }
     with serve(script) as (url, requests):
         agent.run(
-            prompt_template="Say done.", tool_profile="bash",
-            model_config={"base_url": url, "api_key": "local"}, **common,
+            prompt_template="Say done.",
+            tool_profile="bash",
+            model_config={"base_url": url, "api_key": "local"},
+            **common,
         )
         first = {t["function"]["name"] for t in _tool_requests(requests)[0]["tools"]}
     assert first == {"Bash", "finish"}
     with serve(script) as (url, requests):
         agent.run(
             prompt_template="Say done again.",
-            model_config={"base_url": url, "api_key": "local"}, **common,
+            model_config={"base_url": url, "api_key": "local"},
+            **common,
         )
         second = {t["function"]["name"] for t in _tool_requests(requests)[0]["tools"]}
     assert {"Bash", "Read", "Edit", "Write", "finish"} <= second
@@ -244,4 +250,4 @@ def test_profile_without_basic_tools_offers_finish_only_and_no_note(tmp_path: Pa
     assert yaml.safe_load(result)["success"] is True
     request = _tool_requests(requests)[0]
     assert {t["function"]["name"] for t in request["tools"]} == {"finish"}
-    assert "# Restricted tool profile" not in _system_message(request)
+    assert "# Restricted tool profile" not in system_message(request)

@@ -23,8 +23,9 @@ API emulator).
 from __future__ import annotations
 
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,14 +37,17 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import (
     _make_backend,
     _TelegramBot,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 from kiss.tests.conftest import IS_WINDOWS
 
 VALID_TOKEN = "123456:VALID-TOKEN"
-SEEN_REQUESTS: list[dict[str, Any]] = []
 
 
 class _BotApiHandler(BaseHTTPRequestHandler):
     """Minimal Telegram Bot API emulator recording every request."""
+
+    server: RecordingServer  # type: ignore[assignment]
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         """Silence the default stderr access log."""
@@ -54,7 +58,7 @@ class _BotApiHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length)
         _, _, rest = self.path.partition("/bot")
         token, _, method = rest.partition("/")
-        SEEN_REQUESTS.append(
+        self.server.requests.append(
             {
                 "token": token,
                 "method": method,
@@ -95,36 +99,23 @@ class _BotApiHandler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def api_base() -> Any:
-    """Run the Bot API emulator for one test and yield its base URL."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _BotApiHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    SEEN_REQUESTS.clear()
-    try:
-        yield f"http://127.0.0.1:{server.server_address[1]}"
-    finally:
-        server.shutdown()
-        server.server_close()
+def api() -> Iterator[RecordingServer]:
+    """Run the Bot API emulator for one test."""
+    yield from serve_recording(_BotApiHandler)
 
 
 @pytest.fixture
-def legacy_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+def legacy_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate config under a temp ``KISS_HOME`` and force legacy auth."""
-    monkeypatch.setenv("KISS_HOME", str(tmp_path))
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
-    return tmp_path
+    return isolated_kiss_home
 
 
-def _auth_tools(agent: TelegramAgent) -> dict[str, Any]:
-    return {tool.__name__: tool for tool in agent._get_auth_tools()}
-
-
-def test_authenticate_then_check_and_persist(legacy_env: Any, api_base: str) -> None:
+def test_authenticate_then_check_and_persist(legacy_env: Path, api: RecordingServer) -> None:
     """A valid token is validated over HTTP, saved with mode 0600 and reusable."""
     agent = TelegramAgent()
-    agent._backend._api_base = api_base
-    tools = _auth_tools(agent)
+    agent._backend._api_base = api.base_url
+    tools = auth_tools(agent)
     assert tools["check_telegram_auth"]().startswith("Not authenticated with Telegram")
 
     result = json.loads(tools["authenticate_telegram"](f"  {VALID_TOKEN}  "))
@@ -148,7 +139,7 @@ def test_authenticate_then_check_and_persist(legacy_env: Any, api_base: str) -> 
     assert IS_WINDOWS or (config_path.stat().st_mode & 0o777) == 0o600
 
     # Legacy mode puts the real token in the URL and sends no bearer header.
-    get_me = SEEN_REQUESTS[0]
+    get_me = api.requests[0]
     assert get_me["token"] == VALID_TOKEN
     assert "authorization" not in get_me["headers"]
 
@@ -156,7 +147,7 @@ def test_authenticate_then_check_and_persist(legacy_env: Any, api_base: str) -> 
     fresh = TelegramAgent()
     assert fresh._is_authenticated()
     assert isinstance(fresh._backend._bot, _TelegramBot)
-    fresh._backend._api_base = api_base
+    fresh._backend._api_base = api.base_url
     assert fresh._backend.connect() is True
     assert fresh._backend._connection_info == "Authenticated as @emu_bot"
     assert fresh._backend._bot_token() == VALID_TOKEN
@@ -171,11 +162,11 @@ def test_authenticate_then_check_and_persist(legacy_env: Any, api_base: str) -> 
     assert not TelegramAgent()._is_authenticated()
 
 
-def test_authenticate_rejects_bad_or_empty_token(legacy_env: Any, api_base: str) -> None:
+def test_authenticate_rejects_bad_or_empty_token(legacy_env: Path, api: RecordingServer) -> None:
     """A rejected token is reported as an error and nothing is written."""
     agent = TelegramAgent()
-    agent._backend._api_base = api_base
-    tools = _auth_tools(agent)
+    agent._backend._api_base = api.base_url
+    tools = auth_tools(agent)
     assert tools["authenticate_telegram"]("   ") == "bot_token cannot be empty."
 
     result = json.loads(tools["authenticate_telegram"]("999:WRONG"))
@@ -185,10 +176,10 @@ def test_authenticate_rejects_bad_or_empty_token(legacy_env: Any, api_base: str)
     assert not agent._is_authenticated()
 
 
-def test_connect_reports_failure_and_missing_config(legacy_env: Any, api_base: str) -> None:
+def test_connect_reports_failure_and_missing_config(legacy_env: Path, api: RecordingServer) -> None:
     """``connect`` fails closed for a bad stored token and for no config."""
     backend = TelegramChannelBackend()
-    backend._api_base = api_base
+    backend._api_base = api.base_url
     assert backend.connect() is False
     assert backend._connection_info == "No Telegram token found."
 
@@ -197,26 +188,26 @@ def test_connect_reports_failure_and_missing_config(legacy_env: Any, api_base: s
     assert backend._connection_info.startswith("Telegram auth failed: Telegram API getMe failed")
 
 
-def test_make_backend_exits_without_config(legacy_env: Any, capsys: pytest.CaptureFixture) -> None:
+def test_make_backend_exits_without_config(legacy_env: Path, capsys: pytest.CaptureFixture) -> None:
     """Poll-mode startup exits with instructions when no token is stored."""
     with pytest.raises(SystemExit):
         _make_backend()
     assert "Not authenticated. Run: kiss-telegram -t 'authenticate'" in capsys.readouterr().out
 
 
-def test_bot_adapter_multipart_and_error_envelopes(legacy_env: Any, api_base: str) -> None:
+def test_bot_adapter_multipart_and_error_envelopes(legacy_env: Path, api: RecordingServer) -> None:
     """Uploads go multipart; malformed and error envelopes raise RuntimeError."""
     import io
 
     import requests
 
     backend = TelegramChannelBackend()
-    backend._api_base = api_base
+    backend._api_base = api.base_url
     bot = _TelegramBot(backend, VALID_TOKEN, requests.Session())
 
     sent = bot.send_message(42, "hi", reply_to_message_id=5)
     assert sent.message_id == 77
-    assert json.loads(SEEN_REQUESTS[-1]["body"]) == {
+    assert json.loads(api.requests[-1]["body"]) == {
         "chat_id": 42,
         "text": "hi",
         "reply_to_message_id": 5,
@@ -224,7 +215,7 @@ def test_bot_adapter_multipart_and_error_envelopes(legacy_env: Any, api_base: st
 
     photo = bot.send_photo(42, io.BytesIO(b"\x89PNG"), caption="cap")
     assert photo.message_id == 77
-    assert SEEN_REQUESTS[-1]["headers"]["content-type"].startswith("multipart/form-data")
+    assert api.requests[-1]["headers"]["content-type"].startswith("multipart/form-data")
 
     with pytest.raises(RuntimeError, match="badJson failed: HTTP 200 $"):
         bot._call("badJson")
