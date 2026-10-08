@@ -310,7 +310,6 @@ class TerminalService:
         if pid == 0:  # pragma: no cover — the child execs or dies
             # Only exec-safe work here: the parent is multi-threaded.
             try:
-                fcntl.ioctl(0, termios.TIOCSWINSZ, _winsize(rows, cols))
                 os.chdir(cwd)
                 os.execvpe(argv[0], argv, env)
             except BaseException:  # noqa: BLE001
@@ -319,6 +318,11 @@ class TerminalService:
         # ``forkpty`` hands back an inheritable master: without this a
         # later shell would hold every earlier terminal's master open.
         os.set_inheritable(fd, False)
+        # The initial size is set here, on the master, not by the child
+        # before its exec: a child scheduled late (a loaded machine) would
+        # apply the opening size AFTER a resize or re-attach the parent
+        # had already applied, and the shell would start at the old size.
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, _winsize(rows, cols))
         return _Session(
             tab_id=tab_id, conn_id=conn_id, pid=pid, fd=fd,
             shell=argv[0], cwd=cwd,

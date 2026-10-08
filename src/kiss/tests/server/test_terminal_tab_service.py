@@ -286,6 +286,24 @@ def test_dropped_connection_keeps_the_shell_for_a_reattach(
     assert svc.session_count() == 0
 
 
+def test_resize_right_after_open_wins_over_the_opening_size(
+    service: Any, tmp_path: Path,
+) -> None:
+    """A re-attach (or resize) that follows ``open`` at once must leave the
+    pty at ITS size once the shell is up.  The opening size is applied on
+    the master by the parent, in program order with the later ioctls; a
+    forked child applying it before its exec could run after them on a
+    loaded machine and the shell would start at the opening size."""
+    svc, printer = service
+    svc.open("tab-i", "conn-1", str(tmp_path), 80, 24)
+    svc.viewer_gone("conn-1")
+    svc.open("tab-i", "conn-2", str(tmp_path), 90, 25)
+    svc.resize("tab-i", "conn-2", 100, 30)
+    svc.input("tab-i", "conn-2", "stty size\n")
+    printer.wait_for(lambda: "30 100" in printer.output("tab-i"), timeout=20)
+    assert "24 80" not in printer.output("tab-i")
+
+
 def test_reattach_before_grace_expiry_cancels_the_hangup(
     service: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
