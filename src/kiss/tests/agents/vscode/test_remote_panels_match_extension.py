@@ -432,6 +432,10 @@ _PROBE_STYLES_JS = (
   const tpRect = tp.getBoundingClientRect();
   const tcRect = tc.getBoundingClientRect();
   const tpText = getComputedStyle(tp.querySelector('.task-panel-text'));
+  const contentWidth =
+    outRect.width -
+    parseFloat(getComputedStyle(out).paddingLeft) -
+    parseFloat(getComputedStyle(out).paddingRight);
   // Folded state: toggle, measure, restore (probes run after the
   // screenshot, so the toggle never shows up in it).
   tp.classList.add('collapsed');
@@ -442,16 +446,16 @@ _PROBE_STYLES_JS = (
     styles,
     taskPanelCollapsedTextDisplay: collapsedTextDisplay,
     taskPanelTextMaxHeight: tpText.maxHeight,
-    taskPanelGapLeft: tpRect.left - outRect.left,
-    // The task panel is 4/5 of the chat's content width, so its right
-    // gap is a share of that width (the two pages' viewports differ).
-    taskPanelWidthShare:
-      tpRect.width /
-      (outRect.width -
-        parseFloat(getComputedStyle(out).paddingLeft) -
-        parseFloat(getComputedStyle(out).paddingRight)),
+    // The user's task panel sits against the right edge at 4/5 of the
+    // chat's content width and every other event against the left edge
+    // at 7/8 of it (main.css).  The gap on the anchored side is the
+    // chat's padding on both surfaces; the gap on the open side is a
+    // share of the content width, which differs between the two pages,
+    // so that side is checked as the width share instead.
+    taskPanelGapRight: outRect.right - tpRect.right,
+    taskPanelWidthShare: tpRect.width / contentWidth,
     eventGapLeft: tcRect.left - outRect.left,
-    eventGapRight: outRect.right - tcRect.right,
+    eventWidthShare: tcRect.width / contentWidth,
   };
 })()"""
 )
@@ -663,23 +667,23 @@ def _assert_probe_parity(
             f"extension's value: {ext_probes[scalar]!r} != "
             f"{rem_probes[scalar]!r}"
         )
-    for key in (
-        "taskPanelGapLeft",
-        "eventGapLeft",
-        "eventGapRight",
-    ):
+    for key in ("taskPanelGapRight", "eventGapLeft"):
         ext_gap = float(ext_probes[key])
         rem_gap = float(rem_probes[key])
         assert abs(ext_gap - rem_gap) <= 2.0, (
             f"[{label}] {key}: remote panel format must match the "
             f"extension (extension={ext_gap}px, remote={rem_gap}px)"
         )
-    ext_share = float(ext_probes["taskPanelWidthShare"])
-    rem_share = float(rem_probes["taskPanelWidthShare"])
-    assert abs(ext_share - 0.8) <= 0.01 and abs(rem_share - 0.8) <= 0.01, (
-        f"[{label}] the task panel is 4/5 of the chat wide on both surfaces "
-        f"(extension={ext_share:.3f}, remote={rem_share:.3f})"
-    )
+    for key, share, words in (
+        ("taskPanelWidthShare", 0.8, "the task panel is 4/5"),
+        ("eventWidthShare", 0.875, "an event panel is 7/8"),
+    ):
+        ext_share = float(ext_probes[key])
+        rem_share = float(rem_probes[key])
+        assert abs(ext_share - share) <= 0.01 and abs(rem_share - share) <= 0.01, (
+            f"[{label}] {words} of the chat wide on both surfaces "
+            f"(extension={ext_share:.3f}, remote={rem_share:.3f})"
+        )
 
 
 @pytest.mark.timeout(240)

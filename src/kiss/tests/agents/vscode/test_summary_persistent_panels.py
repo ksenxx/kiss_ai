@@ -273,7 +273,16 @@ def test_summary_at_welcome_boundary(chat_page: Page) -> None:
 def test_background_summary_does_not_leak_panels(chat_page: Page) -> None:
     """A hidden chat keeps its panels and responses out of the visible chat."""
     page = chat_page
+    # The fresh page's tab is a local placeholder the daemon's tab
+    # registry never lists; the registry drops it the moment another
+    # tab is registered (the "+" button registers the tab it opens).
+    # A bare ``status`` event does not register a tab (only a run
+    # does), so the hidden chat must be a tab opened through "+".
+    placeholder = page.evaluate("window._testApi.getActiveTabId()")
+    page.locator("#new-chat-btn").click()
     first = page.evaluate("window._testApi.getActiveTabId()")
+    assert first != placeholder
+    expect(page.locator(f'.chat-tab[data-tab-id="{placeholder}"]')).to_have_count(0)
     _send(page, [{"type": "clear"}, {"type": "status", "running": True}])
     page.locator("#new-chat-btn").click()
     second = page.evaluate("window._testApi.getActiveTabId()")

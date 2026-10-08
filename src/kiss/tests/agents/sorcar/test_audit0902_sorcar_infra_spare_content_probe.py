@@ -203,13 +203,22 @@ class TestSpareHasContent:
         self._interrupt_checkout()
         gitdir = Path(_git(self.wt_dir, "rev-parse", "--git-dir").strip())
         before = sorted(p.name for p in gitdir.iterdir())
-        tmp_before = {p for p in Path(tempfile.gettempdir()).glob("kiss-spare-index-*")}
-        assert not GitWorktreeOps.spare_has_content(
-            self.repo, self.branch, self.wt_dir,
-        )
+        # The probe's scratch index goes to the process's temp dir, which
+        # concurrent test processes also litter with ``kiss-spare-index-*``
+        # of their own: give this probe a private one to inspect.
+        private_tmp = Path(self.tmp) / "scratch-tmp"
+        private_tmp.mkdir()
+        saved_tempdir = tempfile.tempdir
+        tempfile.tempdir = str(private_tmp)
+        try:
+            assert not GitWorktreeOps.spare_has_content(
+                self.repo, self.branch, self.wt_dir,
+            )
+        finally:
+            tempfile.tempdir = saved_tempdir
         assert sorted(p.name for p in gitdir.iterdir()) == before
         assert not (gitdir / "index").exists()
-        assert {p for p in Path(tempfile.gettempdir()).glob("kiss-spare-index-*")} == tmp_before
+        assert list(private_tmp.iterdir()) == []
 
     @posix_only("NTFS rejects control characters such as \\r in file names")
     def test_interrupted_checkout_with_newline_filename_is_content(self) -> None:

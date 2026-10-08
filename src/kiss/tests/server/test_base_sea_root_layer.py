@@ -28,7 +28,6 @@ import pytest
 
 from kiss.agents.seas.base.base_sea import (
     ALLOW,
-    FINISH_WITHOUT_SUMMARY_REFUSAL,
     SUMMARY_DUE_REFUSAL,
     SUMMARY_EVERY_STEPS,
     BaseSea,
@@ -210,14 +209,11 @@ class BaseSeaRootLayerDaemonTest(DaemonRunApiHarness):
         assert call["tool_call_hook"]("Bash", {"command": "ls"}) == ALLOW
         assert "house_tool" not in call["tool_names"]
         assert HOUSE_RULE not in call["system_prompt"]
-        # The run's toolset holds ``summary``, so the stock base's own
-        # rule is armed: finish waits for a summary (the implicit-finish
-        # probe, with no arguments, passes).
+        # The run's toolset holds ``summary``, so the stock base's
+        # cadence rule is armed; ``finish`` is never held up by it.
         assert "summary" in call["tool_names"]
         assert call["tool_call_hook"]("finish", {}) == ALLOW
-        assert call["tool_call_hook"]("finish", {"success": True}) == refuse(
-            FINISH_WITHOUT_SUMMARY_REFUSAL
-        )
+        assert call["tool_call_hook"]("finish", {"success": True}) == ALLOW
         assert call["tool_call_hook"]("summary", {"description": "- did x"}) == ALLOW
         assert call["tool_call_hook"]("finish", {"success": True}) == ALLOW
 
@@ -227,30 +223,30 @@ def summary(description: str) -> str:
     return description
 
 
-def test_stock_base_requires_a_summary_at_every_tenth_step_and_before_finish() -> None:
-    """Require a summary before finish and before other tools at every tenth step."""
+def test_stock_base_requires_a_summary_at_every_tenth_step() -> None:
+    """At a 10th step every tool but ``summary`` and ``finish`` waits for a summary.
+
+    ``finish`` is exempt at every step: a one-step run (or the agent's
+    implicit-finish probe) must be able to end without a summary first.
+    """
     sea = BaseSea()
     sea.tools([summary, house_tool])
     assert sea.has_summary_tool
     due = SUMMARY_DUE_REFUSAL.format(step=10, every=SUMMARY_EVERY_STEPS, name="Bash")
-    without = refuse(FINISH_WITHOUT_SUMMARY_REFUSAL)
-    # Nothing ran yet: the probe passes, a real finish waits for a summary.
+    # Nothing ran yet: both the probe and a real finish pass.
     assert base_tool_call_hook([sea], "finish", {}) == ALLOW
-    assert base_tool_call_hook([sea], "finish", {"success": True}) == without
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
     for _ in range(9):
         sea.llm_call_hook([])
         assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
     sea.llm_call_hook([])
     assert sea.step == 10 and sea.summary_due
     assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == refuse(due)
-    assert base_tool_call_hook([sea], "finish", {"success": True}) == without
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
     assert base_tool_call_hook([sea], "finish", {}) == ALLOW
     assert base_tool_call_hook([sea], "summary", {"description": "- ran ls"}) == ALLOW
     assert not sea.summary_due
     assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
-    # The summary is no longer the latest tool: finish waits for a fresh one.
-    assert base_tool_call_hook([sea], "finish", {"success": True}) == without
-    assert base_tool_call_hook([sea], "summary", {"description": "- ran ls again"}) == ALLOW
     assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
     assert base_tool_call_hook([sea], "finish", {"success": True, "is_continue": True}) == ALLOW
     # A toolset without ``summary`` (tool_profile "none", a SEA that
