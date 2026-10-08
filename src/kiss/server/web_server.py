@@ -10275,20 +10275,18 @@ class RemoteAccessServer:
             # is empty RIGHT NOW the orphan is terminated immediately.
             # Cost of the eager kill: a password saved during the wait
             # rotates the public URL instead of re-adopting it.
-            initial_cfg = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                None, load_config,
-            )
+            initial_cfg = await asyncio.to_thread(load_config)
             if not initial_cfg.get("remote_password", ""):
-                await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _terminate_orphan_cloudflared, self.port,
+                await asyncio.to_thread(
+                    _terminate_orphan_cloudflared, self.port,
                 )
-            password = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                None, _wait_for_remote_password, 30.0,
+            password = await asyncio.to_thread(
+                _wait_for_remote_password, 30.0,
             )
             own_tunnel_pid: int | None = None
             if password:
-                adopted = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _try_adopt_existing_cloudflared, self.port,
+                adopted = await asyncio.to_thread(
+                    _try_adopt_existing_cloudflared, self.port,
                 )
                 if adopted is not None:
                     adopted_pid, adopted_port, adopted_url = adopted
@@ -10301,8 +10299,8 @@ class RemoteAccessServer:
                         adopted_pid, adopted_port, adopted_url,
                     )
             if not password:
-                await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _terminate_orphan_cloudflared, self.port,
+                await asyncio.to_thread(
+                    _terminate_orphan_cloudflared, self.port,
                 )
                 logger.warning(
                     "remote_password is not set in ~/%s/config.json; "
@@ -10319,8 +10317,8 @@ class RemoteAccessServer:
                     file=sys.stderr,
                 )
             elif tunnel_url is None:
-                tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, self._start_tunnel,
+                tunnel_url = await asyncio.to_thread(
+                    self._start_tunnel,
                 )
                 spawned = self._tunnel_proc
                 if spawned is not None:
@@ -10337,9 +10335,8 @@ class RemoteAccessServer:
                 # while leaving the tunnel alive for the next daemon —
                 # a cleanup with ``keep_pid=None`` would kill exactly
                 # that tunnel.
-                await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _terminate_stray_cloudflared, self.port,
-                    own_tunnel_pid,
+                await asyncio.to_thread(
+                    _terminate_stray_cloudflared, self.port, own_tunnel_pid,
                 )
 
         self._last_ips = await asyncio.to_thread(_get_local_ips)
