@@ -62,28 +62,16 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-function tabEls(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; list each tab once.
-  const seen = new Set();
-  return Array.from(win.document.querySelectorAll('.chat-tab')).filter(el => {
-    if (!el.dataset.tabId || seen.has(el.dataset.tabId)) return false;
-    seen.add(el.dataset.tabId);
-    return true;
-  });
-}
-
+// Every open tab in tab order.  No row renders the chat tabs any more
+// (the chat on screen is the one picked in the Chats panel; the strip
+// under it only lists that chat's group), so the tab records are the
+// mirror of the daemon registry that the tests compare against.
 function tabBarIds(win) {
-  return tabEls(win).map(el => {
-    return el.dataset.tabId;
-  });
+  return plain(win._testApi.openTabs().map(t => t.id));
 }
 
 function tabBarTitles(win) {
-  return tabEls(win).map(el => {
-    const label = el.querySelector('.chat-tab-label');
-    return label ? label.textContent : '';
-  });
+  return plain(win._testApi.openTabs().map(t => t.title));
 }
 
 // JSDOM objects come from another JS realm, so deepStrictEqual's
@@ -419,10 +407,14 @@ function testCloseTabStillAnnouncedToDaemon() {
     type: 'tabs_state',
     tabs: [snapshotEntry('t1', 'one'), snapshotEntry('t2', 'two')],
   });
+  // Only the chat on screen is rendered (its own entry on the group
+  // strip carries the close button), so bring t2 on screen first.
+  win._testApi.switchToTab('t2');
   posted.length = 0;
   const closeBtn = win.document.querySelector(
-    '.chat-tab[data-tab-id="t2"] .chat-tab-close',
+    '#tab-list .chat-tab[data-tab-id="t2"] .chat-tab-close',
   );
+  assert.ok(closeBtn, 'the chat on screen has a close button on the strip');
   closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   const closes = msgsOf(posted, 'closeTab');
   assert.strictEqual(closes.length, 1);

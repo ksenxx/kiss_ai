@@ -19,6 +19,12 @@
   --border: var(--vscode-panel-border, #2b2b2b);
   --input-bg: var(--vscode-input-background, #313131);
 
+  /* Scrollbar thumb: the foreground at two strengths - resting, and
+     under the pointer or while dragged - so the bar reads on any
+     theme without a track of its own. */
+  --scrollbar-thumb: color-mix(in srgb, var(--fg) 20%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--fg) 45%, transparent);
+
   /* Accent hues come from the theme's charts palette, which VS Code
      tunes for UI in every theme (Dark+ charts.yellow #cca700), not from
      the terminal ANSI colours (Dark+ ansiYellow #e5e510), which are
@@ -427,13 +433,16 @@ body {
 #status-text { color: var(--dim); }
 
 
-/* Two tab rows (renderTabBar): #main-tab-bar lists the chats (and the
-   ownerless daemon browser tab); #tab-bar, the group strip under it,
-   lists the chat on screen with its sub-agents and the files its task
-   opened, and only appears when that group has more than one tab.  In
-   editor-tabs mode VS Code's editor tabs stand in for the main row. */
-#main-tab-bar,
-#tab-bar {
+/* The tab rows (renderTabBar).  There is no row of chat tabs: the
+   chat on screen is the one picked in the Chats panel.  #tab-bar, the
+   group strip, lists the chat on screen with its sub-agents (and, on a
+   stacked surface, every open file, browser and terminal tab) and only
+   appears when it has more than one tab.  #content-tab-bar is the
+   content pane's own row in the desktop remote webapp's split layout
+   (remote-codex.css); hidden everywhere else.  #pane-resizer is the
+   handle between the two panes of that layout. */
+#tab-bar,
+#content-tab-bar {
   display: flex;
   align-items: center;
   flex-shrink: 0;
@@ -442,8 +451,10 @@ body {
   overflow: hidden;
 }
 
-/* The strip reads as the main row's sub-row: slightly shorter tabs on
-   the chat background, indented under the chat tab they belong to. */
+#content-tab-bar,
+#pane-resizer { display: none; }
+
+/* The strip: slightly shorter tabs on the chat background. */
 #tab-bar {
   background: var(--bg);
   padding-left: var(--space-3);
@@ -455,8 +466,8 @@ body {
   font-size: var(--fs-sm);
 }
 
-#main-tab-list,
-#tab-list {
+#tab-list,
+#content-tab-list {
   display: flex;
   flex: 1;
   min-width: 0;
@@ -889,7 +900,6 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  scrollbar-color: var(--dim) transparent;
 }
 
 .task-panel.collapsed .task-panel-text,
@@ -919,6 +929,13 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
   flex: 1; overflow-y: auto; overflow-x: hidden;
   overscroll-behavior-y: none;
   padding: var(--space-3) var(--space-3) var(--space-3);
+}
+
+/* The desktop remote webapp's split layout (the #app grid in
+   remote-codex.css): the transcript fills the chat pane's `chat` area. */
+body.remote-chat.remote-desktop #output {
+  grid-area: chat;
+  min-height: 0;
 }
 
 /* The welcome page is the same on the VS Code webview and the remote
@@ -1616,6 +1633,7 @@ body.content-tab-open #send-btn { display: none !important; }
    soft square that every other icon button in the app shows (tab
    close, panel close, password toggle, custom-model actions). */
 #menu-btn,
+#meta-drawer-btn,
 #new-chat-btn,
 #more-btn,
 .toggle-btn {
@@ -1626,6 +1644,7 @@ body.content-tab-open #send-btn { display: none !important; }
 }
 
 #menu-btn:hover:not(:disabled),
+#meta-drawer-btn:hover:not(:disabled),
 #new-chat-btn:hover:not(:disabled),
 #more-btn:hover:not(:disabled),
 .toggle-btn:hover:not(:disabled) {
@@ -1634,6 +1653,7 @@ body.content-tab-open #send-btn { display: none !important; }
 }
 
 #menu-btn:disabled,
+#meta-drawer-btn:disabled,
 #new-chat-btn:disabled,
 #more-btn:disabled,
 .toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
@@ -2484,33 +2504,12 @@ body.meta-panel-mode #meta-info-content {
 
 /* Sidebar-chat mode (the secondary-sidebar chat view, editor-tabs
    mode OFF): the task-info panel is a DRAWER sliding in from the
-   right over the chat, toggled by #meta-drawer-btn at the tab bar's
-   right edge and dismissed by its close button, the backdrop or
-   Escape — the mobile remote webapp's drawer, restated with the
-   webview's own variables. The top status bar it replaces is hidden
-   above. */
-body.sidebar-chat-mode #meta-drawer-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  margin-left: var(--space-1);
-  padding: 0;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-round);
-  color: color-mix(in srgb, var(--fg) 65%, transparent);
-  font-size: var(--fs-xl);
-  cursor: pointer;
-  transition: background var(--dur-base);
-}
-
-body.sidebar-chat-mode #meta-drawer-btn:hover {
-  background: color-mix(in srgb, var(--fg) 12%, transparent);
-  color: var(--fg);
-}
+   right over the chat, toggled by #meta-drawer-btn among the
+   composer's footer icons (styled with them above) and dismissed by
+   its close button, the backdrop or Escape — the mobile remote
+   webapp's drawer, restated with the webview's own variables. The top
+   status bar it replaces is hidden above. */
+body.sidebar-chat-mode #meta-drawer-btn { display: flex; }
 
 body.sidebar-chat-mode #meta-panel {
   display: flex;
@@ -2738,7 +2737,6 @@ body.sidebar-chat-mode #meta-info-content {
 #workdir-list {
   flex: 1;
   overflow-y: auto;
-  scrollbar-width: thin;
   margin-top: var(--space-0-5);
 }
 
@@ -4935,10 +4933,38 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .tr.collapsed .tr-content { display: none; }
 
 
+/* Scrollbars: a 4px pill thumb riding in a 6px bare gutter (the 1px
+   transparent border keeps it off the content edge), faint at rest
+   and stronger under the pointer or while dragged.  (Chromium does
+   not restyle the thumb when an ancestor is hovered, so there is no
+   "pointer over the list" tier.)  Chromium (VS Code webviews, the
+   remote page in Chrome, Edge, Electron) draws these ::-webkit-
+   parts.  It ignores them on any element that also sets the standard
+   scrollbar-width or scrollbar-color, falling back to its wide native
+   bar there, so those two properties are set only where the pseudo-
+   elements are unsupported (Firefox), and nowhere else in the
+   stylesheet except to hide a bar outright. */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius-sm); }
-::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner { background: transparent; }
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+}
+
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active { background-color: var(--scrollbar-thumb-hover); }
+
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
+}
 
 #kiss-server-loading {
   position: fixed;

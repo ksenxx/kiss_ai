@@ -33,6 +33,7 @@ import pytest
 from kiss.tests.agents.vscode.test_content_tab_file_links import (
     _inject_file_link,
     _open_page,
+    _wait_ready,
     browser,  # noqa: F401  (module fixture used by param name)
 )
 from kiss.tests.conftest import goto_retrying_network_change
@@ -279,15 +280,27 @@ class TestContentTabEditing:
             _open_editor(page, str(path), "lnk-e5")
             _type_at_end(page, "kept = True")
             page.wait_for_selector(_DIRTY_TAB, timeout=10000)
-            # Back to the chat (its entry on the group strip; the main
-            # row's entry would return to the file last viewed), then
-            # click the link again.
-            page.click("#tab-list .chat-tab:not(.content-tab) .chat-tab-label")
-            page.wait_for_selector("#task-input", state="visible")
+            # Another file takes the content pane (the dirty editor is
+            # hidden behind it); the chat, and so the link, stays on
+            # screen in the split layout: click the link again.
+            other = _fresh_file(harness, "edit_reclick_other.py", "other = 1\n")
+            _inject_file_link(page, str(other), "lnk-e5-other")
+            page.click("#lnk-e5-other")
+            page.wait_for_selector(
+                "#content-tab-list .chat-tab.content-tab.active"
+                ":has-text('edit_reclick_other.py')",
+                timeout=30000,
+            )
             page.click("#lnk-e5")
-            page.wait_for_selector("#content-tab-area", state="visible")
+            page.wait_for_selector(
+                "#content-tab-list .chat-tab.content-tab.active"
+                ":has-text('edit_reclick.py')",
+                timeout=30000,
+            )
             page.wait_for_timeout(1000)
-            assert page.locator(".chat-tab.content-tab").count() == 1
+            assert page.locator(
+                ".chat-tab.content-tab:has-text('edit_reclick.py')",
+            ).count() == 1
             assert "kept = True" in _editor_text(page)
             assert page.locator(_DIRTY_TAB).count() == 1
             assert path.read_text() == _SOURCE
@@ -518,8 +531,7 @@ class TestContentTabEditing:
         )
         try:
             goto_retrying_network_change(page, harness.base_url + "/")
-            page.wait_for_selector("#task-input", state="visible", timeout=30000)
-            page.wait_for_selector(".chat-tab", timeout=30000)
+            _wait_ready(page)
             path = _fresh_file(harness, "edit_fallback.py")
             _inject_file_link(page, str(path), "lnk-fb")
             page.click("#lnk-fb")

@@ -177,7 +177,8 @@ function testBackgroundTabRestoreKeepsAnswerOpen() {
     send(win, {type: 'tool_call', name: 'Bash', command: 'ls ' + i, tabId: tab1});
     send(win, {type: 'tool_result', content: 'a', tool_name: 'Bash', tabId: tab1});
   }
-  win.document.querySelector('.chat-tab[data-tab-id="' + tab1 + '"]').click();
+  // The Chats-panel pick brings the chat back on screen.
+  api.switchToTab(tab1);
   assert.strictEqual(api.getActiveTabId(), tab1);
   const out = win.document.getElementById('output');
   const prompt = out.querySelector('.ev.prompt');

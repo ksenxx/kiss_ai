@@ -318,15 +318,16 @@ class TerminalService:
         # ``forkpty`` hands back an inheritable master: without this a
         # later shell would hold every earlier terminal's master open.
         os.set_inheritable(fd, False)
+        session = _Session(
+            tab_id=tab_id, conn_id=conn_id, pid=pid, fd=fd,
+            shell=argv[0], cwd=cwd,
+        )
         # The initial size is set here, on the master, not by the child
         # before its exec: a child scheduled late (a loaded machine) would
         # apply the opening size AFTER a resize or re-attach the parent
         # had already applied, and the shell would start at the old size.
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, _winsize(rows, cols))
-        return _Session(
-            tab_id=tab_id, conn_id=conn_id, pid=pid, fd=fd,
-            shell=argv[0], cwd=cwd,
-        )
+        self._set_winsize(session, cols, rows)
+        return session
 
     def _set_winsize(self, session: _Session, cols: int, rows: int) -> None:
         try:
