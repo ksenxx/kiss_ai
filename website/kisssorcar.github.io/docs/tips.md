@@ -24,7 +24,7 @@ A **Sorcar Extension Agent (SEA)** is a Python file that defines a complete cust
 
 ## Prompt KISS Sorcar Like the Developer of KISS Sorcar
 
-**Always write precise less than 10 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model doesn't work well in contemporary times.
+**Always write precise prompts with fewer than 10 sentences.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model doesn't work well in contemporary times.
 
 See the commit messages at <https://github.com/ksenxx/kiss_ai> which include the prompts used by the developer of KISS Sorcar.
 
@@ -36,8 +36,8 @@ See the commit messages at <https://github.com/ksenxx/kiss_ai> which include the
 - Add the following text to your prompt:
 
 ```text
-Use 'claude-opus-5-5' model for all tasks, including software development. Use 'gpt-6.1-sol-medium'
-(not codex) using `run_parallel` tool for a thorough read-only review and debugging of the
+Use the 'claude-opus-5-5' model for all tasks, including software development. Use 'gpt-6.1-sol-medium'
+(not codex) using the `run_parallel` tool for a thorough read-only review and debugging of the
 other model's work. Thoroughly check whether the other model has missed any code or wiring
 or introduced any bugs. Use at most 50% of the task budget in gpt-6.1-sol-medium for reviewing and
 debugging, and ask the model not to invent new problems. Use model names literally; don't
@@ -66,11 +66,11 @@ Speak 'sorcar', your task ...
 
 Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. Speak "sorcar" followed by your task, and KISS Sorcar will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
 
-You can also steer the agent's execution and ask for status when an agent is running using voice.
+You can also use voice to steer the agent's execution and ask for status while an agent is running.
 
 ## Use the KISS Sorcar Remote Web/Mobile App
 
-Go to the Settings panel and copy the URL at the top. This URL contains a message showing the latest cloudflared URL where you can find the KISS Sorcar web app. Send the URL from the Settings page to your mobile device. Also view or set the remote password on the Settings page. You can SMS, Slack, or email the URL to the mobile device.
+Go to the Settings panel and copy the latest cloudflared URL shown at the top to open the KISS Sorcar web app. Send the URL from the Settings page to your mobile device. Also view or set the remote password on the Settings page. You can SMS, Slack, or email the URL to the mobile device.
 
 Open the URL in a browser on the mobile device and enter your remote password. You will see your familiar Codex-like chat interface.
 
@@ -125,7 +125,7 @@ Just type or speak your shell command in the chat input textbox.
 All you need to do is use a variant of the following prompt with KISS Sorcar:
 
 ```text
-Can you AI discover the lightest and fastest AI model that will give >95% accuracy and
+Can you use AI to discover the lightest and fastest AI model that will give >95% accuracy and
 recall on the data at <</path/to/data>> at the cost of $0.25 per query? Use 'modal' CLI to
 train your models on GPUs and evaluate if needed. Your total budget for Modal.com is $1,000.
 Experiment with a smaller data subset and fewer model parameters to run experiments quickly,

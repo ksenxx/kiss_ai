@@ -62,7 +62,7 @@ In VS Code, you can run {{PRODUCT_NAME}} in two modes: full editor mode, where t
 
 ## Prompt {{PRODUCT_NAME}} like the Developer of {{PRODUCT_NAME}}
 
-**Always write precise less than 10 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let {{PRODUCT_NAME}} plan dynamically, which is always better than AI-written static plans. The waterfall model doesn't work well in contemporary times.
+**Always write precise prompts with fewer than 10 sentences.** Long prompts confuse models. **Do not plan ahead of time.** Let {{PRODUCT_NAME}} plan dynamically, which is always better than AI-written static plans. The waterfall model doesn't work well in contemporary times.
 
 See the commit messages at https://github.com/ksenxx/kiss_ai which include the prompts used by the developer of {{PRODUCT_NAME}}.
 
@@ -76,7 +76,7 @@ See the commit messages at https://github.com/ksenxx/kiss_ai which include the p
 - Add the following text to your prompt:
 
 ```
-Use claude-opus-5-5 for all tasks, including software development. Use gpt-6-astra (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 75% of the task budget in gpt-6-astra for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
+Use claude-opus-5-5 for all tasks, including software development. Use gpt-6-astra (not codex) using the `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 75% of the task budget in gpt-6-astra for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
 ```
 
 # Tip
@@ -101,13 +101,13 @@ Speak 'Hey Sorcar', your task ...
 
 Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. Speak 'Hey Sorcar' followed by your task, and {{PRODUCT_NAME}} will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
 
-You can also steer the agent's execution and ask for status when an agent is running using voice.
+You can also use voice to steer the agent's execution and ask for status while an agent is running.
 
 # Tip
 
 ## To Use the {{PRODUCT_NAME}} Remote Web/Mobile App
 
-Go to the Settings panel and copy the URL at the top. This URL contains a message showing the latest cloudflared URL where you can find the {{PRODUCT_NAME}} web app. Send the URL from the Settings page to your mobile device. Also view or set the remote password on the Settings page. You can SMS, Slack, or email the URL to the mobile device.
+Go to the Settings panel and copy the latest cloudflared URL shown at the top to open the {{PRODUCT_NAME}} web app. Send the URL from the Settings page to your mobile device. Also view or set the remote password on the Settings page. You can SMS, Slack, or email the URL to the mobile device.
 
 Open the URL in a browser on the mobile device and enter your remote password. You will see your familiar Codex-like chat interface.
 
@@ -165,7 +165,7 @@ the chat input textbox.
 All you need to do is use a variant of the following prompt with {{PRODUCT_NAME}}:
 
 ```
-Can you AI discover the lightest and fastest AI model that will give >95% accuracy and recall on the data at \<</path/to/data>> at the cost of $0.25 per query?  Use 'modal' CLI to train your models on GPUs and evaluate if needed. Your total budget for Modal.com is $1,000. Experiment with a smaller data subset and fewer model parameters to run experiments quickly, then extrapolate. Do not STOP until you reach the goals. Create a detailed report.
+Can you use AI to discover the lightest and fastest AI model that will give >95% accuracy and recall on the data at \<</path/to/data>> at the cost of $0.25 per query?  Use 'modal' CLI to train your models on GPUs and evaluate if needed. Your total budget for Modal.com is $1,000. Experiment with a smaller data subset and fewer model parameters to run experiments quickly, then extrapolate. Do not STOP until you reach the goals. Create a detailed report.
 ```
 
 # Tip

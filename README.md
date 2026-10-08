@@ -147,7 +147,7 @@ The picker also lists two bundled router agents under **Routers**: **`autorouter
 
 Automatic task selection prefers a verified Claude subscription, then a verified Codex subscription, then configured API providers. Explicit and valid saved choices are preserved. API defaults are `claude-opus-5-5`, `gpt-6.1-sol-medium`, and `gemini-3.8-flash`. Fast helpers, such as commit-message generation, keep using configured API keys first outside subscription tasks: Claude Sonnet 5.5, GPT-6 Luna, and Gemini 3.5 Flash-Lite. Inside a subscription task they use `cc/haiku` or `codex/gpt-6-luna`. GPT-6.1 Sol uses the Responses API and supports `low`, `medium`, `high`, `xhigh`, and `max` effort.
 
-The picker groups **CLI Models**, **API Models**, **Custom Models**, and **Routers**, then provider and family. **Frequently Used** is ordered by usage count. CLI entries show their billing mode; API prices are USD per million input/output tokens.
+The picker groups **CLI Models**, **API Models**, **Custom Models**, and **Routers**, then by provider and family. **Frequently Used** is ordered by usage count. CLI entries show their billing mode; API prices are USD per million input/output tokens.
 
 Python subscription example:
 
