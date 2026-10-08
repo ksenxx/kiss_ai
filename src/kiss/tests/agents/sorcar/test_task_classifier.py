@@ -1065,7 +1065,7 @@ def test_zero_classifier_spend_emits_no_extra_event(env: IsolatedKissHome) -> No
     agent._fold_classifier_usage()
     assert agent._classifier_spend is None
     assert agent.usage_snapshot() == (0.0, 0, 0)
-    assert agent._usage_events() == []
+    assert agent._usage_ledger.records == []
 
 
 # ---------------------------------------------------------------------------

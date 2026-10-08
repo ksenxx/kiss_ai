@@ -293,7 +293,7 @@ class TestBuiltinNameCollision:
             description="unicode tool name",
             inputSchema={"type": "object", "properties": {}, "required": []},
         )
-        wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "srv½", tool)
+        wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "srv½", tool, "srv½")
         assert wrapper.__name__.isascii()
         assert wrapper.__name__.isidentifier()
 

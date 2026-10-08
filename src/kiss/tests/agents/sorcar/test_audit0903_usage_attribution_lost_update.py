@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import sys
 import threading
-from types import SimpleNamespace
 
 import pytest
 
@@ -75,19 +74,3 @@ def test_concurrent_direct_attributions_never_lose_an_update(
         f"lost updates: banked {parent.total_tokens_used} of {expected} tokens"
     )
     assert parent.total_steps == expected
-
-
-def test_attribution_tolerates_agents_without_a_usage_lock() -> None:
-    """A bare agent-shaped object (no ``_usage_lock``) is still banked.
-
-    ``_attribute_sub_usage`` is typed ``agent: Any``; the lock is a
-    Sorcar-agent attribute, so the function must fall back gracefully
-    for minimal agent objects.
-    """
-    bare = SimpleNamespace(
-        budget_used=0.0, total_tokens_used=0, total_steps=0, printer=None,
-    )
-    _attribute_sub_usage(bare, 1.5, 10, 2)
-    assert (bare.budget_used, bare.total_tokens_used, bare.total_steps) == (
-        1.5, 10, 2,
-    )

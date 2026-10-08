@@ -93,7 +93,7 @@ def _session_records(agent: RelentlessAgent, executor: KISSAgent) -> list[_Usage
     key = executor.__dict__.get("_usage_session_key")
     return [
         event
-        for event in agent._usage_events()
+        for event in agent._usage_ledger.records
         if key is not None and event.source == key
     ]
 
@@ -536,7 +536,7 @@ def test_attribution_holding_old_epoch_is_discarded_by_reset() -> None:
     """
     agent = RelentlessAgent("reset-epoch")
     agent._attribute_usage(5.0, 500, 15)
-    old_ledger = agent._usage_events()
+    old_ledger = agent._usage_ledger.records
 
     paused = threading.Event()
     resume = threading.Event()
@@ -673,9 +673,9 @@ def test_zero_delta_attribution_appends_nothing() -> None:
     """A zero delta (an empty classifier fold) grows no ledger."""
     agent = RelentlessAgent("t")
     agent._attribute_usage(1.0, 10, 1)
-    before = len(agent._usage_events())
+    before = len(agent._usage_ledger.records)
     agent._attribute_usage(0.0, 0, 0)
-    assert len(agent._usage_events()) == before
+    assert len(agent._usage_ledger.records) == before
     assert agent.usage_snapshot() == (1.0, 10, 1)
 
 
@@ -692,7 +692,7 @@ def test_duplicate_ledger_records_count_once() -> None:
     agent._accumulate_usage(executor)
     key = executor.__dict__["_usage_session_key"]
     # Exactly the record a fast-path-bypassing racer would append.
-    agent._usage_events().append(_UsageEvent(key, 0, 1.25, 100, 3))
+    agent._usage_ledger.records.append(_UsageEvent(key, 0, 1.25, 100, 3))
     assert agent.usage_snapshot() == (1.25, 100, 3)
     assert len(_session_records(agent, executor)) == 2
 
@@ -705,12 +705,12 @@ def test_property_setters_overwrite_coherently() -> None:
     agent.total_tokens_used = 7
     agent.total_steps = 2
     assert agent.usage_snapshot() == (5.0, 7, 2)
-    before = len(agent._usage_events())
+    before = len(agent._usage_ledger.records)
     # Overwriting with the current value appends nothing.
     agent.budget_used = 5.0
     agent.total_tokens_used = 7
     agent.total_steps = 2
-    assert len(agent._usage_events()) == before
+    assert len(agent._usage_ledger.records) == before
     assert agent.usage_snapshot() == (5.0, 7, 2)
 
 
