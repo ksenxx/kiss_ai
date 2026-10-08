@@ -327,15 +327,41 @@ def _ledger_totals(ledger: _UsageLedger) -> tuple[float, int, int]:
     since the last fold), so a read never scales with the number of
     records EVER appended to the epoch.
     """
+    budget, tokens, steps, _banked = _ledger_totals_and_banked(ledger, None)
+    return budget, tokens, steps
+
+
+def _ledger_totals_and_banked(
+    ledger: _UsageLedger, session_key: str | None
+) -> tuple[float, int, int, bool]:
+    """:func:`_ledger_totals` plus whether *session_key* is banked in the SAME prefix.
+
+    The membership answer and the totals come from one ``view`` load
+    and one suffix slice, so a reader adding a live session's spend on
+    top can tell whether these totals already include that session —
+    the handoff in ``perform_task`` banks the session before dropping
+    it from ``_current_executor``, and a sum of "banked + live" taken
+    in between would otherwise count it twice.
+
+    Args:
+        ledger: The epoch to sum.
+        session_key: A :func:`_session_key`, or ``None`` to skip the check.
+
+    Returns:
+        ``(budget, tokens, steps, banked)``.
+    """
     view = ledger.view
     budget = view.budget
     tokens = view.tokens
     steps = view.steps
     seen = view.seen
+    banked = session_key is not None and seen.get(session_key) is not None
     local: dict[str, int] = {}
     for event in ledger.records[view.fold_index:]:
         source = event.source
         if source is not None:
+            if source == session_key:
+                banked = True
             folded = seen.get(source)
             if folded is not None and event.seq <= folded:
                 continue
@@ -346,7 +372,7 @@ def _ledger_totals(ledger: _UsageLedger) -> tuple[float, int, int]:
         budget += event.budget
         tokens += event.tokens
         steps += event.steps
-    return budget, tokens, steps
+    return budget, tokens, steps, banked
 
 TASK_PROMPT = """
 {task_description}
@@ -989,6 +1015,30 @@ class RelentlessAgent(Base):
         parent's accounting.
         """
         return _ledger_totals(self._usage_ledger_object())
+
+    def live_usage_snapshot(self) -> tuple[float, int, int]:
+        """Return :meth:`usage_snapshot` plus the in-flight session's spend, counted once.
+
+        A session's spend is folded into the ledger only when the
+        session ends, so mid-session it is visible only on
+        ``_current_executor``.  ``perform_task`` banks the session
+        BEFORE dropping it from ``_current_executor``, so a reader
+        here can observe both; the executor's triple is read first and
+        then added only when the ledger prefix that produced the
+        totals does not already contain the session
+        (:func:`_ledger_totals_and_banked`), so every interleaving
+        counts the session exactly once.
+        """
+        executor = self._current_executor
+        if executor is None:
+            return self.usage_snapshot()
+        live_budget, live_tokens, live_steps = _session_usage(executor)
+        budget, tokens, steps, banked = _ledger_totals_and_banked(
+            self._usage_ledger_object(), _session_key(executor)
+        )
+        if banked:
+            return budget, tokens, steps
+        return budget + live_budget, tokens + live_tokens, steps + live_steps
 
     def _attribute_usage(
         self,
