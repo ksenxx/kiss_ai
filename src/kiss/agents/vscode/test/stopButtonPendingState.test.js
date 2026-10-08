@@ -79,17 +79,22 @@ function click(win, el) {
 }
 
 function clickTab(win, tabId) {
-  // The chat tabs live on the main row; the strip under it lists the
-  // group of the chat on screen.
-  const el = Array.from(
-    win.document.querySelectorAll('#main-tab-list .chat-tab'),
-  ).find(e => e.dataset.tabId === tabId);
-  assert.ok(el, 'tab ' + tabId + ' must be in the tab bar');
-  click(win, el);
+  // Chat tabs have no row of their own: the Chats panel's pick is
+  // switchToTab, and the group strip then lists the chat on screen.
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    'tab ' + tabId + ' must be open',
+  );
+  win._testApi.switchToTab(tabId);
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    tabId,
+    'picking tab ' + tabId + ' must activate it',
+  );
   assert.strictEqual(
     win.document.querySelector('#tab-list .chat-tab.active').dataset.tabId,
     tabId,
-    'clicking tab ' + tabId + ' must activate it',
+    'the group strip must show tab ' + tabId + ' as the one on screen',
   );
 }
 

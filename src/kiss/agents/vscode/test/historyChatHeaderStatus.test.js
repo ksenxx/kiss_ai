@@ -344,8 +344,16 @@ function testLegacyFlatViewHasNoHeaders() {
   console.log('  ok - the flat view is unchanged');
 }
 
+// The open chat tabs (chat tabs have no row of their own: the Chats
+// panel picks the one on screen; the rest stay open, hidden).
 function chatTabs(win) {
-  return win.document.querySelectorAll('#main-tab-list .chat-tab');
+  return win._testApi
+    .openTabs()
+    .filter(t => !t.isSubagentTab && !t.isContentTab);
+}
+
+function hasTab(win, tabId) {
+  return win._testApi.openTabs().some(t => t.id === tabId);
 }
 
 function byType(posted, type) {
@@ -368,12 +376,17 @@ function testExpandingPanelOpensLastTask() {
   const a = group(win, 'A');
   assert.ok(a.classList.contains('collapsed'), 'a settled chat starts collapsed');
   const tabsBefore = chatTabs(win).length;
+  const idleTab = win.kissActiveTabId();
   posted.length = 0;
 
   header(win, 'A').click();
   assert.ok(!a.classList.contains('collapsed'), 'the click expands the panel');
   assert.ok(sidebar.classList.contains('open'), 'the tasks stay in view');
-  assert.strictEqual(chatTabs(win).length, tabsBefore + 1, 'one new tab for the chat');
+  // A fresh tab shows the chat; the idle chat left behind is retired,
+  // so the count does not grow.
+  assert.notStrictEqual(win.kissActiveTabId(), idleTab, 'a new tab is active');
+  assert.ok(!hasTab(win, idleTab), 'the idle chat left behind is retired');
+  assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab for the chat');
   let resumes = byType(posted, 'resumeSession');
   assert.strictEqual(resumes.length, 1, 'the chat is resumed once');
   assert.strictEqual(resumes[0].id, 'A', 'at chat A');
@@ -389,7 +402,7 @@ function testExpandingPanelOpensLastTask() {
   header(win, 'A').click();
   assert.ok(a.classList.contains('collapsed'), 'collapsed again');
   assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'no resume on collapse');
-  assert.strictEqual(chatTabs(win).length, tabsBefore + 1, 'no new tab on collapse');
+  assert.strictEqual(chatTabs(win).length, tabsBefore, 'no new tab on collapse');
 
   // The daemon binds the new tab to chat A; expanding again finds that
   // tab showing the chat and opens nothing more.
@@ -411,9 +424,10 @@ function testExpandingPanelOpensLastTask() {
   header(win, 'A').click();
   assert.ok(!a.classList.contains('collapsed'), 'expanded again');
   assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'chat A is already on screen');
-  assert.strictEqual(chatTabs(win).length, tabsBefore + 1, 'no duplicate tab for chat A');
+  assert.strictEqual(chatTabs(win).length, tabsBefore, 'no duplicate tab for chat A');
 
   // Clicking the icon in the header behaves like the header.
+  const chatATab = win.kissActiveTabId();
   posted.length = 0;
   sendHistory(win, posted, [
     makeRow({id: 'C', task_id: 9, is_running: true, has_events: true, startTs: 1_700_000_950_000}),
@@ -429,6 +443,9 @@ function testExpandingPanelOpensLastTask() {
   assert.strictEqual(resumes.length, 1, 'and opens the running chat');
   assert.strictEqual(resumes[0].id, 'C');
   assert.strictEqual(resumes[0].taskId, 9);
+  assert.notStrictEqual(win.kissActiveTabId(), chatATab, 'in a fresh tab');
+  assert.ok(!hasTab(win, chatATab), 'the settled chat A left behind is retired');
+  assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab: chat C');
   win.close();
   console.log('  ok - expanding a chat panel loads its last task unless a tab shows the chat');
 }
@@ -501,9 +518,13 @@ function testEventlessLastTaskResumesByChatId() {
     makeRow({id: 'E', task_id: 5, has_events: false, startTs: 1_700_000_900_000, endTs: 1}),
   ]);
   const tabsBefore = chatTabs(win).length;
+  const idleTab = win.kissActiveTabId();
   posted.length = 0;
   header(win, 'E').click();
-  assert.strictEqual(chatTabs(win).length, tabsBefore + 1, 'one tab for chat E');
+  // The idle chat left behind is retired, so the count does not grow.
+  assert.notStrictEqual(win.kissActiveTabId(), idleTab, 'a new tab is active');
+  assert.ok(!hasTab(win, idleTab), 'the idle chat left behind is retired');
+  assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab for chat E');
   let resumes = byType(posted, 'resumeSession');
   assert.strictEqual(resumes.length, 1, 'resumed by chat id, not shown read-only');
   assert.strictEqual(resumes[0].id, 'E');
@@ -523,17 +544,21 @@ function testEventlessLastTaskResumesByChatId() {
   assert.ok(group(win, 'E').classList.contains('collapsed'), 'folded');
   posted.length = 0;
   header(win, 'E').click();
-  assert.strictEqual(chatTabs(win).length, tabsBefore + 1, 'no second tab for chat E');
+  assert.strictEqual(chatTabs(win).length, tabsBefore, 'no second tab for chat E');
   assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'no second resume');
   // A row click on the same task still shows it read-only in a fresh
-  // tab when no tab is bound to the chat.
+  // tab when no tab is bound to the chat; the settled chat E left
+  // behind is retired.
+  const chatETab = win.kissActiveTabId();
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, [
     makeRow({id: 'F', task_id: 6, has_events: false, startTs: 1_700_000_900_000, endTs: 1}),
   ]);
   posted.length = 0;
   rowByTask(win, 6).click();
-  assert.strictEqual(chatTabs(win).length, tabsBefore + 2, 'a fresh read-only tab');
+  assert.notStrictEqual(win.kissActiveTabId(), chatETab, 'a fresh read-only tab');
+  assert.ok(!hasTab(win, chatETab), 'chat E is retired');
+  assert.strictEqual(chatTabs(win).length, tabsBefore, 'only the read-only tab');
   assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'nothing to resume');
   win.close();
   console.log('  ok - an eventless last task is resumed by chat id on expand');
@@ -552,9 +577,20 @@ function testSidebarOpenFromHistoryHonoursOnlyIfMissing() {
     extra: JSON.stringify({startTs: 1_700_000_900_000, endTs: 1_700_000_900_001}),
   });
   const chatATab = win.kissActiveTabId();
+  // Chat A starts a new task (the daemon's run status always carries
+  // startTs): "+" retires the chat it leaves only when nothing in it
+  // is still going.
+  send(win, {
+    type: 'status',
+    running: true,
+    tabId: chatATab,
+    startTs: 1_700_000_950_000,
+  });
   win.document.getElementById('new-chat-btn').click();
   const freshTab = win.kissActiveTabId();
   assert.notStrictEqual(freshTab, chatATab, 'a second tab is active');
+  assert.ok(hasTab(win, chatATab), 'the running chat A stays open');
+  assert.strictEqual(chatTabs(win).length, 2, 'two chat tabs');
 
   // The host relays an expanded history panel: chat A has a tab, so
   // nothing moves.
@@ -579,9 +615,18 @@ function testSidebarOpenFromHistoryHonoursOnlyIfMissing() {
     onlyIfMissing: false,
   });
   assert.strictEqual(win.kissActiveTabId(), chatATab, 'a row click switches to the chat');
-  assert.strictEqual(chatTabs(win).length, 2, 'still no new tab');
+  // The empty fresh chat left behind is retired, as it is when the
+  // same row is clicked in the in-webview Chats panel (openHistoryTask).
+  assert.ok(
+    !hasTab(win, freshTab),
+    'the idle fresh chat left behind by a host-relayed Chats-panel pick ' +
+      '(openChatFromHistory) must be retired like one left by an ' +
+      'in-webview pick (openHistoryTask)',
+  );
+  assert.strictEqual(chatTabs(win).length, 1, 'no new tab');
 
-  // Expanding a chat with no tab resumes it in a fresh tab.
+  // Expanding a chat with no tab resumes it in a fresh tab; the
+  // running chat A stays open.
   posted.length = 0;
   send(win, {
     type: 'openChatFromHistory',
@@ -590,7 +635,8 @@ function testSidebarOpenFromHistoryHonoursOnlyIfMissing() {
     title: 'task 5',
     onlyIfMissing: true,
   });
-  assert.strictEqual(chatTabs(win).length, 3, 'a tab for chat B');
+  assert.ok(hasTab(win, chatATab), 'the running chat A stays open');
+  assert.strictEqual(chatTabs(win).length, 2, 'a tab for chat B');
   const resumes = byType(posted, 'resumeSession');
   assert.strictEqual(resumes.length, 1, 'chat B is resumed');
   assert.strictEqual(resumes[0].id, 'B');

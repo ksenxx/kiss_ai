@@ -73,6 +73,18 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// Bring a tab on screen the way the user does: a click on the group strip
+// when the tab is listed there (sub-agents, content tabs, the chat that
+// owns them), else the Chats-panel pick (chat tabs have no row of their
+// own any more).
+function clickTab(win, tabId) {
+  const el = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  );
+  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  else win._testApi.switchToTab(tabId);
+}
+
 function askQuestionCall(win, tab, question) {
   send(win, {
     type: 'tool_call',
@@ -365,9 +377,7 @@ test('the question of a background tab is answered from that tab, not the one on
   // The question pulls the user over to its tab; they go back to the
   // other tab to carry on there.
   assert.strictEqual(win._testApi.getActiveTabId(), tab);
-  win.document
-    .querySelector(`.chat-tab[data-tab-id=${JSON.stringify(other)}]`)
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, other);
   assert.strictEqual(win._testApi.getActiveTabId(), other);
   assert.ok(!answering(win), 'the tab on screen has no question');
   assert.strictEqual(inp.placeholder, 'Ask anything');
@@ -383,10 +393,7 @@ test('the question of a background tab is answered from that tab, not the one on
 
   // Switching to the asking tab: its panel is pending and the composer
   // answers it.
-  const tabEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tab)}]`,
-  );
-  tabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, tab);
   assert.ok(answering(win));
   const panel = win.document.querySelector('#output .tc-question');
   assert.ok(panel && panel.classList.contains('tc-question-pending'));
@@ -440,21 +447,25 @@ test('opening a file tab and coming back keeps the question answerable', () => {
     tabId: tab,
   });
   const fileTab = win._testApi.getActiveTabId();
-  const chatEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tab)}]`,
-  );
-  chatEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  // On a stacked surface the group strip lists the file tab next to the
+  // chat, so both are clicked there.
+  clickTab(win, tab);
   askQuestionCall(win, tab, 'Q?');
   send(win, {type: 'askUser', question: 'Q?', tabId: tab});
   assert.ok(answering(win));
   // Activating the EXISTING file tab leaves answer mode ...
   const fileEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(fileTab)}]`,
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(fileTab)}]`,
   );
+  assert.ok(fileEl, 'the file tab is on the group strip');
   fileEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.ok(!answering(win), 'answer mode is off on the file tab');
   // ... and closing the asking chat while its file tab is up leaves
   // nothing to answer.
+  const chatEl = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tab)}]`,
+  );
+  assert.ok(chatEl, 'the chat is on the group strip next to its file tab');
   const closeBtn = chatEl.querySelector('.chat-tab-close');
   assert.ok(closeBtn, 'the chat tab has a close button');
   closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
@@ -520,10 +531,7 @@ test('a background tab parks its prompt too and shows it again once answered', (
   win._testApi.createNewTab();
   askQuestionCall(win, tab, 'Q?');
   send(win, {type: 'askUser', question: 'Q?', tabId: tab});
-  const tabEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tab)}]`,
-  );
-  tabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, tab);
   assert.strictEqual(inp.value, '', 'the parked prompt is not the answer');
   assert.ok(answering(win));
   posted.length = 0;

@@ -86,12 +86,22 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// Sub-agent tabs are clicked on the group strip (#tab-list); a chat has
+// no tab of its own any more, it is picked in the Chats panel, which
+// switchToTab stands in for.
 function clickTab(win, tabId) {
   const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
   );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  if (el) {
+    el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+    return;
+  }
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
+  );
+  win._testApi.switchToTab(tabId);
 }
 
 function fakeGeometry(el) {

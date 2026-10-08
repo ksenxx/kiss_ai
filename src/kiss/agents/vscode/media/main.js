@@ -752,17 +752,13 @@
       opener.focus();
       return;
     }
-    // While a file/webview tab is on screen the composer is hidden by
-    // CSS (body.content-tab-open) and cannot take focus, so the active
-    // tab's entry on a visible row is the fallback: the group strip
-    // when it is shown, else its main-row entry (a top-level file).
+    // While a file/webview tab is on screen in place of the chat the
+    // composer is hidden by CSS (body.content-tab-open) and cannot take
+    // focus, so the active tab's entry on the group strip is the
+    // fallback.
     const composerHidden = document.body.classList.contains('content-tab-open');
-    const tabBar = document.getElementById('tab-bar');
-    const stripShown = tabBar && tabBar.style.display !== 'none';
     const fallback = composerHidden
-      ? document.querySelector(
-          (stripShown ? '#tab-list' : '#main-tab-list') + ' .chat-tab.active',
-        )
+      ? document.querySelector('#tab-list .chat-tab.active')
       : document.getElementById('task-input');
     if (fallback) fallback.focus();
   }
@@ -1147,6 +1143,10 @@
       unackedAnswer: '',
       unackedQuestion: null,
       isRunning: false,
+      // False for a chat adopted from the registry until its replay
+      // (status / task_events) arrives: its task may be running on
+      // another surface, so retireIdleChat() must not close it yet.
+      statusKnown: true,
       // Raised by the Stop button until the task actually ends, so a
       // stop the agent has not reached yet looks different from a stop
       // that never arrived (see stop_button_delay_2026-08-05.html).
@@ -1227,10 +1227,6 @@
       // the conversation that started it.
       isSubagentTab: false,
       parentTabId: null,
-      // On a top-level tab: the tab of its group (itself, a sub-agent,
-      // an opened file) the user viewed last; its main-row entry brings
-      // that tab back (see groupTargetId).
-      groupActiveId: null,
       isDone: false,
       lastTaskFailed: false,
       hasRunTask: false,
@@ -1527,7 +1523,10 @@
   }
 
   function restoreTab(tab) {
-    hideContentArea();
+    // The split layout's content pane keeps whatever it shows across
+    // chat switches; a stacked surface puts the chat back in place of
+    // the content tab it was showing.
+    if (!splitLayout()) hideContentArea();
     activeTabId = tab.id;
     // Every chat tab activation funnels through here — switching, creating,
     // and falling back after a close — so this is the one place that tells
@@ -1868,18 +1867,39 @@
 
   // ---- Tab groups ---------------------------------------------------
   //
-  // Every surface shows its tabs on two rows, the way editor-tabs mode
-  // does with VS Code's editor tabs above the webview's own strip.  The
-  // MAIN row (#main-tab-list) holds one entry per top-level tab: each
-  // chat tab, plus any tab nobody owns (the daemon's browser tab).  The
-  // GROUP strip (#tab-list) under it holds the tabs of the group on
-  // screen: the chat itself, the sub-agents it spawned and the files,
-  // reports and terminals its task opened, in tab order.  The strip
-  // appears only when that group has more than one tab.  The main row
-  // highlights the group on screen and takes the user back to the tab
-  // they last viewed in a group.  In editor-tabs mode VS Code's editor
-  // tabs are the main row (one WebviewPanel per chat), the panel holds
-  // exactly one group, and #main-tab-bar stays hidden.
+  // There is no row of chat tabs: the chat on screen is the one the
+  // user picked in the Chats panel (openHistoryTask) or opened with
+  // "+" (createNewTab); every other chat tab stays in `tabs`, hidden,
+  // mirrored from the daemon's registry like before.  The GROUP strip
+  // (#tab-list) holds the chat on screen with the sub-agents it
+  // spawned, in tab order, and appears only when it has more than one
+  // tab.  Where the chat and the files it opens share one surface (the
+  // mobile remote webapp, the VS Code sidebar chat), the strip also
+  // lists every open file, browser and terminal tab, and showing one
+  // of them replaces the chat (body.content-tab-open).  The desktop
+  // remote webapp SPLITS the window instead (splitLayout): the chat
+  // pane on the left keeps the strip, and the content pane on the
+  // right has its own tab row (#content-tab-list) with every content
+  // tab; `activeContentTabId` is the one it shows, independent of the
+  // chat on screen (activeTabId, never a content tab there).  In
+  // editor-tabs mode VS Code's editor tabs stand for the chats (one
+  // WebviewPanel per chat) and the panel holds exactly one group.
+
+  /** Whether the chat and content panes sit side by side (desktop remote). */
+  function splitLayout() {
+    return document.body.classList.contains('remote-desktop');
+  }
+
+  // The content tab the split layout's content pane shows (null: the
+  // pane is empty).  Stacked surfaces show a content tab as the active
+  // tab instead; shownContentTabId() reads the one on screen either way.
+  let activeContentTabId = null;
+
+  function shownContentTabId() {
+    if (splitLayout()) return activeContentTabId;
+    const active = getTab(activeTabId);
+    return active && active.isContentTab ? active.id : null;
+  }
 
   /** The tab *tab* hangs off: a sub-agent's parent chat, a file's owning
    *  chat (or file); null for a top-level tab or a broken link. */
@@ -1913,16 +1933,9 @@
     return tabs.filter(t => rootTabOf(t) === root);
   }
 
-  /** The tab a click on *root*'s main-row entry activates: the group's
-   *  last viewed tab while it is still in the group, else the root. */
-  function groupTargetId(root) {
-    const last = root.groupActiveId ? getTab(root.groupActiveId) : null;
-    return last && rootTabOf(last) === root ? last.id : root.id;
-  }
-
-  // The group last scrolled into view on the main row (see
-  // lastScrolledTabId for the same discipline on the strip).
-  let lastScrolledRootId = null;
+  // The content tab last scrolled into view on the content pane's row
+  // (see lastScrolledTabId for the same discipline on the strip).
+  let lastScrolledContentTabId = null;
 
   function renderTabBar() {
     const tabList = document.getElementById('tab-list');
@@ -1930,40 +1943,22 @@
     if (!tabList || !tabBar) return;
 
     const active = getTab(activeTabId);
-    const roots = tabs.filter(t => rootTabOf(t) === t);
     const activeRoot = active ? rootTabOf(active) : null;
-    if (activeRoot) activeRoot.groupActiveId = activeTabId;
-    // The group the strip shows: the active tab's, or the first group
+    // The group the strip shows: the active tab's, or the first chat
     // when nothing is active yet.
-    const shownRoot = activeRoot || roots[0] || null;
-    const members = shownRoot ? groupMembers(shownRoot) : [];
+    const shownRoot =
+      activeRoot ||
+      tabs.find(t => rootTabOf(t) === t && !t.isContentTab) ||
+      null;
+    const group = new Set(shownRoot ? groupMembers(shownRoot) : []);
+    const split = splitLayout();
+    // Content tabs have their own row in the split layout; a stacked
+    // surface lists every one of them on the strip, whoever opened it.
+    const members = tabs.filter(t => (t.isContentTab ? !split : group.has(t)));
 
     // Checked on <body> inline — not via EDITOR_TAB_MODE — so the
     // function stays self-contained.
     const editorTabMode = document.body.classList.contains('editor-tab-mode');
-    const mainBar = document.getElementById('main-tab-bar');
-    const mainList = document.getElementById('main-tab-list');
-    if (mainBar) mainBar.style.display = editorTabMode ? 'none' : '';
-    if (mainList && !editorTabMode) {
-      mainList.setAttribute('role', 'tablist');
-      mainList.setAttribute('aria-label', 'Chat tabs');
-      mainList.innerHTML = '';
-      const rovingRoot = shownRoot || null;
-      roots.forEach(root => {
-        const el = buildTabElement(root, {
-          main: true,
-          selected: root === shownRoot,
-          focusStop: root === rovingRoot,
-        });
-        mainList.appendChild(el);
-      });
-      const activeEl = mainList.querySelector('.chat-tab.active');
-      const shownRootId = shownRoot ? shownRoot.id : null;
-      if (activeEl && shownRootId !== lastScrolledRootId)
-        activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
-      lastScrolledRootId = shownRootId;
-    }
-
     if (editorTabMode) {
       // The EDITOR TAB is this chat's tab: mirror the root chat tab's
       // label (the task on screen while the root is shown, see
@@ -2000,9 +1995,9 @@
     }
 
     // The strip only appears when there is something beyond the chat
-    // itself to switch to (a run_parallel fan-out's sub-agent tabs, a
-    // file the task opened); a single conversation needs no second tab
-    // strip under the main row (or, in editor-tabs mode, under the
+    // itself to switch to (a run_parallel fan-out's sub-agent tabs, on
+    // a stacked surface a file the task opened); a single conversation
+    // needs no tab strip (nor, in editor-tabs mode, one under the
     // editor's own tabs).
     tabBar.style.display = members.length > 1 ? '' : 'none';
 
@@ -2026,7 +2021,6 @@
     members.forEach(tab => {
       tabList.appendChild(
         buildTabElement(tab, {
-          main: false,
           selected: tab.id === activeTabId,
           focusStop: tab.id === rovingStopId,
         }),
@@ -2043,38 +2037,71 @@
     if (activeEl && activeTabId !== lastScrolledTabId)
       activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
     lastScrolledTabId = activeTabId;
+
+    renderContentTabBar(split);
   }
 
   /**
-   * Build one tab element for the main row (opts.main) or the group
-   * strip.  opts.selected marks it the highlighted tab of its row,
-   * opts.focusStop makes it the row's roving Tab stop.  A main-row entry
-   * stands for its whole group: it activates the tab last viewed in the
-   * group and shows the group's pending question.
+   * The content pane's tab row (split layout): every file, browser and
+   * terminal tab in tab order, the pane's tab highlighted.  Empty, and
+   * hidden by CSS, on a stacked surface.
+   */
+  function renderContentTabBar(split) {
+    const list = document.getElementById('content-tab-list');
+    if (!list) return;
+    list.setAttribute('role', 'tablist');
+    list.setAttribute('aria-label', 'Open files');
+    list.innerHTML = '';
+    if (!split) return;
+    const contentTabs = tabs.filter(t => t.isContentTab);
+    const rovingStopId = contentTabs.some(t => t.id === activeContentTabId)
+      ? activeContentTabId
+      : contentTabs.length > 0
+        ? contentTabs[0].id
+        : null;
+    contentTabs.forEach(tab => {
+      list.appendChild(
+        buildTabElement(tab, {
+          selected: tab.id === activeContentTabId,
+          focusStop: tab.id === rovingStopId,
+        }),
+      );
+    });
+    const activeEl = list.querySelector('.chat-tab.active');
+    if (activeEl && activeContentTabId !== lastScrolledContentTabId)
+      activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    lastScrolledContentTabId = activeContentTabId;
+  }
+
+  /**
+   * Build one tab element for the group strip or the content pane's
+   * row.  opts.selected marks it the highlighted tab of its row,
+   * opts.focusStop makes it the row's roving Tab stop.
    */
   function buildTabElement(tab, opts) {
-    const targetId = opts.main ? groupTargetId(tab) : tab.id;
-    const members = opts.main ? groupMembers(tab) : [tab];
-    const needsAnswer = members.some(
-      t => t.askPendingQuestion !== null && t.id !== activeTabId,
-    );
+    const targetId = tab.id;
+    const needsAnswer =
+      tab.askPendingQuestion !== null && tab.id !== activeTabId;
     const el = document.createElement('div');
     el.className =
       'chat-tab' +
       (opts.selected ? ' active' : '') +
       (tab.isSubagentTab ? ' subagent-tab' : '') +
       (tab.isContentTab ? ' content-tab' : '') +
-      (tab.isContentTab && tab.contentDirty ? ' content-dirty' : '') +
-      (opts.main ? ' main-tab' : '');
+      (tab.isContentTab && tab.contentDirty ? ' content-dirty' : '');
     el.dataset.tabId = tab.id;
     el.setAttribute('role', 'tab');
     el.setAttribute('tabindex', opts.focusStop ? '0' : '-1');
     el.setAttribute('aria-selected', opts.selected ? 'true' : 'false');
     const label = tabLabel(tab);
     el.setAttribute('aria-label', label);
-    // All chat tabs swap the one shared chat surface (#output), so a
-    // single shared tabpanel is the correct association.
-    el.setAttribute('aria-controls', 'output');
+    // All chat tabs swap the one shared chat surface (#output), and all
+    // content tabs the one content area, so a single shared tabpanel
+    // per kind is the correct association.
+    el.setAttribute(
+      'aria-controls',
+      tab.isContentTab ? 'content-tab-area' : 'output',
+    );
 
     if (tab.isContentTab) {
       const fileIcon = document.createElement('span');
@@ -2192,9 +2219,15 @@
   }
 
   function switchToTab(tabId) {
-    if (tabId === activeTabId) return;
     const tab = getTab(tabId);
     if (!tab) return;
+    // Split layout: a content tab goes to the content pane; the chat
+    // on screen is not touched.
+    if (tab.isContentTab && splitLayout()) {
+      showInContentPane(tab);
+      return;
+    }
+    if (tabId === activeTabId) return;
     saveCurrentTab();
     // activateAdjacentTab owns the activation tail (restore, running
     // state, timers, chevron, focus); only the bar render and the
@@ -2215,26 +2248,39 @@
   // break the "no tab switch unless finished" rule.  For those closes
   // prefer the closed tab's parent chat tab, then the nearest surviving
   // chat tab, falling back to adjacency only if no chat tab is left.
-  // Returns null when no tab is left (the caller opens a fresh chat
-  // tab then).
+  // A sub-agent tab the user closed hands over inside its own chat's
+  // group (the nearest surviving member, the chat itself included):
+  // without a row of chat tabs, landing on an unrelated chat would be
+  // a surprise.  In the split layout the chat pane never shows a
+  // content tab, so only chat tabs are candidates there.  Returns null
+  // when no tab is left (the caller opens a fresh chat tab then).
   function pickSuccessorTab(closed, origIdx, agentInitiated) {
-    const eligible = (t, chatOnly) => {
-      return !!t && !(chatOnly && t.isContentTab);
-    };
-    const nearest = chatOnly => {
-      for (let d = 0; d < tabs.length; d++) {
-        const after = tabs[origIdx + d];
-        if (eligible(after, chatOnly)) return after;
-        const before = tabs[origIdx - 1 - d];
-        if (eligible(before, chatOnly)) return before;
-      }
-      return null;
-    };
-    const adjacent = nearest(false);
-    if (!agentInitiated) return adjacent;
+    const isChat = t => !t.isContentTab;
+    const ok = t => !splitLayout() || isChat(t);
     const parent = closed.parentTabId ? getTab(closed.parentTabId) : null;
-    if (eligible(parent, true)) return parent;
-    return nearest(true) || adjacent;
+    if (agentInitiated) {
+      if (parent && isChat(parent)) return parent;
+      return nearestTab(origIdx, isChat) || nearestTab(origIdx, ok);
+    }
+    if (parent) {
+      const root = rootTabOf(parent);
+      const inGroup = nearestTab(origIdx, t => ok(t) && rootTabOf(t) === root);
+      if (inGroup) return inGroup;
+    }
+    return nearestTab(origIdx, ok);
+  }
+
+  /** The tab nearest to index *origIdx* (the slot a tab was just removed
+   *  from) that satisfies *ok*: the one now at the slot, then the one
+   *  before it, then further out on both sides. */
+  function nearestTab(origIdx, ok) {
+    for (let d = 0; d < tabs.length; d++) {
+      const after = tabs[origIdx + d];
+      if (after && ok(after)) return after;
+      const before = tabs[origIdx - 1 - d];
+      if (before && ok(before)) return before;
+    }
+    return null;
   }
 
   // agentInitiated marks a close the agent performed by itself rather
@@ -2343,11 +2389,177 @@
     if (contentArea) return contentArea;
     contentArea = document.createElement('div');
     contentArea.id = 'content-tab-area';
-    contentArea.style.display = 'none';
+    contentArea.setAttribute('role', 'tabpanel');
+    contentArea.setAttribute('aria-label', 'Open file');
+    contentArea.style.display = splitLayout() ? '' : 'none';
+    // What the split layout's content pane shows while no file,
+    // browser or terminal tab is open.
+    const empty = document.createElement('div');
+    empty.id = 'content-pane-empty';
+    empty.innerHTML =
+      '<p>No open files.</p>' +
+      '<p>Files the agent opens, files picked in the Explorer, the ' +
+      'browser and the terminal (from the \u2026 menu) show here.</p>';
+    contentArea.appendChild(empty);
     const app = document.getElementById('app');
     const inputArea = document.getElementById('input-area');
     if (app) app.insertBefore(contentArea, inputArea || null);
     return contentArea;
+  }
+
+  /**
+   * Split layout: show *tab* in the content pane, or empty the pane
+   * when *tab* is null.  The chat on screen is not touched.
+   */
+  function showInContentPane(tab) {
+    activeContentTabId = tab ? tab.id : null;
+    if (tab) {
+      showContentTab(tab);
+    } else {
+      closeContentMenu();
+      const area = ensureContentArea();
+      Array.from(area.children).forEach(v => {
+        v.style.display = v.id === 'content-pane-empty' ? '' : 'none';
+      });
+      syncBrowserTabVisibility(null);
+      syncTerminalTabVisibility(null);
+    }
+    renderTabBar();
+  }
+
+  // The chat pane's share of the split (percent of the chat + content
+  // area): --chat-pane-w on #app, remembered in localStorage.
+  const PANE_PCT_KEY = 'kiss-chat-pane-pct';
+  const PANE_PCT_DEFAULT = 50;
+  const PANE_PCT_MIN = 20;
+  const PANE_PCT_MAX = 80;
+
+  /**
+   * Wire #pane-resizer, the handle between the chat pane and the
+   * content pane of the split layout: dragging (pointer capture),
+   * ArrowLeft / ArrowRight in 2% steps, double-click back to the
+   * half-and-half default, ARIA values, and the share kept across
+   * reloads.  Idle on a stacked surface, where CSS hides the handle.
+   */
+  function setupPaneResizer() {
+    const resizer = document.getElementById('pane-resizer');
+    const app = document.getElementById('app');
+    if (!resizer || !app) return;
+    let pct = PANE_PCT_DEFAULT;
+    try {
+      const saved = parseFloat(window.localStorage.getItem(PANE_PCT_KEY));
+      if (isFinite(saved)) pct = saved;
+    } catch {}
+    const apply = () => {
+      pct = Math.max(PANE_PCT_MIN, Math.min(PANE_PCT_MAX, pct));
+      app.style.setProperty('--chat-pane-w', pct + '%');
+      resizer.setAttribute('aria-valuemin', String(PANE_PCT_MIN));
+      resizer.setAttribute('aria-valuemax', String(PANE_PCT_MAX));
+      resizer.setAttribute('aria-valuenow', String(Math.round(pct)));
+    };
+    const persist = () => {
+      try {
+        window.localStorage.setItem(PANE_PCT_KEY, String(pct));
+      } catch {}
+    };
+    apply();
+    let resizing = false;
+    const endResize = e => {
+      if (!resizing) return;
+      resizing = false;
+      document.body.classList.remove('sidebar-resizing');
+      try {
+        if (typeof resizer.releasePointerCapture === 'function')
+          resizer.releasePointerCapture(e.pointerId);
+      } catch {}
+      persist();
+    };
+    resizer.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || !splitLayout()) return;
+      e.preventDefault();
+      resizing = true;
+      document.body.classList.add('sidebar-resizing');
+      try {
+        if (typeof resizer.setPointerCapture === 'function')
+          resizer.setPointerCapture(e.pointerId);
+      } catch {}
+    });
+    resizer.addEventListener('pointermove', e => {
+      if (!resizing) return;
+      const r = app.getBoundingClientRect();
+      if (r.width <= 0) return;
+      pct = ((e.clientX - r.left) / r.width) * 100;
+      apply();
+      layoutShownContentEditor();
+    });
+    resizer.addEventListener('pointerup', endResize);
+    resizer.addEventListener('pointercancel', endResize);
+    resizer.addEventListener('dblclick', () => {
+      pct = PANE_PCT_DEFAULT;
+      apply();
+      layoutShownContentEditor();
+      try {
+        window.localStorage.removeItem(PANE_PCT_KEY);
+      } catch {}
+    });
+    resizer.addEventListener('keydown', e => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      pct += e.key === 'ArrowRight' ? 2 : -2;
+      apply();
+      layoutShownContentEditor();
+      persist();
+    });
+  }
+
+  /** A Monaco editor in the content pane re-measures after the split moves. */
+  function layoutShownContentEditor() {
+    const tab = getTab(shownContentTabId());
+    if (tab && tab.contentEditor && tab.contentEditor.layout) {
+      try {
+        tab.contentEditor.layout();
+      } catch (_e) {}
+    }
+  }
+
+  /**
+   * Put the panes in the state the current layout expects, after the
+   * window crossed the desktop breakpoint (applyRemoteDesktop) and at
+   * start-up.  Going split: a content tab on screen moves to the
+   * content pane and its owning chat (or the first chat, or a fresh
+   * one) takes the chat pane; otherwise the pane shows the content tab
+   * last viewed, if it is still open.  Going stacked: the content pane
+   * goes away and the chat stays on screen.
+   */
+  function applySplitLayout() {
+    const active = getTab(activeTabId);
+    if (splitLayout()) {
+      const area = ensureContentArea();
+      area.style.display = '';
+      setChatSurfaceVisible(true);
+      const shown =
+        active && active.isContentTab
+          ? active
+          : getTab(activeContentTabId) || getTab(lastViewedContentTabId);
+      if (active && active.isContentTab) {
+        const chat =
+          getTab(chatTargetTabId()) || tabs.find(t => !t.isContentTab) || null;
+        if (chat && !chat.isContentTab) {
+          activateAdjacentTab(chat);
+          persistTabState();
+        } else {
+          createNewTab();
+        }
+      }
+      showInContentPane(shown && shown.isContentTab ? shown : null);
+      return;
+    }
+    // Going stacked: the content pane goes away but `activeContentTabId`
+    // keeps naming the tab it showed (a browser or terminal as much as
+    // a file), so the pane comes back on it when the window widens
+    // again; shownContentTabId() ignores it while stacked.
+    hideContentArea();
+    renderTabBar();
   }
 
   function setChatSurfaceVisible(visible) {
@@ -2367,7 +2579,10 @@
     // An open editor menu belongs to the surface being swapped out.
     closeContentMenu();
     const area = ensureContentArea();
-    setChatSurfaceVisible(false);
+    const split = splitLayout();
+    // A stacked surface shows the content tab in place of the chat;
+    // the split layout's content pane sits beside it.
+    if (!split) setChatSurfaceVisible(false);
     area.style.display = '';
     Array.from(area.children).forEach(v => {
       v.style.display = 'none';
@@ -2384,6 +2599,7 @@
     // height 0, where a reveal cannot scroll; retry now that the tab
     // is visible and laid out.
     revealPendingContentLine(tab);
+    if (split) return;
     // A content tab browses the workspace of the chat it was opened
     // from (sidebarWorkDir), which may differ from the previous tab's.
     refreshSidebarDataViews(false);
@@ -2397,6 +2613,7 @@
         : 'none';
   }
 
+  /** Stacked surfaces: put the chat back in place of the content area. */
   function hideContentArea() {
     closeContentMenu();
     if (contentArea) contentArea.style.display = 'none';
@@ -2467,8 +2684,8 @@
     // The surface that asked for the tab switches to it.  A popup the
     // page opened itself only follows on a surface that is showing a
     // browser tab: it never yanks a surface out of its chat.
-    const active = getTab(activeTabId);
-    if (ev.focus && (!ev.popup || (active && active.isBrowserTab))) {
+    const shown = getTab(shownContentTabId());
+    if (ev.focus && (!ev.popup || (shown && shown.isBrowserTab))) {
       switchToTab(tab.id);
     }
     renderTabBar();
@@ -2582,6 +2799,10 @@
 
   function activateAdjacentTab(newTab) {
     if (newTab.isContentTab) {
+      if (splitLayout()) {
+        showInContentPane(newTab);
+        return;
+      }
       activeTabId = newTab.id;
       showContentTab(newTab);
       // The chat tab just left may have been answering a question.
@@ -2754,7 +2975,11 @@
     }
     tabs.splice(idx, 1);
     disposeTabContentView(tab);
-    if (activeTabId === tabId) {
+    if (splitLayout() && activeContentTabId === tabId) {
+      // Split layout: the content pane moves on to the nearest content
+      // tab, or empties.
+      showInContentPane(nearestTab(idx, t => t.isContentTab));
+    } else if (activeTabId === tabId) {
       const successor =
         tabs.length > 0 ? pickSuccessorTab(tab, idx, false) : null;
       if (!successor) {
@@ -3833,8 +4058,8 @@
     e => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
       if (e.key !== 's' && e.key !== 'S') return;
-      const tab = getTab(activeTabId);
-      if (!tab || !tab.isContentTab || !tab.contentEditor) return;
+      const tab = getTab(shownContentTabId());
+      if (!tab || !tab.contentEditor) return;
       e.preventDefault();
       saveContentTab(tab, false);
     },
@@ -4011,7 +4236,7 @@
     channel.port1.onmessage = () => {
       // Saves only while this tab is the one on screen and still
       // shows THIS iframe (a re-rendered preview gets a new port).
-      if (activeTabId !== tab.id || !tab.contentEditor) return;
+      if (shownContentTabId() !== tab.id || !tab.contentEditor) return;
       if (!iframe.isConnected) return;
       saveContentTab(tab, false);
     };
@@ -4295,7 +4520,7 @@
         renderContentView(existing, ev);
       }
       existing.contentReloadRequested = false;
-      if (activeTabId === existing.id) showContentTab(existing);
+      if (shownContentTabId() === existing.id) showContentTab(existing);
       else if (mayFocus) switchToTab(existing.id);
       return;
     }
@@ -4710,6 +4935,43 @@
    *
    * @param {string} taskText The row's task text.
    */
+  /**
+   * Leaving a chat for another one (a Chats panel pick, "+") retires
+   * the chat left behind when nothing in it is still going: no running
+   * task or sub-agent, no question waiting for an answer, no prompt
+   * the daemon has not acknowledged, and (unless *draftMoved*: "+"
+   * carries the composer text into the new chat) no unsent draft.
+   * Without a row of chat tabs nothing else could close it, and the
+   * Chats panel keeps it one click away.  A busy chat stays open,
+   * hidden, so its tab is open on every surface until the task ends.
+   * *left* is the tab the user was on; its whole group goes.
+   */
+  function retireIdleChat(left, draftMoved) {
+    if (!left || left.isContentTab || EDITOR_TAB_MODE) return;
+    const root = rootTabOf(left);
+    const active = getTab(activeTabId);
+    if (!getTab(root.id) || (active && rootTabOf(active) === root)) return;
+    const busy = groupMembers(root).some(
+      t =>
+        !t.isContentTab &&
+        (!t.statusKnown ||
+          t.isRunning ||
+          t.askPendingQuestion !== null ||
+          !!t.unackedPrompt),
+    );
+    if (busy) return;
+    if (!draftMoved && (root.inputValue || '').trim()) return;
+    closeTab(root.id, false, false);
+  }
+
+  /** "+" and its kin: a fresh chat on screen, the chat left behind
+   *  retired when idle (its composer draft moves to the new chat). */
+  function openNewChat() {
+    const left = getTab(activeTabId);
+    createNewTab();
+    retireIdleChat(left, true);
+  }
+
   function openHistoryTaskInNewTab(taskText) {
     createNewTab();
     const t = (taskText || '').trim();
@@ -5026,7 +5288,10 @@
       if (!tab) {
         tab = makeTab(clipTabTitle(e.title));
         tab.id = e.tabId;
-        if (e.chatId) tab.hasRunTask = true;
+        if (e.chatId) {
+          tab.hasRunTask = true;
+          tab.statusKnown = false;
+        }
       } else if (!tab.isSubagentTab && e.title) {
         tab.title = clipTabTitle(e.title);
       }
@@ -5111,10 +5376,17 @@
       }
     });
 
-    if (tabs.length === 0) {
+    if (
+      tabs.length === 0 ||
+      (splitLayout() && !tabs.some(t => !t.isContentTab))
+    ) {
       // Empty registry: keep one local, unregistered placeholder so
       // the composer always exists. The daemon adopts it the moment it
-      // runs a task; until then it is a welcome screen only.
+      // runs a task; until then it is a welcome screen only.  The
+      // split layout's chat pane is always on screen, so it needs the
+      // placeholder even while files survive beside it; a stacked
+      // surface showing a file gets its fresh chat when the file
+      // closes (closeContentTab).
       tabs.push(makeTab('new chat'));
     }
     // Drafts persisted by the previous page instance go back to their
@@ -5128,7 +5400,13 @@
     }
     if (!getTab(activeTabId)) {
       const saved = savedActiveTabId ? getTab(savedActiveTabId) : null;
-      const target = saved || tabs[0];
+      let target = saved || tabs[0];
+      // The split layout's chat pane never shows a content tab: the
+      // removed chat's place goes to a surviving chat (or the
+      // placeholder), never to an open file.
+      if (splitLayout() && target.isContentTab) {
+        target = tabs.find(t => !t.isContentTab);
+      }
       // The previously selected tab is gone: the draft the boot tab
       // showed for it follows the screen to the tab taking it
       // (restoreTab shows tab.inputValue).
@@ -6583,11 +6861,15 @@
       });
       return;
     }
+    // The connect prompt replaces whatever "+" carried over, so the
+    // draft stays with the chat left behind (which it then keeps open).
+    const left = getTab(activeTabId);
     createNewTab();
     inp.value = prompt;
     inp.dispatchEvent(new Event('input', {bubbles: true}));
     setMetaDrawerOpen(false);
     sendMessage();
+    retireIdleChat(left, false);
   }
 
   // ---- Spend subpanel ----
@@ -12893,12 +13175,11 @@
     const oldId = tab.id;
     const panel = _rpTabPanel.get(oldId) || null;
     tab.id = newTabId;
-    // Its nested sub-agents, the files it opened and any group bookmark
-    // follow the rename, so they stay in the chat's group (rootTabOf).
+    // Its nested sub-agents and the files it opened follow the rename,
+    // so they stay in the chat's group (rootTabOf).
     for (const t of tabs) {
       if (t.parentTabId === oldId) t.parentTabId = newTabId;
       if (t.ownerTabId === oldId) t.ownerTabId = newTabId;
-      if (t.groupActiveId === oldId) t.groupActiveId = newTabId;
     }
     if (panel) {
       _rpTabPanel.delete(oldId);
@@ -14132,11 +14413,14 @@
               !sib.classList.contains('llm-panel')
             )
               break;
-            // Text-only Thoughts belong in the digest; media, questions
-            // and messages remain expanded siblings after it.
+            // A Thoughts panel always belongs in the digest, even when
+            // its Markdown shows a picture: the summary stands for the
+            // steps it recounts, their thoughts included.  Other media
+            // panels, questions and messages remain expanded siblings
+            // after the summary.
             if (
-              panelShowsMedia(sib) ||
-              (panelStaysOpen(sib) && !sib.classList.contains('llm-panel'))
+              !sib.classList.contains('llm-panel') &&
+              (panelShowsMedia(sib) || panelStaysOpen(sib))
             )
               preserve.push(sib);
             else adopt.push(sib);
@@ -15334,14 +15618,26 @@
   function focusInputWithRetry(force) {
     cancelInputFocusRetry();
     if (isMobileRemote) return;
+    // The keyboard stays with a content view the user is working in (a
+    // terminal's shell, an editor, the browser screen): a connect-time
+    // or host focus request is a convenience, not a reason to pull the
+    // caret out of it.  Reachable on the desktop remote page only,
+    // where the composer sits beside the content pane.
+    if (contentViewHasFocus()) return;
     if (!force && composerFocusWouldSteal()) return;
     inp.focus();
     inputFocusRetryTimers = [100, 300].map(ms =>
       setTimeout(() => {
-        if (composerFocusWouldSteal()) return;
+        if (contentViewHasFocus() || composerFocusWouldSteal()) return;
         inp.focus();
       }, ms),
     );
+  }
+
+  /** Whether the keyboard is in the content pane (editor, terminal,
+   *  browser screen): the composer must not take it from there. */
+  function contentViewHasFocus() {
+    return Boolean(contentArea && contentArea.contains(document.activeElement));
   }
 
   /** Whether *el* is a text-entry control (typing goes into it). */
@@ -16126,6 +16422,7 @@
           if (phaseHome) setLaunchPhase(phaseHome, '');
         }
         if (evTab) {
+          evTab.statusKnown = true;
           setTabRunning(evTab, !!ev.running);
           // modelpick-coverage:start
           // Belt and braces for the daemon's `modelPick` restore: a task
@@ -16649,6 +16946,7 @@
           ev.taskId !== undefined && ev.taskId !== null && ev.taskId !== '';
         const ocTab = chatId ? getTabByBackendChatId(chatId) : null;
         if (ocTab && ev.onlyIfMissing) break;
+        const ocLeft = getTab(activeTabId);
         if (ocTab) {
           switchToTab(ocTab.id);
           if (
@@ -16673,6 +16971,7 @@
           openHistoryTaskInNewTab(taskText);
           focusInputWithRetry();
         }
+        retireIdleChat(ocLeft, false);
         break;
       }
       case 'clearChat': {
@@ -16682,7 +16981,7 @@
         if (ccTab && !ccTab.backendChatId && ccWelcome) {
           focusInputWithRetry();
         } else {
-          createNewTab();
+          openNewChat();
         }
         break;
       }
@@ -16777,6 +17076,9 @@
         // down. Mirrors the reset `clear` does when a task starts.
         if (teTab) teTab.lastTaskFailed = false;
         // faildot-coverage:end
+        // The daemon sends a running task's `status` before its replay,
+        // so once the replay is here the tab's state is settled.
+        if (teTab) teTab.statusKnown = true;
         if (ev.chat_id && teTab) {
           teTab.backendChatId = ev.chat_id;
           if (!teTab.workDir && configWorkDir) {
@@ -19804,7 +20106,7 @@
     const newChatBtn = document.getElementById('new-chat-btn');
     if (newChatBtn) {
       newChatBtn.addEventListener('click', () => {
-        createNewTab();
+        openNewChat();
       });
     }
     // The "..." overflow menu: working directory, mic, share, attach,
@@ -19929,6 +20231,7 @@
     ) {
       const desktopMq = window.matchMedia('(min-width: 900px)');
       const applyRemoteDesktop = () => {
+        const wasDesktop = document.body.classList.contains('remote-desktop');
         if (desktopMq.matches) {
           document.body.classList.add('remote-desktop');
           // Desktop docks the task-info panel permanently; the mobile
@@ -19950,6 +20253,9 @@
           // order — setMetaDrawerOpen re-checks the body class).
           setMetaDrawerOpen(false);
         }
+        // Desktop splits the window into the chat and content panes;
+        // narrower windows stack them (a content tab replaces the chat).
+        if (wasDesktop !== desktopMq.matches) applySplitLayout();
         syncMetaInfoPolling();
       };
       if (typeof desktopMq.addEventListener === 'function') {
@@ -20175,6 +20481,7 @@
         refreshPanelAriaMax();
       });
     }
+    setupPaneResizer();
     if (frequentTasksBtn) {
       frequentTasksBtn.addEventListener('click', () => {
         if (frequentPanel && frequentPanel.classList.contains('open')) {
@@ -22099,8 +22406,10 @@
       });
       return;
     }
+    const left = getTab(activeTabId);
     if (existingChatTab) {
       switchToTab(existingChatTab.id);
+      retireIdleChat(left, false);
       // The tab may be parked on a different task of the same chat.
       // Scroll the clicked task's region into view so the static
       // task panel names it; when its events are not spliced into
@@ -22123,10 +22432,12 @@
       // persisted: the server reattaches the live chat on replay.
       openHistoryTaskInNewTab(taskText);
       api.resumeSession({id: s.id, taskId: s.task_id, tabId: activeTabId});
+      retireIdleChat(left, false);
     } else {
       // Nothing to resume, but the row still knows what the task was, so
       // show it read-only in the fresh tab.
       openHistoryTaskInNewTab(taskText);
+      retireIdleChat(left, false);
       inp.focus();
     }
   }
@@ -24898,6 +25209,9 @@
       return activeTabId;
     },
     createNewTab: createNewTab,
+    // The Chats panel's pick, without the panel: show the chat (or, in
+    // the split layout, put a content tab in the content pane).
+    switchToTab: switchToTab,
     processEvent: processOutputEvent,
     // Stands in for the first tap or keystroke: after this the window is no
     // longer launching, so no backend event may switch tabs on its own.

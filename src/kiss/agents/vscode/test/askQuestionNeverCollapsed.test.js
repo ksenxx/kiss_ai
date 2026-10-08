@@ -210,14 +210,16 @@ async function testBackgroundTabRestoreKeepsQuestionOpen() {
   send(win, questionCall({tabId: tab1, taskId: '42'}));
   send(win, {type: 'askUser', question: QUESTION, tabId: tab1});
   assert.strictEqual(api.getActiveTabId(), tab1, 'the question pulls the user over');
-  win.document.querySelector('.chat-tab[data-tab-id="' + tab2 + '"]').click();
+  // Chats are picked from the sidebar's Chats panel; switchToTab is that pick.
+  api.switchToTab(tab2);
+  assert.strictEqual(api.getActiveTabId(), tab2);
   send(win, {type: 'askUserDone', tabId: tab1});
   send(win, questionResult({tabId: tab1, taskId: '42'}));
   for (let i = 0; i < 3; i++) {
     send(win, {type: 'tool_call', name: 'Bash', command: 'ls ' + i, tabId: tab1});
     send(win, {type: 'tool_result', content: 'a', tool_name: 'Bash', tabId: tab1});
   }
-  win.document.querySelector('.chat-tab[data-tab-id="' + tab1 + '"]').click();
+  api.switchToTab(tab1);
   assert.strictEqual(api.getActiveTabId(), tab1);
   const out = win.document.getElementById('output');
   const prompt = out.querySelector('.ev.prompt');

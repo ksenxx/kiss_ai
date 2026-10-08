@@ -25,10 +25,14 @@ const SHA_B = 'b'.repeat(40);
 /**
  * Build a webview.  `win.prompt` / `win.confirm` throw: nothing may call
  * them.  `opts.bodyClass` replaces the default `remote-chat` body class
- * (`editor-tab-mode` builds the VS Code editor-tab flavour).
+ * (`editor-tab-mode` builds the VS Code editor-tab flavour).  The remote
+ * page is the desktop one (wide viewport: split chat/content layout)
+ * unless `opts.narrow` is set, which builds the mobile remote where a
+ * content tab replaces the chat.
  */
 function makeWebview(opts) {
   const bodyClass = (opts && opts.bodyClass) || 'remote-chat';
+  const wide = !(opts && opts.narrow);
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
@@ -61,7 +65,7 @@ function makeWebview(opts) {
   };
   win.matchMedia = function (query) {
     return {
-      matches: query === '(min-width: 900px)',
+      matches: wide && query === '(min-width: 900px)',
       media: query,
       addEventListener: () => {},
       removeEventListener: () => {},

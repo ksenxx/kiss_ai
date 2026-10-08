@@ -191,12 +191,13 @@ function testBackgroundTabReplayFollowupClickCopies() {
       {type: 'task_done'},
     ],
   });
-  // Switch back to the first tab via its tab strip, like a user would.
-  const strip = win.document.querySelector(
-    `.chat-tab[data-tab-id="${firstTabId}"]`,
+  // Switch back to the first chat, as a pick in the Chats panel would
+  // (chats have no tab row of their own any more).
+  assert.ok(
+    win._testApi.openTabs().some((t) => t.id === firstTabId),
+    'the background chat must still be open',
   );
-  assert.ok(strip, 'the background tab must have a strip in the tab bar');
-  click(win, strip);
+  win._testApi.switchToTab(firstTabId);
   assert.strictEqual(win._testApi.getActiveTabId(), firstTabId);
   const bar = win.document.querySelector('#output .followup-bar');
   assertClickCopies(win, bar, 'bg next step', 'background-tab replay');

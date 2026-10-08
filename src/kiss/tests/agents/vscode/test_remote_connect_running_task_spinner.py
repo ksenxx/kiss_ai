@@ -220,9 +220,12 @@ def test_remote_client_opened_mid_run_gets_status_replay_and_spinner(
         _assert_ready_replay(harness.run(_remote_ready_replies(harness)), tab, start_ts)
 
         # 2. Rendered: the real remote page (fresh context, no saved
-        #    tabs) shows the chat tab with the header spinner right after
-        #    boot, without any interaction, and its timer counts from the
-        #    task's real start.
+        #    tabs) shows the running chat right after boot, without any
+        #    interaction, and its timer counts from the task's real
+        #    start.  There is no row of chat tabs: the chat is the one
+        #    on screen (``_testApi``: running, titled by the prompt) and
+        #    its spinner is the one on its row in the Chats panel, open
+        #    by default on the desktop remote page.
         context = browser.new_context(
             ignore_https_errors=True, viewport={"width": 1280, "height": 900},
             service_workers="block",
@@ -230,18 +233,25 @@ def test_remote_client_opened_mid_run_gets_status_replay_and_spinner(
         page = context.new_page()
         page.goto(harness.base_url + "/")
         page.wait_for_selector("#task-input", state="visible", timeout=30000)
-        # The chat's header is its entry on the main tab row; the group
-        # strip under it (hidden for a chat without sub-agent or file
-        # tabs) repeats the active chat, so the probe names the row.
-        tab_selector = f'#main-tab-list .chat-tab[data-tab-id="{tab}"]'
-        page.wait_for_selector(f"{tab_selector} .chat-tab-spinner", timeout=15000)
-        assert page.locator(tab_selector).count() == 1
-        assert page.locator(f"{tab_selector} .chat-tab-spinner").is_visible()
-        assert page.locator(f"{tab_selector} .chat-tab-status").count() == 0
+        page.wait_for_function(
+            "(id) => window._testApi && window._testApi.getActiveTabId() === id"
+            " && window._testApi.openTabs().some(t => t.id === id && t.isRunning)",
+            arg=tab,
+            timeout=15000,
+        )
+        records = [t for t in page.evaluate("window._testApi.openTabs()") if t["id"] == tab]
+        assert len(records) == 1, records
+        assert records[0]["isRunning"] is True and records[0]["isDone"] is False
         # Tab titles are shortened with an ellipsis; the visible part is
         # the prompt's beginning.
-        label = page.locator(f"{tab_selector} .chat-tab-label").inner_text()
+        label = records[0]["title"]
         assert PROMPT.startswith(label.rstrip("\u2026")), label
+        row = page.locator("#history-list .sidebar-item.running-item", has_text=PROMPT)
+        row.locator("> .sidebar-item-running.status-spinner").wait_for(timeout=15000)
+        assert row.count() == 1
+        assert row.get_attribute("data-category") == "running"
+        assert row.locator("> .sidebar-item-running.status-spinner").is_visible()
+        assert row.locator(".status-tick").count() == 0
         # The label floors the elapsed seconds and refreshes once a
         # second, so it is read together with the browser clock and
         # retried: within one tick it must equal floor(now - startTs)
@@ -264,8 +274,17 @@ def test_remote_client_opened_mid_run_gets_status_replay_and_spinner(
         #    spinner and shows the tick; VS Code sees the task stop too.
         executor.release.set()
         vscode.wait_for_status(running=False)
-        page.wait_for_selector(f"{tab_selector} .chat-tab-ok", timeout=15000)
-        assert page.locator(f"{tab_selector} .chat-tab-spinner").count() == 0
+        page.wait_for_function(
+            "(id) => window._testApi.openTabs().some(t => t.id === id && !t.isRunning)",
+            arg=tab,
+            timeout=15000,
+        )
+        done_row = page.locator("#history-list .sidebar-item", has_text=PROMPT)
+        done_row.locator("> .sidebar-item-completed.status-tick").wait_for(timeout=15000)
+        assert done_row.count() == 1
+        assert done_row.get_attribute("data-category") == "completed"
+        assert done_row.locator(".status-spinner").count() == 0
+        assert page.locator("#history-list .status-spinner").count() == 0
     finally:
         executor.restore()
         if vscode is not None:
