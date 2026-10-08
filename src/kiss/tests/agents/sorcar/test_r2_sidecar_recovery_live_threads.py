@@ -46,6 +46,17 @@ def _unlink_sidecars(db_path: Path) -> None:
         os.unlink(str(db_path) + suffix)
 
 
+def _open_file_links() -> list[str]:
+    """Targets of this process's open file descriptors (Linux ``/proc``)."""
+    links = []
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            links.append(os.readlink(f"/proc/self/fd/{fd}"))
+        except FileNotFoundError:  # the listing's own descriptor, already closed
+            pass
+    return links
+
+
 def _sleep_two_seconds() -> int:
     """A SQL function whose single step outlasts a short recovery wait."""
     time.sleep(2.0)
@@ -167,13 +178,12 @@ class TestRecoveryWithLiveThreads:
     ) -> None:
         """A step that outlasts the wait keeps the handle; its owner retires it.
 
-        The busy handle stays registered under thread B and keeps the dead
-        mapping alive, so the recovering thread's ``_get_db()`` either
-        works (the checkpoint folded every frame first) or raises the
-        ``disk I/O error`` — but never closes B's handle under its running
-        step.  B's statement ends with ``interrupted``, B's own
-        ``_get_db()`` retires the handle and reconnects, after which the
-        main thread writes too.
+        While the busy handle pins the dead mapping, nothing may be
+        reopened (a new connection would join that mapping for good), so
+        the recovering thread's ``_get_db()`` raises and leaves the handle
+        registered under B.  B's statement ends with ``interrupted``, B's
+        own next ``_get_db()`` completes the recovery, and from then on
+        every thread connects to a live mapping again.
         """
         monkeypatch.setattr(th, "_RECOVERY_IDLE_WAIT_S", 0.3)
         th._add_task("seed")
@@ -200,20 +210,31 @@ class TestRecoveryWithLiveThreads:
         assert stepping.wait(timeout=30)
         time.sleep(0.3)  # B is now inside the sleeping step
         _unlink_sidecars(th._DB_PATH)
-        try:
+        with pytest.raises(sqlite3.OperationalError, match="still busy"):
             th._get_db()
-        except sqlite3.OperationalError as exc:  # the busy handle pins the dead mapping
-            assert "I/O" in str(exc)
         assert b.is_alive(), "B's statement must still be running"
         assert any(owner is b for _conn, owner, _path in th._open_conns.values()), (
             "B's busy handle must stay registered for B to retire"
         )
+        assert str(th._DB_PATH) in th._attached_shm, "the recovery must stay pending"
         b.join(timeout=60)
-        assert not any(owner is b for _conn, owner, _path in th._open_conns.values())
         assert not b.is_alive(), "thread B hung"
         assert "fatal" not in outcome, repr(outcome.get("fatal"))
         assert "interrupted" in str(outcome["error"])
         assert outcome["after"] is not None
+        assert not any(owner is b for _conn, owner, _path in th._open_conns.values())
         th._add_task("main after B reconnected")
         tasks = {h["task"] for h in th._load_history()}
         assert tasks == {"seed", "B after recovery", "main after B reconnected"}
+        if os.path.isdir("/proc/self/fd"):  # the dead mapping is really gone
+            assert f"{th._DB_PATH}-shm (deleted)" not in _open_file_links(), _open_file_links()
+
+    def test_context_manager_and_scripts_run_under_the_lock(self) -> None:
+        """``with conn:`` and ``executescript`` go through the locked wrappers."""
+        db = th._get_db()
+        with db:
+            db.execute("CREATE TABLE IF NOT EXISTS r2_probe (x INTEGER)")
+        db.cursor().executescript(
+            "INSERT INTO r2_probe VALUES (1); INSERT INTO r2_probe VALUES (2);"
+        )
+        assert [row[0] for row in db.execute("SELECT x FROM r2_probe ORDER BY x")] == [1, 2]

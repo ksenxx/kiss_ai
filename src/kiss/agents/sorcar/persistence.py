@@ -34,7 +34,8 @@ import weakref
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import IO, Any, cast
+from types import TracebackType
+from typing import IO, Any, Literal, cast
 
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.chat_summary import upsert_chat_summary
@@ -760,6 +761,12 @@ class _LockedCursor(sqlite3.Cursor):
         with self.lock:
             return super().fetchall()
 
+    def executescript(self, sql_script: str, /) -> _LockedCursor:
+        """Run *sql_script* under the connection's lock."""
+        with self.lock:
+            super().executescript(sql_script)
+        return self
+
     def __next__(self) -> Any:
         with self.lock:
             return super().__next__()
@@ -817,6 +824,18 @@ class _LockedConnection(sqlite3.Connection):
         """Close the connection; waits for a statement in flight on it."""
         with self.lock:
             super().close()
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+        /,
+    ) -> Literal[False]:
+        # ``with conn:`` commits or rolls back from C, bypassing the
+        # Python overrides above, so the lock is taken here.
+        with self.lock:
+            return super().__exit__(exc_type, exc, tb)
 
 
 #: Every connection :func:`_get_db` has opened in this process and not
@@ -939,11 +958,13 @@ def _recover_orphaned_sidecars(current_path: str) -> None:
     feet would crash the process.  A handle whose owner keeps it busy
     beyond :data:`_RECOVERY_IDLE_WAIT_S` stays open and the owner
     retires it on its next ``_get_db()`` — the generation counter is
-    bumped so every thread's next ``_get_db()`` reconnects.  Until that
-    last old handle is gone, new connections keep failing with
-    ``SQLITE_IOERR`` (:func:`_get_db` re-raises; the retry recovers).
-    A thread whose idle handle was closed here fails once with
-    ``ProgrammingError`` on a statement it runs on the old handle.
+    bumped so every thread's next ``_get_db()`` reconnects — and this
+    call raises ``OperationalError`` without reopening anything, since
+    a connection opened while an old handle lives joins the dead
+    mapping for good; the ``_attached_shm`` entry stays so every
+    ``_get_db()`` retries the recovery until the last old handle is
+    retired.  A thread whose idle handle was closed here fails once
+    with ``ProgrammingError`` on a statement it runs on the old handle.
 
     Idempotent under ``_init_tables_lock``: a racing thread that finds
     the mapping already dropped returns without doing anything.
@@ -970,7 +991,10 @@ def _recover_orphaned_sidecars(current_path: str) -> None:
         for key, conn in doomed:
             # Thread-safe by SQLite's contract; a statement another
             # thread is stepping on this handle aborts with
-            # "interrupted", which releases the handle's lock.
+            # "interrupted", which releases the handle's lock.  (A
+            # busy-timeout wait is not interruptible, so a thread
+            # queued behind another process's write transaction can
+            # keep its lock past the deadline.)
             try:
                 conn.interrupt()
             except sqlite3.Error:  # already closed behind the registry's back
@@ -979,6 +1003,9 @@ def _recover_orphaned_sidecars(current_path: str) -> None:
                 continue  # busy: its owner closes it on its next _get_db()
             try:
                 if not checkpointed:
+                    # Fails with "interrupted" on a handle whose
+                    # paused statement the interrupt above hit; the
+                    # next idle handle checkpoints instead.
                     try:
                         conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
                         checkpointed = True
@@ -991,9 +1018,22 @@ def _recover_orphaned_sidecars(current_path: str) -> None:
             finally:
                 conn.lock.release()
             _drop_open_conn_locked(key)
-        _attached_shm.pop(current_path, None)
         _db_conn = None
         _db_generation += 1
+        busy = sum(1 for _c, _o, path in _open_conns.values() if path == current_path)
+        if busy:
+            # A connection opened now would join the dead mapping for
+            # good (SQLite keeps one shared-memory node per database
+            # per process while any handle uses it), so nothing is
+            # reopened: the ``_attached_shm`` entry stays, every
+            # ``_get_db()`` re-runs this recovery until the owners
+            # retire their handles, and this call fails instead.
+            raise sqlite3.OperationalError(
+                f"disk I/O error: {current_path}-wal/-shm were deleted while "
+                f"{busy} connection(s) are still busy; retry once their "
+                "statements finish"
+            )
+        _attached_shm.pop(current_path, None)
     _invalidate_chat_context_cache("")
 
 
