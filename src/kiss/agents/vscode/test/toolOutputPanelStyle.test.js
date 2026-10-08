@@ -5,12 +5,12 @@
 
 // End-to-end tests for two styling requirements of the chat webview:
 //
-// 1. Panels showing tool call output (.bash-panel) use the same
-//    background as the thinking panel (.think): the identical
-//    translucent neutral tint (--panel-tint) standalone, and the same
-//    tint pre-mixed over --bg (--panel-tint-solid) when nested inside a
-//    .tc card (whose opaque --surface would otherwise make the
-//    translucent tint render lighter).
+// 1. Panels showing tool call output (.bash-panel) paint the shared
+//    neutral panel tint: the translucent --panel-tint standalone, and
+//    the same tint pre-mixed over --bg (--panel-tint-solid) when nested
+//    inside a .tc card (whose opaque --surface would otherwise make the
+//    translucent tint render lighter).  The model's thinking tokens are
+//    plain text inside the Thoughts panel, with no box of their own.
 // 2. The model picker pill (#model-btn) width caps:
 //    min(300px, 50vw) in the extension webview and
 //    clamp(72px, 21vw, 220px) in the remote web app.
@@ -86,7 +86,7 @@ function readyTabId(posted) {
   return ready.tabId;
 }
 
-// Replays a transcript containing a thinking panel, a Bash tool call
+// Replays a transcript containing a thought, a Bash tool call
 // (whose streaming output panel nests inside the .tc card), and a bare
 // tool_result with no preceding tool call (a standalone output panel).
 function replayPanels(win, posted) {
@@ -106,39 +106,39 @@ function replayPanels(win, posted) {
   });
 }
 
-function testToolOutputMatchesThinkingBackground() {
+function testToolOutputPaintsThePanelTint() {
   const {win, posted} = makeWebview();
   replayPanels(win, posted);
   const d = win.document;
 
-  const think = d.querySelector('.think');
-  assert.ok(think, 'the transcript must contain a thinking panel');
-  const thinkBg = win.getComputedStyle(think).background;
-  assert.ok(
-    thinkBg && thinkBg !== 'none',
-    'the thinking panel must declare a background',
-  );
+  const think = d.querySelector('.llm-panel > .think');
+  assert.ok(think, 'the thought is a text block inside the Thoughts panel');
+  assert.strictEqual(think.textContent, 'pondering');
+  const thinkStyle = win.getComputedStyle(think);
+  assert.strictEqual(thinkStyle.background, '', 'the thinking text paints no box of its own');
+  assert.strictEqual(thinkStyle.borderStyle, 'none', 'the thinking text draws no border');
+  assert.strictEqual(thinkStyle.fontStyle, 'italic', 'the thinking text is italic');
+  assert.ok(!think.querySelector('.lbl'), 'the thinking text has no "Thinking" header');
 
   const standalone = d.querySelector('#output > .bash-panel');
   assert.ok(standalone, 'the bare tool_result must render a standalone panel');
   assert.strictEqual(
     win.getComputedStyle(standalone).background,
-    thinkBg,
-    'a standalone tool output panel must share the thinking background',
+    'var(--panel-tint)',
+    'a standalone tool output panel paints the neutral panel tint',
   );
 
   const nested = d.querySelector('.tc > .bash-panel');
   assert.ok(nested, 'the Bash tool call must nest an output panel in its .tc');
   // The .tc card paints the opaque --surface behind its children, so the
-  // nested panel paints the same tint pre-mixed over --bg (what the
-  // thinking panel sits on) instead of relying on transparency.  jsdom
+  // nested panel paints the same tint pre-mixed over --bg (what a
+  // standalone panel sits on) instead of relying on transparency.  jsdom
   // leaves var() unresolved, so compare the token definitions in the
   // :root palette of main.css.
-  assert.strictEqual(thinkBg, 'var(--panel-tint)');
   assert.strictEqual(
     win.getComputedStyle(nested).background,
     'var(--panel-tint-solid)',
-    'a nested tool output panel must paint the pre-mixed thinking tint',
+    'a nested tool output panel must paint the pre-mixed panel tint',
   );
   const root = CSS.match(/:root\s*\{([^}]*)\}/)[1];
   const tint = /--panel-tint:\s*([^;]+);/.exec(root)[1].trim();
@@ -174,7 +174,7 @@ function testModelPillWidthCaps() {
 
 function runTests() {
   const tests = [
-    testToolOutputMatchesThinkingBackground,
+    testToolOutputPaintsThePanelTint,
     testModelPillWidthCaps,
   ];
   for (const t of tests) {

@@ -17,8 +17,8 @@ tab ids the daemon addresses it by.  A sub-agent is identified by its
 task id; over one fan-out's life the daemon names the same sub-agent's
 tab by
 
-* the live fan-out id minted by
-  ``ChatSorcarAgent._run_tasks_parallel`` (``task-<parentTaskId>__sub_<idx>``),
+* the live sub-task id the daemon announces while the ``run_parallel``
+  child runs (``task-<parentTaskId>__sub_<idx>``),
 * the deterministic replay id minted by
   :meth:`kiss.server.server.VSCodeServer._open_persisted_subagent_tabs`
   (``<parentTabId>__sub_<subTaskId>``), and

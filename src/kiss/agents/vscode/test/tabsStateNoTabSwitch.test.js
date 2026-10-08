@@ -69,27 +69,24 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// Chats are no longer rendered as a row of tabs (the chat on screen is
+// the one picked in the Chats panel; the others stay open, hidden), so
+// the open set is read from the page's test API.  Copied into this realm
+// so deepStrictEqual does not trip over jsdom's Array prototype.
 function tabIds(win) {
-  return Array.from(win.document.querySelectorAll('.chat-tab')).map(el =>
-    el.getAttribute('data-tab-id'),
-  );
+  return win._testApi.openTabs().map(t => String(t.id));
 }
 
 function tabTitle(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  const label = el.querySelector('.chat-tab-label');
-  return (label || el).textContent.trim();
+  const tab = win._testApi.openTabs().find(t => t.id === tabId);
+  assert.ok(tab, `tab ${tabId} must be open`);
+  return tab.title;
 }
 
+// The Chats-panel pick.
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(tabIds(win).includes(tabId), `tab ${tabId} must be open`);
+  win._testApi.switchToTab(tabId);
 }
 
 function snapshotEntry(tabId, title, chatId) {

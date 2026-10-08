@@ -273,15 +273,14 @@ class ReviseAndReviewPaperSea(BaseSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """A sequential coordinator with the full toolset that may run for a day.
 
-        The rounds run as ``run_agent`` sub-tasks, so fan-out stays off; the
-        ``full`` profile keeps ``run_agent`` available even when a reviewer
+        The rounds run as ``run_agent`` sub-tasks; the ``full`` profile
+        keeps ``run_agent`` available even when a reviewer
         dispatches the loop (the read-only ``review`` profile has none).  The
         ``timeout`` tells the dispatcher a ``/revise_and_review_paper`` run
         may take up to a day.
         """
         return settings | {
             "use_web_tools": False,
-            "allow_fan_out": False,
             "auto_classify": False,
             "tool_profile": "full",
             "timeout": DISPATCH_TIMEOUT_SECONDS,

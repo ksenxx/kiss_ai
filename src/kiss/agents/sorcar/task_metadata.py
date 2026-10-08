@@ -12,8 +12,8 @@ Columns produced:
 * ``task_history.tags`` — comma-separated tags from :func:`classify_task_tags`:
   one of ``work`` / ``personal`` first, then ``secret``, ``chore`` and
   activity tags (``coding``, ``testing``, ``research``, ...).
-* ``task_history.sea`` — the file stem of the SEA (agent script) that ran
-  the task, from the run's ``agentPath``; backfilled for old rows from the
+* ``task_history.sea`` — the file stem of the SEA that ran
+  the task, from the run's ``seaPath``; backfilled for old rows from the
   parent trajectory's ``run_agent`` tool calls (:func:`sea_name_of_agent`).
 * ``chat_summaries`` — per chat a 6-8 word summary and the launch instant
   of the chat's latest task; the code lives in
@@ -209,7 +209,7 @@ def sea_name_of_agent(agent: str, channels: list[str]) -> str:
     (its stem), ``cron`` the bundled ``cron_agent``, a channel name its
     ``<channel>_sea`` script, and an empty value the default
     ``sorcar_sea``.  The same stem is what a live run records from its
-    ``agentPath``, so backfilled and live rows agree.
+    ``seaPath``, so backfilled and live rows agree.
 
     Args:
         agent: The ``agent`` argument of the tool call.

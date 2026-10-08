@@ -41,11 +41,8 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.core.brand import PRODUCT_NAME
-from kiss.server.web_server import (
-    RemoteAccessServer,
-    _generate_self_signed_cert,
-    _kiss_home_dir,
-)
+from kiss.core.config import kiss_home
+from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
@@ -191,7 +188,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         # default unless overridden), as the extension's runUpdate does,
         # so the installer's hooks and reload marker land where this
         # daemon and its extension look.
-        expected = f"nonint=1 home={_kiss_home_dir()}"
+        expected = f"nonint=1 home={kiss_home()}"
         saved_url = os.environ.get("KISS_UPDATE_BOOTSTRAP_URL")
         os.environ["KISS_UPDATE_BOOTSTRAP_URL"] = f"file://{fake}"
         if saved_url is None:
@@ -248,7 +245,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         script.write_text(
             "#!/bin/bash\necho \"updated $KISS_HOME\" > marker.txt\necho done\n",
         )
-        expected = f"updated {_kiss_home_dir()}"
+        expected = f"updated {kiss_home()}"
         reader, writer = await self._connect()
         try:
             await self._send(writer, {"type": "runUpdate"})

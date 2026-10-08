@@ -1039,7 +1039,7 @@ def test_fold_emits_the_cumulative_cost_for_the_ui(
     assert event["cost"] == "$0.2500"
     assert event["total_tokens"] == 123
     assert event["total_steps"] == 2
-    assert "Budget: $0.2500/$5.00" in event["text"]
+    assert "Budget: $0.2500" in event["text"]
     assert agent.usage_snapshot() == (0.25, 123, 2)
 
 
@@ -1065,7 +1065,7 @@ def test_zero_classifier_spend_emits_no_extra_event(env: IsolatedKissHome) -> No
     agent._fold_classifier_usage()
     assert agent._classifier_spend is None
     assert agent.usage_snapshot() == (0.0, 0, 0)
-    assert agent._usage_events() == []
+    assert agent._usage_ledger.records == []
 
 
 # ---------------------------------------------------------------------------

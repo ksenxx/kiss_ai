@@ -2,17 +2,16 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""``run_parallel(agent=...)``: fan-out children run as an agent script.
+"""``run_parallel(agent=...)``: fan-out children run as a SEA.
 
 A real daemon runs a parent whose scripted model calls ``run_parallel``
 with ``agent`` naming a SEA file.  Each child's request to the stand-in
 model shows the SEA's configuration: its ``system_prompt()`` as the
 base prompt, its ``system_prompt()`` addition after the parent's own
 suffix, its ``prompt(task)`` wrapping the child's task, its
-``tools()`` tool, and its ``tool_profile`` setting.  A channel
-agent or an unknown agent is refused with an error string the parent
-sees.  The children inherit the parent's model and sequential/parallel
-choice through the same table as ``run_agent``.
+``tools()`` tool, and its ``tool_profile`` setting.  An unknown agent
+is refused with an error string the parent sees.  The children inherit
+the parent's model through the same table as ``run_agent``.
 """
 
 from __future__ import annotations
@@ -46,7 +45,7 @@ CHILD_SEA = textwrap.dedent('''
 
     class Sea(BaseSea):
         def settings(self, settings):
-            return settings | {"tool_profile": "bash", "allow_fan_out": False}
+            return settings | {"tool_profile": "bash"}
 
         def prompt(self, task):
             return "[child-sea] " + task + "\\n\\nCHILD-ADD"
@@ -137,10 +136,6 @@ def test_run_parallel_children_run_as_the_named_agent_script(
             return tool_call_response(
                 "run_parallel", {"tasks": '["KID-3 say done"]', "agent": "no-such-agent-xyz"},
             )
-        if step == 3:
-            return tool_call_response(
-                "run_parallel", {"tasks": '["KID-3 say done"]', "agent": "ntfy"},
-            )
         return finish_response("parent-done")
 
     model = StandInModelServer(responder)
@@ -152,7 +147,7 @@ def test_run_parallel_children_run_as_the_named_agent_script(
             model_config=model.model_config,
             use_worktree=False,
             auto_commit=False,
-            append_to_system_prompt="PARENT-SUFFIX-TEXT",
+            add_to_system_prompt="PARENT-SUFFIX-TEXT",
             endpoint_file=daemon,
             timeout=300,
         )
@@ -169,12 +164,11 @@ def test_run_parallel_children_run_as_the_named_agent_script(
         assert child["text"].rstrip().endswith("CHILD-ADD"), child["text"][-200:]
         assert sorted(child["tools"]) == ["Bash", "child_probe", "finish"], child["tools"]
         assert child["model"] == STANDIN_MODEL
-    # The refused fan-outs reached the parent as error strings.
+    # The refused fan-out reached the parent as an error string.
     parent_texts = [request_text(r) for r in parent_requests]
     assert any(
         "no-such-agent-xyz" in t and "Error:" in t for t in parent_texts
     ), parent_texts[-1][-500:]
-    assert any("ntfy is a channel agent, which run_parallel cannot run" in t for t in parent_texts)
 
 
 PARENT_SEA = textwrap.dedent('''
@@ -246,10 +240,10 @@ def test_run_parallel_children_inherit_the_parent_and_a_broken_child_fails_alone
             work_dir=str(repo),
             model=STANDIN_MODEL,
             model_config=parent_model.model_config,
-            extension_agent_path=str(repo / "parent_sea.py"),
+            sea_path=str(repo / "parent_sea.py"),
             use_worktree=False,
             auto_commit=False,
-            append_to_prompt="PARENT-PROMPT-SUFFIX",
+            add_to_prompt="PARENT-PROMPT-SUFFIX",
             endpoint_file=daemon,
             timeout=300,
         )

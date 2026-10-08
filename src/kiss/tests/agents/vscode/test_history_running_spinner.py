@@ -689,15 +689,15 @@ def test_paginated_history_batch_can_append_running_spinner(
         )
         assert state == [
             {
-                "text": "successful task",
-                "category": "completed",
-                "hasRunningDot": False,
-                "visible": True,
-            },
-            {
                 "text": "running task",
                 "category": "running",
                 "hasRunningDot": True,
+                "visible": True,
+            },
+            {
+                "text": "successful task",
+                "category": "completed",
+                "hasRunningDot": False,
                 "visible": True,
             },
         ]

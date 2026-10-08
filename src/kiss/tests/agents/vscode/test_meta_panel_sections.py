@@ -125,11 +125,12 @@ _GEOMETRY_JS = """
   const pad = parseFloat(getComputedStyle(panel).paddingBottom);
   const list = document.getElementById('meta-list');
   const content = document.getElementById('meta-info-content');
-  // The per-task sections only: the global Schedule, Apps and Spend
-  // sections (hidden by _open_page unless asked for) are measured
-  // separately.
+  // The per-task sections only: the workspace (Explorer, Source
+  // Control) and global (Schedule, Apps, Spend) sections (hidden by
+  // _open_page unless asked for) are measured separately.
   const isGlobal = el =>
-    el && ['meta-schedule', 'meta-apps', 'meta-spend'].includes(el.id);
+    el && ['meta-explorer', 'meta-scm', 'meta-schedule', 'meta-apps',
+           'meta-spend'].includes(el.id);
   const resizers = Array.from(
     document.querySelectorAll('#meta-panel > .meta-section-resizer'))
     .filter(r => !isGlobal(r.previousElementSibling));
@@ -222,11 +223,24 @@ def browser() -> Iterator[Browser]:
             chromium.close()
 
 
-# Takes the global Schedule, Apps and Spend sections out of the stack
-# (the `hidden` attribute; a Task Info toggle round trip re-applies the
-# layout), leaving the per-task sections these geometry tests measure.
+# Takes the workspace (Explorer, Source Control) and global (Schedule,
+# Apps, Spend) sections out of the stack (the `hidden` attribute; a Task
+# Info toggle round trip re-applies the layout), leaving the per-task
+# sections these geometry tests measure.
+_HIDE_WORKSPACE_SECTIONS_JS = """
+() => {
+  document.getElementById('meta-explorer').hidden = true;
+  document.getElementById('meta-scm').hidden = true;
+  const toggle = document.querySelector('#meta-section-info .meta-section-toggle');
+  toggle.click();
+  toggle.click();
+}
+"""
+
 _HIDE_GLOBAL_SECTIONS_JS = """
 () => {
+  document.getElementById('meta-explorer').hidden = true;
+  document.getElementById('meta-scm').hidden = true;
   document.getElementById('meta-schedule').hidden = true;
   document.getElementById('meta-apps').hidden = true;
   document.getElementById('meta-spend').hidden = true;
@@ -247,10 +261,12 @@ def _open_page(
 ) -> Page:
     """Open the remote page at the given viewport with post recording.
 
-    Unless ``global_sections``, the Schedule, Apps and Spend sections
-    are hidden so only the per-task sections share the panel.
-    ``storage`` entries land in localStorage before the page's scripts
-    run, the way a previous visit would have left them."""
+    The workspace sections (Explorer, Source Control) are always hidden:
+    they browse a daemon this page has none of.  Unless
+    ``global_sections``, the Schedule, Apps and Spend sections are hidden
+    too, so only the per-task sections share the panel.  ``storage``
+    entries land in localStorage before the page's scripts run, the way
+    a previous visit would have left them."""
     page = browser.new_page(viewport={"width": width, "height": height})
     page.add_init_script(_RECORD_POSTS_JS)
     if storage:
@@ -261,8 +277,9 @@ def _open_page(
     goto_retrying_network_change(page, url)
     page.wait_for_selector("body.remote-chat", state="attached")
     page.evaluate(_PREPARE_JS)
-    if not global_sections:
-        page.evaluate(_HIDE_GLOBAL_SECTIONS_JS)
+    page.evaluate(
+        _HIDE_GLOBAL_SECTIONS_JS if not global_sections else _HIDE_WORKSPACE_SECTIONS_JS
+    )
     return page
 
 
@@ -1017,9 +1034,12 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         assert "getSpendReport" in posted
 
         # Clicking an app that is not connected submits a connect task
-        # in a NEW tab.  A new chat is a root tab: it lands on the main
-        # row (#main-tab-list), not in the active chat's group strip.
-        tabs_before = page.locator("#main-tab-list .chat-tab").count()
+        # in a NEW chat, which takes the screen; the idle chat left
+        # behind (no task, no draft) is retired, so the open-tab records
+        # end up with the new root chat in place of the old one.
+        tabs_before = page.evaluate("() => window._testApi.openTabs()")
+        chat_before = page.evaluate("() => window._testApi.getActiveTabId()")
+        assert [t["id"] for t in tabs_before] == [chat_before], tabs_before
         # The shim keeps retrying the websocket and reports the daemon
         # down again after every failed attempt (sendMessage then holds
         # the prompt back), so the "connected" report and the click run
@@ -1036,7 +1056,13 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         assert submit is not None
         assert submit["prompt"].startswith('Connect my Slack app: authenticate the "slack"')
         assert 'run_agent with agent "slack"' in submit["prompt"]
-        assert page.locator("#main-tab-list .chat-tab").count() == tabs_before + 1
+        chat_after = page.evaluate("() => window._testApi.getActiveTabId()")
+        assert chat_after != chat_before, "the connect task runs in a new chat"
+        tabs_after = page.evaluate("() => window._testApi.openTabs()")
+        assert [t["id"] for t in tabs_after] == [chat_after], (
+            f"the new root chat replaces the retired idle one: {tabs_after}"
+        )
+        assert not tabs_after[0]["isSubagentTab"] and not tabs_after[0]["isContentTab"]
     finally:
         page.close()
 
@@ -1071,7 +1097,7 @@ def test_a_long_task_update_leaves_the_apps_list_a_usable_share(
 
 # Each surface that shows the task-info panel, as (viewport width, JS
 # run after boot).  The remote page boots as the desktop dock (wide) or
-# the mobile drawer (narrow, opened from its tab-bar button); the VS
+# the mobile drawer (narrow, opened from its footer button); the VS
 # Code surfaces are the same markup under the extension's body classes
 # (remote-codex.css only styles body.remote-chat, so dropping it leaves
 # main.css's own rules for that mode).
@@ -1172,7 +1198,10 @@ _MINIMUM_GEOMETRY_JS = """
       && row.getBoundingClientRect().top >= list.getBoundingClientRect().top - 0.5
       && row.getBoundingClientRect().bottom <= list.getBoundingClientRect().bottom + 0.5,
     panelOverflows: panel.scrollHeight > panel.clientHeight + 1,
-    headerBottoms: Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'))
+    // The shown sections' headers (the hidden workspace sections have
+    // none on screen).
+    headerBottoms: Array.from(document.querySelectorAll(
+        '#meta-panel > .meta-section:not([hidden]) > .meta-section-hdr'))
       .map(h => h.getBoundingClientRect().bottom),
   };
 }

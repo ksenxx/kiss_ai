@@ -5,14 +5,14 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import {getNonce, mediaAssetVersion} from './SorcarTab';
+import {escapeHtml, getNonce, mediaAssetVersion} from './SorcarTab';
 
 /**
  * The jsDelivr origin pdfView.js loads pdf.js from; the panel's CSP
  * admits it for scripts (the library module) and connections (the
  * worker script, fetched and started from a blob: URL).
  */
-export const PDFJS_CDN_ORIGIN = 'https://cdn.jsdelivr.net';
+const PDFJS_CDN_ORIGIN = 'https://cdn.jsdelivr.net';
 
 /**
  * The message a PDF preview panel posts when its Download link is
@@ -93,12 +93,4 @@ export function buildPdfPreviewHtml(
   </script>
 </body>
 </html>`;
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }

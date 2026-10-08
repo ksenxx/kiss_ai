@@ -142,7 +142,7 @@ def test_three_step_walkthrough_registers_standup_command(home: Path) -> None:
     task_text, path = hit
     assert path.resolve() == sea_file.resolve()
     assert task_text == task
-    assert sea_commands.sea_settings(path)["kind"] == "session"
+    assert not sea_commands.is_channel([sea_commands.load_sea(path)])
 
 
 def test_documented_edge_cases_hold(home: Path) -> None:

@@ -20,8 +20,6 @@
     'ready',
     'getHistory',
     'getAdjacentTask',
-    'getFrequentTasks',
-    'deleteFrequentTask',
     'setFavorite',
     'getInputHistory',
     'getSeaCommands',

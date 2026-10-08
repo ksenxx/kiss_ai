@@ -73,12 +73,16 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// Put chat *tabId* on screen: the Chats-panel pick (there is no row of
+// chat tabs any more), which retires nothing.
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  const api = win._testApi;
+  assert.ok(
+    api.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
   );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  api.switchToTab(tabId);
+  assert.strictEqual(api.getActiveTabId(), tabId, `tab ${tabId} is on screen`);
 }
 
 function sendToolResult(win, tabId, content, workDir) {
@@ -265,11 +269,18 @@ function testClosedTabIsNotReissued() {
   sendToolResult(win, tabB, 'doomed ./src/doomed.py');
 
   outage(win);
+  // Only the chat on screen has an entry (and a close button) on the
+  // group strip: bring B forward and close it there.
+  clickTab(win, tabB);
   const closeBtn = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabB)}] .chat-tab-close`,
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabB)}] .chat-tab-close`,
   );
   assert.ok(closeBtn, 'tab B must have a close button');
   closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    !win._testApi.openTabs().some(t => t.id === tabB),
+    'tab B is closed',
+  );
 
   posted.length = 0;
   reconnect(win);

@@ -111,7 +111,7 @@ def test_wrapper_optional_before_required_property() -> None:
             "required": ["query"],
         },
     )
-    wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "ordsrv", tool)
+    wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "ordsrv", tool, "ordsrv")
     params = list(inspect.signature(wrapper).parameters.values())
     assert [p.name for p in params] == ["query", "limit"]
     assert params[0].default is inspect.Parameter.empty

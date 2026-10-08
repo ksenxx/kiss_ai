@@ -68,12 +68,18 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// A sub-agent or content tab on the group strip is clicked; a chat tab
+// has no row of its own, so it is picked the way the Chats panel does.
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
   );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  const el = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  );
+  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  else win._testApi.switchToTab(tabId);
 }
 
 function bar(win) {

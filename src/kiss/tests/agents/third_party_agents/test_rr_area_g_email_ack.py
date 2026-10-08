@@ -65,10 +65,7 @@ _RAW_MAIL = (
 )
 
 
-@pytest.fixture(autouse=True)
-def _isolated_kiss_home(isolated_kiss_home: Path) -> Path:
-    """Apply the shared per-test ``KISS_HOME`` isolation to every test here."""
-    return isolated_kiss_home
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _make_ssl_context(tmp_path: Path) -> ssl.SSLContext:

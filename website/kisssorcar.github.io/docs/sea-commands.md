@@ -10,7 +10,7 @@ Typing this in the chat box of the VS Code extension or the web app:
 /slack tell #eng that the deploy is done
 ```
 
-runs the `slack/slack_sea.py` agent directly, in the tab's own run, on the task "tell #eng that the deploy is done": the daemon makes that file the run's agent script and your text its prompt, so the SEA's `settings()`, system prompt and tools apply to the very session you are looking at. There is no relay turn in which a model is told to call `run_agent`, no nested sub-agent tab, and no chance for the model to pick a different agent or explore the code first. A slash command is therefore the predictable way to invoke a specific SEA; from inside a running task, `run_agent(agent="slack", task="...")` dispatches the same SEA as a sub-task.
+runs the `slack/slack_sea.py` agent directly, in the tab's own run, on the task "tell #eng that the deploy is done": the daemon makes that file the run's SEA and your text its prompt, so the SEA's `settings()`, system prompt and tools apply to the very session you are looking at. There is no relay turn in which a model is told to call `run_agent`, no nested sub-agent tab, and no chance for the model to pick a different agent or explore the code first. A slash command is therefore the predictable way to invoke a specific SEA; from inside a running task, `run_agent(agent="slack", task="...")` dispatches the same SEA as a sub-task.
 
 Any file that is a valid SEA works: a bundled channel agent, or a file of your own that defines one class deriving from `kiss.agents.seas.base.base_sea.BaseSea`, whose `description()`, `settings(settings)`, `prompt(task)`, `system_prompt(system_prompt)`, `tools(tools)`, `tool_call_hook(name, args)` and `llm_call_hook(new_messages)` methods configure the run. `prompt(task)` receives the text after the command and returns the prompt body; a SEA builds on another by deriving from its class (`class MySea(sea_class("sh"))`, or import the bundled class), and the model picked on the tab (`bestrouter`, `autorouter`) is applied before the SEA of every run there. The SEA file format is described in [Client Interfaces: Sorcar Extension Agents](cli.md#sorcar-extension-agents-seas).
 
@@ -74,8 +74,8 @@ The daemon rescans `SEAS.md` and every listed folder every 2 seconds. Adding a l
         |                       |
         | yes                   | no  -> handled as an ordinary prompt
         v
-    - the tab's run becomes an agent-script run:
-        agent script = /abs/path/to/deploy/deploy_sea.py
+    - the tab's run becomes an SEA run:
+        SEA = /abs/path/to/deploy/deploy_sea.py
         prompt       = ship v2.3
         |
         v
@@ -94,32 +94,32 @@ Details worth knowing:
 - **Exact word match.** `/deployx ship` looks up a command named `deployx`; it does not match `/deploy`.
 - **Text is required.** `/deploy` alone, or a `/name` that is not registered, is not a command: it is sent to the model as a normal prompt and answered like any other question.
 - **`/deploy help` shows the description.** One of the two reserved sub-tasks (any letter case, nothing after it): the daemon does not run the SEA or call a model; it loads the class in `deploy_sea.py`, calls its `description()` and posts the returned sentence as the task result. A SEA whose `description()` does not return a non-empty string gets a diagnostic instead.
-- **`/deploy check` shows what a run would use.** The other reserved sub-task loads the class without running a task and posts: the classes of its inheritance chain, the kind, the effective settings after the kind's defaults, the model a run takes, the names of the tools `tools()` adds, which methods are defined, and the prompt `prompt(task)` yields for a sample task (`{task_id}` shown as `<task id>`). A broken script yields the first error in the words the daemon would use, so a settings typo is found before the first run.
+- **`/deploy check` shows what a run would use.** The other reserved sub-task loads the class without running a task and posts: the classes of its inheritance chain, the effective settings after the base classes' defaults, the model a run takes, the names of the tools `tools()` adds, which methods are defined, and the prompt `prompt(task)` yields for a sample task (`{task_id}` shown as `<task id>`). A broken script yields the first error in the words the daemon would use, so a settings typo is found before the first run.
 - **`<task>` blocks stay intact.** A prompt such as `/deploy <task>build</task><task>publish</task>` reaches the SEA as one sub-task with the tags in place; the daemon does not split it into two Sorcar tasks.
 - **History keeps what you typed.** The task panel, the task list, the chat history, and the frequent-task chips record `/deploy ship v2.3`; the model sees `ship v2.3` as its task.
-- **Where the run happens.** The SEA runs in the tab's working directory with the tab's settings (model, worktree, auto-commit, ...) unless its own `settings()` say otherwise: `/sh` declares `{"kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"]}`, so it runs with the Bash tool alone, directly on the checkout, without a worktree or auto-commit. A tab passes nothing explicitly, so for every run setting the SEA's `settings()` apply over the tab's values (see the precedence rule below).
-- **How long it may run.** A slash-command run is the tab's own task and runs as long as any chat task would. The `timeout` setting matters when another task dispatches the SEA through `run_agent`: the call waits that many seconds (`/write_paper` 6 h, `/review_paper` 2 h, `/revise_and_review_paper` 24 h, `/write` 1 h), else 3600 seconds; when that bound expires the sub-task is not stopped — it keeps running as an `agent_job` and the call returns its job id (`agent_job(id, "wait")` collects the result; a job still running when the calling task ends is killed). An explicit `timeout` argument to `run_agent` overrides both.
+- **Where the run happens.** The SEA runs in the tab's working directory with the tab's settings (model, worktree, auto-commit, ...) unless its own class says otherwise: `/sh` derives from `WorkerSea` and declares `{"tool_profile": "bash", "locked": ["tool_profile"]}`, so it runs with the Bash tool alone, directly on the checkout, without a worktree or auto-commit. A tab passes nothing explicitly, so for every run setting the SEA's `settings()` apply over the tab's values (see the precedence rule below).
+- **How long it may run.** A slash-command run is the tab's own task and runs as long as any chat task would. The `timeout` setting matters when another task dispatches the SEA through `run_agent` or `run_parallel`: the call waits that many seconds (`/write_paper` 6 h, `/review_paper` 2 h, `/revise_and_review_paper` 24 h, `/write` 1 h), else 3600 seconds; when that bound expires the sub-task is not stopped — it keeps running as an `agent_job` and the call returns its job id (`agent_job(id, "wait")` collects the result; a job still running when the calling task ends is killed). An explicit `timeout` argument to `run_agent` or `run_parallel` overrides both.
 
 ## Running a command's SEA from another task
 
-A running task reaches the same SEAs through its `run_agent` tool: `run_agent(agent="sh", task="git status --short")` runs the `/sh` SEA as a sub-task (own tab, own history row, result returned as YAML). `agent` is resolved by three rules: empty or a generic label such as `"general"` or `"assistant"` runs a plain Sorcar sub-agent (`"reviewer"` is refused: a reviewer is a plain sub-agent with `tool_profile="review"`); a path (a `.py` suffix or a path separator) runs that script; a registered command name runs that command's SEA (`"write_paper"`, `"sh"`, a channel such as `"slack"`, `"cron"`, a `SEAS.md` folder; case, spaces, hyphens and underscores are ignored). Anything else is an error naming the closest command. The arguments are the same for `run_agent(task, agent, model, tool_profile, max_budget, timeout, options)` and `run_parallel(tasks, agent, model, tool_profile, max_budget, timeout, max_workers, options)` (`run_parallel`'s `timeout` bounds each child); `options` is a JSON object in the SEA settings vocabulary (`work_dir`, `workspace` for a multi-account channel, `add_to_prompt`, `add_to_system_prompt`, `inherit`, the booleans, ...) such as `{"use_web_tools": false}`. `run_agent(..., wait="false")` returns a job id at once instead of blocking; `agent_job(job_id, "wait" | "tail" | "kill")` then returns the result, reports the status or stops the sub-task.
+A running task reaches the same SEAs through its `run_agent` tool: `run_agent(agent="sh", task="git status --short")` runs the `/sh` SEA as a sub-task (own tab, own history row, result returned as YAML). `agent` is resolved by three rules: empty or a generic label such as `"general"` or `"assistant"` runs a plain Sorcar sub-agent (`"reviewer"` is refused: a reviewer is a plain sub-agent with `tool_profile="review"`); a path (a `.py` suffix or a path separator) runs that script; a registered command name runs that command's SEA (`"write_paper"`, `"sh"`, a channel such as `"slack"`, `"cron"`, a `SEAS.md` folder; case, spaces, hyphens and underscores are ignored). Anything else is an error naming the closest command. The arguments are the same for `run_agent(task, agent, model, tool_profile, max_budget, timeout, options)` and `run_parallel(tasks, agent, model, tool_profile, max_budget, timeout, options)`, which is `run_agent` once per task: every child is a daemon sub-task in its own tab, and the one `timeout` is how long the call blocks before returning the job ids of the children still running; `options` is a JSON object in the SEA settings vocabulary (`work_dir`, `workspace` for a multi-account channel, `add_to_prompt`, `add_to_system_prompt`, `inherit`, the booleans, ...) such as `{"use_web_tools": false}`. `run_agent(..., wait="false")` returns a job id at once instead of blocking; `agent_job(job_id, "wait" | "tail" | "kill")` then returns the result, reports the status or stops the sub-task.
 
 A SEA runs in one of three ways; the table says what differs:
 
 | | `/<name> task` in a tab | `run_agent(agent=<name>)` | `run_parallel(agent=<name>)` |
 |---|---|---|---|
-| Where | the tab's own run | a daemon sub-task with its own tab | a thread of the calling task |
-| Settings honoured | all but `timeout` | all | all; a pinned `use_worktree`, `auto_commit` or `auto_classify: true` or a `chat_id` is refused with an error |
-| Inherits from the caller | nothing (the tab's settings apply) | model, budget share, chat, prompt suffixes, tools, container — unless the SEA is a `channel` or the call passes `inherit: false` | the same; the budget is shared among the children |
-| `timeout` | none | argument, else the setting, else 3600 s | per child: argument, else the setting, else none |
-| `kind: "channel"` SEAs | allowed | allowed | refused |
+| Where | the tab's own run | a daemon sub-task with its own tab | one daemon sub-task with its own tab per task |
+| Settings honoured | all but `timeout` | all | all |
+| Inherits from the caller | nothing (the tab's settings apply) | model, budget share, chat, prompt suffixes, tools, container — unless the SEA is a channel or the call passes `inherit: false` | the same; the budget is shared among the children and the caller |
+| `timeout` | none | argument, else the setting, else 3600 s: how long the call blocks, never a stop | the same, once for the whole call |
+| channels (`ChannelSea`) | allowed | allowed | allowed |
 
 The sub-task's settings follow one rule, generated here from `sea_settings.PRECEDENCE_RULE`:
 
 <!-- sea-docs: precedence -->
 > For every setting of a sub-task: what the call passes explicitly (a `run_agent` / `run_parallel` argument or `options` key) wins, then the SEA's `settings()`, then what the calling task passes on (and, for `/<name>`, the chat panel's persisted settings), then the user's defaults. A SEA may list keys in `locked`: a call that passes a different value for a locked key is refused with an error, never silently overruled.
 >
-> For example, `/sh` declares `{"kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"]}`, so `run_agent(agent="sh", task=..., tool_profile="review")` is refused with `Error: sh: the script locks tool_profile='bash' (asked for 'review')`, while `run_agent(agent="sh", task=..., model="gpt-5")` runs it with that model: `model` is not locked, so the explicit argument wins.
+> For example, `/sh` declares `{"tool_profile": "bash", "locked": ["tool_profile"]}`, so `run_agent(agent="sh", task=..., tool_profile="review")` is refused with `Error: sh: the script locks tool_profile='bash' (asked for 'review')`, while `run_agent(agent="sh", task=..., model="gpt-5")` runs it with that model: `model` is not locked, so the explicit argument wins.
 <!-- /sea-docs -->
 
 The example is generated from the bundled `/sh` by `sea docs`, and `sea lint` checks every sentence of the form "/name declares {...}" in these pages against the script's `settings()`. A `/<name> task` run in a tab passes nothing explicitly, so there the SEA's settings apply over the tab's. See [Client Interfaces: Dispatching SEAs from a task](cli.md#dispatching-seas-from-a-task-with-run_agent-and-run_parallel).
@@ -127,12 +127,12 @@ The example is generated from the bundled `/sh` by `sea docs`, and `sea lint` ch
 Every `run_agent` and `run_parallel` result starts with what the sub-task actually ran with, so the calling model does not have to guess:
 
 ```yaml
-ran: sh (worker) model=gpt-5 tools=bash budget=$1.00 timeout=3600s inherited=model,chat_id,max_budget pinned=use_worktree(True->False)
+ran: sh model=gpt-5 tools=bash budget=$1.00 timeout=3600s inherited=model,chat_id,max_budget pinned=use_worktree(True->False)
 success: true
 summary: ...
 ```
 
-`inherited` lists the settings the sub-task took over from the calling task; `pinned` lists each inherited or default value the SEA's `settings()` replaced, as `key(before->pinned)` (here `/sh` ran without a worktree from a task that uses one). An explicit argument never appears under `pinned`: it either won or the call was refused. A plain sub-agent whose worktree default the pre-run classifier dropped (a non-development task) ends with `classified=use_worktree(True->False)`; an explicit `use_worktree` option is never dropped. `tools=review(inferred)` says nobody named the profile: the sub-agent is a reviewer (a child of one, or one whose task reads as a review and asks for no changes) and got the read-only toolset. A SEA reached by its path that is also a registered command ends the line with `(also agent="name")`, the shorter spelling for the next call. The same record is persisted in the sub-task's `task_settings` event (keys `sea`, `kind`, `tool_profile`, `tool_profile_inferred`, `timeout`, `inherited`, `pinned`, `classified` next to `model`, `work_dir` and `max_budget`), which the task panel shows and `rsi7d` mines.
+`inherited` lists the settings the sub-task took over from the calling task; `pinned` lists each inherited or default value the SEA's `settings()` replaced, as `key(before->pinned)` (here `/sh` ran without a worktree from a task that uses one). An explicit argument never appears under `pinned`: it either won or the call was refused. A plain sub-agent whose worktree default the pre-run classifier dropped (a non-development task) ends with `classified=use_worktree(True->False)`; an explicit `use_worktree` option is never dropped. `tools=review(inferred)` says nobody named the profile: the sub-agent is a reviewer (a child of one, or one whose task reads as a review and asks for no changes) and got the read-only toolset. A SEA reached by its path that is also a registered command ends the line with `(also agent="name")`, the shorter spelling for the next call. The same record is persisted in the sub-task's `task_settings` event (keys `sea`, `channel`, `tool_profile`, `tool_profile_inferred`, `timeout`, `inherited`, `pinned`, `classified` next to `model`, `work_dir` and `max_budget`), which the task panel shows and `rsi7d` mines.
 
 ## The settings vocabulary
 
@@ -143,10 +143,9 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 <!-- sea-docs: settings -->
 | Key | Type | `run` wire field | Meaning |
 |---|---|---|---|
-| `kind` | `str` | — | What the run is: `session` (the default, an ordinary Sorcar session), `worker` or `channel`; each is a dict of defaults laid under the explicit keys (see the kind table). A `channel` run holds its channel workspace, gets the channel preamble, never inherits from a calling task and is never a `run_parallel` child. |
-| `work_dir` | `str` | `workDir` | The directory the run works in; default: the calling task's or the tab's. A relative path is resolved against the script's own folder, not the caller's (one a base class sets: against the base's file). |
-| `model` | `str` | `model` | The LLM model, a catalogue name or a model-picker SEA; `""` or `None` keeps the caller's. |
-| `chat_id` | `str` | `chatId` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a `channel` run, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
+| `work_dir` | `str` | `workDir` | The directory the run works in; default: the calling task's or the tab's. A relative path is a path under the calling task's directory (the tab's for `/<name>`), in a SEA's settings and in a call's `work_dir` option alike. |
+| `model` | `str` | `model` | The LLM model, a catalogue name or a model-picker SEA; default: the caller's (`""`, like `None`, is no override — true of every string key). |
+| `chat_id` | `str` | `chatId` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a channel, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
 | `use_worktree` | `bool` | `useWorktree` | Run in a git worktree of the project; default: the calling task's effective choice, else the persisted setting (an inherited or default `True` is demoted by the classifier for non-implementation tasks, an explicit `True` is kept). |
 | `auto_commit` | `bool` | `autoCommit` | Commit the run's changes when it ends; default: the calling task's effective choice, else the persisted setting. |
 | `max_budget` | `int \| float` | `maxBudget` | USD budget of the run, a finite number; default: the caller's share or the daemon's default. |
@@ -154,24 +153,38 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 | `use_web_tools` | `bool` | `useWebTools` | Give the run the browser tools (daemon default: on). |
 | `auto_classify` | `bool` | `classifyTasks` | Let the pre-run classifier decide the worktree mode and lite prompt (daemon default: the persisted setting). |
 | `use_memory` | `bool` | `useMemory` | Give the run the `memory_*` tools (daemon default: the persisted setting). |
-| `allow_fan_out` | `bool` | `isParallel` | Let the run call `run_parallel`; default: whether the calling task may fan out itself, else `True`. |
 | `tool_profile` | `str` | `toolProfile` | The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full toolset). |
 | `docker_image` | `str` | `dockerImage` | Run inside this Docker image (default: the host). |
-| `timeout` | `int \| float` | — | Seconds the call blocks for the run: the call's `timeout` argument or option wins, then this setting, then the default, which is 3600 for a `run_agent` call (when it expires the run keeps going as an `agent_job` and the call returns its job id; a job still running when the calling task ends is killed) and no limit of its own for a `run_parallel` child (a thread of the calling task, bounded by it); ignored by `/<name>`. |
+| `timeout` | `int \| float` | — | Seconds a `run_agent` / `run_parallel` call blocks for the run: the call's `timeout` argument wins, then this setting, then 3600. When it expires the run is not stopped: it keeps going as an `agent_job` and the call returns its job id (a job still running when the calling task ends is killed). Ignored by `/<name>`. |
 | `locked` | `list` | — | Keys an explicit `run_agent` / `run_parallel` argument or option may not change: a differing value is an error. |
 | `hidden` | `bool` | — | `True`: the script is no `/command` and no `run_agent` agent name (loadable by path and as a base class only). It must be the literal `True` in the class's `settings()` because the command registry reads it from the source without running the script (a computed value is ignored). |
 <!-- /sea-docs -->
 
-### Kinds
+### Base classes
 
-`kind` says what the run is; each kind is only a dict of defaults laid under the explicit keys.
+The base class says what the run is; `WorkerSea` and `ChannelSea` lay a dict of defaults under the subclass's explicit keys.
 
-<!-- sea-docs: kinds -->
-| Kind | Defaults | Use |
+<!-- sea-docs: bases -->
+| Base class | Lays | Use |
 |---|---|---|
-| `session` | nothing | The default: an ordinary Sorcar session with the caller's or the user's settings (`/write`, `/write_paper`, `bestrouter`). |
-| `worker` | `use_worktree=False`, `auto_commit=False`, `auto_classify=False`, `allow_fan_out=False`, `use_web_tools=False`, `use_memory=False` | A focused tool-bound run on the caller's tree: no worktree, no auto-commit, no classifier, no fan-out, no browser, no memory (`/sh`, `/ask`, `/merge`, `/remember`, `/forget`, `/task_update`). |
-| `channel` | `use_worktree=False`, `auto_commit=False`, `auto_classify=False`, `allow_fan_out=False`, `use_web_tools=False`, `use_memory=False`, `work_dir='<home>/channel_work'` | A worker for an external service, in the shared `channel_work` scratch directory under the Sorcar home, never the caller's project; it holds its channel workspace, gets the channel preamble and never inherits from a calling task (every bundled channel agent and `/cron`). |
+| `BaseSea` | nothing | The default: an ordinary Sorcar session with the caller's or the user's settings (`/write`, `/write_paper`, `bestrouter`). |
+| `WorkerSea` | `use_worktree=False`, `auto_commit=False`, `auto_classify=False`, `use_web_tools=False`, `use_memory=False` | A focused tool-bound run on the caller's tree: lays the worker defaults (no worktree, no auto-commit, no classifier, no browser, no memory) under the SEA's own keys (`/sh`, `/ask`, `/merge`, `/remember`, `/forget`, `/task_update`). |
+| `ChannelSea` | `use_worktree=False`, `auto_commit=False`, `auto_classify=False`, `use_web_tools=False`, `use_memory=False`, `work_dir='<home>/channel_work'` | A worker that serves an external service (Slack, email, cron), not the caller's project; every behaviour this adds is listed in the channel table. The command registry reads the base name from the source, so a channel derives from `ChannelSea` by that name. |
+<!-- /sea-docs -->
+
+### Channels
+
+A SEA that serves an external service (Slack, email, cron) derives from `ChannelSea`, by that name; every bundled channel is `class XSea(ChannelSea)` with no `settings()` method, and cron is `CronAgentSea(ChannelSea)` with `work_dir: cron_work_dir()`. The base class is the one thing with behaviour beyond a value passed through; every behaviour:
+
+<!-- sea-docs: channel -->
+| Behaviour | What deriving from `ChannelSea` does |
+|---|---|
+| worker | It is a `WorkerSea`, and the worker keys are locked, so no call may give it a worktree, auto-commit, the classifier, the browser or memory (`resolve_settings`). |
+| scratch directory | It runs in the shared `<home>/channel_work` scratch directory unless its own `work_dir` says otherwise (`/cron` runs in `<home>/cron_work`); `work_dir` is locked, so it never works in the caller's project (`resolve_settings`). |
+| no inheritance | Its `run_agent` dispatch takes nothing from the calling task: not the chat, model, budget share, container or prompt suffixes; the `inherit: true` option is refused (`agent_dispatch`). |
+| workspace | It holds its channel workspace — the `run_agent` option `workspace`, default `default`, the account its tools load credentials for — from before its `tools()` run until the run ends; `workspace` is refused for any other SEA (`sea_apply.channel_workspace`, `agent_dispatch`). |
+| preamble | The channel preamble is appended to its system prompt before its own `system_prompt()` runs (`sea_apply.CHANNEL_PREAMBLE`). |
+| listed as a channel | A third-party SEA folder whose class derives from `ChannelSea` by that name is a channel agent: `run_agent(agent="<folder>")` finds it by name and the `channel` tool lists it (`agent_dispatch.available_channels`, `declares_channel`). |
 <!-- /sea-docs -->
 
 ### `options` keys of `run_agent` and `run_parallel`
@@ -179,22 +192,17 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 <!-- sea-docs: options -->
 | Option | Type | Meaning |
 |---|---|---|
-| `work_dir` | `str` | The directory the sub-task works in; a relative path is resolved against the calling task's directory (a SEA's own `work_dir` setting is relative to the SEA's folder instead). |
-| `model` | `str` | The LLM model, a catalogue name or a model-picker SEA; `""` or `None` keeps the caller's. |
-| `chat_id` | `str` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a `channel` run, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
+| `work_dir` | `str` | The directory the sub-task works in; a relative path is a path under the calling task's directory, as a SEA's own `work_dir` setting is. |
+| `chat_id` | `str` | The chat the run's events go to; default under `run_agent`: the calling task's chat, or a new chat when nothing is inherited (a channel, an `inherit: false` call); a `/<name>` run keeps the tab's chat. |
 | `use_worktree` | `bool` | Run in a git worktree of the project; default: the calling task's effective choice, else the persisted setting (an inherited or default `True` is demoted by the classifier for non-implementation tasks, an explicit `True` is kept). |
 | `auto_commit` | `bool` | Commit the run's changes when it ends; default: the calling task's effective choice, else the persisted setting. |
-| `max_budget` | `int \| float` | USD budget of the run, a finite number; default: the caller's share or the daemon's default. |
 | `model_config` | `dict` | Model configuration dict passed to the LLM (temperature, base URL, ...). |
 | `use_web_tools` | `bool` | Give the run the browser tools (daemon default: on). |
 | `auto_classify` | `bool` | Let the pre-run classifier decide the worktree mode and lite prompt (daemon default: the persisted setting). |
 | `use_memory` | `bool` | Give the run the `memory_*` tools (daemon default: the persisted setting). |
-| `allow_fan_out` | `bool` | Let the run call `run_parallel`; default: whether the calling task may fan out itself, else `True`. |
-| `tool_profile` | `str` | The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full toolset). |
 | `docker_image` | `str` | Run inside this Docker image (default: the host). |
-| `timeout` | `int \| float` | Seconds the call blocks for the run: the call's `timeout` argument or option wins, then this setting, then the default, which is 3600 for a `run_agent` call (when it expires the run keeps going as an `agent_job` and the call returns its job id; a job still running when the calling task ends is killed) and no limit of its own for a `run_parallel` child (a thread of the calling task, bounded by it); ignored by `/<name>`. |
-| `inherit` | `bool` | `false`: the sub-task takes nothing from the calling task (no model, chat, prompt suffixes, tools or container; a `run_parallel` child still gets its budget share); default `true`. A `channel` run never inherits, so `true` is refused there. |
-| `workspace` | `str` | The account a `kind: channel` agent's run holds (its channel workspace); refused for any other kind and by `run_parallel`. |
+| `inherit` | `bool` | `false`: the sub-task takes nothing from the calling task (no model, chat, prompt suffixes, tools or container; its budget is the daemon default); default `true`. A channel never inherits, so `true` is refused there. |
+| `workspace` | `str` | The account a channel's run holds (its channel workspace); refused for any SEA that is not a channel. |
 | `add_to_prompt` | `str` | Text appended to the task after the SEA's `prompt(task)`. |
 | `add_to_system_prompt` | `str` | Text appended to the system prompt before the SEA's `system_prompt(system_prompt)` sees it. |
 <!-- /sea-docs -->
@@ -222,7 +230,7 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
            )
    ```
 
-   Helper modules, prompt files and data the SEA needs go into the same `standup/` folder. To change how the run is configured, add a `settings(self, settings)` method returning `settings | {...}`: a `kind` plus any of the per-run settings listed in [Client Interfaces](cli.md#sorcar-extension-agents-seas) (`model`, `max_budget`, `tool_profile`, `timeout`, ...), for example `{"kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"]}` (what `/sh` declares) or `{"timeout": 3600}` (`/write`). A kind is only a dict of defaults under your keys: `session` (the default) is empty, `worker` turns worktree, auto-commit, classifier, fan-out, browser and memory off, and `channel` is `worker` plus a `work_dir` of `$KISS_HOME/channel_work`, for an agent of an external service (it holds its channel workspace, gets the channel preamble and never inherits from a calling task). `settings()` is data; text and code come from the other methods: `system_prompt(system_prompt)` (return the argument plus your text to append, anything else to replace), `prompt(task)` (its result may contain `{task_id}`, replaced by the calling task's id), `tools(tools)` and the two call hooks. For a SEA that carries its own tools, return `tools + [your callables]` from `tools()`; with `"tool_profile": "none"` in `settings()` the method receives `[]` and what it returns plus `finish` is the agent's whole toolset (what `/ask` does). To build on another SEA, derive from its class (`class MySea(sea_class("sh"))`, with `sea_class` from `kiss.agents.sorcar.sea_commands`, or import the bundled class); the launcher runs the base's methods first, so do not call `super()`. The bundled channel agents are a good template (see [`src/kiss/agents/third_party_agents/`](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents), one folder per agent).
+   Helper modules, prompt files and data the SEA needs go into the same `standup/` folder. To change how the run is configured, add a `settings(self, settings)` method returning `settings | {...}` with any of the per-run settings listed in [Client Interfaces](cli.md#sorcar-extension-agents-seas) (`model`, `max_budget`, `tool_profile`, `timeout`, ...), for example `{"tool_profile": "bash", "locked": ["tool_profile"]}` (what `/sh` declares) or `{"timeout": 3600}` (`/write`). What the SEA *is* is its base class: `BaseSea` is an ordinary session; `WorkerSea` lays the worker defaults under your keys (worktree, auto-commit, classifier, browser and memory off); `ChannelSea` is a worker that serves an external service: it runs in `$KISS_HOME/channel_work`, holds its channel workspace, gets the channel preamble and never inherits from a calling task (the channel table below lists every behaviour). `settings()` is data; text and code come from the other methods: `system_prompt(system_prompt)` (return the argument plus your text to append, anything else to replace), `prompt(task)` (its result may contain `{task_id}`, replaced by the calling task's id), `tools(tools)` and the two call hooks. For a SEA that carries its own tools, return `tools + [your callables]` from `tools()`; with `"tool_profile": "none"` in `settings()` the method receives `[]` and what it returns plus `finish` is the agent's whole toolset (what `/ask` does). To build on another SEA, derive from its class (`class MySea(sea_class("sh"))`, with `sea_class` from `kiss.agents.sorcar.sea_commands`, or import the bundled class); the launcher runs the base's methods first, so do not call `super()`. The bundled channel agents are a good template (see [`src/kiss/agents/third_party_agents/`](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents), one folder per agent).
 
 2. Register the folder:
 
@@ -232,7 +240,7 @@ The tables below are generated from the code by `uv run sea docs` (`uv run check
 
 3. Within two seconds, type `/st` in the chat box: the popup offers `/standup`. Send `/standup help` to see the description you wrote, then `/standup finished the docs page, next is the release, blocked on review` and the note comes back in the chat.
 
-If the command does not appear, check that the script is `<folder>/<folder>_sea.py` (`standup/standup_sea.py`, not `standup_sea.py` at the top of `~/my-seas`), that the folder name uses only `A-Z a-z 0-9 _ -`, and that the folder line in `SEAS.md` resolves to the folder you expect (remember that relative paths are anchored at `~`, not at the project). A broken SEA (import error, no or several `BaseSea` subclasses, `settings()` or another method raising, wrong return type, unknown, renamed or removed settings key, unknown kind) is still listed as a command; the failure surfaces as a diagnostic in the task result when you run it.
+If the command does not appear, check that the script is `<folder>/<folder>_sea.py` (`standup/standup_sea.py`, not `standup_sea.py` at the top of `~/my-seas`), that the folder name uses only `A-Z a-z 0-9 _ -`, and that the folder line in `SEAS.md` resolves to the folder you expect (remember that relative paths are anchored at `~`, not at the project). A broken SEA (import error, no or several `BaseSea` subclasses, `settings()` or another method raising, wrong return type, unknown, renamed or removed settings key) is still listed as a command; the failure surfaces as a diagnostic in the task result when you run it.
 
 ## Bundled commands
 

@@ -270,12 +270,12 @@ class TestSubagentDoneConsistency(unittest.TestCase):
     def test_reattach_and_done_never_contradict(self) -> None:
         """The exact audit contradiction: reattached AND reported done."""
         self._install_state(active=True, thread_alive=False)
-        reattached = self.server._reattach_running_chat(
+        reattached = self.server._attach_viewer_to_running_chat(
             "s309-chat",
             "s309-viewer-tab",
             task_id=self.task_id,
             is_subagent=True,
-        )
+        )[0] is not None
         self.assertTrue(reattached)
         self.assertFalse(
             _subagent_is_done(self.task_id),

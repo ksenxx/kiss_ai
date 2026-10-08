@@ -38,7 +38,7 @@ const AUTH_TIMEOUT_MS = 10_000;
 const ENDPOINT_POLL_MS = 100;
 
 /** Tunables, so a test can exercise the timing without waiting on it. */
-export interface AgentClientOptions {
+interface AgentClientOptions {
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
   pendingTtlMs?: number;

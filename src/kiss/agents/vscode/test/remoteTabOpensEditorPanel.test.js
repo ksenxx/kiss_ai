@@ -630,7 +630,9 @@ async function runTest() {
   // --- terminal teardown must NOT rewrite the record: the editor tabs
   // survive the reload for the serializer, so their ids must too.
   const recordedAtShutdown = [...recordedIds];
-  manager.markShutdown();
+  // What manager.dispose() sets first, before the workbench's own tab
+  // closes can race it.
+  manager._shuttingDown = true;
   createdPanels[6].dispose(); // the workbench closing tabs on reload
   assert.deepStrictEqual(
     recordedIds,

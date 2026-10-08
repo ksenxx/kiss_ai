@@ -33,6 +33,7 @@ import pytest
 from kiss.tests.agents.vscode.test_content_tab_file_links import (
     _inject_file_link,
     _open_page,
+    _wait_ready,
     browser,  # noqa: F401  (module fixture used by param name)
 )
 from kiss.tests.conftest import goto_retrying_network_change
@@ -76,9 +77,11 @@ def _open_editor(page, path: str, link_id: str) -> None:
            }""",
         timeout=30000,
     )
+    _uncover_pane(page)
 
 
 def _type_at_end(page, text: str) -> None:
+    _uncover_pane(page)
     page.click(_MONACO + " .view-lines")
     # Monaco binds "go to end of document" per platform: Ctrl+End on
     # Linux/Windows, Cmd+Down on macOS (Ctrl+End is unbound there, so
@@ -92,6 +95,17 @@ def _editor_text(page) -> str:
         "() => document.querySelector('#content-tab-area')"
         ".innerText.replace(/\\u00a0/g, ' ')",
     ))
+
+
+def _uncover_pane(page) -> None:
+    """Press in the content pane so the task-info panel (which lies on
+    top of the pane's right edge) slides away and the pane's own
+    controls become clickable, as a user does before using them.  Only
+    the desktop layout overlays the pane; a phone stacks the surfaces."""
+    if not page.evaluate("document.body.classList.contains('remote-desktop')"):
+        return
+    page.dispatch_event("#content-tab-area", "pointerdown")
+    page.wait_for_selector("body.meta-hidden", state="attached", timeout=5000)
 
 
 def _dismiss_toasts(page) -> None:
@@ -279,15 +293,27 @@ class TestContentTabEditing:
             _open_editor(page, str(path), "lnk-e5")
             _type_at_end(page, "kept = True")
             page.wait_for_selector(_DIRTY_TAB, timeout=10000)
-            # Back to the chat (its entry on the group strip; the main
-            # row's entry would return to the file last viewed), then
-            # click the link again.
-            page.click("#tab-list .chat-tab:not(.content-tab) .chat-tab-label")
-            page.wait_for_selector("#task-input", state="visible")
+            # Another file takes the content pane (the dirty editor is
+            # hidden behind it); the chat, and so the link, stays on
+            # screen in the split layout: click the link again.
+            other = _fresh_file(harness, "edit_reclick_other.py", "other = 1\n")
+            _inject_file_link(page, str(other), "lnk-e5-other")
+            page.click("#lnk-e5-other")
+            page.wait_for_selector(
+                "#content-tab-list .chat-tab.content-tab.active"
+                ":has-text('edit_reclick_other.py')",
+                timeout=30000,
+            )
             page.click("#lnk-e5")
-            page.wait_for_selector("#content-tab-area", state="visible")
+            page.wait_for_selector(
+                "#content-tab-list .chat-tab.content-tab.active"
+                ":has-text('edit_reclick.py')",
+                timeout=30000,
+            )
             page.wait_for_timeout(1000)
-            assert page.locator(".chat-tab.content-tab").count() == 1
+            assert page.locator(
+                ".chat-tab.content-tab:has-text('edit_reclick.py')",
+            ).count() == 1
             assert "kept = True" in _editor_text(page)
             assert page.locator(_DIRTY_TAB).count() == 1
             assert path.read_text() == _SOURCE
@@ -518,8 +544,7 @@ class TestContentTabEditing:
         )
         try:
             goto_retrying_network_change(page, harness.base_url + "/")
-            page.wait_for_selector("#task-input", state="visible", timeout=30000)
-            page.wait_for_selector(".chat-tab", timeout=30000)
+            _wait_ready(page)
             path = _fresh_file(harness, "edit_fallback.py")
             _inject_file_link(page, str(path), "lnk-fb")
             page.click("#lnk-fb")

@@ -24,7 +24,6 @@ break it.  Locked-down contracts:
    path and the queued ``_queue_chat_event`` + ``_flush_chat_events`` path.
 6. ``_load_chat_context_text`` cache freshness: writes after a cached read
    are reflected on the next read, including after a global invalidation.
-7. ``_delete_frequent_task`` returns True only when the row existed.
 """
 
 from __future__ import annotations
@@ -280,15 +279,3 @@ class TestChatContextCacheFreshness(_PersistenceTestBase):
         th._save_task_result("ctx global result", task_id=task_id)
         assert "ctx global result" in th._load_chat_context_text(chat_id)
         assert th._load_chat_context_text("") == ""
-
-
-class TestDeletions(_PersistenceTestBase):
-    """(7) ``_delete_frequent_task`` contract."""
-
-    def test_delete_frequent_task_true_only_when_existed(self) -> None:
-        th._record_frequent_task("freq task")
-        assert th._delete_frequent_task("freq task") is True
-        assert th._delete_frequent_task("freq task") is False
-        assert th._delete_frequent_task("never recorded") is False
-        assert th._delete_frequent_task("") is False
-        assert th._load_frequent_tasks() == []

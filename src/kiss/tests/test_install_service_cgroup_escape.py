@@ -24,7 +24,6 @@ and is skipped where there is none.
 from __future__ import annotations
 
 import os
-import pty
 import shutil
 import subprocess
 import textwrap
@@ -33,6 +32,12 @@ import uuid
 from pathlib import Path
 
 import pytest
+
+from kiss.tests.conftest import posix_only
+
+# The pty module itself is POSIX-only (a top-level ``import pty`` fails
+# collection on Windows), so it is imported where it is used.
+pytestmark = posix_only("pty, bash scripts, os.symlink and systemd-run")
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPTS = [REPO / "install.sh", REPO / "scripts" / "install.sh"]
@@ -129,6 +134,8 @@ class Harness:
         elif stdin == "pipe":
             argv, input_fd = ["bash", "-s", *args], subprocess.PIPE
         else:
+            import pty
+
             master, slave = pty.openpty()
             argv, input_fd = ["bash", "-c", text, "bash", *args], slave
         proc = subprocess.Popen(

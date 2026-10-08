@@ -341,8 +341,8 @@
   let lastUiTip = "Voice trigger: listen for the words 'Hey Sorcar'";
   let lastFlashCls = null;
 
-  function applyUiClasses(el) {
-    el.classList.remove(
+  function applyUiClasses() {
+    btn.classList.remove(
       'voice-off',
       'voice-loading',
       'voice-listening',
@@ -350,23 +350,19 @@
       'voice-unavailable',
       'active',
     );
-    el.classList.add('voice-' + lastUiState);
-    if (lastUiState === 'listening') el.classList.add('active');
+    btn.classList.add('voice-' + lastUiState);
+    if (lastUiState === 'listening') btn.classList.add('active');
     // The toggle's on/off state for assistive tech, not just a CSS class.
-    el.setAttribute(
+    btn.setAttribute(
       'aria-pressed',
       lastUiState === 'listening' ? 'true' : 'false',
     );
-    el.setAttribute('data-tooltip', lastUiTip);
+    btn.setAttribute('data-tooltip', lastUiTip);
   }
 
-  function applyFlashClasses(el) {
-    el.classList.remove('voice-triggered', 'voice-transcribing');
-    if (lastFlashCls) el.classList.add(lastFlashCls);
-  }
-
-  function applyFlashToAll() {
-    applyFlashClasses(btn);
+  function applyFlashClasses() {
+    btn.classList.remove('voice-triggered', 'voice-transcribing');
+    if (lastFlashCls) btn.classList.add(lastFlashCls);
   }
 
   // The one toast id every voice failure reuses, so a repeated failure
@@ -464,7 +460,7 @@
     }
     lastUiState = state;
     lastUiTip = tip;
-    applyUiClasses(btn);
+    applyUiClasses();
   }
 
   function normalize(text) {
@@ -538,13 +534,13 @@
       flashTimer = null;
     }
     lastFlashCls = cls || null;
-    applyFlashToAll();
+    applyFlashClasses();
     showListening(cls === 'voice-triggered');
     if (!cls) return;
     flashTimer = setTimeout(() => {
       flashTimer = null;
       lastFlashCls = null;
-      applyFlashToAll();
+      applyFlashClasses();
       showListening(false);
       resetSpeechRounds();
     }, timeoutMs);

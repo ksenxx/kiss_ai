@@ -5,7 +5,7 @@
 """E2E regressions for the round-7 usage-ledger hardening.
 
 The round-6 review (``tmp/review6-usage.md``) demonstrated five
-defects with deterministic interleavings
+defects (three of them still in the code) with deterministic interleavings
 (``tmp/review-scratch6/repro_round6_interleavings.py``,
 ``repro_classifier_source_publish.py``,
 ``repro_abandoned_registration_liveness.py``); each is pinned here as
@@ -21,22 +21,16 @@ immutable view with a single store):
   had no retry identity.  Now there is no swap, no drain and no stale
   list: a committed record is visible the instant its append returns,
   under every compaction/interrupt interleaving.
-* Finding 2 — the reclaim validated ``item.epoch`` and then committed
-  through the parent's CURRENT ledger, so a reset between check and
-  append charged old-child spend to the new epoch.  Every reclaim
-  commit is now BOUND to the epoch object captured at registration:
-  late spend settles into the (discarded) prior epoch, never the new
-  one.
+* Finding 2 (reclaim commits bound to the captured epoch) and Finding
+  4 (registration and reclaim sharing one tracking list) concerned the
+  in-process fan-out engine, which no longer exists: every
+  ``run_parallel`` child is a daemon sub-task now, so there is no
+  abandoned-child reclaim to pin.
 * Finding 3 — the classifier stored its fold key and the three spend
   fields separately, so a stop between the stores made the mandatory
   fold consume and clear a zero triple.  The whole outcome is now ONE
   immutable ``_ClassifierSpend`` published with a single store —
   all-or-nothing, never a torn subset.
-* Finding 4 — ``_register_abandoned`` captured the tracking list
-  before locking, so a concurrent reclaim (which replaced the list)
-  stranded a live child in a detached list and worktree cleanup
-  reported "safe" under a live writer.  Registration now fetches the
-  list INSIDE the lock and reclaim updates it in place.
 * Finding 5 — every 200-record compaction copied the whole historical
   key set (``base.keys | folded``), making maintenance quadratic
   (640k events took 25.5s).  The folded dedup state is now a leveled
@@ -56,21 +50,12 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future
 from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.relentless_agent import (
-    _COMPACTION_THRESHOLD,
-    RelentlessAgent,
-    _ledger_totals,
-)
-from kiss.agents.sorcar.sorcar_agent import (
-    SorcarAgent,
-    _AbandonedSubagent,
-    _register_abandoned,
-)
+from kiss.agents.sorcar.relentless_agent import _COMPACTION_THRESHOLD, RelentlessAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.task_classifier import (
     classify_task,
     clear_classification_cache,
@@ -347,78 +332,6 @@ def test_one_shot_commit_survives_compaction_and_immediate_stop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Finding 2 — reclaim commits are bound to the captured epoch object.
-# ---------------------------------------------------------------------------
-
-
-def test_reclaim_crossing_reset_settles_into_old_epoch_only() -> None:
-    """A reset between epoch check and append never charges the new epoch.
-
-    Round-6 broken state: the reclaimer validated ``item.epoch`` under
-    the lock, was paused before the attribution, a ``reset_usage()``
-    swapped the ledger, and the resumed append charged the OLD child's
-    spend to the NEW epoch.  The commit is now bound to the epoch
-    object captured at registration, so the late spend settles in the
-    discarded old ledger and the new epoch stays clean.
-    """
-    parent = SorcarAgent("epoch-parent")
-    old_epoch = parent._usage_epoch()
-    child = RelentlessAgent("epoch-child")
-    child._accumulate_usage(_executor_with_spend("epoch-session", 2.0, 200, 2))
-    future: Future[str] = Future()
-    future.set_result("done")
-    item = _AbandonedSubagent(future, child, (0.0, 0, 0), epoch=old_epoch)
-    parent._abandoned_subagents.append(item)
-
-    pause = _PauseAt(_AbandonedSubagent.bank_unbanked, "_race_delay()")
-    errors: list[BaseException] = []
-
-    def reclaim() -> None:
-        error = pause.run(lambda: parent.reclaim_abandoned_subagents())
-        if error is not None:
-            errors.append(error)
-
-    thread = threading.Thread(target=reclaim)
-    thread.start()
-    assert pause.reached.wait(_WAIT)
-    # The round-6 race: reset lands after the epoch check, before the
-    # attribution append.
-    parent.reset_usage()
-    assert parent._usage_epoch() is not old_epoch
-    pause.resume.set()
-    thread.join(_WAIT)
-    assert not thread.is_alive() and errors == []
-    # Round-6 asserted the NEW epoch read (2.0, 200, 2); it must be
-    # clean now, with the spend settled into the discarded old epoch.
-    assert parent.usage_snapshot() == (0.0, 0, 0)
-    assert _ledger_totals(old_epoch) == (2.0, 200, 2)
-    assert parent._abandoned_subagents == []
-
-
-def test_stale_epoch_spend_advances_checkpoint_without_new_epoch_charge() -> None:
-    """Repeated reclaims of a stale-epoch child never touch the new epoch."""
-    parent = SorcarAgent("stale-parent")
-    old_epoch = parent._usage_epoch()
-    child = RelentlessAgent("stale-child")
-    child._accumulate_usage(_executor_with_spend("stale-session", 1.0, 100, 1))
-    future: Future[str] = Future()
-    item = _AbandonedSubagent(future, child, (0.0, 0, 0), epoch=old_epoch)
-    parent._abandoned_subagents.append(item)
-    parent.reset_usage()
-    # Live child: tracked (blocks worktree deletion), spend settled old.
-    assert not parent.reclaim_abandoned_subagents()
-    assert parent.usage_snapshot() == (0.0, 0, 0)
-    assert _ledger_totals(old_epoch) == (1.0, 100, 1)
-    # The checkpoint advanced: a second reclaim banks nothing more.
-    child._accumulate_usage(_executor_with_spend("stale-late", 2.0, 200, 2))
-    future.set_result("done")
-    assert parent.reclaim_abandoned_subagents()
-    assert parent.usage_snapshot() == (0.0, 0, 0)
-    assert _ledger_totals(old_epoch) == (3.0, 300, 3)
-    assert parent._abandoned_subagents == []
-
-
-# ---------------------------------------------------------------------------
 # Finding 3 — the classifier outcome publishes atomically.
 # ---------------------------------------------------------------------------
 
@@ -546,76 +459,6 @@ def test_classifier_outcome_publication_is_all_or_nothing(
         assert agent2.usage_snapshot() == complete
     finally:
         server.stop()
-
-
-# ---------------------------------------------------------------------------
-# Finding 4 — registration and reclaim agree on one tracking list.
-# ---------------------------------------------------------------------------
-
-
-def test_registration_racing_reclaim_keeps_live_child_tracked() -> None:
-    """A reclaim completing mid-registration cannot strand a live child.
-
-    Round-6 broken state: registration captured the tracking list,
-    a reclaim replaced the attribute with a new list, and the live
-    child was appended only to the detached one — the parent then
-    reported "no abandoned children" while the child's thread kept
-    writing into the (deletable) worktree.  Registration now fetches
-    the list inside the lock and reclaim mutates it in place.
-    """
-    parent = SorcarAgent("registration-parent")
-    tracked_list = parent._abandoned_subagents
-    # A finished child that the racing reclaim will bank and forget.
-    old_child = RelentlessAgent("already-done-child")
-    old_child._accumulate_usage(_executor_with_spend("old-spend", 1.0, 100, 1))
-    old_future: Future[str] = Future()
-    old_future.set_result("done")
-    parent._abandoned_subagents.append(
-        _AbandonedSubagent(
-            old_future, old_child, (0.0, 0, 0), epoch=parent._usage_epoch(),
-        )
-    )
-
-    live_child = RelentlessAgent("new-live-child")
-    live_future: Future[str] = Future()
-    pause = _PauseAt(_register_abandoned, "with lock:")
-    errors: list[BaseException] = []
-
-    def register() -> None:
-        error = pause.run(
-            lambda: _register_abandoned(
-                parent, [live_future], [live_child], [(0.0, 0, 0)],
-            )
-        )
-        if error is not None:
-            errors.append(error)
-
-    thread = threading.Thread(target=register)
-    thread.start()
-    assert pause.reached.wait(_WAIT)
-    # The racing reclaim runs to completion while registration is
-    # parked before the lock.
-    assert parent.reclaim_abandoned_subagents()
-    assert parent.usage_snapshot() == (1.0, 100, 1)
-    assert parent._abandoned_subagents == []
-    pause.resume.set()
-    thread.join(_WAIT)
-    assert not thread.is_alive() and errors == []
-
-    # Round-6 asserted zero tracked items and a True cleanup verdict
-    # while the child lived; the live child MUST be tracked now, in
-    # the very list object every reader consults.
-    assert not live_future.done()
-    assert parent._abandoned_subagents is tracked_list
-    assert len(parent._abandoned_subagents) == 1
-    assert parent._abandoned_subagents[0].future is live_future
-    assert parent.reclaim_abandoned_subagents() is False
-    # Once the child finishes, its spend is banked and cleanup is safe.
-    live_child._accumulate_usage(_executor_with_spend("late", 2.0, 200, 2))
-    live_future.set_result("done")
-    assert parent.reclaim_abandoned_subagents() is True
-    assert parent.usage_snapshot() == (3.0, 300, 3)
-    assert parent._abandoned_subagents == []
 
 
 # ---------------------------------------------------------------------------

@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end: Stop pressed while an Anthropic stream is live is honoured promptly.
 
-``AnthropicModel._stream_message`` now runs its loop through the shared
-:func:`~kiss.core.models.stream_abort.stop_aware_events` wrapper instead
+``AnthropicModel._create_message`` runs its loop through the shared
+:meth:`~kiss.core.models.model.Model._watched_events` wrapper instead
 of hand-running a ``StreamAbortWatchdog``.  The scenario the watchdog
 exists for is pinned here: the provider has sent part of a thinking
 block and then keeps the connection alive with ``ping`` events (bytes

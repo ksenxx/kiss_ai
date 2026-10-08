@@ -10,9 +10,8 @@ server asserts the ``Authorization: Bearer`` header on every call,
 returns canned JSON (or a raw diff for the diff media type), and
 records every request (method, path, headers, body) for verification.
 
-Config state is isolated per pytest process because the session
-conftest points ``KISS_HOME`` at a temporary directory and
-``ChannelConfig.path`` resolves ``$KISS_HOME`` lazily.
+State is isolated per test: ``isolated_kiss_home`` points ``KISS_HOME`` at a
+fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 
 Branch-coverage note: every branch of ``github_sea`` is reachable
 end-to-end with this emulator (validation, read-only gating, HTTP
@@ -299,12 +298,7 @@ def backend(gh_server):
     return b, server
 
 
-@pytest.fixture(autouse=True)
-def _fresh_config():
-    """Start and end every test with no persisted GitHub config."""
-    _config.clear()
-    yield
-    _config.clear()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 _READ_TOOLS = [

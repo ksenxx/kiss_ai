@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from kiss.agents.seas.ask import ask_sea
+from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.sorcar import task_digest
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
@@ -31,6 +32,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.sea_commands import evaluate_sea
+from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -469,7 +471,7 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
     context back as a tool result and finishes with the answer.
 
     The run is configured the way the daemon configures it
-    (``evaluate_sea`` on the SEA): the ``worker`` kind's flags, the
+    (``evaluate_sea`` on the SEA): the ``WorkerSea`` flags, the
     ``none`` tool profile (from which the daemon derives
     ``append_basic_tools=False``), the ``system_prompt`` method as the
     system-prompt hook (it replaces the assembled prompt), the ``tools``
@@ -486,13 +488,14 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
     run = evaluate_sea([sea], "how many trials are done?", task_id)
     settings = run.settings
     assert settings["tool_profile"] == "none"
-    assert settings["kind"] == "worker"
+    assert isinstance(sea, WorkerSea)
+    assert settings["use_worktree"] is False and settings["use_memory"] is False
     assert run.prompt.endswith(ask_sea.ADD_TO_PROMPT.format(task_id=task_id))
     assert run.system_prompt_hook is not None and run.tools_hook is not None
     # ``/ask`` overrides neither LLM-call nor tool-call hook: both are identities.
     messages = [{"role": "user", "content": "hi"}]
     assert run.llm_call_hook is not None and run.llm_call_hook(messages) == messages
-    assert run.tool_call_hook is not None and run.tool_call_hook("x", {}) == "OK"
+    assert run.tool_call_hook is not None and run.tool_call_hook("x", {}) == ALLOW
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("ask-sea-test")
         result = agent.run(
@@ -507,7 +510,6 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
             tools_hook=run.tools_hook,
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

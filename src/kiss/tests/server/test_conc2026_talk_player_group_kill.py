@@ -17,16 +17,16 @@ the single playback queue exists to prevent.
 The fix starts each playback child in its own session
 (``start_new_session`` on POSIX) and, on timeout, signals the whole
 process group: SIGTERM first, escalating to SIGKILL after a grace
-period (``voice_wake_control`` pattern).  ``KISS_SORCAR_PLAY_TIMEOUT``
+period.  ``KISS_SORCAR_PLAY_TIMEOUT``
 makes the 600 s timeout overridable so this test forces it with a
 REAL hung child — no mocks, real subprocesses, a real
 :class:`TalkPlayer` worker.
 
 Unreachable-without-fakes branches, documented instead of mocked:
-``_signal_group``'s ``killpg is None`` path and ``_kill_playback``'s
-``proc.kill()`` fallback only run on Windows (``os.killpg`` always
-exists on POSIX), and ``_signal_group``'s ``PermissionError`` arm
-needs a process group owned by another user.
+``_kill_playback``'s ``proc.kill()`` fallbacks run only when
+:func:`kiss.core.processes.kill_process_group` raises, which on POSIX
+needs a process group owned by another user (``PermissionError``) or
+one that is already gone.
 """
 
 from __future__ import annotations

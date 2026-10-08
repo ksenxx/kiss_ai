@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 import kiss.core.vscode_config as vc
+from kiss.core.utils import atomic_write_text
 
 
 @pytest.mark.skipif(
@@ -89,16 +90,16 @@ class TestD3TempFileLeaks:
     def test_atomic_write_text_secure_failure_leaves_no_temp(
         self, tmp_path: Path,
     ) -> None:
-        """A failing ``os.replace`` must unlink the ``.kiss-rc-*`` file."""
+        """A failing ``os.replace`` of a 0600 RC write must unlink its ``.rc-*`` staging file."""
         target = tmp_path / "rc"
         target.mkdir()
         (target / "child").write_text("occupied")
         with pytest.raises(OSError):
-            vc._atomic_write_text_secure(target, "export KEY=value\n")
+            atomic_write_text(target, "export KEY=value\n", mode=0o600)
         leftovers = sorted(
             p.name
             for p in tmp_path.iterdir()
-            if p.name.startswith(".kiss-rc-")
+            if p.name.startswith((".kiss-rc-", ".rc-"))
         )
         assert leftovers == [], (
             f"staging temp files leaked into {tmp_path}: {leftovers}"

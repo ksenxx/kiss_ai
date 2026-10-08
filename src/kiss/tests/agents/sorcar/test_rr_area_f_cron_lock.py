@@ -4,10 +4,10 @@
 # add your name here
 """End-to-end tests for the deduplicated cron job-store lock (F-R4).
 
-``cron_agent._jobs_lock`` used to re-implement
-``useful_tools._file_lock`` solely to add a non-blocking mode; it is
-now a thin wrapper over it (gaining the 0600 lock-file mode and the
-Windows branch).  These tests pin the wrapper's contract — the exact
+``cron_agent._jobs_lock`` used to re-implement the process-wide file
+lock solely to add a non-blocking mode; it is now a thin wrapper over
+``kiss.core.file_lock.exclusive_file_lock`` (gaining the 0600 lock-file
+mode and the Windows branch).  These tests pin the wrapper's contract — the exact
 semantics the scheduler tick and the ``cron_job`` tool rely on — on
 the real lock file under an isolated ``KISS_HOME``.  The tick-skip
 behavior built on top is covered end-to-end by
@@ -44,14 +44,14 @@ def test_blocking_lock_yields_truthy_and_creates_0600_file(
         assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o600
 
 
-def test_nonblocking_lock_yields_none_while_held() -> None:
+def test_nonblocking_lock_yields_false_while_held() -> None:
     # flock treats separate descriptors of one file as independent
     # holders, so nesting exercises real contention (this is exactly
     # how an overlapping scheduler tick sees a running tool edit).
     with cron_agent._jobs_lock(blocking=True) as held:
         assert held
         with cron_agent._jobs_lock(blocking=False) as inner:
-            assert inner is None
+            assert inner is False
     # Released: the non-blocking tick path acquires immediately.
     with cron_agent._jobs_lock(blocking=False) as reacquired:
         assert reacquired

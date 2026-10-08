@@ -5,8 +5,8 @@
 
 // I-R3: wheel and touch overscroll share one edge handler. Chaining to
 // the previous/next task must behave identically whichever input device
-// crossed the edge, and a scroll that leaves the edge must reset the
-// accumulator for both.
+// crossed the edge, at once, and a scroll that is not at an edge must
+// fetch nothing for either.
 
 /* global require, process, console, __dirname, global, setTimeout, clearTimeout */
 
@@ -143,31 +143,36 @@ function testWheelParity() {
   console.log('  ok - wheel overscroll behaves the same as touch');
 }
 
-function testMidScrollResetsAccumulator() {
+function testOffEdgeTouchFetchesNothing() {
   const {win, posted, O} = setup();
-  // Almost enough overscroll at the top, then a scroll away from the
-  // edge, then a bit more at the top: the accumulator must have reset,
-  // so no adjacent-task request fires.
-  O.scrollTop = 0;
-  touchSequence(win, O, [-60, -60]);
+  // A touch scroll that is not at an edge is ordinary scrolling: no
+  // neighbour is fetched, whatever the direction. (Scrolling NEAR an
+  // edge prefetches through the scroll event, not the touch handler.)
   O.scrollTop = 100;
-  touchSequence(win, O, [-10]);
-  O.scrollTop = 0;
-  touchSequence(win, O, [-60]);
+  touchSequence(win, O, [-60, -60, 60]);
   assert.strictEqual(
     getAdjacent(posted).length,
     0,
-    'leaving the edge must reset the touch overscroll accumulator',
+    'a touch scroll away from the edges must not fetch a neighbour',
   );
+  // One move past the top fetches at once: there is no gesture to
+  // accumulate, the thread simply reads on.
+  O.scrollTop = 0;
+  touchSequence(win, O, [-1]);
+  assert.strictEqual(getAdjacent(posted).length, 1, 'one fetch at once');
+  assert.strictEqual(getAdjacent(posted)[0].direction, 'prev');
+  // Pushing on while that fetch is in flight asks nothing more.
+  touchSequence(win, O, [-60, -60]);
+  assert.strictEqual(getAdjacent(posted).length, 1, 'one fetch at a time');
   win.close();
-  console.log('  ok - scrolling off the edge resets the accumulator');
+  console.log('  ok - an edge push fetches at once; off the edge, nothing');
 }
 
 function main() {
   testTouchPrevAtTop();
   testTouchNextAtBottom();
   testWheelParity();
-  testMidScrollResetsAccumulator();
+  testOffEdgeTouchFetchesNothing();
   console.log('rr_area_hi_overscroll_touch_parity: all tests passed');
   process.exit(0);
 }

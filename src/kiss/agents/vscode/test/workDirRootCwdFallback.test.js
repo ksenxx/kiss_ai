@@ -143,26 +143,7 @@ const fsRoot = path.parse(process.cwd()).root; // '/' on POSIX, 'C:\' on win32
 function makeView() {
   const view = new SorcarSidebarView({fsPath: path.join(tmp, 'ext')});
   const sent = [];
-  view._api = {
-    _sent: sent,
-    forward: c => sent.push(c),
-    submit: c => sent.push({type: 'submit', ...c}),
-    stop: tabId => sent.push({type: 'stop', tabId}),
-    complete: c => sent.push({type: 'complete', ...c}),
-    closeTab: tabId => sent.push({type: 'closeTab', tabId}),
-    getModels: () => {},
-    getInputHistory: () => {},
-    getConfig: () => {},
-    setWorkDir: wd => sent.push({type: 'setWorkDir', workDir: wd}),
-    recordFileUsage: () => {},
-    selectModel: () => {},
-    userAnswer: () => {},
-    resumeSession: () => {},
-    worktreeAction: () => {},
-    generateCommitMessage: () => {},
-    serverReset: () => {},
-    appendUserMessage: () => {},
-  };
+  view._send = c => sent.push(c);
   // What the host actually forwards to the webview.
   const toWebview = [];
   view._view = {

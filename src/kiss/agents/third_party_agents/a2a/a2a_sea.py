@@ -89,7 +89,7 @@ class A2aSea(BaseSea):
         """Return the A2A channel tools (the SEA ``tools`` method).
 
         Called by the kiss-web daemon when this module's path is passed as
-        the API's ``extension_agent_path``: builds a fresh agent from the
+        the API's ``sea_path``: builds a fresh agent from the
         credentials persisted under ``$KISS_HOME`` and returns its
         authentication and backend tools.
         """

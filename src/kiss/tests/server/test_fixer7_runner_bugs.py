@@ -254,13 +254,13 @@ def test_f11_cooldown_suppressed_wake_resets_cleanly(tmp_path: Path) -> None:
     from kiss.server.voice_wake import (
         BLOCK_SIZE,
         COOLDOWN_SECONDS,
-        DEFAULT_MODELS_DIR,
         SAMPLE_RATE,
         WakeDetector,
+        default_models_dir,
         ensure_model,
     )
 
-    model_dir = ensure_model(DEFAULT_MODELS_DIR)
+    model_dir = ensure_model(default_models_dir())
     detector = WakeDetector(model_dir)
     wakes: list[float] = []
     silence_block = b"\x00" * (BLOCK_SIZE * 2)

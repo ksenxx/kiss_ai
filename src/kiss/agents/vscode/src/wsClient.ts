@@ -31,7 +31,7 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const CLOSE_GRACE_MS = 1_000;
 const utf8 = new TextDecoder('utf-8', {fatal: true});
 /** Matches the daemon's frame limit (`web_server._MAX_LINE_BYTES`). */
-export const DEFAULT_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
 
 const OP_CONTINUATION = 0x0;
 const OP_TEXT = 0x1;

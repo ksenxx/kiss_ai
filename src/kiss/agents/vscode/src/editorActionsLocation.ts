@@ -43,8 +43,8 @@ const EDITOR_ACTIONS_SETTING = 'workbench.editor.editorActionsLocation';
  * 'move' or 'keep'.
  */
 export const LOCATION_CONSENT_KEY = 'kissSorcar.editorActionsLocationConsent';
-export const MOVE_ACTION = 'Move actions to title bar';
-export const KEEP_ACTION = 'Keep my setting';
+const MOVE_ACTION = 'Move actions to title bar';
+const KEEP_ACTION = 'Keep my setting';
 
 // The open consent prompt, so repeated syncs (activation followed by a
 // mode flip) never stack a second copy of the question.

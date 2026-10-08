@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Iterator
-from typing import Any
 
 import pytest
 
@@ -42,12 +41,7 @@ def _webhook_url(receiver: JsonWebhookServer) -> str:
     return receiver.base_url + "/cgi-bin/webhook/send?key=testkey"
 
 
-@pytest.fixture(autouse=True)
-def _clean_config() -> Any:
-    """Start and finish every test with no persisted WeCom config."""
-    wecom_mod._config.clear()
-    yield
-    wecom_mod._config.clear()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def test_agent_unauthenticated_exposes_only_auth_trio() -> None:

@@ -34,7 +34,7 @@ import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from kiss.tests.agents.vscode.test_activity_bar import (
+from kiss.tests.agents.vscode.test_workspace_sections import (
     _dismiss_update_toast,
     _set_work_dir,
 )
@@ -150,7 +150,9 @@ def _wait_sessions(harness: ExplorerHarness, want: int, timeout: float = 15) -> 
 
 
 def _close_active_tab(page) -> None:
-    page.click("#tab-list .active .chat-tab-close")
+    """Close the content pane's shown tab (the desktop page is the split
+    layout: terminal tabs live on ``#content-tab-list``)."""
+    page.click("#content-tab-list .active .chat-tab-close")
 
 
 def test_menu_item_opens_a_shell_in_the_work_dir(browser, harness):
@@ -160,18 +162,30 @@ def test_menu_item_opens_a_shell_in_the_work_dir(browser, harness):
     context, page = _open_page(browser, harness)
     try:
         _open_terminal(page)
-        tab = page.locator("#tab-list .active")
+        tab = page.locator("#content-tab-list .active")
         assert tab.inner_text().startswith(">_")
         assert "Terminal" in tab.inner_text()
         page.keyboard.type("echo marker-$((40+2)); pwd; stty size\n")
-        text = _wait_for_output(page, "marker-42")
+        _wait_for_output(page, "marker-42")
+        # The marker lands before pwd and stty answer: wait for the
+        # ``rows cols`` line too before reading the screen.
+        _wait_for_sizes(page, 1)
+        text = _screen(page)
         assert str(harness.work_dir) in text
         size = re.search(r"(?m)^(\d+) (\d+)$", text)
         assert size is not None
         rows, cols = (int(x) for x in size.groups())
         assert rows > 10 and cols > 40
-        # The composer keeps its buttons but the chat surface is hidden.
-        assert page.locator("#output").is_hidden()
+        # Split layout: the chat and composer stay visible beside the
+        # terminal pane; the stacked page's content-tab-open mode is
+        # never entered.
+        assert page.locator("#output").is_visible()
+        assert page.locator("#task-input").is_visible()
+        assert page.locator(".terminal-tab-view").first.is_visible()
+        assert not page.evaluate("document.body.classList.contains('content-tab-open')")
+        assert page.evaluate("window._testApi.getActiveTabId()") == page.evaluate(
+            "window._testApi.openTabs().find(t => !t.isContentTab).id"
+        )
         assert _sessions(harness) == 1
         _close_active_tab(page)
         _wait_sessions(harness, 0)
@@ -229,14 +243,15 @@ def test_second_terminal_gets_its_own_tab_and_shell(browser, harness):
         _wait_for_output(page, "first-shell-")
         _open_terminal(page)
         _wait_sessions(harness, 2)
-        titles = page.locator("#tab-list .chat-tab").all_inner_texts()
+        titles = page.locator("#content-tab-list .chat-tab").all_inner_texts()
         assert any(t.strip().endswith("Terminal 2") or "Terminal 2" in t for t in titles)
         page.keyboard.type("echo second-shell-$$\n")
         text = _wait_for_output(page, "second-shell-")
         assert "first-shell-" not in text
         # Back to the first tab: its screen is intact and still typeable.
-        # Tabs: the chat, "Terminal", "Terminal 2".
-        page.locator("#tab-list .chat-tab").nth(1).click()
+        # Content tabs: "Terminal", "Terminal 2" (the chat is not on
+        # that row).
+        page.locator("#content-tab-list .chat-tab").nth(0).click()
         page.wait_for_function(f"({_SCREEN_TEXT}).includes('first-shell-')")
         page.keyboard.type("echo again-here\n")
         _wait_for_output(page, "again-here")

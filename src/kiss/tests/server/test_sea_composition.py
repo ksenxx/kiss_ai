@@ -11,14 +11,15 @@ What these tests pin down (``reports/sea-design-report.html``):
   through :func:`~kiss.agents.sorcar.sea_commands.sea_class`); the
   ``prompt`` / ``system_prompt`` family are methods, never settings.
 * Inherited settings fold base-first (the subclass's ``settings`` sees
-  what its base returned, so a later value wins); a base's ``kind`` is
-  never masked by the default ``session``.
+  what its base returned, so a later value wins); ``WorkerSea`` lays its
+  defaults under the subclass's own, and a channel is a ``ChannelSea``.
 * Methods chain base-first through the class hierarchy: the subclass's
   ``prompt`` receives what the base produced; a class contributes once
   even when it appears in both a picker base and the script's own MRO.
 * The dispatcher resolves every agent spelling to a script path, accepts
-  ``work_dir`` and ``allow_fan_out`` options, and refuses the old wire
-  spellings of the ``add_to_*`` options.
+  the ``work_dir`` option, refuses the old wire spellings of the
+  ``add_to_*`` options, and takes the caller's ``is_parallel`` off the
+  calling agent rather than from an option.
 * On a real daemon: a slash command on a derived SEA runs the whole chain;
   a channel SEA holds its workspace for the run and releases it; a client-
   sent daemon-side field is dropped.
@@ -35,38 +36,38 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, BaseSea, ChannelSea, WorkerSea
 from kiss.agents.sorcar import agent_dispatch, channel_workspace, daemon_client, sea_commands
-from kiss.agents.sorcar.agent_dispatch import RunOptions, inherit_from_parent, resolve_agent
-from kiss.agents.sorcar.agent_file import (
+from kiss.agents.sorcar.agent_dispatch import resolve_agent
+from kiss.agents.sorcar.sea_apply import (
     CHANNEL_PREAMBLE,
-    AgentFileError,
-    apply_agent_overrides,
+    apply_sea,
     load_layers,
 )
-from kiss.agents.sorcar.agent_file import channel_workspace as held_workspace
+from kiss.agents.sorcar.sea_apply import channel_workspace as held_workspace
 from kiss.agents.sorcar.sea_commands import (
-    SeaScriptError,
     base_settings,
     declared_settings,
     evaluate_sea,
+    is_channel,
     sea_layers,
     sea_settings,
 )
 from kiss.agents.sorcar.sea_settings import (
     REMOVED_SETTINGS,
     SETTING_TYPES,
-    SettingsError,
+    SeaError,
     resolve_settings,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
+from kiss.core.tool_verdict import ALLOW
 from kiss.server import sorcar
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 BASE_SEA = """
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 
 def base_tool(x: str) -> str:
     '''Base tool.'''
@@ -76,11 +77,11 @@ def shared(x: str) -> str:
     '''Shared (base).'''
     return 'base ' + x
 
-class Sea(BaseSea):
+class Sea(WorkerSea):
     def description(self):
         return 'base'
     def settings(self, settings):
-        return settings | {'kind': 'worker', 'use_web_tools': True, 'max_budget': 1}
+        return settings | {'use_web_tools': True, 'max_budget': 1}
     def prompt(self, task):
         return '[base] ' + task + ' BASE-ADD {task_id}'
     def system_prompt(self, system_prompt):
@@ -139,24 +140,25 @@ def _mro_names(sea: BaseSea) -> list[str]:
 def test_settings_vocabulary_has_no_prompt_or_extends_keys() -> None:
     assert "extends" not in SETTING_TYPES
     assert "Python inheritance" in REMOVED_SETTINGS["extends"]
-    with pytest.raises(SettingsError, match="key 'extends' was removed"):
+    with pytest.raises(SeaError, match="key 'extends' was removed"):
         resolve_settings({"extends": "x"})
     for key in ("prompt", "system_prompt"):
-        with pytest.raises(SettingsError, match=f"unknown key {key!r}"):
+        with pytest.raises(SeaError, match=f"unknown key {key!r}"):
             resolve_settings({key: "x"})
     # The prompt suffixes are options, not settings: refused with the method to use.
-    with pytest.raises(SettingsError, match="key 'add_to_prompt' was removed: .*prompt\\(task\\)"):
+    with pytest.raises(SeaError, match="key 'add_to_prompt' was removed: .*prompt\\(task\\)"):
         resolve_settings({"add_to_prompt": "x"})
     # The dispatcher's option vocabulary is the run-settings subset of
     # the SEA vocabulary (no script-describing keys) plus its own.
     assert set(agent_dispatch.OPTION_TYPES) == (
-        set(SETTING_TYPES) - {"kind", "locked", "hidden"}
+        set(SETTING_TYPES) - {"locked", "hidden"}
+        - set(agent_dispatch.ARGUMENT_OPTIONS)
     ) | {"inherit", "workspace", "add_to_prompt", "add_to_system_prompt"}
 
 
-class _Worker(BaseSea):
+class _Worker(WorkerSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        return settings | {"kind": "worker", "use_web_tools": True}
+        return settings | {"use_web_tools": True}
 
 
 class _Budgeted(_Worker):
@@ -164,27 +166,30 @@ class _Budgeted(_Worker):
         return settings | {"max_budget": 1}
 
 
-class _Channel(_Worker):
-    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        return settings | {"kind": "channel"}
+class _Channel(_Worker, ChannelSea):
+    pass
 
 
-def test_inherited_settings_fold_base_first_and_session_never_masks_a_kind() -> None:
+def test_inherited_settings_fold_base_first_and_a_base_lays_its_defaults_under() -> None:
     assert declared_settings([]) == {}
-    assert resolve_settings({}) == {"kind": "session"}
-    # The subclass's settings() sees the base's and its value wins.
+    assert resolve_settings({}) == {}
+    # The subclass's settings() sees the base's and its value wins:
+    # ``WorkerSea`` lays its defaults first, ``_Worker`` turns the browser on.
     assert declared_settings([_Budgeted()]) == {
-        "kind": "worker", "use_web_tools": True, "max_budget": 1,
+        **WORKER_DEFAULTS, "use_web_tools": True, "max_budget": 1,
     }
     resolved = base_settings([_Budgeted()])
-    assert resolved["kind"] == "worker"
     assert resolved["use_web_tools"] is True and resolved["max_budget"] == 1.0
-    assert resolved["allow_fan_out"] is False  # the worker preset
-    # A subclass without a kind keeps its base's; one with a kind replaces it.
-    assert base_settings([_Budgeted()])["kind"] == "worker"
-    assert base_settings([_Channel()])["kind"] == "channel"
+    assert resolved["use_worktree"] is False  # the worker default
+    # What a SEA is, is its class: a ``ChannelSea`` anywhere in the
+    # chain makes the run a channel; it lays the channel scratch
+    # directory under the subclass's keys.
+    assert is_channel([_Budgeted()]) is False
+    assert is_channel([_Channel()]) is True
+    assert base_settings([_Channel()])["work_dir"] == str(kiss_home() / "channel_work")
+    assert base_settings([_Channel()])["use_web_tools"] is True
     # Two layers (picker base, then the script) fold the same way.
-    assert declared_settings([_Worker(), _Channel()])["kind"] == "channel"
+    assert is_channel([_Worker(), _Channel()]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -227,11 +232,11 @@ def test_inheriting_by_command_name_and_by_path_chains_both_classes(registry: Pa
     for derived in (by_name, by_path):
         layers = sea_layers(derived)
         assert [layer.path for layer in layers] == [derived]
-        assert _mro_names(layers[0]) == ["BaseSea", "Sea", "Derived"]
+        assert _mro_names(layers[0]) == ["BaseSea", "WorkerSea", "Sea", "Derived"]
         base_module = sys.modules[type(layers[0]).__mro__[1].__module__]
         assert Path(base_module.__file__ or "") == base.resolve()
         settings = base_settings(layers)
-        assert settings["kind"] == "worker"
+        assert settings["use_worktree"] is False  # the base's worker default
         assert settings["use_web_tools"] is True and settings["max_budget"] == 2.0
         run = evaluate_sea(layers, "do it", task_id="T-1")
         assert run.prompt == "[derived] [base] do it BASE-ADD T-1 DERIVED-ADD"
@@ -243,14 +248,14 @@ def test_inheriting_by_command_name_and_by_path_chains_both_classes(registry: Pa
         assert tools[1]("x") == "derived x"  # the subclass replaced the base's ``shared``
         assert run.llm_call_hook is not None and run.llm_call_hook([]) == []
         # No layer overrides ``tool_call_hook``: the staged hook is the identity.
-        assert run.tool_call_hook is not None and run.tool_call_hook("x", {}) == "OK"
-        cmd: dict[str, Any] = {"agentPath": str(derived), "prompt": "do it", "parentTaskId": "T-1"}
-        overridden = apply_agent_overrides(cmd)
+        assert run.tool_call_hook is not None and run.tool_call_hook("x", {}) == ALLOW
+        cmd: dict[str, Any] = {"seaPath": str(derived), "prompt": "do it", "parentTaskId": "T-1"}
+        overridden = apply_sea(cmd)
         assert cmd["prompt"] == "[derived] [base] do it BASE-ADD T-1 DERIVED-ADD"
         assert cmd["systemPromptHook"]("X") == "BASE SYSTEM\n\nBASE PROTOCOL\n\nDERIVED PROTOCOL"
         assert cmd["maxBudget"] == 2.0 and cmd["useWebTools"] is True
         assert [tool.__name__ for tool in cmd["toolsHook"]([])] == ["base_tool", "shared"]
-        assert cmd["llmCallHook"]([]) == [] and cmd["toolCallHook"]("x", {}) == "OK"
+        assert cmd["llmCallHook"]([]) == [] and cmd["toolCallHook"]("x", {}) == ALLOW
         # The overridden set lists settings and ``prompt`` only, never the
         # four hooks (they are always staged).
         assert {"prompt", "maxBudget", "useWebTools"} <= overridden
@@ -267,7 +272,7 @@ class Sea(BaseSea):
         return settings | {'extends': 'nobody'}
 """)
     with pytest.raises(
-        SeaScriptError,
+        SeaError,
         match=r"settings\(\) key 'extends' was removed: a SEA extends another by Python inherit",
     ):
         sea_settings(extends)
@@ -278,7 +283,7 @@ class Sea(sea_class('nobody')):
     pass
 """)
     with pytest.raises(
-        SeaScriptError,
+        SeaError,
         match=r"missing_sea.py' failed to import: .*sea_class\('nobody'\): not a registered SEA",
     ):
         sea_layers(missing)
@@ -289,36 +294,35 @@ class Sea(sea_class('gone.py')):
     pass
 """)
     with pytest.raises(
-        SeaScriptError,
+        SeaError,
         match=r"gone_sea.py' failed to import: .*sea_class\('gone.py'\): not an existing Python",
     ):
         sea_layers(gone)
     # A channel SEA may inherit from a worker base; a picker base may run
-    # under a channel SEA; either way the channel's settings win.
+    # under a channel SEA; either way the run is a channel.
     _write(registry / "wbase" / "wbase_sea.py", BASE_SEA)
     chan2 = _write(registry / "chan2" / "chan2_sea.py", """
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar.sea_commands import sea_class
 
-class Chan(sea_class('wbase')):
+class Chan(sea_class('wbase'), ChannelSea):
     def description(self):
         return 'c'
-    def settings(self, settings):
-        return settings | {'kind': 'channel'}
 """)
     sea_commands.refresh_registry()
     layers = sea_layers(chan2)
-    assert _mro_names(layers[0]) == ["BaseSea", "Sea", "Chan"]
-    assert base_settings(layers)["kind"] == "channel"
+    assert _mro_names(layers[0]) == ["BaseSea", "WorkerSea", "ChannelSea", "Sea", "Chan"]
+    assert is_channel(layers) is True
     wbase = registry / "wbase" / "wbase_sea.py"
-    cmd: dict[str, Any] = {"agentPath": str(chan2), "prompt": "p", "workspace": "acct"}
+    cmd: dict[str, Any] = {"seaPath": str(chan2), "prompt": "p", "workspace": "acct"}
     assert held_workspace(cmd, load_layers(cmd)) == "acct"
-    assert held_workspace({"agentPath": str(chan2)}, layers) == "default"
-    assert held_workspace({"agentPath": str(wbase)}, load_layers({"agentPath": str(wbase)})) == ""
+    assert held_workspace({"seaPath": str(chan2)}, layers) == "default"
+    assert held_workspace({"seaPath": str(wbase)}, load_layers({"seaPath": str(wbase)})) == ""
     picker_layers = sea_layers(chan2, base=wbase)
     assert [layer.path for layer in picker_layers] == [wbase.resolve(), chan2]
-    assert base_settings(picker_layers)["kind"] == "channel"
-    cmd = {"agentPath": str(chan2), "prompt": "p"}
-    apply_agent_overrides(cmd)
+    assert is_channel(picker_layers) is True
+    cmd = {"seaPath": str(chan2), "prompt": "p"}
+    apply_sea(cmd)
     assert cmd["appendToSystemPrompt"].startswith(CHANNEL_PREAMBLE.format(name="chan2"))
     assert cmd["prompt"] == "[base] p BASE-ADD "
 
@@ -344,7 +348,7 @@ from kiss.agents.sorcar.sea_commands import sea_class
 
 class Picker(sea_class('root')):
     def settings(self, settings):
-        return settings | {'kind': 'worker'}
+        return settings | {'use_web_tools': True}
     def prompt(self, task):
         return '[picker] ' + task
 """)
@@ -367,7 +371,7 @@ class Direct(sea_class('picker')):
     # … but the chain contributes a class once however many times its
     # file was executed: ``prompt`` applies root, picker and direct once each.
     assert evaluate_sea(layers, "t").prompt == "[direct] [picker] [root] t"
-    assert base_settings(layers)["kind"] == "worker"
+    assert base_settings(layers)["use_web_tools"] is True
     # A common ancestor keeps its place under the base chain: a sibling
     # of the picker that shares its root still applies root once, first.
     sibling = _write(registry / "sibling" / "sibling_sea.py", counting.format(name="sibling") + """
@@ -409,7 +413,7 @@ class Sea(BaseSea):
     first = sys.modules[type(sea_layers(sea)[0]).__module__]
     assert typing.get_type_hints(first.Box)["item"] is first.Item
     sea.write_text("def settings(:\n", encoding="utf-8")
-    with pytest.raises(SeaScriptError, match="failed to import"):
+    with pytest.raises(SeaError, match="failed to import"):
         sea_layers(sea)
     # Still resolvable after the failed reload (the module entry was restored).
     assert typing.get_type_hints(first.Box)["item"] is first.Item
@@ -429,7 +433,7 @@ class Sea(BaseSea):
     def prompt(self, task):
         return '  '
 """)
-    with pytest.raises(SeaScriptError, match=r"prompt\(\) of agent script .* non-empty string"):
+    with pytest.raises(SeaError, match=r"prompt\(\) of SEA .* non-empty string"):
         evaluate_sea(sea_layers(sea), "t")
     sea = _write(tmp_path / "num_sea.py", """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -438,13 +442,13 @@ class Sea(BaseSea):
     def prompt(self, task):
         return 5
 """)
-    with pytest.raises(SeaScriptError, match=r"prompt\(\) of agent script .* must return a string"):
+    with pytest.raises(SeaError, match=r"prompt\(\) of SEA .* must return a string"):
         evaluate_sea(sea_layers(sea), "t")
     # A module-level ``prompt`` is no hook: without a BaseSea subclass the
     # file is not a SEA at all.
     sea = _write(tmp_path / "const_sea.py", "def prompt(task):\n    return task\n")
     with pytest.raises(
-        SeaScriptError, match=r"must define exactly one subclass of BaseSea.* found none",
+        SeaError, match=r"must define exactly one subclass of BaseSea.* found none",
     ):
         evaluate_sea(sea_layers(sea), "t")
     sea = _write(tmp_path / "raises_sea.py", """
@@ -454,29 +458,31 @@ class Sea(BaseSea):
     def prompt(self, task):
         raise KeyError('k')
 """)
-    with pytest.raises(SeaScriptError, match=r"prompt\(\) of agent script .* raised: KeyError"):
+    with pytest.raises(SeaError, match=r"prompt\(\) of SEA .* raised: KeyError"):
         evaluate_sea(sea_layers(sea), "t")
     sea = _write(tmp_path / "noprompt_sea.py", PLAIN_SEA)
     run = evaluate_sea(sea_layers(sea), "kept")
     # No ``prompt()``/``tools()``: the task is kept and the tools hook is the identity.
     assert run.prompt == "kept" and run.tools_hook is not None
     assert run.tools_hook([print, len]) == [print, len]
-    cmd: dict[str, Any] = {"agentPath": str(sea), "prompt": "kept"}
-    assert apply_agent_overrides(cmd) == set()
-    assert cmd.pop("_runConfig") == {"sea": "noprompt", "kind": "session", "pinned": {}}
+    cmd: dict[str, Any] = {"seaPath": str(sea), "prompt": "kept"}
+    assert apply_sea(cmd) == set()
+    assert cmd.pop("_runConfig") == {
+        "sea": "noprompt", "channel": False, "pinned": {},
+    }
     # The four hooks are always staged; here they are all identities.
     messages = [{"role": "user", "content": "hi"}]
     assert cmd.pop("systemPromptHook")("S") == "S"
     assert cmd.pop("toolsHook")([print, len]) == [print, len]
     assert cmd.pop("llmCallHook")(messages) == messages
-    assert cmd.pop("toolCallHook")("x", {}) == "OK"
-    assert cmd == {"agentPath": str(sea), "prompt": "kept"}
-    with pytest.raises(AgentFileError, match="must be a path string"):
-        apply_agent_overrides({"agentPath": 7, "prompt": "p"})
+    assert cmd.pop("toolCallHook")("x", {}) == ALLOW
+    assert cmd == {"seaPath": str(sea), "prompt": "kept"}
+    with pytest.raises(SeaError, match="must be a path string"):
+        apply_sea({"seaPath": 7, "prompt": "p"})
 
 
 # ---------------------------------------------------------------------------
-# Dispatcher: one path, work_dir option, renamed options, allow_fan_out
+# Dispatcher: one path, work_dir option, renamed options, is_parallel
 # ---------------------------------------------------------------------------
 
 
@@ -549,12 +555,12 @@ class Sea(BaseSea):
         "'add_to_system_prompt'; use the new name."
     )
     run_agent("t", str(plain), options='{"add_to_system_prompt": "S", "add_to_prompt": "P"}')
-    assert captured[-1]["append_to_system_prompt"] == "S"
-    assert captured[-1]["append_to_prompt"] == "P"
+    assert captured[-1]["add_to_system_prompt"] == "S"
+    assert captured[-1]["add_to_prompt"] == "P"
     # ``workspace`` travels as its own wire field; nothing is held here.
     run_agent("t", "ntfy", options='{"workspace": "acct-2"}')
     assert captured[-1]["workspace"] == "acct-2"
-    assert Path(captured[-1]["extension_agent_path"]).parts[-2:] == ("ntfy", "ntfy_sea.py")
+    assert Path(captured[-1]["sea_path"]).parts[-2:] == ("ntfy", "ntfy_sea.py")
     assert captured[-1]["work_dir"] == str(kiss_home() / "channel_work")
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
 
@@ -565,18 +571,20 @@ def test_is_parallel_is_inherited_from_the_calling_agent(
     parent = SorcarAgent("parent")
     parent.model_name = "gpt-6-astra"
     parent._is_parallel = False
-    inherited = inherit_from_parent(parent, "", None, RunOptions())
-    assert inherited.options.allow_fan_out is False
-    explicit = inherit_from_parent(parent, "", None, RunOptions(allow_fan_out=True))
-    assert explicit.options.allow_fan_out is True
-    assert inherit_from_parent(None, "", None, RunOptions()).options.allow_fan_out is None
     plain = _write(tmp_path / "plain.py", PLAIN_SEA)
     run_agent = agent_dispatch.make_run_agent_tool(str(tmp_path), parent)
     run_agent("t", str(plain))
     assert captured[-1]["is_parallel"] is False
-    run_agent("t", str(plain), options='{"allow_fan_out": true}')
+    # Not a setting: ``run_parallel`` is N ``run_agent`` calls, so the
+    # old option is refused with that explanation.
+    out = run_agent("t", str(plain), options='{"allow_fan_out": true}')
+    assert out.startswith(
+        "Error: options key 'allow_fan_out' was removed: `run_parallel` is N",
+    ), out
+    # A sub-task that inherits nothing, or has no parent (standalone
+    # use), gets the daemon default: fan-out on.
+    run_agent("t", str(plain), options='{"inherit": false}')
     assert captured[-1]["is_parallel"] is True
-    # Without a parent (standalone use) the daemon default — fan-out on — stands.
     agent_dispatch.make_run_agent_tool(str(tmp_path))("t", str(plain))
     assert captured[-1]["is_parallel"] is True
 
@@ -646,13 +654,13 @@ class SeaCompositionDaemonTest(DaemonRunApiHarness):
     def _channel_source(self, extra_methods: str = "") -> str:
         return f"""
 import os
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 
-class Chan(BaseSea):
+class Chan(ChannelSea):
     def description(self):
         return 'c'
     def settings(self, settings):
-        return settings | {{'kind': 'channel', 'work_dir': {self.repo!r}}}
+        return settings | {{'work_dir': {self.repo!r}}}
 {extra_methods}"""
 
     def test_slash_command_on_a_derived_sea_runs_the_whole_chain(self) -> None:
@@ -668,7 +676,6 @@ class Chan(BaseSea):
         assert "BASE PROTOCOL" in run["system_prompt"]
         assert "DERIVED PROTOCOL" in run["system_prompt"]
         assert "base_tool" in run["tool_names"] and "shared" in run["tool_names"]
-        assert "run_parallel" not in run["tool_names"]  # the worker preset
 
     def test_channel_run_holds_its_workspace_for_the_run_and_releases_it(self) -> None:
         # ``tools()`` runs with the run's workspace active (a channel
@@ -683,18 +690,18 @@ class Chan(BaseSea):
         return tools + [probe]
 """))
         assert channel_workspace.WORKSPACE_ENV_VAR not in os.environ
-        run = self._run("hello", extension_agent_path=str(chan), workspace="acct-7")
+        run = self._run("hello", sea_path=str(chan), workspace="acct-7")
         assert run["workspace"] == "acct-7"
         assert "ws_acct-7" in run["tool_names"], run["tool_names"]
         assert CHANNEL_PREAMBLE.format(name="chan") in run["system_prompt"]
         assert channel_workspace.WORKSPACE_ENV_VAR not in os.environ
-        run = self._run("hello", extension_agent_path=str(chan))
+        run = self._run("hello", sea_path=str(chan))
         assert run["workspace"] == "default"
         assert "ws_default" in run["tool_names"], run["tool_names"]
         assert channel_workspace.WORKSPACE_ENV_VAR not in os.environ
         # A client-sent daemon-side field is dropped, never honoured.
         plain = _write(self.folder / "plain_sea.py", PLAIN_SEA)
-        run = self._run("hello", extension_agent_path=str(plain), workspace="acct-7")
+        run = self._run("hello", sea_path=str(plain), workspace="acct-7")
         assert run["workspace"] is None
 
     def test_conflicting_workspace_fails_within_the_bounded_wait(self) -> None:
@@ -710,7 +717,7 @@ class Chan(BaseSea):
             self._record_runs(runs)
             result = sorcar.run(
                 "hello", work_dir=self.repo, use_worktree=False, auto_commit=False,
-                extension_agent_path=str(chan), workspace="mine",
+                sea_path=str(chan), workspace="mine",
                 endpoint_file=self.endpoint_file, timeout=60,
             )
             assert result.success is False

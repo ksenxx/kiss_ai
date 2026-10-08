@@ -2,11 +2,11 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bare-path tasks and ``<task>`` tags of agent-script (SEA) runs on the daemon.
+"""Bare-path tasks and ``<task>`` tags of SEA (SEA) runs on the daemon.
 
 ``/git_extract_knowledge /path/to/repo`` relays to ``run_agent(agent=<SEA
 path>, task='/path/to/repo')``: the daemon then runs the SEA (wire field
-``agentPath``, parent ``parentTaskId``) with a task that is nothing but
+``seaPath``, parent ``parentTaskId``) with a task that is nothing but
 an existing directory.  Two chat conveniences must NOT apply to such a
 run:
 
@@ -62,7 +62,7 @@ class BarePathAgentScriptRunTest(DaemonRunApiHarness):
         KISSAgent.run = stub_run  # type: ignore[assignment,method-assign]
 
     def _sea(self, name: str, body: str) -> str:
-        """Write an agent script under the test tmpdir and return its path."""
+        """Write a SEA under the test tmpdir and return its path."""
         path = Path(self.tmpdir) / f"{name}_sea.py"
         path.write_text(body, encoding="utf-8")
         return str(path)
@@ -89,7 +89,7 @@ class BarePathAgentScriptRunTest(DaemonRunApiHarness):
 
         Covers the paper SEAs, whose ``system_prompt()`` appends to the
         assembled prompt rather than replacing it: the exemption rests
-        on the run being an agent-script run, not on which method it
+        on the run being an SEA run, not on which method it
         defines.
         """
         sea = self._sea(
@@ -102,7 +102,7 @@ class Sea(BaseSea):
         return system_prompt + "\\n\\n" + "Review the paper whose path is the task."
 """,
         )
-        sent = self._run(self.repo, extension_agent_path=sea)
+        sent = self._run(self.repo, sea_path=sea)
         assert f"# Task\n{self.repo}" in sent
         assert DIRECTIVE not in sent
         assert "xdg-open" not in sent
@@ -116,7 +116,7 @@ class Sea(BaseSea):
             "class Sea(BaseSea):\n"
             "    pass  # nothing overridden\n",
         )
-        sent = self._run(self.repo, extension_agent_path=sea)
+        sent = self._run(self.repo, sea_path=sea)
         assert f"# Task\n{self.repo}" in sent
         assert DIRECTIVE not in sent
 
@@ -139,7 +139,7 @@ class Sea(BaseSea):
 """,
         )
         task = f"ask {self.repo} what does <task>hello</task> mean?"
-        sent = self._run(task, extension_agent_path=sea)
+        sent = self._run(task, sea_path=sea)
         assert f"# Task\n{task}" in sent
 
     def test_plain_chat_task_tags_are_still_split(self) -> None:

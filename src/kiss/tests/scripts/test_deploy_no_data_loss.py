@@ -51,7 +51,7 @@ _FINGERPRINT = _ROOT / "src" / "kiss" / "scripts" / "db_fingerprint.py"
 # Everything scripts/sync-task-db.sh reaches for, so that a test can run it
 # from a copy of the tree with one of them left out.
 _HELPERS = ("sync_db.py", "relocate_work_dir.py", "carry_over_tables.py",
-            "running_tasks.py", "db_fingerprint.py")
+            "running_tasks.py", "db_fingerprint.py", "legacy_task_db.py")
 
 _FAKE_SSH = """#!/bin/bash
 while [ $# -gt 0 ]; do

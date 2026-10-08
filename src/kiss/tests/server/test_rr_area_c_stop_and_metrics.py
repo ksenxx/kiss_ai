@@ -137,13 +137,13 @@ class TestThreadAliveSites(unittest.TestCase):
         )
         agent_state.register(state)
         # By task id.
-        assert self.server._reattach_running_chat(
+        assert self.server._attach_viewer_to_running_chat(
             "", "viewer-1", task_id="startup-task",
-        ), "BUG C-R4: startup-window task not reattachable by task id"
+        )[0] is not None, "BUG C-R4: startup-window task not reattachable by task id"
         # By chat id.
-        assert self.server._reattach_running_chat(
+        assert self.server._attach_viewer_to_running_chat(
             "chat-r4", "viewer-2",
-        ), "BUG C-R4: startup-window task not reattachable by chat id"
+        )[0] is not None, "BUG C-R4: startup-window task not reattachable by chat id"
         with self.server.printer._lock:
             viewers = self.server.printer._subscribers.get(
                 "startup-task", set(),
@@ -157,12 +157,12 @@ class TestThreadAliveSites(unittest.TestCase):
             server_owned=True,
         )
         agent_state.register(state)
-        assert not self.server._reattach_running_chat(
+        assert self.server._attach_viewer_to_running_chat(
             "", "viewer-3", task_id="done-task",
-        )
-        assert not self.server._reattach_running_chat(
+        )[0] is None
+        assert self.server._attach_viewer_to_running_chat(
             "chat-done", "viewer-4",
-        )
+        )[0] is None
 
 
 class TestSingleFailureResultBroadcast(unittest.TestCase):
@@ -231,14 +231,14 @@ class TestSingleFailureResultBroadcast(unittest.TestCase):
             assert key in result, f"failure result lost field {key!r}"
 
     def test_outer_failure_emits_one_result(self) -> None:
-        """Outer catch-all path (broken agent script, pre-loop failure)."""
+        """Outer catch-all path (broken SEA, pre-loop failure)."""
         broken_script = Path(self.tmpdir) / "broken_agent.py"
         broken_script.write_text(
-            "raise RuntimeError('broken agent script import')\n",
+            "raise RuntimeError('broken SEA import')\n",
             encoding="utf-8",
         )
         results = self._run_and_collect_results(
-            "r3-outer-tab", {"agentPath": str(broken_script)},
+            "r3-outer-tab", {"seaPath": str(broken_script)},
         )
         assert len(results) == 1, (
             f"expected exactly one terminal result event, got {results}"

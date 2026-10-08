@@ -2,28 +2,26 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Reproduces sub-agent ``new_tab`` mis-routing under worker-thread reuse.
+"""Sub-agent ``new_tab`` events must carry their own task id on a reused thread.
 
-When ``ChatSorcarAgent._run_tasks_parallel`` uses a ``ThreadPoolExecutor``
-whose worker threads are reused across multiple sub-agents (e.g.
-``max_workers=1``), the very first thing each sub-agent's
-``ChatSorcarAgent.run`` does is ``broadcast({"type": "new_tab", ...})``
-— BEFORE it sets ``printer._thread_local.task_id`` to the new
-sub-agent's task key.  On a reused worker thread, that thread-local
+The very first thing a sub-agent's ``ChatSorcarAgent.run`` does is
+``broadcast({"type": "new_tab", ...})`` — BEFORE it sets
+``printer._thread_local.task_id`` to the new sub-agent's task key.  On
+a thread that already ran a previous sub-agent, that thread-local
 still carries the PREVIOUS sub-agent's task key, so
-``JsonPrinter._inject_task_id`` stamps the new_tab event with
+``JsonPrinter._inject_task_id`` would stamp the new_tab event with
 the WRONG ``taskId`` (and ``WebPrinter.broadcast`` would then route
 it through the previous tab's stream, recording / persisting it under
 the previous task).  In the user-visible behaviour the freshly
 spawned sub-agent's panels (including its ``result`` event) end up
 wired through the wrong tab's stream.
 
-The test forces worker reuse with ``max_workers=1`` (a single worker
-thread runs all three sub-agents sequentially), captures every
-broadcast post-``_inject_task_id``, and asserts that the injected
-``taskId`` on every ``new_tab`` payload matches that payload's own
-``task_id`` field (i.e. the new sub-agent's own task), never a
-previously-completed sub-agent's task id.
+The test forces thread reuse with a single-worker pool (one thread
+runs all three sub-agents sequentially), captures every broadcast
+post-``_inject_task_id``, and asserts that the injected ``taskId`` on
+every ``new_tab`` payload matches that payload's own ``task_id`` field
+(i.e. the new sub-agent's own task), never a previously-completed
+sub-agent's task id.
 
 Uses the real ``_FinishHandler`` HTTP server pattern from
 ``test_chat_parallel_integration.py`` (no mocks/patches).
@@ -145,10 +143,9 @@ class _RecordingPrinter(JsonPrinter):
 class TestNewTabStaleTaskId:
     """Sub-agent ``new_tab`` must never carry a stale prior sub-agent's taskId.
 
-    Reproduces the production worker-thread reuse pattern: a single
-    ``ThreadPoolExecutor`` worker thread runs all three sub-agents
-    sequentially (via ``max_workers=1``).  Without the fix, sub-agent
-    N's ``new_tab`` broadcast inherits sub-agent N-1's
+    A single ``ThreadPoolExecutor`` worker thread runs all three
+    sub-agents sequentially (``max_workers=1``).  Without the fix,
+    sub-agent N's ``new_tab`` broadcast inherits sub-agent N-1's
     ``printer._thread_local.task_id`` and is mis-stamped.
     """
 

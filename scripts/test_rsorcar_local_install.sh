@@ -91,6 +91,10 @@ EOF
     cp "$REPO_ROOT/scripts/install-remote-prereqs.sh" \
        "$REPO_ROOT/scripts/check-remote-disk-space.sh" \
        "$REPO_ROOT/scripts/count-api-keys.sh" "$dir/scripts/"
+    # Step 1b feeds this one to the remote's ``python3 -`` (twice: the probe
+    # for the database's name, then the rename); the ssh stub runs it against
+    # the fake remote HOME.
+    cp "$REPO_ROOT/src/kiss/scripts/legacy_task_db.py" "$dir/src/kiss/scripts/"
     local helper
     for helper in scripts/collect-github-auth.sh scripts/install-github-auth.sh \
                   scripts/install-ssh-identity.sh scripts/move-home-to-disk.sh \
@@ -142,8 +146,8 @@ cmd="\$*"
 case "\$cmd" in
     'echo ok') echo ok ;;
     *'printf %s "\$HOME"'*) printf '%s' "$fix/rhome" ;;
+    'python3 - "\$HOME/.kiss"'*) HOME="$fix/rhome" bash -c "\$cmd" ;;   # legacy database-name probe and rename (fed legacy_task_db.py)
     'python3 - '*) cat >/dev/null; echo 0 ;;                  # running-task probe
-    *sorcar.db*) HOME="$fix/rhome" bash -c "\$cmd" ;;         # legacy database-name probe and rename
     REMOTE_DIR=*) cat >/dev/null; echo "SORCAR_PUBLIC_URL=$FAKE_URL" ;;
     *remote-url.json*) echo "$FAKE_URL" ;;
     *remote_password*) echo "$FAKE_PW" ;;
@@ -199,6 +203,42 @@ $OUT"
 [[ ! -e "$WORK/legacy/rhome/.kiss/sorcar.db-wal" ]] \
     || fail "the legacy WAL is still on the remote: $(ls -A "$WORK/legacy/rhome/.kiss")"
 pass "a remote's ~/.kiss/sorcar.db (its pre-2026.10.2 name) is renamed to history.db after the running-task check"
+
+# --- Test 0b: a history.db left by a version of spring 2026 does not hide sorcar.db
+# The database was history.db until 2026-04-24, then sorcar.db, then history.db
+# again: a remote from those weeks has both, and the stale one must be set
+# aside (kept) for the real one to take its name.
+make_env "$WORK/stale"
+populate_checkout "$WORK/stale/checkout" 0 "$WORK/stale"
+python3 - "$WORK/stale/rhome/.kiss/history.db" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.executescript("""
+    CREATE TABLE task_history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL NOT NULL,
+        task TEXT NOT NULL, has_events INTEGER DEFAULT 0, result TEXT DEFAULT '', chat_id TEXT DEFAULT '');
+    INSERT INTO task_history (timestamp, task) VALUES (1.0, 'march 2026');
+""")
+con.commit()
+con.close()
+PY
+echo 'rows' > "$WORK/stale/rhome/.kiss/sorcar.db"
+echo 'pages' > "$WORK/stale/rhome/.kiss/sorcar.db-wal"
+OUT=$(run_rsorcar "$WORK/stale" "$WORK/stale/checkout/rsorcar") || fail "rsorcar failed:
+$OUT"
+echo "$OUT" | grep -q "Renaming user@fakehost's ~/.kiss/sorcar.db to history.db" \
+    || fail "sorcar.db beside a stale history.db was not renamed (or not reported):
+$OUT"
+echo "$OUT" | grep -q "history.db is a leftover from before 2026-04-24; kept as history.db.stale-" \
+    || fail "the stale history.db was not reported as set aside:
+$OUT"
+[[ "$(cat "$WORK/stale/rhome/.kiss/history.db")" == rows && "$(cat "$WORK/stale/rhome/.kiss/history.db-wal")" == pages ]] \
+    || fail "sorcar.db and its WAL did not become history.db: $(ls -A "$WORK/stale/rhome/.kiss")"
+[[ -L "$WORK/stale/rhome/.kiss/sorcar.db" && "$(readlink "$WORK/stale/rhome/.kiss/sorcar.db")" == history.db ]] \
+    || fail "the old name is not a symlink to history.db: $(ls -lA "$WORK/stale/rhome/.kiss")"
+STALE=("$WORK/stale/rhome/.kiss"/history.db.stale-*)
+[[ ${#STALE[@]} -eq 1 && "$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT task FROM task_history").fetchone()[0])' "${STALE[0]}")" == "march 2026" ]] \
+    || fail "the stale history.db was not kept intact: $(ls -A "$WORK/stale/rhome/.kiss")"
+pass "a stale history.db from spring 2026 on the remote is set aside and sorcar.db takes its name"
 
 # --- Test 1: the deploy ends by running install.sh locally -------------------
 make_env "$WORK/ok"

@@ -62,12 +62,15 @@ function headerText(win, id) {
   return win.document.getElementById(id).textContent;
 }
 
+// The Chats-panel pick: chat tabs have no row of their own any more, so a
+// chat is shown through the test API; a sub-agent tab is still clicked on
+// the group strip.
 function switchToTab(win, api, tabId) {
   const tabEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="' + tabId + '"]',
+    '#tab-list .chat-tab[data-tab-id="' + tabId + '"]',
   );
-  assert.ok(tabEl, 'tab element must exist for ' + tabId);
-  tabEl.click();
+  if (tabEl) tabEl.click();
+  else api.switchToTab(tabId);
   assert.strictEqual(api.getActiveTabId(), tabId);
 }
 

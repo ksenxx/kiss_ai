@@ -15,11 +15,11 @@ follow-up message injection, stop support, chat persistence — exactly
 like a task started from the chat UI.
 
 The agent's channel tools are supplied through the API's
-``extension_agent_path`` SEA contract directly: each agent module
+``sea_path`` SEA contract directly: each agent module
 defines a SEA class whose ``tools()`` builds a fresh agent from the
 credentials persisted under the KISS home and adds its authentication
 and backend tools, so the agent's OWN module file (``agent.sea_path``)
-is passed as ``extension_agent_path`` and the daemon loads it and runs
+is passed as ``sea_path`` and the daemon loads it and runs
 its ``tools()``.  No bridge, registry, wrapper, or generated file is
 involved.  The agent's workspace travels on the ``run`` command's
 ``workspace`` field; the daemon holds it for the run's lifetime and
@@ -278,11 +278,11 @@ def run_agent_via_kiss_web(
     """Launch *agent*'s task through :func:`kiss.server.sorcar.run`.
 
     Supplies the agent's channel tools through the API's
-    ``extension_agent_path`` SEA contract (``agent.sea_path`` — the
+    ``sea_path`` SEA contract (``agent.sea_path`` — the
     agent's own module, whose SEA class's ``tools()`` the daemon runs
     to build a fresh agent from the credentials persisted under the
     KISS home and whose ``settings()`` / ``system_prompt()``
-    make the run a ``channel``-kind session with the channel's
+    make the run a channel (a ``ChannelSea``) session with the channel's
     guidance in its system prompt), and submits the task to the in-process kiss-web daemon over its
     Unix-domain socket.  Blocks until the daemon reports the task
     finished and returns the task's YAML result.
@@ -312,7 +312,7 @@ def run_agent_via_kiss_web(
 
     Args:
         agent: The third-party agent instance supplying the channel
-            agent script (``agent.sea_path``), the workspace, and the chat id to
+            SEA (``agent.sea_path``), the workspace, and the chat id to
             continue (``agent.chat_id`` on :class:`KissWebChatAgent`
             carriers).
         prompt_template: The task prompt.
@@ -367,7 +367,7 @@ def run_agent_via_kiss_web(
         work_dir=work_dir,
         model=model_name,
         chat_id=chat_id,
-        extension_agent_path=agent.sea_path,
+        sea_path=agent.sea_path,
         max_budget=max_budget,
         model_config=model_config,
         use_web_tools=web_tools,

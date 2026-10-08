@@ -5,7 +5,7 @@
 
 // End-to-end (JSDOM cascade) parity tests for the sibling side panels
 // of media/main.css: the four dimming overlays (history sidebar,
-// settings, frequent tasks, tricks) and their `.open` state, the four
+// settings, tricks, working directory) and their `.open` state, the four
 // panel close buttons and their hover state, and the two scrolling
 // list panes.  main.css used to spell each of them out as its own copy
 // of the same declarations; they are grouped now, and this test pins
@@ -67,16 +67,16 @@ function assertSiblingsAgree(win, ids, props, label) {
 const OVERLAYS = [
   'sidebar-overlay',
   'settings-overlay',
-  'frequent-overlay',
   'tricks-overlay',
+  'workdir-overlay',
 ];
 const CLOSE_BTNS = [
   'sidebar-close',
   'settings-panel-close',
-  'frequent-panel-close',
   'tricks-panel-close',
+  'workdir-panel-close',
 ];
-const LISTS = ['frequent-list', 'tricks-list'];
+const LISTS = ['tricks-list', 'workdir-list'];
 
 function testOverlaysAgree() {
   const dom = makeDom();
@@ -128,7 +128,7 @@ function testCloseButtonsAgree() {
   ];
   assertSiblingsAgree(win, CLOSE_BTNS, props, 'panel close buttons');
   // The bottom sheets' close buttons sit above their own list pane.
-  for (const id of ['frequent-panel-close', 'tricks-panel-close']) {
+  for (const id of ['tricks-panel-close', 'workdir-panel-close']) {
     assert.strictEqual(
       styleOf(win, win.document.getElementById(id), ['z-index'])['z-index'],
       '1',

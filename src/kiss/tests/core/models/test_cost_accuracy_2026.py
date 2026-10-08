@@ -33,6 +33,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kiss.core.models import model_info
 from kiss.core.models.gemini_model import GeminiModel
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -420,6 +421,95 @@ class TestAnthropicCacheReadFamilies:
         info = MODEL_INFO["openrouter/anthropic/claude-opus-5.5"]
         assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.05)
 
+    def test_sonnet_55_cache_read_is_five_percent_of_input(self):
+        """Sonnet 5.5: $2 / $10, 5m write $2.50, 1h write $4, read $0.10 (2026-10)."""
+        for name in (
+            "claude-sonnet-5-5",
+            "claude-sonnet-5-5-xhigh",
+            "openrouter/anthropic/claude-sonnet-5.5",
+            "openrouter/~anthropic/claude-sonnet-latest",
+        ):
+            info = MODEL_INFO[name]
+            assert info.input_price_per_1M == pytest.approx(2.0), name
+            assert info.output_price_per_1M == pytest.approx(10.0), name
+            assert info.cache_read_price_per_1M == pytest.approx(0.10), name
+            assert info.cache_write_price_per_1M == pytest.approx(2.5), name
+            assert info.cache_write_1h_price_per_1M == pytest.approx(4.0), name
+        cost = calculate_cost("claude-sonnet-5-5", 10_000, 1_000, 1_000_000, 20_000)
+        expected = (10_000 * 2.0 + 1_000 * 10.0 + 1_000_000 * 0.10 + 20_000 * 2.5) / 1e6
+        assert cost == pytest.approx(expected)
+
+
+class TestClaudeHaiku55LongPromptTier:
+    """Haiku 5.5 bills prompts over 100K tokens at 5x every rate.
+
+    https://platform.claude.com/docs/en/models/haiku-5-5/overview:
+    $0.10/$0.50, 5m write $0.125, 1h write $0.20, read $0.01 up to 100K
+    prompt tokens; $0.50/$2.50, $0.625, $1, $0.05 above.  OpenRouter
+    publishes the same ``min_prompt_tokens: 100000`` override.
+    """
+
+    def test_short_prompt_bills_base_rates(self):
+        info = MODEL_INFO["claude-haiku-5-5"]
+        assert info.input_price_per_1M == pytest.approx(0.10)
+        assert info.output_price_per_1M == pytest.approx(0.50)
+        assert info.cache_read_price_per_1M == pytest.approx(0.01)
+        assert info.cache_write_price_per_1M == pytest.approx(0.125)
+        assert info.cache_write_1h_price_per_1M == pytest.approx(0.20)
+        cost = calculate_cost("claude-haiku-5-5", 60_000, 8_000, 30_000, 10_000)
+        expected = (60_000 * 0.10 + 8_000 * 0.50 + 30_000 * 0.01 + 10_000 * 0.125) / 1e6
+        assert cost == pytest.approx(expected)
+
+    def test_exactly_100k_prompt_tokens_is_still_the_short_tier(self):
+        assert calculate_cost("claude-haiku-5-5", 100_000, 1_000) == pytest.approx(
+            (100_000 * 0.10 + 1_000 * 0.50) / 1e6
+        )
+
+    def test_prompt_over_100k_reprices_the_whole_request_at_5x(self):
+        cost = calculate_cost("claude-haiku-5-5", 100_001, 1_000)
+        assert cost == pytest.approx((100_001 * 0.50 + 1_000 * 2.50) / 1e6)
+
+    def test_cache_buckets_count_toward_the_tier_and_scale_5x(self):
+        cost = calculate_cost(
+            "claude-haiku-5-5",
+            50_000,
+            2_000,
+            40_000,
+            20_000,
+            num_cache_write_1h_tokens=5_000,
+        )
+        expected = (
+            50_000 * 0.50 + 2_000 * 2.50 + 40_000 * 0.05 + 20_000 * 0.625 + 5_000 * 1.0
+        ) / 1e6
+        assert cost == pytest.approx(expected)
+
+    def test_large_output_alone_does_not_trigger_the_tier(self):
+        assert calculate_cost("claude-haiku-5-5", 1_000, 120_000) == pytest.approx(
+            (1_000 * 0.10 + 120_000 * 0.50) / 1e6
+        )
+
+    def test_aliases_and_openrouter_twins_inherit_the_tier(self):
+        base = calculate_cost("claude-haiku-5-5", 200_000, 1_000)
+        assert base == pytest.approx((200_000 * 0.50 + 1_000 * 2.50) / 1e6)
+        for name in (
+            "anthropic/claude-haiku-5-5",
+            "openrouter/anthropic/claude-haiku-5.5",
+            "openrouter/~anthropic/claude-haiku-latest",
+        ):
+            assert calculate_cost(name, 200_000, 1_000) == pytest.approx(base), name
+
+    def test_other_claude_models_have_no_long_prompt_tier(self):
+        for name in (
+            "claude-haiku-4-5",
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-fable-5-1",
+            "openrouter/anthropic/claude-sonnet-5.5",
+        ):
+            info = MODEL_INFO[name]
+            expected = (300_000 * info.input_price_per_1M + 1_000 * info.output_price_per_1M) / 1e6
+            assert calculate_cost(name, 300_000, 1_000) == pytest.approx(expected), name
+
 
 class TestGpt6LongContextTier:
     """gpt-6-sol $2/$0.20/$2.50/$10 -> $4/$0.40/$5/$15 above 272k prompt tokens;
@@ -560,3 +650,43 @@ class TestTogetherCachedInputPrices:
         assert calculate_cost("meta-llama/Llama-3.3-70B-Instruct-Turbo", 0, 0, 1_000_000, 0) == (
             pytest.approx(info.input_price_per_1M)
         )
+
+
+class TestHotAddedCustomModelCachePricing:
+    """A MY_MODELS.json entry saved while the daemon runs is priced like a
+    catalog entry: ``_lookup_model_info`` applies the provider's cache
+    discount instead of billing every cache hit at the full input price
+    until the next restart."""
+
+    def test_lazy_lookup_matches_import_time_normalization(self, tmp_path):
+        name = "gpt-4.1-audit-custom"
+        entry = {
+            "context_length": 128_000,
+            "input_price_per_1M": 2.0,
+            "output_price_per_1M": 8.0,
+            "endpoint": "https://example.invalid/v1",
+        }
+        saved = model_info.USER_MY_MODELS_PATH
+        model_info.USER_MY_MODELS_PATH = tmp_path / "MY_MODELS.json"
+        try:
+            model_info.USER_MY_MODELS_PATH.write_text(json.dumps({name: entry}), encoding="utf-8")
+            info = model_info._lookup_model_info(name)
+            assert info is not None
+            # OpenAI 4.1 family: cache reads at 0.25x, no cache-write charge.
+            assert info.cache_read_price_per_1M == pytest.approx(0.5)
+            assert info.cache_write_price_per_1M == pytest.approx(0.0)
+            assert calculate_cost(name, 0, 0, 100_000, 0) == pytest.approx(0.05)
+            restart = model_info._build_model_info_entry(entry)
+            model_info._apply_cache_pricing(name, restart)
+            assert (
+                info.cache_read_price_per_1M,
+                info.cache_write_price_per_1M,
+                info.cache_write_1h_price_per_1M,
+            ) == (
+                restart.cache_read_price_per_1M,
+                restart.cache_write_price_per_1M,
+                restart.cache_write_1h_price_per_1M,
+            )
+            assert model_info._lookup_model_info("openai/" + name) is not None
+        finally:
+            model_info.USER_MY_MODELS_PATH = saved

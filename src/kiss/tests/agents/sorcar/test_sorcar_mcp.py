@@ -27,16 +27,15 @@ from kiss.agents.sorcar.mcp_servers import (
     FileTokenStorage,
     MCPManager,
     MCPServerConfig,
-    _noninteractive_redirect,
+    _refuse_login,
     _result_text,
-    load_mcp_permissions,
     load_mcp_servers,
     make_mcp_tool_wrapper,
     make_mcp_tools,
-    mcp_tool_permission,
     remove_mcp_server,
     save_mcp_server,
 )
+from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 from kiss.tests.conftest import IS_WINDOWS
 
 _SERVER_SCRIPT = '''
@@ -161,7 +160,7 @@ def real_stdin(
 
 
 def test_save_and_load_user_scope(isolated_homes: Path) -> None:
-    """A server saved in the user scope is loaded back with source=user."""
+    """A server saved in the user scope is loaded back."""
     project = isolated_homes / "project"
     cfg = MCPServerConfig(name="s1", command="echo", args=("hi",))
     path = save_mcp_server(cfg, "user", str(project))
@@ -169,7 +168,6 @@ def test_save_and_load_user_scope(isolated_homes: Path) -> None:
     servers = load_mcp_servers(str(project))
     assert servers["s1"].command == "echo"
     assert servers["s1"].args == ("hi",)
-    assert servers["s1"].source == "user"
 
 
 def test_project_overrides_user(isolated_homes: Path) -> None:
@@ -183,7 +181,6 @@ def test_project_overrides_user(isolated_homes: Path) -> None:
     )
     servers = load_mcp_servers(str(project))
     assert servers["s"].command == "proj-cmd"
-    assert servers["s"].source == "project"
 
 
 def test_claude_mcp_json_compat(isolated_homes: Path) -> None:
@@ -199,7 +196,6 @@ def test_claude_mcp_json_compat(isolated_homes: Path) -> None:
     servers = load_mcp_servers(str(project))
     assert servers["local"].transport == "stdio"
     assert servers["local"].env == (("K", "V"),)
-    assert servers["local"].source == "claude-project"
     assert servers["remote"].transport == "http"
     assert servers["remote"].url == "https://example.com/mcp"
     assert servers["ssesrv"].transport == "sse"
@@ -249,20 +245,20 @@ def test_to_json_roundtrip_remote(isolated_homes: Path) -> None:
 def test_permission_wildcards_last_rule_wins() -> None:
     """Wildcard rules cover MCP tools with last-match-wins semantics."""
     rules = {"*": "allow", "mymcp_*": "deny"}
-    assert mcp_tool_permission("mymcp_search", rules) == "deny"
-    assert mcp_tool_permission("other_search", rules) == "allow"
+    assert skill_permission("mymcp_search", rules) == "deny"
+    assert skill_permission("other_search", rules) == "allow"
     rules = {"mymcp_*": "deny", "mymcp_safe": "allow"}
-    assert mcp_tool_permission("mymcp_safe", rules) == "allow"
-    assert mcp_tool_permission("mymcp_rm", rules) == "deny"
-    assert mcp_tool_permission("anything", {}) == "allow"
+    assert skill_permission("mymcp_safe", rules) == "allow"
+    assert skill_permission("mymcp_rm", rules) == "deny"
+    assert skill_permission("anything", {}) == "allow"
 
 
 def test_load_mcp_permissions_from_config(mcp_permission_rules) -> None:
     """``mcp_permissions`` is read from the kiss ``config.json``."""
     mcp_permission_rules({"*": "allow", "internal_*": "DENY "})
-    rules = load_mcp_permissions()
+    rules = load_permission_rules("mcp_permissions")
     assert rules == {"*": "allow", "internal_*": "deny"}
-    assert mcp_tool_permission("internal_x", rules) == "deny"
+    assert skill_permission("internal_x", rules) == "deny"
 
 
 
@@ -356,7 +352,7 @@ def test_wrapper_docstring_carries_schema_descriptions() -> None:
             "required": ["query"],
         },
     )
-    wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "my srv", tool)
+    wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "my srv", tool, "my srv")
     assert wrapper.__name__ == "my_srv_search"
     doc = wrapper.__doc__ or ""
     assert doc.startswith("Search the index. Second line.")
@@ -405,7 +401,7 @@ def test_file_token_storage_roundtrip(isolated_homes: Path) -> None:
 def test_noninteractive_oauth_refuses_browser_flow() -> None:
     """Agent runs never block on OAuth; they direct to the sign-in tool."""
     with pytest.raises(RuntimeError, match="requires an OAuth sign-in.*connect_mcp_server"):
-        asyncio.run(_noninteractive_redirect("https://auth.example/authorize"))
+        asyncio.run(_refuse_login("https://auth.example/authorize"))
 
 
 

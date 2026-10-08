@@ -88,16 +88,16 @@ class TestReattachRunningChatTaskIdDisambiguation:
             agent_state.register(sub_state)
             assert sub_state.is_subagent is True
 
-            ok = server._reattach_running_chat(
+            ok = server._attach_viewer_to_running_chat(
                 "shared-chat", "tab-history-click", task_id="200",
-            )
+            )[0] is not None
             assert ok is True
             assert subs == [("200", "tab-history-click")]
 
             subs.clear()
-            ok2 = server._reattach_running_chat(
+            ok2 = server._attach_viewer_to_running_chat(
                 "shared-chat", "tab-fresh-viewer",
-            )
+            )[0] is not None
             assert ok2 is True
             assert subs == [("100", "tab-fresh-viewer")]
         finally:
@@ -125,12 +125,12 @@ class TestReattachRunningChatTaskIdDisambiguation:
             )
             agent_state.register(parent_state)
 
-            ok = server._reattach_running_chat(
+            ok = server._attach_viewer_to_running_chat(
                 "chat-A",
                 "tab-history-click",
                 task_id="999",
                 is_subagent=True,
-            )
+            )[0] is not None
             assert ok is False
             assert subs == []
         finally:
@@ -158,9 +158,9 @@ class TestReattachRunningChatTaskIdDisambiguation:
             )
             agent_state.register(parent_state)
 
-            ok = server._reattach_running_chat(
+            ok = server._attach_viewer_to_running_chat(
                 "chat-A", "tab-history-click", task_id="999",
-            )
+            )[0] is not None
             assert ok is True
             assert subs == [("100", "tab-history-click")]
         finally:

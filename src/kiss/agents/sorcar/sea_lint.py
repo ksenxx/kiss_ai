@@ -2,11 +2,12 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""``sea lint``: a deterministic checker (and codemod) over every agent script (SEA).
+"""``sea lint``: a deterministic checker (and codemod) over every SEA.
 
 The SEA contract lives in :class:`kiss.agents.seas.base.base_sea.BaseSea`
-(the methods), :mod:`kiss.agents.sorcar.sea_settings` (``settings``
-keys, kinds and their defaults) and :mod:`kiss.agents.sorcar.sea_commands`
+(the methods and the ``WorkerSea`` / ``ChannelSea`` base classes),
+:mod:`kiss.agents.sorcar.sea_settings` (``settings`` keys) and
+:mod:`kiss.agents.sorcar.sea_commands`
 (the launcher, the ``/command`` registry).  This module checks every script against
 it, so a contract change is enforced by ``uv run check`` instead of by
 hand-grepping scripts and docstrings
@@ -17,15 +18,33 @@ Rules, each a :class:`Finding` code:
 ``broken``
     The script does not load or its settings / methods violate the
     contract (import error, no or several ``BaseSea`` subclasses,
-    unknown, renamed or removed key, ill-typed value, unknown kind, a
-    method returning the wrong type).  A renamed key is reported as
-    ``renamed-key`` instead.
+    unknown, renamed or removed key, ill-typed value, a method
+    returning the wrong type).  A renamed key is reported as
+    ``renamed-key`` and a removed one as ``base-class`` or
+    ``removed-key`` instead.
 ``renamed-key``
     ``settings()`` uses a former key name
     (:data:`~kiss.agents.sorcar.sea_settings.RENAMED_SETTINGS`);
     ``--fix`` rewrites it.
+``verdict``
+    A ``tool_call_hook`` returns a literal ``None`` or string, the
+    allow / refuse spellings of older hooks.  The contract is a
+    :class:`~kiss.core.tool_verdict.Verdict`: ``ALLOW`` allows,
+    ``refuse(text)`` refuses.  ``--fix`` rewrites ``None`` to ``ALLOW``
+    and ``"text"`` to ``refuse("text")`` and imports both names from
+    ``kiss.agents.seas.base.base_sea``.
+``base-class``
+    ``settings()`` writes ``"kind": ...``, ``"preset": ...`` or
+    ``"channel": True``: what a SEA is became its base class
+    (``WorkerSea``, ``ChannelSea``).  ``--fix`` drops the entry and
+    rewrites the class's base and its import.
+``removed-key``
+    ``settings()`` writes ``allow_fan_out`` or ``is_parallel``, which
+    mean nothing now that ``run_parallel`` is N ``run_agent`` calls.
+    ``--fix`` drops the entry.
 ``redundant-key``
-    A declared key merely repeats the default of the script's ``kind``.
+    A declared key merely repeats the value the script's base classes
+    lay (``WorkerSea``'s worker defaults, a parent SEA's settings).
 ``no-description``
     A registered ``/command`` whose script defines no ``description()``.
 ``unknown-model``
@@ -73,18 +92,18 @@ import argparse
 import ast
 import json
 import re
-import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from kiss.agents.sorcar.sea_commands import (
     BASE_FOLDER,
-    base_settings,
     bundled_commands,
     check_sea,
     defines,
     get_command,
+    inherited_settings,
     list_commands,
     load_sea,
     model_sea,
@@ -95,7 +114,6 @@ from kiss.agents.sorcar.sea_settings import (
     RENAMED_SETTINGS,
     SeaError,
     declares_hidden,
-    kind_defaults,
     settings_functions,
 )
 
@@ -155,23 +173,23 @@ def bundled_seas() -> list[Path]:
     return sorted(scripts | set(bundled_commands().values()))
 
 
-def registered_seas() -> list[Path]:
-    """Return the scripts of every registered ``/command`` (bundled and user folders)."""
-    paths = [get_command(name) for name in list_commands()]
-    return sorted({path for path in paths if path is not None})
+def registered_commands() -> dict[Path, str]:
+    """Return ``script -> /command name`` of every registered command (bundled and user folders)."""
+    return {path: name for name in list_commands() if (path := get_command(name))}
 
 
-def default_targets(registered: bool) -> list[Path]:
+def default_targets(registered: bool, commands: Mapping[Path, str]) -> list[Path]:
     """Return the scripts ``sea lint`` checks when no path is given.
 
     The bundled scripts always; the user's registered ``SEAS.md``
-    scripts only when *registered* is true (``--registered``), so
-    ``uv run check`` never fails on, and ``--fix`` never rewrites, a
-    file outside this checkout.
+    scripts (the keys of *commands*, :func:`registered_commands`) only
+    when *registered* is true (``--registered``), so ``uv run check``
+    never fails on, and ``--fix`` never rewrites, a file outside this
+    checkout.
     """
     scripts = set(bundled_seas())
     if registered:
-        scripts |= set(registered_seas())
+        scripts |= set(commands)
     return sorted(scripts)
 
 
@@ -187,8 +205,11 @@ def lint_all(paths: Iterable[Path] | None = None, registered: bool = False) -> l
     Returns:
         The findings, in path order.
     """
-    scripts = default_targets(registered) if paths is None else [_script_of(Path(p)) for p in paths]
-    commands = {path: name for name in list_commands() if (path := get_command(name))}
+    commands = registered_commands()
+    if paths is None:
+        scripts = default_targets(registered, commands)
+    else:
+        scripts = [_script_of(Path(p)) for p in paths]
     findings: list[Finding] = []
     for script in scripts:
         findings.extend(lint_sea(script, commands.get(script)))
@@ -205,7 +226,7 @@ PROSE_FILES = (
     "src/kiss/agents/sorcar/agent_dispatch.py",
     "src/kiss/agents/sorcar/sorcar_agent.py",
     "src/kiss/agents/sorcar/run_config.py",
-    "src/kiss/agents/sorcar/agent_file.py",
+    "src/kiss/agents/sorcar/sea_apply.py",
 )
 """Files (relative to the checkout) whose prose the ``stale-prose`` rule reads."""
 
@@ -239,8 +260,8 @@ def _stale_declares_claim(match: re.Match[str]) -> str:
     """Return why a "`/name` declares `{...}`" claim is stale, or ``""`` when the SEA agrees.
 
     The claim is compared with what the command's script's
-    ``settings()`` returns as written (before its kind's defaults are
-    laid under it), so a settings change of a bundled SEA is caught in
+    ``settings()`` returns as written (before its base class's defaults
+    are laid under it), so a settings change of a bundled SEA is caught in
     every page that quotes it.
     """
     name = match.group(1) or match.group(4)
@@ -318,27 +339,26 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
     except (OSError, SyntaxError) as exc:
         return [Finding(path, "broken", f"cannot parse: {exc}")]
     findings.extend(_lint_source(path, source, tree))
-    if any(f.code == "renamed-key" for f in findings):
-        # The loader refuses renamed keys; the rest needs the loaded script.
+    if any(f.code in ("renamed-key", "base-class", "removed-key") for f in findings):
+        # The loader refuses renamed and removed keys; the rest needs the loaded script.
         return findings
     try:
         # Exactly what the daemon does for a run of the script, plus the
         # method checks ``/<name> check`` makes.
-        seas, _cmd, _description = check_sea(path, require_description=False)
-        merged = base_settings(seas)
+        check = check_sea(path, require_description=False)
+        seas, merged = check.seas, check.settings
         declared = own_settings(seas[-1])
     except SeaError as exc:
         findings.append(Finding(path, "broken", str(exc)))
         return findings
-    kind = merged["kind"]
-    defaults = kind_defaults()[kind]
+    inherited = inherited_settings(seas[-1])
     for key, value in declared.items():
-        if key not in META_SETTINGS and key in defaults and defaults[key] == value:
+        if key not in META_SETTINGS and key in inherited and inherited[key] == value:
             findings.append(
                 Finding(
                     path,
                     "redundant-key",
-                    f"settings()[{key!r}] = {value!r} repeats the default of kind {kind!r}",
+                    f"settings()[{key!r}] = {value!r} repeats what the base classes lay",
                 )
             )
     if command is not None and not defines(seas, "description"):
@@ -399,6 +419,45 @@ def _lint_source(path: Path, source: str, tree: ast.Module) -> list[Finding]:
                     fixable=True,
                 )
             )
+    for node in _literal_verdicts(tree):
+        findings.append(
+            Finding(
+                path,
+                "verdict",
+                f"line {node.lineno}: tool_call_hook returns {node.value!r}; return ALLOW or "
+                f"refuse(text) (a Verdict, from kiss.agents.seas.base.base_sea)",
+                fixable=True,
+            )
+        )
+    for entry in _removed_entries(tree):
+        key = entry.dict.keys[entry.index]
+        assert isinstance(key, ast.Constant)
+        if key.value in _DROPPED_KEYS:
+            message = (
+                f"line {key.lineno}: settings() writes {key.value!r}, a removed key "
+                f"(run_parallel is N run_agent calls, so there is nothing to allow or forbid)"
+            )
+            code = "removed-key"
+            fixable = True
+        else:
+            fixable = entry.base is not None and (not entry.base or _sea_class_found(tree))
+            if entry.base is None:
+                becomes = "derive from WorkerSea or ChannelSea by hand (the value is not a literal)"
+            elif not entry.base:
+                becomes = "drop it"
+            elif fixable:
+                becomes = f"derive from {entry.base}"
+            else:
+                becomes = (
+                    f"derive from {entry.base} by hand "
+                    "(no class of the script derives from BaseSea)"
+                )
+            message = (
+                f"line {key.lineno}: settings() writes {key.value!r}; what a SEA is became "
+                f"its base class: {becomes}"
+            )
+            code = "base-class"
+        findings.append(Finding(path, code, message, fixable=fixable))
     for lineno, doc in _docstrings(tree, source):
         stale = sorted(
             name for name in REMOVED_GETTERS
@@ -480,60 +539,373 @@ def _settings_dict_keys(tree: ast.Module) -> list[ast.Constant]:
     which name keys too.
     """
     keys: list[ast.Constant] = []
-    for node in settings_functions(tree):
-        nested = {
-            id(value)
-            for sub in ast.walk(node)
-            if isinstance(sub, ast.Dict)
-            for value in sub.values
-            if isinstance(value, ast.Dict)
-        }
-        for sub in ast.walk(node):
-            if not isinstance(sub, ast.Dict) or id(sub) in nested:
+    for sub in _settings_dicts(tree):
+        for key, value in zip(sub.keys, sub.values, strict=True):
+            if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
                 continue
-            for key, value in zip(sub.keys, sub.values, strict=True):
-                if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
-                    continue
-                keys.append(key)
-                if key.value == "locked" and isinstance(value, ast.List | ast.Tuple):
-                    keys.extend(
-                        e
-                        for e in value.elts
-                        if isinstance(e, ast.Constant) and isinstance(e.value, str)
-                    )
+            keys.append(key)
+            if key.value == "locked" and isinstance(value, ast.List | ast.Tuple):
+                keys.extend(
+                    e
+                    for e in value.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)
+                )
     return keys
 
 
+def _settings_dicts(tree: ast.Module) -> list[ast.Dict]:
+    """Return the dict literals of the SEA's ``settings`` method that hold settings keys.
+
+    Every dict literal in the function except dicts anywhere inside
+    the *value* of another dict's key (``model_config``'s contents,
+    however deep, are not settings).
+    """
+    dicts: list[ast.Dict] = []
+    for node in settings_functions(tree):
+        nested = {
+            id(inner)
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Dict)
+            for value in sub.values
+            for inner in ast.walk(value)
+            if isinstance(inner, ast.Dict)
+        }
+        dicts.extend(
+            sub for sub in ast.walk(node) if isinstance(sub, ast.Dict) and id(sub) not in nested
+        )
+    return dicts
+
+
+def _own_returns(node: ast.AST) -> list[ast.Return]:
+    """Return the ``return`` statements of *node*'s own body, not of nested functions or classes."""
+    scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+    returns: list[ast.Return] = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.Return):
+            returns.append(child)
+        elif not isinstance(child, scopes):
+            returns.extend(_own_returns(child))
+    return returns
+
+
+def _literal_verdicts(tree: ast.Module) -> list[ast.Constant]:
+    """Return every ``None`` or string literal a ``tool_call_hook`` of the script returns itself."""
+    return [
+        ret.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "tool_call_hook"
+        for ret in _own_returns(node)
+        if isinstance(ret.value, ast.Constant)
+        and (ret.value.value is None or isinstance(ret.value.value, str))
+    ]
+
+
+_BASE_CLASS_OF: dict[str, dict[object, str]] = {
+    "kind": {"worker": "WorkerSea", "channel": "ChannelSea", "session": ""},
+    "preset": {"worker": "WorkerSea", "channel": "ChannelSea", "session": ""},
+    "channel": {True: "ChannelSea", False: ""},
+}
+"""Removed ``settings()`` key -> its literal value -> the base class that says it now."""
+
+_DROPPED_KEYS = ("allow_fan_out", "is_parallel")
+"""Removed ``settings()`` keys with no replacement."""
+
+_SEA_BASES = ("BaseSea", "WorkerSea", "ChannelSea")
+"""The base classes a SEA derives from, least to most specific."""
+
+
+@dataclass(frozen=True)
+class _RemovedEntry:
+    """One ``settings()`` dict entry of a removed key: the dict, the entry's index, and the
+    base class the entry's value asks for (``""`` for none, ``None`` when the value is
+    not a literal the table knows, so the entry must be migrated by hand)."""
+
+    dict: ast.Dict
+    index: int
+    base: str | None
+
+
+def _removed_entries(tree: ast.Module) -> list[_RemovedEntry]:
+    """Return every ``kind`` / ``preset`` / ``channel`` / ``allow_fan_out`` / ``is_parallel``
+    entry of a ``settings()`` dict.
+
+    Nested dicts (``model_config``'s contents) are not settings and are
+    left alone, as in :func:`_settings_dict_keys`.  A ``kind`` or
+    ``channel`` literal the table does not know asks for no base class
+    (the entry is still dropped); a value that is not a literal cannot
+    be read here, so the entry is left for a hand migration.
+    """
+    entries: list[_RemovedEntry] = []
+    for sub in _settings_dicts(tree):
+        for index, (key, value) in enumerate(zip(sub.keys, sub.values, strict=True)):
+            if not isinstance(key, ast.Constant):
+                continue
+            if key.value in _DROPPED_KEYS:
+                entries.append(_RemovedEntry(sub, index, ""))
+            elif key.value in _BASE_CLASS_OF:
+                base = (
+                    _BASE_CLASS_OF[key.value].get(value.value, "")
+                    if isinstance(value, ast.Constant) else None
+                )
+                entries.append(_RemovedEntry(sub, index, base))
+    return entries
+
+
+def _drop_spans(
+    container: ast.expr, starts: list[int], ends: list[int], indexes: set[int],
+    offsets: list[int], empty: str,
+) -> list[tuple[int, int, str, list[int]]]:
+    """Return the non-overlapping ``(start, end, replacement, dropped indexes)`` edits that
+    drop the items *indexes* of a literal whose items span ``starts[i]``..``ends[i]``.
+
+    Each run of adjacent dropped items is one edit: a run followed by
+    a kept item goes up to that item's start; a run at the end goes
+    from the previous kept item's end (taking its comma); dropping
+    every item leaves *empty* in place of the whole literal.
+    """
+    if indexes == set(range(len(starts))):
+        return [(*_span(container, offsets), empty, sorted(indexes))]
+    edits: list[tuple[int, int, str, list[int]]] = []
+    run: list[int] = []
+    for index in range(len(starts) + 1):
+        if index in indexes:
+            run.append(index)
+            continue
+        if run and index < len(starts):
+            edits.append((starts[run[0]], starts[index], "", run))
+        elif run:
+            edits.append((ends[run[0] - 1], ends[run[-1]], "", run))
+        run = []
+    return edits
+
+
+def _entry_starts(sub: ast.Dict, data: bytes, offsets: list[int]) -> list[int]:
+    """Return where each entry of the dict *sub* starts: its key, or the ``**`` of an unpack."""
+    starts: list[int] = []
+    for key, value in zip(sub.keys, sub.values, strict=True):
+        start = _span(key or value, offsets)[0]
+        if key is None:
+            start = len(data[:start].rstrip())
+            assert data[start - 2:start] == b"**", data[start - 2:start]
+            start -= 2
+        starts.append(start)
+    return starts
+
+
+def _removed_lock_names(tree: ast.Module) -> dict[ast.List, set[int]]:
+    """Return, per ``settings()`` ``locked`` list literal, the indexes of its elements that
+    name a removed key."""
+    removed = set(_DROPPED_KEYS) | set(_BASE_CLASS_OF)
+    found: dict[ast.List, set[int]] = {}
+    for sub in _settings_dicts(tree):
+        for key, value in zip(sub.keys, sub.values, strict=True):
+            if not (isinstance(key, ast.Constant) and key.value == "locked"):
+                continue
+            if not isinstance(value, ast.List):
+                continue
+            indexes = {
+                index for index, element in enumerate(value.elts)
+                if isinstance(element, ast.Constant) and element.value in removed
+            }
+            if indexes:
+                found[value] = indexes
+    return found
+
+
+def _sea_base_name(tree: ast.Module, base: ast.expr) -> str:
+    """Return the :data:`_SEA_BASES` entry the class base *base* names, or ``""``.
+
+    The base may be named directly, through an ``import ... as`` alias
+    of the ``base_sea`` import, or as an attribute (``base_sea.BaseSea``).
+    """
+    if isinstance(base, ast.Attribute):
+        return base.attr if base.attr in _SEA_BASES else ""
+    if not isinstance(base, ast.Name):
+        return ""
+    return next(
+        (
+            alias.name
+            for imp in tree.body if isinstance(imp, ast.ImportFrom)
+            and imp.module == "kiss.agents.seas.base.base_sea"
+            for alias in imp.names
+            if alias.name in _SEA_BASES and (alias.asname or alias.name) == base.id
+        ),
+        "",
+    )
+
+
+def _sea_class_found(tree: ast.Module) -> bool:
+    """Return whether a class of the script derives from a :data:`_SEA_BASES` entry."""
+    return any(
+        _sea_base_name(tree, base)
+        for node in tree.body if isinstance(node, ast.ClassDef)
+        for base in node.bases
+    )
+
+
+def _base_rewrites(
+    tree: ast.Module, base: str, offsets: list[int], data: bytes, needed: set[str],
+) -> tuple[list[tuple[int, int, str, str]], bool]:
+    """Return the edits that make the script's SEA class derive from *base*, and whether
+    a class deriving from a :data:`_SEA_BASES` entry was found at all (:func:`_sea_base_name`).
+
+    A base already as specific as *base* needs no edit.  A direct name
+    is rewritten in place together with its import unless the old name
+    is used elsewhere in the script (a type annotation); otherwise
+    *base* is added to *needed* for a new import line.
+    """
+    edits: list[tuple[int, int, str, str]] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for old in node.bases:
+            name = _sea_base_name(tree, old)
+            if not name:
+                continue
+            if _SEA_BASES.index(name) >= _SEA_BASES.index(base):
+                return edits, True
+            start, end = _span(old, offsets)
+            note = f"class base {name} -> {base}"
+            if not isinstance(old, ast.Name):
+                text = data[start:end].decode("utf-8")
+                edits.append((start, end, text[: -len(name)] + base, note))
+                return edits, True
+            edits.append((start, end, base, note))
+            used = old.id
+            uses = sum(1 for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == used)
+            alias = next(
+                (
+                    alias for imp in tree.body if isinstance(imp, ast.ImportFrom)
+                    and imp.module == "kiss.agents.seas.base.base_sea"
+                    for alias in imp.names if alias.name == name and alias.asname is None
+                ),
+                None,
+            )
+            if (
+                alias is not None and uses == 1
+                and alias.end_lineno is not None and alias.end_col_offset is not None
+            ):
+                start = offsets[alias.lineno - 1] + alias.col_offset
+                end = offsets[alias.end_lineno - 1] + alias.end_col_offset
+                edits.append((start, end, base, f"import {name} -> {base}"))
+            else:
+                needed.add(base)
+            return edits, True
+    return edits, False
+
+
+def _span(node: ast.expr, offsets: list[int]) -> tuple[int, int]:
+    """Return the ``(start, end)`` byte offsets of *node* in the source *offsets* index."""
+    assert node.end_lineno is not None and node.end_col_offset is not None
+    return (
+        offsets[node.lineno - 1] + node.col_offset,
+        offsets[node.end_lineno - 1] + node.end_col_offset,
+    )
+
+
+def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
+    """Return the byte-span edits ``--fix`` makes to the source *data*, as
+    ``(start, end, new text, note)``.
+
+    A renamed ``settings()`` key gets its current name inside its own
+    quotes; a ``kind`` / ``preset`` / ``channel`` entry with a literal
+    value is dropped once the class derives from the base class it
+    asked for (:func:`_base_rewrites`); an ``allow_fan_out`` /
+    ``is_parallel`` entry is dropped, as is a removed key named in a
+    ``locked`` list;
+    a ``tool_call_hook``'s literal ``None`` becomes
+    ``ALLOW`` and its
+    literal string ``refuse(<the literal>)``, with ``from
+    kiss.agents.seas.base.base_sea import ...`` of the names the
+    script does not import yet inserted after its last top-level
+    import.
+    """
+    lines = data.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+
+    def text(node: ast.expr) -> str:
+        start, end = _span(node, offsets)
+        return data[start:end].decode("utf-8")
+
+    edits: list[tuple[int, int, str, str]] = []
+    for key in _settings_dict_keys(tree):
+        if key.value in RENAMED_SETTINGS:
+            new = RENAMED_SETTINGS[key.value]
+            edits.append((*_span(key, offsets), text(key).replace(key.value, new, 1),
+                          f"{key.value!r} -> {new!r}"))
+    needed: set[str] = set()
+    entries = [entry for entry in _removed_entries(tree) if entry.base is not None]
+    base = max((entry.base for entry in entries if entry.base), key=_SEA_BASES.index, default="")
+    found = True
+    if base:
+        base_edits, found = _base_rewrites(tree, base, offsets, data, needed)
+        edits.extend(base_edits)
+    # An entry asking for a base class is dropped only once the class
+    # derives from it; a script whose SEA class the rewrite cannot find
+    # keeps the entry (and its ``base-class`` finding) for a hand migration.
+    for sub in _settings_dicts(tree):
+        indexes = {
+            entry.index for entry in entries if entry.dict is sub and (found or not entry.base)
+        }
+        if not indexes:
+            continue
+        starts = _entry_starts(sub, data, offsets)
+        ends = [_span(value, offsets)[1] for value in sub.values]
+        for start, end, new, run in _drop_spans(sub, starts, ends, indexes, offsets, "{}"):
+            keys = ", ".join(repr(cast(ast.Constant, sub.keys[i]).value) for i in run)
+            edits.append((start, end, new, f"drop {keys}"))
+    for locked, indexes in _removed_lock_names(tree).items():
+        starts = [_span(element, offsets)[0] for element in locked.elts]
+        ends = [_span(element, offsets)[1] for element in locked.elts]
+        for start, end, new, run in _drop_spans(locked, starts, ends, indexes, offsets, "[]"):
+            names = ", ".join(repr(cast(ast.Constant, locked.elts[i]).value) for i in run)
+            edits.append((start, end, new, f"unlock {names}"))
+    for node in _literal_verdicts(tree):
+        if node.value is None:
+            edits.append((*_span(node, offsets), "ALLOW", "None -> ALLOW"))
+            needed.add("ALLOW")
+        else:
+            edits.append((*_span(node, offsets), f"refuse({text(node)})",
+                          f"{node.value!r} -> refuse({node.value!r})"))
+            needed.add("refuse")
+    imported = {
+        alias.asname or alias.name
+        for node in tree.body if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    missing = sorted(needed - imported)
+    if missing:
+        last_import = max(
+            (node for node in tree.body if isinstance(node, ast.Import | ast.ImportFrom)),
+            key=lambda node: node.end_lineno or 0, default=None,
+        )
+        at = offsets[last_import.end_lineno or 0] if last_import is not None else 0
+        import_line = f"from kiss.agents.seas.base.base_sea import {', '.join(missing)}\n"
+        edits.append((at, at, import_line, f"import {', '.join(missing)}"))
+    return edits
+
+
 def fix_sea(path: Path) -> list[str]:
-    """Rewrite the renamed ``settings()`` keys of the script at *path* in place.
+    """Rewrite the fixable findings of the script at *path* in place (:func:`_rewrites`).
 
     Args:
         path: The ``*_sea.py`` file.
 
     Returns:
-        One line per rewritten key (empty when nothing changed).
+        One line per rewrite (empty when nothing changed).
     """
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     # ``ast`` columns are UTF-8 byte offsets: slice the encoded source.
     data = source.encode("utf-8")
-    lines = data.splitlines(keepends=True)
-    offsets = [0]
-    for line in lines:
-        offsets.append(offsets[-1] + len(line))
-    edits = [
-        (offsets[k.lineno - 1] + k.col_offset, offsets[k.end_lineno - 1] + k.end_col_offset, k)
-        for k in _settings_dict_keys(tree)
-        if k.value in RENAMED_SETTINGS and k.end_lineno is not None and k.end_col_offset is not None
-    ]
     changed: list[str] = []
-    for start, end, key in sorted(edits, reverse=True):
-        old = str(key.value)
-        new = RENAMED_SETTINGS[old]
-        # Replace the name inside the literal, keeping its prefix and quotes.
-        literal = data[start:end].decode("utf-8").replace(old, new, 1)
-        data = data[:start] + literal.encode("utf-8") + data[end:]
-        changed.append(f"{path}:{key.lineno}: {old!r} -> {new!r}")
+    # Applied last span first, so earlier offsets stay valid; the spans are distinct.
+    for start, end, new, note in sorted(_rewrites(tree, data), reverse=True):
+        lineno = data[:start].count(b"\n") + 1
+        data = data[:start] + new.encode("utf-8") + data[end:]
+        changed.append(f"{path}:{lineno}: {note}")
     if changed:
         rewritten = data.decode("utf-8")
         ast.parse(rewritten, filename=str(path))  # never save a script that no longer parses
@@ -541,36 +913,28 @@ def fix_sea(path: Path) -> list[str]:
     return list(reversed(changed))
 
 
-def main(argv: list[str] | None = None) -> int:
-    """``sea lint [--fix] [PATH ...]``: check (and rewrite) agent scripts.
-
-    Args:
-        argv: Command-line arguments; ``None`` reads ``sys.argv``.
-
-    Returns:
-        ``0`` when there are no findings (after ``--fix``), else ``1``.
-    """
-    parser = argparse.ArgumentParser(prog="sea lint", description=(__doc__ or "").split("\n\n")[0])
-    add_arguments(parser)
-    return run(parser.parse_args(argv))
-
-
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Attach the ``sea lint`` arguments to *parser*."""
     parser.add_argument(
         "paths", nargs="*", help="scripts or SEA folders; default: every bundled script"
     )
-    parser.add_argument("--fix", action="store_true", help="rewrite renamed settings() keys")
+    parser.add_argument(
+        "--fix", action="store_true",
+        help="rewrite the fixable findings (renamed-key, base-class, removed-key, verdict)",
+    )
     parser.add_argument(
         "--registered", action="store_true", help="also check the scripts your SEAS.md registers"
     )
 
 
 def run(args: argparse.Namespace) -> int:
-    """Execute ``sea lint`` with parsed *args* (see :func:`main`)."""
+    """Execute ``sea lint`` with parsed *args* (:func:`add_arguments`); return the exit code."""
     paths = [Path(p) for p in args.paths] or None
     if args.fix:
-        targets = [_script_of(p) for p in paths] if paths else default_targets(args.registered)
+        if paths:
+            targets = [_script_of(p) for p in paths]
+        else:
+            targets = default_targets(args.registered, registered_commands())
         for script in targets:
             for line in fix_sea(script):
                 print(f"fixed {line}")
@@ -579,7 +943,3 @@ def run(args: argparse.Namespace) -> int:
         print(finding)
     print(f"sea lint: {len(findings)} finding(s)")
     return 1 if findings else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

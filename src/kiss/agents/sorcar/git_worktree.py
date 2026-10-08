@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import weakref
@@ -149,13 +150,10 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     Yields:
         Nothing; the lock is held for the duration of the block.
     """
-    result = _git("rev-parse", "--git-common-dir", cwd=repo)
-    if result.returncode != 0:  # pragma: no cover — not a git repo
+    git_common = _git_common_dir(repo)
+    if git_common is None:  # pragma: no cover — not a git repo
         yield
         return
-    git_common = Path(result.stdout.strip())
-    if not git_common.is_absolute():  # pragma: no branch
-        git_common = (repo / git_common).resolve()
     lock_path = str(git_common / "kiss-reclaim.lock")
     held = _held_reclaim_locks()
     prior = held.get(lock_path)
@@ -377,9 +375,48 @@ def repo_lock(repo: Path) -> threading.RLock:
 _GIT_TIMEOUT_SECONDS: float = 300.0
 
 
+def _git_command(
+    args: tuple[str, ...], cwd: str | Path,
+) -> tuple[list[str], dict[str, str]]:
+    """Return the argv and environment every git runner in this module uses.
+
+    ``core.quotepath=false`` keeps non-ASCII paths unescaped in output,
+    ``-C`` pins the working directory, and the repo-scoping variables
+    inherited from the environment (``GIT_DIR``, ``GIT_INDEX_FILE``, ...)
+    are dropped so a caller's environment can never redirect a call to
+    another repository.
+
+    Args:
+        args: Git sub-command and arguments (without the leading ``git``).
+        cwd: Working directory for the git command.
+
+    Returns:
+        ``(argv, env)`` ready for ``Popen``.
+    """
+    cmd = ["git", "-c", "core.quotepath=false", "-C", str(cwd), *args]
+    env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
+    return cmd, env
+
+
+def _git_common_dir(repo: Path) -> Path | None:
+    """Return *repo*'s ``--git-common-dir`` as an absolute path, or ``None``.
+
+    Args:
+        repo: Git repo root path.
+    """
+    result = _git("rev-parse", "--git-common-dir", cwd=repo)
+    if result.returncode != 0:  # pragma: no cover — not a git repo
+        return None
+    git_common = Path(result.stdout.strip())
+    if not git_common.is_absolute():  # pragma: no branch
+        git_common = (repo / git_common).resolve()
+    return git_common
+
+
 def _git(
     *args: str,
     cwd: str | Path,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command, returning the CompletedProcess result.
 
@@ -387,6 +424,9 @@ def _git(
     enforces that every git invocation specifies a working directory
     (passed via ``git -C <cwd>``).  This prevents accidental git
     operations against the process's current working directory.
+    Repo-scoping variables inherited from the environment (``GIT_DIR``,
+    ``GIT_INDEX_FILE``, ...) are always dropped; *env* adds explicit
+    ones on top for the single call (e.g. a scratch ``GIT_INDEX_FILE``).
 
     Always passes a timeout so a hung git process (e.g. waiting on a
     credential-helper prompt or a network remote) cannot block the
@@ -398,19 +438,14 @@ def _git(
     Args:
         *args: Git sub-command and arguments (without the leading ``git``).
         cwd: Working directory for the git command (required).
+        env: Extra environment variables for this call only.
 
     Returns:
         The completed process with stdout/stderr captured as text.
     """
-    cmd = [
-        "git",
-        "-c",
-        "core.quotepath=false",
-        "-C",
-        str(cwd),
-        *args,
-    ]
-    env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
+    cmd, full_env = _git_command(args, cwd)
+    if env:
+        full_env.update(env)
     proc = popen_process_group(
         cmd,
         stdout=subprocess.PIPE,
@@ -418,7 +453,7 @@ def _git(
         text=True,
         encoding="utf-8",
         errors="surrogateescape",
-        env=env,
+        env=full_env,
     )
     try:
         stdout, stderr = proc.communicate(timeout=_GIT_TIMEOUT_SECONDS)
@@ -503,8 +538,7 @@ def _git_stdout_head(
         either because more output existed or because git was killed
         by the timeout.
     """
-    cmd = ["git", "-c", "core.quotepath=false", "-C", str(cwd), *args]
-    env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
+    cmd, env = _git_command(args, cwd)
     proc = popen_process_group(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
     )
@@ -1428,8 +1462,7 @@ class GitWorktreeOps:
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.MERGE_FAILED`.
         """
-        diff = _git("diff", "--cached", "--quiet", cwd=repo)
-        if diff.returncode != 0:
+        if GitWorktreeOps.has_staged_changes(repo):
             msg = GitWorktreeOps._merge_commit_message(
                 repo, branch, user_prompt=user_prompt, task_result=task_result,
             )
@@ -1573,10 +1606,9 @@ class GitWorktreeOps:
             entry: The exact line to ensure is present.
         """
         with repo_lock(repo):
-            result = _git("rev-parse", "--git-common-dir", cwd=repo)
-            git_common = Path(result.stdout.strip())
-            if not git_common.is_absolute():  # pragma: no branch
-                git_common = (repo / git_common).resolve()
+            git_common = _git_common_dir(repo)
+            if git_common is None:  # pragma: no cover — not a git repo
+                raise OSError(f"{repo} is not a git repository")
             info_file = git_common / "info" / filename
             info_file.parent.mkdir(parents=True, exist_ok=True)
             with open(
@@ -2113,6 +2145,19 @@ class GitWorktreeOps:
         failed status counts as content: unenumerable state is
         preserved, never destroyed.
 
+        One state the status walk cannot be trusted on: a spare whose
+        gitdir has no ``index`` file.  The pool registers a spare with
+        ``--no-checkout`` and populates it with ``reset --hard`` (see
+        :func:`kiss.agents.sorcar.worktree_pool.prewarm`); a process
+        killed during that reset leaves the files partially written and
+        the index never created, so status lists every tracked file as
+        a staged deletion and the written ones as untracked.  That is
+        checkout debris, not external content — treating it as content
+        preserved such a spare on every reclaim pass forever — so
+        :meth:`_interrupted_checkout_has_content` filters it out and
+        counts only paths outside the ``HEAD`` tree and commits unique
+        to the branch.
+
         Args:
             repo: Git repo root path.
             branch: The spare's ``kiss/wt-*`` branch name.
@@ -2123,6 +2168,9 @@ class GitWorktreeOps:
             (or git could not enumerate them), or commits unique to its
             branch; False when it is contentless plumbing.
         """
+        index = _git("rev-parse", "--git-path", "index", cwd=wt_dir)
+        if index.returncode == 0 and not (wt_dir / index.stdout.strip()).is_file():
+            return GitWorktreeOps._interrupted_checkout_has_content(repo, branch, wt_dir)
         # ``--untracked-files`` is explicit: a repo-level
         # ``status.showUntrackedFiles=no`` would otherwise silence the
         # untracked AND ignored listing and make a written-to spare
@@ -2139,6 +2187,68 @@ class GitWorktreeOps:
         return bool(status.stdout.strip()) or not GitWorktreeOps._branch_is_expendable(
             repo, branch
         )
+
+    @staticmethod
+    def _interrupted_checkout_has_content(repo: Path, branch: str, wt_dir: Path) -> bool:
+        """:meth:`spare_has_content` for a spare whose index was never written.
+
+        Without an index ``git status`` cannot tell the half-written
+        checkout from external writes (every ``HEAD`` file is a staged
+        deletion, every written file untracked).  So the status walk
+        runs against a scratch index built from ``HEAD`` with
+        ``git read-tree`` (``GIT_INDEX_FILE`` in a temporary directory,
+        split-index disabled so no shared index lands in the spare's
+        gitdir; the spare's own index stays unwritten): git then
+        reports a file the killed checkout never wrote as an unstaged
+        deletion ``" D"`` — the only debris an interrupted checkout can
+        leave — and anything else as what it is: ``" M"`` for a tracked
+        file whose contents differ from ``HEAD``, ``??``/``!!`` for
+        paths outside the tree.  Git does the content and filename
+        comparison, so edited files and byte-distinct names are never
+        mistaken for debris.  ``--untracked-files=all`` lists every
+        file individually; the default would hide files written under a
+        directory that replaced a tracked file (reported only as
+        ``" D"`` for that file).  Blind spots of ``git status`` itself
+        (``core.ignorecase``, ``core.filemode=false``, files inside an
+        uninitialised submodule) are shared with the regular probe.
+
+        Args:
+            repo: Git repo root path.
+            branch: The spare's ``kiss/wt-*`` branch name.
+            wt_dir: The spare's worktree directory.
+
+        Returns:
+            True when the spare holds external files, edits or commits
+            (or git could not enumerate them); False when every
+            reported path is an unwritten ``HEAD`` file.
+        """
+        scratch = tempfile.mkdtemp(prefix="kiss-spare-index-")
+        try:
+            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+            no_split = ("-c", "core.splitIndex=false")
+            read_tree = _git(*no_split, "read-tree", "HEAD", cwd=wt_dir, env=env)
+            status = _git(
+                *no_split, "status", "--porcelain", "-z", "--ignored",
+                "--untracked-files=all", cwd=wt_dir, env=env,
+            )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        if read_tree.returncode != 0 or status.returncode != 0:
+            logger.warning(
+                "git failed in index-less spare %s (read-tree rc=%s, status rc=%s); "
+                "treating as content",
+                wt_dir, read_tree.returncode, status.returncode,
+            )
+            return True
+        for entry in status.stdout.split("\0"):
+            if entry and entry[:2] != " D":
+                return True
+        logger.info(
+            "Spare worktree %s has no index (interrupted checkout) and only "
+            "unwritten files; treating as contentless",
+            wt_dir,
+        )
+        return not GitWorktreeOps._branch_is_expendable(repo, branch)
 
     @staticmethod
     def rescue_ignored_files(wt_dir: Path, repo: Path) -> tuple[int, bool]:
@@ -2618,6 +2728,54 @@ class GitWorktreeOps:
         return bool(head_sha) and head_sha == parent_sha
 
     @staticmethod
+    def _theirs_option(repo: Path, baseline: str) -> list[str]:
+        """Return ``["-X", "theirs"]`` when it is safe for a merge from *baseline*.
+
+        Safe exactly when ``HEAD == baseline^`` (see
+        :meth:`squash_merge_from_baseline` for why); empty otherwise.
+
+        Args:
+            repo: Git repo root path.
+            baseline: The worktree's baseline commit SHA.
+        """
+        if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
+            return ["-X", "theirs"]
+        return []
+
+    @staticmethod
+    def squash_merge(
+        repo: Path,
+        branch: str,
+        baseline: str | None,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
+    ) -> MergeResult:
+        """Squash-merge *branch* into HEAD, from *baseline* when one is known.
+
+        Dispatches to :meth:`squash_merge_from_baseline` or, for a legacy
+        worktree without a baseline, :meth:`squash_merge_branch`.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch to merge from.
+            baseline: The worktree's baseline commit SHA, or ``None``.
+            user_prompt: The user's task prompt for the merge commit
+                message, or ``None``.
+            task_result: The task's result summary for the merge
+                commit message, or ``None``.
+
+        Returns:
+            The merge outcome.
+        """
+        if baseline:
+            return GitWorktreeOps.squash_merge_from_baseline(
+                repo, branch, baseline, user_prompt=user_prompt, task_result=task_result,
+            )
+        return GitWorktreeOps.squash_merge_branch(
+            repo, branch, user_prompt=user_prompt, task_result=task_result,
+        )
+
+    @staticmethod
     def squash_merge_from_baseline(
         repo: Path,
         branch: str,
@@ -2700,10 +2858,11 @@ class GitWorktreeOps:
         if count == "0":
             return MergeResult.SUCCESS
 
-        cherry_pick_args = ["cherry-pick", "--no-commit"]
-        if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
-            cherry_pick_args.extend(["-X", "theirs"])
-        cherry_pick_args.append(f"{baseline}..{branch}")
+        cherry_pick_args = [
+            "cherry-pick", "--no-commit",
+            *GitWorktreeOps._theirs_option(repo, baseline),
+            f"{baseline}..{branch}",
+        ]
         before = GitWorktreeOps.status_porcelain(repo)
         result = _git(*cherry_pick_args, cwd=repo)
         if result.returncode != 0:
@@ -2746,8 +2905,7 @@ class GitWorktreeOps:
         args = ["merge-tree", "--write-tree"]
         if baseline:
             args.append(f"--merge-base={baseline}")
-            if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
-                args.extend(["-X", "theirs"])
+            args.extend(GitWorktreeOps._theirs_option(repo, baseline))
         return _git(*args, "HEAD", branch, cwd=repo).returncode == 1
 
     @staticmethod
@@ -2828,10 +2986,11 @@ class GitWorktreeOps:
                     "commit-tree for %s failed: %s", branch, squashed.stderr.strip(),
                 )
                 return None
-            args = ["cherry-pick", "--no-commit"]
-            if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
-                args.extend(["-X", "theirs"])
-            args.append(squashed.stdout.strip())
+            args = [
+                "cherry-pick", "--no-commit",
+                *GitWorktreeOps._theirs_option(repo, baseline),
+                squashed.stdout.strip(),
+            ]
         else:
             args = ["merge", "--squash", branch]
         result = _git(*args, cwd=repo)
@@ -2938,7 +3097,7 @@ class GitWorktreeOps:
             return MergeResult.CONFLICT
         if GitWorktreeOps.paths_with_conflict_markers(repo, conflicted):
             return MergeResult.CONFLICT
-        if _git("diff", "--cached", "--quiet", cwd=repo).returncode == 0:
+        if not GitWorktreeOps.has_staged_changes(repo):
             return MergeResult.CONFLICT
         # ``--no-commit`` leaves no sequencer state, but a resolver that
         # ran ``git cherry-pick --continue`` half-way may have; either
@@ -3446,25 +3605,10 @@ class GitWorktreeOps:
                         "Failed to install scratch merge driver",
                         exc_info=True,
                     )
-                if baseline:
-                    result = GitWorktreeOps.squash_merge_from_baseline(
-                        repo,
-                        branch,
-                        baseline,
-                        user_prompt=None,
-                        task_result=(
-                            "Auto-merged by orphan-worktree reclaim"
-                        ),
-                    )
-                else:
-                    result = GitWorktreeOps.squash_merge_branch(
-                        repo,
-                        branch,
-                        user_prompt=None,
-                        task_result=(
-                            "Auto-merged by orphan-worktree reclaim"
-                        ),
-                    )
+                result = GitWorktreeOps.squash_merge(
+                    repo, branch, baseline,
+                    task_result="Auto-merged by orphan-worktree reclaim",
+                )
                 if result != MergeResult.SUCCESS:
                     logger.warning(
                         "Reclaim of orphan worktree %s: squash "

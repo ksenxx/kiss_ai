@@ -179,9 +179,14 @@ TRANSCRIPT_JS = r"""
 () => {
   const api = window._testApi;
   api.hideWelcome();
-  document.getElementById('task-panel-text').textContent =
-    'Refactor main.css onto a design-token layer and check every theme.';
-  document.getElementById('task-panel').classList.add('visible');
+  const tabId = api.getActiveTabId();
+  for (const ev of [
+    {type: 'setTaskText', tabId, text:
+      'Refactor main.css onto a design-token layer and check every theme.'},
+    {type: 'clear', tabId},
+  ]) {
+    window.dispatchEvent(new MessageEvent('message', {data: ev}));
+  }
   const E = ev => api.processEvent(ev);
   E({type: 'thinking_start'});
   E({type: 'thinking_delta', text: 'The radius values drifted: 2, 3, 4, ' +

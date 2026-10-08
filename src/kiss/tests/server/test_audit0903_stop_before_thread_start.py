@@ -19,7 +19,7 @@ arriving on another connection) found the thread with
   exactly this window (S3-05 / C-R4) — so no force-stop watchdog was
   ever started;
 * only the cooperative stop event was set, which nothing in the run's
-  untrusted setup code (agent-script getters) ever
+  untrusted setup code (SEA getters) ever
   checks, so the run kept executing that code indefinitely and the
   client's stop confirmation wait starved.
 
@@ -33,7 +33,7 @@ registers the state exactly as ``_cmd_run`` does (same fields, same
 lock), calls the real ``_stop_task`` while the real worker thread is
 created but not yet started — the wire-visible window — and only then
 starts the thread on the real ``_run_task``.  The run parks inside a
-real agent-script getter (untrusted setup code with no cooperative
+real SEA getter (untrusted setup code with no cooperative
 checks); a run the stop fails to kill is released via a flag file in
 ``tearDown``, where the getter raises — so no LLM is ever invoked.
 
@@ -152,7 +152,7 @@ class TestStopBeforeThreadStart(TestCase):
             "useWorktree": False,
             "isParallel": False,
             "autoCommit": False,
-            "agentPath": str(self.script),
+            "seaPath": str(self.script),
         }
         # Register the run EXACTLY as ``_cmd_run`` does, up to (and
         # excluding) ``thread.start()`` — the wire-visible window the

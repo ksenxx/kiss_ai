@@ -5,12 +5,12 @@
 """The SEA ``system_prompt(self, system_prompt)`` method is staged as ``systemPromptHook``.
 
 The method receives the assembled system prompt and returns the one the
-run uses; :func:`apply_agent_overrides`, the daemon-side loader, stages
+run uses; :func:`apply_sea`, the daemon-side loader, stages
 it as the ``systemPromptHook`` callable the daemon applies once the
 prompt is assembled.  The hook is written on EVERY run (``BaseSea`` is
 the root of the chain; it is the identity when nothing overrides the
 method), so it is never reported among the overridden fields.  The
-caller's ``appendToSystemPrompt`` and the ``channel`` kind's preamble
+caller's ``appendToSystemPrompt`` and the ``ChannelSea`` preamble
 stay on the ``appendToSystemPrompt`` field, which the hook never
 touches.
 """
@@ -22,8 +22,8 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
-from kiss.agents.sorcar.sea_commands import SeaScriptError
+from kiss.agents.sorcar.sea_apply import CHANNEL_PREAMBLE, apply_sea
+from kiss.agents.sorcar.sea_commands import SeaError
 
 _PROTOCOL_SEA = """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -46,8 +46,8 @@ def test_method_is_staged_as_the_hook_and_receives_the_assembled_prompt(
 ) -> None:
     """``system_prompt()`` becomes ``systemPromptHook``; nothing is evaluated at staging."""
     script = _script(tmp_path, _PROTOCOL_SEA)
-    cmd: dict[str, Any] = {"agentPath": script}
-    assert apply_agent_overrides(cmd) == set()
+    cmd: dict[str, Any] = {"seaPath": script}
+    assert apply_sea(cmd) == set()
     assert "appendToSystemPrompt" not in cmd
     assert "systemPrompt" not in cmd
     assert cmd["systemPromptHook"]("BASE") == "BASE\n\nPROTOCOL"
@@ -56,14 +56,14 @@ def test_method_is_staged_as_the_hook_and_receives_the_assembled_prompt(
 def test_callers_suffix_stays_on_its_field(tmp_path: Path) -> None:
     """The caller's ``appendToSystemPrompt`` survives untouched next to the hook."""
     script = _script(tmp_path, _PROTOCOL_SEA)
-    cmd: dict[str, Any] = {"agentPath": script, "appendToSystemPrompt": "CALLER"}
-    assert apply_agent_overrides(cmd) == set()
+    cmd: dict[str, Any] = {"seaPath": script, "appendToSystemPrompt": "CALLER"}
+    assert apply_sea(cmd) == set()
     assert cmd["appendToSystemPrompt"] == "CALLER"
     assert cmd["systemPromptHook"]("BASE\n\nCALLER") == "BASE\n\nCALLER\n\nPROTOCOL"
 
 
 def test_channel_preamble_goes_to_the_suffix_not_the_hook(tmp_path: Path) -> None:
-    """A ``channel`` SEA's preamble follows the caller's text on ``appendToSystemPrompt``.
+    """A ``ChannelSea``'s preamble follows the caller's text on ``appendToSystemPrompt``.
 
     The hook is independent of the suffix: it rewrites whatever prompt
     the daemon assembled (base plus suffix), so the preamble that keeps
@@ -73,19 +73,16 @@ def test_channel_preamble_goes_to_the_suffix_not_the_hook(tmp_path: Path) -> Non
     script = _script(
         tmp_path,
         """
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 
 
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {"kind": "channel"}
-
+class Sea(ChannelSea):
     def system_prompt(self, system_prompt):
         return system_prompt + "\\n\\nPROTOCOL"
 """,
     )
-    cmd: dict[str, Any] = {"agentPath": script, "appendToSystemPrompt": "CALLER"}
-    overridden = apply_agent_overrides(cmd)
+    cmd: dict[str, Any] = {"seaPath": script, "appendToSystemPrompt": "CALLER"}
+    overridden = apply_sea(cmd)
     assert "appendToSystemPrompt" in overridden
     assert "systemPromptHook" not in overridden
     assert cmd["appendToSystemPrompt"] == (
@@ -112,15 +109,15 @@ class Sea(BaseSea):
         return "REPLACED" if "drop me" in system_prompt else system_prompt
 """,
     )
-    cmd: dict[str, Any] = {"agentPath": script, "appendToSystemPrompt": 5}
-    apply_agent_overrides(cmd)
+    cmd: dict[str, Any] = {"seaPath": script, "appendToSystemPrompt": 5}
+    apply_sea(cmd)
     assert cmd["appendToSystemPrompt"] == 5
     assert cmd["systemPromptHook"]("BASE, drop me") == "REPLACED"
     assert cmd["systemPromptHook"]("BASE") == "BASE"
 
 
 def test_wrong_type_is_rejected_when_the_hook_runs(tmp_path: Path) -> None:
-    """A non-string return is a ``SeaScriptError`` naming the method and the type.
+    """A non-string return is a ``SeaError`` naming the method and the type.
 
     The method runs lazily, so staging succeeds and the command keeps
     the caller's suffix; the diagnostic comes from the hook.
@@ -136,11 +133,11 @@ class Sea(BaseSea):
         return 42
 """,
     )
-    cmd: dict[str, Any] = {"agentPath": script, "appendToSystemPrompt": "CALLER"}
-    assert apply_agent_overrides(cmd) == set()
+    cmd: dict[str, Any] = {"seaPath": script, "appendToSystemPrompt": "CALLER"}
+    assert apply_sea(cmd) == set()
     assert cmd["appendToSystemPrompt"] == "CALLER"
     with pytest.raises(
-        SeaScriptError,
-        match=r"system_prompt\(\) of agent script '.*adder_sea\.py' must return a string, got int",
+        SeaError,
+        match=r"system_prompt\(\) of SEA '.*adder_sea\.py' must return a string, got int",
     ):
         cmd["systemPromptHook"]("BASE")

@@ -89,7 +89,7 @@ class TestCmdRunQueuesFollowup(unittest.TestCase):
         # follow-up, so all run origins behave identically.
         assert new_events == [
             {"type": "setTaskText", "text": "x", "tabId": "t1"},
-            {"type": "prompt", "text": "x", "tabId": "t1"},
+            {"type": "prompt", "text": "x", "tabId": "t1", "steer": True},
         ]
 
         blocker.set()

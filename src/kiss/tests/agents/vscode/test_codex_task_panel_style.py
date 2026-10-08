@@ -6,11 +6,12 @@
 
 Features on the remote webapp (served by ``RemoteAccessServer``):
 
-1. The pinned task panel (``#task-panel``) inherits main.css's
-   look verbatim (the thinking panel's foreground over the accent tint,
-   plus a 1px accent hairline; the remote page merely swaps the
-   palette variables), sized by the page's injected 14px
-   ``--vscode-editor-font-size``.  The event panels likewise inherit
+1. The inline task panel (``.ev.task-panel``, the first event of a
+   task's thread) inherits main.css's look verbatim (the page
+   foreground over the user bubble's accent wash, plus a 1px accent hairline; the
+   remote page merely swaps the palette variables), its text sized by
+   the page's injected 14px ``--vscode-editor-font-size``.  The event
+   panels likewise inherit
    the extension's main.css typography — that extension-parity
    contract is pinned end to end by
    ``test_remote_panels_match_extension.py``.
@@ -290,6 +291,16 @@ def test_remote_metadata_separator_between_groups(selector: str) -> None:
 _INJECT_PAGE_JS = r"""
 (() => {
   const out = document.getElementById('output');
+  // The transcript goes into a tab the daemon's tab registry knows
+  // (createNewTab registers it with openTab; the page's initial tab
+  // is registered only once a task runs in it).  The chat-panel
+  // expand below opens the injected chat in another registered tab,
+  // and the daemon's next tabs_state snapshot prunes every tab it
+  // does not list -- an unregistered transcript tab vanished with
+  // its injected panels whenever that snapshot landed before the
+  // probes (it does once the daemon handshake is quick, e.g. late in
+  // a warmed-up pytest process).
+  window._testApi.createNewTab();
   const welcome = document.getElementById('welcome');
   if (welcome) welcome.style.display = 'none';
   const app = document.getElementById('app');
@@ -297,16 +308,27 @@ _INJECT_PAGE_JS = r"""
   const loading = document.getElementById('kiss-server-loading');
   if (loading) loading.style.display = 'none';
 
-  // Pin the task panel (the typography reference) with real text.
-  document.getElementById('task-panel-text').textContent =
-    'Fix the flux capacitor';
-  document.getElementById('task-panel').classList.add('visible');
+  // Open the transcript with its task panel (the typography
+  // reference), exactly as the daemon's setTaskText + clear pair
+  // starts a task.
+  // The chat is marked running like a real task's chat: a Chats-panel
+  // click below opens another chat, and the chat left behind is
+  // retired unless it is busy -- an idle transcript would vanish
+  // with its injected panels.
+  const tabId = window._testApi.getActiveTabId();
+  for (const ev of [
+    {type: 'setTaskText', tabId, text: 'Fix the flux capacitor'},
+    {type: 'clear', tabId},
+    {type: 'status', tabId, running: true},
+  ]) {
+    window.dispatchEvent(new MessageEvent('message', {data: ev}));
+  }
+  if (!out.querySelector(':scope > .task-panel > .task-panel-text')) {
+    throw new Error('the transcript did not open with its task panel');
+  }
 
   out.insertAdjacentHTML('beforeend', `
-    <div class="ev think">
-      <div class="lbl"><span class="arrow">\u25BE</span> Thinking</div>
-      <div class="cnt">Reasoning about the task panel type.</div>
-    </div>
+    <div class="think">Reasoning about the task panel type.</div>
     <div class="ev txt md-body">Plain assistant text with
       <code>inline code</code> and a table.
       <pre><code class="hljs language-python">print("x")</code></pre>
@@ -457,21 +479,34 @@ _EXPAND_GROUP_JS = r"""
   // running): open the injected chat's panel so its row lays out.
   const g = document.querySelector('#history-list .history-chat-group');
   if (g && g.classList.contains('collapsed')) {
+    // Expanding a panel also opens the chat's last task in a tab when
+    // no tab shows the chat yet; the injected transcript lives in the
+    // original (running, so not retired) tab, so come back to it
+    // (its output is saved and restored across the switch).  Chats
+    // have no tab row: the switch is the Chats-panel pick itself.
+    const before = window.kissActiveTabId();
     g.querySelector('.history-chat-header').click();
+    if (window.kissActiveTabId() !== before) {
+      window._testApi.switchToTab(before);
+    }
   }
   return g ? !g.classList.contains('collapsed') : false;
 })()
 """
 
 _PROBE_STYLES_JS = r"""(() => {
-  const tp = getComputedStyle(document.getElementById('task-panel'));
+  const tp = getComputedStyle(document.querySelector('#output .task-panel'));
+  const tpText = getComputedStyle(
+    document.querySelector('#output .task-panel .task-panel-text'),
+  );
+  const tpHeader = getComputedStyle(
+    document.querySelector('#output .task-panel .task-panel-h'),
+  );
 
-  // The thinking panel injected by _INJECT_TRANSCRIPT_JS: the task
-  // panel must paint the SAME background and foreground.
+  // The thinking text injected by _INJECT_TRANSCRIPT_JS: the task
+  // panel's header must paint the SAME foreground (var(--dim)).
   const think = document.querySelector('#output .think');
   const thinkCs = think ? getComputedStyle(think) : null;
-  const thinkCnt = think ? think.querySelector('.cnt') : null;
-  const thinkCntCs = thinkCnt ? getComputedStyle(thinkCnt) : null;
 
   // Resolve var(--accent) (the hue of the task panel's tint and
   // hairline) to rgb().
@@ -479,6 +514,8 @@ _PROBE_STYLES_JS = r"""(() => {
   accentProbe.style.color = 'var(--accent)';
   document.body.appendChild(accentProbe);
   const accentColor = getComputedStyle(accentProbe).color;
+  accentProbe.style.color = 'var(--fg)';
+  const fgColor = getComputedStyle(accentProbe).color;
   accentProbe.remove();
 
   // The old per-chat accent (djb2 hash of the chat id), resolved to an
@@ -517,15 +554,17 @@ _PROBE_STYLES_JS = r"""(() => {
     infoClipped = info.scrollWidth > info.clientWidth + 1;
   }
   return {
-    taskPanelFontSize: tp.fontSize,
-    taskPanelColor: tp.color,
+    taskPanelFontSize: tpText.fontSize,
+    taskPanelColor: tpText.color,
+    taskPanelHeaderColor: tpHeader.color,
     taskPanelBg: tp.backgroundColor,
     taskPanelBorderWidth: tp.borderTopWidth,
     taskPanelBorderStyle: tp.borderTopStyle,
     taskPanelBorderColor: tp.borderTopColor,
     thinkBg: thinkCs ? thinkCs.backgroundColor : 'MISSING',
-    thinkColor: thinkCntCs ? thinkCntCs.color : 'MISSING',
+    thinkColor: thinkCs ? thinkCs.color : 'MISSING',
     accentColor,
+    fgColor,
     infoLineRects,
     infoClipped,
     oldAccent,
@@ -569,6 +608,7 @@ _LEGACY_VIEW_PROBE_JS = r"""(() => {
     borderRightColor: cs.borderRightColor,
     borderLeftColor: cs.borderLeftColor,
     inlineStyle: row.getAttribute('style'),
+    activeRow: row.classList.contains('history-active-task'),
   };
   toggle.click();
   out.restoredGroups = list.querySelectorAll('.history-chat-group').length;
@@ -630,7 +670,7 @@ def test_live_task_panel_typography_and_history_rows(
     tmp_path: Path,
 ) -> None:
     """Served page + real Chromium: the pinned task panel keeps the
-    extension's look (the thinking panel's foreground over the accent
+    extension's look (the thinking text's foreground over the accent
     tint, 1px accent hairline) under the remote palette; chat headers
     are a faint neutral tint; history rows paint the per-chat color on
     the left border over a neutral background; all metadata flows as
@@ -956,7 +996,10 @@ def test_live_task_panel_typography_and_history_rows(
     assert legacy["borderRightWidth"] == legacy["borderLeftWidth"] == "1px", (
         "the legacy row carries no per-chat colour bar: " + repr(legacy)
     )
-    assert _alpha_of(legacy["borderRightColor"]) == 0, (
+    # The row of the task the chat on screen is bound to carries the
+    # accent outline of ``.running-item.history-active-task`` (pinned by
+    # test_history_panel_tints); every other legacy row has none.
+    assert legacy["activeRow"] or _alpha_of(legacy["borderRightColor"]) == 0, (
         "the legacy row's outline is transparent: " + repr(legacy)
     )
     assert legacy["inlineStyle"] is None, (
@@ -974,23 +1017,29 @@ def test_live_task_panel_typography_and_history_rows(
         "--vscode-editor-font-size: " + repr(probes)
     )
     assert probes["thinkColor"] != "MISSING", (
-        "the injected transcript must render a .think panel: " + repr(probes)
+        "the injected transcript must render a .think text block: " + repr(probes)
     )
-    assert probes["taskPanelColor"] == probes["thinkColor"], (
-        "the task panel text must use the SAME foreground as the "
-        "thinking panel (main.css --panel-fg: var(--dim)): " + repr(probes)
+    assert probes["taskPanelHeaderColor"] == probes["thinkColor"], (
+        "the task panel header must use the SAME foreground as the "
+        "thinking text (main.css .task-panel-h: var(--dim)): " + repr(probes)
     )
-    # The thinking panel is neutral (main.css --panel-tint, 4% of --fg);
-    # the task panel alone sits on the accent tint (--accent-tint, 8%)
-    # behind a 1px accent hairline (--accent-line).
-    assert 0.03 <= _alpha_of(probes["thinkBg"]) <= 0.05, (
-        "the thinking panel is a faint neutral tint: " + repr(probes)
+    assert probes["taskPanelColor"] == probes["fgColor"], (
+        "the task text reads like a user message, in the page foreground "
+        "(main.css .task-panel-text: var(--fg)): " + repr(probes)
+    )
+    # The thinking text is plain text inside the Thoughts panel, with no
+    # tint of its own; the task panel alone sits on the user bubble's
+    # accent wash (--bubble-user-tint, 16%, deeper than the 8%
+    # --accent-tint of other accent-marked panels) behind a 1px accent
+    # hairline (--accent-line).
+    assert _alpha_of(probes["thinkBg"]) == 0, (
+        "the thinking text paints no background of its own: " + repr(probes)
     )
     assert _hue_of(probes["taskPanelBg"]) == pytest.approx(
         _hue_of(probes["accentColor"]), abs=2
-    ), "the task panel background must be the accent tint: " + repr(probes)
-    assert 0.07 <= _alpha_of(probes["taskPanelBg"]) <= 0.09, (
-        "the task panel tint is 8% of the accent: " + repr(probes)
+    ), "the task panel background must be the accent wash: " + repr(probes)
+    assert 0.15 <= _alpha_of(probes["taskPanelBg"]) <= 0.17, (
+        "the task panel tint is 16% of the accent: " + repr(probes)
     )
     assert probes["taskPanelBorderStyle"] == "solid", probes
     assert probes["taskPanelBorderWidth"] == "1px", (

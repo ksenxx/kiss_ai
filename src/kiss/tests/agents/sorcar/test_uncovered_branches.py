@@ -9,12 +9,12 @@ from __future__ import annotations
 import pytest
 
 
-class TestRelentlessAgentDockerBash:
+class TestSorcarAgentDockerBash:
     def test_docker_bash_raises_without_manager(self) -> None:
-        from kiss.agents.sorcar.relentless_agent import RelentlessAgent
+        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
         from kiss.core.kiss_error import KISSError
 
-        agent = RelentlessAgent("test")
+        agent = SorcarAgent("test")
         agent._reset(
             model_name="gemini-3-flash-preview",
             max_sub_sessions=1,

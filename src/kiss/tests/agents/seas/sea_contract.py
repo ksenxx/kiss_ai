@@ -23,17 +23,39 @@ from typing import Any
 from kiss.agents.seas.base.base_sea import BaseSea
 
 REMOVED_GETTERS: tuple[str, ...] = (
-    "model", "work_dir", "chat_id", "docker_image", "model_config",
-    "max_budget", "tool_profile", "use_worktree", "auto_commit", "auto_classify",
-    "allow_fan_out", "use_web_tools", "use_memory", "dispatch_timeout",
-    "append_to_prompt", "append_to_system_prompt", "if_append_basic_tools",
-    "add_to_prompt", "add_to_system_prompt", "add_to_tools",
+    "model",
+    "work_dir",
+    "chat_id",
+    "docker_image",
+    "model_config",
+    "max_budget",
+    "tool_profile",
+    "use_worktree",
+    "auto_commit",
+    "auto_classify",
+    "allow_fan_out",
+    "use_web_tools",
+    "use_memory",
+    "dispatch_timeout",
+    "append_to_prompt",
+    "append_to_system_prompt",
+    "if_append_basic_tools",
+    "add_to_prompt",
+    "add_to_system_prompt",
+    "add_to_tools",
 )
 """Names the old contracts read as getters; none is read any more, on a module or a class."""
 
 MODULE_GETTERS: tuple[str, ...] = (
-    "description", "settings", "prompt", "system_prompt", "tools",
-    "tool_call_hook", "llm_call_hook", "register_as_model", "on_picked_as_model",
+    "description",
+    "settings",
+    "prompt",
+    "system_prompt",
+    "tools",
+    "tool_call_hook",
+    "llm_call_hook",
+    "register_as_model",
+    "on_picked_as_model",
 )
 """The contract methods: defined on the SEA class, never as module-level functions."""
 
@@ -41,8 +63,11 @@ MODULE_GETTERS: tuple[str, ...] = (
 def sea_class_of(module: ModuleType) -> type[BaseSea]:
     """Return the one :class:`BaseSea` subclass *module* defines itself."""
     classes = [
-        value for value in vars(module).values()
-        if isinstance(value, type) and issubclass(value, BaseSea) and value is not BaseSea
+        value
+        for value in vars(module).values()
+        if isinstance(value, type)
+        and issubclass(value, BaseSea)
+        and value is not BaseSea
         and value.__module__ == module.__name__
     ]
     assert len(classes) == 1, f"{module.__name__} defines {len(classes)} SEA classes"
@@ -67,3 +92,8 @@ def assert_no_removed_getters(sea: ModuleType) -> None:
     cls = sea_class_of(sea)
     for name in REMOVED_GETTERS:
         assert name not in vars(cls), f"{cls.__name__}.{name} is a removed getter"
+
+
+def system_message(request: dict[str, Any]) -> str:
+    """Return the system message text of one chat-completions *request*."""
+    return str(next(m for m in request["messages"] if m["role"] == "system")["content"])

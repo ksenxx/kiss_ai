@@ -5,14 +5,13 @@
 
 // An ask_user_question blocks the agent until the user answers, so on
 // every surface a NEW question
-//  * switches the client to the asking tab,
-//  * raises a sticky "Waiting for your answer" toast (cleared by the
-//    user's X, or when the question is answered, its task ends or its
-//    tab closes), and
-//  * in VS Code tells the host (`askWaiting` / `askWaitingDone`) so the
-//    sidebar view or editor panel comes forward too.
-// A replayed copy of a question already pending here changes nothing,
-// and the remote webapp never posts the host-only messages to the daemon.
+//  * switches the client to the asking tab, and
+//  * in VS Code tells the host (`revealForQuestion`) so the sidebar view
+//    or editor panel comes forward too.
+// The Question panel in the transcript is the whole notice: no toast is
+// raised in the webview. A replayed copy of a question already pending
+// here changes nothing, and the remote webapp never posts the host-only
+// message to the daemon.
 
 'use strict';
 
@@ -79,16 +78,26 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// The tab's entry on the group strip (#tab-list): rendered for the chat
+// on screen and its group only, so a background chat has none.
 function tabElement(win, tabId) {
   return win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
   );
 }
 
+// The record of an open tab, or null once it is closed.
+function tabRecord(win, tabId) {
+  return win._testApi.openTabs().find(t => t.id === tabId) || null;
+}
+
+// A tab on the strip is clicked there; a background chat is picked the
+// way the Chats panel does it.
 function clickTab(win, tabId) {
+  assert.ok(tabRecord(win, tabId), `tab ${tabId} must exist`);
   const el = tabElement(win, tabId);
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  else win._testApi.switchToTab(tabId);
 }
 
 // The composer is in answer mode while the tab on screen has a question.
@@ -96,17 +105,21 @@ function answering(win) {
   return win.document.body.classList.contains('ask-answering');
 }
 
-function attentionGlyph(win, tabId) {
-  const el = tabElement(win, tabId);
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  const marker = el.querySelector('.chat-tab-attention');
-  return marker ? marker.textContent : '';
+// Whether the tab is flagged as waiting for an answer (the strip's "?"
+// mark when the tab is rendered there).
+function askPending(win, tabId) {
+  const rec = tabRecord(win, tabId);
+  assert.ok(rec, `tab ${tabId} must exist`);
+  return rec.askPending;
 }
 
-function waitingToast(win, tabId) {
-  return win.document.querySelector(
-    `.kiss-notification[data-notification-id=${JSON.stringify('ask:' + tabId)}]`,
-  );
+// Every toast on screen: a question must never raise one.
+function toasts(win) {
+  return win.document.querySelectorAll('.kiss-notification');
+}
+
+function assertNoToast(win, where) {
+  assert.strictEqual(toasts(win).length, 0, 'no toast ' + where);
 }
 
 // Messages come from the JSDOM realm (a different Object prototype), so
@@ -115,7 +128,7 @@ function hostMessages(posted, type) {
   return JSON.parse(JSON.stringify(posted.filter(m => m.type === type)));
 }
 
-function testNewQuestionSwitchesTabAndRaisesToast() {
+function testNewQuestionSwitchesTabWithoutToast() {
   const {win, posted} = makeWebview();
   const api = win._testApi;
   const questionTab = api.getActiveTabId();
@@ -138,43 +151,24 @@ function testNewQuestionSwitchesTabAndRaisesToast() {
     questionTab,
     'a new question switches to its tab, user activity notwithstanding',
   );
-  assert.strictEqual(
-    win.document.querySelector('.chat-tab.active').dataset.tabId,
-    questionTab,
-  );
   assert.ok(answering(win), 'the composer answers the question at once');
-  assert.strictEqual(attentionGlyph(win, questionTab), '');
-
-  const toast = waitingToast(win, questionTab);
-  assert.ok(toast, 'a waiting toast is on screen');
-  assert.strictEqual(toast.dataset.notificationSticky, 'true');
-  assert.strictEqual(
-    toast.querySelector('.kiss-notification-title').textContent,
-    'Waiting for your answer',
-  );
-  assert.strictEqual(
-    toast.querySelector('.kiss-notification-message').textContent,
-    'Please provide the deployment token.',
-  );
-  assert.strictEqual(
-    toast.getAttribute('aria-label'),
-    'Waiting for your answer: Please provide the deployment token.',
-  );
-  assert.deepStrictEqual(hostMessages(posted, 'askWaiting'), [
-    {
-      type: 'askWaiting',
-      tabId: questionTab,
-      question: 'Please provide the deployment token.',
-    },
+  assert.ok(askPending(win, questionTab));
+  assertNoToast(win, 'when the question arrives');
+  assert.deepStrictEqual(hostMessages(posted, 'revealForQuestion'), [
+    {type: 'revealForQuestion'},
   ]);
+  assert.ok(
+    !posted.some(m => m.type === 'askWaiting' || m.type === 'askWaitingDone'),
+    'the retired waiting-notice messages are never posted',
+  );
 
-  // The user goes back to their own tab: the toast stays, the waiting
-  // tab is flagged, and the toast's button brings them back.
+  // The user goes back to their own tab: the waiting tab stays flagged
+  // and nothing else nags them.
   clickTab(win, otherTab);
   assert.strictEqual(api.getActiveTabId(), otherTab);
   assert.ok(!answering(win));
-  assert.strictEqual(attentionGlyph(win, questionTab), '?');
-  assert.ok(waitingToast(win, questionTab), 'the toast outlives the switch');
+  assert.ok(askPending(win, questionTab));
+  assertNoToast(win, 'after leaving the asking tab');
 
   // A replay of the same pending question (another client reloaded)
   // neither switches tabs again nor re-notifies the host.
@@ -184,23 +178,12 @@ function testNewQuestionSwitchesTabAndRaisesToast() {
     tabId: questionTab,
   });
   assert.strictEqual(api.getActiveTabId(), otherTab);
-  assert.strictEqual(hostMessages(posted, 'askWaiting').length, 1);
+  assert.strictEqual(hostMessages(posted, 'revealForQuestion').length, 1);
+  assertNoToast(win, 'on a replay of the pending question');
 
-  const button = waitingToast(win, questionTab).querySelector(
-    '.kiss-notification-action',
-  );
-  assert.strictEqual(button.textContent, 'Show question');
-  button.click();
-  assert.strictEqual(api.getActiveTabId(), questionTab);
+  // Answering retires the question.
+  clickTab(win, questionTab);
   assert.ok(answering(win));
-  assert.strictEqual(
-    waitingToast(win, questionTab),
-    null,
-    'using the toast button dismisses the toast',
-  );
-  assert.strictEqual(hostMessages(posted, 'askWaitingDone').length, 0);
-
-  // Answering retires the question everywhere.
   win.document.getElementById('task-input').value = 'tok_live_123';
   win.document.getElementById('send-btn').click();
   assert.ok(
@@ -211,42 +194,15 @@ function testNewQuestionSwitchesTabAndRaisesToast() {
         m.answer === 'tok_live_123',
     ),
   );
-  assert.deepStrictEqual(hostMessages(posted, 'askWaitingDone'), [
-    {type: 'askWaitingDone', tabId: questionTab},
-  ]);
   assert.ok(!answering(win));
+  assert.ok(!askPending(win, questionTab), 'the flag goes with the answer');
+  assertNoToast(win, 'after answering');
 
   win.close();
-  console.log('  ok - a new question switches tabs and raises the toast');
+  console.log('  ok - a new question switches tabs and raises no toast');
 }
 
-function testDismissedToastKeepsTheQuestion() {
-  const {win, posted} = makeWebview();
-  const api = win._testApi;
-  const tab = api.getActiveTabId();
-  send(win, {type: 'askUser', question: 'Continue?', tabId: tab});
-  const toast = waitingToast(win, tab);
-  assert.ok(toast);
-
-  toast.querySelector('.kiss-notification-close').click();
-  assert.strictEqual(waitingToast(win, tab), null, 'the X clears the toast');
-  assert.ok(answering(win), 'the question itself is still pending');
-  assert.strictEqual(
-    hostMessages(posted, 'askWaitingDone').length,
-    0,
-    'clearing the toast is not an answer',
-  );
-
-  send(win, {type: 'askUserDone', tabId: tab});
-  assert.ok(!answering(win));
-  assert.deepStrictEqual(hostMessages(posted, 'askWaitingDone'), [
-    {type: 'askWaitingDone', tabId: tab},
-  ]);
-  win.close();
-  console.log('  ok - the X clears the toast but keeps the question');
-}
-
-function testTaskEndAndAskUserDoneClearTheToast() {
+function testTaskEndAndAskUserDoneRaiseNoToast() {
   for (const retire of [
     {type: 'askUserDone'},
     {type: 'task_done', success: true},
@@ -256,43 +212,38 @@ function testTaskEndAndAskUserDoneClearTheToast() {
     const api = win._testApi;
     const tab = api.getActiveTabId();
     send(win, {type: 'askUser', question: 'Which branch?', tabId: tab});
-    assert.ok(waitingToast(win, tab), retire.type + ': toast shown first');
+    assert.ok(answering(win), retire.type + ': answer mode entered');
+    assertNoToast(win, retire.type + ': while the question is pending');
 
     send(win, Object.assign({tabId: tab}, retire));
-    assert.strictEqual(
-      waitingToast(win, tab),
-      null,
-      retire.type + ' must clear the waiting toast',
-    );
-    assert.deepStrictEqual(
-      hostMessages(posted, 'askWaitingDone'),
-      [{type: 'askWaitingDone', tabId: tab}],
-      retire.type + ' must tell the host once',
+    assert.ok(!answering(win), retire.type + ' retires the question');
+    assertNoToast(win, retire.type + ': after the question is retired');
+    assert.ok(
+      !posted.some(m => m.type === 'askWaitingDone'),
+      retire.type + ': nothing to tell the host',
     );
     win.close();
   }
-  console.log('  ok - answering or ending the task clears the toast');
+  console.log('  ok - answering or ending the task raises no toast either');
 }
 
-function testClosingTheAskingTabClearsTheToast() {
+function testClosingTheAskingTabPostsNothingExtra() {
   const {win, posted} = makeWebview();
   const api = win._testApi;
   const askTab = api.getActiveTabId();
   api.createNewTab();
   send(win, {type: 'askUser', question: 'Close me?', tabId: askTab});
   assert.strictEqual(api.getActiveTabId(), askTab);
-  assert.ok(waitingToast(win, askTab));
 
   const closeBtn = tabElement(win, askTab).querySelector('.chat-tab-close');
   assert.ok(closeBtn, 'the tab has a close button');
   closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.strictEqual(tabElement(win, askTab), null, 'the tab is gone');
-  assert.strictEqual(waitingToast(win, askTab), null, 'and so is its toast');
-  assert.deepStrictEqual(hostMessages(posted, 'askWaitingDone'), [
-    {type: 'askWaitingDone', tabId: askTab},
-  ]);
+  assert.strictEqual(tabRecord(win, askTab), null, 'the tab is gone');
+  assert.ok(!answering(win));
+  assertNoToast(win, 'after closing the asking tab');
+  assert.ok(!posted.some(m => m.type === 'askWaitingDone'));
   win.close();
-  console.log('  ok - closing the asking tab clears the toast');
+  console.log('  ok - closing the asking tab leaves nothing behind');
 }
 
 function testAskUserForUnknownTabIsIgnored() {
@@ -308,15 +259,15 @@ function testAskUserForUnknownTabIsIgnored() {
 
   assert.strictEqual(api.getActiveTabId(), activeBefore);
   assert.ok(!answering(win));
-  assert.strictEqual(waitingToast(win, 'foreign-window-tab'), null);
-  assert.strictEqual(hostMessages(posted, 'askWaiting').length, 0);
+  assertNoToast(win, 'for a foreign tab');
+  assert.strictEqual(hostMessages(posted, 'revealForQuestion').length, 0);
   win.close();
   console.log('  ok - foreign-window askUser is ignored');
 }
 
 // A reload while the user was typing an answer in another tab: the
 // persisted draft comes back without yanking them off the tab they were
-// on, and the toast reminds them the agent is still waiting.
+// on.
 function testReloadWithAnswerDraftRestoresInPlace() {
   const first = makeWebview({remote: true});
   send(first.win, {type: 'daemonStatus', connected: true});
@@ -351,7 +302,7 @@ function testReloadWithAnswerDraftRestoresInPlace() {
     't2',
     'a question already being answered here does not switch tabs',
   );
-  assert.ok(waitingToast(second.win, 't1'), 'the reminder toast is back');
+  assertNoToast(second.win, 'after the reload');
   clickTab(second.win, 't1');
   assert.strictEqual(
     second.win.document.getElementById('task-input').value,
@@ -390,18 +341,19 @@ function testReloadWithoutAnswerDraftDoesNotSwitch() {
   });
   send(second.win, {type: 'askUser', tabId: 't1', question: 'Deploy?'});
   assert.strictEqual(second.win._testApi.getActiveTabId(), 't2');
-  assert.ok(waitingToast(second.win, 't1'));
+  assertNoToast(second.win, 'after a reload without a draft');
   // A different question on that tab is new again.
   send(second.win, {type: 'askUserDone', tabId: 't1'});
   send(second.win, {type: 'askUser', tabId: 't1', question: 'Rollback?'});
   assert.strictEqual(second.win._testApi.getActiveTabId(), 't1');
+  assertNoToast(second.win, 'for the next question');
   second.win.close();
   console.log('  ok - a reload without a typed answer stays put');
 }
 
 // A tab closed from another surface arrives as a tabs_state snapshot
-// without it; its toast must not outlive it.
-function testMirroredCloseClearsTheToast() {
+// without it.
+function testMirroredCloseRemovesTheTab() {
   const {win, posted} = makeWebview();
   send(win, {type: 'daemonStatus', connected: true});
   send(win, {
@@ -412,18 +364,17 @@ function testMirroredCloseClearsTheToast() {
     ],
   });
   send(win, {type: 'askUser', tabId: 't1', question: 'Still there?'});
-  assert.ok(waitingToast(win, 't1'));
+  assert.ok(answering(win));
   send(win, {
     type: 'tabs_state',
     tabs: [{tabId: 't2', chatId: 'c2', title: 't2', workDir: ''}],
   });
-  assert.strictEqual(tabElement(win, 't1'), null, 'the tab was removed');
-  assert.strictEqual(waitingToast(win, 't1'), null, 'and its toast with it');
-  assert.deepStrictEqual(hostMessages(posted, 'askWaitingDone'), [
-    {type: 'askWaitingDone', tabId: 't1'},
-  ]);
+  assert.strictEqual(tabRecord(win, 't1'), null, 'the tab was removed');
+  assert.ok(!answering(win), 'and its question with it');
+  assertNoToast(win, 'after a mirrored close');
+  assert.ok(!posted.some(m => m.type === 'askWaitingDone'));
   win.close();
-  console.log('  ok - a close mirrored from another surface clears the toast');
+  console.log('  ok - a close mirrored from another surface removes the tab');
 }
 
 function testRemoteWebappPostsNothingToTheDaemon() {
@@ -439,34 +390,31 @@ function testRemoteWebappPostsNothingToTheDaemon() {
   clickTab(win, 't2');
   send(win, {type: 'askUser', tabId: 't1', question: 'Remote?'});
   assert.strictEqual(win._testApi.getActiveTabId(), 't1', 'switched');
-  assert.ok(waitingToast(win, 't1'), 'toast shown');
+  assertNoToast(win, 'on the remote webapp');
   send(win, {type: 'askUserDone', tabId: 't1'});
-  assert.strictEqual(waitingToast(win, 't1'), null);
   assert.strictEqual(
-    hostMessages(posted, 'askWaiting').length +
-      hostMessages(posted, 'askWaitingDone').length,
+    hostMessages(posted, 'revealForQuestion').length,
     0,
-    'host-only messages never go to the daemon',
+    'the host-only message never goes to the daemon',
   );
   win.close();
-  console.log('  ok - remote webapp: toast and switch, no host messages');
+  console.log('  ok - remote webapp: switch only, no host message');
 }
 
 function runTests() {
-  testNewQuestionSwitchesTabAndRaisesToast();
-  testDismissedToastKeepsTheQuestion();
-  testTaskEndAndAskUserDoneClearTheToast();
-  testClosingTheAskingTabClearsTheToast();
+  testNewQuestionSwitchesTabWithoutToast();
+  testTaskEndAndAskUserDoneRaiseNoToast();
+  testClosingTheAskingTabPostsNothingExtra();
   testAskUserForUnknownTabIsIgnored();
   testReloadWithAnswerDraftRestoresInPlace();
   testReloadWithoutAnswerDraftDoesNotSwitch();
-  testMirroredCloseClearsTheToast();
+  testMirroredCloseRemovesTheTab();
   testRemoteWebappPostsNothingToTheDaemon();
 }
 
 try {
   runTests();
-  console.log('\n9 passed, 0 failed');
+  console.log('\n8 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

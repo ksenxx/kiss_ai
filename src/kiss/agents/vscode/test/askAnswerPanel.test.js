@@ -239,7 +239,7 @@ function testBackgroundTabAnswerSurvivesTabSwitch() {
     'a background tab answer must not render in the active tab',
   );
 
-  win.document.querySelector('.chat-tab[data-tab-id="' + tab1 + '"]').click();
+  api.switchToTab(tab1);
   assert.strictEqual(api.getActiveTabId(), tab1);
   const panel = win.document.querySelector('#output .ev.ask-answer');
   assertAnswerPanel(win, panel);
@@ -366,7 +366,7 @@ function testStaleAnswerForReusedBackgroundTabIsDropped() {
   assert.notStrictEqual(api.getActiveTabId(), tab1);
 
   send(win, askAnswerEvent({tabId: tab1, taskId: '100'}));
-  win.document.querySelector('.chat-tab[data-tab-id="' + tab1 + '"]').click();
+  api.switchToTab(tab1);
   assert.strictEqual(api.getActiveTabId(), tab1);
   assert.strictEqual(
     win.document.querySelector('#output .ev.ask-answer'),

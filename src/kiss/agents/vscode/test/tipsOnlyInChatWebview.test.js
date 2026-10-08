@@ -71,12 +71,12 @@ function loadChatDom(bodyAttrs) {
     };
   };
   // Same script order as chat.html: the empty VS Code bootstrap, then
-  // tips.js, then main.js.
+  // panelCopy.js, tips.js, then main.js.
   win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
   win.eval('window.__TIPS__ = {"tips":[],"show":false,"version":""};');
+  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(
     fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=tips-only-in-chat-main.js',

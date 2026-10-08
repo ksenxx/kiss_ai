@@ -43,15 +43,14 @@ import json
 import os
 import socket
 import sys
-import threading
 import time
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents.github.github_sea import GitHubChannelBackend
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth import client as muse_client
@@ -72,6 +71,11 @@ from kiss.agents.third_party_agents.muse_auth.client import (
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
+)
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingServer,
+    recording_server,
+    serve_recording,
 )
 
 _REAL_DRIVE_TOKEN = "real-secret-token-drive"
@@ -145,22 +149,10 @@ class _ApiHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-class _ApiServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records requests for verification."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _ApiHandler)
-        self.requests: list[dict[str, str]] = []
-
-
 @pytest.fixture()
-def api_server() -> Any:
+def api_server() -> Iterator[RecordingServer]:
     """Run the emulated REST API on a loopback port."""
-    server = _ApiServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    stop_http_server(server, thread)
+    yield from serve_recording(_ApiHandler)
 
 
 @pytest.fixture()
@@ -198,7 +190,10 @@ class _DriveClient:
         """Send one request to ``/files``; errors become ``ok: false``."""
         try:
             resp = self.session.request(
-                method, self.base_url + "/files", json=payload, timeout=10,
+                method,
+                self.base_url + "/files",
+                json=payload,
+                timeout=10,
                 headers={"Authorization": f"Bearer {self.token}"},
             )
         except MuseAuthError as e:
@@ -216,7 +211,7 @@ class _DriveClient:
         return self._call("POST", {"name": name, "mimeType": "application/vnd.google-apps.folder"})
 
 
-def test_surrogate_swap_read_allowed(muse_env: Path, api_server: _ApiServer) -> None:
+def test_surrogate_swap_read_allowed(muse_env: Path, api_server: RecordingServer) -> None:
     """Reads run without approval and the API sees only the real token."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
@@ -236,7 +231,7 @@ def test_surrogate_swap_read_allowed(muse_env: Path, api_server: _ApiServer) -> 
     assert not legacy.exists()
 
 
-def test_write_needs_grant_once_consumed(muse_env: Path, api_server: _ApiServer) -> None:
+def test_write_needs_grant_once_consumed(muse_env: Path, api_server: RecordingServer) -> None:
     """Writes ask for approval; a once grant allows exactly one write."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
@@ -263,7 +258,7 @@ def test_write_needs_grant_once_consumed(muse_env: Path, api_server: _ApiServer)
     assert backend.create_folder("blocked-3")["ok"] is False
 
 
-def test_ttl_and_session_grants(muse_env: Path, api_server: _ApiServer) -> None:
+def test_ttl_and_session_grants(muse_env: Path, api_server: RecordingServer) -> None:
     """TTL grants expire; session grants die with the daemon."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
@@ -287,7 +282,7 @@ def test_ttl_and_session_grants(muse_env: Path, api_server: _ApiServer) -> None:
     assert backend2.create_folder("new-session")["ok"] is False
 
 
-def test_host_acl_blocks_unlisted_host(muse_env: Path, api_server: _ApiServer) -> None:
+def test_host_acl_blocks_unlisted_host(muse_env: Path, api_server: RecordingServer) -> None:
     """A Drive surrogate cannot be spent against a non-Drive host."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
     port = api_server.server_address[1]
@@ -299,7 +294,7 @@ def test_host_acl_blocks_unlisted_host(muse_env: Path, api_server: _ApiServer) -
     assert not api_server.requests
 
 
-def test_stale_surrogate_raises(muse_env: Path, api_server: _ApiServer) -> None:
+def test_stale_surrogate_raises(muse_env: Path, api_server: RecordingServer) -> None:
     """A surrogate from a dead daemon is rejected, not silently honored."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
     handle = mint_surrogate("google_drive")
@@ -314,7 +309,9 @@ def test_stale_surrogate_raises(muse_env: Path, api_server: _ApiServer) -> None:
         )
 
 
-def test_missing_surrogate_and_service_mismatch(muse_env: Path, api_server: _ApiServer) -> None:
+def test_missing_surrogate_and_service_mismatch(
+    muse_env: Path, api_server: RecordingServer
+) -> None:
     """Requests without a surrogate, or claiming the wrong service, fail."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
     port = api_server.server_address[1]
@@ -329,7 +326,7 @@ def test_missing_surrogate_and_service_mismatch(muse_env: Path, api_server: _Api
         mismatched.get(url, headers={"Authorization": f"Bearer {handle.token}"})
 
 
-def test_github_bearer_service(muse_env: Path, api_server: _ApiServer) -> None:
+def test_github_bearer_service(muse_env: Path, api_server: RecordingServer) -> None:
     """A bearer-token connector auto-enrolls and swaps at the boundary."""
     config_dir = muse_env / "third_party_agents" / "github"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -359,7 +356,7 @@ def test_github_bearer_service(muse_env: Path, api_server: _ApiServer) -> None:
     assert bearer_surrogate("github", "") == ""
 
 
-def test_audit_log_and_no_secrets(muse_env: Path, api_server: _ApiServer) -> None:
+def test_audit_log_and_no_secrets(muse_env: Path, api_server: RecordingServer) -> None:
     """Every decision is audited and the audit never leaks tokens."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
     backend = _DriveClient(f"http://127.0.0.1:{api_server.server_address[1]}")
@@ -374,7 +371,7 @@ def test_audit_log_and_no_secrets(muse_env: Path, api_server: _ApiServer) -> Non
     assert all(r["service"] == "google_drive" for r in records)
 
 
-def test_unrefreshable_vault_credential_errors(muse_env: Path, api_server: _ApiServer) -> None:
+def test_unrefreshable_vault_credential_errors(muse_env: Path, api_server: RecordingServer) -> None:
     """A vault credential without token or refresh_token fails clearly."""
     store_credentials(
         "google_drive", {"refresh_token": "", "client_id": "c", "client_secret": "s"}, []
@@ -416,8 +413,7 @@ def test_cli_status_grant_import_audit(muse_env: Path, capsys: pytest.CaptureFix
     assert muse_cli.main(["import", "unknown_service"]) == 1
 
 
-def test_legacy_mode_untouched(isolated_kiss_home: Path,
-                               monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_mode_untouched(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """With KISS_MUSE_AUTH=0, the legacy paths are fully preserved."""
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     assert not muse_auth_enabled()
@@ -425,8 +421,9 @@ def test_legacy_mode_untouched(isolated_kiss_home: Path,
     assert action_class("Post") == "write"
 
 
-def test_muse_auth_enabled_by_default(isolated_kiss_home: Path,
-                                      monkeypatch: pytest.MonkeyPatch) -> None:
+def test_muse_auth_enabled_by_default(
+    isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Muse-auth defaults on where the daemon can run, unless explicitly off.
 
     The platform default is ``platform_supports_muse_daemon()``: True on
@@ -434,6 +431,7 @@ def test_muse_auth_enabled_by_default(isolated_kiss_home: Path,
     branches are exercised for real by running the suite on each OS.
     """
     from kiss.agents.third_party_agents.muse_auth._common import platform_supports_muse_daemon
+
     default_on = platform_supports_muse_daemon()
     assert default_on == hasattr(socket, "SO_PEERCRED")
 
@@ -582,7 +580,7 @@ def test_cli_entrypoints_survive_missing_fcntl(isolated_kiss_home: Path) -> None
     assert "govee-usage-ok" in result.stdout
 
 
-def test_boundary_hardening(muse_env: Path, api_server: _ApiServer) -> None:
+def test_boundary_hardening(muse_env: Path, api_server: RecordingServer) -> None:
     """Traversal names, userinfo URLs, plaintext hosts, and bad TTLs fail."""
     with pytest.raises(MuseAuthError, match="invalid service name"):
         store_credentials("../evil", {"kind": "bearer", "token": "x"}, [])
@@ -617,8 +615,12 @@ def test_boundary_hardening(muse_env: Path, api_server: _ApiServer) -> None:
     # Duplicate case-variant Authorization headers cannot smuggle a
     # value past the swap: exactly one real header reaches the API.
     reply = muse_client._boundary_call(
-        "google_drive", "GET", f"http://127.0.0.1:{port}/drive/v3/files",
-        {"Authorization": f"Bearer {handle.token}", "authorization": "Bearer evil"}, b"", 10,
+        "google_drive",
+        "GET",
+        f"http://127.0.0.1:{port}/drive/v3/files",
+        {"Authorization": f"Bearer {handle.token}", "authorization": "Bearer evil"},
+        b"",
+        10,
     )
     assert reply["ok"] is True and reply["status"] == 200
     assert api_server.requests[-1]["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}"
@@ -629,7 +631,7 @@ def test_boundary_hardening(muse_env: Path, api_server: _ApiServer) -> None:
 
 
 def test_github_read_only_survives_token_migration(
-    muse_env: Path, api_server: _ApiServer
+    muse_env: Path, api_server: RecordingServer
 ) -> None:
     """read_only from config.json is honored after the token moves to the vault."""
     config_dir = muse_env / "third_party_agents" / "github"
@@ -647,7 +649,7 @@ def test_github_read_only_survives_token_migration(
     assert backend2._token.startswith("muse-sgt.github.")
 
 
-def test_reachable_edge_paths(muse_env: Path, api_server: _ApiServer) -> None:
+def test_reachable_edge_paths(muse_env: Path, api_server: RecordingServer) -> None:
     """Exercise reachable daemon/client/sentinel/vault edge branches.
 
     Covers the requests-style verb wrappers, unknown ops, malformed
@@ -701,14 +703,12 @@ def test_reachable_edge_paths(muse_env: Path, api_server: _ApiServer) -> None:
     assert muse_cli.main(["audit"]) == 0
 
     # An unknown grant scope reaching the daemon is reported, not crashed.
-    reply = mc._op(
-        {"op": "grant", "service": "google_drive", "action": "write", "scope": "bogus"}
-    )
+    reply = mc._op({"op": "grant", "service": "google_drive", "action": "write", "scope": "bogus"})
     assert reply["ok"] is False
     assert "unknown grant scope" in reply["error"]
 
 
-def test_policy_deny_and_malformed_policy(muse_env: Path, api_server: _ApiServer) -> None:
+def test_policy_deny_and_malformed_policy(muse_env: Path, api_server: RecordingServer) -> None:
     """An explicit deny rule blocks reads; a malformed policy falls back safely."""
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
@@ -739,7 +739,7 @@ def test_policy_deny_and_malformed_policy(muse_env: Path, api_server: _ApiServer
     assert "allowlist" in json.dumps(result)
 
 
-def test_caller_headers_preserved_at_boundary(muse_env: Path, api_server: _ApiServer) -> None:
+def test_caller_headers_preserved_at_boundary(muse_env: Path, api_server: RecordingServer) -> None:
     """Non-Authorization request headers survive the surrogate swap."""
     store_credentials("notion", {"kind": "bearer", "token": "ntn_real_secret"}, [])
     handle = mint_surrogate("notion")
@@ -794,21 +794,17 @@ class _RedirectHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-class _RedirectServer(ThreadedHTTPServer):
+class _RedirectServer(RecordingServer):
     """Redirect-capable emulated server recording requests."""
 
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _RedirectHandler)
-        self.requests: list[dict[str, str]] = []
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
         self.redirect_to = "/final"
 
 
 def test_boundary_follows_same_host_redirect_with_token(muse_env: Path) -> None:
     """A same-host redirect is followed and still carries the real token."""
-    server = _RedirectServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
+    with recording_server(_RedirectHandler, _RedirectServer) as server:
         store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
         handle = mint_surrogate("google_drive")
         assert handle is not None
@@ -823,36 +819,26 @@ def test_boundary_follows_same_host_redirect_with_token(muse_env: Path) -> None:
         # Both hops saw the real token (same allowlisted host).
         assert [r["path"] for r in server.requests] == ["/start", "/final"]
         assert all(r["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}" for r in server.requests)
-    finally:
-        stop_http_server(server, thread)
 
 
 def test_boundary_strips_token_on_cross_host_redirect(muse_env: Path) -> None:
     """A cross-host redirect is followed WITHOUT leaking the real token."""
-    downstream = _RedirectServer(("127.0.0.1", 0))
-    dthread = threading.Thread(target=downstream.serve_forever, daemon=True)
-    dthread.start()
-    try:
-        upstream = _RedirectServer(("127.0.0.1", 0))
+    with (
+        recording_server(_RedirectHandler, _RedirectServer) as downstream,
+        recording_server(_RedirectHandler, _RedirectServer) as upstream,
+    ):
         upstream.redirect_to = f"http://localhost:{downstream.server_address[1]}/final"
-        uthread = threading.Thread(target=upstream.serve_forever, daemon=True)
-        uthread.start()
-        try:
-            store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
-            handle = mint_surrogate("google_drive")
-            assert handle is not None
-            session = MuseBoundarySession("google_drive")
-            port = upstream.server_address[1]
-            resp = session.get(
-                f"http://127.0.0.1:{port}/start",
-                headers={"Authorization": f"Bearer {handle.token}"},
-            )
-            assert resp.status_code == 200
-            # The upstream (allowlisted) host saw the real token; the
-            # cross-host (localhost, not allowlisted) target did NOT.
-            assert upstream.requests[0]["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}"
-            assert downstream.requests[-1]["auth"] == ""
-        finally:
-            stop_http_server(upstream, uthread)
-    finally:
-        stop_http_server(downstream, dthread)
+        store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
+        handle = mint_surrogate("google_drive")
+        assert handle is not None
+        session = MuseBoundarySession("google_drive")
+        port = upstream.server_address[1]
+        resp = session.get(
+            f"http://127.0.0.1:{port}/start",
+            headers={"Authorization": f"Bearer {handle.token}"},
+        )
+        assert resp.status_code == 200
+        # The upstream (allowlisted) host saw the real token; the
+        # cross-host (localhost, not allowlisted) target did NOT.
+        assert upstream.requests[0]["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}"
+        assert downstream.requests[-1]["auth"] == ""

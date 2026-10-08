@@ -53,7 +53,7 @@ class TestAdjacentSkipsSubagent:
 
     def _mark_subagent(self, task_id: str, parent_task_id: str) -> None:
         """Persist the subagent marker on a task_history row, mirroring
-        what :class:`ChatSorcarAgent._run_tasks_parallel` writes."""
+        what a daemon-dispatched sub-agent's :meth:`ChatSorcarAgent.run` writes."""
         th._save_task_extra(
             {"subagent": {"parent_task_id": parent_task_id}},
             task_id=task_id,

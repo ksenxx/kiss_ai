@@ -36,6 +36,7 @@ occupancy, so the backstop is a no-op (``stranded_repo is None``).
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as _persistence
@@ -312,11 +313,19 @@ class TestManualCommitAndDiscardTriggerMerge(_DeferredMergeBase):
         self._assert_still_waiting()
         self.events.clear()
 
-        self.server._run_autocommit_job(_DIRECT_TAB, self.repo, Path(self.repo))
+        # The "Git Commit" button's command: commits on a worker thread,
+        # re-arms the tab, then merges the waiting worktree.
+        self.server._cmd_autocommit_action({"tabId": _DIRECT_TAB, "workDir": self.repo})
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not [
+            e for e in self._worktree_results() if e.get("tabId") == _WT_TAB
+        ]:
+            time.sleep(0.05)
 
         assert not self.server._main_dirty_files(self.repo)
         self._assert_merged()
         assert (Path(self.repo) / "seed.txt").read_text() == "agent output\n"
+        assert _DIRECT_TAB not in self.server._autocommit_tabs, "the tab is re-armed"
 
     def test_main_tree_discard_merges_the_waiting_worktree(self) -> None:
         self._strand_worktree()

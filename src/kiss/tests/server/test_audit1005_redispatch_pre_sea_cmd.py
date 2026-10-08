@@ -9,7 +9,7 @@ as the tab's next run (``_redispatch_leftover_prompts``) — "what would
 have happened had the user typed one second later".  The follow-up is
 built from the finished run's ``run`` command, which ``_apply_sea``
 had rewritten IN PLACE: a ``/xxx text`` slash command had become a run
-of the SEA ``xxx`` (``agentPath`` set, ``prompt`` replaced by the
+of the SEA ``xxx`` (``seaPath`` set, ``prompt`` replaced by the
 trailing text) and the SEA's pinned settings had overwritten the
 user's.  A follow-up typed during a ``/sh ls`` run was therefore
 re-submitted as another run of the ``sh`` SEA — the SEA executed
@@ -181,6 +181,6 @@ def test_followup_after_slash_run_is_a_plain_run(
     assert st is not None and st.task_thread is None
     assert st.last_user_prompt == late
     # The SEA was executed by the slash command only; the follow-up is
-    # the user's plain prompt (no ``agentPath``), so it did not run the
+    # the user's plain prompt (no ``seaPath``), so it did not run the
     # SEA a second time.
     assert marker.read_text(encoding="utf-8").count("executed") == 1

@@ -28,8 +28,6 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import pytest
-
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
@@ -38,7 +36,6 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_context,
     _save_task_result,
 )
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 def _retry_on_busy[T](op: Callable[[], T], attempts: int = 8) -> T:
@@ -226,10 +223,10 @@ class TestSequentialSharedChatId:
 
 
 class TestParallelFlowSimulation:
-    """Simulate the _run_tasks_parallel flow: parent + sequential sub-agents.
+    """Simulate the run_parallel flow: parent + sequential sub-agents.
 
-    The _run_tasks_parallel method creates ChatSorcarAgent sub-agents
-    that share the parent's chat_id.  Here we simulate that flow
+    A ``run_parallel`` child is a ``ChatSorcarAgent`` sub-task that
+    shares the parent's chat_id.  Here we simulate that flow
     sequentially to verify chat_id propagation without SQLite
     concurrency issues.
     """
@@ -250,7 +247,7 @@ class TestParallelFlowSimulation:
     def test_parent_then_sub_agents_share_chat_id(self) -> None:
         """Parent runs, then sub-agents with same chat_id accumulate in session.
 
-        Replicates the _run_tasks_parallel flow: parent establishes
+        Replicates the run_parallel flow: parent establishes
         chat_id, sub-agents resume it.
         """
         model_config = {"base_url": self.url, "api_key": "test-key"}
@@ -573,39 +570,3 @@ class TestConcurrentThreadPoolExecutor:
         assert "seed-task" in recorded
         for tn in task_names:
             assert tn in recorded
-
-
-
-class TestBareStringTasksDoesNotIterateCharacters:
-    """Passing ``tasks`` as a bare string must not iterate per character.
-
-    Reproduces the bug where ``ChatSorcarAgent._run_tasks_parallel`` (and
-    ``SorcarAgent._run_tasks_parallel``) accepted ``tasks="hello"`` and
-    iterated ``enumerate("hello")``.  After the fix, both methods route
-    through :func:`_coerce_tasks` which wraps a bare string into a
-    single-element list.  With ``max_workers=0`` the
-    ``ThreadPoolExecutor`` raises :class:`ValueError` after coercion,
-    proving the bare string is treated as one task — character iteration
-    would not reach the executor.
-    """
-
-    def test_chat_sorcar_string_tasks_reaches_executor(self) -> None:
-        """``ChatSorcarAgent`` coerces a bare string into one task."""
-        agent = ChatSorcarAgent("regression-chat")
-
-        with pytest.raises(ValueError):
-            agent._run_tasks_parallel("hello", max_workers=0)  # type: ignore[arg-type]
-
-    def test_chat_sorcar_invalid_tasks_raises_typeerror(self) -> None:
-        """Non-string, non-list-of-str inputs raise ``TypeError``."""
-        agent = ChatSorcarAgent("regression-chat-bad")
-
-        with pytest.raises(TypeError):
-            agent._run_tasks_parallel([1, 2, 3], max_workers=0)  # type: ignore[list-item]
-
-    def test_sorcar_string_tasks_reaches_executor(self) -> None:
-        """``SorcarAgent`` base method also coerces a bare string."""
-        agent = SorcarAgent("regression-base")
-
-        with pytest.raises(ValueError):
-            agent._run_tasks_parallel("world!", max_workers=0)  # type: ignore[arg-type]

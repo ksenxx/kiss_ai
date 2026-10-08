@@ -81,8 +81,10 @@ function click(win, id) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-function cs(win, id) {
-  return win.getComputedStyle(win.document.getElementById(id));
+function cs(win, selector) {
+  const el = win.document.querySelector(selector);
+  assert.ok(el, `element ${selector} must exist`);
+  return win.getComputedStyle(el);
 }
 
 /** Whether *el* and every ancestor up to #output is displayed. */
@@ -105,15 +107,13 @@ function showTaskPanel(win, posted, task) {
     tabId: ready.tabId,
     chat_id: 'chat-taskpanel',
   });
-  assert.ok(
-    win.document.getElementById('task-panel').classList.contains('visible'),
-    'task panel must be visible after a task replay',
-  );
+  const panel = win.document.querySelector('#output .task-panel');
+  assert.ok(panel, 'the transcript must open with the task panel');
   return ready.tabId;
 }
 
 function assertFullTextPanel(win, why) {
-  const textCs = cs(win, 'task-panel-text');
+  const textCs = cs(win, '#output .task-panel .task-panel-text');
   assert.strictEqual(
     textCs.whiteSpace,
     'pre-wrap',
@@ -148,102 +148,72 @@ function assertFullTextPanel(win, why) {
   );
 }
 
-function testCollapseChatsButtonGone(remote) {
+function testTaskPanelOpensTheTranscript(remote) {
   const {win, posted} = makeWebview({remote});
   showTaskPanel(win, posted, LONG_TASK);
   const d = win.document;
+  const output = d.getElementById('output');
+  const panel = output.querySelector('.task-panel');
   assert.strictEqual(
-    d.getElementById('task-panel-collapse-btn'),
-    null,
-    `#task-panel-collapse-btn must not exist (remote=${remote})`,
-  );
-  assert.strictEqual(
-    d.getElementById('task-panel-collapse-label'),
-    null,
-    `#task-panel-collapse-label must not exist (remote=${remote})`,
+    output.firstElementChild,
+    panel,
+    `the task panel is the first panel of the transcript (remote=${remote})`,
   );
   assert.ok(
-    !/(Uncollapse Chats|Collapse Chats)/.test(
-      d.getElementById('task-panel').textContent,
-    ),
-    `no Collapse/Uncollapse Chats text may remain (remote=${remote})`,
-  );
-  assert.ok(
-    d.getElementById('task-panel-drawer-btn'),
-    'the drawer toggle must survive the removal',
-  );
-  assert.ok(
-    d.getElementById('task-panel-copy'),
-    'the copy-task button must survive the removal',
-  );
-  win.close();
-}
-
-function testExpandTaskPanelShowsEntireTask(remote) {
-  const {win, posted} = makeWebview({remote});
-  showTaskPanel(win, posted, LONG_TASK);
-  const d = win.document;
-  const panel = d.getElementById('task-panel');
-  const btn = d.getElementById('task-panel-drawer-btn');
-
-  assert.ok(
-    panel.classList.contains('drawer-collapsed'),
-    'the task drawer opens collapsed',
+    panel.classList.contains('collapsible') &&
+      !panel.classList.contains('collapsed'),
+    `the task panel is a regular, open event panel (remote=${remote})`,
   );
   assert.strictEqual(
-    btn.getAttribute('aria-label'),
-    'Expand task panel',
-    'the collapsed drawer toggle must offer "Expand task panel"',
+    panel.querySelector('.task-panel-h').textContent.includes('Task'),
+    true,
+    'the panel header names it as the task',
   );
   assert.strictEqual(
-    cs(win, 'task-panel-text').whiteSpace,
-    'nowrap',
-    'collapsed task drawer must clamp the task text to one line',
-  );
-
-  click(win, 'task-panel-drawer-btn');
-  assert.ok(
-    !panel.classList.contains('drawer-collapsed'),
-    '"Expand task panel" must expand the drawer',
-  );
-  assert.strictEqual(
-    btn.getAttribute('aria-label'),
-    'Collapse task panel',
-    'the expanded drawer toggle must offer "Collapse task panel"',
-  );
-  assert.strictEqual(
-    d.getElementById('task-panel-text').textContent,
+    panel.querySelector('.task-panel-text').textContent,
     LONG_TASK,
-    'the expanded panel must contain the entire task text',
+    'the panel must contain the entire task text',
   );
-  assertFullTextPanel(win, `after Expand task panel, remote=${remote}`);
+  assert.ok(
+    panel.querySelector(':scope > .panel-copy-btn'),
+    'the task panel carries the copy button every event panel has',
+  );
+  assert.strictEqual(
+    d.getElementById('task-panel'),
+    null,
+    `no fixed task panel remains above the transcript (remote=${remote})`,
+  );
+  assertFullTextPanel(win, `transcript task panel, remote=${remote}`);
   win.close();
 }
 
-// The panel opens collapsed, so the whole task is in the DOM but clamped to
-// one line. One click on the chevron and all of it is on screen.
-function testCollapsedPanelKeepsTheWholeTaskOneClickAway() {
+// A click on the header folds the panel like any other event panel:
+// the text is hidden behind a one-line preview, and the whole task is
+// one click away again.
+function testTaskPanelFoldsLikeAnyPanel() {
   const {win, posted} = makeWebview();
   showTaskPanel(win, posted, LONG_TASK);
-  const text = win.document.getElementById('task-panel-text');
+  const panel = win.document.querySelector('#output .task-panel');
+  const header = panel.querySelector('.collapse-header');
+  header.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(panel.classList.contains('collapsed'), 'a header click folds');
   assert.strictEqual(
-    text.textContent,
-    LONG_TASK,
-    'the collapsed panel must still hold the entire task text',
+    cs(win, '#output .task-panel .task-panel-text').display,
+    'none',
+    'the folded panel hides the task text',
   );
-  assert.strictEqual(
-    cs(win, 'task-panel-text').textOverflow,
-    'ellipsis',
-    'the collapsed panel ellipsizes what does not fit on its one line',
+  assert.ok(
+    panel.querySelector('.collapse-preview').textContent.startsWith('step 1'),
+    'the folded panel previews the task text',
   );
-
-  click(win, 'task-panel-drawer-btn');
+  header.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(!panel.classList.contains('collapsed'), 'a second click opens');
   assert.strictEqual(
-    text.textContent,
+    panel.querySelector('.task-panel-text').textContent,
     LONG_TASK,
     'expanding must hold the entire task text',
   );
-  assertFullTextPanel(win, 'expanded from the default collapsed state');
+  assertFullTextPanel(win, 'expanded again');
   win.close();
 }
 
@@ -317,6 +287,10 @@ function testChevronPassWorksWithoutButton() {
     !rpPanel.classList.contains('collapsed'),
     'precondition: the fan-out panel is open while the task runs',
   );
+  // A tool-call panel starts folded; the user opens the adopted one.
+  assert.ok(adopted.classList.contains('collapsed'), 'adopted: folded at birth');
+  adopted.querySelector(':scope > .collapse-header').click();
+  assert.ok(!adopted.classList.contains('collapsed'), 'the user opened it');
 
   send(win, {
     type: 'result',
@@ -333,6 +307,20 @@ function testChevronPassWorksWithoutButton() {
     !rc.classList.contains('collapsed'),
     'the result panel must stay open',
   );
+  // The end of the task folds every event panel into one collapsed
+  // Trajectory panel; the result stays outside it.
+  const traj = O.querySelector(':scope > .trajectory');
+  assert.ok(
+    traj && traj.classList.contains('collapsed'),
+    'the end folds the panels into a collapsed Trajectory panel',
+  );
+  assert.ok(
+    traj.contains(summaryPanel) &&
+      traj.contains(readPanel) &&
+      traj.contains(rpPanel) &&
+      !traj.contains(rc),
+    'the summary, Read and fan-out panels sit inside the Trajectory',
+  );
   assert.ok(
     summaryPanel.classList.contains('collapsed'),
     'the summary digest must fold',
@@ -342,13 +330,19 @@ function testChevronPassWorksWithoutButton() {
     'panels adopted inside the summary are left as they are',
   );
   assert.ok(
-    readPanel.classList.contains('collapsed') &&
-      isDisplayed(win, readPanel),
-    'a plain finished panel must fold but stay on screen',
+    readPanel.classList.contains('collapsed') && !isDisplayed(win, readPanel),
+    'a plain finished panel folds and hides behind the Trajectory',
   );
   assert.ok(
-    rpPanel.classList.contains('collapsed') && isDisplayed(win, rpPanel),
-    'the finished run_parallel panel must fold but stay on screen',
+    rpPanel.classList.contains('collapsed') && !isDisplayed(win, rpPanel),
+    'the finished run_parallel panel folds behind the Trajectory too',
+  );
+  traj.querySelector('.collapse-header').dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  assert.ok(
+    isDisplayed(win, readPanel) && isDisplayed(win, rpPanel),
+    'opening the Trajectory shows the folded panels, one click away',
   );
   assert.strictEqual(
     d.querySelectorAll('.tab.subagent-tab, .tab[data-subagent="1"]').length +
@@ -375,6 +369,31 @@ function testChevronPassWorksWithoutButton() {
     'the chevron pass must not re-fold a panel the user opened',
   );
 
+  // A panel that lands after the end (a late tool call) stands outside
+  // the Trajectory: the chevron pass that follows every rendered event
+  // folds it to its digest, and it stays on screen.
+  send(win, {type: 'tool_call', name: 'Bash', command: 'late', tabId: parentId});
+  const late = O.querySelector(':scope > .tc-bash');
+  assert.ok(late, 'the late panel renders outside the Trajectory');
+  assert.ok(
+    late.classList.contains('collapsed') && isDisplayed(win, late),
+    'the chevron pass folds a late finished panel but keeps it on screen',
+  );
+  // A late fan-out is born OPEN (its open panel is what keeps the
+  // sub-agent tabs up); with the task over, the chevron pass folds it.
+  send(win, {
+    type: 'tool_call',
+    name: 'run_parallel',
+    tabId: parentId,
+    extras: {tasks: JSON.stringify(['late sub'])},
+  });
+  const lateRp = O.querySelector(':scope > .tc-run-parallel');
+  assert.ok(lateRp, 'the late fan-out renders outside the Trajectory');
+  assert.ok(
+    lateRp.classList.contains('collapsed') && isDisplayed(win, lateRp),
+    'the chevron pass folds a late fan-out once the task is over',
+  );
+
   send(win, {
     type: 'adjacent_task_events',
     direction: 'prev',
@@ -388,19 +407,24 @@ function testChevronPassWorksWithoutButton() {
   });
   const adjacent = O.querySelector('.adjacent-task[data-task="Older task"]');
   assert.ok(adjacent, 'the adjacent task container must render');
-  const adjPanel = adjacent.querySelector('.collapsible:not(.rc)');
+  const adjTraj = adjacent.querySelector(':scope > .trajectory');
+  assert.ok(
+    adjTraj && adjTraj.classList.contains('collapsed'),
+    "the adjacent task's replay folds its panels into its own Trajectory",
+  );
+  const adjPanel = adjTraj.querySelector('.trajectory-sub .collapsible');
   assert.ok(adjPanel, 'the adjacent task must replay its tool panel');
   assert.ok(
-    adjPanel.classList.contains('collapsed') && isDisplayed(win, adjPanel),
-    "the adjacent task's finished panels fold but stay on screen too",
+    adjPanel.classList.contains('collapsed') && !isDisplayed(win, adjPanel),
+    "the adjacent task's finished panels fold behind its Trajectory",
   );
   win.close();
 }
 
-// A task that finishes ON SCREEN (a real task_done, not a replay)
-// stamps its panels, and the chevron pass leaves them exactly as the
-// stream left them: not collapsed.
-function testLiveFinishedPanelsSkipChevronPass() {
+// A task that finishes ON SCREEN folds its panels into the Trajectory
+// panel; the chevron pass a trailing event triggers leaves the panels
+// inside the Trajectory exactly as the fold left them.
+function testTrajectoryPanelsSkipChevronPass() {
   const {win, posted} = makeWebview();
   const d = win.document;
   const ready = posted.find(m => m.type === 'ready');
@@ -410,44 +434,50 @@ function testLiveFinishedPanelsSkipChevronPass() {
   send(win, {type: 'setTaskText', text: 'live task', tabId: parentId});
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: parentId});
   send(win, {type: 'tool_result', name: 'Bash', content: 'f', tabId: parentId});
-
-  const panels = Array.from(d.querySelectorAll('#output .collapsible'));
-  assert.ok(panels.length > 0, 'the stream must have rendered panels');
-  const before = panels.map(p => p.classList.contains('collapsed'));
-
   send(win, {type: 'result', tabId: parentId, summary: 'done', success: true});
   send(win, {type: 'task_done', tabId: parentId});
   send(win, {type: 'status', running: false, tabId: parentId});
-  send(win, {type: 'usage_info', tabId: parentId});
 
-  panels.forEach((p, i) => {
+  const traj = d.querySelector('#output > .trajectory');
+  assert.ok(traj, 'the finish folded the panels into a Trajectory panel');
+  const inner = Array.from(traj.querySelectorAll('.trajectory-sub .collapsible'));
+  assert.ok(inner.length > 0, 'the Trajectory holds the event panels');
+  // The user opens the Trajectory and one panel inside it.
+  traj.querySelector('.collapse-header').dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  inner[0].classList.remove('collapsed');
+  const before = inner.map(p => p.classList.contains('collapsed'));
+
+  send(win, {type: 'usage_info', tabId: parentId});
+  inner.forEach((p, i) => {
     assert.strictEqual(
       p.classList.contains('collapsed'),
       before[i],
-      'a live finish must not change the collapsed state of panel #' + i,
+      'the chevron pass must not touch Trajectory panel #' + i,
     );
   });
+  assert.ok(
+    !traj.classList.contains('collapsed'),
+    'the Trajectory the user opened stays open',
+  );
   win.close();
 }
 
 function runTests() {
   const tests = [
-    () => testCollapseChatsButtonGone(false),
-    () => testCollapseChatsButtonGone(true),
-    () => testExpandTaskPanelShowsEntireTask(false),
-    () => testExpandTaskPanelShowsEntireTask(true),
-    testCollapsedPanelKeepsTheWholeTaskOneClickAway,
+    () => testTaskPanelOpensTheTranscript(false),
+    () => testTaskPanelOpensTheTranscript(true),
+    testTaskPanelFoldsLikeAnyPanel,
     testChevronPassWorksWithoutButton,
-    testLiveFinishedPanelsSkipChevronPass,
+    testTrajectoryPanelsSkipChevronPass,
   ];
   const names = [
-    'testCollapseChatsButtonGone(vscode)',
-    'testCollapseChatsButtonGone(remote)',
-    'testExpandTaskPanelShowsEntireTask(vscode)',
-    'testExpandTaskPanelShowsEntireTask(remote)',
-    'testCollapsedPanelKeepsTheWholeTaskOneClickAway',
+    'testTaskPanelOpensTheTranscript(vscode)',
+    'testTaskPanelOpensTheTranscript(remote)',
+    'testTaskPanelFoldsLikeAnyPanel',
     'testChevronPassWorksWithoutButton',
-    'testLiveFinishedPanelsSkipChevronPass',
+    'testTrajectoryPanelsSkipChevronPass',
   ];
   for (let i = 0; i < tests.length; i++) {
     tests[i]();

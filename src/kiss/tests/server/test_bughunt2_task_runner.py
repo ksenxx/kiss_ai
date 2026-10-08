@@ -101,6 +101,7 @@ class TestAnswerQueueCrossTaskHijack(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.server.printer._thread_local.task_id = None
+        self.server.printer._thread_local.stop_event = None
         agent_state.agent_states.clear()
 
     def test_resolution_skips_viewer_running_its_own_task(self) -> None:
@@ -122,16 +123,14 @@ class TestAnswerQueueCrossTaskHijack(unittest.TestCase):
         self.server.printer.subscribe_tab("8999", viewer)
 
         self.server.printer._thread_local.task_id = "8301"
-        resolved = self.server._resolve_task_answer_queue()
+        self.server.printer._thread_local.stop_event = threading.Event()
+        viewer_queue.put_nowait("answer meant for 8999")
 
-        self.assertIsNot(
-            resolved,
-            viewer_queue,
-            "Task 8301 hijacked the answer queue owned by the viewer "
-            "tab's own task 8999 — answers meant for 8999 would be "
-            "stolen by 8301",
-        )
-        self.assertIsNone(resolved)
+        # Task 8301's queue is gone: the wait must abort rather than
+        # consume the answer owned by the viewer tab's own task 8999.
+        with self.assertRaisesRegex(KeyboardInterrupt, "queue is missing"):
+            self.server._await_user_response()
+        self.assertEqual(viewer_queue.get_nowait(), "answer meant for 8999")
 
     def test_owner_queue_still_resolves(self) -> None:
         """Regression guard: the asking task's own live queue must
@@ -144,7 +143,9 @@ class TestAnswerQueueCrossTaskHijack(unittest.TestCase):
         self.server.printer.subscribe_tab("8302", owner)
 
         self.server.printer._thread_local.task_id = "8302"
-        self.assertIs(self.server._resolve_task_answer_queue(), owner_queue)
+        self.server.printer._thread_local.stop_event = threading.Event()
+        owner_queue.put_nowait("yes")
+        self.assertEqual(self.server._await_user_response(), "yes")
 
 
 if __name__ == "__main__":

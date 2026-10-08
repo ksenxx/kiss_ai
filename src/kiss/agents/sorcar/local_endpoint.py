@@ -13,7 +13,7 @@ daemon writes it, with the listener's URL, to
 can read it — the same access rule the old ``sorcar.sock`` Unix socket
 had from its file mode).  A client that presents the token in its
 ``auth`` frame from a loopback address is treated as *local* and may
-use the local-only commands (``readKissConfig``, voice wake, ...).
+use the local-only commands (file saves, directory listings, ...).
 
 The file doubles as the daemon's presence marker: it exists while a
 daemon is up and names the daemon's pid, and the client's failed

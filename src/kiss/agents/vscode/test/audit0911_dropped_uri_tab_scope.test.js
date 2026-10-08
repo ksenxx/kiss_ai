@@ -84,12 +84,13 @@ function dropUris(win, uris) {
   container.dispatchEvent(ev);
 }
 
+// The Chats-panel pick: chat tabs have no row of their own any more.
 function switchTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
   );
-  assert.ok(el, `tab ${tabId} must be in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  win._testApi.switchToTab(tabId);
   assert.strictEqual(win._testApi.getActiveTabId(), tabId);
 }
 

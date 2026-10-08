@@ -21,6 +21,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, WorkerSea
 from kiss.agents.seas.task_update import task_update_sea as sea
 from kiss.agents.seas.task_update.task_update_sea import TaskUpdateSea
 from kiss.agents.sorcar import sea_commands, task_digest
@@ -78,15 +79,17 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
     assert "task_transcript" in sea.SYSTEM_PROMPT
     assert agent.tools([]) == [sea.task_transcript]
     assert agent.tools([print]) == [print, sea.task_transcript]
-    assert agent.settings({}) == {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
-    # ``worker`` turns fan-out, browser, memory, worktree, auto-commit and
-    # the classifier off; ``system_prompt`` is a hook the daemon applies,
+    assert isinstance(agent, WorkerSea)
+    assert agent.settings({}) == {"tool_profile": "bash", "max_budget": 1.0}
+    # A ``WorkerSea`` turns browser, memory, worktree, auto-commit and
+    # the classifier off (the base class's own ``settings`` layer, folded
+    # under the SEA's); ``system_prompt`` is a hook the daemon applies,
     # so the resolved settings do not carry its text.
-    assert sea_commands.base_settings([agent]) == resolve_settings(agent.settings({})) == {
-        "kind": "worker",
+    assert sea_commands.base_settings([agent]) == resolve_settings(
+        {**WORKER_DEFAULTS, **agent.settings({})}
+    ) == {
         "tool_profile": "bash",
         "max_budget": 1.0,
-        "allow_fan_out": False,
         "use_web_tools": False,
         "use_memory": False,
         "use_worktree": False,
@@ -288,7 +291,6 @@ def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path)
             system_prompt_hook=run.system_prompt_hook,
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

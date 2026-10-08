@@ -18,8 +18,9 @@ sidebar view, a VS Code editor-tab panel and browser tabs of the
 remote web app.  This test runs the REAL daemon on its local WSS
 endpoint and REAL webviews under jsdom (``test/multiSurfaceBridge.js``),
 one daemon connection per webview, exactly like production; only the LLM loop is
-scripted (the parent fans out through ``_run_tasks_parallel``, one
-child nests a grandchild, and the leaves block until released).
+scripted (the parent fans out through ``run_agents_parallel``, whose
+children are sub-tasks of the same daemon; one child nests a
+grandchild, and the leaves block until released).
 
 Checked, on every surface, from the rendered tab bar:
 
@@ -71,7 +72,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar import persistence as _persistence
+from kiss.agents.sorcar.agent_dispatch import run_agents_parallel
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
 _VSCODE_DIR = Path(__file__).resolve().parents[2] / "agents" / "vscode"
@@ -166,15 +169,17 @@ def _fan_out(agent: Any, tasks: list[str]) -> None:
     """Call ``run_parallel`` the way the model does: the ``tool_call`` /
     ``tool_result`` events frame the fan-out in the transcript (the
     webview's fan-out panel, which keeps finished children's tabs
-    closed on later replays, is built from them)."""
+    closed on later replays, is built from them).  The children are
+    daemon sub-tasks of the calling task (:func:`run_agents_parallel`,
+    dispatched to the harness daemon)."""
     tool_input = {"tasks": json.dumps(tasks)}
     agent.printer.print(
         "run_parallel", type="tool_call", tool_input=tool_input,
         call_id=uuid.uuid4().hex,
     )
-    results = agent._run_tasks_parallel(tasks)
+    results = run_agents_parallel(agent.work_dir, tasks, parent_agent=agent)
     agent.printer.print(
-        json.dumps(results), type="tool_result", tool_name="run_parallel",
+        results, type="tool_result", tool_name="run_parallel",
         tool_input=tool_input, is_error=False, interrupted=False,
     )
 
@@ -190,20 +195,28 @@ class SubagentTabsAllSurfacesTest(DaemonLocalHarness):
         if not _WS_CLIENT.is_file():
             self.skipTest("out/wsClient.js missing: run `npm run compile` in agents/vscode")
         super().setUp()
+        # ``run_parallel`` children are dispatched to the daemon
+        # hosting the parent; record this harness daemon's endpoint
+        # the way kiss-web does at boot.
+        self._cron_stop = cron_agent.start_scheduler_thread(
+            interval=3600, endpoint_file=str(self.endpoint_file),
+        )
         self.bridge = SurfaceBridge(str(self.endpoint_file))
 
     def tearDown(self) -> None:
         self.bridge.quit()
+        cron_agent.stop_scheduler_thread(self._cron_stop)
         super().tearDown()
 
     def _install_plan(self, plan: Any) -> None:
-        """Replace the LLM loop: *plan(agent, name)* does the run's work.
+        """Replace the LLM loop: *plan(agent, prompt)* does the run's work.
 
-        The level comes from ``self.name`` (``Parallel-{task}``), never
-        from the prompt: sub-agent prompts embed the chat's earlier
-        tasks.  Any other agent the daemon runs alongside (e.g. the
-        "Task update" side channel) is a plain leaf that returns at
-        once.
+        The level comes from the marker in the run's prompt: a
+        sub-agent's prompt embeds the chat's earlier top-level tasks
+        (never its sibling sub-agents' rows), so each plan checks the
+        deepest marker first.  Any other agent the daemon runs
+        alongside (e.g. the "Task update" side channel) is a plain
+        leaf that returns at once.
         """
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
@@ -218,7 +231,7 @@ class SubagentTabsAllSurfacesTest(DaemonLocalHarness):
                 kwargs.get("work_dir")
                 or getattr(self_agent, "work_dir", ".") or ".",
             )
-            plan(self_agent, str(getattr(self_agent, "name", "")))
+            plan(self_agent, str(kwargs.get("prompt_template", "")))
             self_agent.total_tokens_used = 5
             self_agent.budget_used = 0.001
             self_agent.total_steps = 1
@@ -239,17 +252,17 @@ class SubagentTabsAllSurfacesTest(DaemonLocalHarness):
         *leaf_release* so the mid-run state can be inspected.
         """
 
-        def plan(agent: Any, name: str) -> None:
-            if GRANDCHILD_MARK in name:
+        def plan(agent: Any, prompt: str) -> None:
+            if GRANDCHILD_MARK in prompt:
                 leaf_release.wait(timeout=60)
-            elif NEST_MARK in name:
+            elif NEST_MARK in prompt:
                 # Fan out IMMEDIATELY: no client can have subscribed to
                 # this sub-agent's tab yet, the worst case for parenting
                 # the grandchild under a tab every surface knows.
                 _fan_out(agent, [f"{GRANDCHILD_MARK} leaf"])
-            elif CHILD_MARK in name:
+            elif CHILD_MARK in prompt:
                 leaf_release.wait(timeout=60)
-            elif getattr(agent, "_subagent_info", None) is None:
+            elif PARENT_PROMPT in prompt:
                 _fan_out(agent, [
                     f"{CHILD_MARK} plain leaf",
                     f"{CHILD_MARK} {NEST_MARK} parent of a grandchild",
@@ -265,12 +278,12 @@ class SubagentTabsAllSurfacesTest(DaemonLocalHarness):
         Each child blocks on its wave's release event.
         """
 
-        def plan(agent: Any, name: str) -> None:
-            if WAVE2_MARK in name:
+        def plan(agent: Any, prompt: str) -> None:
+            if WAVE2_MARK in prompt:
                 wave2_release.wait(timeout=60)
-            elif CHILD_MARK in name:
+            elif CHILD_MARK in prompt:
                 wave1_release.wait(timeout=60)
-            elif getattr(agent, "_subagent_info", None) is None:
+            elif PARENT_PROMPT in prompt:
                 _fan_out(agent, [f"{CHILD_MARK} first wave"])
                 _fan_out(agent, [f"{CHILD_MARK} {WAVE2_MARK} second wave"])
 

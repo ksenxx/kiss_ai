@@ -7,7 +7,7 @@
 // as the "Question" transcript panel (translucent red header), the daemon's
 // live askUser event marks that panel pending and puts the composer into
 // answer mode, the text typed into the composer is posted as the userAnswer,
-// and the tool_result (the answer) is shown inside the same panel.
+// and the tool_result (the answer) is shown as a separate user message.
 
 'use strict';
 
@@ -71,6 +71,18 @@ function makeWebview(withMarked) {
 
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
+}
+
+// Bring a tab on screen the way the user does: a click on the group strip
+// when the tab is listed there (sub-agents, content tabs, the chat that
+// owns them), else the Chats-panel pick (chat tabs have no row of their
+// own any more).
+function clickTab(win, tabId) {
+  const el = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  );
+  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  else win._testApi.switchToTab(tabId);
 }
 
 function askQuestionCall(win, tab, question) {
@@ -236,7 +248,7 @@ test('Enter in the composer posts the text as the userAnswer, not a prompt', () 
   );
   assert.ok(!panel.querySelector('.tc-question-hint'), 'the hint is gone');
 
-  // The tool returns the answer: it is shown inside the Question panel.
+  // The tool returns the answer as a separate user message.
   send(win, {
     type: 'tool_result',
     tool_name: 'ask_user_question',
@@ -244,17 +256,11 @@ test('Enter in the composer posts the text as the userAnswer, not a prompt', () 
     tabId: tab,
     ts: Date.now(),
   });
-  const ans = panel.querySelector('.tc-question-answer');
-  assert.ok(ans, 'the answer block is inside the Question panel');
-  assert.strictEqual(
-    ans.querySelector('.tc-question-answer-label').textContent,
-    'Answer',
-  );
-  assert.strictEqual(
-    ans.querySelector('.tc-question-answer-text').textContent,
-    'main',
-  );
-  assert.strictEqual(ans.dataset.rawText, 'Answer: main');
+  const ans = panel.nextElementSibling;
+  assert.ok(ans.classList.contains('user-msg'), 'the response is a user message');
+  assert.ok(ans.querySelector('.task-panel-h').textContent.includes('Response'));
+  assert.strictEqual(ans.querySelector('.task-panel-text').textContent, 'main');
+  assert.strictEqual(ans.dataset.rawText, 'main');
   assert.ok(
     !panel.querySelector('.bash-panel'),
     'no generic tool output block is added for a question',
@@ -314,7 +320,7 @@ test('a replayed answered question shows question and answer, never pending', ()
       .textContent.includes('Which branch?'),
   );
   assert.strictEqual(
-    panel.querySelector('.tc-question-answer-text').textContent,
+    panel.nextElementSibling.querySelector('.task-panel-text').textContent,
     'release',
   );
   assert.ok(!panel.classList.contains('tc-question-pending'));
@@ -371,9 +377,7 @@ test('the question of a background tab is answered from that tab, not the one on
   // The question pulls the user over to its tab; they go back to the
   // other tab to carry on there.
   assert.strictEqual(win._testApi.getActiveTabId(), tab);
-  win.document
-    .querySelector(`.chat-tab[data-tab-id=${JSON.stringify(other)}]`)
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, other);
   assert.strictEqual(win._testApi.getActiveTabId(), other);
   assert.ok(!answering(win), 'the tab on screen has no question');
   assert.strictEqual(inp.placeholder, 'Ask anything');
@@ -389,10 +393,7 @@ test('the question of a background tab is answered from that tab, not the one on
 
   // Switching to the asking tab: its panel is pending and the composer
   // answers it.
-  const tabEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tab)}]`,
-  );
-  tabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, tab);
   assert.ok(answering(win));
   const panel = win.document.querySelector('#output .tc-question');
   assert.ok(panel && panel.classList.contains('tc-question-pending'));
@@ -446,21 +447,25 @@ test('opening a file tab and coming back keeps the question answerable', () => {
     tabId: tab,
   });
   const fileTab = win._testApi.getActiveTabId();
-  const chatEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tab)}]`,
-  );
-  chatEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  // On a stacked surface the group strip lists the file tab next to the
+  // chat, so both are clicked there.
+  clickTab(win, tab);
   askQuestionCall(win, tab, 'Q?');
   send(win, {type: 'askUser', question: 'Q?', tabId: tab});
   assert.ok(answering(win));
   // Activating the EXISTING file tab leaves answer mode ...
   const fileEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(fileTab)}]`,
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(fileTab)}]`,
   );
+  assert.ok(fileEl, 'the file tab is on the group strip');
   fileEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.ok(!answering(win), 'answer mode is off on the file tab');
   // ... and closing the asking chat while its file tab is up leaves
   // nothing to answer.
+  const chatEl = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tab)}]`,
+  );
+  assert.ok(chatEl, 'the chat is on the group strip next to its file tab');
   const closeBtn = chatEl.querySelector('.chat-tab-close');
   assert.ok(closeBtn, 'the chat tab has a close button');
   closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
@@ -526,10 +531,7 @@ test('a background tab parks its prompt too and shows it again once answered', (
   win._testApi.createNewTab();
   askQuestionCall(win, tab, 'Q?');
   send(win, {type: 'askUser', question: 'Q?', tabId: tab});
-  const tabEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tab)}]`,
-  );
-  tabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, tab);
   assert.strictEqual(inp.value, '', 'the parked prompt is not the answer');
   assert.ok(answering(win));
   posted.length = 0;
@@ -634,7 +636,7 @@ test('the send button answers too', () => {
   assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 1);
 });
 
-test('a pending question is never folded by the streaming collapse pass', () => {
+test('a question is never folded by the streaming collapse pass, answered or not', () => {
   const {win, tab} = makeWebview(true);
   function bash(callId) {
     send(win, {
@@ -663,10 +665,25 @@ test('a pending question is never folded by the streaming collapse pass', () => 
     !question.classList.contains('collapsed'),
     'the unanswered question stays open',
   );
-  // Answered: the next events fold it like any other panel.
+  // Answered: the question stays open while the stream goes on (the
+  // user's side of the conversation is never folded away; see
+  // askQuestionNeverCollapsed.test.js for the answer and the replays).
   send(win, {type: 'askUserDone', tabId: tab});
   bash(5);
-  assert.ok(question.classList.contains('collapsed'));
+  bash(6);
+  bash(7);
+  assert.ok(
+    !question.classList.contains('collapsed'),
+    'the answered question stays open too',
+  );
+  assert.ok(
+    !question.classList.contains('tc-question-pending'),
+    'and is no longer marked pending',
+  );
+  assert.ok(
+    win.document.querySelectorAll('#output .ev.tc')[2].classList.contains('collapsed'),
+    'while plain panels around it still fold',
+  );
 });
 
 test('answers stay out of the prompt history, and history recall is off while answering', () => {

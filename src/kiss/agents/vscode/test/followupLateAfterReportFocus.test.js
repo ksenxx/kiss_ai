@@ -73,21 +73,17 @@ function tabEl(win, tabId) {
   );
 }
 
-// Reaches a tab the way the user does: a tab whose group is off screen
-// comes back through its chat's main-row entry (which lands on the tab
-// last viewed in that group), then the group strip picks the tab.
+// Reaches a tab the way the user does: a click on the group strip when
+// the tab is listed there, else the Chats-panel pick (chat tabs have no
+// row of their own any more).
 function clickTab(win, tabId) {
-  let el = tabEl(win, tabId);
-  if (!el) {
-    const main = win.document.querySelector(
-      `#main-tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-    );
-    assert.ok(main, `tab ${tabId} must exist in the tab bar`);
-    main.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-    el = tabEl(win, tabId);
-  }
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
+  );
+  const el = tabEl(win, tabId);
+  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  else win._testApi.switchToTab(tabId);
 }
 
 function outputBars(win) {

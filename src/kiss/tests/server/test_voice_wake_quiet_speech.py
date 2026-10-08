@@ -46,9 +46,9 @@ from pathlib import Path
 
 from kiss.server.voice_wake import (
     BLOCK_SIZE,
-    DEFAULT_MODELS_DIR,
     MAX_LEADING_NOISE_SECONDS,
     WakeDetector,
+    default_models_dir,
     ensure_model,
     wake_with_leading_noise,
 )
@@ -76,7 +76,7 @@ def _tts_pcm(directory: Path, name: str, text: str, voice: str | None) -> bytes:
 
 def _count_wakes(pcm: bytes) -> int:
     """Stream PCM through a real default-sensitivity WakeDetector."""
-    detector = WakeDetector(ensure_model(DEFAULT_MODELS_DIR))
+    detector = WakeDetector(ensure_model(default_models_dir()))
     return sum(
         1
         for start in range(0, len(pcm), 2 * BLOCK_SIZE)

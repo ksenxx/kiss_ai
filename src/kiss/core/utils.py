@@ -76,6 +76,42 @@ def dump_yaml(data: Any, stream: IO[str] | None = None, **kwargs: Any) -> Any:
     return yaml.dump(data, stream, Dumper=_KissDumper, **kwargs)
 
 
+def seed_file_atomically(path: Path, content: str) -> None:
+    """Create *path* holding *content*, if it does not exist yet.
+
+    The seed is **atomic and non-clobbering**: *content* is staged in a
+    sibling temp file and hard-linked into place, so a concurrent reader
+    never observes the empty file that a plain ``write_text`` exposes
+    between creating the target and writing to it (the autocomplete
+    worker once read a torn ``MY_INJECTION.md`` that way).  If the
+    target appears between the existence check and the link (a
+    concurrent seeder, or a user edit), the existing file wins.
+    :func:`atomic_write_text` is the replacing counterpart.
+
+    Args:
+        path: The file to create.
+        content: UTF-8 text written on first creation only.
+
+    Raises:
+        OSError: When the directory cannot be created or written.
+    """
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, staged = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
+    try:
+        # A buffered file object (rather than a bare os.write, whose
+        # partial-write count would have to be handled) guarantees the
+        # whole payload is on disk before the link publishes it.
+        with os.fdopen(fd, "wb") as f:
+            f.write(content.encode("utf-8"))
+        os.link(staged, path)
+    except FileExistsError:
+        logger.debug("Exception caught", exc_info=True)
+    finally:
+        Path(staged).unlink(missing_ok=True)
+
+
 def atomic_write_text(
     target: Path,
     content: str,
@@ -451,7 +487,7 @@ def config_to_dict() -> dict[Any, Any]:
     return cast(dict[Any, Any], convert_to_json(config_module.DEFAULT_CONFIG))
 
 
-def _coerce_bool(value: bool | str) -> bool:
+def coerce_bool(value: bool | str) -> bool:
     """Coerce a string or bool tool argument to a Python bool.
 
     Args:
@@ -572,8 +608,8 @@ def finish(
         non-empty suggestion was given.
     """
     result: dict[str, Any] = {
-        "success": _coerce_bool(success),
-        "is_continue": _coerce_bool(is_continue),
+        "success": coerce_bool(success),
+        "is_continue": coerce_bool(is_continue),
         "summary": ensure_html(summary_in_html),
     }
     suggestion = str(suggested_next_task).strip() if suggested_next_task else ""

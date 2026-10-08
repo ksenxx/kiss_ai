@@ -37,14 +37,9 @@ class TestModelsDirHonoursKissHome(unittest.TestCase):
         old = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = "/tmp/fixer5-profile"
         try:
-            self.assertEqual(
-                voice_wake.default_models_dir(),
-                Path("/tmp/fixer5-profile") / "models",
-            )
-            # The legacy module constant must resolve lazily too —
             # voice_wake was imported long before KISS_HOME changed.
             self.assertEqual(
-                voice_wake.DEFAULT_MODELS_DIR,
+                voice_wake.default_models_dir(),
                 Path("/tmp/fixer5-profile") / "models",
             )
         finally:

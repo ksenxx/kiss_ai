@@ -168,9 +168,10 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         return self._roundtrip([cmd], "share_done")
 
     BODY = (
-        '<div id="task-panel" class="visible">'
-        '<div id="task-panel-text">list files</div></div>'
-        '<div id="output"><div class="ev tc collapsible">'
+        '<div id="output"><div class="ev task-panel collapsible">'
+        '<div class="task-panel-h collapse-header">Task</div>'
+        '<div class="task-panel-text">list files</div></div>'
+        '<div class="ev tc collapsible">'
         '<div class="tc-h collapse-header">Bash</div>'
         "<pre>ls -la</pre></div></div>"
     )
@@ -193,11 +194,11 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         # Self-contained: the webview stylesheet, the highlight.js
         # theme, the VS Code palette and the collapse script are all
         # inlined, so the page needs no server and no other file.
-        self.assertIn("#task-panel {", page)  # main.css
+        self.assertIn(".ev.task-panel, .ev.user-msg {", page)  # main.css
         self.assertIn(".collapse-preview", page)  # main.css
         self.assertIn(".hljs", page)  # highlight theme
         self.assertIn("--vscode-editor-background: #1f1f1f", page)
-        self.assertIn("window.toggleThink", page)  # share.js
+        self.assertIn("renderShareTabBar", page)  # share.js
         # share.js's click delegation — a marker that appears in the
         # script only, never in this test's transcript body.
         self.assertIn(".closest('.collapse-header')", page)

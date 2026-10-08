@@ -110,7 +110,6 @@ export function activate(context: vscode.ExtensionContext): void {
       {webviewOptions: {retainContextWhenHidden: true}},
     ),
   );
-  context.subscriptions.push({dispose: () => sidebarView?.dispose()});
 
   // Root tab ids of the chat panels open when the previous session
   // shut down — the registry tabs behind whatever serialized chat
@@ -145,12 +144,6 @@ export function activate(context: vscode.ExtensionContext): void {
     recordPanelTab,
   );
   context.subscriptions.push(panelManager.registerSerializer());
-  context.subscriptions.push({
-    dispose: () => {
-      panelManager?.dispose();
-      panelManager = undefined;
-    },
-  });
 
   const editorTabsMode = () => SorcarPanelManager.modeEnabled();
 
@@ -177,7 +170,6 @@ export function activate(context: vscode.ExtensionContext): void {
       {webviewOptions: {retainContextWhenHidden: true}},
     ),
   );
-  context.subscriptions.push({dispose: () => metaView?.dispose()});
   panelManager.setMetaSink((values, taskUpdate) => {
     metaView?.postMetaState(values, taskUpdate);
   });
@@ -421,7 +413,6 @@ export function activate(context: vscode.ExtensionContext): void {
       {webviewOptions: {retainContextWhenHidden: true}},
     ),
   );
-  context.subscriptions.push({dispose: () => historyView?.dispose()});
   // The history panel highlights (and scrolls to) the row of the task
   // the chat surface on screen shows: in editor-tabs mode the panel
   // manager relays the ACTIVE editor panel's ids, in sidebar mode the
@@ -985,10 +976,15 @@ export function activate(context: vscode.ExtensionContext): void {
   console.log('KISS Sorcar extension activated');
 }
 
+/**
+ * Tear down the four controllers.  VS Code calls this before disposing
+ * `context.subscriptions`, so the views are not also registered there:
+ * the order matters (the manager's dispose marks shutdown first, so the
+ * panel disposals below, and any the workbench triggers, must not retire
+ * chats from the daemon's registry) and a second dispose would be a
+ * no-op anyway.
+ */
 export function deactivate(): void {
-  // The manager's dispose marks shutdown first: the panel disposals
-  // below (and any the workbench triggers) must not retire chats from
-  // the daemon's registry.
   panelManager?.dispose();
   panelManager = undefined;
   sidebarView?.dispose();

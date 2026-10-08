@@ -405,11 +405,13 @@ async function testWebviewSide() {
         !activeText.includes('BGERR1'),
       'background-tab worktree results must not render in the active tab',
     );
-    const tabEl = win.document.querySelector(
-      '.chat-tab[data-tab-id="' + tab1 + '"]',
+    // Chat tabs have no row of their own: the Chats panel's pick is
+    // switchToTab.
+    assert.ok(
+      api.openTabs().some(t => t.id === tab1),
+      'tab1 must still be open',
     );
-    assert.ok(tabEl, 'tab1 element must exist in the tab bar');
-    tabEl.click();
+    api.switchToTab(tab1);
     assert.strictEqual(api.getActiveTabId(), tab1, 'tab1 must be active now');
     const restored = win.document.getElementById('output').textContent;
     assert.ok(

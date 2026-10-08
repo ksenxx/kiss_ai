@@ -119,8 +119,10 @@ function openPanelViaMenu(win) {
   assert.ok(panelOpen(win), 'the menu item opens the panel');
 }
 
+// The Chats-panel pick: chat tabs have no row of their own any more, so a
+// chat is shown through the test API.
 function switchToTab(win, tabId) {
-  click(win, win.document.querySelector(`.chat-tab[data-tab-id="${tabId}"]`));
+  win._testApi.switchToTab(tabId);
   assert.strictEqual(win._testApi.getActiveTabId(), tabId);
 }
 

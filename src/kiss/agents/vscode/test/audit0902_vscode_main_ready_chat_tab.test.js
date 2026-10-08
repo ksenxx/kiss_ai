@@ -78,6 +78,12 @@ function readies(posted) {
   return posted.filter(m => m.type === 'ready');
 }
 
+// Every open tab id (chats and content tabs), in tab order.  Chats are
+// not rendered as a row any more, so this is the only place to see them.
+function openTabIds(win) {
+  return win._testApi.openTabs().map(t => t.id);
+}
+
 function openReport(win, name) {
   send(win, {
     type: 'fileContent',
@@ -171,17 +177,16 @@ function testReadyOnOrphanContentTabFallsBackToAnyChat() {
   }
   // The registry snapshot never lists content tabs, so the report stays.
   assert.ok(
-    win.document.querySelector(
-      `.chat-tab[data-tab-id=${JSON.stringify(contentTab)}]`,
-    ),
+    openTabIds(win).includes(contentTab),
     'the content tab survives the snapshot',
   );
   assert.ok(
-    !win.document.querySelector(
-      `.chat-tab[data-tab-id=${JSON.stringify(chatB)}]`,
+    win.document.querySelector(
+      `#tab-list .chat-tab[data-tab-id=${JSON.stringify(contentTab)}]`,
     ),
-    'chat B is gone',
+    'the content tab is still on the group strip',
   );
+  assert.ok(!openTabIds(win).includes(chatB), 'chat B is gone');
   reconnect(win);
   const again = readies(posted);
   assert.strictEqual(
@@ -204,22 +209,17 @@ function testReadyWithNoChatReportsNone() {
     type: 'tabs_state',
     tabs: [{tabId: 'other', chatId: 'c1', title: 'other', workDir: '/other'}],
   });
-  assert.ok(
-    !win.document.querySelector(
-      `.chat-tab[data-tab-id=${JSON.stringify(chatA)}]`,
-    ),
-    'the placeholder chat is gone',
-  );
+  assert.ok(!openTabIds(win).includes(chatA), 'the placeholder chat is gone');
+  assert.ok(openTabIds(win).includes('other'), 'the registry chat is open');
   assert.strictEqual(win._testApi.getActiveTabId(), contentTab);
-  // The user closes that chat too: the content tab survives as the
-  // only tab, so no chat is left to represent the window.
-  win.document
-    .querySelector('.chat-tab[data-tab-id="other"] .chat-tab-close')
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.ok(
-    !win.document.querySelector('.chat-tab[data-tab-id="other"]'),
-    'the chat tab is closed',
-  );
+  // That chat is closed from another client (the registry snapshot no
+  // longer lists it; there is no row of chat tabs to close it from
+  // here while the orphaned report is on screen): the content tab
+  // survives as the only tab, so no chat is left to represent the
+  // window.
+  send(win, {type: 'tabs_state', tabs: []});
+  assert.ok(!openTabIds(win).includes('other'), 'the chat tab is closed');
+  assert.strictEqual(openTabIds(win).join(','), contentTab);
   assert.strictEqual(win._testApi.getActiveTabId(), contentTab);
   const lastChanged = posted.filter(m => m.type === 'activeTabChanged').pop();
   assert.strictEqual(

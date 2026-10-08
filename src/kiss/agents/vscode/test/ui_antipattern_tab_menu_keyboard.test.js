@@ -4,11 +4,12 @@
 // add your name here
 //
 // End-to-end (jsdom) tests for anti-patterns A5/A12 in media/main.js:
-// the chat-tab context menu is keyboard operable like the sidebar tree
-// menus.  Shift+F10 / the ContextMenu key open it from a focused tab,
-// its items are focusable menuitems reached with the arrows, Home and
-// End, Enter picks one, and Escape closes it and hands focus back to
-// the tab.  Each test fails on the old code.
+// the tab context menu of the group strip (#tab-list: the chat on
+// screen and its sub-agent tabs) is keyboard operable like the sidebar
+// tree menus.  Shift+F10 / the ContextMenu key open it from a focused
+// tab, its items are focusable menuitems reached with the arrows, Home
+// and End, Enter picks one, and Escape closes it and hands focus back
+// to the tab.  Each test fails on the old code.
 'use strict';
 
 const assert = require('assert');
@@ -18,7 +19,7 @@ const {test, report} = h.makeRunner();
 
 function tabEl(win, tabId) {
   return win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
   );
 }
 
@@ -30,6 +31,8 @@ function items(win) {
   return h.all(win, '#tab-context-menu .tab-ctx-item');
 }
 
+// Two chats; tabA is on screen with a sub-agent tab, so the strip is
+// shown (a lone chat has no strip) and tabA's entry can take focus.
 function twoTabs() {
   const {win, posted} = h.makeWebview();
   const tabA = win._testApi.getActiveTabId();
@@ -37,6 +40,22 @@ function twoTabs() {
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();
   assert.notStrictEqual(tabA, tabB);
+  win._testApi.switchToTab(tabA);
+  h.send(win, {
+    type: 'openSubagentTab',
+    tab_id: 'sub-a',
+    parent_tab_id: tabA,
+    description: 'a sub-agent',
+    task_id: 'sub-task-a',
+    taskIndex: 0,
+    isSubagentTab: true,
+  });
+  assert.strictEqual(win._testApi.getActiveTabId(), tabA, 'tabA is on screen');
+  assert.notStrictEqual(
+    h.byId(win, 'tab-bar').style.display,
+    'none',
+    'the group strip is shown',
+  );
   return {win, posted, tabA, tabB};
 }
 

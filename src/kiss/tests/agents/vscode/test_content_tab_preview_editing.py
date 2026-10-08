@@ -35,13 +35,14 @@ import pytest
 
 from kiss.tests.agents.vscode.test_content_tab_editing import (
     _dismiss_toasts,
+    _uncover_pane,
     _wait_for_disk,
 )
 from kiss.tests.agents.vscode.test_content_tab_file_links import (
     _inject_file_link,
-    _open_page,
     browser,  # noqa: F401  (module fixture used by param name)
 )
+from kiss.tests.agents.vscode.test_result_ls_listing_file_links import _open_page
 from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_content_tab_file_links import (
     harness,  # noqa: F401  (module fixture used by param name)
@@ -62,7 +63,10 @@ _MODE_BTN = _VIEW + ".content-mode-btn"
 _STATUS = _VIEW + ".content-save-status"
 _PREVIEW = _VIEW + ".content-preview-holder"
 _SOURCE_HOLDER = _VIEW + ".content-monaco-holder"
-_DIRTY_TAB = ".chat-tab.content-tab.content-dirty"
+# The desktop remote page is the split layout: content tabs live on
+# the content pane's own row, next to the (always visible) chat.
+_CONTENT_TAB = "#content-tab-list .chat-tab.content-tab"
+_DIRTY_TAB = _CONTENT_TAB + ".content-dirty"
 
 
 def _fresh_file(harness, name: str, text: str) -> Path:
@@ -78,8 +82,9 @@ def _open_preview(page, path: str, link_id: str) -> None:
     """Click a link to *path* and wait for its preview iframe."""
     _inject_file_link(page, path, link_id)
     page.click("#" + link_id)
-    page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
+    page.wait_for_selector(_CONTENT_TAB, timeout=30000)
     page.wait_for_selector(_FRAME, timeout=30000)
+    _uncover_pane(page)
 
 
 def _enter_source_mode(page) -> None:
@@ -93,6 +98,7 @@ def _enter_source_mode(page) -> None:
 
 
 def _type_at_end(page, text: str) -> None:
+    _uncover_pane(page)
     page.click(_MONACO + " .view-lines")
     # Monaco binds "go to end of document" per platform: Ctrl+End on
     # Linux/Windows, Cmd+Down on macOS (Ctrl+End is unbound there, so
@@ -318,20 +324,18 @@ class TestMarkdownHtmlEditSource:
             )
             _type_at_end(page, " EDIT")
             page.wait_for_selector(_DIRTY_TAB, timeout=10000)
-            # Back to the chat (its entry on the group strip; the main
-            # row's entry would return to the file last viewed), then a
-            # NEW :5 link to the dirty file: the tab comes forward in
-            # source mode, jumped to line 5, with the unsaved edit
-            # intact.
-            page.click("#tab-list .chat-tab:not(.content-tab) .chat-tab-label")
-            page.wait_for_selector("#task-input", state="visible")
+            # The chat stays on screen beside the file (split layout),
+            # so a NEW :5 link to the dirty file can be clicked right
+            # away: the tab stays forward in source mode, jumped to
+            # line 5, with the unsaved edit intact.
+            assert page.locator("#task-input").is_visible()
             _inject_file_link(page, str(path) + ":5", "lnk-ln2")
             page.click("#lnk-ln2")
             page.wait_for_function(
                 self._JUMPED_JS, arg=["marker-005", "marker-250"],
                 timeout=30000,
             )
-            assert page.locator(".chat-tab.content-tab").count() == 1
+            assert page.locator(_CONTENT_TAB).count() == 1
             assert page.locator(_DIRTY_TAB).count() == 1
             assert path.read_text() == source
         finally:
@@ -540,7 +544,7 @@ class TestMarkdownHtmlEditSource:
             (folder / "inner.txt").write_text("inner\n")
             _inject_file_link(page, str(folder), "lnk-p7")
             page.click("#lnk-p7")
-            page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
+            page.wait_for_selector(_CONTENT_TAB, timeout=30000)
             page.wait_for_selector(
                 _MONACO + ", " + _FALLBACK, timeout=30000,
             )
@@ -576,7 +580,10 @@ class TestMarkdownHtmlEditSource:
             page.wait_for_selector(
                 "#task-input", state="visible", timeout=30000,
             )
-            page.wait_for_selector(".chat-tab", timeout=30000)
+            page.wait_for_function(
+                "() => window._testApi && window._testApi.getActiveTabId()",
+                timeout=30000,
+            )
             path = _fresh_file(harness, "toggle_fb.md", _MD_SOURCE)
             _open_preview(page, str(path), "lnk-p8")
             _dismiss_toasts(page)

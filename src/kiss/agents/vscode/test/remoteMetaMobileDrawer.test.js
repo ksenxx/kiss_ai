@@ -6,8 +6,8 @@
 // End-to-end tests for the mobile remote webapp's task-info drawer
 // (media/chat.html + media/main.js, remote mode below 900px):
 //
-// * #meta-drawer-btn (the tab bar's right edge) opens the #meta-panel
-//   drawer with its #meta-overlay backdrop and flips aria-expanded;
+// * #meta-drawer-btn (a composer footer icon, next to the chats burger)
+//   opens the #meta-panel drawer with its #meta-overlay backdrop and flips aria-expanded;
 //   the close button and the backdrop both dismiss it;
 // * the 5s getTaskUpdate poll runs only while the drawer is OPEN (and a
 //   task runs): opening polls immediately, closing stops the timer; the
@@ -226,17 +226,22 @@ function openRunningDrawer() {
 
 async function main() {
   await test(
-    'the tab-bar button toggles the drawer; close button and backdrop ' +
+    'the footer button toggles the drawer; close button and backdrop ' +
       'dismiss it',
     () => {
       const wv = makeWebview();
       const win = wv.win;
       const btn = win.document.getElementById('meta-drawer-btn');
-      assert.ok(btn, 'the toggle exists in the tab bar');
+      assert.ok(btn, 'the toggle exists in the composer footer');
       assert.strictEqual(
         btn.parentElement.id,
-        'main-tab-bar',
-        'the toggle rides the main tab row, not the composer footer',
+        'footer-tools',
+        'the toggle is a composer footer icon (there is no main tab row)',
+      );
+      assert.strictEqual(
+        btn.previousElementSibling && btn.previousElementSibling.id,
+        'menu-btn',
+        'it sits right after the chats burger',
       );
       assert.strictEqual(btn.getAttribute('aria-expanded'), 'false');
       assert.ok(!drawerOpen(win));

@@ -125,8 +125,8 @@ function testUnitLadder(remote) {
   const label = remote ? 'webapp' : 'extension';
   const {win} = makeWebview(remote);
   const now = Date.now();
-  // One session per rung of the ladder, oldest first so each maps to a
-  // distinct rendered row (renderHistory keeps the given order).
+  // One session per rung. Identify each row by chat, independent of
+  // the history renderer's running-first/chronological section order.
   const cases = [
     {ago: 30 * 1000, text: 'just now'},
     {ago: 5 * MINUTE_MS, text: '5 minutes ago'},
@@ -158,13 +158,16 @@ function testUnitLadder(remote) {
     cases.length,
     `${label}: one history row per session`,
   );
-  rows.forEach((row, i) => {
+  cases.forEach((testCase, i) => {
+    const row = win.document.querySelector(
+      '[data-chat-id="chat-' + i + '"] .sidebar-item',
+    );
     const ago = row.querySelector('.sidebar-item-launched');
     assert.ok(ago, `${label}: row ${i} renders the launched-ago label`);
     assert.strictEqual(
       ago.textContent,
-      cases[i].text,
-      `${label}: row ${i} (${cases[i].ago} ms old)`,
+      testCase.text,
+      `${label}: row ${i} (${testCase.ago} ms old)`,
     );
     // "Next to the show details button": the label lives in the same
     // action strip, immediately after the collapse toggle.
@@ -229,7 +232,9 @@ function testTimestampSources() {
     }),
     makeSession({id: 'chat-f', task_id: 'task-f', startTs: 0, timestamp: 1e20}),
   ]);
-  const rows = historyRows(win);
+  const rows = ['a', 'b', 'c', 'd', 'e', 'f'].map(id =>
+    win.document.querySelector('[data-chat-id="chat-' + id + '"] .sidebar-item'),
+  );
   assert.strictEqual(
     rows[0].querySelector('.sidebar-item-launched').textContent,
     '2 hours ago',

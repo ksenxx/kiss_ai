@@ -17,7 +17,7 @@ subscribed tab, so the setup-failure result must be too — delivered
 live exactly once per watching tab, and recorded exactly once.
 
 Everything is real: a real ``VSCodeServer``, a run submitted through
-``_cmd_run`` whose agent-script ``settings()`` parks on a file
+``_cmd_run`` whose SEA ``settings()`` parks on a file
 and then raises (a real setup failure, no LLM call), and a real
 history-click attach through ``_replay_session``.
 """
@@ -114,11 +114,11 @@ class TestSetupFailureResultReachesViewer(TestCase):
             "useWorktree": False,
             "isParallel": False,
             "autoCommit": False,
-            "agentPath": str(self.script),
+            "seaPath": str(self.script),
         })
         self.assertTrue(
             self._wait((self.tmp / "entered").exists, 30.0),
-            "the run never reached the agent-script getter",
+            "the run never reached the SEA getter",
         )
         state = agent_state.find_by_tab(launcher)
         assert state is not None

@@ -120,9 +120,7 @@ class TestBrowserProcessKilledOnClose:
             assert tool.go_to_url("about:blank").startswith("Page:")
             new_pid = tool._browser_pid
             assert new_pid is not None
-            assert _wait_dead(old_pid), (
-                f"old Chromium (pid {old_pid}) leaked across relaunch"
-            )
+            assert _wait_dead(old_pid), f"old Chromium (pid {old_pid}) leaked across relaunch"
         finally:
             tool.close()
         assert _wait_dead(new_pid)
@@ -140,9 +138,7 @@ class TestBrowserProcessKilledOnClose:
             tool._browser_pid = victim.pid
             tool._browser_identity = "bogus-identity-recorded-long-ago"
             tool._kill_browser_process()
-            assert victim.poll() is None, (
-                "unrelated process was killed despite identity mismatch"
-            )
+            assert victim.poll() is None, "unrelated process was killed despite identity mismatch"
             assert tool._browser_pid is None
         finally:
             victim.terminate()
@@ -169,9 +165,7 @@ class TestCloseBrowserTool:
             pid = _launch(tool)
             msg = tool.close_browser()
             assert "closed" in msg.lower()
-            assert _wait_dead(pid), (
-                f"Chromium (pid {pid}) survived close_browser()"
-            )
+            assert _wait_dead(pid), f"Chromium (pid {pid}) survived close_browser()"
             new_pid = _launch(tool)
             assert new_pid != pid
         finally:
@@ -185,30 +179,30 @@ class TestEphemeralProfile:
 
     def test_ephemeral_profile_removed_on_close(self):
         tool = WebUseTool(headless=True, ephemeral=True)
-        profile = tool.user_data_dir
-        assert profile is not None and os.path.isdir(profile)
         try:
             pid = _launch(tool)
+            profile = tool.user_data_dir
+            assert profile is not None and os.path.isdir(profile)
         finally:
             tool.close()
         assert _wait_dead(pid)
         assert not os.path.exists(profile), "ephemeral profile dir leaked"
 
     def test_ephemeral_close_without_launch(self):
+        """A tool that never launched has no profile directory to leak."""
         tool = WebUseTool(headless=True, ephemeral=True)
-        profile = tool.user_data_dir
-        assert profile is not None and os.path.isdir(profile)
+        assert tool.user_data_dir is None
         tool.close()
-        assert not os.path.exists(profile)
+        assert tool.user_data_dir is None
 
     def test_ephemeral_profile_removed_again_after_revival(self):
         """close() → revive (relaunch) → close() must delete the profile
         both times: the ephemeral marker survives the first close."""
         tool = WebUseTool(headless=True, ephemeral=True)
-        profile = tool.user_data_dir
-        assert profile is not None
         try:
             pid1 = _launch(tool)
+            profile = tool.user_data_dir
+            assert profile is not None
             tool.close()
             assert _wait_dead(pid1)
             assert not os.path.exists(profile)
@@ -217,9 +211,7 @@ class TestEphemeralProfile:
         finally:
             tool.close()
         assert _wait_dead(pid2)
-        assert not os.path.exists(profile), (
-            "ephemeral profile dir leaked after revival"
-        )
+        assert not os.path.exists(profile), "ephemeral profile dir leaked after revival"
 
 
 @_posix_only
@@ -237,18 +229,13 @@ class TestStaleEscalationDirCleanup:
         tool = WebUseTool(user_data_dir=str(base), headless=True)
         try:
             pid = _launch(tool)
-            assert not (tmp_path / "profile_1").exists(), (
-                "stale profile_1 not cleaned"
-            )
-            assert not (tmp_path / "profile_2").exists(), (
-                "stale profile_2 not cleaned"
-            )
+            assert not (tmp_path / "profile_1").exists(), "stale profile_1 not cleaned"
+            assert not (tmp_path / "profile_2").exists(), "stale profile_2 not cleaned"
         finally:
             tool.close()
         assert _wait_dead(pid)
 
     @posix_only("Chromium's SingletonLock symlink is the POSIX profile lock")
-
     def test_live_escalation_dir_is_preserved(self, tmp_path):
         base = tmp_path / "profile"
         base.mkdir()
@@ -258,9 +245,7 @@ class TestStaleEscalationDirCleanup:
         tool = WebUseTool(user_data_dir=str(base), headless=True)
         try:
             pid = _launch(tool)
-            assert (tmp_path / "profile_1").exists(), (
-                "live escalation dir was deleted"
-            )
+            assert (tmp_path / "profile_1").exists(), "live escalation dir was deleted"
         finally:
             tool.close()
         assert _wait_dead(pid)
@@ -279,8 +264,8 @@ class TestSubagentBrowserPolicy:
             tool = agent.web_use_tool
             assert tool is not None
             assert tool._headless is True
-            assert tool._ephemeral_dir is not None
-            assert tool.user_data_dir == tool._ephemeral_dir
+            assert tool._ephemeral is True
+            assert tool.user_data_dir is None, "ephemeral profile created before any launch"
         finally:
             if agent.web_use_tool is not None:
                 agent.web_use_tool.close()
@@ -294,7 +279,7 @@ class TestSubagentBrowserPolicy:
             tool = agent.web_use_tool
             assert tool is not None
             assert tool._headless is True
-            assert tool._ephemeral_dir is None
+            assert tool._ephemeral is False
         finally:
             if agent.web_use_tool is not None:
                 agent.web_use_tool.close()

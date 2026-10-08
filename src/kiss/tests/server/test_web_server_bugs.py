@@ -4,9 +4,11 @@
 # add your name here
 """Integration tests for web_server.py bugs (audit findings F1/F5).
 
-* D1 (F1): ``_handle_ready`` must skip non-dict ``restoredTabs``
+* D1 (F1): the ``ready`` handler must skip non-dict ``restoredTabs``
   elements instead of raising ``AttributeError`` and tearing down the
-  whole authenticated WebSocket connection.
+  whole authenticated WebSocket connection.  Driven through the server
+  API's ``ready`` (the only production caller of ``_handle_ready``,
+  and the one place the list is sanitized).
 * D3 (F5): ``translate_webview_command`` no longer rewrites
   ``userActionDone`` (the branch was dead — no client ever sends it;
   ``media/main.js`` posts ``userAnswer`` directly), so the command
@@ -26,7 +28,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.sorcar import translate_webview_command
+from kiss.server.sorcar import ApiContext, translate_webview_command
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -61,6 +63,13 @@ class _RecordingEndpoint:
 
 class _ServerTestBase(IsolatedAsyncioTestCase):
     """Shared setup: a real ``RemoteAccessServer`` with recorded I/O."""
+
+    async def ready(self, cmd: dict[str, Any], endpoint: _RecordingEndpoint) -> None:
+        """Run *cmd* through the server API's ``ready`` as a remote client."""
+        ctx = ApiContext(
+            endpoint=endpoint, conn_state={"conn_id": "c1"}, is_local=False,
+        )
+        await self.server._server_api.ready(cmd, ctx)
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -110,7 +119,7 @@ class TestReadyMalformedRestoredTabs(_ServerTestBase):
             "connId": "c1",
             "restoredTabs": ["x"],
         }
-        await self.server._handle_ready(cmd, endpoint)
+        await self.ready(cmd, endpoint)
         self.assertTrue(
             any('"focusInput"' in s for s in endpoint.sent),
             f"focusInput not sent; sent={endpoint.sent}",
@@ -129,7 +138,7 @@ class TestReadyMalformedRestoredTabs(_ServerTestBase):
                 ["nested"],
             ],
         }
-        await self.server._handle_ready(cmd, endpoint)
+        await self.ready(cmd, endpoint)
         resumes = [c for c in self.run_cmds if c.get("type") == "resumeSession"]
         self.assertEqual(len(resumes), 1)
         self.assertEqual(resumes[0]["chatId"], "chat-2")

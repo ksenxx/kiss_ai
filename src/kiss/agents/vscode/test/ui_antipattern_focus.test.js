@@ -138,10 +138,12 @@ async function main() {
       tabB,
       'the user keeps their place',
     );
-    const doneTab = win.document.querySelector(
-      `.chat-tab[data-tab-id=${JSON.stringify(tabA)}]`,
+    // Chats are no longer rendered as a row of tabs: the finished chat
+    // stays open (hidden, one Chats-panel pick away).
+    assert.ok(
+      win._testApi.openTabs().some(t => t.id === tabA),
+      'the finished tab is still open',
     );
-    assert.ok(doneTab, 'the finished tab is still in the strip');
     win.close();
   });
 

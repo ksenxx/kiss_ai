@@ -27,7 +27,7 @@ from kiss.core.models.model import (
     merge_system_texts,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error, stop_aware_events
+from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error
 
 logger = logging.getLogger(__name__)
 
@@ -754,35 +754,21 @@ class GeminiModel(Model):
             ),
             self._http_client,
         )
-        # `events` is closed in `finally`, mirroring the OpenAI
-        # transports: the loop body can raise (a token callback
-        # propagating Stop, most commonly), and an abandoned generator
-        # runs its cleanup only when the traceback holding its frame is
-        # released — until then a daemon watchdog thread stays alive and
-        # armed over a connection that never returns to the pool.
-        events = stop_aware_events(
-            stream,
-            stall_timeout=self._stream_stall_timeout,
-            on_abort=self._close_thinking_if_open,
-            name="gemini-stream-abort-watchdog",
-        )
         try:
-            for chunk in events:
-                last_chunk = chunk
-                if chunk.usage_metadata is not None:
-                    # Billed already: kept for take_partial_usage_response
-                    # if the stream fails before it ends.
-                    usage_chunk = self._rejected_response = chunk
-                chunk_parts = self._parts_from_response(chunk)
-                self._stream_parts(chunk_parts)
-                parts.extend(chunk_parts)
+            with self._watched_events(stream, "gemini-stream-abort-watchdog") as events:
+                for chunk in events:
+                    last_chunk = chunk
+                    if chunk.usage_metadata is not None:
+                        # Billed already: kept for take_partial_usage_response
+                        # if the stream fails before it ends.
+                        usage_chunk = self._rejected_response = chunk
+                    chunk_parts = self._parts_from_response(chunk)
+                    self._stream_parts(chunk_parts)
+                    parts.extend(chunk_parts)
         except httpx.TimeoutException as e:
             # The byte-level clock fired first; report it in the same
             # words as the event-level watchdog would have.
             raise stall_error(self._stream_stall_timeout) from e
-        finally:
-            events.close()
-            self._close_thinking_if_open()
         self._rejected_response = None
         return parts, usage_chunk or last_chunk
 

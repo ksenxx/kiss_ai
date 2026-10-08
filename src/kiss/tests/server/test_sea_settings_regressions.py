@@ -12,10 +12,10 @@ first cut of the ``settings()`` contract:
   inherited tools;
 * a ``settings()`` value whose own methods raise (an untrusted ``str``
   or number subclass) escaped :func:`resolve_settings` as the raw
-  exception instead of a :exc:`SettingsError` naming the source;
+  exception instead of a :exc:`SeaError` naming the source;
 * an unknown settings key was accepted silently when its value was
   ``None``;
-* a ``/xxx text`` run of a ``channel``-preset SEA worked in the
+* a ``/xxx text`` run of a ``ChannelSea`` worked in the
   project directory instead of ``~/.kiss/channel_work``, unlike the
   same SEA dispatched through ``run_agent``;
 * the terminal persistence of a slash-command run stored the stripped
@@ -36,7 +36,7 @@ import pytest
 
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.persistence import _get_db, _rw_lock
-from kiss.agents.sorcar.sea_settings import SettingsError, resolve_settings
+from kiss.agents.sorcar.sea_settings import SeaError, resolve_settings
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import agent_state, sorcar
@@ -75,22 +75,22 @@ def test_prompt_settings_are_unknown_keys() -> None:
     # ``prompt`` and ``system_prompt`` are functions, not settings: the
     # key is rejected before its (untrusted) value is ever touched.
     declared: dict[str, Any] = {"prompt": _RaisingStr("x")}
-    with pytest.raises(SettingsError, match=r"settings\(\) has an unknown key 'prompt'"):
+    with pytest.raises(SeaError, match=r"settings\(\) has an unknown key 'prompt'"):
         resolve_settings(declared)
     declared = {"system_prompt": "x"}
-    with pytest.raises(SettingsError, match=r"has an unknown key 'system_prompt'"):
+    with pytest.raises(SeaError, match=r"has an unknown key 'system_prompt'"):
         resolve_settings(declared)
 
 
 def test_broken_numeric_value_is_a_settings_error() -> None:
     declared = {"timeout": _RaisingNumber(5)}
-    with pytest.raises(SettingsError, match=r"settings\(\)\['timeout'\] returned a broken value"):
+    with pytest.raises(SeaError, match=r"settings\(\)\['timeout'\] returned a broken value"):
         resolve_settings(declared)
 
 
 def test_overflowing_numeric_value_is_reported_as_non_finite() -> None:
     declared = {"max_budget": _OverflowingNumber(1)}
-    with pytest.raises(SettingsError, match=r"max_budget'\] must return a finite number"):
+    with pytest.raises(SeaError, match=r"max_budget'\] must return a finite number"):
         resolve_settings(declared)
 
 
@@ -101,15 +101,15 @@ def test_finite_numbers_are_returned_as_floats() -> None:
 
 
 def test_unknown_key_with_none_value_is_rejected() -> None:
-    declared = {"kind": "worker", "tiemout": None}
-    with pytest.raises(SettingsError, match="unknown key 'tiemout'"):
+    declared = {"use_web_tools": True, "tiemout": None}
+    with pytest.raises(SeaError, match="unknown key 'tiemout'"):
         resolve_settings(declared)
 
 
 def test_known_key_with_none_value_is_dropped() -> None:
-    resolved = resolve_settings({"kind": "worker", "timeout": None})
+    resolved = resolve_settings({"use_web_tools": True, "timeout": None})
     assert "timeout" not in resolved
-    assert resolved["kind"] == "worker"
+    assert resolved["use_web_tools"] is True
 
 
 def _history_tasks() -> list[str]:
@@ -227,7 +227,7 @@ class Sea(BaseSea):
                 return
             child_results.append(sorcar.run(
                 "CHILD", work_dir=self.repo, use_worktree=False, auto_commit=False,
-                extension_agent_path=str(child), tool_profile=" none ",
+                sea_path=str(child), tool_profile=" none ",
                 parent_task_id=task_id, inherit_tools=True,
                 endpoint_file=self.endpoint_file, timeout=60,
             ))
@@ -235,7 +235,7 @@ class Sea(BaseSea):
         self._record_runs(runs, dispatch_child)
         result = sorcar.run(
             "PARENT", work_dir=self.repo, use_worktree=False, auto_commit=False,
-            extension_agent_path=str(parent),
+            sea_path=str(parent),
             endpoint_file=self.endpoint_file, timeout=120,
         )
         assert result.success is True, result
@@ -250,19 +250,16 @@ class Sea(BaseSea):
         child_tools = by_prompt["# Task\nCHILD"]["tool_names"]
         assert sorted(child_tools) == ["_child_tool", "finish"], child_tools
 
-    def test_channel_preset_slash_command_runs_in_the_channel_scratch_dir(self) -> None:
+    def test_channel_sea_slash_command_runs_in_the_channel_scratch_dir(self) -> None:
         """``/chan text`` works in ``~/.kiss/channel_work``, as ``run_agent`` would."""
         _seed_seas_md(
             Path(self.tmpdir) / "user-seas", "chan",
             """
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 
-class Sea(BaseSea):
+class Sea(ChannelSea):
     def description(self):
         return 'a channel'
-
-    def settings(self, settings):
-        return settings | {'kind': 'channel'}
 """,
         )
         runs: list[dict[str, Any]] = []
@@ -279,7 +276,7 @@ class Sea(BaseSea):
         assert runs[0]["work_dirs"] == [scratch], runs[0]
         assert Path(scratch).is_dir()
 
-    def test_session_preset_slash_command_keeps_the_project_dir(self) -> None:
+    def test_plain_sea_slash_command_keeps_the_project_dir(self) -> None:
         """A plain SEA's slash run stays in the calling project."""
         _seed_seas_md(
             Path(self.tmpdir) / "user-seas", "plain",

@@ -61,10 +61,10 @@ function initialTabId(posted) {
   return ready.tabId;
 }
 
-function tabElement(win, tabId) {
-  return win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
+// Chat tabs have no row of their own: the open tabs are read back
+// through the test API (a background root is not on the group strip).
+function tabRecord(win, tabId) {
+  return win._testApi.openTabs().find(t => t.id === tabId) || null;
 }
 
 function notificationToasts(win) {
@@ -83,7 +83,7 @@ function testPhantomSubagentTabNotMaterialised() {
     isDone: false,
   });
   assert.strictEqual(
-    tabElement(win, 'phantom-sub-1'),
+    tabRecord(win, 'phantom-sub-1'),
     null,
     'a webview that does not own the target tab must not materialise ' +
       'a phantom sub-agent tab from a blank-parent openSubagentTab',
@@ -119,12 +119,14 @@ function testOwnedTabConversionStillWorks() {
     isSubagentTab: true,
     isDone: true,
   });
-  const el = tabElement(win, ownedTabId);
-  assert.ok(el, 'the owned tab still exists');
+  const rec = tabRecord(win, ownedTabId);
+  assert.ok(rec, 'the owned tab still exists');
   assert.ok(
-    el.className.includes('subagent-tab'),
+    rec.isSubagentTab,
     'the owned tab was converted into a sub-agent tab',
   );
+  assert.strictEqual(rec.title, 'converted sub-agent');
+  assert.ok(rec.isDone, 'the converted tab carries isDone');
   console.log('  ok - blank-parent openSubagentTab still converts the owned tab');
 }
 
@@ -138,7 +140,7 @@ function testUnknownParentStillDropped() {
     task_id: 'sub-task-10',
   });
   assert.strictEqual(
-    tabElement(win, 'sub-of-foreign-parent'),
+    tabRecord(win, 'sub-of-foreign-parent'),
     null,
     'non-empty unknown parent_tab_id must still be dropped',
   );
@@ -196,9 +198,10 @@ function testBackgroundTabErrorRetained() {
   const {win, posted} = makeWebview();
   const bgTabId = initialTabId(posted);
   win._testApi.createNewTab();
+  assert.ok(tabRecord(win, bgTabId), 'the initial tab is still open');
   assert.notStrictEqual(
-    tabElement(win, bgTabId).className.includes('active'),
-    true,
+    win._testApi.getActiveTabId(),
+    bgTabId,
     'the initial tab is now a background tab',
   );
 
@@ -208,12 +211,9 @@ function testBackgroundTabErrorRetained() {
     "a background tab's error must not render into the ACTIVE tab",
   );
 
-  tabElement(win, bgTabId).dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true}),
-  );
-  assert.ok(
-    win.document.getElementementById === undefined,
-  );
+  // The Chats panel's pick brings the background chat back on screen.
+  win._testApi.switchToTab(bgTabId);
+  assert.strictEqual(win._testApi.getActiveTabId(), bgTabId);
   assert.ok(
     win.document.getElementById('output').textContent.includes('bg boom'),
     "the background tab's error banner must appear after switching to it",
