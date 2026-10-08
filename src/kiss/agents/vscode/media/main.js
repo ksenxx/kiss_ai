@@ -18250,6 +18250,8 @@
       if (hasStart) t0 = doneStartTs;
       endTs = hasEnd ? doneEndTs : Date.now();
       setRunningState(false);
+      stopTimer();
+      removeSpinner();
       statusText.textContent = label || 'Ready';
       // A finished task (or its replay after a reconnect) must not raise
       // the phone's keyboard, nor pull the caret out of a field the user
@@ -22777,7 +22779,6 @@
       Math.max(1000, next.getTime() - now.getTime()),
     );
   }
-
 
   // Mouse events cover pointing devices in every environment; pointer
   // events additionally cover touch, where the compatibility mouse
