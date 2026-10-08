@@ -291,7 +291,7 @@ function spawnCollect(
  * notification: every step checks the token between commands, and a
  * running command is killed (spawnCollect).
  */
-export class SetupCancelledError extends Error {
+class SetupCancelledError extends Error {
   code = 'ECANCELLED';
   constructor() {
     super('Setup was cancelled.');
@@ -406,7 +406,7 @@ async function commandExistsAsync(cmd: string): Promise<boolean> {
  * Default model when KISS's own catalog cannot be consulted: the
  * environment's API keys, then an installed Claude Code / Codex CLI.
  */
-export async function getFallbackDefaultModel(): Promise<string> {
+async function getFallbackDefaultModel(): Promise<string> {
   const fromEnv = envDefaultModel();
   if (fromEnv) return fromEnv;
   if (await commandExistsAsync('claude')) return 'cc/opus';
@@ -961,7 +961,7 @@ function killPids(pids: string[], signal: NodeJS.Signals): void {
 }
 
 /** Where `kiss-web` lives in the bundled project's venv. */
-export function kissWebBinPath(kissProjectPath: string): string {
+function kissWebBinPath(kissProjectPath: string): string {
   return process.platform === 'win32'
     ? path.join(kissProjectPath, '.venv', 'Scripts', 'kiss-web.exe')
     : path.join(kissProjectPath, '.venv', 'bin', 'kiss-web');
@@ -2962,7 +2962,7 @@ const SAVE_CONFIG_TIMEOUT_MS = 60_000;
  * @returns Resolves once save_config has written the file; rejects with
  *   the reason (uv missing, spawn error, or the exit code and stderr).
  */
-export function saveKissConfig(
+function saveKissConfig(
   update: Record<string, unknown>,
   uvPath: string | null,
   kissProjectPath: string,

@@ -173,7 +173,7 @@ export function metaPanelBodyAttrs(): string {
  * a webview cannot reach the daemon's HTTPS port, and the browser's
  * HTTP cache keeps repeat downloads cheap.
  */
-export const VOICE_MODEL_URL =
+const VOICE_MODEL_URL =
   'https://ccoreilly.github.io/vosk-browser/models/' +
   'vosk-model-small-en-us-0.15.tar.gz';
 
@@ -323,7 +323,7 @@ const ATTR_STRING_KEYS: ReadonlySet<string> = new Set([
  * untouched. Mirrors `_build_html` in `kiss/server/web_server.py`, which
  * renders the same `media/chat.html` for the remote web app.
  */
-export function substituteTemplate(
+function substituteTemplate(
   tpl: string,
   subs: Record<string, string>,
 ): string {

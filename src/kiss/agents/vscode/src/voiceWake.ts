@@ -317,10 +317,17 @@ export class VoiceWakeService {
       }
       try {
         if (process.platform === 'win32') {
+          // Synchronous on the extension host's event loop, so bounded:
+          // a stalled taskkill must not freeze every window.
           const result = spawnSync(
             'taskkill',
             ['/PID', String(pid), '/T', '/F'],
-            {stdio: 'ignore', windowsHide: true},
+            {
+              stdio: 'ignore',
+              windowsHide: true,
+              timeout: 5000,
+              killSignal: 'SIGKILL',
+            },
           );
           if (result.error || result.status !== 0) proc.kill();
         } else {
