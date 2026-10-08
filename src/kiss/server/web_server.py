@@ -109,12 +109,13 @@ from kiss.core.vscode_config import (
 )
 from kiss.server import agent_state, tls_certs
 from kiss.server import sorcar as sorcar_api
+from kiss.server.commands import broadcast_to_conn
 from kiss.server.json_printer import (
     JsonPrinter,
     stamp_event_ts,
     with_task_settings_event,
 )
-from kiss.server.server import VSCodeServer, broadcast_to_conn
+from kiss.server.server import VSCodeServer
 from kiss.server.stall_watchdog import start_stall_watchdog
 from kiss.server.task_update import TaskUpdateRunner
 from kiss.server.tips import tips_data
@@ -2911,13 +2912,7 @@ class WebPrinter(JsonPrinter):
         # The tabId branch above returned, so ``event`` has no tabId.
         data = "" if talk else json.dumps(event)
         with self.delivery_lock:
-            with self._lock:
-                self._record_event(event)
-                # Mirror JsonPrinter.broadcast: record the file paths of
-                # mutating tool calls so the end-of-task cross-repo
-                # auto-commit (_autocommit_changed_repos) also sees tasks
-                # run through the web printer.
-                self._track_changed_path(event)
+            self._record_task_event(event)
             if persist_id:
                 _queue_chat_event(data, task_id=persist_id)
             if not record_only and not talk:

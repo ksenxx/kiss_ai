@@ -100,7 +100,6 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
 
     def _make_server(self) -> Any:
         from kiss.server.commands import _CommandsMixin
-        from kiss.server.server import broadcast_to_conn
 
         class FakeServer(_CommandsMixin):
             def __init__(self) -> None:
@@ -111,11 +110,6 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
 
             def _get_models(self, conn_id: str = "") -> None:
                 pass
-
-            def _broadcast_to_conn(
-                self, event: dict[str, Any], conn_id: str,
-            ) -> None:
-                broadcast_to_conn(self.printer, event, conn_id)
 
         return FakeServer()
 
