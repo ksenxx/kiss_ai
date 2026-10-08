@@ -23,10 +23,10 @@ REAL hung child — no mocks, real subprocesses, a real
 :class:`TalkPlayer` worker.
 
 Unreachable-without-fakes branches, documented instead of mocked:
-``_signal_group``'s ``killpg is None`` path and ``_kill_playback``'s
-``proc.kill()`` fallback only run on Windows (``os.killpg`` always
-exists on POSIX), and ``_signal_group``'s ``PermissionError`` arm
-needs a process group owned by another user.
+``_kill_playback``'s ``proc.kill()`` fallbacks run only when
+:func:`kiss.core.processes.kill_process_group` raises, which on POSIX
+needs a process group owned by another user (``PermissionError``) or
+one that is already gone.
 """
 
 from __future__ import annotations
