@@ -1500,6 +1500,24 @@
     reportChatTab(chatTabIdForHost());
   }
 
+  /**
+   * The chat tab at the root of *tab*'s owner chain: *tab* itself when
+   * it is a chat; for a content tab, the chat whose work produced it
+   * (a file opened FROM a file view names that view as its owner, so
+   * the chain is walked; the visited set fails closed on a cycle).
+   *
+   * @param {object|undefined} tab A tab object.
+   * @returns {object|null} The chat tab, or null when none is reached.
+   */
+  function rootChatTab(tab) {
+    const visited = new Set();
+    while (tab && tab.isContentTab && !visited.has(tab.id)) {
+      visited.add(tab.id);
+      tab = getTab(tab.ownerTabId);
+    }
+    return tab && !tab.isContentTab ? tab : null;
+  }
+
   // readychat-coverage:start
   /**
    * The id of the CHAT tab that represents this window to the host
@@ -1515,13 +1533,10 @@
    * @returns {string} A chat tab id, or ''.
    */
   function chatTabIdForHost() {
-    const active = getTab(activeTabId);
-    let chat = active && !active.isContentTab ? active : null;
-    if (!chat && active && active.isContentTab && active.ownerTabId) {
-      const ownerTab = getTab(active.ownerTabId);
-      if (ownerTab && !ownerTab.isContentTab) chat = ownerTab;
-    }
-    if (!chat) chat = tabs.find(t => !t.isContentTab) || null;
+    const chat =
+      rootChatTab(getTab(activeTabId)) ||
+      tabs.find(t => !t.isContentTab) ||
+      null;
     return chat ? chat.id : '';
   }
   // readychat-coverage:end
@@ -1537,16 +1552,8 @@
    * @returns {string} The id of the chat tab the action belongs to.
    */
   function chatTargetTabId() {
-    let tab = getTab(activeTabId);
-    // A file opened FROM a file view names that view as its owner, so
-    // the chain is walked to the chat at its root; the visited set
-    // fails closed on a cycle.
-    const visited = new Set();
-    while (tab && tab.isContentTab && !visited.has(tab.id)) {
-      visited.add(tab.id);
-      tab = getTab(tab.ownerTabId);
-    }
-    return tab && !tab.isContentTab ? tab.id : activeTabId;
+    const chat = rootChatTab(getTab(activeTabId));
+    return chat ? chat.id : activeTabId;
   }
 
   function restoreTab(tab) {
@@ -4033,11 +4040,7 @@
     // a straggling reply is ignored.
     clearTimeout(tab.contentSaveTimer);
     tab.contentSaveTimer = setTimeout(() => {
-      if (!tab.contentSaving) return;
-      tab.contentSaving = false;
-      tab.contentSaveToken = '';
-      tab.contentCloseAfterSave = false;
-      setContentSaveStatus(tab, 'Save failed: no reply from the server', true);
+      failContentSave(tab, 'Save failed: no reply from the server');
     }, 30000);
     api.saveFile({
       path: tab.contentPath,
@@ -4048,6 +4051,21 @@
       version: tab.contentFileVersion,
       force: !!force,
     });
+  }
+
+  /**
+   * Give up on the save *tab* is waiting for (its reply timed out or the
+   * connection that carried the request dropped): the tab stays dirty
+   * and the Save button works again, and a straggling reply is ignored
+   * because the token is retired.
+   */
+  function failContentSave(tab, message) {
+    if (!tab.contentSaving) return;
+    clearTimeout(tab.contentSaveTimer);
+    tab.contentSaving = false;
+    tab.contentSaveToken = '';
+    tab.contentCloseAfterSave = false;
+    setContentSaveStatus(tab, message, true);
   }
 
   // Re-read the file from disk into the tab, dropping its edits: the
@@ -4592,15 +4610,19 @@
       // Unsaved edits win over a fresh copy of the file: like VS Code,
       // opening a file that is already open in a dirty editor merely
       // brings that editor forward (and jumps to the requested line).
-      // Only an explicit reload replaces the text.
-      if (existing.contentDirty && !existing.contentReloadRequested) {
+      // Only an explicit reload replaces the text, and only the reply
+      // to the chat that asked for it is that reload (as in the error
+      // path above): another chat's open of the same path meanwhile
+      // must neither replace the edits nor consume the pending reload.
+      const reloading = existing.contentReloadRequested === owner;
+      if (existing.contentDirty && !reloading) {
         const line = parseInt(ev.line, 10);
         existing.contentRevealLine = line > 0 ? line : 0;
         revealPendingContentLine(existing);
       } else {
         renderContentView(existing, ev);
       }
-      existing.contentReloadRequested = false;
+      if (reloading) existing.contentReloadRequested = false;
       if (shownContentTabId() === existing.id) showContentTab(existing);
       else if (mayFocus) switchToTab(existing.id);
       return;
@@ -6295,7 +6317,7 @@
     // here: retarget — which clears and repolls — instead of polling
     // the new tab under the old tab's signature and generation.
     if (metaInfoChatTabId() !== metaInfoTabId) {
-      setMetaInfoTarget();
+      setMetaInfoTarget(refresh);
       return;
     }
     if (!metaInfoTabId) return;
@@ -6318,8 +6340,11 @@
    * tab switch, and a late reply for the former target no longer
    * matches — then polls immediately instead of waiting out the
    * interval.
+   *
+   * @param {boolean} [refresh] Forwarded to that first poll (the refresh
+   *   button pressed right after a tab switch must still run the agent).
    */
-  function setMetaInfoTarget() {
+  function setMetaInfoTarget(refresh) {
     const tabId = metaInfoChatTabId();
     if (tabId === metaInfoTabId) return;
     metaInfoTabId = tabId;
@@ -6328,7 +6353,7 @@
     metaInfoState = null;
     renderTaskUpdate(null);
     postMetaUpdateSoon();
-    requestTaskUpdate();
+    requestTaskUpdate(refresh);
   }
 
   // Whether the last syncMetaInfoRunning call saw a running task, so
@@ -8188,6 +8213,7 @@
       }
       node.loading = true;
       row.classList.add('loading');
+      node.kids.textContent = '';
       explorerNote(node.kids, node.depth + 1, 'Loading...');
       api.listDir({
         path: path,
@@ -8196,6 +8222,23 @@
         token: explorerToken(key),
       });
     }
+  }
+
+  /**
+   * Forget every folder listing still in flight: the daemon connection
+   * dropped, so its reply is never coming.  A folder whose first listing
+   * was lost is collapsed again (its next expansion asks afresh); a
+   * folder listed before keeps its rows and is re-listed by the refresh
+   * that follows the reconnect.
+   */
+  function abandonExplorerListings() {
+    explorerDirs.forEach(node => {
+      if (!node.loading) return;
+      node.loading = false;
+      node.refreshAfterLoad = false;
+      node.row.classList.remove('loading');
+      if (!node.loaded) toggleExplorerDir(node.row, false);
+    });
   }
 
   /**
@@ -9456,8 +9499,11 @@
    * Open a read-only text tab that is not a file on disk (a commit's
    * patch, search results, a comparison).  *key* identifies the tab so
    * repeating the action refreshes it instead of opening a second one.
+   * *ownerTabId* is the tab the request was sent as (the reply echoes
+   * it): a reply landing after a tab switch opens in that tab's
+   * workspace, not the current one's.
    */
-  function openTextResultTab(key, name, text, languageName) {
+  function openTextResultTab(key, name, text, languageName, ownerTabId) {
     handleFileContent(
       {
         path: key,
@@ -9467,7 +9513,7 @@
         isVirtual: true,
       },
       true,
-      activeTabId,
+      ownerTabId || activeTabId,
     );
   }
 
@@ -9524,7 +9570,10 @@
           request.action === 'rename' ? request.dest : request.path,
         );
         confirmAction({
-          id: 'fs-overwrite',
+          // One toast per destination: a multi-entry paste or move asks
+          // once per clash, and a shared id would replace the earlier
+          // question (and lose its Replace) with the later one.
+          id: 'fs-overwrite:' + (request.dest || request.path),
           message:
             "A file or folder named '" +
             target +
@@ -9552,6 +9601,8 @@
         (ev.count ? ev.count + ' result' + (ev.count === 1 ? '' : 's') : '') +
           (ev.count ? ' in ' + request.path + '\n\n' : '') +
           text,
+        '',
+        ev.tabId,
       );
       return;
     }
@@ -9561,6 +9612,7 @@
         pathBaseName(request.path) + ' \u2194 ' + pathBaseName(request.dest),
         ev.text || '',
         'x.diff',
+        ev.tabId,
       );
       return;
     }
@@ -10243,6 +10295,7 @@
         ev.base + ' \u2194 ' + short,
         text,
         'x.diff',
+        ev.tabId,
       );
       return;
     }
@@ -10253,6 +10306,7 @@
         pathBaseName(ev.path) + ' (' + short + ')',
         text,
         pathBaseName(ev.path),
+        ev.tabId,
       );
       return;
     }
@@ -13872,36 +13926,48 @@
     return el;
   }
 
+  // Largest edit the line diff aligns by LCS; a bigger one (an Edit
+  // tool call rewriting thousands of lines) is shown as the old block
+  // removed and the new block added, since the (m+1)*(n+1) table would
+  // otherwise take hundreds of megabytes and freeze the webview.
+  const LINE_DIFF_MAX_CELLS = 16000000;
+
   function lineDiff(a, b) {
     const al = a.split('\n'),
       bl = b.split('\n'),
       m = al.length,
       n = bl.length;
-    const dp = [];
-    for (let i = 0; i <= m; i++) {
-      dp[i] = new Array(n + 1);
-      dp[i][0] = 0;
+    const w = n + 1;
+    const ops = [];
+    if ((m + 1) * w > LINE_DIFF_MAX_CELLS) {
+      for (let i = 0; i < m; i++) ops.push({t: '-', o: al[i]});
+      for (let j = 0; j < n; j++) ops.push({t: '+', n: bl[j]});
+      return ops;
     }
-    for (let j = 0; j <= n; j++) dp[0][j] = 0;
+    // dp[i * w + j] is the LCS length of al[0..i) and bl[0..j); row and
+    // column 0 stay at their initial 0.
+    const dp = new Int32Array((m + 1) * w);
     for (let i = 1; i <= m; i++)
       for (let j = 1; j <= n; j++)
-        dp[i][j] =
+        dp[i * w + j] =
           al[i - 1] === bl[j - 1]
-            ? dp[i - 1][j - 1] + 1
-            : Math.max(dp[i - 1][j], dp[i][j - 1]);
-    const ops = [];
+            ? dp[(i - 1) * w + j - 1] + 1
+            : Math.max(dp[(i - 1) * w + j], dp[i * w + j - 1]);
     let ci = m,
       cj = n;
     while (ci > 0 || cj > 0) {
       if (ci > 0 && cj > 0 && al[ci - 1] === bl[cj - 1]) {
-        ops.unshift({t: '=', o: al[--ci], n: bl[--cj]});
-      } else if (cj > 0 && (ci === 0 || dp[ci][cj - 1] >= dp[ci - 1][cj])) {
-        ops.unshift({t: '+', n: bl[--cj]});
+        ops.push({t: '=', o: al[--ci], n: bl[--cj]});
+      } else if (
+        cj > 0 &&
+        (ci === 0 || dp[ci * w + cj - 1] >= dp[(ci - 1) * w + cj])
+      ) {
+        ops.push({t: '+', n: bl[--cj]});
       } else {
-        ops.unshift({t: '-', o: al[--ci]});
+        ops.push({t: '-', o: al[--ci]});
       }
     }
-    return ops;
+    return ops.reverse();
   }
 
   function hlInline(oldL, newL) {
@@ -15045,6 +15111,11 @@
       if (reported) ctx.stepCount = reported;
     }
     if (t === 'result') {
+      // A failure's result follows the last tool_result directly, so the
+      // Thoughts panel opened on spec above is still empty: withdraw it
+      // rather than seal it into the transcript.
+      if (ctx.llmPanel && ctx.llmPanel._provisional)
+        discardProvisionalPanel(ctx.llmPanel);
       ctx.llmPanel = null;
       // The daemon's own count is the authoritative one.
       if (ev.step_count) ctx.stepCount = ev.step_count;
@@ -16286,6 +16357,11 @@
         if (!ev.connected) {
           forgetInFlightPathChecks();
           stopAppsRefreshSpin();
+          abandonExplorerListings();
+          setAutocommitInFlight(false);
+          tabs.forEach(t => {
+            failContentSave(t, 'Save failed: the server connection dropped');
+          });
           // An outage swallows in-flight replies. A getAdjacentTask reply
           // that never comes must not leave the loader row up and every
           // later scroll blocked behind adjacentLoading; sidebar
@@ -19908,6 +19984,12 @@
     });
     document.addEventListener('keyup', e => {
       if (e.key === 'Shift') _shiftHeld = false;
+    });
+    // The keyup is lost when focus leaves the window with Shift down
+    // (Shift+Tab out, Alt+Shift, a system shortcut); Enter would then
+    // insert line breaks instead of sending until Shift is pressed again.
+    window.addEventListener('blur', () => {
+      _shiftHeld = false;
     });
     inp.addEventListener('beforeinput', e => {
       if (e.inputType === 'insertLineBreak' && !_shiftHeld) {
