@@ -29,17 +29,14 @@ from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
     _record_steer_input,
+    _set_task_favorite,
 )
 from kiss.agents.sorcar.sea_commands import (
     RESERVED_SUBCOMMANDS,
-    SeaScriptError,
+    SeaError,
+    help_text_if_command,
+    list_commands,
     run_picked_hook,
-)
-from kiss.agents.sorcar.sea_commands import (
-    help_text_if_command as sea_help_text,
-)
-from kiss.agents.sorcar.sea_commands import (
-    list_commands as list_sea_commands,
 )
 from kiss.core.brand import HOME_DIR
 from kiss.core.utils import is_root_dir
@@ -49,6 +46,7 @@ from kiss.server.merge_flow import _effective_commit_repo
 from kiss.server.tab_registry import OpenTabOutcome
 from kiss.server.task_runner import (
     _client_task_id_of,
+    _result_event,
     contains_task_tags,
     parse_task_tags,
 )
@@ -161,14 +159,13 @@ def _task_accepts_input(state: AgentState | None) -> bool:
     ``server.py``.  MUST be called while holding
     :data:`agent_state.STATE_LOCK`.
 
-    Delegates the thread-liveness half to
-    :meth:`AgentState.thread_alive`, which deliberately counts a
-    created-but-not-yet-started thread (``ident is None``,
-    ``is_alive()`` False) as alive: ``_cmd_run`` installs
-    ``task_thread`` and broadcasts before ``thread.start()``, so an
-    ``appendUserMessage`` from another connection in that window must
-    still be accepted — a raw ``is_alive()`` check here reopened the
-    exact S3-05 drop this predicate exists to close.
+    Delegates to :meth:`AgentState.running`, whose thread-liveness
+    half deliberately counts a created-but-not-yet-started thread
+    (``ident is None``, ``is_alive()`` False) as alive: ``_cmd_run``
+    installs ``task_thread`` and broadcasts before ``thread.start()``,
+    so an ``appendUserMessage`` from another connection in that window
+    must still be accepted — a raw ``is_alive()`` check here reopened
+    the exact S3-05 drop this predicate exists to close.
 
     Args:
         state: The agent state to inspect (``None`` accepted).
@@ -177,9 +174,7 @@ def _task_accepts_input(state: AgentState | None) -> bool:
         True when the state's task is active or its worker thread is
         still alive.
     """
-    if state is None:
-        return False
-    return state.is_task_active or state.thread_alive()
+    return state is not None and state.running()
 
 
 # Prefix that flags an ``appendUserMessage`` as a live-side-channel
@@ -320,6 +315,30 @@ def _opt_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def broadcast_to_conn(
+    printer: Any,
+    event: dict[str, Any],
+    conn_id: str,
+) -> None:
+    """Broadcast *event* on *printer*, stamped with *conn_id* when non-empty.
+
+    Stamping ``connId`` makes the printer deliver the event ONLY to the
+    requesting connection (the VS Code window / browser tab whose user
+    triggered the command), so one window's request never repaints — or
+    pops a banner in — another window's UI; ``""`` broadcasts to all.
+    Shared by :meth:`_CommandsMixin._broadcast_to_conn` and
+    ``RemoteAccessServer._broadcast_to_conn`` (web_server.py).
+
+    Args:
+        printer: Any printer exposing ``broadcast(event)``.
+        event: The event payload to broadcast (mutated in place).
+        conn_id: Requesting connection id (``""`` reaches all).
+    """
+    if conn_id:
+        event["connId"] = conn_id
+    printer.broadcast(event)
+
+
 class _CommandsMixin:
     """Methods that implement frontend command handlers."""
 
@@ -384,9 +403,6 @@ class _CommandsMixin:
             conn_id: str = "",
             tag: str = "",
         ) -> None: ...
-        def _get_frequent_tasks(
-            self, limit: int = 50, conn_id: str = "",
-        ) -> None: ...
         def _get_files(
             self,
             prefix: str,
@@ -415,9 +431,6 @@ class _CommandsMixin:
             task_id: str | None = None,
             create: bool = False,
         ) -> int: ...
-        def _broadcast_to_conn(
-            self, event: dict[str, Any], conn_id: str,
-        ) -> None: ...
         def _ensure_complete_worker(self) -> None: ...
         def _get_input_history(self, conn_id: str = "") -> None: ...
         def _get_adjacent_task(
@@ -458,10 +471,15 @@ class _CommandsMixin:
             self, action: str, work_dir: str,
         ) -> dict[str, Any]: ...
         def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
-        def _handle_delete_frequent_task(self, task: str) -> None: ...
-        def _handle_set_favorite(
-            self, task_id: str, is_favorite: bool,
-        ) -> None: ...
+
+    def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
+        """Broadcast *event*, stamped with *conn_id* when non-empty.
+
+        Args:
+            event: The event payload to broadcast (mutated in place).
+            conn_id: Requesting connection id (``""`` reaches all).
+        """
+        broadcast_to_conn(self.printer, event, conn_id)
 
     def _apply_new_work_dir(self, new_dir: str, if_unset: bool = False) -> None:
         """Adopt *new_dir* as the one global working directory.
@@ -646,21 +664,21 @@ class _CommandsMixin:
                 # submitted during the startup window in which the
                 # thread was alive but the flag not yet raised.
                 if typed:
-                    remember = self._route_prompt_to_owner(prev, prompt, tab_id)
-                    if _reruns_after_teardown(prev):
+                    queued = self._queue_prompt_on_owner(prev, prompt, tab_id)
+                    if queued is None:
                         # Queued after the agent loop ended: no drain
                         # will consume it, so ``_run_task``'s cleanup
                         # re-submits it as the tab's next run, whose
                         # own prompt echo replaces the steering echo.
                         return
+                    remember, inject_task = queued
                     inject_prompt = prompt
-                    inject_task = _owner_task_id(prev)
-                    if not inject_task:
-                        prev.unattributed_prompt_echoes.append(prompt)
             elif asked is not None:
-                remember = self._route_prompt_to_owner(asked, prompt, tab_id)
+                queued = self._queue_prompt_on_owner(asked, prompt, tab_id)
+                if queued is None:
+                    return
+                remember, inject_task = queued
                 inject_prompt = prompt
-                inject_task = _owner_task_id(asked)
             elif self._update_installing:
                 # The self-update installer is (about to be) running
                 # and will restart this daemon: a task started now
@@ -705,7 +723,7 @@ class _CommandsMixin:
                 # script setup — a client that reconnects during that
                 # window replays this run through the pre-history-row
                 # branch of ``_replay_session``, whose ``task`` field
-                # (the fixed task panel's text) reads this attribute.
+                # (the task panel's text) reads this attribute.
                 state.last_user_prompt = str(cmd.get("prompt", "") or "")
                 if prev is not None:
                     # Carry the previous task's agent (it may hold a
@@ -766,8 +784,8 @@ class _CommandsMixin:
                 # CREATES its tab — a Python client's synthetic ``api-…``
                 # tab (``sorcar.run``): no
                 # client had adopted the tab yet, so every client dropped
-                # the task-panel text and the tab showed its transcript
-                # WITHOUT the fixed task panel at the top.  Re-echo the
+                # the task text and the tab's transcript opened WITHOUT
+                # its task panel (and the tab had no title).  Re-echo the
                 # text now that the registration's ``tabs_state`` snapshot
                 # has handed every client the tab.  Unconditional on
                 # purpose: gating it on a pre-registration ``has_tab``
@@ -892,12 +910,7 @@ class _CommandsMixin:
             exc_info=True,
         )
         self.printer.broadcast({
-            "type": "result",
-            "text": f"Task failed: {type(exc).__name__}: {exc}",
-            "success": False,
-            "total_tokens": 0,
-            "cost": "$0.0000",
-            "step_count": 0,
+            **_result_event(f"Task failed: {type(exc).__name__}: {exc}", success=False),
             "tabId": tab_id,
         })
         status_end: dict[str, Any] = {
@@ -993,6 +1006,10 @@ class _CommandsMixin:
             if not model:
                 return
             self._default_model = model
+            # Persisted under the lock on purpose: ``_refresh_default_model``
+            # re-reads the on-disk last model under the same lock, so a
+            # concurrent ``getModels`` / ``newChat`` can never observe the
+            # stale file and revert the pick that was just made.
             _record_model_usage(model)
         # A real model name runs no hook; the registry look-up that tells
         # happens on the hook's thread, so a changed SEA's re-import never
@@ -1022,26 +1039,17 @@ class _CommandsMixin:
             tag if isinstance(tag, str) else "",
         )
 
-    def _cmd_get_frequent_tasks(self, cmd: dict[str, Any]) -> None:
-        """Send the top-N most-frequent tasks (default 50)."""
-        limit = _parse_int(cmd.get("limit", 50))
-        self._get_frequent_tasks(
-            50 if limit is None else limit, cmd.get("connId", ""),
-        )
-
-    def _cmd_delete_frequent_task(self, cmd: dict[str, Any]) -> None:
-        """Delete a row from the ``frequent_tasks`` table by task text."""
-        task = cmd.get("task")
-        if isinstance(task, str) and task:
-            self._handle_delete_frequent_task(task)
-
     def _cmd_set_favorite(self, cmd: dict[str, Any]) -> None:
         """Persist the favourite flag on a task history row."""
         task_id = _opt_str(cmd.get("taskId"))
         if task_id is None:
             return
-        is_favorite = bool(cmd.get("isFavorite", False))
-        self._handle_set_favorite(task_id, is_favorite)
+        # Merges ``{"is_favorite": <bool>}`` into the row's ``extra``
+        # JSON, preserving its other keys.  No broadcast: the
+        # originating webview updates its star optimistically and the
+        # next ``getHistory`` refresh shows the persisted flag to
+        # every other client.
+        _set_task_favorite(task_id, bool(cmd.get("isFavorite", False)))
 
     def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
         """Send file list for autocomplete, scoped to the tab's work_dir.
@@ -1140,8 +1148,11 @@ class _CommandsMixin:
             owner: The state whose agent thread is waiting on *q*.
             q: The owner's live ``user_answer_queue``.
             answer: The user's answer text.
-            ans_tab: Frontend tab id the answer was typed into (see
-                :meth:`_user_answer_clear_tabs`).
+            ans_tab: Frontend tab id the answer was typed into; the
+                question closes there and on every tab subscribed to
+                the answered task (not on every historic subscriber
+                set containing *ans_tab*, which could dismiss an
+                unrelated tab's current question).
         """
         owner.pending_ask_question = ""
         while not q.empty():
@@ -1153,8 +1164,7 @@ class _CommandsMixin:
             q.put_nowait(answer)
         except queue.Full:  # pragma: no cover — drained immediately above
             pass
-        for tab_id in self._user_answer_clear_tabs(ans_tab, owner.task_id):
-            self.printer.broadcast({"type": "askUserDone", "tabId": tab_id})
+        self.printer.broadcast_transient({"type": "askUserDone"}, owner.task_id, ans_tab)
 
     def _route_prompt_to_owner(
         self, owner: AgentState, prompt: str, tab_id: str,
@@ -1229,6 +1239,40 @@ class _CommandsMixin:
         owner.pending_user_messages.append(prompt)
         return True
 
+    def _queue_prompt_on_owner(
+        self, owner: AgentState, prompt: str, tab_id: str,
+    ) -> tuple[bool, str] | None:
+        """Route *prompt* to *owner* and resolve how to echo it.
+
+        Wraps :meth:`_route_prompt_to_owner` with the echo bookkeeping
+        every mid-run message needs: when the prompt will instead be
+        re-run as the tab's next run (:func:`_reruns_after_teardown`),
+        that run echoes it itself and the caller must emit no steering
+        echo; when the owner has no task row yet
+        (:func:`_owner_task_id` is ``""``), the prompt is remembered on
+        ``unattributed_prompt_echoes`` so the row can claim it later.
+
+        MUST be called while holding :data:`agent_state.STATE_LOCK`.
+
+        Args:
+            owner: The running-task state that accepted the prompt.
+            prompt: The user's message (non-empty).
+            tab_id: Frontend tab id the message was typed into.
+
+        Returns:
+            ``(remember, owner_task)`` — the *remember* flag of
+            :meth:`_route_prompt_to_owner` and the task id to stamp the
+            echo with (``""`` when unknown) — or ``None`` when no echo
+            must be emitted.
+        """
+        remember = self._route_prompt_to_owner(owner, prompt, tab_id)
+        if _reruns_after_teardown(owner):
+            return None
+        owner_task = _owner_task_id(owner)
+        if not owner_task:
+            owner.unattributed_prompt_echoes.append(prompt)
+        return remember, owner_task
+
     def _viewer_awaiting_answer(self, tab_id: str) -> AgentState | None:
         """Return the task *tab_id* views whose agent is blocked in ``ask_user_question``.
 
@@ -1256,45 +1300,6 @@ class _CommandsMixin:
             if state.pending_ask_question and state.user_answer_queue is not None:
                 return state
         return None
-
-    def _user_answer_clear_tabs(
-        self, ans_tab: str, answered_task_id: str,
-    ) -> list[str]:
-        """Return every tab whose pending ask-user question should close.
-
-        A submitted answer resolves one pending question for exactly one
-        running task/chat, regardless of which subscribed tab supplied it.
-        Completed-task subscriber sets are intentionally retained for
-        post-task broadcasts, so closing every historic subscriber set
-        that contains ``ans_tab`` can dismiss an unrelated tab's current
-        question.  The pending-question registry records the task id that
-        owns the queue which consumed this answer; only that task's
-        subscribers receive ``askUserDone``.
-
-        Args:
-            ans_tab: Frontend tab id carried by the ``userAnswer``
-                command.
-            answered_task_id: Task id associated with the live
-                ``ask_user_question`` that consumed the answer.
-
-        Returns:
-            Stable list of tab ids to receive ``askUserDone``.
-        """
-        if not ans_tab:
-            return []
-        if not answered_task_id:
-            return [ans_tab]
-        printer_lock = getattr(self.printer, "_lock", None)
-        subs_map = getattr(self.printer, "_subscribers", {})
-        if printer_lock is None:
-            return [ans_tab]
-        task_key = self.printer._coerce_task_id(answered_task_id)
-        with printer_lock:
-            viewers = list(subs_map.get(task_key, ()))
-        tabs = {str(v) for v in viewers if v}
-        if not tabs:
-            tabs.add(ans_tab)
-        return sorted(tabs)
 
     def _resolve_user_answer_state(
         self, ans_tab: str,
@@ -1389,10 +1394,14 @@ class _CommandsMixin:
                 _record_steer_input(prompt)
             except Exception:
                 logger.warning("steer input not recorded", exc_info=True)
+        # ``steer`` tells the chat webview this is a message the user
+        # typed into a RUNNING task (not the task's own prompt), which
+        # it shows in a panel like the task's.
         echo: dict[str, Any] = {
             "type": "prompt",
             "text": prompt,
             "tabId": tab_id,
+            "steer": True,
         }
         if owner_task:
             echo["taskId"] = owner_task
@@ -1411,7 +1420,7 @@ class _CommandsMixin:
 
         Spawns a daemon thread that calls
         :func:`daemon_client.run` with the resolved ``ask_sea`` script
-        as ``extension_agent_path``: the daemon accepts the run over
+        as ``sea_path``: the daemon accepts the run over
         its own local endpoint and runs it as a sub-agent of
         *owner_task_id*.  The frontend then renders the answering
         session as a nested sub-agent tab under the running task's
@@ -1476,7 +1485,7 @@ class _CommandsMixin:
             try:
                 result = daemon_client.run(
                     question,
-                    extension_agent_path=str(sea_path),
+                    sea_path=str(sea_path),
                     parent_task_id=owner_task_id,
                     parent_tab_id=tab_id,
                     side_channel=True,
@@ -1661,16 +1670,15 @@ class _CommandsMixin:
             if question is not None and owner_task:
                 ask_question = question
             else:
-                remember = self._route_prompt_to_owner(owner, prompt, tab_id)
-                if _reruns_after_teardown(owner):
+                queued = self._queue_prompt_on_owner(owner, prompt, tab_id)
+                if queued is None:
                     # The agent loop is over: nothing drains the queue
                     # any more and ``_run_task``'s cleanup re-submits
                     # the text as the tab's next run, which echoes it
                     # as its own prompt — a steering echo here would
                     # show the message twice.
                     return
-                if not owner_task:
-                    owner.unattributed_prompt_echoes.append(prompt)
+                remember, owner_task = queued
         if ask_question is not None:
             # Echo the raw ``/ask …`` line the user typed, then hand
             # off to the side-channel worker.  The echo carries the
@@ -1684,8 +1692,8 @@ class _CommandsMixin:
                 # ``/xxx help`` / ``/xxx check`` — answered here, no
                 # dispatch.
                 try:
-                    help_text, help_ok = sea_help_text(prompt), True
-                except SeaScriptError as exc:
+                    help_text, help_ok = help_text_if_command(prompt), True
+                except SeaError as exc:
                     help_text, help_ok = str(exc), False
                 if help_text is not None:
                     self._broadcast_ask_answer(
@@ -1826,8 +1834,8 @@ class _CommandsMixin:
         self.browser_tabs.viewport(
             str(cmd.get("tab_id") or ""),
             cmd.get("connId", ""),
-            _as_int(cmd.get("width")),
-            _as_int(cmd.get("height")),
+            max(0, _parse_int(cmd.get("width")) or 0),
+            max(0, _parse_int(cmd.get("height")) or 0),
             bool(cmd.get("visible", True)),
         )
 
@@ -1925,7 +1933,7 @@ class _CommandsMixin:
         chat webview uses the list to render the autocomplete popup
         when the user types ``/`` at the start of the composer.
         """
-        commands = list_sea_commands()
+        commands = list_commands()
         event: dict[str, Any] = {
             "type": "seaCommands",
             "commands": commands,
@@ -1995,37 +2003,70 @@ class _CommandsMixin:
                 )
                 return
             self._commit_msg_tabs.add(tab_id)
+        self._start_tab_job(
+            self._commit_msg_tabs,
+            tab_id,
+            functools.partial(
+                self._generate_commit_message, tab_id, work_dir=work_dir,
+            ),
+        )
+
+    def _start_tab_job(
+        self,
+        in_flight: set[str],
+        tab_id: str,
+        job: Callable[[], None],
+        after: Callable[[], None] | None = None,
+    ) -> None:
+        """Run *job* on a daemon thread as *tab_id*'s in-flight entry of *in_flight*.
+
+        The caller added *tab_id* to *in_flight* under ``_state_lock``,
+        in the same critical section as the duplicate / busy checks
+        the job needs.  The entry is released when the job returns
+        (see :meth:`_finish_tab_job`) — or right here when the thread
+        cannot be started, so a failed spawn never leaves the tab
+        dropping every later request as a duplicate.
+
+        Args:
+            in_flight: The per-tab claim set (``_commit_msg_tabs`` or
+                ``_autocommit_tabs``).
+            tab_id: Frontend tab that requested the job.
+            job: The work to run on the thread.
+            after: Optional follow-up that runs on the same thread
+                once the entry is released, so it never touches an
+                entry a later request re-added.
+        """
         try:
             threading.Thread(
-                target=self._run_commit_message_job,
-                args=(tab_id, work_dir),
+                target=self._finish_tab_job,
+                args=(in_flight, tab_id, job, after),
                 daemon=True,
             ).start()
         except BaseException:
-            # The worker never ran, so its ``finally`` cannot release
-            # the claim published above — release it here or the tab
-            # drops every later request as a duplicate.
             with self._state_lock:
-                self._commit_msg_tabs.discard(tab_id)
+                in_flight.discard(tab_id)
             raise
 
-    def _run_commit_message_job(self, tab_id: str, work_dir: str) -> None:
-        """Generate the tab's commit message and re-arm the button.
+    def _finish_tab_job(
+        self,
+        in_flight: set[str],
+        tab_id: str,
+        job: Callable[[], None],
+        after: Callable[[], None] | None,
+    ) -> None:
+        """Run *job*, release *tab_id*'s entry in *in_flight*, then run *after*.
 
-        Body of the daemon thread spawned by
-        :meth:`_cmd_generate_commit_message`; the ``finally`` releases
-        the tab's in-flight claim so a failed generation never wedges
-        the tab out of ever generating a message again.
-
-        Args:
-            tab_id: Frontend tab that requested the message.
-            work_dir: The tab's working directory.
+        Body of the thread :meth:`_start_tab_job` spawns; the
+        ``finally`` makes a failed job re-arm the tab.  *after* runs
+        only when *job* succeeded.
         """
         try:
-            self._generate_commit_message(tab_id, work_dir=work_dir)
+            job()
         finally:
             with self._state_lock:
-                self._commit_msg_tabs.discard(tab_id)
+                in_flight.discard(tab_id)
+        if after is not None:
+            after()
 
     def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
         """Stage-all + commit the tab's working tree in the background.
@@ -2113,17 +2154,26 @@ class _CommandsMixin:
                 return
             self._autocommit_tabs.add(tab_id)
         try:
-            threading.Thread(
-                target=self._run_autocommit_job,
-                args=(tab_id, work_dir, repo, dispatch_claims),
-                daemon=True,
-            ).start()
+            self._start_tab_job(
+                self._autocommit_tabs,
+                tab_id,
+                functools.partial(
+                    self._run_autocommit_job,
+                    tab_id, work_dir, repo, dispatch_claims,
+                ),
+                # The main tree is committed (and its claim released):
+                # merge the worktrees whose merge waited for exactly
+                # this commit.  Runs after the tab is re-armed, so a
+                # second click during those merges is a new request
+                # (refused by the busy guard), not a duplicate.
+                after=functools.partial(self._merge_deferred_worktrees, repo),
+            )
         except BaseException:
             # The worker never ran, so its ``finally`` cannot release
-            # the claims published above — release them here or the
-            # repo (and the tab's commit button) stay wedged.
+            # the main-tree claims published above — release them here
+            # or the repo stays wedged (``_start_tab_job`` already
+            # re-armed the tab).
             with self._state_lock:
-                self._autocommit_tabs.discard(tab_id)
                 for claim in dispatch_claims:
                     self._release_main_tree_claim(claim)
             raise
@@ -2135,13 +2185,13 @@ class _CommandsMixin:
         repo: Path | None,
         dispatch_claims: list[Any] | None = None,
     ) -> None:
-        """Commit the tab's working tree and re-arm the button.
+        """Commit the tab's working tree and release the repository.
 
-        Body of the daemon thread spawned by
-        :meth:`_cmd_autocommit_action`; the ``finally`` releases the
-        tab's in-flight claim (so a failed commit never wedges the tab
-        out of ever committing again) and the repository's main-tree
-        claim (so tasks can start again).
+        The job :meth:`_cmd_autocommit_action` runs through
+        :meth:`_start_tab_job`; the ``finally`` here releases the
+        repository's main-tree claim so tasks can start again even
+        after a failed commit.  The tab's in-flight entry is released
+        by :meth:`_finish_tab_job` right after this returns.
 
         Args:
             tab_id: Frontend tab that requested the commit.
@@ -2159,12 +2209,8 @@ class _CommandsMixin:
             )
         finally:
             with self._state_lock:
-                self._autocommit_tabs.discard(tab_id)
                 for claim in dispatch_claims or []:
                     self._release_main_tree_claim(claim)
-        # The main tree is committed (and its claim released): merge
-        # the worktrees whose merge waited for exactly this commit.
-        self._merge_deferred_worktrees(repo)
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
@@ -2242,10 +2288,7 @@ class _CommandsMixin:
             # agent runs on.
             "machine": platform.node(),
         }
-        conn_id = cmd.get("connId", "")
-        if conn_id:
-            event["connId"] = conn_id
-        self.printer.broadcast(event)
+        self._broadcast_to_conn(event, cmd.get("connId", ""))
 
     def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
         """Save configuration and API keys from the frontend.
@@ -2329,10 +2372,9 @@ class _CommandsMixin:
         # Same effective directory as ``getConfig``: a save that carries
         # no ``work_dir`` must not report the startup fallback as "".
         new_cfg["work_dir"] = self.work_dir
-        event: dict[str, Any] = {"type": "configData", "config": new_cfg}
-        if conn_id:
-            event["connId"] = conn_id
-        self.printer.broadcast(event)
+        self._broadcast_to_conn(
+            {"type": "configData", "config": new_cfg}, conn_id,
+        )
 
         if password_changed:
             _restart_kiss_web_daemon()
@@ -2347,13 +2389,10 @@ class _CommandsMixin:
         """
         from kiss.core.models.model_info import list_custom_models
 
-        event: dict[str, Any] = {
-            "type": "myModelsData", "models": list_custom_models(),
-        }
-        conn_id = cmd.get("connId", "")
-        if conn_id:
-            event["connId"] = conn_id
-        self.printer.broadcast(event)
+        self._broadcast_to_conn(
+            {"type": "myModelsData", "models": list_custom_models()},
+            cmd.get("connId", ""),
+        )
 
     def _broadcast_my_models(self) -> None:
         """Broadcast the current custom-model list to every client.
@@ -2409,11 +2448,9 @@ class _CommandsMixin:
         Stamped with the sender's ``connId`` when present so the banner
         pops only in the window that clicked.
         """
-        event: dict[str, Any] = {"type": "error", "text": error}
-        conn_id = cmd.get("connId", "")
-        if conn_id:
-            event["connId"] = conn_id
-        self.printer.broadcast(event)
+        self._broadcast_to_conn(
+            {"type": "error", "text": error}, cmd.get("connId", ""),
+        )
 
     def _cmd_delete_my_model(self, cmd: dict[str, Any]) -> None:
         """Delete one custom model from ``~/.kiss/MY_MODELS.json``.
@@ -2517,9 +2554,9 @@ class _CommandsMixin:
         event: dict[str, Any] = {"type": "tricksData", **read_tricks_data()}
         if error:
             self._send_error_to_sender(error, cmd)
-            if cmd.get("connId"):
-                event["connId"] = cmd["connId"]
-        self.printer.broadcast(event)
+        # A failed write repaints only the sender; a successful one
+        # repaints every window (the file is shared).
+        self._broadcast_to_conn(event, cmd.get("connId", "") if error else "")
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Make ``workDir`` the global working directory of every task.
@@ -2568,8 +2605,6 @@ class _CommandsMixin:
         "getCLIConnections": _cmd_get_cli_connections,
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,
-        "getFrequentTasks": _cmd_get_frequent_tasks,
-        "deleteFrequentTask": _cmd_delete_frequent_task,
         "setFavorite": _cmd_set_favorite,
         "getFiles": _cmd_get_files,
         "recordFileUsage": _cmd_record_file_usage,
@@ -2603,10 +2638,3 @@ class _CommandsMixin:
         "browserInput": _cmd_browser_input,
         "browserViewport": _cmd_browser_viewport,
     }
-
-
-def _as_int(value: object) -> int:
-    """Coerce an untrusted JSON number to a non-negative ``int`` (``0`` otherwise)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0
-    return max(0, int(value))

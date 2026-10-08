@@ -50,7 +50,6 @@ from kiss.agents.sorcar.task_classifier import (
     CLASSIFIER_TASK_MAX_CHARS,
     ClassifierRun,
     TaskClassification,
-    _cached_decision,
     _decisions_model_config,
     cached_classification,
     classify_task,
@@ -70,6 +69,14 @@ SERVED_MODEL = "typesafe/jev-1.13-20260917"
 INPUT_TOKENS = 612
 OUTPUT_TOKENS = 5
 REPORTED_COST = 3.1e-05  # what the scripted endpoint says it charged (not the catalog rate)
+
+
+def _cached_decision(task: str) -> TaskClassification | None:
+    """The memoised decisions verdict for *task*, keyed like the classifier keys it."""
+    return cached_classification(
+        task, DEFAULT_DECISIONS_MODEL, _decisions_model_config(), _DECISIONS_CRITERIA
+    )
+
 
 
 def _choice_answer(kind: str) -> dict[str, Any]:
@@ -253,12 +260,12 @@ def test_memo_is_bound_to_the_decisions_endpoint(
     assert _cached_decision(task) is None
 
 
-def test_run_to_completion_models_are_classified_by_decisions(env: IsolatedKissHome) -> None:
-    """``cc/*`` and ``codex/*`` runs, skipped by the LLM classifier, get a Jev verdict."""
+def test_subscription_cli_models_skip_paid_decisions(env: IsolatedKissHome) -> None:
+    """Subscription CLI tasks do not spend API credits on the decisions classifier."""
     task = "kind:git_only push the branch"
     outcome = classify_task(task=task, model_name="cc/claude-fable-5")
-    assert outcome.classification == TaskClassification(is_simple=True, is_development=False)
-    assert len(_JevHandler.requests) == 1
+    assert outcome == ClassifierRun(classification=None, budget_used=0.0, tokens_used=0, steps=0)
+    assert len(_JevHandler.requests) == 0
 
 
 def test_task_is_truncated_before_it_is_sent(env: IsolatedKissHome) -> None:
@@ -399,10 +406,10 @@ def test_both_classifiers_failing_yields_no_verdict(env: IsolatedKissHome) -> No
 
 
 def test_run_to_completion_model_falls_back_to_skip(env: IsolatedKissHome) -> None:
-    """When Jev fails for a ``cc/*`` run, the LLM route's skip applies: no verdict, no call."""
+    """A subscription CLI run skips both API classifier routes, even on failure input."""
     outcome = classify_task(task="http-400 x", model_name="cc/claude-fable-5")
     assert outcome == ClassifierRun(classification=None, budget_used=0.0, tokens_used=0, steps=0)
-    assert len(_JevHandler.requests) == 1
+    assert len(_JevHandler.requests) == 0
 
 
 # ---------------------------------------------------------------------------

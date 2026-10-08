@@ -130,6 +130,7 @@ async function main() {
       throw new Error('not allowed');
     };
     click(win, btn);
+    await sleep(5);
     assert.ok(btn.classList.contains('copy-failed'), btn.className);
     assert.ok(isCross(btn));
   });

@@ -31,6 +31,7 @@ from kiss.tests.agents.vscode.test_content_tab_editing import (
 from kiss.tests.agents.vscode.test_content_tab_file_links import (
     _inject_file_link,
     _open_page,
+    _wait_ready,
     browser,  # noqa: F401  (module fixture used by param name)
 )
 from kiss.tests.conftest import reload_retrying_network_change
@@ -150,15 +151,15 @@ class TestContentTabMonacoTheme:
         try:
             page.evaluate("() => localStorage.removeItem('kissRemoteTheme')")
             reload_retrying_network_change(page)
-            page.wait_for_selector(".chat-tab", timeout=30000)
+            _wait_ready(page)
             assert page.evaluate(
                 "() => document.body.classList.contains('light-theme')",
             )
             _open_editor(page, str(_fresh_file(harness, "theme_a.py")), "lnk-t1")
-            # The chat output (and so the link) is hidden behind the
-            # first content tab: click the second link from script.
+            # The chat (and so the second link) stays on screen beside
+            # the content pane in the split layout.
             _inject_file_link(page, str(_fresh_file(harness, "theme_b.py")), "lnk-t2")
-            page.evaluate("() => document.getElementById('lnk-t2').click()")
+            page.click("#lnk-t2")
             page.wait_for_function(
                 f"() => document.querySelectorAll('{_MONACO}').length === 2",
                 timeout=30000,
@@ -189,7 +190,7 @@ class TestContentTabMonacoTheme:
         try:
             page.evaluate("() => localStorage.setItem('kissRemoteTheme', 'dark')")
             reload_retrying_network_change(page)
-            page.wait_for_selector(".chat-tab", timeout=30000)
+            _wait_ready(page)
             assert not page.evaluate(
                 "() => document.body.classList.contains('light-theme')",
             )

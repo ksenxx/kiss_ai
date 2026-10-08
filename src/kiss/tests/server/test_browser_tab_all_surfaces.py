@@ -46,16 +46,14 @@ import threading
 import time
 from collections.abc import Callable
 from functools import partial
-from pathlib import Path
 from typing import Any, cast
 
+from kiss.tests.conftest import PLAYWRIGHT_CHROMIUM_INSTALLED
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 from kiss.tests.server.test_subagent_tabs_all_surfaces import (
     _JSDOM_PKG,
     SurfaceBridge,
 )
-
-_PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
 
 _HOME_PAGE = """<!doctype html><html><head><title>Home Page</title></head>
 <body style="margin:0;background:#fff">
@@ -106,7 +104,7 @@ class BrowserTabAllSurfacesTest(DaemonLocalHarness):
             self.skipTest("node is not available on PATH")
         if not _JSDOM_PKG.is_file():
             self.skipTest("jsdom is not installed under agents/vscode")
-        if not _PLAYWRIGHT_CACHE.is_dir():
+        if not PLAYWRIGHT_CHROMIUM_INSTALLED:
             self.skipTest("Playwright browsers are not installed")
         self.httpd = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -218,11 +216,9 @@ class BrowserTabAllSurfacesTest(DaemonLocalHarness):
         _wait(lambda: self._info("sidebar", tab_id)["hasFrame"], "a frame on the sidebar")
         time.sleep(0.5)
         self.assertEqual(self._info("remote1", tab_id)["frames"], 0)
-        # The browser tab belongs to no chat, so it is a top-level entry
-        # on the main tab row.
-        reply = bridge.call(
-            "click", name="remote1", selector=f'#main-tab-list [data-tab-id="{tab_id}"]'
-        )
+        # The browser tab belongs to no chat; on a stacked surface (jsdom)
+        # every content tab is listed on the group strip.
+        reply = bridge.call("click", name="remote1", selector=f'#tab-list [data-tab-id="{tab_id}"]')
         self.assertTrue(reply["found"])
         _wait(partial(self._has_frame, "remote1", tab_id), "a frame on remote1")
 

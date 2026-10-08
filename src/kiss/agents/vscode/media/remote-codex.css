@@ -57,12 +57,8 @@ body.remote-chat {
   --menu-bg: var(--vscode-editorWidget-background, #202020);
   --link: var(--vscode-textLink-foreground, #4daafc);
   --link-active: var(--vscode-textLink-activeForeground, #4daafc);
-  --scrollbar: var(--vscode-scrollbarSlider-background, #79797966);
   --tabs-bg: var(--vscode-editorGroupHeader-tabsBackground, #2b2b2b);
   --tab-active-line: var(--vscode-tab-activeBorderTop, #0078d4);
-  --activity-active: var(--vscode-activityBar-foreground, #d7d7d7);
-  --activity-inactive: var(--vscode-activityBar-inactiveForeground, #868686);
-  --activity-line: var(--vscode-activityBar-activeBorder, #0078d4);
   --send-bg: var(--vscode-button-background, #0078d4);
   --send-fg: var(--vscode-button-foreground, #fff);
   --send-hover-bg: var(--vscode-button-hoverBackground, #026ec1);
@@ -92,6 +88,10 @@ body.remote-chat {
   --accent-tint: color-mix(in srgb, var(--accent) 8%, transparent);
   --accent-tint-solid: color-mix(in srgb, var(--accent) 8%, var(--bg));
   --accent-line: color-mix(in srgb, var(--accent) 45%, var(--border));
+  --bubble-user-tint: color-mix(in srgb, var(--accent) 16%, transparent);
+  --bubble-agent-tint: color-mix(in srgb, var(--fg) 7%, var(--bg));
+  --scrollbar-thumb: color-mix(in srgb, var(--fg) 20%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--fg) 45%, transparent);
 
   /* The settings dialog's outline (see #settings-panel below): the
      theme's widget border, so the dialog reads like a native VS Code
@@ -134,13 +134,13 @@ body.remote-chat {
   color: var(--fg);
 }
 
-/* The two tab rows: VS Code's editor-group header colours — a darker
+/* The tab rows: VS Code's editor-group header colours — a darker
    band, dim inactive pills, the active pill in the editor background
-   with the accent line on its top edge.  The main row lists the chats;
-   the group strip under it (the chat on screen, its sub-agents, the
-   files its task opened) sits on the editor background with smaller
-   pills, so it reads as the main row's sub-row. */
-body.remote-chat #main-tab-bar,
+   with the accent line on its top edge.  #content-tab-bar is the
+   content pane's row (desktop split layout, below); the group strip
+   (#tab-bar: the chat on screen and its sub-agents) sits on the editor
+   background with smaller pills. */
+body.remote-chat #content-tab-bar,
 body.remote-chat #tab-bar {
   background: var(--tabs-bg);
   border-bottom: 1px solid var(--border);
@@ -152,10 +152,10 @@ body.remote-chat #tab-bar {
   padding: var(--space-1) var(--space-2-5) var(--space-1) var(--space-5);
 }
 
-body.remote-chat #main-tab-list,
+body.remote-chat #content-tab-list,
 body.remote-chat #tab-list { gap: var(--space-1-5); }
 
-body.remote-chat #main-tab-bar .chat-tab,
+body.remote-chat #content-tab-bar .chat-tab,
 body.remote-chat #tab-bar .chat-tab {
   border: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
@@ -171,13 +171,13 @@ body.remote-chat #tab-bar .chat-tab {
   font-size: var(--fs-sm);
 }
 
-body.remote-chat #main-tab-bar .chat-tab:hover,
+body.remote-chat #content-tab-bar .chat-tab:hover,
 body.remote-chat #tab-bar .chat-tab:hover {
   background: var(--hover);
   color: var(--fg);
 }
 
-body.remote-chat #main-tab-bar .chat-tab.active,
+body.remote-chat #content-tab-bar .chat-tab.active,
 body.remote-chat #tab-bar .chat-tab.active {
   background: var(--bg);
   border-color: var(--border-input);
@@ -187,8 +187,24 @@ body.remote-chat #tab-bar .chat-tab.active {
 
 body.remote-chat #tab-bar .chat-tab.active { background: var(--bg2); }
 
-body.remote-chat #main-tab-bar .chat-tab-close,
+body.remote-chat #content-tab-bar .chat-tab-close,
 body.remote-chat #tab-bar .chat-tab-close { border-radius: var(--radius-pill); }
+
+/* The content pane with nothing open (split layout). */
+body.remote-chat #content-pane-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: var(--space-5);
+  text-align: center;
+  color: var(--dim);
+  font-size: var(--fs-sm);
+}
+
+body.remote-chat #content-pane-empty p { margin: 0; max-width: 36em; }
 
 /* The top status bar goes on the whole remote page: the task-info
    panel — docked on desktop, the right-hand drawer on mobile — shows
@@ -257,6 +273,7 @@ body.remote-chat #input-footer {
 body.remote-chat #footer-tools { gap: var(--space-0-5); }
 
 body.remote-chat #menu-btn,
+body.remote-chat #meta-drawer-btn,
 body.remote-chat #new-chat-btn,
 body.remote-chat #tricks-btn,
 body.remote-chat #more-btn {
@@ -275,6 +292,7 @@ body.remote-chat #more-btn {
 }
 
 body.remote-chat #menu-btn:hover:not(:disabled),
+body.remote-chat #meta-drawer-btn:hover:not(:disabled),
 body.remote-chat #new-chat-btn:hover:not(:disabled),
 body.remote-chat #tricks-btn:hover:not(:disabled),
 body.remote-chat #more-btn:hover:not(:disabled) {
@@ -379,7 +397,6 @@ body.remote-chat .file-chip.error {
 }
 
 body.remote-chat #sidebar,
-body.remote-chat #frequent-panel,
 body.remote-chat #tricks-panel,
 body.remote-chat #workdir-panel {
   background: var(--surface);
@@ -450,18 +467,14 @@ body.remote-chat .server-reset-confirm-btn {
 }
 
 /* VS Code hands every webview a base stylesheet (links in
-   textLink.foreground, the scrollbar slider) that main.css relies on;
-   the remote page has no host, so it declares those defaults here. */
+   textLink.foreground) that main.css relies on; the remote page has
+   no host, so it declares those defaults here. */
 body.remote-chat a {
   color: var(--link);
 }
 
 body.remote-chat a:hover {
   color: var(--link-active);
-}
-
-body.remote-chat ::-webkit-scrollbar-thumb {
-  background: var(--scrollbar);
 }
 
 /* The delete-confirmation pair: VS Code secondary buttons instead of
@@ -477,25 +490,6 @@ body.remote-chat .sidebar-confirm-no:hover {
   background: var(--hover);
 }
 
-/* The frequent-tasks list: main.js skips its hashed pastel row
-   backgrounds on the remote page (renderFrequentTasks), so the inline
-   buttons and the count badge, which main.css tunes for dark text on
-   pastel, take the theme foregrounds here. */
-body.remote-chat .frequent-item .sidebar-item-delete,
-body.remote-chat .frequent-item .sidebar-item-copy {
-  color: var(--icon);
-}
-
-body.remote-chat .frequent-item .sidebar-item-delete:hover,
-body.remote-chat .frequent-item .sidebar-item-copy:hover {
-  background: var(--hover-strong);
-}
-
-body.remote-chat .frequent-item-count {
-  color: var(--dim);
-  background: var(--selected);
-}
-
 @media (width <= 600px) {
   body.remote-chat #input-area {
     padding-left: var(--space-2);
@@ -503,36 +497,9 @@ body.remote-chat .frequent-item-count {
   }
 }
 
-/* The activity bar (Tasks / Explorer / Source Control) exists only on
-   the remote page: a VS Code window has the real Explorer and Source
-   Control views.  It takes VS Code's activityBar.* colours: the
-   sidebar background, dim inactive icons, the accent line beside the
-   active one. */
-body.remote-chat #activity-bar {
-  display: flex;
-  background: var(--surface);
-  border-right: 1px solid var(--border-soft);
-}
-
-/* Here the activity bar is the history list's left boundary: the Tasks
-   view and its list bleed over the bar's 10px right margin (main.css
-   #activity-bar, #sidebar-tab-history-panel) so the chat panels meet
-   the bar's edge. */
-body.remote-chat #sidebar-tab-history-panel { --history-bleed-l: 10px; }
-
-body.remote-chat .activity-btn {
-  color: var(--activity-inactive);
-}
-
-body.remote-chat .activity-btn:hover,
-body.remote-chat .activity-btn.active {
-  color: var(--activity-active);
-}
-
-body.remote-chat .activity-btn.active {
-  border-left-color: var(--activity-line);
-}
-
+/* The Explorer and Source Control sections of the task-info panel
+   exist only on the remote page: a VS Code window has the real
+   Explorer and Source Control views. */
 body.remote-chat .explorer-row:hover,
 body.remote-chat .scm-row:hover,
 body.remote-chat .scm-commit:hover {
@@ -545,14 +512,6 @@ body.remote-chat .scm-commit.expanded {
 
 body.remote-chat .scm-section-hdr:hover {
   color: var(--fg);
-}
-
-/* The phone drawer's close button (#sidebar-close, absolute at the
-   panel's top-right) would otherwise sit on top of the Explorer /
-   Source Control header's refresh button.  Desktop docking hides the
-   close button, and the media query below drops this padding again. */
-body.remote-chat #sidebar .sidebar-hdr-row {
-  padding-right: var(--space-10);
 }
 
 body.remote-chat #sidebar-resizer {
@@ -674,35 +633,12 @@ body.remote-chat #meta-info-content {
 /*
  * Mobile mode: the task-info panel is a DRAWER sliding in from the
  * RIGHT over the chat — the mirror image of the history drawer on the
- * left — toggled by #meta-drawer-btn at the tab bar's right edge and
- * dismissed by its close button or the backdrop.  Desktop (>= 900px)
- * docks the panel permanently instead, so both the toggle and the
- * close button exist only here.
+ * left — toggled by #meta-drawer-btn among the composer's footer icons
+ * and dismissed by its close button or the backdrop.  Desktop
+ * (>= 900px) docks the panel permanently instead, so both the toggle
+ * and the close button exist only here.
  */
 @media (width < 900px) {
-  body.remote-chat #meta-drawer-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    width: 32px;
-    height: 32px;
-    margin-left: var(--space-1);
-    padding: 0;
-    background: transparent;
-    border: none;
-    border-radius: var(--radius-round);
-    color: var(--icon);
-    font-size: var(--fs-lg);
-    cursor: pointer;
-    transition: background var(--dur-base);
-  }
-
-  body.remote-chat #meta-drawer-btn:hover {
-    background: var(--hover-strong);
-    color: var(--fg);
-  }
-
   body.remote-chat #meta-panel {
     display: flex;
     flex-direction: column;
@@ -724,30 +660,35 @@ body.remote-chat #meta-info-content {
     transform: translateX(0);
   }
 
-  body.remote-chat #meta-close {
-    display: block;
-    position: absolute;
-    top: 12px;
-    right: 12px;
-    background: none;
-    border: none;
-    color: var(--dim);
-    font-size: var(--fs-2xl);
-    cursor: pointer;
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
-  }
+  body.remote-chat #meta-close { display: block; }
+}
 
-  body.remote-chat #meta-close:hover {
-    color: var(--fg);
-    background: var(--hover);
-  }
+/* The panel's close button: the phone drawer's dismiss, and the
+   docked desktop panel's "hide" while it lies over an open content
+   pane (both contexts set `display`; main.css hides it elsewhere).
+   It sits over the first section's header row, which keeps its text
+   clear of it. */
+body.remote-chat #meta-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: var(--fs-2xl);
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+}
 
-  /* The close button sits over the first section's header row: keep
-     the header's text clear of it. */
-  body.remote-chat #meta-panel > .meta-section:first-of-type > .meta-section-hdr {
-    padding-right: var(--space-10);
-  }
+body.remote-chat #meta-close:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+
+body.remote-chat:not(.remote-desktop) #meta-panel > .meta-section:first-of-type > .meta-section-hdr,
+body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:first-of-type > .meta-section-hdr {
+  padding-right: var(--space-10);
 }
 
 /*
@@ -763,12 +704,9 @@ body.remote-chat #meta-info-content {
      it open whenever .remote-desktop is set), so the burger — which
      only toggled it — and the drawer's close button go. */
   body.remote-chat.remote-desktop #menu-btn,
+  body.remote-chat.remote-desktop #meta-drawer-btn,
   body.remote-chat.remote-desktop #sidebar-close {
     display: none;
-  }
-
-  body.remote-chat.remote-desktop #sidebar .sidebar-hdr-row {
-    padding-right: 0;
   }
 
   body.remote-chat.remote-desktop #sidebar.open {
@@ -785,9 +723,8 @@ body.remote-chat #meta-info-content {
     padding-left: min(var(--space-4), calc(var(--sidebar-w, var(--sidebar-default-w)) / 4));
     padding-right: min(var(--space-4), calc(var(--sidebar-w, var(--sidebar-default-w)) / 4));
 
-    /* The activity bar (main.css #activity-bar) cancels this padding
-       with a negative left margin so it stays flush with the panel's
-       edge however narrow the panel gets. */
+    /* Children that span the padding (main.css --sidebar-pad-x) follow
+       it however narrow the panel gets. */
     --sidebar-pad-x: min(var(--space-4), calc(var(--sidebar-w, var(--sidebar-default-w)) / 4));
 
     /* The chat panels in the history list run flush to the right edge,
@@ -801,7 +738,7 @@ body.remote-chat #meta-info-content {
   /* Clips the panel's content to the panel's padding box, exactly as
      the panel's overflow: hidden did: the insets reach out over the
      panel's padding (16px top and bottom, --sidebar-pad-x at the
-     sides), where the activity bar and the history list bleed. */
+     sides), where the history list bleeds. */
   body.remote-chat.remote-desktop #sidebar.open #sidebar-body {
     clip-path: inset(-16px calc(-1 * var(--sidebar-pad-x)));
   }
@@ -813,15 +750,130 @@ body.remote-chat #meta-info-content {
 
   body.remote-chat.remote-desktop #app {
     /* Matches the panel's own 0.2s slide in main.css so the chat does
-       not jump ahead of it while the burger shows or hides it.  The
-       right margin permanently clears the docked task-info panel. */
+       not jump ahead of it while the burger shows or hides it.  With
+       no content tab open the right margin clears the docked
+       task-info panel, so the chat never sits under it. */
     margin-left: 0;
     margin-right: var(--meta-w, var(--meta-panel-w));
     transition: margin-left var(--dur-slow) var(--ease);
+
+    /* #app is a grid.  With no file, browser or terminal tab open
+       (no body.content-pane-open) it is the CHAT pane alone: the
+       group strip, the machine name, the chat transcript and the
+       composer in one column.  Every element keeps its place in the
+       flat #app markup; the grid areas (further down) put it in its
+       pane. */
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      'machine'
+      'strip'
+      'status'
+      'chat'
+      'composer';
+  }
+
+  /* The split layout, while a content tab is open: the CHAT pane on
+     the left (--chat-pane-w of the width, dragged via #pane-resizer in
+     main.js, half by default) and on the right the CONTENT pane with
+     its own tab row and the content area showing the open files,
+     browser and terminal tabs.  #app then runs to the window's right
+     edge and the docked task-info panel (position: fixed) lies ON TOP
+     of the content pane; a click in the pane slides the panel away
+     (body.meta-hidden, below) and the #meta-drawer tab brings it back. */
+  body.remote-chat.remote-desktop.content-pane-open #app {
+    margin-right: 0;
+
+    /* Each pane keeps at least 280px, or 30% of #app when the docked
+       history panel leaves less than that (two 280px minimums plus
+       the handle would otherwise overflow #app near the breakpoint). */
+    grid-template-columns:
+      minmax(min(280px, 30%), var(--chat-pane-w, 50%))
+      5px
+      minmax(min(280px, 30%), 1fr);
+    grid-template-areas:
+      'machine  handle ctabs'
+      'strip    handle content'
+      'status   handle content'
+      'chat     handle content'
+      'composer handle content';
   }
 
   body.remote-chat.remote-desktop:has(#sidebar.open) #app {
     margin-left: var(--sidebar-w, var(--sidebar-default-w));
+  }
+
+  /* The content pane's row, area and handle exist only while a
+     content tab is open (main.js keeps body.content-pane-open in step
+     with the open content tabs). */
+  body.remote-chat.remote-desktop:not(.content-pane-open) #content-tab-bar,
+  body.remote-chat.remote-desktop:not(.content-pane-open) #content-tab-area,
+  body.remote-chat.remote-desktop:not(.content-pane-open) #pane-resizer {
+    display: none;
+  }
+
+  /* Hiding and showing the task-info panel over the content pane
+     slides it through the window's right edge, where the drawer tab
+     sits: the panel looks like it emerges from, and folds back into,
+     the drawer.  The panel is a fixed-position element (its rule is
+     below, with the transition), so the translation moves nothing
+     else. */
+  body.remote-chat.remote-desktop.content-pane-open.meta-hidden #meta-panel {
+    transform: translateX(100%);
+  }
+
+  /* Over the content pane the panel shows its close button as the
+     "hide" control: a wide panel may cover the whole pane, leaving no
+     pane to press. */
+  body.remote-chat.remote-desktop.content-pane-open #meta-close { display: block; }
+
+  /* The drawer tab: a small rounded handle on the window's right edge,
+     vertically centred, only while a content tab is open.  It fades in
+     as the panel slides out over it (and back out as the panel
+     returns) so that, panel open, nothing of it shows.  `visibility`
+     flips with the fade (delayed on the way out) so the invisible tab
+     is neither in the tab order nor in the accessibility tree. */
+  body.remote-chat.remote-desktop.content-pane-open #meta-drawer {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 50%;
+    right: 0;
+    width: 18px;
+    height: 56px;
+    margin: 0;
+    padding: 0;
+    transform: translateY(-50%);
+    border: 1px solid var(--border-soft);
+    border-right: none;
+    border-radius: var(--radius-md) 0 0 var(--radius-md);
+    background: var(--surface);
+    color: var(--dim);
+    font-size: var(--fs-md);
+    cursor: pointer;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+      opacity var(--dur-slow) var(--ease),
+      visibility 0s linear var(--dur-slow);
+    z-index: var(--z-docked);
+  }
+
+  body.remote-chat.remote-desktop.content-pane-open.meta-hidden #meta-drawer {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition: opacity var(--dur-slow) var(--ease);
+  }
+
+  body.remote-chat.remote-desktop #meta-drawer:hover,
+  body.remote-chat.remote-desktop #meta-drawer:focus-visible {
+    color: var(--fg);
+    background: var(--hover);
+    outline: none;
   }
 
   body.remote-chat.remote-desktop #settings-panel {
@@ -853,9 +905,13 @@ body.remote-chat #meta-info-content {
        #meta-list, exactly like #history-list inside the history
        panel.  If the panel itself scrolled, the absolutely-positioned
        #meta-resizer would scroll away with the content and the mouse
-       could no longer reach it. */
-    overflow: hidden;
+       could no longer reach it.  `clip`, not `hidden`: a hidden
+       overflow still scrolls from script and from focus (tabbing to a
+       section header below a short window's edge), and a window too
+       short for every section header would carry the handle away. */
+    overflow: clip;
     z-index: var(--z-docked);
+    transition: transform var(--dur-slow) var(--ease);
   }
 
   body.remote-chat.remote-desktop #sidebar.open #sidebar-resizer {
@@ -889,5 +945,67 @@ body.remote-chat #meta-info-content {
   body.remote-chat.remote-desktop #meta-resizer:active,
   body.remote-chat.remote-desktop #meta-resizer:focus-visible {
     background: var(--border-widget);
+  }
+}
+
+/* The split layout's grid areas (see the #app rule above; the
+   transcript's own, `chat`, is set next to #output in main.css) and
+   the handle between its two panes. */
+@media (width >= 900px) {
+  body.remote-chat.remote-desktop #tab-bar { grid-area: strip; }
+
+  /* The machine name shares its row with the content pane's tab row
+     and sits at that row's vertical centre. */
+  body.remote-chat.remote-desktop #chat-machine {
+    grid-area: machine;
+    align-self: center;
+  }
+
+  body.remote-chat.remote-desktop #tab-status-bar { grid-area: status; }
+
+  body.remote-chat.remote-desktop #input-area {
+    grid-area: composer;
+    min-width: 0;
+  }
+
+  body.remote-chat.remote-desktop #content-tab-bar {
+    grid-area: ctabs;
+    display: flex;
+    min-width: 0;
+  }
+
+  /* "New output ↓" shares the transcript's cell, pinned to its bottom
+     centre (in the stacked flex column it floats over the transcript's
+     bottom edge by a negative margin instead). */
+  body.remote-chat.remote-desktop .new-output-btn {
+    grid-area: chat;
+    align-self: end;
+    justify-self: center;
+    margin-top: 0;
+    margin-bottom: var(--space-2);
+  }
+
+  body.remote-chat.remote-desktop #content-tab-area {
+    grid-area: content;
+    min-height: 0;
+    min-width: 0;
+    border-left: 1px solid var(--border);
+  }
+
+  /* The handle: a hairline that widens into a grab target on hover. */
+  body.remote-chat.remote-desktop #pane-resizer {
+    grid-area: handle;
+    display: block;
+    cursor: col-resize;
+    touch-action: none;
+    background: var(--border);
+    transition: background var(--dur-base);
+  }
+
+  body.remote-chat.remote-desktop #pane-resizer:hover,
+  body.remote-chat.remote-desktop #pane-resizer:active,
+  body.remote-chat.remote-desktop #pane-resizer:focus-visible {
+    background: var(--border-widget);
+    outline: none;
   }
 }

@@ -175,7 +175,7 @@ class TaskResult:
             run; ``""`` when the run ended before a row was allocated
             (e.g. the daemon had no model configured).
         settings: The run's ``task_settings`` event payload (its
-            effective model, work directory, budget, agent script, kind,
+            effective model, work directory, budget, SEA, kind,
             tool profile, timeout, inherited and overridden values; see
             :mod:`kiss.agents.sorcar.run_config`); empty when the run
             ended before the daemon emitted it.
@@ -308,42 +308,41 @@ def _to_task_result(
     )
 
 
-def resolve_agent_path(agent_path: str | None) -> str:
-    """Validate a client-supplied agent-script path and resolve it.
+def resolve_sea_path(sea_path: str | None) -> str:
+    """Validate a client-supplied SEA path and resolve it.
 
     Client-side counterpart of the daemon's
-    ``kiss.agents.sorcar.agent_file.apply_agent_overrides``: the path is
+    ``kiss.agents.sorcar.sea_apply.apply_sea``: the path is
     resolved against the CLIENT's working directory (the daemon may run
     with a different one) and validated eagerly so a bad value fails
     fast, before any daemon connection is made.
 
     Args:
-        agent_path: Path string of a Python file whose top-level
-            ``X()`` functions compute the run's parameters, or
-            ``None``/empty for no agent script.
+        sea_path: Path string of a SEA file (a Python file defining a
+            ``BaseSea`` subclass), or ``None``/empty for no SEA.
 
     Returns:
-        The absolute path as a string, or ``""`` when *agent_path* is
+        The absolute path as a string, or ``""`` when *sea_path* is
         ``None`` or empty.
 
     Raises:
-        ValueError: When *agent_path* is neither ``None`` nor a string,
+        ValueError: When *sea_path* is neither ``None`` nor a string,
             is not a ``.py`` file, or does not exist.
     """
-    if agent_path is None or agent_path == "":
+    if sea_path is None or sea_path == "":
         return ""
-    if not isinstance(agent_path, str):
+    if not isinstance(sea_path, str):
         raise ValueError(
-            "agent_path must be a string path to a Python file, got "
-            f"{type(agent_path).__name__}: {agent_path!r}"
+            "sea_path must be a string path to a Python file, got "
+            f"{type(sea_path).__name__}: {sea_path!r}"
         )
-    path = Path(agent_path).expanduser().resolve()
+    path = Path(sea_path).expanduser().resolve()
     # Quote the path literally rather than via repr(): repr doubles every
     # backslash of a Windows path, which misleads the reader.
     if path.suffix != ".py":
-        raise ValueError(f"agent script '{path}' is not a Python (.py) file")
+        raise ValueError(f"SEA '{path}' is not a Python (.py) file")
     if not path.is_file():
-        raise ValueError(f"agent script '{path}' does not exist")
+        raise ValueError(f"SEA '{path}' does not exist")
     return str(path)
 
 
@@ -411,6 +410,41 @@ def _send_stop(ws: ClientConnection, tab_id: str, run_token: str) -> None:
     _send(ws, {"type": "stop", "tabId": tab_id, "taskId": run_token})
 
 
+def _stop_and_await_confirmation(
+    ws: ClientConnection, tab_id: str, run_token: str, what: str,
+) -> float:
+    """Send the stop for a *what* task and return the confirmation deadline.
+
+    Args:
+        ws: The connected daemon connection.
+        tab_id: The run's synthetic tab id.
+        run_token: The client-minted per-submission run token.
+        what: ``"cancelled"`` or ``"timed-out"``, for the error text.
+
+    Returns:
+        The ``time.monotonic()`` deadline by which the daemon's terminal
+        status must confirm the stop (:data:`_STOP_CONFIRM_GRACE_SECONDS`).
+
+    Raises:
+        ConnectionError: When the stop could not even be sent, so the
+            task was neither stopped nor confirmed dead — raising a
+            plain ``TimeoutError`` would let a caller claim "was
+            stopped"; the broken daemon connection is surfaced instead,
+            like every other mid-run connection failure.
+    """
+    # Clocked before the send: a slow but
+    # successful send must not extend the caller's wait.
+    deadline = time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
+    try:
+        _send_stop(ws, tab_id, run_token)
+    except OSError as send_exc:
+        raise ConnectionError(
+            "The sorcar daemon connection failed while "
+            f"stopping the {what} task: {send_exc}"
+        ) from send_exc
+    return deadline
+
+
 def run(
     prompt: str,
     *,
@@ -423,17 +457,17 @@ def run(
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
-    extension_agent_path: str = "",
+    sea_path: str = "",
     use_worktree: bool = True,
     auto_commit: bool = True,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     use_web_tools: bool | None = None,
-    classify_tasks: bool | None = None,
+    auto_classify: bool | None = None,
     use_memory: bool | None = None,
     is_parallel: bool = True,
-    append_to_system_prompt: str = "",
-    append_to_prompt: str = "",
+    add_to_system_prompt: str = "",
+    add_to_prompt: str = "",
     tool_profile: str = "",
     docker_image: str = "",
     inherit_tools: bool = False,
@@ -475,7 +509,7 @@ def run(
             task, and a ``subagentDone`` broadcast stops the tab's
             running indicator when the run ends.  Empty (the default)
             runs as an ordinary top-level task.  It is a
-            client/UI-transport parameter with no agent-script
+            client/UI-transport parameter with no SEA
             setting: a dispatched script must not be able to re-parent
             itself under an unrelated task.
         parent_tab_id: Frontend tab id of the calling task's tab,
@@ -483,14 +517,14 @@ def run(
             webview knows which tab spawned it (nested placement and
             cascade-close).  Only meaningful with *parent_task_id*;
             empty spawns a parentless sub-agent tab, exactly like a
-            headless ``run_parallel`` fan-out.  No agent-script setting.
+            headless ``run_parallel`` fan-out.  No SEA setting.
         parent_reviewer: Whether the dispatched run belongs to a
             reviewer's sub-tree — the caller is a reviewer sub-agent,
             or *prompt* itself is a review task (see
             :mod:`kiss.agents.sorcar.fanout_guard`).  Stamped on the
             child's ``_subagent_info`` so it and its helpers keep the
             read-only ``review`` tool profile.  Only meaningful with
-            *parent_task_id*; no agent-script setting, for the same
+            *parent_task_id*; no SEA setting, for the same
             reason as *parent_task_id*.
         side_channel: Whether the run is a side channel of the parent
             — a sub-agent whose result is delivered into the PARENT's
@@ -498,7 +532,7 @@ def run(
             tab is scaffolding that is closed when the run ends and
             never re-opened by a replay.  Persisted on the child's
             history row; only meaningful with *parent_task_id*; no
-            agent-script setting.
+            SEA setting.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -514,13 +548,13 @@ def run(
             id, ``$KISS_HOME/AGENTS.md``) so the agent's tool contract
             keeps working.  Empty (default) runs with the default
             system prompt as usual.
-        extension_agent_path: Optional path — a string — to a Python
+        sea_path: Optional path — a string — to a Python
             file defining a Sorcar Extension Agent (SEA) that
             configures this run **on the daemon**.  When non-empty, the
             daemon loads the file's one subclass of
             :class:`kiss.agents.seas.base.base_sea.BaseSea` and applies
             its methods (:mod:`kiss.agents.sorcar.sea_commands`,
-            :func:`kiss.agents.sorcar.agent_file.apply_agent_overrides`) on top
+            :func:`kiss.agents.sorcar.sea_apply.apply_sea`) on top
             of the values passed to this call: a setting the SEA
             declares replaces the parameter of the same name; one it
             does not declare keeps the value passed here.
@@ -540,40 +574,41 @@ def run(
                         ...
                     def tools(self, tools: list) -> list: ...    # toolset -> the run's toolset
                     def llm_call_hook(self, new_messages: list) -> list: ...
-                    def tool_call_hook(self, name: str, args: dict) -> str: ...
+                    def tool_call_hook(self, name: str, args: dict) -> Verdict: ...  # ALLOW/refuse
                     def register_as_model(self) -> bool: ...     # model-picker entry
                     def on_picked_as_model(self, work_dir: str) -> str: ...
 
             A SEA extends another by deriving from its class (the
             launcher runs every class of the chain, base first; do not
             call ``super()``).  ``settings`` returns its argument with
-            a ``kind`` and any of the keyword parameters of this
-            function except the transport, identity and prompt ones
-            (``prompt`` and ``system_prompt`` are the methods above,
-            not settings) laid over it: ``work_dir``,
-            ``model``, ``chat_id``, ``use_worktree``, ``auto_commit``,
-            ``max_budget`` (finite), ``model_config``,
-            ``use_web_tools``, ``auto_classify`` (this function's
-            ``classify_tasks``), ``use_memory``, ``allow_fan_out``
-            (``is_parallel``), ``tool_profile``, ``docker_image``; plus
+            any of the keyword parameters of this function except the
+            transport, identity and prompt ones (``prompt`` and
+            ``system_prompt`` are the methods above, not settings)
+            laid over it: ``work_dir``, ``model``, ``chat_id``,
+            ``use_worktree``, ``auto_commit``, ``max_budget`` (finite),
+            ``model_config``, ``use_web_tools``, ``auto_classify``,
+            ``use_memory``, ``tool_profile``, ``docker_image``; plus
             two dispatcher keys: ``timeout`` (seconds a ``run_agent``
             call waits for this SEA's sub-task) and ``locked`` (keys an
             explicit caller argument may not change).  ``prompt(task)``
-            receives the task text
-            and returns the prompt body; ``{task_id}`` in its result is
-            replaced by *parent_task_id*.  A ``None`` value means "no
-            override".  A kind is pure defaults under the explicit
-            keys: ``session`` (the default, changes nothing), ``worker``
+            receives the task text and returns the prompt body; every
+            ``{task_id}`` of the result is replaced by
+            *parent_task_id*.  A ``None`` value, or ``""`` for a
+            string key, means "no override".  The base class says what
+            the SEA is: ``BaseSea`` changes nothing; ``WorkerSea``
+            lays the worker defaults under the explicit keys
             (``use_worktree``, ``auto_commit``, ``auto_classify``,
-            ``allow_fan_out``, ``use_web_tools``, ``use_memory`` all
-            off) and ``channel`` (``worker`` plus ``work_dir:
-            $KISS_HOME/channel_work``; the run gets the channel preamble
-            and a workspace held for the run, and a ``run_agent``
-            sub-task of it inherits nothing from the caller).
+            ``use_web_tools``, ``use_memory`` all off); ``ChannelSea``
+            (a worker) marks a messaging channel: it defaults
+            ``work_dir`` to ``$KISS_HOME/channel_work`` and locks it
+            with the worker keys, gives the run the channel preamble
+            and a workspace held for the run, makes a ``run_agent``
+            sub-task of it inherit nothing from the caller, and lists
+            it as a channel.
 
             ``system_prompt(system_prompt)`` receives the run's
             assembled system prompt (the base prompt plus
-            *append_to_system_prompt*) and returns the run's: the same
+            *add_to_system_prompt*) and returns the run's: the same
             text with additions, or a replacement.  ``tools(tools)``
             receives the built-in toolset and returns the run's: a list
             of tool callables (never a file path); with
@@ -595,9 +630,9 @@ def run(
             ``llm_call_hook(new_messages)`` is called before every LLM
             call and its return value replaces the new messages about
             to be sent, and ``tool_call_hook(name, args)`` is called
-            before every tool call — the tool executes only when the
-            hook returns ``"OK"``; any other returned string is given
-            to the model as the tool's result instead.  The hooks apply
+            before every tool call and returns a ``Verdict``: the tool
+            executes on ``ALLOW``; on ``refuse(text)`` the model is
+            given *text* as the tool's result instead.  The hooks apply
             to the task's own agent, not to sub-agents it spawns via
             ``run_parallel``.
 
@@ -620,9 +655,9 @@ def run(
             client's timeout behavior — and *scope_work_dir* /
             *parent_task_id* / *parent_tab_id* are the CALLING task's
             identity, which the script must not be able to forge.  The
-            *extension_agent_path* itself is resolved against this
+            *sea_path* itself is resolved against this
             process's working directory and validated eagerly.  A
-            broken agent script (deleted before the daemon reads it,
+            broken SEA (deleted before the daemon reads it,
             raising at import time, a non-callable getter, a raising
             ``settings()`` or getter, an unknown settings key or
             kind, or a wrong-typed value) stops the task: the daemon
@@ -643,7 +678,7 @@ def run(
             ``None`` uses the daemon's configured default (the
             settings panel's "Use web tools" checkbox, persisted as
             ``use_web_browser``).
-        classify_tasks: Per-task override of pre-run task
+        auto_classify: Per-task override of pre-run task
             classification (``kiss.agents.sorcar.task_classifier``),
             which runs one lightweight model call before the task — a
             typed question to a decisions model when an OpenRouter key
@@ -677,9 +712,9 @@ def run(
             run-to-completion CLI model (``cc/*``, ``codex/*``), or a
             caller-supplied ``model_config["system_instruction"]``
             stays memory-free even with ``True``.
-        is_parallel: Whether the agent may spawn parallel sub-agents.
-            Defaults to True.
-        append_to_system_prompt: Extra text appended to the run's
+        is_parallel: Whether the agent gets the ``run_parallel`` tool
+            (the user's parallel-mode toggle).  Defaults to True.
+        add_to_system_prompt: Extra text appended to the run's
             system prompt when the agent is executed — after the
             default ``SYSTEM.md`` prompt (or the *system_prompt*
             replacement) and before the daemon's per-run operational
@@ -687,7 +722,7 @@ def run(
             suffix on their own system prompts, like a *system_prompt*
             replacement, so the extra instructions constrain the whole
             task tree.  Empty (default) appends nothing.
-        append_to_prompt: Extra text appended to the executed task
+        add_to_prompt: Extra text appended to the executed task
             prompt.  A multi-``<task>`` *prompt* runs the agent once
             per subtask, and the text is appended to EACH subtask's
             prompt.  The appended text is part of the prompt the agent
@@ -735,7 +770,7 @@ def run(
             that prompt refers to.  ``False`` (default) adds nothing;
             ignored without *parent_task_id*.
         workspace: Workspace/account identifier for multi-account
-            channels.  A ``channel``-kind agent script's run holds
+            channels.  A channel SEA's run (``channel: True``) holds
             it (``KISS_CHANNEL_WORKSPACE``) for its whole lifetime, so
             its channel tools load that account's credentials; empty
             means ``"default"``.  Ignored by every other run.
@@ -813,9 +848,9 @@ def run(
 
     Raises:
         ValueError: When *prompt* is empty or blank, or when
-            *extension_agent_path* is neither empty nor the path string
+            *sea_path* is neither empty nor the path string
             of an existing Python (``.py``) file (see
-            :func:`resolve_agent_path`).
+            :func:`resolve_sea_path`).
         ConnectionError: When no daemon is reachable at the endpoint,
             the daemon drops the connection before the task finishes,
             or a *stop_on_timeout* stop cannot be sent on the broken
@@ -868,7 +903,7 @@ def run(
 
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
-    agent_file = resolve_agent_path(extension_agent_path)
+    sea_file = resolve_sea_path(sea_path)
     path = _resolve_endpoint_file(endpoint_file)
     tab_id = f"api-{uuid.uuid4().hex}"
     # Client-minted per-submission run token.  Echoed on the run's
@@ -904,17 +939,17 @@ def run(
             "sideChannel": side_channel,
             "model": model,
             "systemPrompt": system_prompt,
-            "agentPath": agent_file,
+            "seaPath": sea_file,
             "useWorktree": use_worktree,
             "autoCommit": auto_commit,
             "maxBudget": max_budget,
             "modelConfig": model_config,
             "useWebTools": use_web_tools,
-            "classifyTasks": classify_tasks,
+            "classifyTasks": auto_classify,
             "useMemory": use_memory,
             "isParallel": is_parallel,
-            "appendToSystemPrompt": append_to_system_prompt,
-            "appendToPrompt": append_to_prompt,
+            "appendToSystemPrompt": add_to_system_prompt,
+            "appendToPrompt": add_to_prompt,
             "toolProfile": tool_profile,
             "dockerImage": docker_image,
             "inheritTools": inherit_tools,
@@ -952,14 +987,7 @@ def run(
                 # as a stop-on-timeout, decided below in the
                 # ``stopping`` branches with ``cancelled`` set.
                 cancelled = stopping = True
-                deadline = time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
-                try:
-                    _send_stop(ws, tab_id, run_token)
-                except OSError as send_exc:
-                    raise ConnectionError(
-                        "The sorcar daemon connection failed while "
-                        f"stopping the cancelled task: {send_exc}"
-                    ) from send_exc
+                deadline = _stop_and_await_confirmation(ws, tab_id, run_token, "cancelled")
                 continue
             if deadline is None:
                 # No deadline: wake periodically so an injected
@@ -976,21 +1004,9 @@ def run(
                         # caller must not resume while the child could
                         # still act (see _STOP_CONFIRM_GRACE_SECONDS).
                         stopping = True
-                        deadline = time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
-                        try:
-                            _send_stop(ws, tab_id, run_token)
-                        except OSError as send_exc:
-                            # The stop could not even be sent, so the
-                            # task was neither stopped nor confirmed
-                            # dead — raising the plain TimeoutError
-                            # here would let a caller (``_dispatch``)
-                            # claim "was stopped".  Surface the broken
-                            # daemon connection instead, like every
-                            # other mid-run connection failure.
-                            raise ConnectionError(
-                                "The sorcar daemon connection failed while "
-                                f"stopping the timed-out task: {send_exc}"
-                            ) from send_exc
+                        deadline = _stop_and_await_confirmation(
+                            ws, tab_id, run_token, "timed-out",
+                        )
                         continue
                     if stopping:
                         # The confirmation grace expired without a

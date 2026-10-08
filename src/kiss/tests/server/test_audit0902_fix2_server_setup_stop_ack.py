@@ -6,7 +6,7 @@
 
 ``_run_task`` wraps the whole run in an outer ``try``; a
 ``KeyboardInterrupt`` injected before the run reaches
-``_run_task_inner``'s own ``try`` (agent-script overrides, state
+``_run_task_inner``'s own ``try`` (SEA overrides, state
 resolution, the ``status`` broadcast, the inner prologue up to the
 ``Task started`` log line) is caught by that OUTER catch.  It used to
 hard-code ``"Task stopped by user"`` there without calling
@@ -29,9 +29,9 @@ runner's logger that parks the worker inside the production
 inside the outer catch's own log call, holding the cancellation
 handling past the watchdog's retry moment (6 s after Stop).
 
-Why the interrupt cannot be aimed at ``apply_agent_overrides`` itself:
+Why the interrupt cannot be aimed at ``apply_sea`` itself:
 ``execute_python_file`` and every getter call wrap ``BaseException``
-into ``AgentFileError``, so an interrupt landing inside user script
+into ``SeaError``, so an interrupt landing inside user script
 code never reaches the outer catch as a ``KeyboardInterrupt``.
 """
 
@@ -47,10 +47,12 @@ import time
 from pathlib import Path
 from typing import Any
 from unittest import TestCase
+from unittest.mock import patch
 
 from websockets.exceptions import ConnectionClosed
 
 from kiss.agents.sorcar import local_endpoint
+from kiss.core import config
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.task_runner import _state_owns_thread
@@ -192,6 +194,10 @@ class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
         asyncio.run_coroutine_threadsafe(
             self.remote.start_private_async(), self.loop,
         ).result(timeout=30)
+        credential = patch.object(config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "test-key")
+        credential.start()
+        self.addCleanup(credential.stop)
+        self.remote._vscode_server._default_model = "claude-opus-5-5"
         self.client = _LocalClient(self.endpoint_file)
         self.logger = logging.getLogger("kiss.server.task_runner")
         self._saved_level = self.logger.level
@@ -301,17 +307,17 @@ class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
         self.logger.addHandler(handler)
         self.client.send({
             "type": "run",
-            "prompt": "broken agent script",
+            "prompt": "broken SEA",
             "tabId": tab_id,
             "workDir": str(self.work_dir),
-            "agentPath": str(self.tmp / "missing_agent.py"),
+            "seaPath": str(self.tmp / "missing_agent.py"),
             "useWorktree": False,
             "isParallel": False,
             "autoCommit": False,
         })
         result = self.client.wait_for("result", tab_id)
         self.assertTrue(
-            result["text"].startswith("Task failed: AgentFileError: "), result["text"],
+            result["text"].startswith("Task failed: SeaError: "), result["text"],
         )
         self.client.wait_for("status", tab_id, running=False)
         self.assertIn("Task setup failed", "\n".join(handler.messages))

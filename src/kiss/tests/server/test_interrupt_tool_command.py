@@ -25,6 +25,8 @@ import unittest
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core import tool_interrupt
 from kiss.core.tool_interrupt import (
@@ -36,6 +38,8 @@ from kiss.core.tool_interrupt import (
 )
 from kiss.server import agent_state
 from kiss.server.sorcar import API
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _make_server() -> Any:

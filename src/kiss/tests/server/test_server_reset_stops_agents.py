@@ -47,6 +47,8 @@ from websockets.exceptions import ConnectionClosed
 
 from kiss.agents.sorcar import local_endpoint
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 _CHILD_SCRIPT = r"""
 import os
 import sys

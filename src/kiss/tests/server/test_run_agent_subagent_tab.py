@@ -37,13 +37,18 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
+
+import pytest
 
 from kiss.agents.sorcar import daemon_client
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.core import vscode_config
+from kiss.core import config, vscode_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import make_test_tls, open_local_connection
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 PARENT_TAB_ID = "webtab-parent-1"
 
@@ -117,6 +122,11 @@ class DaemonLocalHarness(unittest.TestCase):
         asyncio.run_coroutine_threadsafe(
             self.server.start_private_async(), self.loop,
         ).result(timeout=30)
+        # Startup loads isolated settings before these mocked runs are admitted.
+        credential = patch.object(config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "test-key")
+        credential.start()
+        self.addCleanup(credential.stop)
+        self.server._vscode_server._default_model = "claude-opus-5-5"
 
         self._viewer_writer: Any | None = None
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
@@ -603,7 +613,7 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
         control_marker = "control wire child zq9"
         # No parentReviewer flag, but the prompt itself is a review
         # task: the daemon must mark it from the EFFECTIVE prompt (the
-        # path an agent script's prompt() override would take).
+        # path a SEA's prompt() override would take).
         worded_marker = "wire child zq9, inspect it for defects"
         recorded: dict[str, Any] = {}
 

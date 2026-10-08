@@ -25,6 +25,7 @@ The tests skip when no Docker daemon is reachable.
 
 from __future__ import annotations
 
+import os
 import socket
 from pathlib import Path
 from typing import Any, cast
@@ -32,6 +33,7 @@ from typing import Any, cast
 import docker
 import pytest
 
+from kiss.agents.sorcar import local_endpoint
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
@@ -100,9 +102,7 @@ class DockerWorkDirMountTest(DaemonRunApiHarness):
                 "read": tools["Read"](NOTE),
             }
             if run_parallel_task and run_parallel_task not in record["task"]:
-                record["run_parallel"] = tools["run_parallel"](
-                    f'["{run_parallel_task}"]', max_workers="1",
-                )
+                record["run_parallel"] = tools["run_parallel"](f'["{run_parallel_task}"]')
             if "run_parallel" in record or not run_parallel_task:
                 tools["Write"]("index/notes/from_container.txt", "written in the container\n")
             calls.append(record)
@@ -171,7 +171,17 @@ class DockerWorkDirMountTest(DaemonRunApiHarness):
         """
         calls: list[dict[str, Any]] = []
         self._install_tool_running_stub(calls, run_parallel_task="child inspects")
-        result = self._run("parent inspects", timeout=240)
+        # The child is a sub-task of this test's private daemon, which the
+        # parent's ``run_parallel`` reaches through the endpoint variable.
+        saved_endpoint = os.environ.get(local_endpoint.LOCAL_ENDPOINT_ENV)
+        os.environ[local_endpoint.LOCAL_ENDPOINT_ENV] = self.endpoint_file
+        try:
+            result = self._run("parent inspects", timeout=240)
+        finally:
+            if saved_endpoint is None:
+                os.environ.pop(local_endpoint.LOCAL_ENDPOINT_ENV, None)
+            else:
+                os.environ[local_endpoint.LOCAL_ENDPOINT_ENV] = saved_endpoint
         assert result.success is True, result.text
         parents = [c for c in calls if "run_parallel" in c]
         children = [c for c in calls if "run_parallel" not in c]

@@ -59,10 +59,14 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 _GOOD_PPTX_BYTES: bytes = b"GOOD-DECK\x00" + os.urandom(8192)
 _PARTIAL_PPTX_BYTES: bytes = b"PARTIAL\x00" + os.urandom(4096)

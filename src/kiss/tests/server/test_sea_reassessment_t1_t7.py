@@ -4,10 +4,11 @@
 # add your name here
 """T1-T7 of ``reports/sea-run-agent-semantics-reassessment-2026-10-05.html``.
 
-T1  ``options`` is the whole settings vocabulary: ``model``, ``max_budget``
-    and ``timeout`` are options, the tool arguments are shortcuts that must
-    agree with them, a renamed key names its new name, and a setting passed
-    as a tool keyword is pointed at ``options``.
+T1  ``options`` is the settings vocabulary minus the four settings the tool
+    takes as arguments (``model``, ``tool_profile``, ``max_budget``,
+    ``timeout``: an ``options`` key of those names is refused, naming the
+    argument), a renamed key names its new name, and a setting passed as a
+    tool keyword is pointed at ``options``.
 T2  ``/ask`` and ``/sh`` lock ``tool_profile``.
 T3  the plain sub-agent SEA is ``seas/sorcar/sorcar_sea.py``.
 T4  one ``timeout`` sentence: argument or option > setting > default
@@ -30,12 +31,14 @@ import yaml
 
 from kiss.agents.sorcar import agent_dispatch, sea_commands
 from kiss.agents.sorcar.agent_dispatch import (
+    ARGUMENT_OPTIONS,
     DEFAULT_AGENT_PATH,
     OPTION_TYPES,
+    RUN_OPTION_KEYS,
     RunOptions,
     _run_agent,
     command_alias,
-    is_agent_path,
+    is_sea_path,
     make_run_agent_tool,
     parse_run_options,
     resolve_agent,
@@ -51,41 +54,40 @@ from kiss.core.models.model_info import get_available_models
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 from kiss.tests.server.test_run_config_echo import _parent
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 # --- T1: options = settings vocabulary ---------------------------------------------
 
 
 def test_options_vocabulary_is_the_settings_vocabulary_minus_the_script_keys() -> None:
-    assert set(OPTION_TYPES) == (set(SETTING_TYPES) - set(META_SETTINGS)) | {
-        "inherit", "workspace", "add_to_prompt", "add_to_system_prompt",
-    }
-    assert {"model", "max_budget", "timeout", "tool_profile"} <= set(OPTION_TYPES)
-    assert set(RunOptions.__dataclass_fields__) == set(OPTION_TYPES) | {"system_prompt"}
+    assert set(OPTION_TYPES) == (
+        set(SETTING_TYPES) - set(META_SETTINGS) - set(ARGUMENT_OPTIONS)
+    ) | {"inherit", "workspace", "add_to_prompt", "add_to_system_prompt"}
+    assert set(ARGUMENT_OPTIONS) == {"model", "max_budget", "timeout", "tool_profile"}
+    assert set(RunOptions.__dataclass_fields__) == set(RUN_OPTION_KEYS) | {"system_prompt"}
 
 
-def test_arguments_are_shortcuts_for_the_options_of_the_same_name() -> None:
-    by_options = parse_run_options(
-        '{"model": "gpt-5", "max_budget": 2, "timeout": 30, "tool_profile": "review"}'
-    )
+def test_the_four_argument_settings_have_one_place_the_argument() -> None:
     by_arguments = parse_run_options("", "review", "gpt-5", "2", "30")
-    assert by_options == by_arguments
-    assert by_options.model == "gpt-5" and by_options.max_budget == 2.0
-    assert by_options.timeout == 30.0 and by_options.tool_profile == "review"
-    # Both ways at once is fine when they agree, an error when they differ.
-    assert parse_run_options('{"model": " gpt-5 "}', model="gpt-5").model == "gpt-5"
-    with pytest.raises(ValueError, match=r"options\['model'\] = 'a' contradicts the model arg"):
-        parse_run_options('{"model": "a"}', model="b")
-    # A blank option is "not passed", so it never contradicts the argument.
-    assert parse_run_options('{"model": "", "tool_profile": " "}', "review", "m").model == "m"
-    assert parse_run_options('{"tool_profile": ""}', "review").tool_profile == "review"
+    assert by_arguments.model == "gpt-5" and by_arguments.max_budget == 2.0
+    assert by_arguments.timeout == 30.0 and by_arguments.tool_profile == "review"
+    assert parse_run_options("", "readonly", " gpt-5 ").model == "gpt-5"
+    assert parse_run_options("", "readonly").tool_profile == "review"
+    # The same key inside ``options`` is refused, naming the argument.
+    for key, value in [("model", '"a"'), ("tool_profile", '"shell"'), ("max_budget", "1"),
+                       ("timeout", "10")]:
+        with pytest.raises(
+            ValueError,
+            match=rf"options key '{key}' is the {key} argument of this tool; pass {key}=\.\.\.",
+        ):
+            parse_run_options(f'{{"{key}": {value}}}')
+    # ... even when the argument is given too, or the option is blank.
+    with pytest.raises(ValueError, match="options key 'model' is the model argument"):
+        parse_run_options('{"model": "gpt-5"}', model="gpt-5")
+    with pytest.raises(ValueError, match="options key 'tool_profile' is the tool_profile arg"):
+        parse_run_options('{"tool_profile": ""}', "review")
     assert parse_run_options('{"add_to_prompt": "  "}') == RunOptions()
-    # A JSON integer too large for a float is "not a number", not a crash.
-    with pytest.raises(ValueError, match=r"options\['timeout'\] must be a number, got 1000"):
-        parse_run_options('{"timeout": ' + "1" + "0" * 400 + "}")
-    with pytest.raises(ValueError, match=r"options\['timeout'\] = 10.0 contradicts the timeout"):
-        parse_run_options('{"timeout": 10}', timeout="20")
-    with pytest.raises(ValueError, match=r"options\['max_budget'\] = 1.0 contradicts"):
-        parse_run_options('{"max_budget": 1}', max_budget="2")
-    # Numbers are validated once, whichever way they come.
+    # Numbers are validated once, as arguments.
     for text, bad in [("max_budget", "cheap"), ("timeout", "soon")]:
         with pytest.raises(ValueError, match=f"{text} must be a number, got '{bad}'"):
             parse_run_options("", **{text: bad})
@@ -93,26 +95,23 @@ def test_arguments_are_shortcuts_for_the_options_of_the_same_name() -> None:
         for bad in ("0", "-1", "inf", "nan"):
             with pytest.raises(ValueError, match=f"{key} must be a positive finite number"):
                 parse_run_options("", **{key: bad})
-        with pytest.raises(ValueError, match=rf"options\['{key}'\] must be a positive finite"):
-            parse_run_options(f'{{"{key}": 0}}')
-        with pytest.raises(ValueError, match=rf"options\['{key}'\] must be a number, got True"):
-            parse_run_options(f'{{"{key}": true}}')
-        with pytest.raises(ValueError, match=rf"options\['{key}'\] must be a number, got 'x'"):
-            parse_run_options(f'{{"{key}": "x"}}')
-    # ``null`` and empty strings mean "not passed".
-    assert parse_run_options('{"model": null, "timeout": null}', model=" ") == RunOptions()
+    # Blank arguments mean "not passed".
+    assert parse_run_options("", model=" ", max_budget=" ", timeout="") == RunOptions()
 
 
 def test_a_renamed_setting_in_options_names_its_new_name() -> None:
     run_agent = make_run_agent_tool("/tmp")
     assert run_agent("say hi", options='{"is_parallel": false}') == (
-        "Error: options key 'is_parallel' was renamed to 'allow_fan_out'; use the new name."
+        "Error: options key 'is_parallel' was removed: `run_parallel` is N `run_agent` "
+        "calls, so there is nothing to allow or forbid separately; `tool_profile` chooses "
+        "the toolset."
     )
-    assert run_agent("say hi", options='{"preset": "worker"}') == (
-        "Error: options key 'preset' was renamed to 'kind'; use the new name."
+    assert run_agent("say hi", options='{"preset": "worker"}').startswith(
+        "Error: options key 'preset' was removed: what a SEA is became its base class: "
+        "derive from `WorkerSea`"
     )
     assert run_agent("say hi", options='{"colour": 1}').startswith(
-        "Error: options has an unknown key 'colour'; known keys: work_dir, model, chat_id, "
+        "Error: options has an unknown key 'colour'; known keys: work_dir, chat_id, "
     )
     assert run_agent("say hi", max_budget="cheap") == (
         "Error: max_budget must be a number, got 'cheap'."
@@ -121,7 +120,8 @@ def test_a_renamed_setting_in_options_names_its_new_name() -> None:
         "Error: timeout must be a positive finite number, got '-5'."
     )
     assert run_agent("say hi", options='{"model": "a"}', model="b") == (
-        "Error: options['model'] = 'a' contradicts the model argument 'b'; pass one of them."
+        "Error: options key 'model' is the model argument of this tool; pass model=... "
+        "instead of putting it in options."
     )
 
 
@@ -132,7 +132,7 @@ def test_a_setting_passed_as_a_tool_keyword_is_pointed_at_options() -> None:
         {"name": "run_agent", "arguments": {"task": "hi", "use_worktree": False, "model": "m"}}
     )
     assert out.startswith("Failed to call run_agent with ")
-    assert "Expected signature: run_agent(task: str, agent: str = ''" in out
+    assert "Expected signature: run_agent(task: 'str', agent: 'str' = ''" in out
     # The tool knows its vocabulary: the hint is definite, not conditional.
     assert out.rstrip().endswith(
         "use_worktree is a run setting, not an argument; pass it in the `options` JSON "
@@ -144,11 +144,11 @@ def test_a_setting_passed_as_a_tool_keyword_is_pointed_at_options() -> None:
     assert "unexpected keyword argument 'loud'" in out and "`options`" not in out
 
 
-def test_run_agent_docstring_names_the_shortcut_options() -> None:
+def test_run_agent_docstring_says_the_four_argument_settings_are_arguments_only() -> None:
     doc = " ".join((make_run_agent_tool("/tmp").__doc__ or "").split())
     assert (
-        "keys are the SEA settings vocabulary: ``model``, ``tool_profile``, ``max_budget``, "
-        "``timeout`` (the four arguments above are shortcuts for these)"
+        "keys are the SEA settings vocabulary except ``model``, ``tool_profile``, "
+        "``max_budget`` and ``timeout``, which are the arguments above and are refused here"
     ) in doc
     assert 'ends with ``(also agent="name")``' in doc
 
@@ -167,7 +167,8 @@ def test_ask_and_sh_lock_their_tool_profile() -> None:
             f"Error: {name}: the script locks tool_profile='{profile}' (asked for 'review')"
         )
         assert run_agent("ls", agent=name, options='{"tool_profile": "shell"}') == (
-            f"Error: {name}: the script locks tool_profile='{profile}' (asked for 'shell')"
+            "Error: options key 'tool_profile' is the tool_profile argument of this tool; "
+            "pass tool_profile=... instead of putting it in options."
         )
 
 
@@ -203,16 +204,14 @@ def test_the_plain_sub_agent_sea_is_named_sorcar() -> None:
 def test_timeout_has_one_sentence_and_one_resolution() -> None:
     doc = SETTING_DOCS["timeout"]
     assert doc.startswith(
-        "Seconds the call blocks for the run: the call's `timeout` argument or option wins"
+        "Seconds a `run_agent` / `run_parallel` call blocks for the run: the call's "
+        "`timeout` argument wins, then this setting, then 3600."
     )
-    assert "3600 for a `run_agent` call" in doc
     assert "keeps going as an `agent_job`" in doc
-    assert "no limit of its own for a `run_parallel` child" in doc
-    assert "ignored by `/<name>`" in doc
+    assert "Ignored by `/<name>`" in doc
     assert resolve_timeout(None, {}) == 3600.0
     assert resolve_timeout(None, {"timeout": 10}) == 10.0
     assert resolve_timeout(5.0, {"timeout": 10}) == 5.0
-    assert parse_run_options('{"timeout": 7}').timeout == 7.0
     assert parse_run_options("", timeout="7").timeout == 7.0
 
 
@@ -244,12 +243,12 @@ def _prose_root(tmp_path: Path, sentence: str) -> Path:
 
 
 def test_lint_checks_declares_claims_against_the_script(tmp_path: Path) -> None:
-    sh = '`{"kind": "worker", "tool_profile": "bash", "locked": ["tool_profile"]}`'
+    sh = '`{"tool_profile": "bash", "locked": ["tool_profile"]}`'
     # A true claim, in either word order, passes; the generated block is never read.
     assert lint_prose(_prose_root(tmp_path / "a", f"`/sh` declares {sh}.")) == []
     assert lint_prose(_prose_root(tmp_path / "b", f"for example {sh} (what `/sh` declares)")) == []
     # A Python literal is read like JSON.
-    literal = "`{'kind': 'worker', 'tool_profile': 'bash', 'locked': ['tool_profile']}`"
+    literal = "`{'tool_profile': 'bash', 'locked': ['tool_profile']}`"
     assert lint_prose(_prose_root(tmp_path / "c", f"`/sh` declares {literal}.")) == []
     # A stale claim names the current literal.
     [finding] = lint_prose(
@@ -261,8 +260,7 @@ def test_lint_checks_declares_claims_against_the_script(tmp_path: Path) -> None:
         _prose_root(tmp_path / "e", '`{"tool_profile": "none"}` (what `/ask` declares)')
     )
     assert finding.message == (
-        'line 3: `/ask` declares `{"kind": "worker", "tool_profile": "none", '
-        '"locked": ["tool_profile"]}`'
+        'line 3: `/ask` declares `{"tool_profile": "none", "locked": ["tool_profile"]}`'
     )
     [finding] = lint_prose(_prose_root(tmp_path / "f", "`/no_such_sea` declares `{}`"))
     assert finding.message == "line 3: `/no_such_sea` is not a registered command"
@@ -303,12 +301,12 @@ def test_lint_flags_prose_claiming_a_timeout_stops_the_sub_task(tmp_path: Path) 
 
 def test_command_alias_and_run_config_line() -> None:
     sh = str(sea_commands.get_command("sh"))
-    assert is_agent_path(sh) and not is_agent_path("sh")
+    assert is_sea_path(sh) and not is_sea_path("sh")
     assert command_alias(sh) == "sh" and command_alias("/tmp/nowhere_sea.py") == ""
     assert command_alias(DEFAULT_AGENT_PATH) == ""  # hidden: not a command
-    line = run_config_line({"sea": "sh", "kind": "worker"}, "sh")
+    line = run_config_line({"sea": "sh"}, "sh")
     assert line.endswith('inherited=none pinned=none (also agent="sh")')
-    assert "(also" not in run_config_line({"sea": "sh", "kind": "worker"})
+    assert "(also" not in run_config_line({"sea": "sh"})
 
 
 # --- T7: hidden documents the literal ----------------------------------------------
@@ -367,28 +365,35 @@ class ReassessmentDaemonTest(DaemonLocalHarness):
         sh = str(sea_commands.get_command("sh"))
         out = _run_agent(self.repo, "echo hi", agent=sh, parent_agent=parent)
         ran = yaml.safe_load(out)["ran"]
-        assert ran.startswith("sh (worker) ") and " tools=bash " in ran, ran
+        assert ran.startswith("sh model=") and " tools=bash " in ran, ran
         assert ran.endswith(' (also agent="sh")'), ran
         # By name, nothing to add; a non-command path has no alias either.
         out = _run_agent(self.repo, "echo hi", agent="sh", parent_agent=parent)
         ran = yaml.safe_load(out)["ran"]
-        assert ran.startswith("sh (worker) ") and "(also" not in ran, ran
+        assert ran.startswith("sh model=") and "(also" not in ran, ran
         ran = yaml.safe_load(
             _run_agent(self.repo, "hi", agent=str(self.local_sea), parent_agent=parent)
         )["ran"]
-        assert ran.startswith("local (session) ") and "(also" not in ran, ran
-        # The lock: the same profile is fine (explicitly or as an option), another is refused.
-        for kwargs in ({"tool_profile": "bash"}, {"options": '{"tool_profile": "bash"}'}):
-            out = _run_agent(self.repo, "echo hi", agent="sh", parent_agent=parent, **kwargs)
-            assert yaml.safe_load(out)["success"] is True, out
+        assert ran.startswith("local model=") and "(also" not in ran, ran
+        # The lock: the same profile is fine, another is refused.
+        out = _run_agent(self.repo, "echo hi", agent="sh", parent_agent=parent, tool_profile="bash")
+        assert yaml.safe_load(out)["success"] is True, out
         out = _run_agent(
             self.repo, "echo hi", agent="sh", tool_profile="review", parent_agent=parent,
         )
         assert out == "Error: sh: the script locks tool_profile='bash' (asked for 'review')"
-        # T1 through the daemon: ``model`` and ``timeout`` as options.
+        # T1 through the daemon: ``model`` and ``timeout`` as arguments (an
+        # ``options`` key of either name is refused before anything runs).
+        out = _run_agent(
+            self.repo, "echo hi", agent=sh, parent_agent=parent, options='{"timeout": 45}',
+        )
+        assert out == (
+            "Error: options key 'timeout' is the timeout argument of this tool; "
+            "pass timeout=... instead of putting it in options."
+        )
         out = _run_agent(
             self.repo, "echo hi", agent=sh, parent_agent=parent,
-            options=f'{{"model": "{_parent(self.repo).model_name}", "timeout": 45}}',
+            model=_parent(self.repo).model_name, timeout="45",
         )
         ran = yaml.safe_load(out)["ran"]
         assert " timeout=45s " in ran and "inherited=" in ran, ran

@@ -31,9 +31,10 @@ import re
 from collections import Counter
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from kiss.tests.agents.vscode.test_activity_bar import (
+from kiss.tests.agents.vscode.test_workspace_sections import (
     _explorer_row,
     _explorer_row_sel,
     _sent,
@@ -79,20 +80,24 @@ def _click_root_button(page, root: str, action: str) -> None:
     """
     row = page.locator(_row_at(root, ".is-root"))
     button = page.locator(f"{_row_at(root, '.is-root')} .explorer-root-{action}")
-    for _ in range(50):
+    for attempt in range(50):
         row.hover()
-        if button.is_visible():
-            break
-        page.wait_for_timeout(100)
-    button.click()
+        try:
+            button.click(timeout=500)
+            return
+        except PlaywrightTimeoutError:
+            if attempt == 49:
+                raise
+            page.wait_for_timeout(100)
 
 
-def _open_page(browser, harness):
+
+def _open_page(browser, harness, width: int = 1400):
     """Open the remote page in desktop mode with clipboard access and
     record the WS frames the client sends."""
     context = browser.new_context(
         ignore_https_errors=True,
-        viewport={"width": 1400, "height": 900},
+        viewport={"width": width, "height": 900},
         permissions=["clipboard-read", "clipboard-write"],
     )
     page = context.new_page()
@@ -140,14 +145,21 @@ def _settle(page) -> None:
     page.wait_for_timeout(400)
 
 
+def _show_section(page, section_id: str) -> None:
+    """Expand the Explorer / Source Control section of the task-info
+    panel if it is collapsed (an expanded one is live already)."""
+    if page.locator(f"#{section_id}.collapsed").count():
+        page.click(f"#{section_id} .meta-section-toggle")
+
+
 def _open_explorer(page):
-    page.click("#activity-explorer")
+    _show_section(page, "meta-explorer")
     page.wait_for_selector(".explorer-row.is-file", timeout=15000)
     _settle(page)
 
 
 def _open_scm(page):
-    page.click("#activity-scm")
+    _show_section(page, "meta-scm")
     page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
     _settle(page)
 
@@ -465,14 +477,18 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
         (harness.work_dir / "dir" / "main-only.txt").write_text("keep\n")
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
-        message = _answer_confirm(page, "fs-overwrite", accept=False)
+        # One question per clashing entry (a multi-entry paste asks once
+        # per clash): the toast id carries the destination folder and
+        # the entry's name.
+        overwrite_id = f"fs-overwrite:{harness.work_dir}/dir|main-only.txt"
+        message = _answer_confirm(page, overwrite_id, accept=False)
         assert "already exists" in message
         page.wait_for_timeout(300)
         assert (harness.work_dir / "dir" / "main-only.txt").read_text() == "keep\n"
         # "Replace" replaces it.
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
-        _answer_confirm(page, "fs-overwrite", accept=True)
+        _answer_confirm(page, overwrite_id, accept=True)
         # The server renames the old file aside and copies the new one in;
         # a read landing inside that window finds no file or, on Windows,
         # a copy still holding the target exclusively.  Neither is torn.
@@ -1257,13 +1273,13 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         # reports no repository.
         assert _sent(frames, "setWorkDir")[-1]["workDir"] == str(harness.plain_dir)
         assert not _sent(frames, "saveConfig")
-        page.click("#activity-scm")
+        _show_section(page, "meta-scm")
         page.wait_for_function(
             "document.getElementById('scm-changes').innerText.includes('Not a git repository')",
             timeout=15000,
         )
         # Escape closes a reopened picker without changing anything.
-        page.click("#activity-explorer")
+        _show_section(page, "meta-explorer")
         page.click("#explorer-pick-folder")
         page.wait_for_selector("#folder-picker:not([hidden])", timeout=5000)
         page.keyboard.press("Escape")
@@ -1374,6 +1390,56 @@ _PDFJS_MODULE = (
 )
 
 
+# The multi-page PDF tests reason about which page sits under the middle
+# of the view, which depends on how tall a fit-width page is: they open a
+# wider window and give the content pane most of it (_widen_content_pane)
+# so a fit-width page is about as tall as on the old single-pane page.
+_PDF_PAGE_WIDTH = 2000
+
+
+def _widen_content_pane(page) -> None:
+    """Shrink the chat pane to its 20% minimum with the real resizer
+    (ArrowLeft steps of 2% from the 50% default), giving the content
+    pane the rest of the window.  The resizer exists only once a
+    content tab is open (the chat alone fills the window before)."""
+    resizer = page.locator("#pane-resizer")
+    resizer.wait_for(state="visible", timeout=15000)
+    # The composer grabs focus once the page has settled, which may land
+    # between two key presses: re-focus the handle before each one.
+    for _ in range(40):
+        resizer.focus()
+        page.keyboard.press("ArrowLeft")
+        if resizer.get_attribute("aria-valuenow") == "20":
+            return
+    raise AssertionError(
+        "chat pane share stuck at " + str(resizer.get_attribute("aria-valuenow"))
+    )
+
+
+def _hide_panel(page) -> None:
+    """Desktop: the task-info panel lies over the content pane's right
+    edge, where the PDF toolbar sits; press in the pane to slide the
+    panel away (a phone stacks the surfaces, nothing to hide)."""
+    if not page.evaluate("document.body.classList.contains('remote-desktop')"):
+        return
+    page.dispatch_event("#content-tab-area", "pointerdown")
+    page.wait_for_selector("body.meta-hidden", state="attached", timeout=5000)
+
+
+def _show_panel(page) -> None:
+    """Bring the task-info panel (and the Explorer in it) back from its
+    drawer after a press in the content pane slid it off screen."""
+    if not page.evaluate("document.body.classList.contains('meta-hidden')"):
+        return
+    page.click("#meta-drawer")
+    page.wait_for_function(
+        "() => !document.body.classList.contains('meta-hidden')"
+        " && document.getElementById('meta-panel').getBoundingClientRect().right"
+        "    <= window.innerWidth + 1",
+        timeout=5000,
+    )
+
+
 def _wait_pdf_rendered(page) -> None:
     """Wait for the pdf.js viewer to draw the first page.  A viewer error
     fails the test unless the pdf.js CDN really is unreachable from the
@@ -1384,6 +1450,7 @@ def _wait_pdf_rendered(page) -> None:
         timeout=60000,
     )
     if page.locator(_PDF_PAGE + " canvas").count() > 0:
+        _hide_panel(page)
         return
     note = page.locator(".content-tab-view .content-binary-note").first.inner_text()
     cdn_ok = page.evaluate(
@@ -1546,6 +1613,7 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         )
         # Clicking the open PDF again reloads it in the same tab: the old
         # viewer (and its worker) go, a fresh one draws the page.
+        _show_panel(page)
         _explorer_row(page, "report.pdf").click()
         page.wait_for_function(
             f"""() => {{
@@ -1558,6 +1626,7 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         )
         _wait_tab_count(page, tabs_before + 1)
         # An image opens as a picture.
+        _show_panel(page)
         _explorer_row(page, "dot.png").click()
         _wait_tab_count(page, tabs_before + 2)
         img = page.locator(".content-tab-view img.content-image")
@@ -1567,23 +1636,19 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         # (which frees that document) leaves the second one drawing.
         second = harness.work_dir / "report2.pdf"
         second.write_bytes((harness.work_dir / "report.pdf").read_bytes())
-        # Back to the chat through its GROUP-STRIP entry: the main-row
-        # entry stands for the whole group and would return to the tab
-        # last viewed there (the picture), not to the chat.
-        page.evaluate(
-            "document.querySelector('#tab-list .chat-tab:not(.content-tab)').click()"
-        )
-        page.wait_for_selector("#output", state="visible", timeout=15000)
+        # The split layout keeps the chat on screen beside the content
+        # pane, so a link in the chat is clickable while the picture shows.
+        assert page.locator("#output").is_visible()
         _inject_file_link(page, str(second), "lnk-pdf2")
         page.click("#lnk-pdf2")
         _wait_tab_count(page, tabs_before + 3)
         _wait_pdf_rendered(page)
-        # The chat's main-row entry is highlighted too, so the active
-        # content tab (and its close button) is the strip's.
-        page.locator("#tab-list .chat-tab", has_text="report.pdf").first.click()
-        page.locator("#tab-list .chat-tab.active .chat-tab-close").click()
+        # Content tabs sit on the content pane's own row; the shown one
+        # (and its close button) carries .active there.
+        page.locator("#content-tab-list .chat-tab", has_text="report.pdf").first.click()
+        page.locator("#content-tab-list .chat-tab.active .chat-tab-close").click()
         _wait_tab_count(page, tabs_before + 2)
-        page.locator("#tab-list .chat-tab", has_text="report2.pdf").first.click()
+        page.locator("#content-tab-list .chat-tab", has_text="report2.pdf").first.click()
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
         page.click(_PDF_VIEWER + " .pdf-zoom-in")
         page.wait_for_function(
@@ -1591,7 +1656,7 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
             timeout=15000,
         )
         # Closing a PDF tab removes its viewer.
-        page.locator("#tab-list .chat-tab.active .chat-tab-close").click()
+        page.locator("#content-tab-list .chat-tab.active .chat-tab-close").click()
         _wait_tab_count(page, tabs_before + 1)
         assert page.locator(".pdf-viewer").count() == 0
     finally:
@@ -1708,7 +1773,10 @@ def test_pdf_scrolls_and_pinch_zooms_on_a_phone(browser, harness, worktree):
     try:
         goto_retrying_network_change(page, harness.base_url + "/")
         page.wait_for_selector("#task-input", state="visible", timeout=30000)
-        page.wait_for_selector(".chat-tab", timeout=30000)
+        page.wait_for_function(
+            "() => window._testApi && window._testApi.getActiveTabId()",
+            timeout=30000,
+        )
         assert page.locator("body.remote-desktop").count() == 0
         _inject_file_link(page, str(harness.work_dir / "report.pdf"), "lnk-pdf")
         page.click("#lnk-pdf")
@@ -1763,11 +1831,12 @@ def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
     indicator follows the page under the middle of the view."""
     pdf = harness.work_dir / "pages8.pdf"
     pdf.write_bytes(_pdf_bytes(8))
-    context, page, frames = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness, width=_PDF_PAGE_WIDTH)
     try:
         _inject_file_link(page, str(pdf), "lnk-pdf8")
         page.click("#lnk-pdf8")
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _widen_content_pane(page)
         _wait_pdf_rendered(page)
         assert page.locator(_PDF_PAGE).count() == 8
         assert _pdf_status(page) == "Page 1 of 8"
@@ -1873,11 +1942,12 @@ def test_pdf_page_field_jumps_to_the_typed_page(browser, harness, worktree):
     the edit."""
     pdf = harness.work_dir / "pages8.pdf"
     pdf.write_bytes(_pdf_bytes(8))
-    context, page, frames = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness, width=_PDF_PAGE_WIDTH)
     try:
         _inject_file_link(page, str(pdf), "lnk-pdf8")
         page.click("#lnk-pdf8")
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _widen_content_pane(page)
         _wait_pdf_rendered(page)
         field = page.locator(_PDF_VIEWER + " .pdf-page-input")
         assert _pdf_status(page) == "Page 1 of 8"
@@ -1991,13 +2061,14 @@ def test_pdf_keyboard_shortcuts_move_pages_and_zoom(browser, harness, worktree):
     the arrows pan instead once the pages are wider than the view."""
     pdf = harness.work_dir / "pages8.pdf"
     pdf.write_bytes(_pdf_bytes(8))
-    context, page, frames = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness, width=_PDF_PAGE_WIDTH)
     errors: list[str] = []
     page.on("pageerror", lambda err: errors.append(str(err)))
     try:
         _inject_file_link(page, str(pdf), "lnk-pdf8")
         page.click("#lnk-pdf8")
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _widen_content_pane(page)
         _wait_pdf_rendered(page)
         assert _pdf_status(page) == "Page 1 of 8"
         # No click into the viewer first: the keys work as soon as the
@@ -2092,15 +2163,15 @@ def test_pdf_keyboard_shortcuts_move_pages_and_zoom(browser, harness, worktree):
         page.keyboard.press("PageDown")
         _assert_pdf_page_at_top(page, 2)
         page_two = _pdf_scroll_top(page)
-        # The chat's GROUP-STRIP entry shows the chat; its main-row entry
-        # would return to the group's last viewed tab, the viewer itself.
-        page.evaluate(
-            "document.querySelector('#tab-list .chat-tab:not(.content-tab)').click()"
-        )
-        page.wait_for_selector("#output", state="visible", timeout=15000)
+        # The split layout's chat never hides the content pane, so
+        # another content tab (a picture) has to cover the viewer.
+        _inject_file_link(page, str(harness.work_dir / "dot.png"), "lnk-dot")
+        page.click("#lnk-dot")
+        page.locator(".content-tab-view img.content-image").wait_for(timeout=15000)
+        page.locator(_PDF_VIEWER).wait_for(state="hidden", timeout=15000)
         page.evaluate("document.activeElement.blur()")
         page.keyboard.press("PageDown")
-        page.locator("#tab-list .chat-tab", has_text="pages8.pdf").first.click()
+        page.locator("#content-tab-list .chat-tab", has_text="pages8.pdf").first.click()
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
         assert _pdf_scroll_top(page) == page_two
         _assert_pdf_page_at_top(page, 2)
@@ -2108,9 +2179,9 @@ def test_pdf_keyboard_shortcuts_move_pages_and_zoom(browser, harness, worktree):
         page.keyboard.press("PageDown")
         _assert_pdf_page_at_top(page, 3)
         # Closing the tab takes the listener with it: the key is nobody's.
-        # (The chat's main-row entry is highlighted as well, so the
-        # active tab's close button is the strip's.)
-        page.locator("#tab-list .chat-tab.active .chat-tab-close").click()
+        # (The shown content tab is the one with .active on the content
+        # pane's row.)
+        page.locator("#content-tab-list .chat-tab.active .chat-tab-close").click()
         page.wait_for_function(
             "() => document.querySelectorAll('.pdf-viewer').length === 0", timeout=15000
         )
@@ -2292,7 +2363,6 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
         )
     context, page, frames = _open_page(browser, harness)
     try:
-        page.click("#activity-tasks")
         page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
         assert (
             page.locator(f".history-chat-group[data-chat-id='{chat_b}'] .history-chat-title")
@@ -2340,10 +2410,8 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
             ),
         )
         cdp.send("Network.enable")
-        pre_tab_ids = page.evaluate(
-            "Array.from(document.querySelectorAll('.chat-tab'))"
-            ".map(t => t.dataset.tabId)"
-        )
+        # Chat tabs have no DOM row any more: read them from _testApi.
+        pre_tab_ids = page.evaluate("window._testApi.openTabs().map(t => t.id)")
         # Chat panels are collapsed by default (nothing is running):
         # the header of a chat not yet summarised shows the chat's FIRST
         # task and opens the panel.
@@ -2361,23 +2429,21 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
         # neither the tab count nor "every old id vanished" is a stable
         # outcome.  Assert the designed outcome instead: the surviving
         # ACTIVE tab is fresh (an id the page did not have before the
-        # click), it shows the clicked task in its read-only task panel,
+        # click), its transcript opens with the clicked task's panel,
         # and a canonical `tabs_state` snapshot names that fresh id.
         page.wait_for_function(
-            "document.getElementById('task-panel-text')"
-            " && document.getElementById('task-panel-text').textContent"
+            "document.querySelector('#output .task-panel-text')"
+            " && document.querySelector('#output .task-panel-text').textContent"
             "      === 'alpha one'",
             timeout=15000,
         )
         page.wait_for_function(
-            "pre => { const act = document.querySelector('.chat-tab.active');"
-            " return !!act && !pre.includes(act.dataset.tabId); }",
+            "pre => { const act = window._testApi.getActiveTabId();"
+            " return !!act && !pre.includes(act); }",
             arg=pre_tab_ids,
             timeout=15000,
         )
-        active_id = page.evaluate(
-            "document.querySelector('.chat-tab.active').dataset.tabId"
-        )
+        active_id = page.evaluate("window._testApi.getActiveTabId()")
         for _ in range(100):
             if any(
                 '"tabs_state"' in frame and active_id in frame
@@ -2437,7 +2503,6 @@ def test_history_click_survives_mid_press_refresh(browser, harness, worktree):
             ),
         )
         cdp.send("Network.enable")
-        page.click("#activity-tasks")
         page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
         # Open the collapsed chat panel so its row can be pressed; the
         # explicit expand survives the parked rebuild below.
@@ -2487,8 +2552,8 @@ def test_history_click_survives_mid_press_refresh(browser, harness, worktree):
         page.mouse.up()
         # The browser-synthesized click still opens the pressed task.
         page.wait_for_function(
-            "document.getElementById('task-panel-text')"
-            " && document.getElementById('task-panel-text').textContent"
+            "document.querySelector('#output .task-panel-text')"
+            " && document.querySelector('#output .task-panel-text').textContent"
             "      === 'hold target'",
             timeout=15000,
         )

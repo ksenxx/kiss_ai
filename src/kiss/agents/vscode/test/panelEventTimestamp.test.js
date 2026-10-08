@@ -65,11 +65,6 @@ function makeWebview(opts) {
     },
   });
 
-  if (remote) {
-    const btn = win.document.createElement('button');
-    btn.id = 'frequent-tasks-btn';
-    win.document.body.appendChild(btn);
-  }
   win.acquireVsCodeApi = function () {
     let state;
     return {
@@ -595,13 +590,10 @@ async function run() {
       ts: now,
     });
     const tc = output.querySelector('.ev.tc');
-    assert.ok(!tc.classList.contains('collapsed'), 'the live panel is open');
+    assert.ok(tc.classList.contains('collapsed'), 'the live panel starts folded');
     const label = tc.querySelector(
       ':scope > .panel-time > .panel-ts',
     ).textContent;
-    tc.querySelector('.tc-h').dispatchEvent(
-      new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-    );
     assert.ok(tc.classList.contains('collapsed'), 'panel collapsed');
     const prev = tc.querySelector('.collapse-preview');
     assert.ok(

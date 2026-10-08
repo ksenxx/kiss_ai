@@ -37,13 +37,7 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
 )
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 
-
-@pytest.fixture(autouse=True)
-def _fresh_state():
-    """Start and end every test with no recorded Gmail connection."""
-    reset_state(_SERVICE)
-    yield
-    reset_state(_SERVICE)
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 class TestBodyExtraction:

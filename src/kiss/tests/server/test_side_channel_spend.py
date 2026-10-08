@@ -136,15 +136,22 @@ def test_running_ancestor_without_a_live_agent_is_skipped() -> None:
 
 
 def test_missing_rows_and_zero_spend_charge_nothing() -> None:
-    """An unknown task id or a zero spend is a no-op."""
+    """An empty task id or a zero spend is a no-op; a task without a row is banked live.
+
+    A ``run_agent`` caller may have a task id but no persisted row (a
+    run that persists none): its spend goes to the live agent, as for
+    an unfinished row, instead of vanishing.
+    """
     assert _add_late_task_usage("no-such-task", 1, 1.0, 1) == ([], "")
     task = _task(finished=True)
     agent = SorcarAgent("zero")
     charge_side_channel_usage(None, agent, task, 0.0, 0, 0)
     charge_side_channel_usage(None, agent, "", 1.0, 1, 1)
-    charge_side_channel_usage(None, agent, "no-such-task", 1.0, 1, 1)
     assert _row(task) == (100, 1.0, 2)
     assert _agent_usage(agent) == (0.0, 0, 0)
+    charge_side_channel_usage(None, agent, "no-such-task", 1.0, 1, 1)
+    assert _row(task) == (100, 1.0, 2)
+    assert _agent_usage(agent) == (1.0, 1, 1)
 
 
 class _AnswerDaemon:

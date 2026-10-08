@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E tests for Fixer-3 findings (tmp/findings-2.md F1, F2, F7, F9, F14).
+"""E2E tests for Fixer-3 findings (tmp/findings-2.md F7, F9, F14).
 
 Each test drives the real agent classes against a fresh git repo with an
 isolated persistence DB.  No mocks/patches libraries are used; where a
@@ -14,12 +14,6 @@ so the real ``WorktreeSorcarAgent.run`` / ``ChatSorcarAgent.run`` /
 
 Covered findings:
 
-* F1 — base ``run_tasks_parallel`` used ``parent_task_id=None`` while the
-  chat path uses the ``""`` sentinel (regression guard: persisted column
-  and ``new_tab`` payload use the empty-string convention).
-* F2 — base ``run_tasks_parallel`` broadcast ``subagentDone`` with tab id
-  ``{parent}__sub_{idx}`` while the chat executor registers tabs as
-  ``task-{parent}__sub_{idx}``.
 * F7 — ``WorktreeSorcarAgent.run``'s direct-execution fallback propagated
   non-``KISSError`` exceptions while the worktree path converts them to a
   YAML ``success: false`` result.
@@ -38,12 +32,14 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml
 
 import kiss.agents.sorcar.persistence as _persistence
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.server.json_printer import JsonPrinter
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 _PARENT_CLASS = cast(Any, SorcarAgent.__mro__[1])
 
@@ -124,73 +120,6 @@ class _Base(unittest.TestCase):
     @staticmethod
     def _porcelain(cwd: Path) -> str:
         return _run_git(str(cwd), "status", "--porcelain").stdout.strip()
-
-
-class TestSubagentDoneTabIdFormat(_Base):
-    """F2: base executor must use the chat-style ``task-…__sub_N`` id."""
-
-    def test_subagent_done_uses_task_prefixed_tab_id(self) -> None:
-        _PARENT_CLASS.run = _raising_run
-        printer = JsonPrinter()
-        events: list[dict[str, Any]] = []
-        printer.broadcast = events.append  # type: ignore[assignment]
-        parent_task_id = "f" * 32
-        printer._thread_local.task_id = parent_task_id
-
-        results = run_tasks_parallel(
-            ["dummy task"],
-            max_workers=1,
-            work_dir=self.repo,
-            printer=printer,
-        )
-
-        self.assertEqual(len(results), 1)
-        parsed = yaml.safe_load(results[0])
-        self.assertIs(parsed["success"], False)
-        done = [e for e in events if e.get("type") == "subagentDone"]
-        self.assertTrue(done, f"no subagentDone in {events!r}")
-        self.assertEqual(
-            done[0].get("tab_id"),
-            f"task-{parent_task_id}__sub_0",
-        )
-
-
-class TestSubagentParentIdConvention(_Base):
-    """The base fan-out nests its children, whoever the parent is.
-
-    A bare functional ``run_tasks_parallel`` has no parent agent and no
-    parent row, but its children are real chat runs that DO create
-    rows.  They must still be stored as sub-agents: a blank
-    ``parent_task_id`` is what the history query reads as "top-level
-    task", which would add one bogus root entry per child.
-    """
-
-    def test_base_parallel_children_share_one_non_blank_parent_id(self) -> None:
-        _PARENT_CLASS.run = _raising_run
-        printer = JsonPrinter()
-        events: list[dict[str, Any]] = []
-        printer.broadcast = events.append  # type: ignore[assignment]
-
-        run_tasks_parallel(
-            ["dummy task"],
-            max_workers=1,
-            work_dir=self.repo,
-            printer=printer,
-        )
-
-        new_tabs = [e for e in events if e.get("type") == "new_tab"]
-        self.assertTrue(new_tabs, f"no new_tab in {events!r}")
-        self.assertEqual(new_tabs[0].get("parent_tab_id"), "")
-
-        conn = _persistence._get_db()
-        rows = conn.execute(
-            "SELECT parent_task_id FROM task_history"
-        ).fetchall()
-        self.assertTrue(rows)
-        parents = {row[0] for row in rows}
-        self.assertNotIn("", parents, "a sub-agent became a root history row")
-        self.assertEqual(len(parents), 1, f"one parent id per fan-out: {parents}")
-        self.assertEqual(_persistence._load_history(), [])
 
 
 class TestWorktreeFallbackExceptionContract(_Base):

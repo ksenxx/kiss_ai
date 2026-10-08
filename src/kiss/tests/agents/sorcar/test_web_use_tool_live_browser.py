@@ -17,15 +17,16 @@ Branches that cannot be reached without doubles: the headed
 ``_mask_headless_user_agent`` no-op needs a display; the "page closed
 while being scanned" skip in ``_find_live_page``, the tab clean-up when
 ``connect_over_cdp`` itself fails in ``_attach_live``, and the
-``except`` arms of ``_live_connected``/``_live_tab_id``/``_detach_live``
-need the browser or the page to vanish between two CDP round trips; the
-localStorage restore failure needs the page's origin to be unreachable
-at exactly that moment.
+``except`` arms of ``_live_tab_id``/``_detach_live`` need the browser or
+the page to vanish between two CDP round trips; the localStorage restore
+failure needs the page's origin to be unreachable at exactly that moment.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import threading
 import time
 from collections.abc import Callable
@@ -38,10 +39,11 @@ import pytest
 from kiss.agents.sorcar import web_use_tool as wut
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.server.browser_tab import BrowserTabService
+from kiss.tests.conftest import PLAYWRIGHT_CHROMIUM_INSTALLED
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 pytestmark = pytest.mark.skipif(
-    not (Path.home() / ".cache" / "ms-playwright").is_dir(),
+    not PLAYWRIGHT_CHROMIUM_INSTALLED,
     reason="Playwright browsers not installed",
 )
 
@@ -359,7 +361,7 @@ def test_agent_tab_cdp_url_points_at_the_browser(service):
     svc, printer = service
     tab = svc.open_for_agent()
     assert tab.tab_id in svc._pages and tab.target_id
-    assert tab.cdp_url.startswith("http://127.0.0.1:")
+    assert tab.cdp_url.startswith("ws://127.0.0.1:") and "/devtools/browser/" in tab.cdp_url
     assert _events(printer, "openBrowserTab", tab_id=tab.tab_id, focus=True)
     assert svc.tab_for_target(tab.target_id) == tab.tab_id
     assert svc.tab_for_target("no-such-target") is None
@@ -367,6 +369,10 @@ def test_agent_tab_cdp_url_points_at_the_browser(service):
     svc.interrupt(tab.tab_id)  # a responsive page just keeps running
     time.sleep(0.5)
     assert not svc._pages[tab.tab_id].page.is_closed()
+    # The path names the browser instance: a relaunch gets another.
+    svc.close(tab.tab_id)
+    _wait(lambda: svc._context is None, "browser exited")
+    assert svc.open_for_agent().cdp_url != tab.cdp_url
 
 
 def test_agent_hands_its_live_browser_to_the_web_tool(service):
@@ -561,3 +567,59 @@ def test_switching_after_the_page_was_closed_deletes_nothing(tool, service, serv
 
     tool.go_to_url(f"{server}/cookies")
     assert PERSISTENT_COOKIE in tool.get_page_content(text_only=True)
+
+
+def _daemon_browser_pid(tool: WebUseTool) -> int:
+    """The OS pid of the Browser tab's Chromium, over the tool's own connection."""
+    cdp = tool._browser.new_browser_cdp_session()
+    try:
+        info = cdp.send("SystemInfo.getProcessInfo")
+    finally:
+        cdp.detach()
+    return next(int(p["id"]) for p in info["processInfo"] if p["type"] == "browser")
+
+
+def test_liveness_probe_of_a_browser_that_does_not_answer_is_bounded(tool, service, server):
+    """``_is_alive`` comes back on its own while the browser is not answering
+    (stopped here; shutting down on a loaded machine in the wild).  The old
+    probe waited for the browser's reply, so it waited until the browser
+    answered again, forever on one that exited under it."""
+    tool.show_browser()
+    tool.go_to_url(f"{server}/inert")
+    pid = _daemon_browser_pid(tool)
+    os.kill(pid, signal.SIGSTOP)
+    resume = threading.Timer(40, os.kill, args=(pid, signal.SIGCONT))
+    resume.daemon = True
+    resume.start()
+    try:
+        started = time.monotonic()
+        alive = tool._is_alive()
+        elapsed = time.monotonic() - started
+    finally:
+        resume.cancel()
+        os.kill(pid, signal.SIGCONT)
+    assert alive, "a browser that is merely slow is alive"
+    assert elapsed < 30, f"the probe waited {elapsed:.0f}s for the browser"
+    assert tool.go_to_url(f"{server}/inert").startswith("Page:")
+
+
+def test_browser_exiting_during_the_liveness_probe_is_noticed(tool, service, server):
+    """A browser that dies while ``_is_alive`` waits on it is reported dead at
+    once, and the next call reconnects to the browser the daemon relaunches."""
+    svc, _printer = service
+    tool.show_browser()
+    tool.go_to_url(f"{server}/inert")
+    connection = tool._browser
+    pid = _daemon_browser_pid(tool)
+    os.kill(pid, signal.SIGSTOP)
+    kill = threading.Timer(1, os.kill, args=(pid, signal.SIGKILL))
+    kill.daemon = True
+    kill.start()
+    started = time.monotonic()
+    alive = tool._is_alive()
+    elapsed = time.monotonic() - started
+    assert not alive and elapsed < 30, (alive, elapsed)
+    _wait(lambda: svc._context is None, "browser exited")
+
+    assert tool.go_to_url(f"{server}/inert").startswith("Page:")
+    assert tool._live_tab in svc._pages and tool._browser is not connection

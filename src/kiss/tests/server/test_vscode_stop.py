@@ -25,11 +25,15 @@ import unittest
 
 import pytest
 
+from kiss.tests.conftest import requires_anthropic_api_key
+
 
 class TestVSCodeServerStop(unittest.TestCase):
     """Integration test: stop command interrupts a running task."""
 
     @pytest.mark.slow
+    @pytest.mark.live_api
+    @requires_anthropic_api_key
     def test_stop_command_interrupts_running_task(self) -> None:
         """Dispatch a run command, then a stop command, and verify the task stops."""
         from kiss.server import agent_state

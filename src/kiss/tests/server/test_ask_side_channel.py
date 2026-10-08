@@ -50,7 +50,7 @@ import pytest
 
 from kiss.agents.seas.ask import ask_sea
 from kiss.agents.sorcar import daemon_client, sea_commands
-from kiss.agents.sorcar.agent_file import apply_agent_overrides
+from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.commands import _split_ask_command
@@ -215,6 +215,7 @@ def test_ask_message_bypasses_pending_queue_and_dispatches() -> None:
         "type": "prompt",
         "text": "/ask why did the last step fail?",
         "tabId": "tab-1",
+        "steer": True,
         "taskId": "task-abc",
     }]
 
@@ -242,7 +243,8 @@ def test_ask_help_answers_with_the_description_without_dispatch() -> None:
     assert st.pending_user_messages == []
     assert calls == []
     assert [e for e in events if e.get("type") == "prompt"] == [{
-        "type": "prompt", "text": "/ask HELP", "tabId": "tab-1", "taskId": "task-abc",
+        "type": "prompt", "text": "/ask HELP", "tabId": "tab-1", "steer": True,
+        "taskId": "task-abc",
     }]
     assert [e for e in events if e.get("type") == "ask_answer"] == [{
         "type": "ask_answer",
@@ -451,7 +453,7 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     """The worker MUST call ``daemon_client.run`` with the pinned args.
 
     - ``prompt`` is the user's question (verbatim).
-    - ``extension_agent_path`` is the resolved ``ask_sea.py`` path.
+    - ``sea_path`` is the resolved ``ask_sea.py`` path.
     - ``parent_task_id`` is the OWNER's task id: the daemon applies the
       ask SEA's methods itself — its ``prompt(task)`` (``{task_id}`` ->
       the owner id), ``system_prompt`` and ``tools`` as the run's hooks —
@@ -475,7 +477,7 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
 
     kwargs = calls[0]
     assert kwargs["prompt"] == "why did the last step fail?"
-    assert kwargs["extension_agent_path"] == str(Path(ask_sea.__file__))
+    assert kwargs["sea_path"] == str(Path(ask_sea.__file__))
     assert "append_to_prompt" not in kwargs
     assert "append_to_system_prompt" not in kwargs
     assert kwargs["parent_task_id"] == "task-abc"
@@ -486,11 +488,11 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     assert kwargs["side_channel"] is True
     # What the daemon applies from the dispatched script for that owner:
     cmd: dict[str, Any] = {
-        "agentPath": kwargs["extension_agent_path"],
+        "seaPath": kwargs["sea_path"],
         "parentTaskId": kwargs["parent_task_id"],
         "prompt": kwargs["prompt"],
     }
-    apply_agent_overrides(cmd)
+    apply_sea(cmd)
     assert cmd["prompt"] == (
         "why did the last step fail?\n\n"
         "The question above is about the task with id task-abc. "
@@ -553,7 +555,7 @@ class Sea(BaseSea):
     finally:
         seas_md.unlink()
 
-    dispatched = Path(calls[0]["extension_agent_path"]).resolve()
+    dispatched = Path(calls[0]["sea_path"]).resolve()
     assert dispatched == Path(ask_sea.__file__).resolve()
 
 

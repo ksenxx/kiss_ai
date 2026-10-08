@@ -5,58 +5,53 @@
 """The settings of a SEA and the loader that executes one.
 
 A SEA is a class deriving from
-:class:`kiss.agents.seas.base.base_sea.BaseSea`.  Its run parameters
-come from its ``settings`` method, which lays the SEA's keys over what
-its base classes declared::
+:class:`kiss.agents.seas.base.base_sea.BaseSea` — directly for an
+ordinary session, through :class:`~kiss.agents.seas.base.base_sea.WorkerSea`
+for a focused tool-bound run on the caller's tree, through
+:class:`~kiss.agents.seas.base.base_sea.ChannelSea` for an agent that
+serves an external service (its behaviours are
+:data:`CHANNEL_BEHAVIOURS`).  Its run parameters come from its
+``settings`` method, which lays the SEA's keys over what its base
+classes declared::
 
     def settings(self, settings: dict) -> dict:
-        return settings | {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
+        return settings | {"tool_profile": "bash", "max_budget": 1.0}
 
-The result is data: a ``kind`` (``session``, the default, ``worker``
-or ``channel``: a named dict of defaults laid under the explicit keys,
-see :func:`kind_defaults`), any of the per-run parameters of
+The result is data: any of the per-run parameters of
 :func:`kiss.server.sorcar.run` listed in :data:`SETTING_TYPES`, and
-three keys read by the launcher: ``timeout`` (seconds the sub-task may
-take: the call's value, else this setting, else 3600 for ``run_agent``
-and no own limit for a ``run_parallel`` child), ``locked`` (the keys
-an explicit caller argument may not replace) and ``hidden`` (the file
-is no command).  Against the caller there is one precedence rule,
+three keys read by the launcher: ``timeout`` (seconds a ``run_agent``
+/ ``run_parallel`` call blocks for the run: the call's value, else
+this setting, else 3600), ``locked`` (the keys an explicit caller
+argument may not replace) and ``hidden`` (the file is no command).
+Against the caller there is one precedence rule,
 :data:`PRECEDENCE_RULE`, enforced by :func:`locked_conflicts` and
-rendered by ``sea docs`` into every page that states it.
+rendered by ``sea docs`` into every page that states it.  A relative
+``work_dir`` — a SEA's setting or a call's option — is a path under
+the calling task's directory (:func:`anchored_work_dir`).
 
 The other methods of the class — ``prompt``, ``system_prompt``,
 ``tools``, ``tool_call_hook``, ``llm_call_hook`` — shape the run;
 :mod:`kiss.agents.sorcar.sea_commands` loads the class and applies
 them.
 
-A SEA runs in one of three ways; what differs is only where it runs
-and which settings apply:
+A SEA runs in one of three ways; ``run_parallel`` is N ``run_agent``
+calls, so what differs is only the tab and the inheritance:
 
-==================  ====================  ======================  ========================
-                    ``/<name> task``      ``run_agent(agent=)``   ``run_parallel(agent=)``
-==================  ====================  ======================  ========================
-Where               the tab's own run     a daemon sub-task in    a thread of the caller
-                                          its own tab
-Settings honoured   all but ``timeout``   all                     all; a pinned
-                                                                  ``use_worktree`` /
-                                                                  ``auto_commit`` /
-                                                                  ``auto_classify: True``
-                                                                  or ``chat_id`` is
-                                                                  refused with an error
-Parent inheritance  none (tab settings)   yes, unless the kind    yes; budget =
-                                          is ``channel`` or the   remaining / (N+1)
-                                          ``inherit`` option
-                                          is ``false``
-``timeout``         none                  argument > setting      argument > setting
-                                          > 3600                  > none (per child)
-``kind: "channel"`` allowed               allowed                 refused
-==================  ====================  ======================  ========================
+==================  ====================  ==========================================
+                    ``/<name> task``      ``run_agent(agent=)`` / ``run_parallel``
+==================  ====================  ==========================================
+Where               the tab's own run     a daemon sub-task in its own tab
+Settings honoured   all but ``timeout``   all
+Parent inheritance  none (tab settings)   yes, unless the SEA is a channel or the
+                                          ``inherit`` option is ``false``; budget =
+                                          remaining / (N+1) for N sub-tasks
+``timeout``         none                  argument > setting > 3600: the seconds the
+                                          call blocks before returning the job ids
+==================  ====================  ==========================================
 
-``kind: "channel"`` is the one key the daemon acts on beyond passing a
-value through: the run holds its channel workspace
-(``run_agent(options='{"workspace": ...}')``, default ``"default"``),
-the channel preamble is added to its system prompt, and it cannot be a
-``run_parallel`` child.
+The base class is the one thing with behaviour beyond a value passed
+through — every behaviour of a channel is listed in
+:data:`CHANNEL_BEHAVIOURS`.
 
 :func:`execute_python_file` is the ONE loader every reader of a SEA
 file uses: it compiles and executes the file into a throw-away module,
@@ -70,12 +65,13 @@ import hashlib
 import logging
 import math
 import sys
+import threading
 import types
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from kiss.core.config import kiss_home
+from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, channel_work_dir
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +91,6 @@ docstrings quote it, so a change here changes every statement of it.
 """
 
 SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
-    "kind": str,
     "work_dir": str,
     "model": str,
     "chat_id": str,
@@ -106,7 +101,6 @@ SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
     "use_web_tools": bool,
     "auto_classify": bool,
     "use_memory": bool,
-    "allow_fan_out": bool,
     "tool_profile": str,
     "docker_image": str,
     "timeout": (int, float),
@@ -116,17 +110,13 @@ SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
 """Every key ``settings()`` may return, with the type its value must have."""
 
 SETTING_DOCS: dict[str, str] = {
-    "kind": "What the run is: `session` (the default, an ordinary Sorcar session), `worker` or "
-            "`channel`; each is a dict of defaults laid under the explicit keys (see the kind "
-            "table). A `channel` run holds its channel workspace, gets the channel preamble, "
-            "never inherits from a calling task and is never a `run_parallel` child.",
     "work_dir": "The directory the run works in; default: the calling task's or the tab's. A "
-                "relative path is resolved against the script's own folder, not the caller's "
-                "(one a base class sets: against the base's file).",
-    "model": "The LLM model, a catalogue name or a model-picker SEA; `\"\"` or `None` keeps "
-             "the caller's.",
+                "relative path is a path under the calling task's directory (the tab's for "
+                "`/<name>`), in a SEA's settings and in a call's `work_dir` option alike.",
+    "model": "The LLM model, a catalogue name or a model-picker SEA; default: the caller's "
+             "(`\"\"`, like `None`, is no override — true of every string key).",
     "chat_id": "The chat the run's events go to; default under `run_agent`: the calling "
-               "task's chat, or a new chat when nothing is inherited (a `channel` run, an "
+               "task's chat, or a new chat when nothing is inherited (a channel, an "
                "`inherit: false` call); a `/<name>` run keeps the tab's chat.",
     "use_worktree": "Run in a git worktree of the project; default: the calling task's "
                     "effective choice, else the persisted setting (an inherited or default "
@@ -141,17 +131,14 @@ SETTING_DOCS: dict[str, str] = {
     "auto_classify": "Let the pre-run classifier decide the worktree mode and lite prompt "
                      "(daemon default: the persisted setting).",
     "use_memory": "Give the run the `memory_*` tools (daemon default: the persisted setting).",
-    "allow_fan_out": "Let the run call `run_parallel`; default: whether the calling task may "
-                     "fan out itself, else `True`.",
     "tool_profile": "The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full "
                     "toolset).",
     "docker_image": "Run inside this Docker image (default: the host).",
-    "timeout": "Seconds the call blocks for the run: the call's `timeout` argument or option "
-               "wins, then this setting, then the default, which is 3600 for a `run_agent` "
-               "call (when it expires the run keeps going as an `agent_job` and the call "
-               "returns its job id; a job still running when the calling task ends is "
-               "killed) and no limit of its own for a `run_parallel` child (a thread of the "
-               "calling task, bounded by it); ignored by `/<name>`.",
+    "timeout": "Seconds a `run_agent` / `run_parallel` call blocks for the run: the call's "
+               "`timeout` argument wins, then this setting, then 3600. When it expires the "
+               "run is not stopped: it keeps going as an `agent_job` and the call returns "
+               "its job id (a job still running when the calling task ends is killed). "
+               "Ignored by `/<name>`.",
     "locked": "Keys an explicit `run_agent` / `run_parallel` argument or option may not change: "
               "a differing value is an error.",
     "hidden": "`True`: the script is no `/command` and no `run_agent` agent name (loadable by "
@@ -161,39 +148,35 @@ SETTING_DOCS: dict[str, str] = {
 }
 """One line of documentation per :data:`SETTING_TYPES` key (rendered by ``sea docs``)."""
 
-META_SETTINGS = ("kind", "locked", "hidden")
+META_SETTINGS = ("locked", "hidden")
 """Keys that shape the settings themselves rather than the run; never lockable."""
 
-DISPATCHER_SETTINGS = ("kind", "timeout", "locked", "hidden")
+DISPATCHER_SETTINGS = ("timeout", "locked", "hidden")
 """``settings()`` keys with no ``run`` command wire field.
 
-``kind`` is resolved by :func:`resolve_settings` (the daemon reads it
-from the SEA's settings, :mod:`kiss.agents.sorcar.agent_file`); ``timeout``
-is read by the dispatcher (:mod:`kiss.agents.sorcar.agent_dispatch`);
-``locked`` names the keys an explicit caller argument may not replace
-(:func:`locked_conflicts`); ``hidden`` keeps the script out of the
-command registry (:func:`declares_hidden`).  Every other key is a parameter of
+``timeout`` is read by the dispatcher
+(:mod:`kiss.agents.sorcar.agent_dispatch`); ``locked`` names the keys
+an explicit caller argument may not replace (:func:`locked_conflicts`);
+``hidden`` keeps the script out of the command registry
+(:func:`declares_hidden`).  Every other key is a parameter of
 :func:`kiss.server.sorcar.run`, sent as :func:`wire_field` of the key.
 """
 
 RENAMED_SETTINGS = {
-    "is_parallel": "allow_fan_out",
     "classify_tasks": "auto_classify",
-    "preset": "kind",
     "model_name": "model",
 }
 """Former settings keys and their current names.
 
-``allow_fan_out`` says whether the run may call ``run_parallel`` (the
-wire field ``isParallel``); ``auto_classify`` whether the daemon's
-classifier decides the run's worktree mode (``classifyTasks``);
-``kind`` is the one axis that used to be split into ``preset``
-(``session`` / ``worker`` / ``channel``) and ``kind`` (``agent`` /
-``channel``); ``model_name`` is the ``run()`` parameter callers keep
-reaching for in place of the settings key ``model``.  The old names
-are refused — in a script's ``settings()`` and in a ``run_agent`` /
-``run_parallel`` ``options`` object alike — with a message naming the
-new one; ``sea lint --fix`` rewrites them in a script.
+``auto_classify`` says whether the daemon's classifier decides the
+run's worktree mode (the wire field ``classifyTasks``); ``model_name``
+is the ``SorcarAgent.run`` parameter callers keep reaching for in
+place of the settings key ``model``.  The old names are refused — in
+a script's ``settings()`` and in a ``run_agent`` / ``run_parallel``
+``options`` object alike — with a message naming the new one; ``sea
+lint --fix`` rewrites them in a script.  :func:`kiss.server.sorcar.run`
+takes the current names as its keywords, so a key spelled the
+settings way is right everywhere.
 """
 
 RENAMED_OPTIONS = {
@@ -205,10 +188,12 @@ RENAMED_OPTIONS = {
 
 :data:`RENAMED_SETTINGS` plus the two prompt suffixes, which are
 options only — ``append_to_prompt`` and ``append_to_system_prompt``
-are the ``run()`` parameter spellings of the options ``add_to_prompt``
-and ``add_to_system_prompt``.  In a script's ``settings()`` those keys
-are refused as removed (:data:`REMOVED_SETTINGS`): a SEA shapes the
-prompts in its ``prompt`` and ``system_prompt`` methods instead.
+were the former ``run()`` keywords of the options ``add_to_prompt``
+and ``add_to_system_prompt`` (the wire fields are still
+``appendToPrompt`` and ``appendToSystemPrompt``).  In a script's
+``settings()`` those keys are refused as removed
+(:data:`REMOVED_SETTINGS`): a SEA shapes the prompts in its ``prompt``
+and ``system_prompt`` methods instead.
 """
 
 PROFILE_ALIASES = {"readonly": "review", "read_only": "review", "read-only": "review"}
@@ -217,7 +202,7 @@ PROFILE_ALIASES = {"readonly": "review", "read_only": "review", "read-only": "re
 ``review`` is the read-only profile and callers keep asking for it by
 that property.  Every way a profile name arrives — a script's
 ``tool_profile`` setting (:func:`resolve_settings`), a ``run_agent`` /
-``run_parallel`` argument or option, a ``run()`` parameter
+``run_parallel`` argument, a ``run()`` parameter
 (:func:`kiss.agents.sorcar.sorcar_agent.canonical_tool_profile`) —
 replaces the alias with the key first, so locks, the ``pinned`` record
 and the ``ran:`` line compare and show keys only.
@@ -245,9 +230,23 @@ _SYSTEM_PROMPT_SUFFIX_REMOVED = (
     "`add_to_system_prompt` is a `run_agent` option, not a setting"
 )
 
+_BASE_CLASS_REMOVED = (
+    "what a SEA is became its base class: derive from `WorkerSea` (a tool-bound run on the "
+    "caller's tree) or `ChannelSea` (an external-service agent) instead of `BaseSea` "
+    "(`from kiss.agents.seas.base.base_sea import ...`); run `uv run sea lint --fix` to "
+    "rewrite the script"
+)
+
 REMOVED_SETTINGS = {
-    "inherit": "a `channel` run never inherits from the calling task and every other kind "
-               "always does; the caller's `inherit` option opts out of inheriting",
+    "kind": _BASE_CLASS_REMOVED,
+    "preset": _BASE_CLASS_REMOVED,
+    "channel": _BASE_CLASS_REMOVED,
+    "allow_fan_out": "`run_parallel` is N `run_agent` calls, so there is nothing to allow or "
+                     "forbid separately; `tool_profile` chooses the toolset",
+    "is_parallel": "`run_parallel` is N `run_agent` calls, so there is nothing to allow or "
+                   "forbid separately; `tool_profile` chooses the toolset",
+    "inherit": "a channel never inherits from the calling task and every other SEA always "
+               "does; the caller's `inherit` option opts out of inheriting",
     "append_to_prompt": _PROMPT_SUFFIX_REMOVED,
     "add_to_prompt": _PROMPT_SUFFIX_REMOVED,
     "append_to_system_prompt": _SYSTEM_PROMPT_SUFFIX_REMOVED,
@@ -259,62 +258,78 @@ REMOVED_SETTINGS = {
 }
 """Former settings keys with no replacement, and why; refused with the explanation."""
 
-KINDS = ("session", "worker", "channel")
-"""The values of the ``kind`` setting (see :func:`kind_defaults`)."""
-
-WORKER_DEFAULTS: dict[str, Any] = {
-    "use_worktree": False,
-    "auto_commit": False,
-    "auto_classify": False,
-    "allow_fan_out": False,
-    "use_web_tools": False,
-    "use_memory": False,
-}
-"""The defaults of the ``worker`` kind (and, with a ``work_dir``, of ``channel``)."""
-
-KIND_DOCS: dict[str, str] = {
-    "session": "The default: an ordinary Sorcar session with the caller's or the user's "
+BASE_CLASS_DOCS: dict[str, str] = {
+    "BaseSea": "The default: an ordinary Sorcar session with the caller's or the user's "
                "settings (`/write`, `/write_paper`, `bestrouter`).",
-    "worker": "A focused tool-bound run on the caller's tree: no worktree, no auto-commit, no "
-              "classifier, no fan-out, no browser, no memory (`/sh`, `/ask`, `/merge`, "
-              "`/remember`, `/forget`, `/task_update`).",
-    "channel": "A worker for an external service, in the shared `channel_work` scratch "
-               "directory under the Sorcar home, never the caller's project; it holds its "
-               "channel workspace, gets the channel preamble and never inherits from a calling "
-               "task (every bundled channel agent and `/cron`).",
+    "WorkerSea": "A focused tool-bound run on the caller's tree: lays the worker defaults "
+                 "(no worktree, no auto-commit, no classifier, no browser, no memory) under "
+                 "the SEA's own keys (`/sh`, `/ask`, `/merge`, `/remember`, `/forget`, "
+                 "`/task_update`).",
+    "ChannelSea": "A worker that serves an external service (Slack, email, cron), not the "
+                  "caller's project; every behaviour this adds is listed in the channel "
+                  "table. The command registry reads the base name from the source, so a "
+                  "channel derives from `ChannelSea` by that name.",
 }
-"""One line of documentation per kind (rendered by ``sea docs``)."""
+"""One line of documentation per base class (rendered by ``sea docs``)."""
 
 
-def kind_defaults() -> dict[str, dict[str, Any]]:
-    """Return the dict of defaults each ``kind`` lays under the script's explicit keys.
+def base_class_defaults() -> dict[str, dict[str, Any]]:
+    """Return the settings each base class lays under a subclass's own keys.
 
-    ``session`` is empty: the run is an ordinary Sorcar session with
-    the caller's or the user's settings.  ``worker`` is a focused
-    tool-bound run on the caller's tree: no worktree, no auto-commit,
-    no classifier, no fan-out, no browser, no memory.  ``channel`` is
-    a worker for an external service with a ``work_dir`` of the shared
-    ``channel_work`` scratch directory under the Sorcar home (never the caller's
-    project, whose git lifecycle it does not join); the daemon and the
-    dispatcher give a channel its workspace and preamble and never let
-    it inherit from a calling task.  Computed on every call so a
-    redirected ``$KISS_HOME`` is honoured.
+    What ``sea docs`` renders next to :data:`BASE_CLASS_DOCS`:
+    :class:`~kiss.agents.seas.base.base_sea.BaseSea` lays nothing,
+    :class:`~kiss.agents.seas.base.base_sea.WorkerSea` the
+    :data:`WORKER_DEFAULTS`, :class:`~kiss.agents.seas.base.base_sea.ChannelSea`
+    those plus the scratch ``work_dir``.
     """
     return {
-        "session": {},
-        "worker": dict(WORKER_DEFAULTS),
-        "channel": {**WORKER_DEFAULTS, "work_dir": str(kiss_home() / "channel_work")},
+        "BaseSea": {},
+        "WorkerSea": dict(WORKER_DEFAULTS),
+        "ChannelSea": {**WORKER_DEFAULTS, "work_dir": channel_work_dir()},
     }
 
 
-class SeaError(Exception):
-    """Base of every "this SEA is broken" error.
+CHANNEL_BEHAVIOURS: tuple[tuple[str, str], ...] = (
+    ("worker",
+     "It is a `WorkerSea`, and the worker keys are locked, so no call may give it a "
+     "worktree, auto-commit, the classifier, the browser or memory (`resolve_settings`)."),
+    ("scratch directory",
+     "It runs in the shared `<home>/channel_work` scratch directory unless its own "
+     "`work_dir` says otherwise (`/cron` runs in `<home>/cron_work`); `work_dir` is locked, "
+     "so it never works in the caller's project (`resolve_settings`)."),
+    ("no inheritance",
+     "Its `run_agent` dispatch takes nothing from the calling task: not the chat, model, "
+     "budget share, container or prompt suffixes; the `inherit: true` option is refused "
+     "(`agent_dispatch`)."),
+    ("workspace",
+     "It holds its channel workspace — the `run_agent` option `workspace`, default "
+     "`default`, the account its tools load credentials for — from before its `tools()` "
+     "run until the run ends; `workspace` is refused for any other SEA "
+     "(`sea_apply.channel_workspace`, `agent_dispatch`)."),
+    ("preamble",
+     "The channel preamble is appended to its system prompt before its own "
+     "`system_prompt()` runs (`sea_apply.CHANNEL_PREAMBLE`)."),
+    ("listed as a channel",
+     "A third-party SEA folder whose class derives from `ChannelSea` by that name is a "
+     "channel agent: `run_agent(agent=\"<folder>\")` finds it by name and the `channel` "
+     "tool lists it (`agent_dispatch.available_channels`, `declares_channel`)."),
+)
+"""Every behaviour deriving from ``ChannelSea`` adds, as ``(name, what it does and where it
+is enforced)``.
 
-    :exc:`kiss.agents.sorcar.sea_commands.SeaScriptError` (raised by the
-    registry and the dispatcher) and
-    :exc:`kiss.agents.sorcar.agent_file.AgentFileError` (raised by the daemon's
-    task runner) both derive from it, so a caller that only wants to
-    know "the script failed" catches one class.
+The one place the list exists: ``sea docs`` renders it, and the
+modules named enforce exactly these.  A setting has no behaviour
+beyond its value.
+"""
+
+
+class SeaError(Exception):
+    """The one "this SEA is broken" error: a bad file, settings, method or dispatch.
+
+    Raised by the loader, the settings resolver, the command registry,
+    the dispatcher and the daemon's task runner alike, so a caller that
+    wants to know "the SEA failed" catches one class and the message
+    (prefixed with the SEA's file name where known) is the diagnostic.
     """
 
 
@@ -322,22 +337,26 @@ def wire_field(key: str) -> str:
     """Return the ``run`` command wire field of the ``run()`` keyword *key*.
 
     The wire vocabulary is the keyword vocabulary in camelCase
-    (``use_web_tools`` -> ``useWebTools``), with four aliases kept from
+    (``use_web_tools`` -> ``useWebTools``), with three aliases kept from
     the wire protocol's earlier vocabulary: ``add_to_prompt`` ->
     ``appendToPrompt``, ``add_to_system_prompt`` ->
-    ``appendToSystemPrompt``, ``allow_fan_out`` -> ``isParallel`` and
-    ``auto_classify`` -> ``classifyTasks``.
+    ``appendToSystemPrompt`` and ``auto_classify`` -> ``classifyTasks``.
+    This table is the only place the wire spelling exists on the
+    client side: settings keys, ``options`` keys and ``run()`` keywords
+    all use the snake_case name.
     """
-    aliases = {
-        "add_to_prompt": "appendToPrompt",
-        "add_to_system_prompt": "appendToSystemPrompt",
-        "allow_fan_out": "isParallel",
-        "auto_classify": "classifyTasks",
-    }
-    if key in aliases:
-        return aliases[key]
+    if key in _WIRE_ALIASES:
+        return _WIRE_ALIASES[key]
     first, *rest = key.split("_")
     return first + "".join(part.capitalize() for part in rest)
+
+
+_WIRE_ALIASES = {
+    "add_to_prompt": "appendToPrompt",
+    "add_to_system_prompt": "appendToSystemPrompt",
+    "auto_classify": "classifyTasks",
+}
+"""The settings keys whose wire field is not their camelCase spelling (:func:`wire_field`)."""
 
 
 def script_name(path: str) -> str:
@@ -370,14 +389,18 @@ def safe_message(exc: BaseException) -> str:
         return name
 
 
-def execute_python_file(
-    raw_path: Any,
-    error_cls: type[Exception] = SeaError,
-    label: str = "SEA",
-) -> dict[str, Any]:
+_EXECUTE_LOCK = threading.RLock()
+"""Serialises :func:`execute_python_file`'s ``sys.modules`` swap and the execution it brackets.
+
+Re-entrant: a SEA that loads another SEA at import time executes it on
+the same thread.
+"""
+
+
+def execute_python_file(raw_path: Any) -> dict[str, Any]:
     """Execute a caller-supplied Python file and return its namespace.
 
-    The one loader of SEAs (the daemon's ``agentPath``, the
+    The one loader of SEAs (the daemon's ``seaPath``, the
     slash-command registry, the dispatcher, SEAs that load other
     scripts such as ``skillopt``).  The source is compiled and executed
     directly (no ``__pycache__`` read or write), so every call observes
@@ -393,35 +416,32 @@ def execute_python_file(
     not one per run, and an earlier execution's classes resolve their
     annotations through the latest execution of the same source; two
     files with the same stem in different folders get different names.
+    Executions are serialised (:data:`_EXECUTE_LOCK`): task threads
+    evaluate SEAs concurrently, and a failed execution in one thread
+    must restore the entry that is current when it fails, not the one
+    it saw before another thread replaced it.
 
     Args:
         raw_path: The path of the file — expected to be an absolute path
             string, but treated as untrusted.
-        error_cls: The exception class to raise on any failure, so each
-            caller keeps its own diagnostic type.
-        label: Human-readable name of the file kind (``"SEA"``,
-            ``"SEA"``), used in diagnostic messages.
 
     Returns:
         The executed module's namespace dict.
 
     Raises:
-        Exception: An *error_cls* instance when *raw_path* is not a
-            string, is not the path of an existing ``.py`` file, or
-            names a module that raises at import time (``BaseException``
-            included: a file raising ``KeyboardInterrupt`` or
-            ``SystemExit`` at import time is a broken file, not a
-            cancelled task; the original raise stays reachable as
-            ``__cause__``).
+        SeaError: *raw_path* is not a string, is not the path of an
+            existing ``.py`` file, or names a module that raises at
+            import time (``BaseException`` included: a file raising
+            ``KeyboardInterrupt`` or ``SystemExit`` at import time is a
+            broken file, not a cancelled task; the original raise stays
+            reachable as ``__cause__``).
     """
     # Type-check FIRST: comparing or repr-ing an untrusted non-string
     # object could run arbitrary code (raising ``__eq__``/``__repr__``),
     # so nothing touches *raw_path* beyond isinstance until it is known
     # to be a plain string.
     if not isinstance(raw_path, str):
-        raise error_cls(
-            f"{label} field must be a path string, got {type(raw_path).__name__}"
-        )
+        raise SeaError(f"SEA field must be a path string, got {type(raw_path).__name__}")
     path = Path(raw_path)
     try:
         is_py_file = path.suffix == ".py" and path.is_file()
@@ -429,33 +449,49 @@ def execute_python_file(
         # e.g. an embedded NUL byte makes ``is_file`` raise ValueError.
         is_py_file = False
     if not is_py_file:
-        raise error_cls(f"{label} {raw_path!r} is not an existing Python (.py) file")
+        raise SeaError(f"SEA {raw_path!r} is not an existing Python (.py) file")
     module_name = f"_kiss_sea_{path.stem}_{hashlib.sha1(str(path).encode()).hexdigest()[:12]}"
     module = types.ModuleType(module_name)
     module.__file__ = str(path)
-    # A failed re-execution must not unregister the module of an earlier,
-    # successful execution of the same file whose classes still resolve
-    # their annotations through this name: the previous entry is put back.
-    previous = sys.modules.get(module_name)
-    sys.modules[module_name] = module
-    try:
-        source = path.read_text(encoding="utf-8")
-        code = compile(source, str(path), "exec", dont_inherit=True)
-        exec(code, module.__dict__)  # noqa: S102 — the script is the user's own code
-    except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
-        logger.warning("Failed to import %s %r", label, raw_path, exc_info=True)
-        if previous is None:
-            sys.modules.pop(module_name, None)
-        else:
-            sys.modules[module_name] = previous
-        raise error_cls(
-            f"{label} {raw_path!r} failed to import: {safe_message(exc)}"
-        ) from exc
+    with _EXECUTE_LOCK:
+        # A failed re-execution must not unregister the module of an
+        # earlier, successful execution of the same file whose classes
+        # still resolve their annotations through this name: the previous
+        # entry is put back.
+        previous = sys.modules.get(module_name)
+        sys.modules[module_name] = module
+        try:
+            source = path.read_text(encoding="utf-8")
+            code = compile(source, str(path), "exec", dont_inherit=True)
+            exec(code, module.__dict__)  # noqa: S102 — the script is the user's own code
+        except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
+            logger.warning("Failed to import SEA %r", raw_path, exc_info=True)
+            if previous is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
+            raise SeaError(f"SEA {raw_path!r} failed to import: {safe_message(exc)}") from exc
     return module.__dict__
 
 
-class SettingsError(SeaError, ValueError):
-    """A SEA's settings are malformed (wrong type, unknown key or kind)."""
+def anchored_work_dir(work_dir: str, base_dir: str) -> str:
+    """Return *work_dir* as the absolute directory it names from the calling task's *base_dir*.
+
+    The one rule for a relative ``work_dir``, wherever it is written: a
+    SEA's ``work_dir`` setting, a ``run_agent`` / ``run_parallel``
+    ``work_dir`` option and the daemon's staging of a SEA's setting
+    all resolve it against the directory of the calling task (the tab's
+    for ``/<name>``), never against the SEA file's folder.
+
+    Args:
+        work_dir: The directory as written; ``~`` is expanded.
+        base_dir: The calling task's directory.
+
+    Returns:
+        *work_dir* itself when absolute, else ``base_dir/work_dir``.
+    """
+    path = Path(work_dir.strip()).expanduser()
+    return str(path if path.is_absolute() else Path(base_dir).expanduser() / path)
 
 
 def declares_hidden(path: Path) -> bool:
@@ -472,37 +508,100 @@ def declares_hidden(path: Path) -> bool:
     return declared_literal(path, "hidden") is True
 
 
+def declares_channel(path: Path) -> bool:
+    """Return whether the SEA at *path* derives its class from ``ChannelSea`` by that name.
+
+    Read from the source (``ast``), never by executing the script, like
+    :func:`declares_hidden`: the channel listing scans every
+    third-party folder without importing the channel modules.  Hence
+    the contract that a channel names ``ChannelSea`` (bare, under an
+    import alias, or as the last attribute of a dotted name) in the
+    bases of a class the file defines; a channel reached through a
+    base class of another file is still a channel when loaded
+    (``isinstance``), but is not listed.
+    """
+    return "ChannelSea" in declared_bases(path)
+
+
+def declared_bases(path: Path) -> set[str]:
+    """Return the last name of every base of every class the SEA at *path* defines.
+
+    Parsed from the source, never executed (see :func:`declares_hidden`).
+    A base imported under an alias (``from ... import ChannelSea as C``)
+    counts under its imported name; a dotted base (``base_sea.BaseSea``)
+    under its last attribute; a computed base (``sea_class('picker')``)
+    under its source text.  Empty for an unreadable or unparsable file.
+    """
+    return _parsed(path)[0]
+
+
 def declared_literal(path: Path, key: str) -> Any:
     """Return the literal value the SEA at *path* writes for *key* in ``settings``, or ``None``.
 
     Parsed from the source, never executed (see :func:`declares_hidden`);
     only a constant value under a string-literal key in a dict inside
-    the file's own ``settings`` method counts.  The parse is cached per path until the
-    file's size or mtime changes, so a registry refresh costs one
-    ``stat`` per SEA.
+    the file's own ``settings`` method counts.
+    """
+    return _parsed(path)[1].get(key)
+
+
+_PARSE_CACHE: dict[Path, tuple[tuple[int, int, int], set[str], dict[str, Any]]] = {}
+"""``path -> ((mtime_ns, size, inode), {base class name}, {settings key: literal})``.
+
+The memo of :func:`_parsed`: one parse per file revision, so a registry
+refresh costs one ``stat`` per SEA.
+"""
+
+
+def _parsed(path: Path) -> tuple[set[str], dict[str, Any]]:
+    """Return ``(base class names, settings literals)`` of *path*, parsed once per revision.
+
+    The revision is the file's mtime, size and inode, so an atomic
+    replacement that keeps the mtime and size is still re-read.  A
+    revision that does not parse is memoised as empty, so the registry
+    watcher does not re-read a broken SEA on every poll.
     """
     try:
         stat = path.stat()
-        stamp = (stat.st_mtime_ns, stat.st_size)
+        stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
     except OSError:
-        return None
-    cached = _LITERAL_CACHE.get(path)
+        return set(), {}
+    cached = _PARSE_CACHE.get(path)
     if cached is None or cached[0] != stamp:
-        cached = (stamp, _settings_literals(path))
-        _LITERAL_CACHE[path] = cached
-    return cached[1].get(key)
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except OSError:
+            return set(), {}
+        except (SyntaxError, ValueError):
+            cached = (stamp, set(), {})
+        else:
+            cached = (stamp, _class_bases(tree), _settings_literals(tree))
+        _PARSE_CACHE[path] = cached
+    return cached[1], cached[2]
 
 
-_LITERAL_CACHE: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
-"""``path -> ((mtime_ns, size), {key: literal value})`` memo of :func:`declared_literal`."""
+def _class_bases(tree: ast.Module) -> set[str]:
+    """Return the last name of every base of every class definition in *tree*."""
+    imported = {
+        alias.asname: alias.name
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        for alias in node.names if alias.asname
+    }
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                if isinstance(base, ast.Name):
+                    names.add(imported.get(base.id, base.id))
+                elif isinstance(base, ast.Attribute):
+                    names.add(base.attr)
+                else:
+                    names.add(ast.unparse(base))
+    return names
 
 
-def _settings_literals(path: Path) -> dict[str, Any]:
-    """Parse *path*; return the constant ``"key": value`` entries of the dicts in ``settings()``."""
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, ValueError):
-        return {}
+def _settings_literals(tree: ast.Module) -> dict[str, Any]:
+    """Return the constant ``"key": value`` entries of the dicts in the ``settings()`` of *tree*."""
     literals: dict[str, Any] = {}
     for node in settings_functions(tree):
         for sub in ast.walk(node):
@@ -521,55 +620,56 @@ def settings_functions(tree: ast.Module) -> list[ast.FunctionDef]:
     ]
 
 
-def resolve_settings(declared: Mapping[str, Any]) -> dict[str, Any]:
+def resolve_settings(declared: Mapping[str, Any], channel: bool = False) -> dict[str, Any]:
     """Return the effective settings a SEA *declared*.
 
     *declared* is what the SEA's ``settings`` methods returned, base
-    class first (:func:`kiss.agents.sorcar.sea_commands.sea_settings`
-    folds them).  The ``kind``'s defaults are merged under its keys,
-    every value is type-checked against :data:`SETTING_TYPES`, a
-    ``tool_profile`` alias (``readonly``) becomes its key
-    (:func:`alias_free_profile`), and a ``channel`` locks the keys of
-    its kind: it runs in its own scratch directory, never the caller's,
-    and no call may give it a worktree, auto-commit, the classifier,
-    fan-out, the browser or memory.  ``work_dir`` is kept as declared;
-    the launcher anchors a relative one at the SEA's folder.
+    class first (:func:`kiss.agents.sorcar.sea_commands.base_settings`
+    folds them, the worker and channel defaults of the base classes
+    included).  Every value is type-checked against
+    :data:`SETTING_TYPES`, a ``tool_profile`` alias (``readonly``)
+    becomes its key (:func:`alias_free_profile`), and a *channel*
+    gets the settings side of :data:`CHANNEL_BEHAVIOURS`: ``work_dir``
+    plus the worker keys are locked.  ``work_dir`` is otherwise kept as
+    declared; the launcher anchors a relative one at the calling task's
+    directory (:func:`anchored_work_dir`).
 
     Args:
         declared: The declared settings.
+        channel: Whether the SEA derives from ``ChannelSea``.
 
     Returns:
-        A new dict: ``{"kind": name, <key>: value, ...}`` with the
-        kind's defaults already merged in under the explicit keys.
-        A key whose value is ``None`` is dropped — as is a ``model`` of
-        ``""`` — it means "no override", so the caller's or the
-        persisted value stands.
+        A new dict of the effective settings.  A key whose value is
+        ``None`` is dropped — as is a string key (``work_dir``,
+        ``model``, ``chat_id``, ``tool_profile``, ``docker_image``)
+        whose value is ``""`` — it means "no override", so the
+        caller's or the persisted value stands.
 
     Raises:
-        SettingsError: When *declared* names an unknown, renamed or
-            removed key or an unknown ``kind``, or a value has the
-            wrong type.
+        SeaError: When *declared* names an unknown, renamed or removed
+            key, or a value has the wrong type.
     """
     sources = {key: f"settings()[{key!r}]" for key in declared}
     for key in declared:
         if key in RENAMED_SETTINGS:
-            raise SettingsError(
+            raise SeaError(
                 f"settings() key {key!r} was renamed to {RENAMED_SETTINGS[key]!r}; "
                 f"run `uv run sea lint --fix` to rewrite the script"
             )
         if key in REMOVED_SETTINGS:
-            raise SettingsError(f"settings() key {key!r} was removed: {REMOVED_SETTINGS[key]}")
+            raise SeaError(f"settings() key {key!r} was removed: {REMOVED_SETTINGS[key]}")
         if key not in SETTING_TYPES:
-            raise SettingsError(
+            raise SeaError(
                 f"settings() has an unknown key {key!r}; "
                 f"known keys: {', '.join(SETTING_TYPES)}"
             )
     # ``None`` means "no override": the caller's or persisted value
-    # stands.  So does an empty ``model`` (the spelling of "no model" a
-    # script computing its model may produce).
+    # stands.  So does ``""`` for a string key (the spelling of "none"
+    # a script computing its model, profile or directory may produce),
+    # as a blank ``run_agent`` option does (``agent_dispatch.parse_options``).
     settings = {
         key: value for key, value in declared.items()
-        if value is not None and not (key == "model" and value == "")
+        if value is not None and not (SETTING_TYPES[key] is str and value == "")
     }
     if isinstance(settings.get("tool_profile"), str):
         settings["tool_profile"] = alias_free_profile(settings["tool_profile"])
@@ -581,17 +681,16 @@ def resolve_settings(declared: Mapping[str, Any]) -> dict[str, Any]:
                 " or ".join(t.__name__ for t in expected)
                 if isinstance(expected, tuple) else expected.__name__
             )
-            raise SettingsError(
+            raise SeaError(
                 f"{sources[key]} must be {names}, got {type(value).__name__}"
             )
         settings[key] = _check_value(sources[key], key, value)
-    kind = settings.get("kind", "session")
-    resolved = {"kind": kind, **kind_defaults()[kind], **settings}
-    if kind == "channel":
-        resolved["locked"] = sorted(
-            {*resolved.get("locked", ()), *kind_defaults()["channel"]}
-        )
-    return resolved
+    if channel:
+        # CHANNEL_BEHAVIOURS "worker" and "scratch directory": the base
+        # classes laid the values; the locks are added here so a
+        # subclass that writes its own ``locked`` cannot drop them.
+        settings["locked"] = sorted({*settings.get("locked", ()), "work_dir", *WORKER_DEFAULTS})
+    return settings
 
 
 def locked_conflicts(
@@ -647,18 +746,16 @@ def _check_value(source: str, key: str, value: Any) -> Any:
     (``coerce_budget_override`` would otherwise SILENTLY discard a
     NaN/infinite budget downstream) and are returned as floats.  A
     value whose own methods raise (an untrusted number subclass) is
-    reported as broken.  ``kind`` must be one of :data:`KINDS`.
+    reported as broken.
 
     Raises:
-        SettingsError: Naming *source* (``settings()['timeout']``).
+        SeaError: Naming *source* (``settings()['timeout']``).
     """
-    if key == "kind" and value not in KINDS:
-        raise SettingsError(f"{source} must be one of {', '.join(KINDS)}; got {value!r}")
     if key == "locked":
         lockable = [k for k in SETTING_TYPES if k not in META_SETTINGS]
         bad = [item for item in value if not isinstance(item, str) or item not in lockable]
         if bad:
-            raise SettingsError(
+            raise SeaError(
                 f"{source} may only name settings keys ({', '.join(lockable)}); got {bad!r}"
             )
         return sorted(set(value))
@@ -668,11 +765,11 @@ def _check_value(source: str, key: str, value: Any) -> Any:
         except OverflowError:
             value = math.inf
         except BaseException as exc:  # noqa: BLE001 — an untrusted number subclass may raise
-            raise SettingsError(
+            raise SeaError(
                 f"{source} returned a broken value: {safe_message(exc)}"
             ) from exc
         if not math.isfinite(value):
-            raise SettingsError(f"{source} must return a finite number or None")
+            raise SeaError(f"{source} must return a finite number or None")
         if key == "timeout" and value <= 0:
-            raise SettingsError(f"{source} must be a positive number of seconds, got {value:g}")
+            raise SeaError(f"{source} must be a positive number of seconds, got {value:g}")
     return value

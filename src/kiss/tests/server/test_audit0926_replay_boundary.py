@@ -41,6 +41,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
+import pytest
 from websockets.asyncio.client import ClientConnection
 
 import kiss.agents.sorcar.persistence as th
@@ -51,6 +52,8 @@ from kiss.server.json_printer import JsonPrinter
 from kiss.tests.server.test_web_server_tab_mirroring import (
     TabMirroringBase,
 )
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 _SENTINEL = "audit0926_replay_boundary_sentinel"
 
@@ -327,7 +330,7 @@ class TestReplayBoundary(TabMirroringBase):
                 "useWorktree": False,
                 "isParallel": False,
                 "autoCommit": False,
-                "agentPath": str(script),
+                "seaPath": str(script),
             })
         finally:
             threading.settrace(None)  # type: ignore[arg-type]

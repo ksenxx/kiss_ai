@@ -133,6 +133,35 @@
   const _activePanels = new Set();
   let _activePanelTickIv = null;
 
+  /**
+   * Make *el* an active panel: from its opening event (a tool_call, the
+   * first thinking token) until the one that closes it (its
+   * tool_result, the task's end; _deactivatePanel) its elapsed time
+   * ticks on the shared interval (_startActivePanelTick) and its header
+   * text pulses (main.css, `.panel-active`).
+   *
+   * @param {Element} el The panel.
+   */
+  function _activatePanel(el) {
+    _activePanels.add(el);
+    el.classList.add('panel-active');
+  }
+
+  /**
+   * The reverse of _activatePanel: *el* stops ticking and pulsing, and
+   * the shared interval ends with the last active panel.
+   *
+   * @param {Element} el The panel.
+   */
+  function _deactivatePanel(el) {
+    _activePanels.delete(el);
+    if (el && el.classList) el.classList.remove('panel-active');
+    if (_activePanels.size === 0 && _activePanelTickIv) {
+      clearInterval(_activePanelTickIv);
+      _activePanelTickIv = null;
+    }
+  }
+
   function stampPanelStart(el, ts) {
     if (!el) return;
     if (_deferHighlight) {
@@ -150,7 +179,7 @@
     }
     if (el.dataset.startMs) return;
     el.dataset.startMs = String(Date.now());
-    _activePanels.add(el);
+    _activatePanel(el);
     _renderPanelTime(el);
     _startActivePanelTick();
   }
@@ -181,15 +210,8 @@
     if (_activePanels.size === 0) return;
     _activePanelTickIv = setInterval(() => {
       for (const el of Array.from(_activePanels)) {
-        if (!el || !el.isConnected) {
-          _activePanels.delete(el);
-          continue;
-        }
-        _renderPanelTime(el);
-      }
-      if (_activePanels.size === 0) {
-        clearInterval(_activePanelTickIv);
-        _activePanelTickIv = null;
+        if (el && el.isConnected) _renderPanelTime(el);
+        else _deactivatePanel(el);
       }
     }, 1000);
   }
@@ -201,11 +223,7 @@
     // sealed, a terminal event after the tool_result) must not
     // re-render it against a later clock.
     if (el.dataset.timeDone) {
-      _activePanels.delete(el);
-      if (_activePanels.size === 0 && _activePanelTickIv) {
-        clearInterval(_activePanelTickIv);
-        _activePanelTickIv = null;
-      }
+      _deactivatePanel(el);
       return;
     }
     const startMs = Number(el.dataset.startMs || 0);
@@ -230,11 +248,7 @@
     // historical start — but is still sealed below so it can never
     // resume ticking.
     el.dataset.timeDone = '1';
-    _activePanels.delete(el);
-    if (_activePanels.size === 0 && _activePanelTickIv) {
-      clearInterval(_activePanelTickIv);
-      _activePanelTickIv = null;
-    }
+    _deactivatePanel(el);
   }
 
   function reviveActivePanelTimes(root) {
@@ -243,7 +257,7 @@
       '[data-start-ms]:not([data-time-done])',
     );
     for (let i = 0; i < stamped.length; i++) {
-      _activePanels.add(stamped[i]);
+      _activatePanel(stamped[i]);
       _renderPanelTime(stamped[i]);
     }
     _startActivePanelTick();
@@ -255,8 +269,8 @@
    * Called when a task ends (task_done / task_error / task_stopped /
    * task_interrupted): whatever panels its transcript still has open —
    * a tool call that never reported back, a finish panel — stop at the
-   * task's end instead of counting time the task no longer spends, and
-   * can never be revived by a later tab switch.
+   * task's end instead of counting time the task no longer spends,
+   * stop pulsing, and can never be revived by a later tab switch.
    *
    * @param {Element|DocumentFragment|null} root The tab's transcript.
    * @param {number|undefined} endTs The terminal event's timestamp.
@@ -268,6 +282,23 @@
         '[data-start-ts]:not([data-time-done])',
     );
     for (let i = 0; i < open.length; i++) finalizePanelTime(open[i], endTs);
+  }
+
+  /**
+   * Stop the ticking and pulsing of every active panel under *root*
+   * without sealing it.  A bare `status running: false` says the task
+   * is not running but is not a terminal event — a refused submit on a
+   * busy tab broadcasts one too (commands.py, _refuse_run) — so a later
+   * tool_result must still render the panel's true duration
+   * (finalizePanelTime) and a tab switch may revive it
+   * (reviveActivePanelTimes).
+   *
+   * @param {Element|DocumentFragment|null} root The tab's transcript.
+   */
+  function pauseActivePanels(root) {
+    if (!root || !root.querySelectorAll) return;
+    const active = root.querySelectorAll('.panel-active');
+    for (let i = 0; i < active.length; i++) _deactivatePanel(active[i]);
   }
 
   /**
@@ -289,57 +320,84 @@
     if (endTab) sealPanelTimes(endTab.outputFragment, endTs);
   }
 
-  // livedone-coverage:start
+  // trajectory-coverage:start
   /**
-   * Stamp every event panel of *root* as having finished on screen.
+   * Fold the event panels of a finished task into one collapsed
+   * "Trajectory" panel.
    *
    * Called when a task ends (task_done / task_error / task_stopped /
-   * task_interrupted): a stamped panel keeps the exact collapsed or
-   * expanded state the live stream left it in — the finish must not
-   * explicitly collapse (or hide) any event panel the user was
-   * watching (see applyChevronState). The stamp is a plain JS
-   * property, so a REPLAYED transcript (a reload or reattach builds
-   * fresh DOM from stored events) carries none and keeps the
-   * finished-task digest presentation.
+   * task_interrupted) and after the replay of a task that has ended:
+   * every `.ev` / `.llm-panel` child of *root* -- tool calls and
+   * results, Thoughts, prompts, summaries, status lines -- moves, in
+   * order, into the `.trajectory-sub` of one `.ev.trajectory`
+   * panel standing where the first of them stood, so the transcript
+   * reads as the task's text, its trajectory and its result.  Left
+   * outside: the task panel heading the transcript, the result
+   * panels, and a neighbouring task's `.adjacent-task` container (its
+   * own replay folds it).  A trajectory panel already there (a task
+   * that ends twice: a terminal event after a status-only end) adopts
+   * the newcomers.
    *
-   * @param {Element|DocumentFragment|null} root The tab's transcript.
+   * @param {Element|DocumentFragment|null} root The task's transcript:
+   *   #output, a hidden tab's fragment or an adjacent-task container.
    */
-  function markPanelsLiveFinished(root) {
-    if (!root || !root.querySelectorAll) return;
-    const panels = root.querySelectorAll('.collapsible');
-    for (let i = 0; i < panels.length; i++) {
-      // A neighbouring task's replayed transcript did not finish on
-      // screen — it keeps its digest, so it takes no stamp.
-      if (panels[i].closest('.adjacent-task')) continue;
-      panels[i]._liveFinished = true;
+  function foldTrajectory(root) {
+    if (!root || !root.children) return;
+    let panel = null;
+    const adopt = [];
+    for (let i = 0; i < root.children.length; i++) {
+      const el = root.children[i];
+      if (el.classList.contains('trajectory')) {
+        panel = el;
+      } else if (
+        (el.classList.contains('ev') || el.classList.contains('llm-panel')) &&
+        !el.classList.contains('task-panel') &&
+        !el.classList.contains('rc')
+      ) {
+        adopt.push(el);
+      }
     }
+    if (!adopt.length) return;
+    if (!panel) {
+      panel = mkEl('div', 'ev trajectory');
+      const hdr = mkEl('div', 'trajectory-h');
+      hdr.textContent = 'Trajectory';
+      panel.appendChild(hdr);
+      panel.appendChild(mkEl('div', 'trajectory-sub'));
+      addCollapse(panel, hdr, undefined);
+      root.insertBefore(panel, adopt[0]);
+    }
+    const sub = panel.querySelector(':scope > .trajectory-sub');
+    for (let i = 0; i < adopt.length; i++) sub.appendChild(adopt[i]);
+    panel.classList.add('collapsed');
+    panel.classList.remove('user-pinned');
+    collapsePreview(panel);
+    // The fan-outs now hidden hand their sub-agent tabs in, as they
+    // do under any collapsed panel.
+    collapseNestedRunParallel(panel);
   }
 
   /**
-   * Stamp the panels of the tab a terminal event names (see
-   * markPanelsLiveFinished). The tab's transcript is #output when it
-   * is on screen and its detached fragment when it is hidden; a
-   * terminal event for a tab this client no longer has is a no-op.
+   * Fold the transcript of the tab a terminal event names (see
+   * foldTrajectory). The tab's transcript is #output when it is on
+   * screen and its detached fragment when it is hidden; a terminal
+   * event for a tab this client no longer has is a no-op.
    *
    * @param {string|undefined} evTabId The terminal event's tab id.
    */
-  function markTabPanelsLiveFinished(evTabId) {
+  function foldTabTrajectory(evTabId) {
     if (evTabId === undefined || evTabId === activeTabId) {
-      markPanelsLiveFinished(O);
+      foldTrajectory(O);
       return;
     }
     const endTab = getTab(evTabId);
-    if (endTab) markPanelsLiveFinished(endTab.outputFragment);
+    if (endTab) foldTrajectory(endTab.outputFragment);
   }
-  // livedone-coverage:end
+  // trajectory-coverage:end
 
   function discardProvisionalPanel(el) {
     if (!el) return;
-    _activePanels.delete(el);
-    if (_activePanels.size === 0 && _activePanelTickIv) {
-      clearInterval(_activePanelTickIv);
-      _activePanelTickIv = null;
-    }
+    _deactivatePanel(el);
     if (el.parentNode) el.parentNode.removeChild(el);
   }
 
@@ -721,17 +779,13 @@
       opener.focus();
       return;
     }
-    // While a file/webview tab is on screen the composer is hidden by
-    // CSS (body.content-tab-open) and cannot take focus, so the active
-    // tab's entry on a visible row is the fallback: the group strip
-    // when it is shown, else its main-row entry (a top-level file).
+    // While a file/webview tab is on screen in place of the chat the
+    // composer is hidden by CSS (body.content-tab-open) and cannot take
+    // focus, so the active tab's entry on the group strip is the
+    // fallback.
     const composerHidden = document.body.classList.contains('content-tab-open');
-    const tabBar = document.getElementById('tab-bar');
-    const stripShown = tabBar && tabBar.style.display !== 'none';
     const fallback = composerHidden
-      ? document.querySelector(
-          (stripShown ? '#tab-list' : '#main-tab-list') + ' .chat-tab.active',
-        )
+      ? document.querySelector('#tab-list .chat-tab.active')
       : document.getElementById('task-input');
     if (fallback) fallback.focus();
   }
@@ -953,11 +1007,6 @@
   // undecodable HEIC on a browser without HEIC support, an unreadable file).
   // Rendered next to the file chips so a failed attachment is never silent.
   let attachErrors = [];
-  // While a send is parked waiting for an attachment to finish converting,
-  // `tab.awaitingAttachments` is set on the tab that submitted, so repeated
-  // Enter presses cannot submit the same prompt twice.  It lives on the tab,
-  // like the attachments themselves: a wait in one tab must not swallow the
-  // Enter of another.
   let _deferHighlight = false;
   // True while renderReplayedEvents rebuilds a transcript from recorded
   // events.  Per-event work that only matters for a live stream (folding
@@ -1034,6 +1083,11 @@
   let historyFavExpiryDeadline = Infinity;
 
   let currentTaskName = '';
+  // The prompt the daemon last echoed for this tab (setTaskText). The
+  // echo doubles for queued follow-ups and refused submits, which stay
+  // part of the task on screen, so it becomes the tab's task only when
+  // the run announces itself with 'clear'.
+  let pendingTaskText = '';
   let currentTaskId = null;
   // The chat and task the user is looking at — the ones the Task Info
   // rows describe — as the history list knows them: its row carries
@@ -1046,11 +1100,11 @@
   let historyActiveScrollPending = false;
   // Settings of the active tab's OWN current task (model, worktree /
   // parallel modes, budget, start time, chat / task / parent ids) —
-  // what the static task panel's info block shows while the panel
-  // names that task. Mirrors currentTaskName's lifecycle.
+  // what the Task Info panel shows while the tab's own task is the one
+  // on screen. Mirrors currentTaskName's lifecycle.
   let currentTaskSettings = null;
   // Settings of every task seen by this window, keyed by task id, so
-  // the panel info can follow the reader across spliced-in
+  // the Task Info rows can follow the reader across spliced-in
   // `.adjacent-task` neighbours (see updateVisibleTask).
   const taskSettingsById = Object.create(null);
   let oldestLoadedTaskId = null;
@@ -1058,10 +1112,10 @@
   let adjacentLoading = false;
   let noPrevTask = false;
   let noNextTask = false;
-  let overscrollAccum = 0;
-  let overscrollDir = '';
-  let overscrollTimer = null;
-  const OVERSCROLL_THRESHOLD = 150;
+  // The task the reader is looking at: the tab's own task, or the
+  // neighbouring task scrolled into view (see updateVisibleTask). The
+  // active tab's label names it, see tabLabel.
+  let shownTaskName = '';
   let currentTaskMetrics = {tokens: '', budget: '', steps: ''};
 
   function genTabId() {
@@ -1112,13 +1166,20 @@
       unackedAnswer: '',
       unackedQuestion: null,
       isRunning: false,
+      // False for a chat adopted from the registry until its replay
+      // (status / task_events) arrives: its task may be running on
+      // another surface, so retireIdleChat() must not close it yet.
+      statusKnown: true,
       // Raised by the Stop button until the task actually ends, so a
       // stop the agent has not reached yet looks different from a stop
       // that never arrived (see stop_button_delay_2026-08-05.html).
       isStopping: false,
       outputFragment: null,
-      taskPanelHTML: '',
-      taskPanelVisible: false,
+      // The tab's own task text, restored into currentTaskName on
+      // switch (see saveCurrentTab).
+      taskText: '',
+      // The prompt echoed for this tab that no run has claimed yet.
+      pendingTaskText: '',
       // Settings of the tab's own current task, restored into
       // currentTaskSettings on switch (see saveCurrentTab).
       taskSettings: null,
@@ -1189,10 +1250,6 @@
       // the conversation that started it.
       isSubagentTab: false,
       parentTabId: null,
-      // On a top-level tab: the tab of its group (itself, a sub-agent,
-      // an opened file) the user viewed last; its main-row entry brings
-      // that tab back (see groupTargetId).
-      groupActiveId: null,
       isDone: false,
       lastTaskFailed: false,
       hasRunTask: false,
@@ -1353,8 +1410,8 @@
     if (!tab) return;
     if (tab.isContentTab) return;
     // visibletask-coverage:start
-    // The panel and the status row may be describing a neighbouring task
-    // the reader scrolled into. That is a viewing position, not the tab's
+    // The status row may be describing a neighbouring task the reader
+    // scrolled into. That is a viewing position, not the tab's
     // identity, so a tab is always saved under its own task. This has to
     // be read before the transcript is detached below, while #output
     // still has the geometry the reader was looking at.
@@ -1369,16 +1426,8 @@
     tab.outputFragment = document.createDocumentFragment();
     while (O.firstChild) tab.outputFragment.appendChild(O.firstChild);
     // visibletask-coverage:start
-    tab.taskPanelHTML = neighbour
-      ? currentTaskName
-      : taskPanelText
-        ? taskPanelText.textContent
-        : '';
-    tab.taskPanelVisible = neighbour
-      ? !!currentTaskName
-      : taskPanel
-        ? taskPanel.classList.contains('visible')
-        : false;
+    tab.taskText = currentTaskName;
+    tab.pendingTaskText = pendingTaskText;
     // Always the tab's OWN task's settings: the info block may be
     // showing a neighbour's, but that is a viewing position too.
     tab.taskSettings = currentTaskSettings;
@@ -1406,7 +1455,6 @@
     tab.attachments = attachments;
     tab.attachErrors = attachErrors;
     tab.inputValue = inp.value;
-    tab.isRunning = isActiveTabRunning();
     tab.t0 = t0;
     tab.endTs = endTs;
     tab.streamState = state;
@@ -1448,6 +1496,24 @@
     reportChatTab(chatTabIdForHost());
   }
 
+  /**
+   * The chat tab at the root of *tab*'s owner chain: *tab* itself when
+   * it is a chat; for a content tab, the chat whose work produced it
+   * (a file opened FROM a file view names that view as its owner, so
+   * the chain is walked; the visited set fails closed on a cycle).
+   *
+   * @param {object|undefined} tab A tab object.
+   * @returns {object|null} The chat tab, or null when none is reached.
+   */
+  function rootChatTab(tab) {
+    const visited = new Set();
+    while (tab && tab.isContentTab && !visited.has(tab.id)) {
+      visited.add(tab.id);
+      tab = getTab(tab.ownerTabId);
+    }
+    return tab && !tab.isContentTab ? tab : null;
+  }
+
   // readychat-coverage:start
   /**
    * The id of the CHAT tab that represents this window to the host
@@ -1463,13 +1529,10 @@
    * @returns {string} A chat tab id, or ''.
    */
   function chatTabIdForHost() {
-    const active = getTab(activeTabId);
-    let chat = active && !active.isContentTab ? active : null;
-    if (!chat && active && active.isContentTab && active.ownerTabId) {
-      const ownerTab = getTab(active.ownerTabId);
-      if (ownerTab && !ownerTab.isContentTab) chat = ownerTab;
-    }
-    if (!chat) chat = tabs.find(t => !t.isContentTab) || null;
+    const chat =
+      rootChatTab(getTab(activeTabId)) ||
+      tabs.find(t => !t.isContentTab) ||
+      null;
     return chat ? chat.id : '';
   }
   // readychat-coverage:end
@@ -1485,20 +1548,15 @@
    * @returns {string} The id of the chat tab the action belongs to.
    */
   function chatTargetTabId() {
-    let tab = getTab(activeTabId);
-    // A file opened FROM a file view names that view as its owner, so
-    // the chain is walked to the chat at its root; the visited set
-    // fails closed on a cycle.
-    const visited = new Set();
-    while (tab && tab.isContentTab && !visited.has(tab.id)) {
-      visited.add(tab.id);
-      tab = getTab(tab.ownerTabId);
-    }
-    return tab && !tab.isContentTab ? tab.id : activeTabId;
+    const chat = rootChatTab(getTab(activeTabId));
+    return chat ? chat.id : activeTabId;
   }
 
   function restoreTab(tab) {
-    hideContentArea();
+    // The split layout's content pane keeps whatever it shows across
+    // chat switches; a stacked surface puts the chat back in place of
+    // the content tab it was showing.
+    if (!splitLayout()) hideContentArea();
     activeTabId = tab.id;
     // Every chat tab activation funnels through here — switching, creating,
     // and falling back after a close — so this is the one place that tells
@@ -1529,19 +1587,10 @@
       autoScrollLatestEventPanel(O.lastElementChild);
       // autoscroll-coverage:end
     }
-    if (taskPanel && taskPanelText) {
-      const restoredTask = (tab.taskPanelHTML || '').trim();
-      taskPanelText.textContent = restoredTask;
-      if (restoredTask) {
-        taskPanelText.setAttribute('data-tooltip', restoredTask);
-      } else {
-        taskPanelText.removeAttribute('data-tooltip');
-      }
-      if (tab.taskPanelVisible) taskPanel.classList.add('visible');
-      else taskPanel.classList.remove('visible');
-    }
     currentTaskSettings = tab.taskSettings || null;
-    currentTaskName = (tab.taskPanelHTML || '').trim();
+    currentTaskName = (tab.taskText || '').trim();
+    pendingTaskText = tab.pendingTaskText || '';
+    setShownTask(currentTaskName);
     // The task id lands before the Task Info repaint: without settings
     // to read the ids from, the repaint reports the tab's own task id
     // to the history list, not the previous tab's.
@@ -1587,8 +1636,7 @@
     clearGhost();
     hideAC();
     syncClearBtn();
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     t0 = tab.t0 || null;
     endTs = tab.endTs || 0;
     state = tab.streamState || mkS();
@@ -1617,8 +1665,8 @@
     syncAskComposer();
     // visibletask-coverage:start
     // The transcript comes back where the reader left it, which may well
-    // be inside a neighbouring task, so the panel is derived from the
-    // restored transcript rather than from the tab's own name.
+    // be inside a neighbouring task, so the shown task is derived from
+    // the restored transcript rather than from the tab's own name.
     updateVisibleTask();
     // visibletask-coverage:end
     // The Explorer / Source Control views follow the tab's workspace.
@@ -1821,8 +1869,7 @@
   // '×' controls keep tabindex=0 (they are separate buttons, not tabs,
   // and this keeps them directly Tab-reachable -- the simplest correct
   // option under the pattern).
-  // The arrow keys move within the row the focused tab is in (the main
-  // row or the group strip), never across rows.
+  // The arrow keys move within the group strip the focused tab is in.
   function moveTabFocus(fromEl, key) {
     const tabList = fromEl.parentElement;
     if (!tabList) return;
@@ -1849,18 +1896,39 @@
 
   // ---- Tab groups ---------------------------------------------------
   //
-  // Every surface shows its tabs on two rows, the way editor-tabs mode
-  // does with VS Code's editor tabs above the webview's own strip.  The
-  // MAIN row (#main-tab-list) holds one entry per top-level tab: each
-  // chat tab, plus any tab nobody owns (the daemon's browser tab).  The
-  // GROUP strip (#tab-list) under it holds the tabs of the group on
-  // screen: the chat itself, the sub-agents it spawned and the files,
-  // reports and terminals its task opened, in tab order.  The strip
-  // appears only when that group has more than one tab.  The main row
-  // highlights the group on screen and takes the user back to the tab
-  // they last viewed in a group.  In editor-tabs mode VS Code's editor
-  // tabs are the main row (one WebviewPanel per chat), the panel holds
-  // exactly one group, and #main-tab-bar stays hidden.
+  // There is no row of chat tabs: the chat on screen is the one the
+  // user picked in the Chats panel (openHistoryTask) or opened with
+  // "+" (createNewTab); every other chat tab stays in `tabs`, hidden,
+  // mirrored from the daemon's registry like before.  The GROUP strip
+  // (#tab-list) holds the chat on screen with the sub-agents it
+  // spawned, in tab order, and appears only when it has more than one
+  // tab.  Where the chat and the files it opens share one surface (the
+  // mobile remote webapp, the VS Code sidebar chat), the strip also
+  // lists every open file, browser and terminal tab, and showing one
+  // of them replaces the chat (body.content-tab-open).  The desktop
+  // remote webapp SPLITS the window instead (splitLayout): the chat
+  // pane on the left keeps the strip, and the content pane on the
+  // right has its own tab row (#content-tab-list) with every content
+  // tab; `activeContentTabId` is the one it shows, independent of the
+  // chat on screen (activeTabId, never a content tab there).  In
+  // editor-tabs mode VS Code's editor tabs stand for the chats (one
+  // WebviewPanel per chat) and the panel holds exactly one group.
+
+  /** Whether the chat and content panes sit side by side (desktop remote). */
+  function splitLayout() {
+    return document.body.classList.contains('remote-desktop');
+  }
+
+  // The content tab the split layout's content pane shows (null: the
+  // pane is empty).  Stacked surfaces show a content tab as the active
+  // tab instead; shownContentTabId() reads the one on screen either way.
+  let activeContentTabId = null;
+
+  function shownContentTabId() {
+    if (splitLayout()) return activeContentTabId;
+    const active = getTab(activeTabId);
+    return active && active.isContentTab ? active.id : null;
+  }
 
   /** The tab *tab* hangs off: a sub-agent's parent chat, a file's owning
    *  chat (or file); null for a top-level tab or a broken link. */
@@ -1894,16 +1962,9 @@
     return tabs.filter(t => rootTabOf(t) === root);
   }
 
-  /** The tab a click on *root*'s main-row entry activates: the group's
-   *  last viewed tab while it is still in the group, else the root. */
-  function groupTargetId(root) {
-    const last = root.groupActiveId ? getTab(root.groupActiveId) : null;
-    return last && rootTabOf(last) === root ? last.id : root.id;
-  }
-
-  // The group last scrolled into view on the main row (see
-  // lastScrolledTabId for the same discipline on the strip).
-  let lastScrolledRootId = null;
+  // The content tab last scrolled into view on the content pane's row
+  // (see lastScrolledTabId for the same discipline on the strip).
+  let lastScrolledContentTabId = null;
 
   function renderTabBar() {
     const tabList = document.getElementById('tab-list');
@@ -1911,44 +1972,26 @@
     if (!tabList || !tabBar) return;
 
     const active = getTab(activeTabId);
-    const roots = tabs.filter(t => rootTabOf(t) === t);
     const activeRoot = active ? rootTabOf(active) : null;
-    if (activeRoot) activeRoot.groupActiveId = activeTabId;
-    // The group the strip shows: the active tab's, or the first group
+    // The group the strip shows: the active tab's, or the first chat
     // when nothing is active yet.
-    const shownRoot = activeRoot || roots[0] || null;
-    const members = shownRoot ? groupMembers(shownRoot) : [];
+    const shownRoot =
+      activeRoot ||
+      tabs.find(t => rootTabOf(t) === t && !t.isContentTab) ||
+      null;
+    const group = new Set(shownRoot ? groupMembers(shownRoot) : []);
+    const split = splitLayout();
+    // Content tabs have their own row in the split layout; a stacked
+    // surface lists every one of them on the strip, whoever opened it.
+    const members = tabs.filter(t => (t.isContentTab ? !split : group.has(t)));
 
     // Checked on <body> inline — not via EDITOR_TAB_MODE — so the
     // function stays self-contained.
     const editorTabMode = document.body.classList.contains('editor-tab-mode');
-    const mainBar = document.getElementById('main-tab-bar');
-    const mainList = document.getElementById('main-tab-list');
-    if (mainBar) mainBar.style.display = editorTabMode ? 'none' : '';
-    if (mainList && !editorTabMode) {
-      mainList.setAttribute('role', 'tablist');
-      mainList.setAttribute('aria-label', 'Chat tabs');
-      mainList.innerHTML = '';
-      const rovingRoot = shownRoot || null;
-      roots.forEach(root => {
-        const el = buildTabElement(root, {
-          main: true,
-          selected: root === shownRoot,
-          focusStop: root === rovingRoot,
-        });
-        mainList.appendChild(el);
-      });
-      const activeEl = mainList.querySelector('.chat-tab.active');
-      const shownRootId = shownRoot ? shownRoot.id : null;
-      if (activeEl && shownRootId !== lastScrolledRootId)
-        activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
-      lastScrolledRootId = shownRootId;
-    }
-
     if (editorTabMode) {
       // The EDITOR TAB is this chat's tab: mirror the root chat tab's
-      // label (the static task panel's text while the root is on
-      // screen, see tabLabel) onto it through the host.
+      // label (the task on screen while the root is shown, see
+      // tabLabel) onto it through the host.
       const root = editorRootTab();
       if (root) {
         const title = tabLabel(root) || 'new chat';
@@ -1981,9 +2024,9 @@
     }
 
     // The strip only appears when there is something beyond the chat
-    // itself to switch to (a run_parallel fan-out's sub-agent tabs, a
-    // file the task opened); a single conversation needs no second tab
-    // strip under the main row (or, in editor-tabs mode, under the
+    // itself to switch to (a run_parallel fan-out's sub-agent tabs, on
+    // a stacked surface a file the task opened); a single conversation
+    // needs no tab strip (nor, in editor-tabs mode, one under the
     // editor's own tabs).
     tabBar.style.display = members.length > 1 ? '' : 'none';
 
@@ -2007,16 +2050,11 @@
     members.forEach(tab => {
       tabList.appendChild(
         buildTabElement(tab, {
-          main: false,
           selected: tab.id === activeTabId,
           focusStop: tab.id === rovingStopId,
         }),
       );
     });
-
-    // The "+" (new chat), settings and theme controls used to live in
-    // this bar; they are now in the input footer (#new-chat-btn and the
-    // "..." overflow menu), so the bar carries only the tabs.
 
     // A hidden strip (a lone tab in the group) has nothing to scroll.
     const activeEl =
@@ -2024,38 +2062,92 @@
     if (activeEl && activeTabId !== lastScrolledTabId)
       activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
     lastScrolledTabId = activeTabId;
+
+    renderContentTabBar(split);
   }
 
   /**
-   * Build one tab element for the main row (opts.main) or the group
-   * strip.  opts.selected marks it the highlighted tab of its row,
-   * opts.focusStop makes it the row's roving Tab stop.  A main-row entry
-   * stands for its whole group: it activates the tab last viewed in the
-   * group and shows the group's pending question.
+   * The content pane's tab row (split layout): every file, browser and
+   * terminal tab in tab order, the pane's tab highlighted.  Empty, and
+   * hidden by CSS, on a stacked surface.
+   */
+  function renderContentTabBar(split) {
+    const list = document.getElementById('content-tab-list');
+    if (!list) return;
+    list.setAttribute('role', 'tablist');
+    list.setAttribute('aria-label', 'Open files');
+    list.innerHTML = '';
+    const contentTabs = tabs.filter(t => t.isContentTab);
+    syncContentPaneOpen(split && contentTabs.length > 0);
+    if (!split) return;
+    const rovingStopId = contentTabs.some(t => t.id === activeContentTabId)
+      ? activeContentTabId
+      : contentTabs.length > 0
+        ? contentTabs[0].id
+        : null;
+    contentTabs.forEach(tab => {
+      list.appendChild(
+        buildTabElement(tab, {
+          selected: tab.id === activeContentTabId,
+          focusStop: tab.id === rovingStopId,
+        }),
+      );
+    });
+    const activeEl = list.querySelector('.chat-tab.active');
+    if (activeEl && activeContentTabId !== lastScrolledContentTabId)
+      activeEl.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    lastScrolledContentTabId = activeContentTabId;
+  }
+
+  /**
+   * Keep body.content-pane-open true to the split layout's content
+   * pane: set while a file, browser or terminal tab is open, so the
+   * pane (its tab row, area and handle) shows and #app runs under the
+   * docked task-info panel; clear otherwise, so the chat alone fills
+   * #app beside the panel (remote-codex.css).  The pane going away
+   * brings a panel hidden behind the drawer back: docked beside the
+   * chat, it is always on screen.
+   *
+   * @param {boolean} open Whether the split layout has a content tab.
+   */
+  function syncContentPaneOpen(open) {
+    open = !!open;
+    if (document.body.classList.contains('content-pane-open') === open) return;
+    document.body.classList.toggle('content-pane-open', open);
+    if (!open) setMetaPanelHidden(false);
+    // The pane's editor sized itself to a cell that just changed.
+    layoutShownContentEditor();
+  }
+
+  /**
+   * Build one tab element for the group strip or the content pane's
+   * row.  opts.selected marks it the highlighted tab of its row,
+   * opts.focusStop makes it the row's roving Tab stop.
    */
   function buildTabElement(tab, opts) {
-    const targetId = opts.main ? groupTargetId(tab) : tab.id;
-    const members = opts.main ? groupMembers(tab) : [tab];
-    const needsAnswer = members.some(
-      t => t.askPendingQuestion !== null && t.id !== activeTabId,
-    );
+    const targetId = tab.id;
+    const needsAnswer =
+      tab.askPendingQuestion !== null && tab.id !== activeTabId;
     const el = document.createElement('div');
     el.className =
       'chat-tab' +
       (opts.selected ? ' active' : '') +
       (tab.isSubagentTab ? ' subagent-tab' : '') +
       (tab.isContentTab ? ' content-tab' : '') +
-      (tab.isContentTab && tab.contentDirty ? ' content-dirty' : '') +
-      (opts.main ? ' main-tab' : '');
+      (tab.isContentTab && tab.contentDirty ? ' content-dirty' : '');
     el.dataset.tabId = tab.id;
     el.setAttribute('role', 'tab');
     el.setAttribute('tabindex', opts.focusStop ? '0' : '-1');
     el.setAttribute('aria-selected', opts.selected ? 'true' : 'false');
     const label = tabLabel(tab);
     el.setAttribute('aria-label', label);
-    // All chat tabs swap the one shared chat surface (#output), so a
-    // single shared tabpanel is the correct association.
-    el.setAttribute('aria-controls', 'output');
+    // All chat tabs swap the one shared chat surface (#output), and all
+    // content tabs the one content area, so a single shared tabpanel
+    // per kind is the correct association.
+    el.setAttribute(
+      'aria-controls',
+      tab.isContentTab ? 'content-tab-area' : 'output',
+    );
 
     if (tab.isContentTab) {
       const fileIcon = document.createElement('span');
@@ -2173,9 +2265,15 @@
   }
 
   function switchToTab(tabId) {
-    if (tabId === activeTabId) return;
     const tab = getTab(tabId);
     if (!tab) return;
+    // Split layout: a content tab goes to the content pane; the chat
+    // on screen is not touched.
+    if (tab.isContentTab && splitLayout()) {
+      showInContentPane(tab);
+      return;
+    }
+    if (tabId === activeTabId) return;
     saveCurrentTab();
     // activateAdjacentTab owns the activation tail (restore, running
     // state, timers, chevron, focus); only the bar render and the
@@ -2196,26 +2294,39 @@
   // break the "no tab switch unless finished" rule.  For those closes
   // prefer the closed tab's parent chat tab, then the nearest surviving
   // chat tab, falling back to adjacency only if no chat tab is left.
-  // Returns null when no tab is left (the caller opens a fresh chat
-  // tab then).
+  // A sub-agent tab the user closed hands over inside its own chat's
+  // group (the nearest surviving member, the chat itself included):
+  // without a row of chat tabs, landing on an unrelated chat would be
+  // a surprise.  In the split layout the chat pane never shows a
+  // content tab, so only chat tabs are candidates there.  Returns null
+  // when no tab is left (the caller opens a fresh chat tab then).
   function pickSuccessorTab(closed, origIdx, agentInitiated) {
-    const eligible = (t, chatOnly) => {
-      return !!t && !(chatOnly && t.isContentTab);
-    };
-    const nearest = chatOnly => {
-      for (let d = 0; d < tabs.length; d++) {
-        const after = tabs[origIdx + d];
-        if (eligible(after, chatOnly)) return after;
-        const before = tabs[origIdx - 1 - d];
-        if (eligible(before, chatOnly)) return before;
-      }
-      return null;
-    };
-    const adjacent = nearest(false);
-    if (!agentInitiated) return adjacent;
+    const isChat = t => !t.isContentTab;
+    const ok = t => !splitLayout() || isChat(t);
     const parent = closed.parentTabId ? getTab(closed.parentTabId) : null;
-    if (eligible(parent, true)) return parent;
-    return nearest(true) || adjacent;
+    if (agentInitiated) {
+      if (parent && isChat(parent)) return parent;
+      return nearestTab(origIdx, isChat) || nearestTab(origIdx, ok);
+    }
+    if (parent) {
+      const root = rootTabOf(parent);
+      const inGroup = nearestTab(origIdx, t => ok(t) && rootTabOf(t) === root);
+      if (inGroup) return inGroup;
+    }
+    return nearestTab(origIdx, ok);
+  }
+
+  /** The tab nearest to index *origIdx* (the slot a tab was just removed
+   *  from) that satisfies *ok*: the one now at the slot, then the one
+   *  before it, then further out on both sides. */
+  function nearestTab(origIdx, ok) {
+    for (let d = 0; d < tabs.length; d++) {
+      const after = tabs[origIdx + d];
+      if (after && ok(after)) return after;
+      const before = tabs[origIdx - 1 - d];
+      if (before && ok(before)) return before;
+    }
+    return null;
   }
 
   // agentInitiated marks a close the agent performed by itself rather
@@ -2286,11 +2397,7 @@
     }
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
-      if (i >= 0) {
-        if (typeof tabs[i].askPendingQuestion === 'string')
-          dismissAskWaitingNotice(id);
-        tabs.splice(i, 1);
-      }
+      if (i >= 0) tabs.splice(i, 1);
       forgetPendingFileLinks(id);
       // report-coverage:start
       discardReadyReports(id);
@@ -2328,18 +2435,214 @@
     if (contentArea) return contentArea;
     contentArea = document.createElement('div');
     contentArea.id = 'content-tab-area';
-    contentArea.style.display = 'none';
+    contentArea.setAttribute('role', 'tabpanel');
+    contentArea.setAttribute('aria-label', 'Open file');
+    contentArea.style.display = splitLayout() ? '' : 'none';
+    // What the split layout's content pane shows while no file,
+    // browser or terminal tab is open.
+    const empty = document.createElement('div');
+    empty.id = 'content-pane-empty';
+    empty.innerHTML =
+      '<p>No open files.</p>' +
+      '<p>Files the agent opens, files picked in the Explorer, the ' +
+      'browser and the terminal (from the \u2026 menu) show here.</p>';
+    contentArea.appendChild(empty);
+    // Capture phase: the Monaco editor stops the press's propagation.
+    contentArea.addEventListener('pointerdown', onContentPanePointerDown, true);
+    // A press inside a sandboxed frame (the Markdown / HTML preview)
+    // never reaches this document, but the focus it takes does: the
+    // window blurs with the frame as the active element.
+    window.addEventListener('blur', onWindowBlurIntoContentFrame);
     const app = document.getElementById('app');
     const inputArea = document.getElementById('input-area');
     if (app) app.insertBefore(contentArea, inputArea || null);
     return contentArea;
   }
 
-  function setChatSurfaceVisible(visible) {
-    ['output', 'task-panel'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.style.display = visible ? '' : 'none';
+  /**
+   * A press anywhere in the content pane (its tab row or the file,
+   * browser or terminal on show) slides the docked task-info panel
+   * off the pane; the drawer tab brings it back (see setMetaPanelHidden).
+   */
+  function onContentPanePointerDown() {
+    if (splitLayout()) setMetaPanelHidden(true);
+  }
+
+  /** The panel's close button: hides the docked panel, closes the drawer. */
+  function onMetaCloseClick() {
+    if (splitLayout()) setMetaPanelHidden(true);
+    else setMetaDrawerOpen(false);
+  }
+
+  /** The window lost focus to a frame of the content pane: a press there. */
+  function onWindowBlurIntoContentFrame() {
+    const ae = document.activeElement;
+    if (
+      ae &&
+      ae.tagName === 'IFRAME' &&
+      contentArea &&
+      contentArea.contains(ae)
+    )
+      onContentPanePointerDown();
+  }
+
+  /**
+   * Split layout: show *tab* in the content pane, or empty the pane
+   * when *tab* is null.  The chat on screen is not touched.
+   */
+  function showInContentPane(tab) {
+    activeContentTabId = tab ? tab.id : null;
+    if (tab) {
+      showContentTab(tab);
+    } else {
+      closeContentMenu();
+      const area = ensureContentArea();
+      Array.from(area.children).forEach(v => {
+        v.style.display = v.id === 'content-pane-empty' ? '' : 'none';
+      });
+      syncBrowserTabVisibility(null);
+      syncTerminalTabVisibility(null);
+    }
+    renderTabBar();
+  }
+
+  // The chat pane's share of the split (percent of the chat + content
+  // area): --chat-pane-w on #app, remembered in localStorage.
+  const PANE_PCT_KEY = 'kiss-chat-pane-pct';
+  const PANE_PCT_DEFAULT = 50;
+  const PANE_PCT_MIN = 20;
+  const PANE_PCT_MAX = 80;
+
+  /**
+   * Wire #pane-resizer, the handle between the chat pane and the
+   * content pane of the split layout: dragging (pointer capture),
+   * ArrowLeft / ArrowRight in 2% steps, double-click back to the
+   * half-and-half default, ARIA values, and the share kept across
+   * reloads.  Idle on a stacked surface, where CSS hides the handle.
+   */
+  function setupPaneResizer() {
+    const resizer = document.getElementById('pane-resizer');
+    const app = document.getElementById('app');
+    if (!resizer || !app) return;
+    let pct = PANE_PCT_DEFAULT;
+    try {
+      const saved = parseFloat(window.localStorage.getItem(PANE_PCT_KEY));
+      if (isFinite(saved)) pct = saved;
+    } catch {}
+    const apply = () => {
+      pct = Math.max(PANE_PCT_MIN, Math.min(PANE_PCT_MAX, pct));
+      app.style.setProperty('--chat-pane-w', pct + '%');
+      resizer.setAttribute('aria-valuemin', String(PANE_PCT_MIN));
+      resizer.setAttribute('aria-valuemax', String(PANE_PCT_MAX));
+      resizer.setAttribute('aria-valuenow', String(Math.round(pct)));
+    };
+    const persist = () => {
+      try {
+        window.localStorage.setItem(PANE_PCT_KEY, String(pct));
+      } catch {}
+    };
+    apply();
+    let resizing = false;
+    const endResize = e => {
+      if (!resizing) return;
+      resizing = false;
+      document.body.classList.remove('sidebar-resizing');
+      try {
+        if (typeof resizer.releasePointerCapture === 'function')
+          resizer.releasePointerCapture(e.pointerId);
+      } catch {}
+      persist();
+    };
+    resizer.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || !splitLayout()) return;
+      e.preventDefault();
+      resizing = true;
+      document.body.classList.add('sidebar-resizing');
+      try {
+        if (typeof resizer.setPointerCapture === 'function')
+          resizer.setPointerCapture(e.pointerId);
+      } catch {}
     });
+    resizer.addEventListener('pointermove', e => {
+      if (!resizing) return;
+      const r = app.getBoundingClientRect();
+      if (r.width <= 0) return;
+      pct = ((e.clientX - r.left) / r.width) * 100;
+      apply();
+      layoutShownContentEditor();
+    });
+    resizer.addEventListener('pointerup', endResize);
+    resizer.addEventListener('pointercancel', endResize);
+    resizer.addEventListener('dblclick', () => {
+      pct = PANE_PCT_DEFAULT;
+      apply();
+      layoutShownContentEditor();
+      try {
+        window.localStorage.removeItem(PANE_PCT_KEY);
+      } catch {}
+    });
+    resizer.addEventListener('keydown', e => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      pct += e.key === 'ArrowRight' ? 2 : -2;
+      apply();
+      layoutShownContentEditor();
+      persist();
+    });
+  }
+
+  /** A Monaco editor in the content pane re-measures after the split moves. */
+  function layoutShownContentEditor() {
+    const tab = getTab(shownContentTabId());
+    if (tab && tab.contentEditor && tab.contentEditor.layout) {
+      try {
+        tab.contentEditor.layout();
+      } catch (_e) {}
+    }
+  }
+
+  /**
+   * Put the panes in the state the current layout expects, after the
+   * window crossed the desktop breakpoint (applyRemoteDesktop) and at
+   * start-up.  Going split: a content tab on screen moves to the
+   * content pane and its owning chat (or the first chat, or a fresh
+   * one) takes the chat pane; otherwise the pane shows the content tab
+   * last viewed, if it is still open.  Going stacked: the content pane
+   * goes away and the chat stays on screen.
+   */
+  function applySplitLayout() {
+    const active = getTab(activeTabId);
+    if (splitLayout()) {
+      const area = ensureContentArea();
+      area.style.display = '';
+      setChatSurfaceVisible(true);
+      const shown =
+        active && active.isContentTab
+          ? active
+          : getTab(activeContentTabId) || getTab(lastViewedContentTabId);
+      if (active && active.isContentTab) {
+        const chat =
+          getTab(chatTargetTabId()) || tabs.find(t => !t.isContentTab) || null;
+        if (chat && !chat.isContentTab) {
+          activateAdjacentTab(chat);
+          persistTabState();
+        } else {
+          createNewTab();
+        }
+      }
+      showInContentPane(shown && shown.isContentTab ? shown : null);
+      return;
+    }
+    // Going stacked: the content pane goes away but `activeContentTabId`
+    // keeps naming the tab it showed (a browser or terminal as much as
+    // a file), so the pane comes back on it when the window widens
+    // again; shownContentTabId() ignores it while stacked.
+    hideContentArea();
+    renderTabBar();
+  }
+
+  function setChatSurfaceVisible(visible) {
+    if (O) O.style.display = visible ? '' : 'none';
     // The composer's button row stays on screen on every surface: a
     // file/webview tab still offers + (new chat) and ... (more
     // actions). CSS scoped by `content-tab-open` hides the text box
@@ -2355,7 +2658,10 @@
     // An open editor menu belongs to the surface being swapped out.
     closeContentMenu();
     const area = ensureContentArea();
-    setChatSurfaceVisible(false);
+    const split = splitLayout();
+    // A stacked surface shows the content tab in place of the chat;
+    // the split layout's content pane sits beside it.
+    if (!split) setChatSurfaceVisible(false);
     area.style.display = '';
     Array.from(area.children).forEach(v => {
       v.style.display = 'none';
@@ -2372,6 +2678,7 @@
     // height 0, where a reveal cannot scroll; retry now that the tab
     // is visible and laid out.
     revealPendingContentLine(tab);
+    if (split) return;
     // A content tab browses the workspace of the chat it was opened
     // from (sidebarWorkDir), which may differ from the previous tab's.
     refreshSidebarDataViews(false);
@@ -2385,6 +2692,7 @@
         : 'none';
   }
 
+  /** Stacked surfaces: put the chat back in place of the content area. */
   function hideContentArea() {
     closeContentMenu();
     if (contentArea) contentArea.style.display = 'none';
@@ -2455,8 +2763,8 @@
     // The surface that asked for the tab switches to it.  A popup the
     // page opened itself only follows on a surface that is showing a
     // browser tab: it never yanks a surface out of its chat.
-    const active = getTab(activeTabId);
-    if (ev.focus && (!ev.popup || (active && active.isBrowserTab))) {
+    const shown = getTab(shownContentTabId());
+    if (ev.focus && (!ev.popup || (shown && shown.isBrowserTab))) {
       switchToTab(tab.id);
     }
     renderTabBar();
@@ -2575,6 +2883,10 @@
 
   function activateAdjacentTab(newTab) {
     if (newTab.isContentTab) {
+      if (splitLayout()) {
+        showInContentPane(newTab);
+        return;
+      }
       activeTabId = newTab.id;
       showContentTab(newTab);
       // The chat tab just left may have been answering a question.
@@ -2747,7 +3059,11 @@
     }
     tabs.splice(idx, 1);
     disposeTabContentView(tab);
-    if (activeTabId === tabId) {
+    if (splitLayout() && activeContentTabId === tabId) {
+      // Split layout: the content pane moves on to the nearest content
+      // tab, or empties.
+      showInContentPane(nearestTab(idx, t => t.isContentTab));
+    } else if (activeTabId === tabId) {
       const successor =
         tabs.length > 0 ? pickSuccessorTab(tab, idx, false) : null;
       if (!successor) {
@@ -3720,11 +4036,7 @@
     // a straggling reply is ignored.
     clearTimeout(tab.contentSaveTimer);
     tab.contentSaveTimer = setTimeout(() => {
-      if (!tab.contentSaving) return;
-      tab.contentSaving = false;
-      tab.contentSaveToken = '';
-      tab.contentCloseAfterSave = false;
-      setContentSaveStatus(tab, 'Save failed: no reply from the server', true);
+      failContentSave(tab, 'Save failed: no reply from the server');
     }, 30000);
     api.saveFile({
       path: tab.contentPath,
@@ -3735,6 +4047,21 @@
       version: tab.contentFileVersion,
       force: !!force,
     });
+  }
+
+  /**
+   * Give up on the save *tab* is waiting for (its reply timed out or the
+   * connection that carried the request dropped): the tab stays dirty
+   * and the Save button works again, and a straggling reply is ignored
+   * because the token is retired.
+   */
+  function failContentSave(tab, message) {
+    if (!tab.contentSaving) return;
+    clearTimeout(tab.contentSaveTimer);
+    tab.contentSaving = false;
+    tab.contentSaveToken = '';
+    tab.contentCloseAfterSave = false;
+    setContentSaveStatus(tab, message, true);
   }
 
   // Re-read the file from disk into the tab, dropping its edits: the
@@ -3826,8 +4153,8 @@
     e => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
       if (e.key !== 's' && e.key !== 'S') return;
-      const tab = getTab(activeTabId);
-      if (!tab || !tab.isContentTab || !tab.contentEditor) return;
+      const tab = getTab(shownContentTabId());
+      if (!tab || !tab.contentEditor) return;
       e.preventDefault();
       saveContentTab(tab, false);
     },
@@ -4004,7 +4331,7 @@
     channel.port1.onmessage = () => {
       // Saves only while this tab is the one on screen and still
       // shows THIS iframe (a re-rendered preview gets a new port).
-      if (activeTabId !== tab.id || !tab.contentEditor) return;
+      if (shownContentTabId() !== tab.id || !tab.contentEditor) return;
       if (!iframe.isConnected) return;
       saveContentTab(tab, false);
     };
@@ -4279,16 +4606,20 @@
       // Unsaved edits win over a fresh copy of the file: like VS Code,
       // opening a file that is already open in a dirty editor merely
       // brings that editor forward (and jumps to the requested line).
-      // Only an explicit reload replaces the text.
-      if (existing.contentDirty && !existing.contentReloadRequested) {
+      // Only an explicit reload replaces the text, and only the reply
+      // to the chat that asked for it is that reload (as in the error
+      // path above): another chat's open of the same path meanwhile
+      // must neither replace the edits nor consume the pending reload.
+      const reloading = existing.contentReloadRequested === owner;
+      if (existing.contentDirty && !reloading) {
         const line = parseInt(ev.line, 10);
         existing.contentRevealLine = line > 0 ? line : 0;
         revealPendingContentLine(existing);
       } else {
         renderContentView(existing, ev);
       }
-      existing.contentReloadRequested = false;
-      if (activeTabId === existing.id) showContentTab(existing);
+      if (reloading) existing.contentReloadRequested = false;
+      if (shownContentTabId() === existing.id) showContentTab(existing);
       else if (mayFocus) switchToTab(existing.id);
       return;
     }
@@ -4585,7 +4916,6 @@
     '.chat-tab-close',
     '#input-clear-btn',
     '.search-clear-btn',
-    '#task-panel-drawer-btn',
     '#input-drawer-btn',
   ].join(', ');
   // Drop the focus ring a mouse click leaves on a toolbar button.  A
@@ -4696,6 +5026,65 @@
     return subTab;
   }
 
+  /**
+   * Open a fresh tab for a history row's task: the tab's label names
+   * the task and its transcript opens with the task panel, so the text
+   * is on screen at once — read-only when there is nothing to resume,
+   * and until the replay rebuilds the transcript otherwise.
+   *
+   * @param {string} taskText The row's task text.
+   */
+  /**
+   * Leaving a chat for another one (a Chats panel pick, "+") retires
+   * the chat left behind when nothing in it is still going: no running
+   * task or sub-agent, no question waiting for an answer, no prompt
+   * the daemon has not acknowledged, and (unless *draftMoved*: "+"
+   * carries the composer text into the new chat) no unsent draft.
+   * Without a row of chat tabs nothing else could close it, and the
+   * Chats panel keeps it one click away.  A busy chat stays open,
+   * hidden, so its tab is open on every surface until the task ends.
+   * *left* is the tab the user was on; its whole group goes.
+   */
+  function retireIdleChat(left, draftMoved) {
+    if (!left || left.isContentTab || EDITOR_TAB_MODE) return;
+    const root = rootTabOf(left);
+    const active = getTab(activeTabId);
+    if (!getTab(root.id) || (active && rootTabOf(active) === root)) return;
+    const busy = groupMembers(root).some(
+      t =>
+        !t.isContentTab &&
+        (!t.statusKnown ||
+          t.isRunning ||
+          t.askPendingQuestion !== null ||
+          !!t.unackedPrompt),
+    );
+    if (busy) return;
+    if (!draftMoved && (root.inputValue || '').trim()) return;
+    closeTab(root.id, false, false);
+  }
+
+  /** "+" and its kin: a fresh chat on screen, the chat left behind
+   *  retired when idle (its composer draft moves to the new chat). */
+  function openNewChat() {
+    const left = getTab(activeTabId);
+    createNewTab();
+    retireIdleChat(left, true);
+  }
+
+  function openHistoryTaskInNewTab(taskText) {
+    createNewTab();
+    const t = (taskText || '').trim();
+    // Editor-tabs mode opens the task in a new editor panel instead.
+    if (!t || document.body.classList.contains('editor-tab-mode')) return;
+    currentTaskName = t;
+    setShownTask(t);
+    if (welcome) {
+      welcome.style.display = 'none';
+      refreshWelcomeLayout();
+    }
+    setOwnTaskPanel(O, t);
+  }
+
   function createNewTab() {
     // Editor-tabs mode: a new conversation is a new EDITOR tab, never a
     // second internal chat tab in this panel. (Checked on <body> inline
@@ -4721,12 +5110,8 @@
     restoreTab(tab);
     renderTabBar();
     persistTabState();
-    setRunningState(tab.isRunning);
-    if (!tab.isRunning) {
-      t0 = null;
-      stopTimer();
-      removeSpinner();
-    }
+    setRunningState(false);
+    t0 = null;
     registerTab(tab);
     api.newChat({tabId: tab.id});
     api.getWelcomeInfo();
@@ -4785,9 +5170,7 @@
       // The active tab id will not do — a sub-agent tab may be on
       // screen when the window goes down.
       editorRootTabId: root ? root.id : undefined,
-      taskDrawerCollapsed: taskDrawerCollapsed,
       inputDrawerCollapsed: inputDrawerCollapsed,
-      taskDrawerUserSet: taskDrawerUserSet,
       inputDrawerUserSet: inputDrawerUserSet,
       drawersVersion: DRAWERS_VERSION,
     });
@@ -4843,23 +5226,18 @@
   /**
    * The title a chat tab displays.
    *
-   * The ACTIVE top-level chat tab names whatever the static task panel
-   * above the transcript names: the tab's own task normally, but also
-   * a neighbouring task the reader scrolled into or a history row's
+   * The ACTIVE top-level chat tab names the task on screen
+   * (shownTaskName): the tab's own task normally, but also a
+   * neighbouring task the reader scrolled into or a history row's
    * task shown read-only before any task ran. `tab.title` stays the
    * tab's own task (its identity for the registry and the share
-   * title); only the label follows the panel. Every other tab - a
+   * title); only the label follows the reader. Every other tab - a
    * background chat, a sub-agent, a file - shows its own title.
    */
   function tabLabel(tab) {
     if (tab.id !== activeTabId || tab.isSubagentTab || tab.isContentTab)
       return tab.title;
-    const panel = document.getElementById('task-panel');
-    const text = document.getElementById('task-panel-text');
-    if (!panel || !text || !panel.classList.contains('visible'))
-      return tab.title;
-    const shown = (text.textContent || '').trim();
-    return shown ? clipTabTitle(shown) : tab.title;
+    return shownTaskName ? clipTabTitle(shownTaskName) : tab.title;
   }
 
   // Editor-tabs mode: the panel's single top-level chat tab. Sub-agent
@@ -4890,7 +5268,7 @@
   // and follow the registry's titles, order and chat bindings.
   //
   // Client-local state survives untouched: the active-tab selection,
-  // and each tab's own composer draft, model pick and task panel
+  // and each tab's own composer draft, model pick and task text
   // (mirroring covers the tab SET and transcript CONTENTS, not what
   // the user is typing). Two kinds of tabs stay client-local by
   // design and are never removed here: sub-agent tabs (derived state,
@@ -5005,7 +5383,10 @@
       if (!tab) {
         tab = makeTab(clipTabTitle(e.title));
         tab.id = e.tabId;
-        if (e.chatId) tab.hasRunTask = true;
+        if (e.chatId) {
+          tab.hasRunTask = true;
+          tab.statusKnown = false;
+        }
       } else if (!tab.isSubagentTab && e.title) {
         tab.title = clipTabTitle(e.title);
       }
@@ -5077,9 +5458,6 @@
     // (content tabs are never in the registry and carry no
     // parentTabId), so there is no editor to dispose.
     removedIds.forEach(id => {
-      const doomed = byId.get(id);
-      if (doomed && typeof doomed.askPendingQuestion === 'string')
-        dismissAskWaitingNotice(id);
       forgetPendingFileLinks(id);
       // report-coverage:start
       discardReadyReports(id);
@@ -5093,10 +5471,17 @@
       }
     });
 
-    if (tabs.length === 0) {
+    if (
+      tabs.length === 0 ||
+      (splitLayout() && !tabs.some(t => !t.isContentTab))
+    ) {
       // Empty registry: keep one local, unregistered placeholder so
       // the composer always exists. The daemon adopts it the moment it
-      // runs a task; until then it is a welcome screen only.
+      // runs a task; until then it is a welcome screen only.  The
+      // split layout's chat pane is always on screen, so it needs the
+      // placeholder even while files survive beside it; a stacked
+      // surface showing a file gets its fresh chat when the file
+      // closes (closeContentTab).
       tabs.push(makeTab('new chat'));
     }
     // Drafts persisted by the previous page instance go back to their
@@ -5110,7 +5495,13 @@
     }
     if (!getTab(activeTabId)) {
       const saved = savedActiveTabId ? getTab(savedActiveTabId) : null;
-      const target = saved || tabs[0];
+      let target = saved || tabs[0];
+      // The split layout's chat pane never shows a content tab: the
+      // removed chat's place goes to a surviving chat (or the
+      // placeholder), never to an open file.
+      if (splitLayout() && target.isContentTab) {
+        target = tabs.find(t => !t.isContentTab);
+      }
       // The previously selected tab is gone: the draft the boot tab
       // showed for it follows the screen to the tab taking it
       // (restoreTab shows tab.inputValue).
@@ -5145,19 +5536,14 @@
 
   const DRAWERS_VERSION = 3;
   const isMobileRemote = isMobileRemoteWebApp();
-  // The static task panel opens collapsed in every chat webview -- the
-  // extension sidebar and the remote web app, phone or desktop. It is a
-  // header, not content: the transcript deserves the room. Only a click on
-  // #task-panel-drawer-btn may expand it, so an expanded panel is restored
-  // only when the persisted blob says a click put it there. `*UserSet`
-  // records that click; without it the defaults below always win, which is
-  // what keeps a reload, a reconnect or a new task from re-expanding a
-  // panel the user never opened.
-  let taskDrawerCollapsed = true;
-  let taskDrawerUserSet = false;
   // The composer stays reachable by default. On a phone the textbox folds
   // away while a task is running (see syncMobileInputDrawer) to give the
   // transcript more room; the button bar below it stays visible either way.
+  // Only a click on #input-drawer-btn may fold it, so a folded composer is
+  // restored only when the persisted blob says a click put it there.
+  // `inputDrawerUserSet` records that click; without it the default wins,
+  // which is what keeps a reload or a reconnect from re-folding a composer
+  // the user never folded.
   let inputDrawerCollapsed = false;
   let inputDrawerUserSet = false;
   {
@@ -5166,10 +5552,6 @@
       _saved &&
       typeof _saved === 'object' &&
       _saved.drawersVersion >= DRAWERS_VERSION;
-    if (_drawersTrusted && _saved.taskDrawerUserSet) {
-      taskDrawerCollapsed = !!_saved.taskDrawerCollapsed;
-      taskDrawerUserSet = true;
-    }
     if (_drawersTrusted && _saved.inputDrawerUserSet) {
       inputDrawerCollapsed = !!_saved.inputDrawerCollapsed;
       inputDrawerUserSet = true;
@@ -5191,9 +5573,6 @@
   // from local storage. The boot placeholder below is replaced by the
   // first snapshot; `savedActiveTabId` restores this client's own tab
   // selection (selection stays client-local) once that snapshot lands.
-  // `legacyRestoredTabs` carries a pre-registry client's locally
-  // persisted tab set into `ready` exactly once, so the first daemon
-  // with an empty registry can adopt it (one-time migration).
   let savedActiveTabId = '';
   // The composer drafts the previous page instance persisted on its way
   // out (persistTabState), by tab id: the selected tab's is shown in the
@@ -5205,7 +5584,6 @@
   // every replay), dropped when it asks nothing or something else — the
   // answer had arrived after all.
   let savedAskDrafts = null;
-  const legacyRestoredTabs = [];
   (function () {
     const saved = vscode.getState();
     const drafts = saved && saved.inputDrafts;
@@ -5228,21 +5606,6 @@
             answer: typeof d.answer === 'string' ? d.answer : '',
           };
         }
-      });
-    }
-    if (saved && saved.tabs && saved.tabs.length > 0) {
-      const seenChatIds = new Set();
-      saved.tabs.forEach(st => {
-        if (!st || st.isSubagentTab) return;
-        const chatId = st.backendChatId ? String(st.backendChatId) : '';
-        if (!st.chatId || !chatId || seenChatIds.has(chatId)) return;
-        seenChatIds.add(chatId);
-        legacyRestoredTabs.push({
-          tabId: String(st.chatId),
-          chatId: chatId,
-          title: st.title || '',
-          workDir: st.workDir || '',
-        });
       });
     }
     if (saved && saved.chatId) savedActiveTabId = String(saved.chatId);
@@ -5305,11 +5668,6 @@
   const settingsPanel = document.getElementById('settings-panel');
   const settingsOverlay = document.getElementById('settings-overlay');
   const settingsPanelClose = document.getElementById('settings-panel-close');
-  const frequentPanel = document.getElementById('frequent-panel');
-  const frequentOverlay = document.getElementById('frequent-overlay');
-  const frequentPanelClose = document.getElementById('frequent-panel-close');
-  const frequentTasksBtn = document.getElementById('frequent-tasks-btn');
-  const frequentList = document.getElementById('frequent-list');
   const tricksPanel = document.getElementById('tricks-panel');
   const tricksOverlay = document.getElementById('tricks-overlay');
   const tricksPanelClose = document.getElementById('tricks-panel-close');
@@ -5361,10 +5719,6 @@
   );
   const memoryToggleBtn = document.getElementById('cfg-use-memory');
   const shareBtn = document.getElementById('share-btn');
-  const taskPanel = document.getElementById('task-panel');
-  const taskPanelText = document.getElementById('task-panel-text');
-  const taskPanelCopy = document.getElementById('task-panel-copy');
-  const taskPanelDrawerBtn = document.getElementById('task-panel-drawer-btn');
   const inputDrawerBtn = document.getElementById('input-drawer-btn');
   const inputAreaEl = document.getElementById('input-area');
   const statusTokens = document.getElementById('status-tokens');
@@ -5737,8 +6091,8 @@
   const metaInfoContent = document.getElementById('meta-info-content');
   const metaInfoStatus = document.getElementById('meta-info-status');
   const metaInfoRefreshBtn = document.getElementById('meta-info-refresh');
-  // The task-info panel and its mobile-drawer controls (the toggle at
-  // the tab bar's right edge, the in-panel close button, the dimming
+  // The task-info panel and its mobile-drawer controls (the toggle in
+  // the composer's footer tools, the in-panel close button, the dimming
   // backdrop — all remote mobile only, see remote-codex.css).
   const metaPanel = document.getElementById('meta-panel');
   const metaOverlay = document.getElementById('meta-overlay');
@@ -5931,7 +6285,7 @@
     // here: retarget — which clears and repolls — instead of polling
     // the new tab under the old tab's signature and generation.
     if (metaInfoChatTabId() !== metaInfoTabId) {
-      setMetaInfoTarget();
+      setMetaInfoTarget(refresh);
       return;
     }
     if (!metaInfoTabId) return;
@@ -5954,8 +6308,11 @@
    * tab switch, and a late reply for the former target no longer
    * matches — then polls immediately instead of waiting out the
    * interval.
+   *
+   * @param {boolean} [refresh] Forwarded to that first poll (the refresh
+   *   button pressed right after a tab switch must still run the agent).
    */
-  function setMetaInfoTarget() {
+  function setMetaInfoTarget(refresh) {
     const tabId = metaInfoChatTabId();
     if (tabId === metaInfoTabId) return;
     metaInfoTabId = tabId;
@@ -5964,7 +6321,7 @@
     metaInfoState = null;
     renderTaskUpdate(null);
     postMetaUpdateSoon();
-    requestTaskUpdate();
+    requestTaskUpdate(refresh);
   }
 
   // Whether the last syncMetaInfoRunning call saw a running task, so
@@ -6117,6 +6474,41 @@
       // Focus is best-effort (detached nodes, jsdom quirks).
     }
     syncMetaInfoPolling();
+    // The Explorer and Source Control sections in the drawer load (or
+    // catch up on task news) once the drawer shows them.
+    if (open && !wasOpen) refreshSidebarDataViews(false);
+  }
+
+  /**
+   * Desktop remote page, content pane open: slide the task-info panel
+   * off the window's right edge (a click in the content pane) or bring
+   * it back (the drawer tab).  `hidden` is a no-op without a content
+   * pane: the panel is docked beside the chat then, never hidden.
+   *
+   * @param {boolean} hidden True to slide the panel away.
+   */
+  function setMetaPanelHidden(hidden) {
+    const panel = document.getElementById('meta-panel');
+    if (!panel) return;
+    hidden = !!hidden && document.body.classList.contains('content-pane-open');
+    // Unchanged: leave `inert` alone (the phone drawer sets its own).
+    if (document.body.classList.contains('meta-hidden') === hidden) return;
+    document.body.classList.toggle('meta-hidden', hidden);
+    // Off screen, the panel's controls leave the keyboard tab order.
+    if (typeof panel.toggleAttribute === 'function') {
+      panel.toggleAttribute('inert', hidden);
+    }
+    const drawer = document.getElementById('meta-drawer');
+    if (drawer) {
+      drawer.setAttribute('aria-expanded', hidden ? 'false' : 'true');
+      // Keyboard focus follows the control that is left: the drawer
+      // once the panel (and its close button) is inert, the panel's
+      // close button once the drawer has faded out.
+      const ae = document.activeElement;
+      if (hidden && ae && panel.contains(ae)) drawer.focus();
+      else if (!hidden && ae === drawer && metaCloseBtn) metaCloseBtn.focus();
+    }
+    if (!hidden) refreshSidebarDataViews(false);
   }
   // metainfo-coverage:end
 
@@ -6578,11 +6970,15 @@
       });
       return;
     }
+    // The connect prompt replaces whatever "+" carried over, so the
+    // draft stays with the chat left behind (which it then keeps open).
+    const left = getTab(activeTabId);
     createNewTab();
     inp.value = prompt;
     inp.dispatchEvent(new Event('input', {bubbles: true}));
     setMetaDrawerOpen(false);
     sendMessage();
+    retireIdleChat(left, false);
   }
 
   // ---- Spend subpanel ----
@@ -7048,18 +7444,17 @@
   }
   // sidebarpanels-coverage:end
 
-  // activitybar-coverage:start
-  // ---- Activity bar: Tasks / Explorer / Source Control views ----
+  // workspaceviews-coverage:start
+  // ---- Workspace views: the Explorer and Source Control sections ----
   //
-  // The remote webapp's history panel carries a VS Code-like activity
-  // bar (#activity-bar, shown by remote-codex.css) switching between
-  // three stacked .sidebar-view panels: Tasks (the history list),
-  // Explorer (the workspace file tree, listDir -> dirListing) and
-  // Source Control (gitStatus -> "Changes", gitLog -> commit "Graph").
-  // The VS Code webview keeps the bar hidden and the Tasks view up.
-  const SIDEBAR_VIEWS = ['tasks', 'explorer', 'scm'];
-  const SIDEBAR_VIEW_KEY = 'kiss-sidebar-view';
-  const activityBar = document.getElementById('activity-bar');
+  // The remote webapp's task-info panel carries two collapsible
+  // sections for the workspace: Explorer (the file tree, listDir ->
+  // dirListing) and Source Control (gitStatus -> "Changes", gitLog ->
+  // commit "Graph").  Both start `hidden` in chat.html; the remote page
+  // lifts that (setupWorkspaceViews).  The VS Code webview has the real
+  // Explorer and Source Control views and never shows them.
+  const explorerSection = document.getElementById('meta-explorer');
+  const scmSection = document.getElementById('meta-scm');
   const explorerTree = document.getElementById('explorer-tree');
   const scmChangesList = document.getElementById('scm-changes');
   const scmChangesCount = document.getElementById('scm-changes-count');
@@ -7067,8 +7462,8 @@
   const scmGraphCount = document.getElementById('scm-graph-count');
   const scmBranchEl = document.getElementById('scm-branch');
   const scmBodyEl = document.getElementById('scm-body');
-  let activeSidebarView = 'tasks';
-  // Task news that arrived while a data view was hidden (or the drawer
+  // Task news that arrived while a view was out of sight (its section
+  // collapsed, the panel hidden behind the drawer or the phone drawer
   // closed) is remembered here, so the view reloads when it next shows.
   let explorerDirty = false;
   let scmDirty = false;
@@ -7096,78 +7491,64 @@
     return workDirForTab(tab ? tab.id : activeTabId);
   }
 
-  function sidebarIsOpen() {
-    return HISTORY_PANEL_MODE || sidebar.classList.contains('open');
+  /**
+   * Whether the task-info panel is on screen: docked and not slid
+   * behind the drawer on the desktop remote page, the open drawer on
+   * the phone remote page.
+   */
+  function metaPanelIsOpen() {
+    if (!metaPanel) return false;
+    if (document.body.classList.contains('remote-desktop'))
+      return !document.body.classList.contains('meta-hidden');
+    return metaPanel.classList.contains('open');
   }
 
   /**
-   * Show one side view and hide the others, VS Code activity-bar
-   * style.  Showing the Explorer or Source Control view (re)loads it
-   * for the current workspace.  The choice is remembered in
-   * localStorage so a reload comes back to the same view.
+   * Whether a workspace section (Explorer or Source Control) is on
+   * screen: the panel is open and the section is shown and expanded.
    *
-   * @param {string} view 'tasks' | 'explorer' | 'scm'
+   * @param {Element|null} section #meta-explorer or #meta-scm.
    */
-  function setSidebarView(view) {
-    if (!activityBar) return;
-    if (SIDEBAR_VIEWS.indexOf(view) < 0) view = 'tasks';
-    activeSidebarView = view;
-    activityBar.querySelectorAll('.activity-btn').forEach(btn => {
-      const on = btn.dataset.view === view;
-      btn.classList.toggle('active', on);
-      btn.setAttribute('aria-selected', on ? 'true' : 'false');
-      // Roving tabindex: only the selected tab is in the tab order.
-      btn.tabIndex = on ? 0 : -1;
-    });
-    document.querySelectorAll('#sidebar-views .sidebar-view').forEach(p => {
-      p.hidden = p.dataset.view !== view;
-    });
-    try {
-      window.localStorage.setItem(SIDEBAR_VIEW_KEY, view);
-    } catch {}
-    refreshSidebarDataViews(false);
+  function workspaceViewShown(section) {
+    return (
+      !!section &&
+      !section.hidden &&
+      !section.classList.contains('collapsed') &&
+      document.body.classList.contains('remote-chat') &&
+      metaPanelIsOpen()
+    );
   }
 
   /**
    * Bring the Explorer / Source Control views up to date with the
-   * current workspace.  Called when a view is shown, when the active
-   * tab or the workspace scope changes (restoreTab, showContentTab,
-   * applyWorkspaceScope), and — with `force` — whenever the daemon
-   * reports task news (refreshHistory), since a finished task may have
-   * written files or committed.
+   * current workspace.  Called when a section expands or the panel
+   * comes back on screen, when the active tab or the workspace scope
+   * changes (restoreTab, showContentTab, applyWorkspaceScope), and —
+   * with `force` — whenever the daemon reports task news
+   * (refreshHistory), since a finished task may have written files or
+   * committed.
    *
-   * Only the view on screen reloads right away.  Task news marks BOTH
-   * views dirty first, so a hidden view (or one behind a closed phone
-   * drawer) reloads the moment it is shown instead of staying stale.
+   * Only a view on screen reloads right away.  Task news marks BOTH
+   * views dirty first, so a view out of sight (its section collapsed,
+   * the panel hidden) reloads the moment it shows instead of staying
+   * stale.
    *
    * @param {boolean} force Reload even if the workspace is unchanged.
    */
   function refreshSidebarDataViews(force) {
-    if (!activityBar || !document.body.classList.contains('remote-chat'))
-      return;
+    if (!document.body.classList.contains('remote-chat')) return;
     if (force) {
       explorerDirty = true;
       scmDirty = true;
     }
-    if (!sidebarIsOpen()) return;
-    if (activeSidebarView === 'explorer') {
+    if (workspaceViewShown(explorerSection)) {
       refreshExplorer(explorerDirty);
       explorerDirty = false;
-    } else if (activeSidebarView === 'scm') {
+    }
+    if (workspaceViewShown(scmSection)) {
       refreshSourceControl(scmDirty);
       scmDirty = false;
     }
-  }
-
-  /** Re-apply the view remembered from the last visit (remote only). */
-  function restoreSidebarView() {
-    if (!activityBar || !document.body.classList.contains('remote-chat'))
-      return;
-    let saved = null;
-    try {
-      saved = window.localStorage.getItem(SIDEBAR_VIEW_KEY);
-    } catch {}
-    setSidebarView(saved || activeSidebarView);
   }
 
   /** Last path segment of a file system path ('' for a bare root). */
@@ -7200,8 +7581,10 @@
 
   /**
    * Ask the daemon to open a file as a content tab (fileContent).  On
-   * the phone layout the drawer closes so the tab is visible, exactly
-   * as after a history-row click; the docked desktop panel stays.
+   * the phone layout the task-info drawer (which holds the Explorer
+   * and Source Control) closes so the tab is visible, exactly as the
+   * history drawer does after a history-row click; the docked desktop
+   * panel stays.
    */
   function openWorkspaceFile(path, workDir) {
     api.send({
@@ -7210,7 +7593,8 @@
       workDir: workDir || sidebarWorkDir(),
       tabId: activeTabId,
     });
-    closeSidebar();
+    if (!document.body.classList.contains('remote-desktop'))
+      setMetaDrawerOpen(false);
   }
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -7797,6 +8181,7 @@
       }
       node.loading = true;
       row.classList.add('loading');
+      node.kids.textContent = '';
       explorerNote(node.kids, node.depth + 1, 'Loading...');
       api.listDir({
         path: path,
@@ -7805,6 +8190,23 @@
         token: explorerToken(key),
       });
     }
+  }
+
+  /**
+   * Forget every folder listing still in flight: the daemon connection
+   * dropped, so its reply is never coming.  A folder whose first listing
+   * was lost is collapsed again (its next expansion asks afresh); a
+   * folder listed before keeps its rows and is re-listed by the refresh
+   * that follows the reconnect.
+   */
+  function abandonExplorerListings() {
+    explorerDirs.forEach(node => {
+      if (!node.loading) return;
+      node.loading = false;
+      node.refreshAfterLoad = false;
+      node.row.classList.remove('loading');
+      if (!node.loaded) toggleExplorerDir(node.row, false);
+    });
   }
 
   /**
@@ -8117,7 +8519,7 @@
       scmRefreshTimer = null;
       // The view may have gone off screen meanwhile: leave it dirty
       // so it reloads when shown instead of asking git for nothing.
-      if (activeSidebarView === 'scm' && sidebarIsOpen()) {
+      if (workspaceViewShown(scmSection)) {
         requestSourceControl(sidebarWorkDir());
       } else {
         scmDirty = true;
@@ -8983,16 +9385,9 @@
     return IS_LINUX && linux ? linux : win;
   }
 
-  /** Put *text* on the clipboard (the content menu's robust copy). */
+  /** Put *text* on the clipboard (Explorer / Git context menus). */
   function copyTextToClipboard(text) {
-    const ctx = window.ContentContextMenu;
-    if (ctx && typeof ctx.copyText === 'function') {
-      ctx.copyText(document, text);
-      return;
-    }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).catch(() => {});
-    }
+    window.PanelCopy.copyText(text);
   }
 
   /**
@@ -9065,8 +9460,11 @@
    * Open a read-only text tab that is not a file on disk (a commit's
    * patch, search results, a comparison).  *key* identifies the tab so
    * repeating the action refreshes it instead of opening a second one.
+   * *ownerTabId* is the tab the request was sent as (the reply echoes
+   * it): a reply landing after a tab switch opens in that tab's
+   * workspace, not the current one's.
    */
-  function openTextResultTab(key, name, text, languageName) {
+  function openTextResultTab(key, name, text, languageName, ownerTabId) {
     handleFileContent(
       {
         path: key,
@@ -9076,7 +9474,7 @@
         isVirtual: true,
       },
       true,
-      activeTabId,
+      ownerTabId || activeTabId,
     );
   }
 
@@ -9133,7 +9531,12 @@
           request.action === 'rename' ? request.dest : request.path,
         );
         confirmAction({
-          id: 'fs-overwrite',
+          // One toast per clashing entry: a multi-entry paste or move
+          // asks once per clash, and a shared id would replace the
+          // earlier question (and lose its Replace) with the later one.
+          // For copy/move `dest` is the destination folder, so the
+          // entry's own name is part of the key.
+          id: 'fs-overwrite:' + (request.dest || request.path) + '|' + target,
           message:
             "A file or folder named '" +
             target +
@@ -9161,6 +9564,8 @@
         (ev.count ? ev.count + ' result' + (ev.count === 1 ? '' : 's') : '') +
           (ev.count ? ' in ' + request.path + '\n\n' : '') +
           text,
+        '',
+        ev.tabId,
       );
       return;
     }
@@ -9170,6 +9575,7 @@
         pathBaseName(request.path) + ' \u2194 ' + pathBaseName(request.dest),
         ev.text || '',
         'x.diff',
+        ev.tabId,
       );
       return;
     }
@@ -9190,7 +9596,7 @@
     }
     refreshExplorer(true);
     scmDirty = true;
-    if (activeSidebarView === 'scm') refreshSidebarDataViews(false);
+    refreshSidebarDataViews(false);
     // The folder that received the entry opens so the result is seen
     // (VS Code reveals a pasted / created entry the same way).
     const target =
@@ -9365,15 +9771,116 @@
    * Delete on every row.  Items that only make sense for one entry
    * (New File, Paste, Rename, Find in Folder) are left out.
    */
-  function explorerMultiMenuItems(rows) {
+  /** Whether *row* is a top-level Explorer folder. */
+  function explorerRowIsRoot(row) {
+    return (
+      row.classList.contains('is-root') ||
+      row.dataset.explorerPath === explorerRowRoot(row)
+    );
+  }
+
+  /**
+   * The Cut and Copy items of an Explorer menu acting on *rows*: a
+   * top-level folder cannot be cut or copied.
+   */
+  function explorerCutCopyItems(rows) {
     const paths = rows.map(r => r.dataset.explorerPath);
+    const enabled = !rows.some(explorerRowIsRoot);
+    return [
+      {
+        id: 'cut',
+        label: 'Cut',
+        key: keyLabel('Ctrl+X', '\u2318X'),
+        enabled: enabled,
+        run: () => {
+          explorerClipboard = {paths: paths, cut: true};
+        },
+      },
+      {
+        id: 'copy',
+        label: 'Copy',
+        key: keyLabel('Ctrl+C', '\u2318C'),
+        enabled: enabled,
+        run: () => {
+          explorerClipboard = {paths: paths, cut: false};
+        },
+      },
+    ];
+  }
+
+  /** The Copy Path and Copy Relative Path items for *rows*. */
+  function explorerCopyPathItems(rows) {
+    return [
+      {
+        id: 'copy-path',
+        label: 'Copy Path',
+        key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
+        run: () =>
+          copyTextToClipboard(rows.map(r => r.dataset.explorerPath).join('\n')),
+      },
+      {
+        id: 'copy-relative-path',
+        label: 'Copy Relative Path',
+        key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
+        run: () =>
+          copyTextToClipboard(
+            rows
+              .map(r => {
+                return (
+                  explorerRelativePath(
+                    r.dataset.explorerPath,
+                    explorerRowRoot(r),
+                  ) || '.'
+                );
+              })
+              .join('\n'),
+          ),
+      },
+    ];
+  }
+
+  /**
+   * The Delete item for *rows*: asks first, since the server has no
+   * trash.  A top-level folder is removed from the Explorer instead
+   * (see explorerMenuItems), never deleted.
+   */
+  function explorerDeleteItem(rows) {
+    const what =
+      rows.length === 1
+        ? "'" +
+          (pathBaseName(rows[0].dataset.explorerPath) ||
+            rows[0].dataset.explorerPath) +
+          "'? The server has no trash, so it cannot be restored."
+        : rows.length +
+          ' items? The server has no trash, so they cannot be restored.';
+    return {
+      id: 'delete',
+      label: 'Delete',
+      key: keyLabel('Delete', '\u2318\u232B'),
+      enabled: !rows.some(explorerRowIsRoot),
+      run: () => {
+        confirmAction({
+          id: 'fs-delete',
+          message: 'Delete ' + what,
+          confirmLabel: 'Delete',
+          cancelLabel: 'Keep',
+          danger: true,
+          onConfirm: function () {
+            rows.forEach(r => {
+              sendFsAction({
+                action: 'delete',
+                path: r.dataset.explorerPath,
+                root: explorerRowRoot(r),
+              });
+            });
+          },
+        });
+      },
+    };
+  }
+
+  function explorerMultiMenuItems(rows) {
     const files = rows.filter(r => !r.classList.contains('is-dir'));
-    const hasRoot = rows.some(r => {
-      return (
-        r.classList.contains('is-root') ||
-        r.dataset.explorerPath === explorerRowRoot(r)
-      );
-    });
     const items = [];
     if (files.length) {
       items.push({
@@ -9403,77 +9910,11 @@
       });
       items.push({separator: true});
     }
-    items.push({
-      id: 'cut',
-      label: 'Cut',
-      key: keyLabel('Ctrl+X', '\u2318X'),
-      enabled: !hasRoot,
-      run: () => {
-        explorerClipboard = {paths: paths, cut: true};
-      },
-    });
-    items.push({
-      id: 'copy',
-      label: 'Copy',
-      key: keyLabel('Ctrl+C', '\u2318C'),
-      enabled: !hasRoot,
-      run: () => {
-        explorerClipboard = {paths: paths, cut: false};
-      },
-    });
+    items.push(...explorerCutCopyItems(rows));
     items.push({separator: true});
-    items.push({
-      id: 'copy-path',
-      label: 'Copy Path',
-      key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
-      run: () => copyTextToClipboard(paths.join('\n')),
-    });
-    items.push({
-      id: 'copy-relative-path',
-      label: 'Copy Relative Path',
-      key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
-      run: () =>
-        copyTextToClipboard(
-          rows
-            .map(r => {
-              return (
-                explorerRelativePath(
-                  r.dataset.explorerPath,
-                  explorerRowRoot(r),
-                ) || '.'
-              );
-            })
-            .join('\n'),
-        ),
-    });
+    items.push(...explorerCopyPathItems(rows));
     items.push({separator: true});
-    items.push({
-      id: 'delete',
-      label: 'Delete',
-      key: keyLabel('Delete', '\u2318\u232B'),
-      enabled: !hasRoot,
-      run: () => {
-        confirmAction({
-          id: 'fs-delete',
-          message:
-            'Delete ' +
-            rows.length +
-            ' items? The server has no trash, so they cannot be restored.',
-          confirmLabel: 'Delete',
-          cancelLabel: 'Keep',
-          danger: true,
-          onConfirm: function () {
-            rows.forEach(r => {
-              sendFsAction({
-                action: 'delete',
-                path: r.dataset.explorerPath,
-                root: explorerRowRoot(r),
-              });
-            });
-          },
-        });
-      },
-    });
+    items.push(explorerDeleteItem(rows));
     return items;
   }
 
@@ -9486,7 +9927,7 @@
     const path = row.dataset.explorerPath;
     const root = explorerRowRoot(row);
     const isDir = row.classList.contains('is-dir');
-    const isRoot = row.classList.contains('is-root') || path === root;
+    const isRoot = explorerRowIsRoot(row);
     const isWorkDir = isRoot && path === explorerRoot;
     const parent = isDir ? path : explorerParentPath(row);
     const name = pathBaseName(path) || path;
@@ -9580,24 +10021,7 @@
       });
       items.push({separator: true});
     }
-    items.push({
-      id: 'cut',
-      label: 'Cut',
-      key: keyLabel('Ctrl+X', '\u2318X'),
-      enabled: !isRoot,
-      run: () => {
-        explorerClipboard = {paths: [path], cut: true};
-      },
-    });
-    items.push({
-      id: 'copy',
-      label: 'Copy',
-      key: keyLabel('Ctrl+C', '\u2318C'),
-      enabled: !isRoot,
-      run: () => {
-        explorerClipboard = {paths: [path], cut: false};
-      },
-    });
+    items.push(...explorerCutCopyItems(rows));
     items.push({
       id: 'paste',
       label: 'Paste',
@@ -9616,18 +10040,7 @@
       },
     });
     items.push({separator: true});
-    items.push({
-      id: 'copy-path',
-      label: 'Copy Path',
-      key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
-      run: () => copyTextToClipboard(path),
-    });
-    items.push({
-      id: 'copy-relative-path',
-      label: 'Copy Relative Path',
-      key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
-      run: () => copyTextToClipboard(explorerRelativePath(path, root) || '.'),
-    });
+    items.push(...explorerCopyPathItems(rows));
     items.push({separator: true});
     if (isRoot) {
       // The top-level folder items VS Code's root menu ends with (Add
@@ -9668,26 +10081,7 @@
         });
       },
     });
-    items.push({
-      id: 'delete',
-      label: 'Delete',
-      key: keyLabel('Delete', '\u2318\u232B'),
-      run: () => {
-        confirmAction({
-          id: 'fs-delete',
-          message:
-            "Delete '" +
-            name +
-            "'? The server has no trash, so it cannot be restored.",
-          confirmLabel: 'Delete',
-          cancelLabel: 'Keep',
-          danger: true,
-          onConfirm: function () {
-            sendFsAction({action: 'delete', path: path, root: root});
-          },
-        });
-      },
-    });
+    items.push(explorerDeleteItem(rows));
     return items;
   }
 
@@ -9828,7 +10222,7 @@
     scmDirty = false;
     requestSourceControl(sidebarWorkDir());
     explorerDirty = true;
-    if (activeSidebarView === 'explorer') refreshSidebarDataViews(false);
+    refreshSidebarDataViews(false);
   }
 
   function handleGitShow(ev) {
@@ -9852,6 +10246,7 @@
         ev.base + ' \u2194 ' + short,
         text,
         'x.diff',
+        ev.tabId,
       );
       return;
     }
@@ -9862,6 +10257,7 @@
         pathBaseName(ev.path) + ' (' + short + ')',
         text,
         pathBaseName(ev.path),
+        ev.tabId,
       );
       return;
     }
@@ -9880,6 +10276,7 @@
             : ''),
       text,
       'x.diff',
+      ev.tabId,
     );
   }
 
@@ -10777,30 +11174,25 @@
     }
   }
 
-  /** Wire the activity bar, the Explorer and the Source Control view. */
-  function setupActivityBar() {
-    if (!activityBar) return;
-    activityBar.addEventListener('click', e => {
-      const btn = e.target.closest('.activity-btn');
-      if (btn && btn.dataset.view) setSidebarView(btn.dataset.view);
-    });
-    // Vertical tablist keyboard model: Up / Down (and Home / End) move
-    // between the buttons and select the view they land on.
-    activityBar.addEventListener('keydown', e => {
-      const btns = Array.from(activityBar.querySelectorAll('.activity-btn'));
-      const idx = btns.indexOf(e.target.closest('.activity-btn'));
-      if (idx < 0) return;
-      let next = -1;
-      if (e.key === 'ArrowDown') next = (idx + 1) % btns.length;
-      else if (e.key === 'ArrowUp')
-        next = (idx + btns.length - 1) % btns.length;
-      else if (e.key === 'Home') next = 0;
-      else if (e.key === 'End') next = btns.length - 1;
-      if (next < 0) return;
-      e.preventDefault();
-      btns[next].focus();
-      setSidebarView(btns[next].dataset.view);
-    });
+  /**
+   * Wire the Explorer and Source Control sections of the task-info
+   * panel (remote page only: the VS Code webview keeps them hidden).
+   * A section (re)loads its view when it is expanded; the loads that
+   * follow the panel coming back on screen are triggered by
+   * setMetaPanelHidden and setMetaDrawerOpen.
+   */
+  function setupWorkspaceViews() {
+    if (!document.body.classList.contains('remote-chat')) return;
+    for (const section of [explorerSection, scmSection]) {
+      if (!section) continue;
+      section.hidden = false;
+      const toggle = section.querySelector('.meta-section-toggle');
+      // Runs after the metasections block's own click listener, which
+      // toggled the section: an expanded view loads now.
+      if (toggle)
+        toggle.addEventListener('click', () => refreshSidebarDataViews(false));
+    }
+    applyMetaSectionLayout();
     const explorerRefresh = document.getElementById('explorer-refresh');
     if (explorerRefresh) {
       explorerRefresh.addEventListener('click', () => refreshExplorer(true));
@@ -10954,9 +11346,9 @@
         onScmActivate(item);
       });
     }
-    restoreSidebarView();
+    refreshSidebarDataViews(false);
   }
-  // activitybar-coverage:end
+  // workspaceviews-coverage:end
 
   // The welcome screen lives inside the scrolling chat container, so
   // whatever scroll offset the previous content left behind (a finished
@@ -10985,25 +11377,86 @@
 
   refreshWelcomeLayout();
 
-  function setTaskText(text) {
-    if (!taskPanel || !taskPanelText) return;
+  /**
+   * Record *text* as the task the reader is looking at (the tab's own
+   * task, or the neighbouring task scrolled into view).
+   *
+   * The active tab's label (and, in editor-tabs mode, the editor tab's
+   * title) names it, see tabLabel. Only a real change repaints:
+   * scrolling calls this on every event.
+   *
+   * @param {string} text The task text; '' when no task is shown.
+   */
+  function setShownTask(text) {
     const t = (text || '').trim();
-    const changed =
-      t !== taskPanelText.textContent ||
-      !!t !== taskPanel.classList.contains('visible');
-    if (t) {
-      taskPanelText.textContent = t;
-      taskPanelText.setAttribute('data-tooltip', t);
-      taskPanel.classList.add('visible');
-    } else {
-      taskPanelText.textContent = '';
-      taskPanelText.removeAttribute('data-tooltip');
-      taskPanel.classList.remove('visible');
+    if (t === shownTaskName) return;
+    shownTaskName = t;
+    renderTabBar();
+  }
+
+  /**
+   * The event panel that opens a task's transcript with the task's own
+   * text: the first panel of the tab's transcript, of a neighbouring
+   * task spliced in by scrolling, and of every task of a shared page.
+   * A regular collapsible event panel (click-to-fold header, copy button) that
+   * scrolls with the rest of the thread; the collapse passes leave it
+   * open, so the thread reads as each task's text followed by its
+   * events.
+   *
+   * @param {string} text The task text.
+   * @returns {HTMLElement} The `.ev.task-panel` element.
+   */
+  function createTaskPanel(text) {
+    return createUserTextPanel('task-panel', 'Task', text, undefined);
+  }
+
+  /**
+   * The panel for a message the user typed into a running task (the
+   * daemon echoes it as a `prompt` event flagged `steer`): the task
+   * and the steering messages are both the user's words, so it looks
+   * like the task panel, headed "Message". Like the task panel, no
+   * automatic pass folds it (panelStaysOpen).
+   *
+   * @param {string} text The message text.
+   * @param {*} ts The event's timestamp, for the panel's time badge.
+   * @returns {HTMLElement} The `.ev.user-msg` element.
+   */
+  function createUserMessagePanel(text, ts) {
+    return createUserTextPanel('user-msg', 'Message', text, ts);
+  }
+
+  function createUserTextPanel(cls, label, text, ts) {
+    const el = mkEl('div', 'ev ' + cls);
+    const header = mkEl('div', 'task-panel-h');
+    header.textContent = label;
+    const body = mkEl('div', 'task-panel-text');
+    body.textContent = text;
+    el.appendChild(header);
+    el.appendChild(body);
+    el.dataset.rawText = text;
+    addCollapse(el, header, ts);
+    return el;
+  }
+
+  /**
+   * Put the tab's own task panel at the top of *root* (the live
+   * `#output` or a hidden tab's fragment), replacing the one already
+   * there: a transcript starts with its task's text.
+   *
+   * @param {ParentNode} root The transcript root.
+   * @param {string} text The task text; '' removes the panel.
+   */
+  function setOwnTaskPanel(root, text) {
+    if (!root) return;
+    const kids = root.children;
+    for (let i = kids.length - 1; i >= 0; i--) {
+      if (kids[i].classList.contains('task-panel')) root.removeChild(kids[i]);
     }
-    // The active tab's label (and, in editor-tabs mode, the editor
-    // tab's title) names what the panel names, see tabLabel. Only a
-    // real change repaints: scrolling calls this on every event.
-    if (changed) renderTabBar();
+    const t = (text || '').trim();
+    if (!t) return;
+    const first =
+      root.firstChild === welcome ? welcome.nextSibling : root.firstChild;
+    root.insertBefore(createTaskPanel(t), first);
   }
 
   // taskinfo-coverage:start
@@ -11029,9 +11482,9 @@
   }
 
   /**
-   * A task's settings info as HTML for the STATIC task panels of the
-   * shared page (the live panel shows none: the Task Info panel carries
-   * them) — the same shape the history sidebar's info rows use: a
+   * A task's settings info as HTML for the task panels of the shared
+   * page (the live panels show none: the Task Info panel carries them)
+   * — the same shape the history sidebar's info rows use: a
    * `workDir • model • wt • parallel • budget • started` line and a
    * `chat • task • parent • subagent` ids line.
    *
@@ -11127,8 +11580,7 @@
   function metaAgentText(s) {
     if (!s || typeof s !== 'object') return '\u2014';
     const parts = [];
-    if (s.sea)
-      parts.push(String(s.sea) + (s.kind ? ' (' + String(s.kind) + ')' : ''));
+    if (s.sea) parts.push(String(s.sea) + (s.channel ? ' (channel)' : ''));
     if (s.tool_profile) parts.push('tools ' + String(s.tool_profile));
     if (typeof s.timeout === 'number')
       parts.push('timeout ' + String(s.timeout) + 's');
@@ -11168,8 +11620,8 @@
    * Parallel mode, Chat id, Task id and — when the task has one —
    * Parent task.  This is the choke point every task-settings repaint (tab
    * switch, task_settings event, scroll into a neighbouring task) goes
-   * through, so the items always describe the task the static task
-   * panel names.  A task without settings falls back to the tab's
+   * through, so the items always describe the task the tab label
+   * names.  A task without settings falls back to the tab's
    * pinned workdir and the configured default budget, and shows '—'
    * for the rest.  The info subpanel's poll target follows the same
    * tab (setMetaInfoTarget), keeping the rows and the task update on
@@ -11235,8 +11687,8 @@
 
   /**
    * Adopt *s* as the active tab's own task's settings and show them.
-   * Mirrors setTaskText: callers that only LEND the panel to a
-   * neighbouring task use updateMetaTaskDetails directly instead.
+   * Callers that only LEND the Task Info rows to a neighbouring task
+   * use updateMetaTaskDetails directly instead.
    */
   function setTaskSettings(s) {
     currentTaskSettings = s && typeof s === 'object' ? s : null;
@@ -11253,9 +11705,10 @@
    * preview, so any event of a past task can be opened by a click.
    * Left as they are: the panels of a running task, the result, a
    * panel showing an image, a `/ask` answer, a panel the user opened
-   * (`user-pinned`), a panel that finished on screen (`_liveFinished`)
-   * and the panels a `summary` tool call adopted (`.summary-sub`, shown
-   * when the summary panel is opened).
+   * (`user-pinned`), the panels a `summary` tool call adopted
+   * (`.summary-sub`, shown when the summary panel is opened) and the
+   * panels of a finished task's Trajectory (`.trajectory-sub`, folded
+   * by foldTrajectory when the task ended).
    *
    * @param {string} taskName Only panels of this task are folded; a
    *     falsy name folds every task on screen.
@@ -11272,47 +11725,19 @@
         ? adjacentContainer.dataset.task || ''
         : currentTaskName;
       if (taskName && panelTask !== taskName) continue;
-      if (
-        inRunning ||
-        p.classList.contains('rc') ||
-        panelShowsImage(p) ||
-        answerPanelStaysOpen(p)
-      )
-        continue;
-      // livedone-coverage:start
-      // The panel was on screen when its task finished: the finish must
-      // not explicitly collapse any event panel, so the panel keeps the
-      // exact state the live stream left it in — untouched — until a
-      // replay rebuilds the transcript (markPanelsLiveFinished).
-      if (p._liveFinished) continue;
-      // livedone-coverage:end
-      if (p.closest('.summary-sub')) continue;
+      if (inRunning || panelNeverFolds(p)) continue;
+      if (p.closest('.summary-sub') || p.closest('.trajectory-sub')) continue;
       if (p.classList.contains('user-pinned')) continue;
       // Already folded: its preview was built when it collapsed and
       // its nested fan-outs were folded with it.
       if (p.classList.contains('collapsed')) continue;
-      p.classList.add('collapsed');
-      collapsePreview(p);
-      syncRunParallelPanel(p);
-      collapseNestedRunParallel(p);
+      foldPanel(p);
     }
   }
   // chevron-coverage:end
 
   // drawer-coverage:start
   function applyDrawerState() {
-    if (taskPanel && taskPanelDrawerBtn) {
-      taskPanel.classList.toggle('drawer-collapsed', taskDrawerCollapsed);
-      taskPanelDrawerBtn.setAttribute(
-        'aria-expanded',
-        taskDrawerCollapsed ? 'false' : 'true',
-      );
-      const taskLabel = taskDrawerCollapsed
-        ? 'Expand task panel'
-        : 'Collapse task panel';
-      taskPanelDrawerBtn.setAttribute('aria-label', taskLabel);
-      taskPanelDrawerBtn.removeAttribute('data-tooltip');
-    }
     if (inputAreaEl && inputDrawerBtn) {
       inputAreaEl.classList.toggle('drawer-collapsed', inputDrawerCollapsed);
       inputDrawerBtn.setAttribute(
@@ -11327,15 +11752,6 @@
     }
   }
 
-  if (taskPanelDrawerBtn) {
-    taskPanelDrawerBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      taskDrawerCollapsed = !taskDrawerCollapsed;
-      taskDrawerUserSet = true;
-      applyDrawerState();
-      persistTabState();
-    });
-  }
   if (inputDrawerBtn) {
     inputDrawerBtn.addEventListener('click', e => {
       e.stopPropagation();
@@ -11445,41 +11861,14 @@
   }
   // launchswitch-coverage:end
 
-  function fallbackCopyText(text) {
-    return window.PanelCopy.fallbackCopyText(text);
-  }
-
-  if (taskPanelCopy && taskPanelText) {
-    let copyResetTimer = null;
-    taskPanelCopy.addEventListener('click', async e => {
-      e.stopPropagation();
-      const text = (taskPanelText.textContent || '').trim();
-      if (!text) return;
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch {
-        fallbackCopyText(text);
-      }
-      const iconCopy = taskPanelCopy.querySelector('.icon-copy');
-      const iconCheck = taskPanelCopy.querySelector('.icon-check');
-      if (iconCopy && iconCheck) {
-        iconCopy.style.display = 'none';
-        iconCheck.style.display = '';
-      }
-      taskPanelCopy.classList.add('copied');
-      if (copyResetTimer) clearTimeout(copyResetTimer);
-      copyResetTimer = setTimeout(() => {
-        if (iconCopy && iconCheck) {
-          iconCopy.style.display = '';
-          iconCheck.style.display = 'none';
-        }
-        taskPanelCopy.classList.remove('copied');
-      }, 1500);
-    });
-  }
-
   function syncClearBtn() {
     if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
+  }
+
+  /** Grow or shrink the composer to fit its text. */
+  function autosizeComposer() {
+    inp.style.height = 'auto';
+    inp.style.height = inp.scrollHeight + 'px';
   }
 
   let state = mkS();
@@ -11496,7 +11885,6 @@
   function mkS() {
     return {
       thinkEl: null,
-      thinkCnt: null,
       thinkBuf: '',
       thinkRaf: 0,
       txtEl: null,
@@ -11537,22 +11925,7 @@
     newestLoadedTaskId = currentTaskId;
     noPrevTask = false;
     noNextTask = false;
-    overscrollAccum = 0;
-    overscrollDir = '';
-    if (overscrollTimer) {
-      clearTimeout(overscrollTimer);
-      overscrollTimer = null;
-    }
-    // taskwheel-coverage:start
-    taskWheelPendingDir = '';
-    taskWheelLastTarget = null;
-    taskWheelAccum = 0;
-    taskWheelDir = '';
-    if (taskWheelTimer) {
-      clearTimeout(taskWheelTimer);
-      taskWheelTimer = null;
-    }
-    // taskwheel-coverage:end
+    pinnedRegion = null;
   }
 
   function showAdjacentLoader(direction) {
@@ -11653,18 +12026,43 @@
     return container;
   }
 
+  /**
+   * The element the reader's place is measured against while the thread
+   * changes above them: the first transcript child under the loader.
+   *
+   * @returns {Element|null} Null for an empty transcript.
+   */
+  function readerAnchor() {
+    for (let el = O.firstElementChild; el; el = el.nextElementSibling)
+      if (el.id !== 'adjacent-loader' && el !== welcome) return el;
+    return null;
+  }
+
+  /**
+   * Keep the reader's place after the thread changed above *anchor*:
+   * scrollTop follows the element's movement since it sat at *top*.
+   * Measuring the element rather than the scroll height also absorbs
+   * the browser's own scroll anchoring, which may already have moved
+   * scrollTop for part of the change (and never does at scrollTop 0).
+   *
+   * @param {Element|null} anchor The element readerAnchor() returned.
+   * @param {number} top Its viewport top before the change.
+   */
+  function restoreReaderAnchor(anchor, top) {
+    if (anchor) O.scrollTop += anchor.getBoundingClientRect().top - top;
+  }
+
   function renderAdjacentTask(direction, task, events, taskId, ownerTabId) {
+    const anchor = direction === 'prev' ? readerAnchor() : null;
+    const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
     removeAdjacentLoader();
     adjacentLoading = false;
-    // taskwheel-coverage:start
-    const wheelScrollPending = taskWheelPendingDir === direction;
-    taskWheelPendingDir = '';
-    // taskwheel-coverage:end
 
     const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
     if (!hasTaskId && !task) {
       if (direction === 'prev') noPrevTask = true;
       else noNextTask = true;
+      restoreReaderAnchor(anchor, anchorTop);
       return;
     }
 
@@ -11672,7 +12070,7 @@
 
     // The tab-switch reset rewinds the pagination anchors while spliced
     // `.adjacent-task` containers survive in the restored transcript, so a
-    // later overscroll can fetch a task that is already on screen. Splicing
+    // later scroll can fetch a task that is already on screen. Splicing
     // it again would stack duplicate regions; just repair the anchor.
     if (hasTaskId) {
       const rendered = Array.from(O.querySelectorAll('.adjacent-task')).some(
@@ -11681,6 +12079,7 @@
       if (rendered) {
         if (direction === 'prev') oldestLoadedTaskId = taskId;
         else newestLoadedTaskId = taskId;
+        restoreReaderAnchor(anchor, anchorTop);
         return;
       }
     }
@@ -11694,32 +12093,28 @@
     if (hasTaskId) container.dataset.taskId = String(taskId);
     if (!container.firstChild) {
       const ph = mkEl('div', 'adjacent-task-placeholder');
-      ph.textContent = taskLabel + ' — (no output recorded)';
+      ph.textContent = '(no output recorded)';
       container.appendChild(ph);
     }
+    // The thread reads as each task's text followed by its events: the
+    // neighbour opens with its own task panel, like the tab's own task.
+    container.insertBefore(createTaskPanel(taskLabel), container.firstChild);
 
     if (direction === 'prev') {
-      const prevScrollHeight = O.scrollHeight;
       O.insertBefore(container, O.firstChild);
-      const newScrollHeight = O.scrollHeight;
-      O.scrollTop += newScrollHeight - prevScrollHeight;
       if (hasTaskId) oldestLoadedTaskId = taskId;
     } else {
       O.appendChild(container);
       if (hasTaskId) newestLoadedTaskId = taskId;
     }
+    // Folding the neighbour's panels changes its height, so the
+    // reader's place is restored only once both are done.
     applyChevronState(taskLabel);
-    // taskwheel-coverage:start
-    if (wheelScrollPending)
-      scrollTaskRegionToTop({
-        task: taskLabel,
-        first: container,
-        last: container,
-      });
-    // taskwheel-coverage:end
+    restoreReaderAnchor(anchor, anchorTop);
     // Splicing the transcript changes what is on screen even when nothing
-    // scrolls — a short transcript cannot scroll at all — so the panel is
-    // re-derived here rather than waiting for a scroll that may never come.
+    // scrolls — a short transcript cannot scroll at all — so the shown
+    // task is re-derived here rather than waiting for a scroll that may
+    // never come.
     updateVisibleTask();
   }
 
@@ -11780,8 +12175,7 @@
     if (/\S$/.test(inp.value)) inp.value += ' ';
     clearGhost();
     syncClearBtn();
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     return true;
   }
 
@@ -11792,8 +12186,7 @@
     if (histCache.length > 0 && (histIdx >= 0 || !inp.value)) {
       histIdx = Math.min(histIdx + 1, histCache.length - 1);
       inp.value = histCache[histIdx];
-      inp.style.height = 'auto';
-      inp.style.height = inp.scrollHeight + 'px';
+      autosizeComposer();
       syncClearBtn();
       clearGhost();
       return true;
@@ -11805,8 +12198,7 @@
     if (histIdx < 0) return false;
     histIdx--;
     inp.value = histIdx >= 0 ? histCache[histIdx] : '';
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     syncClearBtn();
     clearGhost();
     return true;
@@ -11883,10 +12275,6 @@
   let tooltipTimer = null;
   function showTooltipFor(target) {
     tooltipEl.textContent = target.dataset.tooltip;
-    tooltipEl.classList.toggle(
-      'task-panel-tooltip',
-      target.id === 'task-panel-text',
-    );
     const rect = target.getBoundingClientRect();
     // Measure at the origin first: a fixed box placed near the right
     // edge shrinks to the room left of that edge (a right-sidebar
@@ -12435,17 +12823,10 @@
     });
   }
 
-  function toggleThink(el) {
-    const p = el.parentElement;
-    const hidden = p.querySelector('.cnt').classList.toggle('hidden');
-    el.querySelector('.arrow').classList.toggle('collapsed', hidden);
-    el.setAttribute('aria-expanded', hidden ? 'false' : 'true');
-  }
-
   /**
-   * Enter / Space on a focused disclosure header (a thinking block's
-   * label or a collapsible panel's header) act like a click, so the
-   * header is operable without a mouse.
+   * Enter / Space on a focused disclosure header (a collapsible
+   * panel's header) act like a click, so the header is operable
+   * without a mouse.
    */
   function onDisclosureHeaderKey(e) {
     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -12454,32 +12835,12 @@
     e.currentTarget.click();
   }
 
-  // The thinking block's label is rendered from an HTML string whose
-  // inline onclick="toggleThink(this)" the webview's CSP never runs
-  // (the shared, CSP-free page exported from this DOM still needs it),
-  // so its click is delegated here -- unless the inline handler is
-  // live (`onclick` reads null when CSP blocked it), which would make
-  // the click toggle twice.
-  document.addEventListener('click', e => {
-    if (!e.target || typeof e.target.closest !== 'function') return;
-    const lbl = e.target.closest('.ev.think > .lbl');
-    if (lbl && typeof lbl.onclick !== 'function') toggleThink(lbl);
-  });
-  document.addEventListener('keydown', e => {
-    if (!e.target || typeof e.target.matches !== 'function') return;
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    if (!e.target.matches('.ev.think > .lbl')) return;
-    e.preventDefault();
-    e.target.click();
-  });
-
   function collectText(node) {
     if (node.nodeType === 3) return node.textContent || '';
     if (node.nodeType === 1 && node.classList) {
       if (
         node.classList.contains('panel-copy-btn') ||
         node.classList.contains('panel-stop-btn') ||
-        node.classList.contains('collapse-chv') ||
         node.classList.contains('collapse-preview') ||
         node.classList.contains('panel-ts') ||
         node.classList.contains('panel-time')
@@ -12509,31 +12870,66 @@
     }
   }
 
+  /**
+   * The preview a collapsed Trajectory panel shows: how many event
+   * panels it holds (their text would run to the whole transcript).
+   *
+   * @param {Element} panelEl The `.trajectory` panel.
+   * @returns {string} "N events".
+   */
+  function trajectoryPreviewText(panelEl) {
+    const sub = panelEl.querySelector(':scope > .trajectory-sub');
+    const n = sub ? sub.children.length : 0;
+    return n + (n === 1 ? ' event' : ' events');
+  }
+
   function collapsePreview(panelEl) {
     syncCollapseAria(panelEl);
     const prev = panelEl.querySelector('.collapse-preview');
     if (!prev) return;
-    if (panelEl.classList.contains('tc-summary')) {
-      prev.textContent = '';
-      return;
-    }
-    if (!panelEl.classList.contains('collapsed')) {
-      prev.textContent = '';
-      return;
-    }
+    prev.textContent = collapsePreviewText(panelEl);
+  }
+
+  /** The text a folded panel's header shows after its title ('' when open). */
+  function collapsePreviewText(panelEl) {
+    if (panelEl.classList.contains('tc-summary')) return '';
+    if (!panelEl.classList.contains('collapsed')) return '';
+    if (panelEl.classList.contains('trajectory'))
+      return trajectoryPreviewText(panelEl);
+    const brief = briefPreviewText(panelEl);
+    if (brief !== null) return brief;
     let txt = '';
     for (let i = 0; i < panelEl.children.length; i++) {
       const ch = panelEl.children[i];
+      // The header (and anything wrapping one) stays out of its own
+      // preview; the preview summarizes the body.
       if (
-        ch.classList.contains('collapse-chv') ||
-        ch === prev ||
-        ch.querySelector('.collapse-chv')
+        ch.classList.contains('collapse-header') ||
+        ch.querySelector('.collapse-header')
       )
         continue;
       txt += collectText(ch) + ' ';
     }
-    txt = txt.replace(/\s+/g, ' ').trim();
-    prev.textContent = txt;
+    return txt.replace(/\s+/g, ' ').trim();
+  }
+
+  /**
+   * The one argument a folded tool panel's header shows after the tool
+   * name: a Bash call's description ("Bash list the files"), a Read or
+   * Write call's path ("Read src/app.py"), with no "description:" or
+   * "path:" label in between.
+   *
+   * @param {Element} panelEl The collapsed panel.
+   * @returns {string|null} The argument text, or null for a panel whose
+   *     preview summarizes its whole body.
+   */
+  function briefPreviewText(panelEl) {
+    let sel = null;
+    if (panelEl.classList.contains('tc-bash')) sel = '.tc-arg-desc .tc-arg-val';
+    else if (panelEl.classList.contains('tc-path')) sel = '.tc-arg-path .tp';
+    if (!sel) return null;
+    const el = panelEl.querySelector(':scope > .tc-b > ' + sel);
+    return el ? el.textContent.trim() : null;
   }
 
   /**
@@ -12573,10 +12969,7 @@
 
   function addCollapse(panelEl, headerEl, ts) {
     panelEl.classList.add('collapsible');
-    const chv = mkEl('span', 'collapse-chv');
-    chv.textContent = '\u25BE';
     const prev = mkEl('span', 'collapse-preview');
-    headerEl.insertBefore(chv, headerEl.firstChild);
     headerEl.appendChild(prev);
     headerEl.classList.add('collapse-header');
     headerEl.style.cursor = 'pointer';
@@ -12869,12 +13262,11 @@
     const oldId = tab.id;
     const panel = _rpTabPanel.get(oldId) || null;
     tab.id = newTabId;
-    // Its nested sub-agents, the files it opened and any group bookmark
-    // follow the rename, so they stay in the chat's group (rootTabOf).
+    // Its nested sub-agents and the files it opened follow the rename,
+    // so they stay in the chat's group (rootTabOf).
     for (const t of tabs) {
       if (t.parentTabId === oldId) t.parentTabId = newTabId;
       if (t.ownerTabId === oldId) t.ownerTabId = newTabId;
-      if (t.groupActiveId === oldId) t.groupActiveId = newTabId;
     }
     if (panel) {
       _rpTabPanel.delete(oldId);
@@ -13137,6 +13529,33 @@
    *
    * @param {Element} panelEl The fan-out panel.
    */
+  /**
+   * Whether the software never folds panel *p*: a result card, the
+   * task's own text (it heads its thread like a user message), a panel
+   * showing an image or video, or a `/ask` question and its answer (a
+   * reloaded, shared or neighbouring transcript shows it exactly as the
+   * live one did; see panelStaysOpen).
+   */
+  function panelNeverFolds(p) {
+    return (
+      p.classList.contains('rc') ||
+      p.classList.contains('task-panel') ||
+      panelShowsMedia(p) ||
+      panelStaysOpen(p)
+    );
+  }
+
+  /**
+   * Fold event panel *p* the way the auto-fold does: build its preview,
+   * refresh a fan-out's summary and fold the fan-outs it hides.
+   */
+  function foldPanel(p) {
+    p.classList.add('collapsed');
+    collapsePreview(p);
+    syncRunParallelPanel(p);
+    collapseNestedRunParallel(p);
+  }
+
   function rpCollapsePanel(panelEl) {
     if (!panelEl.classList.contains('collapsed')) {
       panelEl.classList.add('collapsed');
@@ -13155,36 +13574,45 @@
 
   // imagepanel-coverage:start
   /**
-   * Whether *panel* shows a picture (a tool result's images, see
-   * appendResultImages).  Such a panel is never folded or hidden by the
-   * automatic passes below -- on any surface, a screenshot the agent
-   * took or a chart it produced stays in view; only the user's own
-   * click on the chevron collapses it.
+   * Whether a panel contains an image or video, including rendered
+   * Markdown and HTML. Automatic folding leaves these panels readable;
+   * the user can still fold them by clicking their header.
+   *
+   * @param {Element} panel The transcript panel.
+   * @returns {boolean} Whether the panel contains visual media.
    */
-  function panelShowsImage(panel) {
-    return !!(
-      panel &&
-      panel.querySelector &&
-      panel.querySelector('img.tr-img')
-    );
+  function panelShowsMedia(panel) {
+    return !!panel.querySelector('img, video');
   }
   // imagepanel-coverage:end
 
   /**
-   * True for the panel of a `/ask` answer (an `ask_answer` event).
+   * True for a panel that no automatic pass ever folds or hides: a
+   * Thoughts panel (`llm-panel`, the agent's words), a message the
+   * user typed into the running task (`user-msg`), a `/ask` answer
+   * (an `ask_answer` event) or an ask_user_question "Question" panel.
+   * The user's response is a separate `user-msg` panel.
    *
-   * The answer is something the user asked for while the task ran, so
-   * no automatic pass ever folds or hides it: not the streaming sweep
-   * (collapseOlderPanels), not a replay or share export
-   * (collapseAllExceptResult), not the finished-task digest
-   * (applyChevronState), and a `summary` tool call leaves it out of
-   * the panels it adopts. Only the user folds it, by its header.
+   * These are what the agent said and what the user said or asked for
+   * while the task ran, so they stay readable on any surface the tab
+   * is loaded on: not the streaming sweep (collapseOlderPanels), not a
+   * replay or share export (collapseAllExceptResult), not the
+   * finished-task digest (applyChevronState), and a `summary` tool call
+   * leaves them out of the panels it adopts -- except the Thoughts
+   * panels, which the summary does fold (it recounts those very
+   * steps). Otherwise only the user folds them, by their header.
    *
    * @param {Element} panel A `.collapsible` panel.
-   * @returns {boolean} Whether *panel* is an answer panel.
+   * @returns {boolean} Whether *panel* is a thoughts, user message,
+   *     answer or question panel.
    */
-  function answerPanelStaysOpen(panel) {
-    return panel.classList.contains('ask-answer');
+  function panelStaysOpen(panel) {
+    return (
+      panel.classList.contains('llm-panel') ||
+      panel.classList.contains('user-msg') ||
+      panel.classList.contains('ask-answer') ||
+      panel.classList.contains('tc-question')
+    );
   }
 
   function collapseAllExceptResult(container, ownerTabId) {
@@ -13192,12 +13620,7 @@
     const panels = container.querySelectorAll('.collapsible');
     for (let i = 0; i < panels.length; i++) {
       const p = panels[i];
-      if (p.classList.contains('rc')) continue;
-      if (panelShowsImage(p)) continue;
-      // A `/ask` answer is never folded by the software (see
-      // answerPanelStaysOpen): a reloaded, shared or neighbouring
-      // transcript shows it exactly as the live one did.
-      if (answerPanelStaysOpen(p)) continue;
+      if (panelNeverFolds(p)) continue;
       if (p.classList.contains('tc-run-parallel')) {
         rpAdoptOpenSubagents(p, ownerId);
         // A fan-out still running when its task's own transcript is
@@ -13215,10 +13638,7 @@
           continue;
       }
       if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
-      p.classList.add('collapsed');
-      collapsePreview(p);
-      syncRunParallelPanel(p);
-      collapseNestedRunParallel(p);
+      foldPanel(p);
     }
   }
 
@@ -13280,21 +13700,11 @@
       // rebuilding it from the panel's DOM on every event is the
       // quadratic cost that freezes long transcripts.
       if (p.classList.contains('collapsed')) continue;
-      if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
-        continue;
-      // A `/ask` answer the user is reading while the task keeps
-      // streaming: the next event must not fold it away.
-      if (answerPanelStaysOpen(p)) continue;
-      // A question the user has not answered yet must stay readable.
-      if (p.classList.contains('tc-question-pending')) continue;
-      if (panelShowsImage(p)) continue;
+      if (p.classList.contains('user-pinned') || panelNeverFolds(p)) continue;
       if (p.classList.contains('tc-run-parallel'))
         rpAdoptOpenSubagents(p, tabId);
       if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
-      p.classList.add('collapsed');
-      collapsePreview(p);
-      syncRunParallelPanel(p);
-      collapseNestedRunParallel(p);
+      foldPanel(p);
     }
   }
 
@@ -13379,10 +13789,10 @@
       '<div class="rc-h"><h3>' +
       esc(titleOverride || 'Result') +
       '</h3><div class="rs">' +
-      '<span>Tokens <b>' +
+      '<span>Tokens <b class="rs-tokens">' +
       fmtTokens(ev.total_tokens || 0) +
       '</b></span>' +
-      '<span>Cost <b>' +
+      '<span>Cost <b class="rs-cost">' +
       esc(fmtCost(ev.cost || 'N/A')) +
       '</b></span>' +
       '</div></div><div class="rc-body md-body' +
@@ -13463,38 +13873,48 @@
     return el;
   }
 
-  window.toggleThink = toggleThink;
+  // Largest edit the line diff aligns by LCS; a bigger one (an Edit
+  // tool call rewriting thousands of lines) is shown as the old block
+  // removed and the new block added, since the (m+1)*(n+1) table would
+  // otherwise take hundreds of megabytes and freeze the webview.
+  const LINE_DIFF_MAX_CELLS = 16000000;
 
   function lineDiff(a, b) {
     const al = a.split('\n'),
       bl = b.split('\n'),
       m = al.length,
       n = bl.length;
-    const dp = [];
-    for (let i = 0; i <= m; i++) {
-      dp[i] = new Array(n + 1);
-      dp[i][0] = 0;
+    const w = n + 1;
+    const ops = [];
+    if ((m + 1) * w > LINE_DIFF_MAX_CELLS) {
+      for (let i = 0; i < m; i++) ops.push({t: '-', o: al[i]});
+      for (let j = 0; j < n; j++) ops.push({t: '+', n: bl[j]});
+      return ops;
     }
-    for (let j = 0; j <= n; j++) dp[0][j] = 0;
+    // dp[i * w + j] is the LCS length of al[0..i) and bl[0..j); row and
+    // column 0 stay at their initial 0.
+    const dp = new Int32Array((m + 1) * w);
     for (let i = 1; i <= m; i++)
       for (let j = 1; j <= n; j++)
-        dp[i][j] =
+        dp[i * w + j] =
           al[i - 1] === bl[j - 1]
-            ? dp[i - 1][j - 1] + 1
-            : Math.max(dp[i - 1][j], dp[i][j - 1]);
-    const ops = [];
+            ? dp[(i - 1) * w + j - 1] + 1
+            : Math.max(dp[(i - 1) * w + j], dp[i * w + j - 1]);
     let ci = m,
       cj = n;
     while (ci > 0 || cj > 0) {
       if (ci > 0 && cj > 0 && al[ci - 1] === bl[cj - 1]) {
-        ops.unshift({t: '=', o: al[--ci], n: bl[--cj]});
-      } else if (cj > 0 && (ci === 0 || dp[ci][cj - 1] >= dp[ci - 1][cj])) {
-        ops.unshift({t: '+', n: bl[--cj]});
+        ops.push({t: '=', o: al[--ci], n: bl[--cj]});
+      } else if (
+        cj > 0 &&
+        (ci === 0 || dp[ci * w + cj - 1] >= dp[(ci - 1) * w + cj])
+      ) {
+        ops.push({t: '+', n: bl[--cj]});
       } else {
-        ops.unshift({t: '-', o: al[--ci]});
+        ops.push({t: '-', o: al[--ci]});
       }
     }
-    return ops;
+    return ops.reverse();
   }
 
   function hlInline(oldL, newL) {
@@ -13595,7 +14015,7 @@
     // imagepanel-coverage:start
     // The panel now shows a picture: if an automatic pass folded it
     // before the result arrived (an older panel of a streaming
-    // transcript), open it again -- see panelShowsImage.
+    // transcript), open it again -- see panelShowsMedia.
     const panel = container.closest ? container.closest('.collapsible') : null;
     if (panel && panel.classList.contains('collapsed')) {
       panel.classList.remove('collapsed');
@@ -13612,7 +14032,7 @@
   // event panel follows its own tail as streamed text appears inside
   // it, unless that subpanel's own user scroll lock is engaged.
   const AUTO_SCROLL_SUBPANEL_SEL =
-    '.think, .bash-panel-content, .llm-panel, .tc-b, .tr, ' +
+    '.bash-panel-content, .llm-panel, .tc-b, .tr, ' +
     '.prompt-body, .system-prompt-body';
 
   function scrollPanelToEnd(el) {
@@ -13767,6 +14187,34 @@
   }
   // autoscroll-coverage:end
 
+  /** Flush the buffered thinking text of *tState* into its `.think` block. */
+  function appendThinkText(tState) {
+    const el = tState.thinkEl;
+    const last = el.lastChild;
+    if (last && last.nodeType === 3) last.appendData(tState.thinkBuf);
+    else el.appendChild(document.createTextNode(tState.thinkBuf));
+    tState.thinkBuf = '';
+  }
+
+  /**
+   * A panel body of class *cls* holding *raw* rendered as Markdown
+   * (highlighted, file paths linkified) — or as plain text without
+   * marked — with the raw text kept for the copy button.
+   */
+  function markdownBody(cls, raw, workDir, ownerTabId) {
+    const el = mkEl('div', cls);
+    if (typeof marked !== 'undefined' && raw) {
+      el.classList.add('md-body');
+      el.innerHTML = kissSanitize(marked.parse(raw));
+      hlBlock(el);
+      linkifyFilePaths(el, workDir, ownerTabId);
+    } else {
+      el.textContent = raw;
+    }
+    el.dataset.rawText = raw;
+    return el;
+  }
+
   function handleOutputEvent(ev, target, tState, ownerWorkDir, ownerTabId) {
     const evWorkDir =
       typeof ownerWorkDir === 'string'
@@ -13778,39 +14226,33 @@
     const evOwnerTab = ownerTabId === undefined ? activeTabId : ownerTabId;
     // tableak-coverage:end
     const t = ev.type;
+    // A Result panel follows the run total only until anything else is
+    // said in the transcript: a continuation session's first event ends
+    // the earlier session's panel's claim on later usage totals.
+    if (t !== 'usage_info' && t !== 'result') tState.resultPanelEl = null;
     switch (t) {
+      // The model's thinking tokens stream as plain text straight into
+      // the Thoughts panel (a dim `.think` block, no header or box of
+      // its own), followed by its words (`.txt`).
       case 'thinking_start':
-        tState.thinkEl = mkEl('div', 'ev think');
-        tState.thinkEl.innerHTML =
-          '<div class="lbl" onclick="toggleThink(this)" tabindex="0" ' +
-          'role="button" aria-expanded="true">' +
-          '<span class="arrow">\u25BE</span> Thinking</div>' +
-          '<div class="cnt"></div>';
-        tState.thinkCnt = tState.thinkEl.querySelector('.cnt');
+        tState.thinkEl = mkEl('div', 'think');
         tState.thinkBuf = '';
         tState.thinkRaf = 0;
         target.appendChild(tState.thinkEl);
         break;
       case 'thinking_delta':
-        if (tState.thinkCnt) {
+        if (tState.thinkEl) {
           tState.thinkBuf += (ev.text || '').replace(/\n\n+/g, '\n');
           if (!tState.thinkRaf) {
             tState.thinkRaf = requestAnimationFrame(() => {
               tState.thinkRaf = 0;
-              if (!tState.thinkCnt) {
+              if (!tState.thinkEl) {
                 tState.thinkBuf = '';
                 return;
               }
-              const cnt = tState.thinkCnt;
-              const last = cnt.lastChild;
-              if (last && last.nodeType === 3) {
-                last.appendData(tState.thinkBuf);
-              } else {
-                cnt.appendChild(document.createTextNode(tState.thinkBuf));
-              }
-              tState.thinkBuf = '';
+              appendThinkText(tState);
               // autoscroll-coverage:start
-              autoScrollStreamed(cnt);
+              autoScrollStreamed(tState.thinkEl);
               // autoscroll-coverage:end
             });
           }
@@ -13820,19 +14262,15 @@
         if (tState.thinkRaf) {
           cancelAnimationFrame(tState.thinkRaf);
           tState.thinkRaf = 0;
-          if (tState.thinkCnt && tState.thinkBuf) {
-            const cnt = tState.thinkCnt;
-            const last = cnt.lastChild;
-            if (last && last.nodeType === 3) last.appendData(tState.thinkBuf);
-            else cnt.appendChild(document.createTextNode(tState.thinkBuf));
+          if (tState.thinkEl && tState.thinkBuf) {
+            appendThinkText(tState);
             // autoscroll-coverage:start
-            autoScrollStreamed(cnt);
+            autoScrollStreamed(tState.thinkEl);
             // autoscroll-coverage:end
           }
           tState.thinkBuf = '';
         }
         tState.thinkEl = null;
-        tState.thinkCnt = null;
         break;
       case 'text_delta':
         if (!tState.txtEl) {
@@ -13909,7 +14347,9 @@
         // report-coverage:end
         const c = mkEl('div', 'ev tc');
         const hdr = mkEl('div', 'tc-h');
-        hdr.textContent = ev.name || 'Tool';
+        const hdrName = mkEl('span', 'tc-h-name');
+        hdrName.textContent = ev.name || 'Tool';
+        hdr.appendChild(hdrName);
         if (ev.name === 'Bash') {
           hdr.classList.add('tc-h-bash');
           c.classList.add('tc-bash');
@@ -13921,7 +14361,7 @@
         // while the composer is in answer mode.
         const isQuestion = ev.name === 'ask_user_question';
         if (isQuestion) {
-          hdr.textContent = 'Question';
+          hdrName.textContent = 'Question';
           hdr.classList.add('tc-h-question');
           c.classList.add('tc-question');
         }
@@ -13968,11 +14408,16 @@
           hdr.appendChild(hint);
           // summaryhint-coverage:end
         }
+        // Folded, a Bash panel's header reads "Bash <description>" and
+        // a Read or Write panel's "Read <path>" (collapsePreview finds
+        // the text by the `tc-arg-desc` / `tc-arg-path` classes).
+        if (ev.name === 'Read' || ev.name === 'Write')
+          c.classList.add('tc-path');
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
           b +=
-            '<div class="tc-arg"><span class="tc-arg-name">path:</span> <span class="tp" data-path-candidate="' +
+            '<div class="tc-arg tc-arg-path"><span class="tc-arg-name">path:</span> <span class="tp" data-path-candidate="' +
             ep +
             '">' +
             esc(ev.path) +
@@ -13980,9 +14425,9 @@
         }
         if (ev.description && !isSummary)
           b +=
-            '<div class="tc-arg"><span class="tc-arg-name">description:</span> ' +
+            '<div class="tc-arg tc-arg-desc"><span class="tc-arg-name">description:</span> <span class="tc-arg-val">' +
             esc(ev.description) +
-            '</div>';
+            '</span></div>';
         if (ev.command)
           b +=
             '<pre><code class="language-bash">' +
@@ -14021,18 +14466,10 @@
           b || '<em style="color:var(--dim)">No arguments</em>';
         c.appendChild(hdr);
         if (isQuestion) {
-          const qd = mkEl('div', 'tc-question-body');
           const rawQ = (ev.extras && ev.extras.question) || '';
-          if (typeof marked !== 'undefined' && rawQ) {
-            qd.classList.add('md-body');
-            qd.innerHTML = kissSanitize(marked.parse(rawQ));
-            hlBlock(qd);
-            linkifyFilePaths(qd, evWorkDir, evOwnerTab);
-          } else {
-            qd.textContent = rawQ;
-          }
-          qd.dataset.rawText = rawQ;
-          c.appendChild(qd);
+          c.appendChild(
+            markdownBody('tc-question-body', rawQ, evWorkDir, evOwnerTab),
+          );
           // Replay rebuilds the panel without clearing the pending question.
           // Duplicate askUser events preserve drafts and do not re-mark it.
           // An earlier answered call is cleared by its replayed tool_result.
@@ -14040,23 +14477,28 @@
           if (qTab && qTab.askPendingQuestion === rawQ)
             setQuestionPanelPending(c, true);
         } else if (isSummary) {
-          const sd = mkEl('div', 'tc-summary-desc');
-          const rawDesc = ev.description || '';
-          if (typeof marked !== 'undefined' && rawDesc) {
-            sd.classList.add('md-body');
-            sd.innerHTML = kissSanitize(marked.parse(rawDesc));
-            hlBlock(sd);
-            linkifyFilePaths(sd, evWorkDir, evOwnerTab);
-          } else {
-            sd.textContent = rawDesc;
-          }
-          sd.dataset.rawText = rawDesc;
-          c.appendChild(sd);
+          c.appendChild(
+            markdownBody(
+              'tc-summary-desc',
+              ev.description || '',
+              evWorkDir,
+              evOwnerTab,
+            ),
+          );
         } else {
           c.appendChild(tcBody);
           verifyFileLinkCandidates(tcBody, evWorkDir, evOwnerTab);
         }
+        // A tool call's panel starts folded: its header (the tool name
+        // and, through collapsePreview, its one-line argument) is what
+        // the transcript shows while the call runs; a click unfolds it.
+        // A Question must be read, and a fan-out's open panel is what
+        // keeps its sub-agent tabs open (collapseNestedRunParallel), so
+        // those two start open.
+        if (!isQuestion && !c.classList.contains('tc-run-parallel'))
+          c.classList.add('collapsed');
         addCollapse(c, hdr, ev.ts);
+        collapsePreview(c);
         // toolstop-coverage:start
         // The panel's own Stop: interrupts just this tool call on the
         // task that owns this transcript (a sub-agent tab names the
@@ -14079,12 +14521,16 @@
         if (isSummary) {
           const sub = mkEl('div', 'summary-sub');
           const adopt = [];
+          const preserve = [];
           let sib = c.previousElementSibling;
           while (sib) {
             if (
+              sib.dataset.summaryPreserved ||
               sib.classList.contains('tc-summary') ||
+              sib.classList.contains('trajectory') ||
               sib.classList.contains('prompt') ||
               sib.classList.contains('system-prompt') ||
+              sib.classList.contains('task-panel') ||
               sib.classList.contains('adjacent-task') ||
               sib.classList.contains('rc')
             )
@@ -14094,27 +14540,34 @@
               !sib.classList.contains('llm-panel')
             )
               break;
-            // A `/ask` answer stays on the transcript, in front of the
-            // summary that folds its neighbours (answerPanelStaysOpen).
-            if (!answerPanelStaysOpen(sib)) adopt.push(sib);
+            // A Thoughts panel always belongs in the digest, even when
+            // its Markdown shows a picture: the summary stands for the
+            // steps it recounts, their thoughts included.  Other media
+            // panels, questions and messages remain expanded siblings
+            // after the summary.
+            if (
+              !sib.classList.contains('llm-panel') &&
+              (panelShowsMedia(sib) || panelStaysOpen(sib))
+            )
+              preserve.push(sib);
+            else adopt.push(sib);
             sib = sib.previousElementSibling;
           }
           for (let ai = adopt.length - 1; ai >= 0; ai--)
             sub.appendChild(adopt[ai]);
           c.appendChild(sub);
-          // A summary folds the panels it adopted -- unless one of
-          // them shows an image: a picture the agent produced stays on
-          // screen until the user folds it (panelShowsImage).
-          if (!panelShowsImage(c)) {
-            c.classList.add('collapsed');
-            // The adopted panels are now hidden behind this collapsed
-            // summary; a fan-out panel among them must give its
-            // sub-agent tabs up like any other collapsed fan-out.
-            collapseNestedRunParallel(c);
-            syncCollapseAria(c);
+          for (let pi = preserve.length - 1; pi >= 0; pi--) {
+            // A later summary must not move this summary's panels again.
+            preserve[pi].dataset.summaryPreserved = '1';
+            target.appendChild(preserve[pi]);
           }
+          c.classList.add('collapsed');
+          collapseNestedRunParallel(c);
+          syncCollapseAria(c);
         }
         tState.lastToolCallEl = c;
+        // Active (ticking, header pulsing) until the tool_result
+        // (finalizePanelTime).
         stampPanelStart(c, ev.ts);
         if (ev.command) {
           const bp = mkEl('div', 'bash-panel');
@@ -14189,10 +14642,10 @@
         if (ev.is_error) {
           const r = mkEl('div', 'ev tr err');
           r.innerHTML =
-            '<div class="rl fail">FAILED</div><div class="tr-content">' +
+            '<div class="rl fail">Failed</div><div class="tr-content">' +
             esc(ev.content) +
             '</div>';
-          r.dataset.rawText = 'FAILED\n' + (ev.content || '');
+          r.dataset.rawText = 'Failed\n' + (ev.content || '');
           addCollapse(
             r,
             r.querySelector('.rl'),
@@ -14205,17 +14658,16 @@
           tState.lastToolCallEl &&
           tState.lastToolCallEl.classList.contains('tc-question')
         ) {
-          // The user's answer, read back from the tool's return value
-          // so a replay shows it under its question too.
-          const ans = mkEl('div', 'tc-question-answer');
-          const lbl = mkEl('span', 'tc-question-answer-label');
-          lbl.textContent = 'Answer';
-          const txt = mkEl('div', 'tc-question-answer-text');
-          txt.textContent = ev.content || '';
-          ans.appendChild(lbl);
-          ans.appendChild(txt);
-          ans.dataset.rawText = 'Answer: ' + (ev.content || '');
-          resultTarget.appendChild(ans);
+          // The tool returns the user's words: render a separate user
+          // bubble, not agent output nested inside the question.
+          target.appendChild(
+            createUserTextPanel(
+              'user-msg tc-question-answer',
+              'Response',
+              ev.content || '',
+              ev.ts,
+            ),
+          );
           setQuestionPanelPending(resultTarget, false);
         } else {
           const op = mkEl('div', 'bash-panel');
@@ -14293,6 +14745,7 @@
             ),
           );
         }
+        tState.resultPanelEl = target.lastElementChild;
         if (statusTokens && ev.total_tokens)
           statusTokens.textContent = 'Tokens: ' + fmtTokens(ev.total_tokens);
         if (statusBudget && ev.cost && ev.cost !== 'N/A')
@@ -14302,6 +14755,10 @@
       }
       case 'system_prompt':
       case 'prompt': {
+        if (ev.steer) {
+          target.appendChild(createUserMessagePanel(ev.text || '', ev.ts));
+          break;
+        }
         const cls = t === 'system_prompt' ? 'system-prompt' : 'prompt';
         const label = t === 'system_prompt' ? 'System Prompt' : 'Prompt';
         let el = null;
@@ -14361,6 +14818,21 @@
             statusBudget.textContent = 'Cost: ' + fmtCost(ev.cost);
           if (statusSteps && ev.total_steps != null)
             statusSteps.textContent = 'Steps: ' + ev.total_steps;
+          // Spend folded after the run's terminal result (the pre-run
+          // classifier, a sub-task reclaimed at the end) arrives as this
+          // run total, so the Result panel just rendered must show the
+          // same figure as the header.  Only the panel nothing has
+          // followed yet is refreshed (see the reset at the top of this
+          // function): once a continuation session says anything after
+          // it, its figures are that session's history.
+          const panel = tState.resultPanelEl;
+          if (panel) {
+            const tokensEl = panel.querySelector('.rs-tokens');
+            if (tokensEl) tokensEl.textContent = fmtTokens(ev.total_tokens);
+            const costEl = panel.querySelector('.rs-cost');
+            if (costEl && ev.cost !== 'N/A')
+              costEl.textContent = fmtCost(ev.cost);
+          }
         } else {
           updateUsageMetrics(ev.text || '');
         }
@@ -14571,15 +15043,9 @@
    */
   function streamEnd(ctx, ev, target) {
     const t = ev.type;
-    // livedone-coverage:start
-    // The result IS the task finishing: the pass that folds older
-    // panels behind each new event must not run for it, or the finish
-    // would explicitly collapse the panels (a done run_parallel
-    // fan-out, the last open tool panel) the user was watching.
-    if (target === ctx.container && t !== 'result') {
+    if (target === ctx.container) {
       collapseOlderPanels(ctx.container, ctx.tabId);
     }
-    // livedone-coverage:end
     if (t === 'tool_result' && ctx.lastToolName !== 'finish' && !ctx.llmPanel) {
       // The agent is thinking again; the panel its words will land in is
       // opened now so the transcript does not sit empty, and withdrawn
@@ -14619,6 +15085,11 @@
       if (reported) ctx.stepCount = reported;
     }
     if (t === 'result') {
+      // A failure's result follows the last tool_result directly, so the
+      // Thoughts panel opened on spec above is still empty: withdraw it
+      // rather than seal it into the transcript.
+      if (ctx.llmPanel && ctx.llmPanel._provisional)
+        discardProvisionalPanel(ctx.llmPanel);
       ctx.llmPanel = null;
       // The daemon's own count is the authoritative one.
       if (ev.step_count) ctx.stepCount = ev.step_count;
@@ -14787,7 +15258,7 @@
     // sweep replays.
     const deferTail =
       ctx.stepCount === stepsBefore &&
-      ((t === 'thinking_delta' && !!tState.thinkRaf && !!tState.thinkCnt) ||
+      ((t === 'thinking_delta' && !!tState.thinkRaf && !!tState.thinkEl) ||
         (t === 'text_delta' && !!tState.txtRaf) ||
         (t === 'system_output' && !!tState.bashRaf && !!tState.bashPanel));
     if (deferTail) {
@@ -14823,6 +15294,21 @@
     updateVisibleTask();
     // visibletask-coverage:end
   }
+
+  // tableak-coverage:start
+  /**
+   * Park a diagnostic (error, notice, warning) addressed to a tab other
+   * than the visible one in that tab's transcript.  Returns true when
+   * the event belongs to another tab — routed there, or dropped because
+   * the tab is gone — so the caller must not show it in the visible one.
+   */
+  function routedToBackgroundTab(ev) {
+    if (!isAddressed(ev) || isForActiveTab(ev)) return false;
+    const bgTab = findTabByEvt(ev);
+    if (bgTab) processOutputEventForBgTab(ev, bgTab);
+    return true;
+  }
+  // tableak-coverage:end
 
   function processOutputEventForBgTab(ev, tab) {
     normalizeEventTs(ev);
@@ -14907,52 +15393,65 @@
     tab.welcomeVisible = false;
   }
 
-  function accumulateOverscroll(dir, delta, taskId) {
+  // How close to the top or bottom edge of the transcript, in pixels,
+  // the reader may scroll before the task beyond that edge is fetched.
+  const NEIGHBOUR_PREFETCH_PX = 400;
+
+  /**
+   * Fetch the chat's task beyond the transcript's *dir* edge; the reply
+   * (adjacent_task_events) splices it in through renderAdjacentTask, so
+   * the chat's thread grows as the reader moves through it.
+   *
+   * @param {string} dir 'prev' for the task above the top, 'next' for
+   *     the one below the bottom.
+   */
+  function loadNeighbourTask(dir) {
+    const taskId = dir === 'prev' ? oldestLoadedTaskId : newestLoadedTaskId;
     if (taskId === undefined || taskId === null || taskId === '') return;
-    if (overscrollDir !== dir) {
-      overscrollAccum = 0;
-      overscrollDir = dir;
-    }
-    overscrollAccum += Math.abs(delta);
-    clearTimeout(overscrollTimer);
-    overscrollTimer = setTimeout(() => {
-      overscrollAccum = 0;
-      overscrollDir = '';
-    }, 500);
-    if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
-      overscrollAccum = 0;
-      overscrollDir = '';
-      adjacentLoading = true;
-      showAdjacentLoader(dir);
-      api.getAdjacentTask({tabId: activeTabId, taskId: taskId, direction: dir});
+    adjacentLoading = true;
+    showAdjacentLoader(dir);
+    api.getAdjacentTask({tabId: activeTabId, taskId: taskId, direction: dir});
+  }
+
+  /**
+   * True while the thread on screen may grow in direction *dir*: a chat
+   * tab whose task is known, whose chat has not run out of tasks that
+   * way, and whose neighbour is not already on its way. A running task
+   * is the newest of its chat, so nothing is ever fetched below it.
+   *
+   * @param {string} dir 'prev' or 'next'.
+   * @returns {boolean}
+   */
+  function canLoadNeighbour(dir) {
+    if (adjacentLoading || !activeTabId || !currentTaskName) return false;
+    if (dir === 'next' ? noNextTask || isRunning : noPrevTask) return false;
+    const activeTab = getTab(activeTabId);
+    return !(activeTab && activeTab.isSubagentTab);
+  }
+
+  // One edge rule for every input device: a scroll that pushes past the
+  // top of the transcript loads the previous task, past the bottom the
+  // next one — at once, so a transcript too short to scroll still reads
+  // on into its neighbours.
+  function handleEdgeOverscroll(delta) {
+    const atTop = O.scrollTop <= 0;
+    const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
+    if (atTop && delta < 0 && canLoadNeighbour('prev')) {
+      loadNeighbourTask('prev');
+    } else if (atBottom && delta > 0 && canLoadNeighbour('next')) {
+      loadNeighbourTask('next');
     }
   }
 
-  // One edge-overscroll rule for every input device: scrolling past the
-  // top of the transcript accumulates towards loading the previous
-  // task, past the bottom towards the next one, and any scroll that is
-  // not pinned to an edge resets the accumulator.
-  function handleEdgeOverscroll(delta) {
-    if (adjacentLoading || !activeTabId || !currentTaskName) return;
-    const activeTab = getTab(activeTabId);
-    if (activeTab && activeTab.isSubagentTab) return;
-
-    const atTop = O.scrollTop <= 0;
-    const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
-
-    if (atTop && delta < 0 && !noPrevTask && oldestLoadedTaskId != null) {
-      accumulateOverscroll('prev', delta, oldestLoadedTaskId);
-    } else if (
-      atBottom &&
-      delta > 0 &&
-      !noNextTask &&
-      newestLoadedTaskId != null
-    ) {
-      accumulateOverscroll('next', delta, newestLoadedTaskId);
-    } else {
-      overscrollAccum = 0;
-      overscrollDir = '';
-    }
+  // The thread reads on without a stop at either edge: a reader scrolling
+  // towards the top of the transcript has the previous task spliced in
+  // before reaching it, towards the bottom the next one.
+  function prefetchNeighbourTask() {
+    const nearTop = O.scrollTop < NEIGHBOUR_PREFETCH_PX;
+    const nearBottom =
+      O.scrollTop + O.clientHeight > O.scrollHeight - NEIGHBOUR_PREFETCH_PX;
+    if (nearTop && canLoadNeighbour('prev')) loadNeighbourTask('prev');
+    else if (nearBottom && canLoadNeighbour('next')) loadNeighbourTask('next');
   }
 
   O.addEventListener('wheel', e => {
@@ -14979,19 +15478,6 @@
       const touchDelta = _touchOutputLastY - currentY;
       _touchOutputLastY = currentY;
       handleEdgeOverscroll(touchDelta);
-    },
-    {passive: true},
-  );
-
-  O.addEventListener(
-    'touchend',
-    () => {
-      overscrollAccum = 0;
-      overscrollDir = '';
-      if (overscrollTimer) {
-        clearTimeout(overscrollTimer);
-        overscrollTimer = null;
-      }
     },
     {passive: true},
   );
@@ -15046,7 +15532,7 @@
    * is the first one above the content and the last one below it.
    */
   function getVisibleRegionIndex(regions) {
-    const pinned = wheelPinnedTarget();
+    const pinned = pinnedRegionTarget();
     if (pinned)
       for (let i = 0; i < regions.length; i++)
         if (regions[i].first === pinned.el) return i;
@@ -15105,9 +15591,9 @@
     const region = visibleRegion();
     if (!region) return;
     const container = regionNeighbour(region);
-    setTaskText(region.task || currentTaskName);
+    setShownTask(region.task || currentTaskName);
     // taskinfo-coverage:start
-    // The Task Info rows follow the panel: a neighbour's settings
+    // The Task Info rows follow the shown task: a neighbour's settings
     // while the reader is parked on it, the tab's own otherwise.
     updateMetaTaskDetails(
       container
@@ -15135,42 +15621,41 @@
     updateUserScrollLock();
     // autoscroll-coverage:end
     updateVisibleTask();
+    prefetchNeighbourTask();
   });
 
-  const TASK_WHEEL_STEP = 60;
-  // taskwheel-coverage:start
-  let taskWheelAccum = 0;
-  let taskWheelDir = '';
-  let taskWheelTimer = null;
-  let taskWheelPendingDir = '';
-  let taskWheelLastTarget = null;
+  // visibletask-coverage:start
+  // The region a programmatic scroll (scrollChatToTask) put at the top of
+  // the viewport, with the scroll offset it landed on: that region is the
+  // one the reader is looking at until the transcript scrolls again,
+  // whatever share of the viewport it covers.
+  let pinnedRegion = null;
 
-  function wheelPinnedTarget() {
-    if (!taskWheelLastTarget) return null;
-    if (O.scrollTop !== taskWheelLastTarget.scrollTop) {
-      taskWheelLastTarget = null;
+  function pinnedRegionTarget() {
+    if (!pinnedRegion) return null;
+    if (
+      O.scrollTop !== pinnedRegion.scrollTop ||
+      !O.contains(pinnedRegion.el)
+    ) {
+      pinnedRegion = null;
       return null;
     }
-    if (!O.contains(taskWheelLastTarget.el)) {
-      taskWheelLastTarget = null;
-      return null;
-    }
-    return taskWheelLastTarget;
+    return pinnedRegion;
   }
 
   function scrollTaskRegionToTop(region) {
     const outputRect = O.getBoundingClientRect();
     const top = region.first.getBoundingClientRect().top;
     O.scrollTop += top - outputRect.top;
-    taskWheelLastTarget = {el: region.first, scrollTop: O.scrollTop};
+    pinnedRegion = {el: region.first, scrollTop: O.scrollTop};
     updateVisibleTask();
   }
+  // visibletask-coverage:end
 
-  // taskwheel-coverage:end
   /**
    * Scroll the transcript so the task with `taskId` sits at the top of
    * the viewport.  `scrollTaskRegionToTop` pins the region and re-derives
-   * the static task panel, so the clicked task is what the panel names.
+   * the shown task, so the clicked task is what the tab label names.
    *
    * Returns true when the task is shown by this tab — a region in the
    * transcript, either the tab's own task (`currentTaskId`) or a
@@ -15198,68 +15683,18 @@
     }
     // The tab's own task may have no rendered region at all (nothing
     // was output yet), so there is nothing to scroll to and nothing to
-    // fetch.  The panel and the status row may still be lent to a
+    // fetch.  The tab label and the status row may still be lent to a
     // spliced-in neighbour the reader scrolled into; reclaim them so
-    // the clicked task is what the panel names.
+    // the clicked task is what the label names.
     if (ownIdStr === '' || idStr !== ownIdStr) return false;
     if (O.querySelector('.adjacent-task[data-task]')) {
-      taskWheelLastTarget = null;
-      setTaskText(currentTaskName);
+      pinnedRegion = null;
+      setShownTask(currentTaskName);
       updateMetaTaskDetails(currentTaskSettings);
       showLiveMetrics();
     }
     return true;
   }
-  // taskwheel-coverage:start
-
-  function stepTaskFromPanel(dir) {
-    const tab = getTab(activeTabId);
-    if (tab && tab.isSubagentTab) return;
-    const regions = getTaskRegions();
-    if (!regions.length) return;
-    const idx = getVisibleRegionIndex(regions);
-    const targetIdx = dir === 'next' ? idx + 1 : idx - 1;
-    if (targetIdx >= 0 && targetIdx < regions.length) {
-      scrollTaskRegionToTop(regions[targetIdx]);
-      return;
-    }
-    if (adjacentLoading || !activeTabId || !currentTaskName) return;
-    if (dir === 'prev' ? noPrevTask : noNextTask) return;
-    const anchorId = dir === 'prev' ? oldestLoadedTaskId : newestLoadedTaskId;
-    if (anchorId === undefined || anchorId === null || anchorId === '') return;
-    taskWheelPendingDir = dir;
-    adjacentLoading = true;
-    showAdjacentLoader(dir);
-    api.getAdjacentTask({tabId: activeTabId, taskId: anchorId, direction: dir});
-  }
-
-  if (taskPanel) {
-    taskPanel.addEventListener(
-      'wheel',
-      e => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (!e.deltaY) return;
-        const dir = e.deltaY > 0 ? 'next' : 'prev';
-        if (taskWheelDir !== dir) {
-          taskWheelAccum = 0;
-          taskWheelDir = dir;
-        }
-        taskWheelAccum += Math.abs(e.deltaY);
-        clearTimeout(taskWheelTimer);
-        taskWheelTimer = setTimeout(() => {
-          taskWheelAccum = 0;
-          taskWheelDir = '';
-        }, 300);
-        if (taskWheelAccum >= TASK_WHEEL_STEP) {
-          taskWheelAccum = 0;
-          stepTaskFromPanel(dir);
-        }
-      },
-      {passive: false},
-    );
-  }
-  // taskwheel-coverage:end
 
   let endTs = 0;
   function doneLabelFor(startMs, endMs) {
@@ -15348,14 +15783,26 @@
   function focusInputWithRetry(force) {
     cancelInputFocusRetry();
     if (isMobileRemote) return;
+    // The keyboard stays with a content view the user is working in (a
+    // terminal's shell, an editor, the browser screen): a connect-time
+    // or host focus request is a convenience, not a reason to pull the
+    // caret out of it.  Reachable on the desktop remote page only,
+    // where the composer sits beside the content pane.
+    if (contentViewHasFocus()) return;
     if (!force && composerFocusWouldSteal()) return;
     inp.focus();
     inputFocusRetryTimers = [100, 300].map(ms =>
       setTimeout(() => {
-        if (composerFocusWouldSteal()) return;
+        if (contentViewHasFocus() || composerFocusWouldSteal()) return;
         inp.focus();
       }, ms),
     );
+  }
+
+  /** Whether the keyboard is in the content pane (editor, terminal,
+   *  browser screen): the composer must not take it from there. */
+  function contentViewHasFocus() {
+    return Boolean(contentArea && contentArea.contains(document.activeElement));
   }
 
   /** Whether *el* is a text-entry control (typing goes into it). */
@@ -15382,8 +15829,8 @@
   /**
    * Whether focusing the composer now would take the keyboard away
    * from something the user is using: another text field, or an open
-   * sheet / overlay (settings, promptlets, frequent tasks, working
-   * directory, server-reset confirm, a notification with a textbox).
+   * sheet / overlay (settings, promptlets, working directory,
+   * server-reset confirm, a notification with a textbox).
    */
   function composerFocusWouldSteal() {
     const active = document.activeElement;
@@ -15453,11 +15900,14 @@
     });
   }
 
+  /** Fetch page one of the history list afresh. */
+  function requestHistoryFromStart() {
+    resetHistoryPagination();
+    requestHistory();
+  }
+
   function refreshHistory() {
-    if (sidebar.classList.contains('open')) {
-      resetHistoryPagination();
-      requestHistory();
-    }
+    if (sidebar.classList.contains('open')) requestHistoryFromStart();
     // Task news (a run started or finished, a commit landed) may have
     // changed the workspace: re-list the Explorer folders on screen /
     // re-read git for the Source Control view.  A hidden view — or one
@@ -15798,7 +16248,7 @@
     const id = chatTargetTabId();
     return {tabId: id, taskId: tabTaskId(getTab(id))};
   };
-  // Retained for callers that only need the visible tab id.
+  // The visible tab's id (the tests read it).
   window.kissActiveTabId = function () {
     return activeTabId;
   };
@@ -15899,12 +16349,16 @@
         if (!ev.connected) {
           forgetInFlightPathChecks();
           stopAppsRefreshSpin();
+          abandonExplorerListings();
+          setAutocommitInFlight(false);
+          tabs.forEach(t => {
+            failContentSave(t, 'Save failed: the server connection dropped');
+          });
           // An outage swallows in-flight replies. A getAdjacentTask reply
           // that never comes must not leave the loader row up and every
-          // later overscroll blocked behind adjacentLoading; sidebar
+          // later scroll blocked behind adjacentLoading; sidebar
           // fs/git requests awaiting a reply are equally dead.
           adjacentLoading = false;
-          taskWheelPendingDir = '';
           removeAdjacentLoader();
           if (pendingSidebarRequests.size > 0) {
             // The user asked for something and would otherwise wait
@@ -16029,8 +16483,8 @@
       case 'pathsExist':
         handlePathsExist(ev);
         return;
-      // Replies of the activity bar's Explorer / Source Control views
-      // (remote webapp only).  They are matched to the request by token,
+      // Replies of the task-info panel's Explorer / Source Control
+      // sections (remote webapp only).  They are matched to the request by token,
       // so no tab check is needed: a reply for a tree or workspace that
       // is no longer shown simply finds no taker.
       case 'dirListing':
@@ -16138,9 +16592,16 @@
           if (evTab)
             phaseHome = evTab.id === activeTabId ? O : evTab.outputFragment;
           else if (!isAddressed(ev)) phaseHome = O;
-          if (phaseHome) setLaunchPhase(phaseHome, '');
+          if (phaseHome) {
+            setLaunchPhase(phaseHome, '');
+            // Nothing of a stopped task runs: its open panels stop
+            // ticking and pulsing even when no tool_result or
+            // task_done arrives.
+            pauseActivePanels(phaseHome);
+          }
         }
         if (evTab) {
+          evTab.statusKnown = true;
           setTabRunning(evTab, !!ev.running);
           // modelpick-coverage:start
           // Belt and braces for the daemon's `modelPick` restore: a task
@@ -16195,6 +16656,15 @@
           // sub-agent composer) waits for the real tab switch.
           setRunningState(ev.running);
         }
+        // trajectory-coverage:start
+        // A task that ended without a terminal event this client saw
+        // (a status-only end after a replay, a refused run) folds its
+        // panels into the Trajectory here, after setRunningState has
+        // settled the stream's pending tail sweep on the panels still
+        // in place; after a terminal event the fold is already done
+        // and this finds nothing to adopt.
+        if (!ev.running) foldTabTrajectory(ev.tabId);
+        // trajectory-coverage:end
         renderTabBar();
         refreshHistory();
         syncMobileInputDrawer();
@@ -16283,6 +16753,9 @@
         if (typeof ev.machine === 'string') {
           const statusMachine = document.getElementById('status-machine');
           if (statusMachine) statusMachine.textContent = ev.machine;
+          // ...and, in bold green, at the top of the chat pane itself.
+          const chatMachine = document.getElementById('chat-machine');
+          if (chatMachine) chatMachine.textContent = ev.machine;
         }
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
         if (ev.config && Array.isArray(ev.config.recent_work_dirs)) {
@@ -16391,9 +16864,6 @@
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         autofillHistoryDateRange(ev.dateRange);
         break;
-      case 'frequentTasks':
-        renderFrequentTasks(ev.tasks || []);
-        break;
       case 'files': {
         // tableak-coverage:start
         if (!isForActiveTab(ev)) break;
@@ -16447,7 +16917,6 @@
         }
         syncAskComposer();
         renderTabBar();
-        showAskWaitingNotice(askTab);
         if (!knownQuestion) focusAskingTab(askTab);
         break;
       }
@@ -16491,15 +16960,9 @@
             : getTab(activeTabId);
           if (refusedTab) restoreRefusedPrompt(refusedTab);
         }
-        // tableak-coverage:start
         // Diagnostics are task output like any other: a message that names a
         // task or a tab belongs to that conversation and nowhere else.
-        if (isAddressed(ev) && !isForActiveTab(ev)) {
-          const bgErrTab = findTabByEvt(ev);
-          if (bgErrTab) processOutputEventForBgTab(ev, bgErrTab);
-          break;
-        }
-        // tableak-coverage:end
+        if (routedToBackgroundTab(ev)) break;
         addError(ev.text);
         // An unaddressed error answers a window-level request: an
         // update started from the settings sheet or a promptlet add
@@ -16511,13 +16974,7 @@
         }
         break;
       case 'notice':
-        // tableak-coverage:start
-        if (isAddressed(ev) && !isForActiveTab(ev)) {
-          const bgNoticeTab = findTabByEvt(ev);
-          if (bgNoticeTab) processOutputEventForBgTab(ev, bgNoticeTab);
-          break;
-        }
-        // tableak-coverage:end
+        if (routedToBackgroundTab(ev)) break;
         addNotice(ev.text);
         if (!isAddressed(ev)) relayUpdateStatus(ev.text, false);
         break;
@@ -16539,17 +16996,10 @@
         setLaunchPhase(phaseContainer, ev.text || '');
         break;
       }
-      case 'warning': {
-        // tableak-coverage:start
-        if (isAddressed(ev) && !isForActiveTab(ev)) {
-          const bgWarnTab = findTabByEvt(ev);
-          if (bgWarnTab) processOutputEventForBgTab(ev, bgWarnTab);
-          break;
-        }
-        // tableak-coverage:end
+      case 'warning':
+        if (routedToBackgroundTab(ev)) break;
         addWarning(ev.message || ev.text || '');
         break;
-      }
       case 'clear': {
         // report-coverage:start
         // A new task is starting in this tab: any report queued by a
@@ -16592,12 +17042,30 @@
           collapseNestedRunParallel(O);
           clearOutput();
           resetOutputState();
+          // The new transcript opens with the task's text (the
+          // setTaskText that precedes every run echoed it); the task's
+          // events follow it.
+          if (pendingTaskText) {
+            currentTaskName = pendingTaskText;
+            pendingTaskText = '';
+          }
+          setShownTask(currentTaskName);
+          setOwnTaskPanel(O, currentTaskName);
           setTaskSettings(null);
           showSpinner();
         } else if (clearTab) {
           collapseNestedRunParallel(clearTab.outputFragment);
           forgetPendingFileLinks(clearTab.id);
           clearTab.outputFragment = null;
+          if (clearTab.pendingTaskText) {
+            clearTab.taskText = clearTab.pendingTaskText;
+            clearTab.pendingTaskText = '';
+          }
+          if (clearTab.taskText) {
+            clearTab.outputFragment = document.createDocumentFragment();
+            setOwnTaskPanel(clearTab.outputFragment, clearTab.taskText);
+            clearTab.welcomeVisible = false;
+          }
           clearTab.streamState = null;
           clearTab.streamLlmPanel = null;
           clearTab.streamLlmPanelState = null;
@@ -16655,6 +17123,8 @@
         const hasTaskId =
           ev.taskId !== undefined && ev.taskId !== null && ev.taskId !== '';
         const ocTab = chatId ? getTabByBackendChatId(chatId) : null;
+        if (ocTab && ev.onlyIfMissing) break;
+        const ocLeft = getTab(activeTabId);
         if (ocTab) {
           switchToTab(ocTab.id);
           if (
@@ -16669,18 +17139,17 @@
             });
           }
         } else if (chatId) {
-          createNewTab();
-          setTaskText(taskText);
+          openHistoryTaskInNewTab(taskText);
           api.resumeSession({
             id: chatId,
             taskId: ev.taskId,
             tabId: activeTabId,
           });
         } else {
-          createNewTab();
-          setTaskText(taskText);
+          openHistoryTaskInNewTab(taskText);
           focusInputWithRetry();
         }
+        retireIdleChat(ocLeft, false);
         break;
       }
       case 'clearChat': {
@@ -16690,7 +17159,7 @@
         if (ccTab && !ccTab.backendChatId && ccWelcome) {
           focusInputWithRetry();
         } else {
-          createNewTab();
+          openNewChat();
         }
         break;
       }
@@ -16699,6 +17168,13 @@
         const swTab = getTab(swTabId);
         if (swTab) {
           if (ev.model) applyModelPick(swTabId, ev.model, 'restore');
+          // The daemon answers every fresh tab's `newChat` with this
+          // reset.  A tab opened for a history row already shows that
+          // task's panel (openHistoryTaskInNewTab); blanking it would
+          // drop the only thing the tab was opened to show.
+          const swTask =
+            swTabId === activeTabId ? currentTaskName : swTab.taskText;
+          if ((swTask || '').trim()) break;
           if (swTabId === activeTabId) {
             // Resetting the chat to the welcome screen discards its
             // transcript, fan-out panels and all; their sub-agent tabs
@@ -16778,6 +17254,9 @@
         // down. Mirrors the reset `clear` does when a task starts.
         if (teTab) teTab.lastTaskFailed = false;
         // faildot-coverage:end
+        // The daemon sends a running task's `status` before its replay,
+        // so once the replay is here the tab's state is settled.
+        if (teTab) teTab.statusKnown = true;
         if (ev.chat_id && teTab) {
           teTab.backendChatId = ev.chat_id;
           if (!teTab.workDir && configWorkDir) {
@@ -16804,8 +17283,8 @@
           const taskTitle = (ev.task || '').trim();
           if (taskTitle) {
             teTab.title = clipTabTitle(taskTitle);
-            teTab.taskPanelHTML = taskTitle;
-            teTab.taskPanelVisible = true;
+            teTab.taskText = taskTitle;
+            teTab.pendingTaskText = '';
             renderTabBar();
           }
           if (ev.extra) {
@@ -16825,6 +17304,9 @@
             } catch (_e) {}
           }
           const frag = document.createDocumentFragment();
+          // The replayed transcript opens with its task's text, like
+          // the visible tab's replayTaskEvents below.
+          setOwnTaskPanel(frag, teTab.taskText);
           // Hand the tab its new transcript BEFORE replaying into it:
           // the replay's collapse pass asks this tab which run_parallel
           // panels it owns, and against the outgoing fragment it would
@@ -16935,10 +17417,11 @@
         }
         if (ev.task) {
           currentTaskName = ev.task;
+          pendingTaskText = '';
           if (ev.task_id !== undefined && ev.task_id !== null)
             currentTaskId = ev.task_id;
           resetAdjacentState();
-          setTaskText(ev.task);
+          setShownTask(ev.task);
           if (welcome) {
             welcome.style.display = 'none';
             refreshWelcomeLayout();
@@ -16951,6 +17434,7 @@
             currentTaskName = (tetTab && tetTab.title) || 'Task';
           }
           resetAdjacentState();
+          setShownTask(currentTaskName);
         }
         if (ev.extra) {
           try {
@@ -17001,7 +17485,7 @@
         if (!isAddressed(ev) || isForActiveTab(ev)) {
           // tableak-coverage:end
           if (stt) {
-            currentTaskName = stt;
+            pendingTaskText = stt;
             currentTaskId = null;
             resetAdjacentState();
             if (welcome) {
@@ -17010,18 +17494,18 @@
             }
             updateActiveTabTitle(stt);
           }
-          // Settings are NOT cleared here: the server echoes
-          // setTaskText for queued follow-ups and refused submits too,
-          // which stay part of the CURRENT task. A real replacement
-          // task announces itself with the 'clear' event, which is
-          // where the previous task's settings are dropped.
-          setTaskText(ev.text || '');
+          // Neither the shown task nor the settings change here, and
+          // no task panel is put up: the server echoes setTaskText for
+          // queued follow-ups and refused submits too, which stay part
+          // of the CURRENT task (a follow-up shows as a prompt event).
+          // A real replacement task announces itself with the 'clear'
+          // event, which opens the new transcript with the echoed
+          // text's panel and drops the previous task's settings.
         } else if (stt) {
           const sttTab = getTab(ev.tabId);
           if (sttTab) {
             sttTab.title = clipTabTitle(stt);
-            sttTab.taskPanelHTML = stt;
-            sttTab.taskPanelVisible = true;
+            sttTab.pendingTaskText = stt;
             renderTabBar();
             persistTabState();
           }
@@ -17262,9 +17746,9 @@
         // donelabel-coverage:end
         markTabDone(ev.tabId, ev.success === false);
         sealTabPanelTimes(ev.tabId, ev.endTs);
-        // livedone-coverage:start
-        markTabPanelsLiveFinished(ev.tabId);
-        // livedone-coverage:end
+        // trajectory-coverage:start
+        foldTabTrajectory(ev.tabId);
+        // trajectory-coverage:end
         clearActionProgressForTab(ev.tabId);
         setReady(doneLabel, ev.tabId, ev.startTs, ev.endTs);
         focusFinishedTab(ev.tabId);
@@ -17295,9 +17779,9 @@
           }
         }
         sealTabPanelTimes(ev.tabId, ev.endTs);
-        // livedone-coverage:start
-        markTabPanelsLiveFinished(ev.tabId);
-        // livedone-coverage:end
+        // trajectory-coverage:start
+        foldTabTrajectory(ev.tabId);
+        // trajectory-coverage:end
         const label =
           t === 'task_error'
             ? 'Error'
@@ -17460,8 +17944,15 @@
         const subDone = !!ev.isDone;
         subTab.isDone = subDone;
         setTabRunning(subTab, !subDone);
-        subTab.taskPanelHTML = subDesc;
-        subTab.taskPanelVisible = true;
+        subTab.taskText = subDesc;
+        // The sub-agent's transcript opens with its task, like any
+        // other: the live events that follow append to this fragment
+        // (a replay of the tab rebuilds it with the same panel).
+        if (!subTab.outputFragment && subTab.id !== activeTabId) {
+          subTab.outputFragment = document.createDocumentFragment();
+          setOwnTaskPanel(subTab.outputFragment, subDesc);
+          subTab.welcomeVisible = false;
+        }
         if (rpPanel)
           rpRegisterSubagent(rpPanel, parentId, subTaskId, subTab.id);
         renderTabBar();
@@ -17695,12 +18186,6 @@
     syncMetaInfoRunning(running);
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
-    // A tab that is not running has nothing left to stop, so the
-    // pending state never survives the task it belonged to.
-    if (!running) {
-      const activeTab = getTab(activeTabId);
-      if (activeTab) activeTab.isStopping = false;
-    }
     renderStopButton();
 
     updateInputDisabled();
@@ -17750,43 +18235,13 @@
 
   // A new question brings its tab forward on every surface: the internal
   // strip switches to it and, in VS Code, the host reveals the sidebar
-  // view or editor panel (raising a native notice when the webview was
-  // hidden). Unlike focusFinishedTab this ignores
-  // userInteractedSinceSubmit: the agent is blocked until the user
-  // answers, so the question is where they need to be.
+  // view or editor panel. The Question panel itself is the only notice:
+  // no toast and no native notification. Unlike focusFinishedTab this
+  // ignores userInteractedSinceSubmit: the agent is blocked until the
+  // user answers, so the question is where they need to be.
   function focusAskingTab(tab) {
     if (tab.id !== activeTabId) switchToTab(tab.id);
-    if (VSCODE_CHAT_HOST) {
-      postToHost({
-        type: 'askWaiting',
-        tabId: tab.id,
-        question: tab.askPendingQuestion || '',
-      });
-    }
-  }
-
-  function askWaitingNoticeId(tabId) {
-    return 'ask:' + tabId;
-  }
-
-  // Sticky toast saying the agent is blocked on the user, with a button
-  // back to the question. The user clears it with its X; it also goes
-  // when the question is answered, its task ends or its tab closes
-  // (dismissAskWaitingNotice).
-  function showAskWaitingNotice(tab) {
-    showNotification({
-      id: askWaitingNoticeId(tab.id),
-      severity: 'info',
-      sticky: true,
-      title: 'Waiting for your answer',
-      message: tab.askPendingQuestion || '',
-      actions: [{label: 'Show question', onClick: () => switchToTab(tab.id)}],
-    });
-  }
-
-  function dismissAskWaitingNotice(tabId) {
-    removeNotification(askWaitingNoticeId(tabId), undefined, false);
-    if (VSCODE_CHAT_HOST) postToHost({type: 'askWaitingDone', tabId: tabId});
+    if (VSCODE_CHAT_HOST) postToHost({type: 'revealForQuestion'});
   }
 
   function focusFinishedTab(tabId) {
@@ -17931,53 +18386,27 @@
   }
 
   /**
-   * Synthesize one static task panel for the shared page, showing
-   * *taskText*. The live #task-panel is cloned as the template (same
-   * id, classes and buttons, so the page's inlined main.css and
-   * share.js style and drive every copy alike) and reset to the
-   * expanded, visible state. The text element alone gets a per-task
-   * unique id so each drawer button's aria-controls names ITS text —
-   * assistive technology cannot resolve a duplicated id (the styling
-   * ids stay duplicated on purpose: main.css keys on them, and
-   * share.js scopes every interaction with closest()).
+   * The task panel of one task of the shared page: the same panel the
+   * live thread opens every task with (createTaskPanel), plus an info
+   * block with the task's settings. The live panel shows no settings
+   * (the Task Info panel carries them); the shared page has no such
+   * panel, so every exported task gets its own block below the text
+   * (main.css hides an empty one).
    *
    * @param {string} taskText The task's description text.
-   * @param {number} seq 1-based position of the task on the page.
    * @param {object|null} settings The task's task_settings payload,
    *     rendered into the panel's info block (cleared when null).
-   * @returns {Element|null} The panel, or null without a template.
+   * @returns {Element} The panel.
    */
-  function shareTaskPanel(taskText, seq, settings) {
-    if (!taskPanel) return null;
-    const panel = taskPanel.cloneNode(true);
-    panel.classList.add('visible');
-    panel.classList.remove('drawer-collapsed');
-    const textId = 'task-panel-text-' + seq;
-    const txt = panel.querySelector('#task-panel-text');
-    if (txt) {
-      txt.textContent = taskText;
-      txt.id = textId;
-      // The live panel's hover tooltip names the task on SCREEN; the
-      // static page has no tooltip machinery, so the leftover
-      // attribute would only mislead anyone reading the markup.
-      txt.removeAttribute('data-tooltip');
-    }
+  function shareTaskPanel(taskText, settings) {
+    const panel = createTaskPanel(taskText);
     // taskinfo-coverage:start
-    // The live panel shows no settings (the Task Info panel carries
-    // them); the shared page has no such panel, so every exported
-    // panel gets an info block with ITS OWN task's settings, below the
-    // text and above the buttons (main.css hides an empty one).
     const info = document.createElement('div');
-    info.id = 'task-panel-info';
+    info.className = 'task-panel-info';
     info.innerHTML = taskPanelInfoHTML(settings || null);
-    const btn = panel.querySelector('#task-panel-drawer-btn');
-    panel.insertBefore(info, btn);
+    const text = panel.querySelector('.task-panel-text');
+    panel.insertBefore(info, text.nextSibling);
     // taskinfo-coverage:end
-    if (btn) {
-      btn.setAttribute('aria-expanded', 'true');
-      btn.setAttribute('aria-label', 'Collapse task panel');
-      if (txt) btn.setAttribute('aria-controls', textId);
-    }
     return panel;
   }
 
@@ -17986,7 +18415,9 @@
    * screen (an input surface, not a panel) is dropped, and so are the
    * spliced-in `.adjacent-task` neighbours and their loader — those
    * tasks are exported from their own persisted transcripts, so
-   * keeping the splices would print them twice.
+   * keeping the splices would print them twice — and the tab's own
+   * task panel, which shareTaskSection synthesizes with the task's
+   * settings.
    *
    * The live fan-out panels' sub-agent bookkeeping (`_rpSubagents`,
    * `_rpExpectedCount`) lives in JS properties that a DOM clone does
@@ -18000,7 +18431,7 @@
   function shareLiveTranscript() {
     const live = O.cloneNode(true);
     const drop = live.querySelectorAll(
-      '#welcome, #adjacent-loader, .adjacent-task',
+      '#welcome, #adjacent-loader, .adjacent-task, :scope > .task-panel',
     );
     for (let i = 0; i < drop.length; i++) drop[i].remove();
     const origPanels = Array.from(
@@ -18159,10 +18590,9 @@
    *     ({task, task_id, parent_task_id, events}).
    * @param {Map<string, Array<object>>} byParent The chat task's
    *     sub-agents grouped by parent (shareSubagentsByParent).
-   * @param {number} seq Page-unique 1-based section number.
    * @returns {Element} The hidden, assembled section.
    */
-  function shareSubagentSection(sub, byParent, seq) {
+  function shareSubagentSection(sub, byParent) {
     const body = replayDetachedTranscript(sub.events || [], activeTabId);
     body.classList.remove('adjacent-task');
     const sid = String(sub.task_id || '');
@@ -18170,7 +18600,6 @@
     const section = shareTaskSection(
       sub.task,
       body,
-      seq,
       taskSettingsFromEvents(sub.events),
     );
     section.classList.add('share-subagent');
@@ -18194,21 +18623,20 @@
   // sharesub-coverage:end
 
   /**
-   * Wrap one task of the chat — its synthesized static task panel and
-   * the children of *body* — into a `.share-task` section of the
-   * shared page.
+   * Wrap one task of the chat — its task panel and the children of
+   * *body* — into a `.share-task` section of the shared page.
    *
    * @param {string} taskText The task's description text.
    * @param {Element} body Holder whose children are the transcript.
-   * @param {number} seq 1-based position of the task on the page.
    * @param {object|null} settings The task's task_settings payload.
    * @returns {Element} The assembled section.
    */
-  function shareTaskSection(taskText, body, seq, settings) {
+  function shareTaskSection(taskText, body, settings) {
     const section = document.createElement('div');
     section.className = 'share-task';
-    const panel = shareTaskPanel(taskText || '(untitled task)', seq, settings);
-    if (panel) section.appendChild(panel);
+    section.appendChild(
+      shareTaskPanel(taskText || '(untitled task)', settings),
+    );
     while (body.firstChild) section.appendChild(body.firstChild);
     return section;
   }
@@ -18242,8 +18670,8 @@
 
   /**
    * Build the HTML body of the standalone shared page: one section
-   * per task of the chat, oldest first — every section a static task
-   * panel above the task's transcript. *tasks* is the chat's
+   * per task of the chat, oldest first — every section a task panel
+   * above the task's transcript. *tasks* is the chat's
    * persisted task list from the daemon's `share_tasks` reply; the
    * task on screen contributes the live DOM (a running task's newest
    * panels are not in the database yet) and every other task replays
@@ -18279,7 +18707,6 @@
     // The hidden sub-agent sections all land AFTER the chat's own task
     // sections, so the visible chat reads top to bottom uninterrupted.
     const subSections = [];
-    let seq = 0;
     _suppressFileLinkChecks = true;
     try {
       for (let i = 0; i < list.length; i++) {
@@ -18301,10 +18728,10 @@
           body.classList.remove('adjacent-task');
         }
         shareStampRunParallel(body, byParent.get(tid) || []);
-        out.appendChild(shareTaskSection(t.task, body, ++seq, settings));
+        out.appendChild(shareTaskSection(t.task, body, settings));
         for (let s = 0; s < subs.length; s++) {
           if (!subs[s] || typeof subs[s] !== 'object') continue;
-          subSections.push(shareSubagentSection(subs[s], byParent, ++seq));
+          subSections.push(shareSubagentSection(subs[s], byParent));
         }
       }
     } finally {
@@ -18314,7 +18741,7 @@
       const live = shareLiveTranscript();
       if (live.querySelector('.ev, .llm-panel')) {
         const last = out.lastElementChild;
-        if (last && !last.querySelector('.ev, .llm-panel')) {
+        if (last && !last.querySelector('.ev:not(.task-panel), .llm-panel')) {
           // A task the daemon listed without events while the screen
           // is streaming panels is that same task mid-write (its row
           // lands in the database at start, its events follow): the
@@ -18326,7 +18753,7 @@
           // all (the chat was never persisted). It is the chat's
           // newest surface, so it closes the page.
           out.appendChild(
-            shareTaskSection(currentTaskName, live, ++seq, currentTaskSettings),
+            shareTaskSection(currentTaskName, live, currentTaskSettings),
           );
         }
       }
@@ -18341,7 +18768,8 @@
     // silently dropped.
     const sections = out.children;
     for (let i = 0; i < sections.length; i++) {
-      if (sections[i].querySelector('.ev, .llm-panel')) continue;
+      if (sections[i].querySelector('.ev:not(.task-panel), .llm-panel'))
+        continue;
       const ph = mkEl('div', 'adjacent-task-placeholder');
       ph.textContent = '(no output recorded)';
       sections[i].appendChild(ph);
@@ -18449,19 +18877,17 @@
     let urlFlashTimer = null;
     copyBtn.addEventListener('click', e => {
       e.preventDefault();
-      // A rejected write (webview unfocused) just skips the flash; an
-      // unhandled rejection would be the only other outcome.
-      navigator.clipboard.writeText(displayUrl).then(
-        () => {
-          copyBtn.innerHTML = checkSvg;
-          if (urlFlashTimer) clearTimeout(urlFlashTimer);
-          urlFlashTimer = setTimeout(() => {
-            urlFlashTimer = null;
-            copyBtn.innerHTML = copySvg;
-          }, 1500);
-        },
-        () => {},
-      );
+      // A failed copy (webview unfocused and no execCommand) just
+      // skips the flash.
+      window.PanelCopy.copyText(displayUrl).then(ok => {
+        if (!ok) return;
+        copyBtn.innerHTML = checkSvg;
+        if (urlFlashTimer) clearTimeout(urlFlashTimer);
+        urlFlashTimer = setTimeout(() => {
+          urlFlashTimer = null;
+          copyBtn.innerHTML = copySvg;
+        }, 1500);
+      });
     });
     // urlflash0903-coverage:end
     row.appendChild(link);
@@ -18806,6 +19232,15 @@
     // that wants the numbers this replay painted must read them now.
     if (opts && opts.onEventsRendered) opts.onEventsRendered();
     collapseAllExceptResult(container, ownerTabId);
+    // trajectory-coverage:start
+    // A task that has ended reads as its text, one Trajectory panel
+    // and its result, replayed or live (foldTrajectory).  A running
+    // task's replay keeps its panels in the open: they are still the
+    // live stream's, and the terminal event folds them when it ends.
+    if (isAdjacentReplay || !(replayOwnerTab && replayOwnerTab.isRunning)) {
+      foldTrajectory(container);
+    }
+    // trajectory-coverage:end
     if (typeof hljs !== 'undefined') {
       container.querySelectorAll('code.needs-hl').forEach(bl => {
         if (!bl.closest('.collapsible.collapsed')) {
@@ -18831,6 +19266,9 @@
     clearOutput();
     resetOutputState();
     clearUsageMetrics();
+    // The replayed transcript opens with its task's text; a neighbour
+    // spliced in later by scrolling brings its own (renderAdjacentTask).
+    setOwnTaskPanel(O, currentTaskName);
     const rCtx = replayEventsInto(O, events, {
       ownerTabId: activeTabId,
       onFollowupClick: copyFollowupToInput,
@@ -19312,14 +19750,13 @@
   }
   // readychat-coverage:end
 
-  // The `ready` announcement: hands the daemon this client's legacy
-  // locally-persisted tabs exactly once (adopted only into an empty
-  // registry) — or, on a re-`ready` after a daemon restart, the tabs
-  // currently on screen, so a daemon whose registry file was wiped
-  // re-adopts them. The daemon answers with the canonical `tabs_state`
-  // snapshot and replays every chat-bound tab.
+  // The chat tabs the `ready` announcement carries: on a re-`ready`
+  // after a daemon restart, a daemon whose registry file was wiped
+  // re-adopts the tabs on screen (into an empty registry only). The
+  // daemon answers with the canonical `tabs_state` snapshot and replays
+  // every chat-bound tab.
   function collectRestoredTabs() {
-    const current = tabs
+    return tabs
       .filter(t => {
         return !t.isSubagentTab && !t.isContentTab && t.backendChatId;
       })
@@ -19338,7 +19775,6 @@
               : t.workDir || '',
         };
       });
-    return current.length > 0 ? current : legacyRestoredTabs;
   }
 
   function sendReady() {
@@ -19404,8 +19840,7 @@
     if (bootTab && bootTab.inputValue && !inp.value) {
       inp.value = bootTab.inputValue;
       syncClearBtn();
-      inp.style.height = 'auto';
-      inp.style.height = inp.scrollHeight + 'px';
+      autosizeComposer();
     }
     sendReady();
     if (EDITOR_TAB_MODE) {
@@ -19527,6 +19962,12 @@
     document.addEventListener('keyup', e => {
       if (e.key === 'Shift') _shiftHeld = false;
     });
+    // The keyup is lost when focus leaves the window with Shift down
+    // (Shift+Tab out, Alt+Shift, a system shortcut); Enter would then
+    // insert line breaks instead of sending until Shift is pressed again.
+    window.addEventListener('blur', () => {
+      _shiftHeld = false;
+    });
     inp.addEventListener('beforeinput', e => {
       if (e.inputType === 'insertLineBreak' && !_shiftHeld) {
         e.preventDefault();
@@ -19534,8 +19975,7 @@
       }
     });
     inp.addEventListener('input', () => {
-      inp.style.height = 'auto';
-      inp.style.height = inp.scrollHeight + 'px';
+      autosizeComposer();
       checkAutocomplete();
       requestGhost();
       histIdx = -1;
@@ -19818,8 +20258,7 @@
         if (!document.body.classList.contains('remote-desktop')) {
           sidebarOverlay.classList.add('open');
         }
-        resetHistoryPagination();
-        requestHistory();
+        requestHistoryFromStart();
         // The drawer may have missed task news while closed.
         refreshSidebarDataViews(false);
       }
@@ -19833,8 +20272,7 @@
       // sidebar fresh via refreshHistory, and a webview re-shown after
       // being hidden re-syncs whatever it missed.
       sidebar.classList.add('open');
-      resetHistoryPagination();
-      requestHistory();
+      requestHistoryFromStart();
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') refreshHistory();
       });
@@ -19842,7 +20280,7 @@
     const newChatBtn = document.getElementById('new-chat-btn');
     if (newChatBtn) {
       newChatBtn.addEventListener('click', () => {
-        createNewTab();
+        openNewChat();
       });
     }
     // The "..." overflow menu: working directory, mic, share, attach,
@@ -19933,10 +20371,29 @@
       });
     }
     if (metaCloseBtn) {
-      metaCloseBtn.addEventListener('click', () => setMetaDrawerOpen(false));
+      // The phone drawer's close button doubles as the docked desktop
+      // panel's "hide" control while the panel lies over the content
+      // pane: a wide panel may cover the whole pane, leaving no pane to
+      // press (the drawer tab brings the panel back either way).
+      metaCloseBtn.addEventListener('click', onMetaCloseClick);
     }
     if (metaOverlay) {
       metaOverlay.addEventListener('click', () => setMetaDrawerOpen(false));
+    }
+    // Desktop remote, content pane open: the pane's tab row hides the
+    // task-info panel like the pane itself (ensureContentArea), and
+    // the drawer tab on the right edge brings the panel back.
+    const contentTabBar = document.getElementById('content-tab-bar');
+    if (contentTabBar) {
+      contentTabBar.addEventListener(
+        'pointerdown',
+        onContentPanePointerDown,
+        true,
+      );
+    }
+    const metaDrawer = document.getElementById('meta-drawer');
+    if (metaDrawer) {
+      metaDrawer.addEventListener('click', () => setMetaPanelHidden(false));
     }
     if (metaPanel && metaDrawerBtn) {
       // Escape dismisses the open mobile drawer like any dialog; the
@@ -19950,7 +20407,7 @@
         setMetaDrawerOpen(false);
       });
     }
-    setupActivityBar();
+    setupWorkspaceViews();
     setupWorkDirPanel();
     applyRemoteTheme(getSavedRemoteTheme());
     followVscodeTheme();
@@ -19967,6 +20424,7 @@
     ) {
       const desktopMq = window.matchMedia('(min-width: 900px)');
       const applyRemoteDesktop = () => {
+        const wasDesktop = document.body.classList.contains('remote-desktop');
         if (desktopMq.matches) {
           document.body.classList.add('remote-desktop');
           // Desktop docks the task-info panel permanently; the mobile
@@ -19974,20 +20432,25 @@
           setMetaDrawerOpen(false);
           if (!sidebar.classList.contains('open')) {
             sidebar.classList.add('open');
-            resetHistoryPagination();
-            requestHistory();
-            refreshSidebarDataViews(false);
+            requestHistoryFromStart();
           }
           sidebarOverlay.classList.remove('open');
+          // The docked panel's Explorer and Source Control load now.
+          refreshSidebarDataViews(false);
         } else {
           document.body.classList.remove('remote-desktop');
           sidebar.classList.remove('open');
           sidebarOverlay.classList.remove('open');
           // The task-info panel is a drawer again: it starts closed
           // (and inert, so its off-screen close button leaves the tab
-          // order — setMetaDrawerOpen re-checks the body class).
+          // order — setMetaDrawerOpen re-checks the body class), and
+          // a desktop "hidden behind the drawer tab" state is over.
+          setMetaPanelHidden(false);
           setMetaDrawerOpen(false);
         }
+        // Desktop splits the window into the chat and content panes;
+        // narrower windows stack them (a content tab replaces the chat).
+        if (wasDesktop !== desktopMq.matches) applySplitLayout();
         syncMetaInfoPolling();
       };
       if (typeof desktopMq.addEventListener === 'function') {
@@ -20213,21 +20676,7 @@
         refreshPanelAriaMax();
       });
     }
-    if (frequentTasksBtn) {
-      frequentTasksBtn.addEventListener('click', () => {
-        if (frequentPanel && frequentPanel.classList.contains('open')) {
-          closeFrequentPanel();
-        } else {
-          openFrequentPanel();
-        }
-      });
-    }
-    if (frequentPanelClose) {
-      frequentPanelClose.addEventListener('click', closeFrequentPanel);
-    }
-    if (frequentOverlay) {
-      frequentOverlay.addEventListener('click', closeFrequentPanel);
-    }
+    setupPaneResizer();
     if (tricksBtn) {
       tricksBtn.addEventListener('click', () => {
         if (tricksPanel && tricksPanel.classList.contains('open')) {
@@ -21240,8 +21689,6 @@
   // the parked prompt comes back. An answer still being typed is kept
   // too, above it, so nothing the user wrote is lost.
   function retireAskForTab(tab) {
-    if (typeof tab.askPendingQuestion === 'string')
-      dismissAskWaitingNotice(tab.id);
     tab.askPendingQuestion = null;
     const panel = lastQuestionPanel(tab);
     if (panel) setQuestionPanelPending(panel, false);
@@ -21584,7 +22031,6 @@
       e.stopPropagation();
       delBtn.style.display = 'none';
       confirmWrap.style.display = '';
-      if (opts.onShowConfirm) opts.onShowConfirm();
       // The safe choice holds focus, so Enter keeps and Escape cancels.
       cancelBtn.focus();
     });
@@ -21596,7 +22042,6 @@
       e.stopPropagation();
       confirmWrap.style.display = 'none';
       delBtn.style.display = '';
-      if (opts.onCancel) opts.onCancel();
       if (delBtn.isConnected) delBtn.focus();
     });
     return {delBtn: delBtn, confirmWrap: confirmWrap};
@@ -21749,7 +22194,7 @@
   }
 
   /**
-   * The agent script (SEA) that ran the task, e.g. "write_paper_sea",
+   * The SEA that ran the task, e.g. "write_paper_sea",
    * shown with the tags; null for a plain run.
    */
   function makeTaskSeaLabel(session) {
@@ -21758,16 +22203,16 @@
     const span = document.createElement('span');
     span.className = 'sidebar-item-sea';
     span.textContent = sea;
-    span.title = 'Agent script: ' + sea;
+    span.title = 'SEA: ' + sea;
     return span;
   }
 
-  // The SEA <select>'s value for rows with no agent script.
+  // The SEA <select>'s value for rows with no SEA.
   const HF_SEA_NONE = '__none__';
 
   /**
    * Rebuild the SEA filter's options from the loaded history rows: All,
-   * None (plain runs) and every distinct agent script seen, sorted.
+   * None (plain runs) and every distinct SEA seen, sorted.
    * The current selection survives even when no loaded row carries it
    * any more (a later page or a refresh may bring it back).
    */
@@ -21834,11 +22279,12 @@
     btn.type = 'button';
     btn.className = 'sidebar-item-copy';
     btn.setAttribute('aria-label', ariaLabel || 'Copy task to clipboard');
-    wireCopyButton(btn, text, false);
+    wireCopyButton(btn, text);
     return btn;
   }
 
-  function wireCopyButton(btn, text, retryFallback) {
+  /** Make *btn* copy *text* on click and flash a check mark on success. */
+  function wireCopyButton(btn, text) {
     btn.innerHTML = PANEL_COPY_SVG;
 
     // sidebarflash0903-coverage:start
@@ -21861,14 +22307,9 @@
     btn.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
-      const payload = String(text == null ? '' : text);
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(payload).then(flash, () => {
-          if (retryFallback && fallbackCopyText(payload)) flash();
-        });
-      } else if (fallbackCopyText(payload)) {
-        flash();
-      }
+      window.PanelCopy.copyText(String(text == null ? '' : text)).then(ok => {
+        if (ok) flash();
+      });
     });
   }
 
@@ -21878,19 +22319,13 @@
     btn.className = 'ids-copy-btn ids-copy-' + kind;
     btn.dataset.tooltip = 'Copy ' + kind + ' id';
     btn.setAttribute('aria-label', 'Copy ' + kind + ' id to clipboard');
-    wireCopyButton(btn, idText, true);
+    wireCopyButton(btn, idText);
     return btn;
   }
 
-  // ---- History grouping: one block per chat, day separators ----
-  //
-  // The daemon lists tasks newest first, so the first task seen for a
-  // chat is its latest one and the chats come out ordered by their
-  // latest task; later pages only add older tasks to existing blocks or
-  // open blocks for older chats.  A separator ("Today", "Yesterday", or
-  // the date) precedes the first chat of each day, by local time.
+  // ---- History sections: running tasks/chats, then local-day buckets ----
+  // Keep pagination order in the session/row arrays; arrange only the DOM.
   const historyChatGroups = new Map(); // chat id -> .history-chat-group
-  let historyLastDay = '';
   let historyMidnightTimer = null;
 
   function historyDayKey(d) {
@@ -22178,6 +22613,144 @@
     line.replaceChildren(makeLaunchedAgoLabelFor(ms, 'last launched'));
   }
 
+  /**
+   * The status icon a history task row shows for *s*: the pulsing "?"
+   * while the task is blocked on an ask_user_question (the daemon nudges
+   * a repaint with tasks_updated when the question opens and closes),
+   * the spinner while it runs, the red cross once it failed, the green
+   * tick once it completed during this page's life, or null for a task
+   * that settled before the page loaded.
+   *
+   * @param {Object} s A history row from the daemon.
+   * @returns {HTMLElement|null} The icon span, or null when none applies.
+   */
+  function historyStatusMark(s) {
+    const mark = document.createElement('span');
+    let label = '';
+    if (s.is_running && s.awaiting_answer) {
+      mark.className = 'sidebar-item-running sidebar-item-asking';
+      mark.textContent = '?';
+      label = 'Waiting for your answer';
+    } else if (s.is_running) {
+      mark.className = 'sidebar-item-running status-spinner';
+      label = 'Task running';
+    } else if (s.failed) {
+      mark.className = 'sidebar-item-failed status-cross';
+      label = 'Task failed';
+    } else if (s.task_id && historyJustCompletedTaskIds.has(s.task_id)) {
+      mark.className = 'sidebar-item-completed status-tick';
+      label = 'Task completed';
+    } else {
+      return null;
+    }
+    mark.dataset.tooltip = label;
+    mark.setAttribute('aria-label', label);
+    return mark;
+  }
+
+  /**
+   * Keep *group* tracking the chat's LAST task: its header shows that
+   * task's status icon (the same icon the task's own row shows) and
+   * `group._kissLastSession` names the task the header opens when the
+   * panel is expanded. Rows arrive newest first, so a chat's first row
+   * is normally its last task, but a later page or a search can hand
+   * the chat a row out of order: the newest launch time wins, and on a
+   * tie the row seen first.
+   *
+   * @param {HTMLElement} group The chat's .history-chat-group.
+   * @param {Object} session The row just added to the group.
+   */
+  function updateHistoryGroupLastTask(group, session) {
+    const btn = group.querySelector(':scope > .history-chat-header');
+    const ms = taskLaunchMs(session);
+    const known =
+      group.dataset.statusTs === undefined
+        ? NaN
+        : Number(group.dataset.statusTs);
+    if (isFinite(known) && !(ms > known)) return;
+    group.dataset.statusTs = String(isFinite(ms) ? ms : 0);
+    group._kissLastSession = session;
+    const old = btn.querySelector(':scope > .history-chat-status');
+    if (old) old.remove();
+    const mark = historyStatusMark(session);
+    if (!mark) return;
+    mark.classList.add('history-chat-status');
+    btn.insertBefore(mark, btn.querySelector(':scope > .history-chat-title'));
+  }
+
+  /**
+   * Show history row *s* in a tab, as clicking its row does: reveal
+   * the tab already bound to its chat (scrolled or replayed to the
+   * task), or open a new tab that resumes the chat at the task (in
+   * editor-tabs mode the host opens or reveals the chat's own panel).
+   * A task with nothing to resume is shown read-only in a fresh tab.
+   *
+   * @param {Object} s The history row from the daemon.
+   * @param {boolean} onlyIfMissing Leave a tab already bound to the
+   *   chat as it is (the host does the same for its editor panels):
+   *   an expanded history panel only wants the chat on screen. The
+   *   chat is then always resumed by id, even for a task without
+   *   persisted events: a read-only tab would bind to no chat, so the
+   *   next expand could not tell the chat is on screen already.
+   */
+  function openHistoryTask(s, onlyIfMissing) {
+    // The task text goes to the read-only task panel only.  #task-input
+    // holds the user's own draft for the NEXT prompt and is never written.
+    const taskText = s.preview || s.title || '';
+    const existingChatTab = getTabByBackendChatId(s.id);
+    if (onlyIfMissing && existingChatTab) return;
+    const resumable =
+      !!s.id && (s.has_events || s.is_running || !!onlyIfMissing);
+    // Editor-tabs mode: a chat that is not THIS panel's belongs in
+    // its own editor tab. The host either reveals the panel already
+    // bound to the chat or opens a new one that resumes it.
+    if (EDITOR_TAB_MODE && !existingChatTab) {
+      postToHost({
+        type: 'openChatPanel',
+        chatId: resumable ? s.id : undefined,
+        taskId:
+          s.task_id === undefined || s.task_id === null ? null : s.task_id,
+        title: taskText,
+        onlyIfMissing: !!onlyIfMissing,
+      });
+      return;
+    }
+    const left = getTab(activeTabId);
+    if (existingChatTab) {
+      switchToTab(existingChatTab.id);
+      retireIdleChat(left, false);
+      // The tab may be parked on a different task of the same chat.
+      // Scroll the clicked task's region into view so the static
+      // task panel names it; when its events are not spliced into
+      // the transcript yet, replay the tab at that task instead.
+      if (
+        !existingChatTab.isContentTab &&
+        !scrollChatToTask(s.task_id) &&
+        s.task_id !== undefined &&
+        s.task_id !== null &&
+        s.task_id !== ''
+      ) {
+        api.resumeSession({
+          id: s.id,
+          taskId: s.task_id,
+          tabId: existingChatTab.id,
+        });
+      }
+    } else if (resumable) {
+      // A running task is resumable even before its first event is
+      // persisted: the server reattaches the live chat on replay.
+      openHistoryTaskInNewTab(taskText);
+      api.resumeSession({id: s.id, taskId: s.task_id, tabId: activeTabId});
+      retireIdleChat(left, false);
+    } else {
+      // Nothing to resume, but the row still knows what the task was, so
+      // show it read-only in the fresh tab.
+      openHistoryTaskInNewTab(taskText);
+      retireIdleChat(left, false);
+      inp.focus();
+    }
+  }
+
   /** Build the collapsible chat panel's clickable header. */
   function historyGroupHeader(group, chatId) {
     const btn = document.createElement('button');
@@ -22205,6 +22778,12 @@
         if (chatId) historyChatCollapseOverrides.set(chatId, collapsed);
       }
       applyHistoryGroupCollapsed(group);
+      // Expanding a chat's panel also brings the chat on screen: its
+      // last task is loaded in a tab unless a tab already shows the
+      // chat (the panel stays open so the tasks remain in view).
+      if (!collapsed && group._kissLastSession) {
+        openHistoryTask(group._kissLastSession, true);
+      }
     });
     return btn;
   }
@@ -22212,16 +22791,17 @@
   function historyGroupFor(session) {
     const chatId = typeof session.id === 'string' ? session.id : '';
     const existing = chatId ? historyChatGroups.get(chatId) : null;
+    const ts = historyTimestamp(session);
     if (existing) {
+      // A running row can arrive before a newer completed row of its chat.
+      if (
+        !isFinite(Number(existing.dataset.ts)) ||
+        ts > Number(existing.dataset.ts)
+      ) {
+        existing.dataset.ts = String(ts);
+      }
       updateHistoryGroupHeader(existing, session);
       return existing;
-    }
-    const ts = historyTimestamp(session);
-    const dayKey = historyDayBucket(ts);
-    if (dayKey !== historyLastDay) {
-      historyLastDay = dayKey;
-      historyList.appendChild(historyDaySeparator(ts));
-      if (!historyMidnightTimer) scheduleHistoryMidnightRelabel(true);
     }
     const group = document.createElement('div');
     group.className = 'history-chat-group';
@@ -22268,33 +22848,64 @@
     return sep;
   }
 
+  /** Newest first, with undated history after dated history; ties stay stable. */
+  function historyNewestFirst(a, b) {
+    const aTs = Number(a.dataset.ts);
+    const bTs = Number(b.dataset.ts);
+    return (
+      (isFinite(bTs) ? bTs : -Infinity) - (isFinite(aTs) ? aTs : -Infinity)
+    );
+  }
+
+  /** Whether a flat row or an entire chat belongs in the Running section. */
+  function historyItemRunning(item) {
+    return (
+      item.dataset.category === 'running' || item.dataset.hasRunning === '1'
+    );
+  }
+
+  /** Running items first, newest first within each section. */
+  function historySectionOrder(a, b) {
+    return (
+      Number(historyItemRunning(b)) - Number(historyItemRunning(a)) ||
+      historyNewestFirst(a, b)
+    );
+  }
+
   /**
-   * Recompute every separator's label: "Today" turns into "Yesterday"
-   * at local midnight, and a machine woken after a sleep may find the
-   * day (or the time zone) changed.  Runs at each midnight while
-   * separators are on screen, and whenever the page becomes visible
-   * again.
+   * Arrange running tasks/chats before dated history and rebuild separators.
+   * Also runs at midnight and on visibility changes to reflect local-day or
+   * time-zone changes. Reuse rows and groups so folds and focus survive.
    */
   function relabelHistoryDaySeparators() {
-    // Separators are rebuilt from the chat blocks' own timestamps: a
-    // time-zone change can move a block to another local day, so the
-    // partition may change, not just the words.
     historyList.querySelectorAll('.history-day-sep').forEach(sep => {
       sep.remove();
     });
-    const groups = historyList.querySelectorAll(':scope > .history-chat-group');
+    const items = Array.from(
+      historyList.querySelectorAll(
+        ':scope > .history-chat-group, :scope > .sidebar-item',
+      ),
+    ).sort(historySectionOrder);
+    let cursor = historyList.firstElementChild;
     let lastDay = '';
-    groups.forEach(group => {
-      const ts = Number(group.dataset.ts);
-      const dayKey = historyDayBucket(ts);
+    items.forEach(item => {
+      if (item !== cursor) historyList.insertBefore(item, cursor);
+      cursor = item.nextElementSibling;
+      const ts = Number(item.dataset.ts);
+      const running = historyItemRunning(item);
+      const dayKey = running ? 'running' : historyDayBucket(ts);
       if (dayKey !== lastDay) {
         lastDay = dayKey;
-        historyList.insertBefore(historyDaySeparator(ts), group);
+        const sep = historyDaySeparator(ts);
+        if (running) {
+          sep.dataset.day = 'running';
+          sep.textContent = 'Running';
+        }
+        historyList.insertBefore(sep, item);
       }
     });
-    historyLastDay = lastDay;
-    if (groups.length) applyHistoryFilterVisibility();
-    scheduleHistoryMidnightRelabel(groups.length > 0);
+    if (items.length) applyHistoryFilterVisibility();
+    scheduleHistoryMidnightRelabel(items.length > 0);
   }
 
   /**
@@ -22314,10 +22925,6 @@
       Math.max(1000, next.getTime() - now.getTime()),
     );
   }
-
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) relabelHistoryDaySeparators();
-  });
 
   // Mouse events cover pointing devices in every environment; pointer
   // events additionally cover touch, where the compatibility mouse
@@ -22349,13 +22956,16 @@
   });
   // A hidden page cannot hold a press, but hiding it mid-press can eat
   // the release event: drop the latches so the parked page can land.
+  // Coming back, the day separators may need relabelling.
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      historyMouseHeld = false;
-      historyHeldKeys.clear();
-      historyActivePointers.clear();
-      historyMaybeApplyPending();
+    if (!document.hidden) {
+      relabelHistoryDaySeparators();
+      return;
     }
+    historyMouseHeld = false;
+    historyHeldKeys.clear();
+    historyActivePointers.clear();
+    historyMaybeApplyPending();
   });
 
   function historyPressHeld() {
@@ -22764,7 +23374,6 @@
       historyRenderedRows = [];
       allHistSessions = [];
       historyChatGroups.clear();
-      historyLastDay = '';
       scheduleHistoryMidnightRelabel(false);
       // Emptying the list drops its scroll offset: the rebuilt list
       // lands at the top, so the highlighted row is brought back into
@@ -22809,6 +23418,7 @@
           ? 'errors'
           : 'completed';
       div.dataset.timestamp = String(Number(s.timestamp || 0));
+      div.dataset.ts = String(historyTimestamp(s));
       div.dataset.favorite = s.is_favorite ? '1' : '0';
       div.dataset.workDir = s.work_dir || '';
       div.dataset.sea = typeof s.sea === 'string' ? s.sea.trim() : '';
@@ -22816,25 +23426,8 @@
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
 
-      if (s.is_running) {
-        const runningDot = document.createElement('span');
-        runningDot.className = 'sidebar-item-running status-spinner';
-        runningDot.dataset.tooltip = 'Task running';
-        runningDot.setAttribute('aria-label', 'Task running');
-        div.appendChild(runningDot);
-      } else if (s.failed) {
-        const failedDot = document.createElement('span');
-        failedDot.className = 'sidebar-item-failed status-cross';
-        failedDot.dataset.tooltip = 'Task failed';
-        failedDot.setAttribute('aria-label', 'Task failed');
-        div.appendChild(failedDot);
-      } else if (s.task_id && historyJustCompletedTaskIds.has(s.task_id)) {
-        const completedDot = document.createElement('span');
-        completedDot.className = 'sidebar-item-completed status-tick';
-        completedDot.dataset.tooltip = 'Task completed';
-        completedDot.setAttribute('aria-label', 'Task completed');
-        div.appendChild(completedDot);
-      }
+      const statusMark = historyStatusMark(s);
+      if (statusMark) div.appendChild(statusMark);
 
       const textSpan = document.createElement('span');
       textSpan.className = 'sidebar-item-text';
@@ -22897,7 +23490,7 @@
       }
 
       actions.appendChild(makeSidebarCollapseToggle(div, s));
-      // After the buttons: the task's age, then its tags and agent script.
+      // After the buttons: the task's age, then its tags and SEA.
       const launchedAgo = makeLaunchedAgoLabel(s);
       if (launchedAgo) actions.appendChild(launchedAgo);
       const tagsLabel = makeTaskTagsLabel(s);
@@ -22977,64 +23570,19 @@
       div.appendChild(info);
 
       div.addEventListener('click', () => {
-        // The task text goes to the read-only task panel only.  #task-input
-        // holds the user's own draft for the NEXT prompt and is never written.
-        const taskText = s.preview || s.title || '';
-        const existingChatTab = getTabByBackendChatId(s.id);
-        // Editor-tabs mode: a chat that is not THIS panel's belongs in
-        // its own editor tab. The host either reveals the panel already
-        // bound to the chat or opens a new one that resumes it.
-        if (EDITOR_TAB_MODE && !existingChatTab) {
-          postToHost({
-            type: 'openChatPanel',
-            chatId: s.id && (s.has_events || s.is_running) ? s.id : undefined,
-            taskId:
-              s.task_id === undefined || s.task_id === null ? null : s.task_id,
-            title: taskText,
-          });
-          closeSidebar();
-          return;
-        }
-        if (existingChatTab) {
-          switchToTab(existingChatTab.id);
-          // The tab may be parked on a different task of the same chat.
-          // Scroll the clicked task's region into view so the static
-          // task panel names it; when its events are not spliced into
-          // the transcript yet, replay the tab at that task instead.
-          if (
-            !existingChatTab.isContentTab &&
-            !scrollChatToTask(s.task_id) &&
-            s.task_id !== undefined &&
-            s.task_id !== null &&
-            s.task_id !== ''
-          ) {
-            api.resumeSession({
-              id: s.id,
-              taskId: s.task_id,
-              tabId: existingChatTab.id,
-            });
-          }
-        } else if (s.id && (s.has_events || s.is_running)) {
-          // A running task is resumable even before its first event is
-          // persisted: the server reattaches the live chat on replay.
-          createNewTab();
-          setTaskText(taskText);
-          api.resumeSession({id: s.id, taskId: s.task_id, tabId: activeTabId});
-        } else {
-          // Nothing to resume, but the row still knows what the task was, so
-          // show it read-only in the fresh tab.
-          createNewTab();
-          setTaskText(taskText);
-          inp.focus();
-        }
+        openHistoryTask(s);
         closeSidebar();
       });
       if (historyLegacyView) {
-        // The flat list: rows in the daemon's newest-first order.
         historyList.appendChild(div);
       } else {
         const group = historyGroupFor(s);
-        historyGroupBody(group).appendChild(div);
+        const body = historyGroupBody(group);
+        const before = Array.from(body.children).find(
+          row => historyNewestFirst(div, row) < 0,
+        );
+        body.insertBefore(div, before || null);
+        updateHistoryGroupLastTask(group, s);
         if (s.is_running && group.dataset.hasRunning !== '1') {
           // A running task keeps its chat's panel open by default.
           group.dataset.hasRunning = '1';
@@ -23049,7 +23597,7 @@
       historyHasMore = false;
     }
     refreshHistorySeaOptions();
-    applyHistoryFilterVisibility();
+    relabelHistoryDaySeparators();
     syncHistoryActiveTask();
     if (focusKey) {
       // The rebuild detached the focused row; give the keyboard the
@@ -23347,7 +23895,7 @@
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
     const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
-    // '' = every agent script, HF_SEA_NONE = plain runs only, otherwise
+    // '' = every SEA, HF_SEA_NONE = plain runs only, otherwise
     // the exact SEA name.
     const seaFilter = hfSea ? hfSea.value : '';
     // The daemon already filters each page by tag; checking the rows
@@ -23421,7 +23969,8 @@
         daySep = el;
         dayShown = false;
       } else if (
-        el.classList.contains('history-chat-group') &&
+        (el.classList.contains('history-chat-group') ||
+          el.classList.contains('sidebar-item')) &&
         el.style.display !== 'none'
       ) {
         dayShown = true;
@@ -23480,8 +24029,8 @@
   }
 
   /**
-   * Sheets (settings / promptlets / frequent tasks) in the order they
-   * were opened; the last entry is the topmost one Escape closes.
+   * Sheets (settings / promptlets) in the order they were opened; the
+   * last entry is the topmost one Escape closes.
    * Each entry remembers the control that opened the sheet so closing
    * it can hand keyboard focus back instead of dropping it on <body>.
    */
@@ -23584,7 +24133,6 @@
     // panel) keep their own Escape handling.
     if (panel === settingsPanel) closeSettingsPanel();
     else if (panel === tricksPanel) closeTricksPanel();
-    else if (panel === frequentPanel) closeFrequentPanel();
     else return;
     e.preventDefault();
   }
@@ -23679,16 +24227,6 @@
     settingsEditedFields.clear();
     setSettingsUpdateStatus('', false);
     setPanelOpen(settingsPanel, settingsOverlay, false);
-  }
-
-  function openFrequentPanel() {
-    if (!frequentPanel) return;
-    setPanelOpen(frequentPanel, frequentOverlay, true, frequentTasksBtn);
-    api.getFrequentTasks({limit: 50});
-  }
-
-  function closeFrequentPanel() {
-    setPanelOpen(frequentPanel, frequentOverlay, false);
   }
 
   function openTricksPanel() {
@@ -23993,8 +24531,8 @@
           openTrickEditor(index);
         });
         div.appendChild(editBtn);
-        // Same two-step inline confirm as a frequent task's delete: the
-        // trash icon only reveals Delete / Cancel, nothing is posted yet.
+        // Two-step inline confirm: the trash icon only reveals
+        // Delete / Cancel, nothing is posted yet.
         const del = makeSidebarDeleteConfirm({
           ariaLabel: 'Delete promptlet',
           onConfirm: () => deleteTrick(index),
@@ -24022,8 +24560,7 @@
         inp.value = before + injected + after;
         const caret = start + injected.length;
         syncClearBtn();
-        inp.style.height = 'auto';
-        inp.style.height = inp.scrollHeight + 'px';
+        autosizeComposer();
         inp.focus();
         try {
           inp.setSelectionRange(caret, caret);
@@ -24038,78 +24575,6 @@
     }
   }
 
-  function renderFrequentTasks(tasks) {
-    if (!frequentList) return;
-    if (!tasks || tasks.length === 0) {
-      frequentList.innerHTML = '<div class="sidebar-empty">No tasks yet</div>';
-      return;
-    }
-    frequentList.innerHTML = '';
-    tasks.forEach(t => {
-      const div = document.createElement('div');
-      div.className = 'sidebar-item frequent-item';
-      const text = String(t.task || '');
-      div.dataset.tooltip = text;
-
-      const textSpan = document.createElement('span');
-      textSpan.className = 'sidebar-item-text';
-      textSpan.textContent = text;
-      div.appendChild(textSpan);
-
-      const cnt = document.createElement('span');
-      cnt.className = 'frequent-item-count';
-      cnt.textContent = String(t.count);
-      div.appendChild(cnt);
-
-      const copyBtn = makeSidebarCopyButton(text);
-      div.appendChild(copyBtn);
-
-      const {delBtn, confirmWrap} = makeSidebarDeleteConfirm({
-        ariaLabel: 'Delete frequent task',
-        onShowConfirm: () => {
-          cnt.style.display = 'none';
-        },
-        onCancel: () => {
-          cnt.style.display = '';
-        },
-        onConfirm: () => {
-          api.deleteFrequentTask({task: text});
-          div.remove();
-        },
-      });
-
-      div.appendChild(delBtn);
-      div.appendChild(confirmWrap);
-
-      div.addEventListener('click', () => {
-        // A draft the user is composing is not overwritten silently:
-        // ask whether the frequent task replaces it.
-        if (inp.value.trim() && inp.value.trim() !== text) {
-          confirmAction({
-            id: 'frequent-replace-draft',
-            message:
-              'Replace the text in the composer with this frequent task?',
-            confirmLabel: 'Replace draft',
-            cancelLabel: 'Keep draft',
-            onConfirm: () => useFrequentTask(text),
-          });
-          return;
-        }
-        useFrequentTask(text);
-      });
-      frequentList.appendChild(div);
-    });
-  }
-
-  /** Put frequent task *text* in the composer and close the sheet. */
-  function useFrequentTask(text) {
-    inp.value = text;
-    syncClearBtn();
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
-    closeFrequentPanel();
-    inp.focus();
-  }
   function setupPasswordToggle(toggleId, inputId, secretName) {
     const btn = document.getElementById(toggleId);
     const inp = document.getElementById(inputId);
@@ -24547,8 +25012,8 @@
     editBtn.addEventListener('click', () => startCustomModelEdit(model));
     row.appendChild(editBtn);
 
-    // Two-step inline confirm (as for frequent tasks and promptlets):
-    // the trash icon reveals Delete / Cancel, nothing is posted yet.
+    // Two-step inline confirm (as for promptlets): the trash icon
+    // reveals Delete / Cancel, nothing is posted yet.
     const del = makeSidebarDeleteConfirm({
       ariaLabel: 'Delete ' + model.name,
       onConfirm: () => {
@@ -24829,8 +25294,7 @@
     syncClearBtn();
     const np = inserted.length;
     inp.setSelectionRange(np, np);
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     hideAC();
     inp.focus();
   }
@@ -25023,8 +25487,7 @@
     if (/\S$/.test(inp.value)) inp.value += ' ';
     clearGhost();
     syncClearBtn();
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     const np = inp.value.length;
     inp.setSelectionRange(np, np);
     hideAC();
@@ -25071,6 +25534,9 @@
       return activeTabId;
     },
     createNewTab: createNewTab,
+    // The Chats panel's pick, without the panel: show the chat (or, in
+    // the split layout, put a content tab in the content pane).
+    switchToTab: switchToTab,
     processEvent: processOutputEvent,
     // Stands in for the first tap or keystroke: after this the window is no
     // longer launching, so no backend event may switch tabs on its own.

@@ -67,13 +67,18 @@ from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
-from kiss.agents.sorcar.useful_tools import _file_lock
+from kiss.core.file_lock import exclusive_file_lock
 
 logger = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 60.0
 _CONNECT_STRAGGLER_GRACE_S = 5.0
 CALL_TIMEOUT = 300.0
+
+#: Seconds :meth:`MCPManager.disconnect_all` waits — once for every
+#: connection together — for the tasks to unwind, and once more for the
+#: cancelled stragglers to finish.
+_DISCONNECT_WAIT_S = 10.0
 
 #: How long a connection may sit unused before the next :meth:`connect`
 #: reaps it.  Nothing in the long-lived daemon ever disconnects servers
@@ -114,11 +119,6 @@ class MCPServerConfig:
         env: Extra environment variables for stdio servers.
         url: Endpoint URL for http/sse servers (empty otherwise).
         headers: Extra HTTP headers for http/sse servers.
-        source: Where the server was configured — ``"user"``,
-            ``"claude-project"``, or ``"project"``.  Pure bookkeeping:
-            excluded from equality so the same server re-discovered
-            from a different file compares equal and its healthy
-            connection is reused instead of torn down and re-opened.
     """
 
     name: str
@@ -128,7 +128,6 @@ class MCPServerConfig:
     env: tuple[tuple[str, str], ...] = ()
     url: str = ""
     headers: tuple[tuple[str, str], ...] = ()
-    source: str = field(default="user", compare=False)
 
     def to_json(self) -> dict[str, Any]:
         """Return the Claude-Code-compatible JSON dict for this server."""
@@ -166,13 +165,12 @@ def mcp_auth_dir() -> Path:
     return _default_kiss_dir() / "mcp_auth"
 
 
-def _parse_server_entry(name: str, raw: Any, source: str) -> MCPServerConfig | None:
+def _parse_server_entry(name: str, raw: Any) -> MCPServerConfig | None:
     """Parse one ``mcpServers`` JSON entry leniently.
 
     Args:
         name: The server name (the JSON key).
         raw: The JSON value (must be a dict to be usable).
-        source: Discovery source label (e.g. ``"user"``).
 
     Returns:
         The parsed config, or ``None`` when the entry is unusable.
@@ -204,11 +202,10 @@ def _parse_server_entry(name: str, raw: Any, source: str) -> MCPServerConfig | N
         url=url,
         headers=tuple((str(k), str(v)) for k, v in headers.items())
         if isinstance(headers, dict) else (),
-        source=source,
     )
 
 
-def _load_config_file(path: Path, source: str) -> dict[str, MCPServerConfig]:
+def _load_config_file(path: Path) -> dict[str, MCPServerConfig]:
     """Load every server from one ``{"mcpServers": {...}}`` file."""
     servers: dict[str, MCPServerConfig] = {}
     try:
@@ -222,7 +219,7 @@ def _load_config_file(path: Path, source: str) -> dict[str, MCPServerConfig]:
     if not isinstance(entries, dict):
         return servers
     for name, entry in entries.items():
-        cfg = _parse_server_entry(str(name), entry, source)
+        cfg = _parse_server_entry(str(name), entry)
         if cfg is not None:
             servers[cfg.name] = cfg
     return servers
@@ -241,13 +238,9 @@ def load_mcp_servers(work_dir: str) -> dict[str, MCPServerConfig]:
     Returns:
         Mapping of server name → :class:`MCPServerConfig`.
     """
-    servers = _load_config_file(user_mcp_config_path(), "user")
-    servers.update(
-        _load_config_file(
-            claude_project_mcp_config_path(work_dir), "claude-project"
-        )
-    )
-    servers.update(_load_config_file(project_mcp_config_path(work_dir), "project"))
+    servers = _load_config_file(user_mcp_config_path())
+    servers.update(_load_config_file(claude_project_mcp_config_path(work_dir)))
+    servers.update(_load_config_file(project_mcp_config_path(work_dir)))
     return servers
 
 
@@ -268,7 +261,7 @@ def save_mcp_server(cfg: MCPServerConfig, scope: str, work_dir: str) -> Path:
         else project_mcp_config_path(work_dir)
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _file_lock(path.with_suffix(".lock")):
+    with exclusive_file_lock(path.with_suffix(".lock")):
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -300,7 +293,9 @@ def remove_mcp_server(name: str, work_dir: str) -> list[Path]:
         claude_project_mcp_config_path(work_dir),
         project_mcp_config_path(work_dir),
     ):
-        with _file_lock(path.with_suffix(".lock")):
+        if not path.exists():
+            continue
+        with exclusive_file_lock(path.with_suffix(".lock")):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -322,34 +317,6 @@ def _atomic_write_config(path: Path, raw: dict[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
-
-
-def load_mcp_permissions() -> dict[str, str]:
-    """Load the ``mcp_permissions`` rules from ``~/.kiss/config.json``.
-
-    Returns:
-        Mapping of wildcard pattern → ``"allow"``/``"deny"``, in file
-        order.  Empty when the config or key is missing/malformed.
-    """
-    return load_permission_rules("mcp_permissions")
-
-
-def mcp_tool_permission(tool_name: str, rules: dict[str, str]) -> str:
-    """Resolve the permission for the full *tool_name* against *rules*.
-
-    Rules use shell-style wildcards matched against the complete
-    ``<server>_<tool>`` name (so ``mymcp_*`` covers every tool of the
-    ``mymcp`` server); the **last** matching rule wins and the default
-    is ``"allow"`` — identical semantics to skill permissions.
-
-    Args:
-        tool_name: The full tool name (e.g. ``"mymcp_search"``).
-        rules: Mapping of pattern → ``"allow"``/``"deny"``.
-
-    Returns:
-        ``"allow"`` or ``"deny"``.
-    """
-    return skill_permission(tool_name, rules)
 
 
 _RESERVED_BASENAMES = frozenset(
@@ -427,6 +394,17 @@ class FileTokenStorage:
             tmp.unlink(missing_ok=True)
             raise
 
+    def _load(self, data: dict[str, Any], key: str, model: Any) -> Any:
+        """Return ``data[key]`` validated as the pydantic *model*, else ``None``."""
+        raw = data.get(key)
+        if not raw:
+            return None
+        try:
+            return model.model_validate(raw)
+        except Exception:
+            logger.debug("invalid %s in %s", key, self.path, exc_info=True)
+            return None
+
     async def get_tokens(self) -> Any:
         """Return the stored :class:`~mcp.shared.auth.OAuthToken`, if any.
 
@@ -439,13 +417,8 @@ class FileTokenStorage:
         from mcp.shared.auth import OAuthToken
 
         data = self._read()
-        raw = data.get("tokens")
-        if not raw:
-            return None
-        try:
-            token = OAuthToken.model_validate(raw)
-        except Exception:
-            logger.debug("invalid stored tokens in %s", self.path, exc_info=True)
+        token = self._load(data, "tokens", OAuthToken)
+        if token is None:
             return None
         expires_at = data.get("expires_at")
         if isinstance(expires_at, (int, float)) and time.time() >= expires_at - 60:
@@ -456,14 +429,7 @@ class FileTokenStorage:
         """Return the authorization server metadata saved at sign-in, if any."""
         from mcp.shared.auth import OAuthMetadata
 
-        raw = self._read().get("oauth_metadata")
-        if not raw:
-            return None
-        try:
-            return OAuthMetadata.model_validate(raw)
-        except Exception:
-            logger.debug("invalid oauth metadata in %s", self.path, exc_info=True)
-            return None
+        return self._load(self._read(), "oauth_metadata", OAuthMetadata)
 
     def set_oauth_metadata(self, metadata: Any) -> None:
         """Persist the authorization server metadata discovered at sign-in.
@@ -475,16 +441,17 @@ class FileTokenStorage:
         Args:
             metadata: An :class:`~mcp.shared.auth.OAuthMetadata`.
         """
-        self._locked_update("oauth_metadata", metadata.model_dump(mode="json", exclude_none=True))
+        self.put("oauth_metadata", metadata.model_dump(mode="json", exclude_none=True))
 
-    def _locked_update(self, key: str, value: Any) -> None:
+    def put(self, key: str, value: Any) -> None:
         """Replace *key* in the stored JSON under the inter-process lock.
 
         Args:
-            key: Top-level key to set (``"tokens"``/``"client_info"``).
+            key: Top-level key to set (``"tokens"``, ``"client_info"`` or
+                ``"oauth_metadata"``).
             value: Its already-serialized JSON value, or ``None`` to forget it.
         """
-        with _file_lock(self._lock_path):
+        with exclusive_file_lock(self._lock_path):
             data = self._read()
             data[key] = value
             if key == "tokens":
@@ -508,23 +475,14 @@ class FileTokenStorage:
         tool call.
         """
         await asyncio.to_thread(
-            self._locked_update,
-            "tokens",
-            tokens.model_dump(mode="json", exclude_none=True),
+            self.put, "tokens", tokens.model_dump(mode="json", exclude_none=True),
         )
 
     async def get_client_info(self) -> Any:
         """Return the stored OAuth client registration, if any."""
         from mcp.shared.auth import OAuthClientInformationFull
 
-        raw = self._read().get("client_info")
-        if not raw:
-            return None
-        try:
-            return OAuthClientInformationFull.model_validate(raw)
-        except Exception:
-            logger.debug("invalid client info in %s", self.path, exc_info=True)
-            return None
+        return self._load(self._read(), "client_info", OAuthClientInformationFull)
 
     async def set_client_info(self, client_info: Any) -> None:
         """Persist the dynamically registered OAuth client information.
@@ -534,9 +492,7 @@ class FileTokenStorage:
         event loop is shared by every MCP connection.
         """
         await asyncio.to_thread(
-            self._locked_update,
-            "client_info",
-            client_info.model_dump(mode="json", exclude_none=True),
+            self.put, "client_info", client_info.model_dump(mode="json", exclude_none=True),
         )
 
     def clear(self) -> bool:
@@ -559,13 +515,8 @@ _LOGIN_HINT = (
 )
 
 
-async def _noninteractive_redirect(url: str) -> None:
-    """Refuse to start a browser OAuth flow during an agent run."""
-    raise RuntimeError(_LOGIN_HINT)
-
-
-async def _noninteractive_callback() -> tuple[str, str | None]:
-    """Refuse to wait for an OAuth callback during an agent run."""
+async def _refuse_login(*_: Any) -> Any:
+    """Refuse to start or await a browser OAuth flow during an agent run."""
     raise RuntimeError(_LOGIN_HINT)
 
 
@@ -574,10 +525,9 @@ def build_oauth_provider(cfg: MCPServerConfig) -> Any:
 
     The provider reuses the tokens stored by :class:`FileTokenStorage`
     and refreshes them at the token endpoint recorded at sign-in.  It
-    never starts an interactive login:
-    an agent run must not block waiting for a human at a browser, so
-    both handlers refuse and point at the sign-in tool
-    (:mod:`kiss.agents.sorcar.mcp_oauth`).
+    never starts an interactive login: an agent run must not block
+    waiting for a human at a browser, so both handlers refuse and
+    point at the sign-in tool (:mod:`kiss.agents.sorcar.mcp_oauth`).
 
     Args:
         cfg: The remote server configuration.
@@ -585,20 +535,9 @@ def build_oauth_provider(cfg: MCPServerConfig) -> Any:
     Returns:
         An ``httpx.Auth`` instance (``OAuthClientProvider``).
     """
-    from mcp.client.auth import OAuthClientProvider
+    from kiss.agents.sorcar.mcp_oauth import build_provider
 
-    from kiss.agents.sorcar.mcp_oauth import client_metadata
-
-    storage = FileTokenStorage(cfg.name)
-    provider = OAuthClientProvider(
-        server_url=cfg.url,
-        client_metadata=client_metadata(),
-        storage=storage,
-        redirect_handler=_noninteractive_redirect,
-        callback_handler=_noninteractive_callback,
-    )
-    provider.context.oauth_metadata = storage.get_oauth_metadata()
-    return provider
+    return build_provider(cfg, _refuse_login, _refuse_login)
 
 
 @dataclass
@@ -677,18 +616,6 @@ async def _enter_transport(stack: Any, config: MCPServerConfig, auth: Any) -> tu
     return read, write
 
 
-def _cancel_if_not_done(task: Any) -> None:
-    """Cancel *task* (a ``concurrent.futures.Future``) if still pending.
-
-    Runs on the manager loop via ``call_later`` once the straggler
-    grace period elapses; cancelling the future propagates to the
-    wrapped asyncio task, raising ``CancelledError`` at its stuck
-    ``await`` so the transport context unwinds and its child dies.
-    """
-    if not task.done():
-        task.cancel()
-
-
 async def _park_until_stopped(
     conn: _Connection, session: Any, health_interval: float,
 ) -> None:
@@ -703,8 +630,8 @@ async def _park_until_stopped(
     is in flight (one that started after the ping went out) is
     inconclusive and ignored: a server whose loop is busy in a long
     sync tool handler cannot answer the ping, and failing it would tear
-    the session down under a valid call, stranding that call until
-    ``CALL_TIMEOUT`` (a dead server is caught by the call's own
+    the session down under a valid call, failing that call with
+    "Connection closed" (a dead server is caught by the call's own
     timeout).
 
     Args:
@@ -900,12 +827,14 @@ class MCPManager:
         A connection with a tool call in flight is never a candidate,
         however old it is: dropping it makes ``_maintain_connection``
         leave the session context underneath a live
-        ``session.call_tool``, which strands that call until the
-        five-minute call timeout expires.  Tool calls block for as long
-        as the tool runs, so the busiest connection is regularly also
-        the least recently *started* one.  Such a connection becomes an
-        ordinary candidate again the moment its last call returns, so
-        the cap still holds — it is enforced a little later.
+        ``session.call_tool``, which fails that call with "Connection
+        closed".  Tool calls block for as long as the tool runs, so
+        the busiest connection is regularly also the least recently
+        *started* one.  Nor is a connection still in its handshake:
+        evicting it fails the ``connect()`` that is waiting on it with
+        "evicted" instead of a session.  Both become ordinary
+        candidates again (the last call returns; the handshake ends),
+        so the cap still holds — it is enforced a little later.
 
         Args:
             keep: The connection key just connected, never evicted.
@@ -914,7 +843,7 @@ class MCPManager:
         with self._lock:
             evictable = {
                 key for key, conn in self._connections.items()
-                if key != keep and conn.in_flight == 0
+                if key != keep and conn.in_flight == 0 and conn.ready.is_set()
             }
             doomed = {
                 key for key in evictable
@@ -950,15 +879,12 @@ class MCPManager:
         if task is None:
             return
         task.add_done_callback(functools.partial(self._forget_orphan, conn))
-        try:
-            self._loop.call_soon_threadsafe(
-                self._loop.call_later,
-                _CONNECT_STRAGGLER_GRACE_S,
-                _cancel_if_not_done,
-                task,
-            )
-        except RuntimeError:
-            pass
+        # Cancelling the future propagates to the wrapped asyncio task,
+        # raising ``CancelledError`` at its stuck ``await`` so the
+        # transport context unwinds and its child dies.
+        self._loop.call_soon_threadsafe(
+            self._loop.call_later, _CONNECT_STRAGGLER_GRACE_S, task.cancel,
+        )
 
     def _forget_orphan(self, conn: _Connection, _future: Any) -> None:
         """Drop a finished straggler from ``_orphans`` (done callback)."""
@@ -1079,7 +1005,10 @@ class MCPManager:
         ``finally`` may never run once the loop stops, and a thread
         blocked in :meth:`connect` must not burn the whole
         CONNECT_TIMEOUT waiting for a connection the manager already
-        tore down.
+        tore down.  The two waits (for the tasks to unwind, then for
+        the cancelled stragglers to finish) each share one deadline
+        across every connection, so a shutdown is bounded by
+        2 × :data:`_DISCONNECT_WAIT_S` however many servers hang.
         """
         with self._lock:
             conns = list(self._connections.values())
@@ -1088,14 +1017,21 @@ class MCPManager:
             self._orphans.clear()
         for conn in conns:
             self._loop.call_soon_threadsafe(conn.stop.set)
+        deadline = time.monotonic() + _DISCONNECT_WAIT_S
+        stragglers: list[_Connection] = []
         for conn in conns:
-            if conn.task is not None:
-                try:
-                    conn.task.result(timeout=10)
-                except BaseException:  # noqa: BLE001 — CancelledError is BaseException
-                    conn.task.cancel()
-                    logger.debug("MCP disconnect error", exc_info=True)
-                    conn.finished.wait(timeout=10)
+            if conn.task is None:
+                continue
+            try:
+                conn.task.result(timeout=max(0.0, deadline - time.monotonic()))
+            except BaseException:  # noqa: BLE001 — CancelledError is BaseException
+                conn.task.cancel()
+                logger.debug("MCP disconnect error", exc_info=True)
+                stragglers.append(conn)
+        deadline = time.monotonic() + _DISCONNECT_WAIT_S
+        for conn in stragglers:
+            conn.finished.wait(timeout=max(0.0, deadline - time.monotonic()))
+        for conn in conns:
             conn.session = None
             conn.error = conn.error or "disconnected"
             conn.ready.set()
@@ -1251,7 +1187,7 @@ def _python_param_name(prop_name: str, used: set[str]) -> str:
 
 
 def make_mcp_tool_wrapper(
-    manager: MCPManager, server: str, tool: Any, connection_key: str | None = None,
+    manager: MCPManager, server: str, tool: Any, connection_key: str,
 ) -> Any:
     """Wrap one MCP tool as a kiss-compatible Python function.
 
@@ -1265,8 +1201,7 @@ def make_mcp_tool_wrapper(
         server: The configured server name.
         tool: The MCP ``Tool`` (name, description, inputSchema).
         connection_key: The :func:`_connection_key` of the live
-            connection to route calls to; defaults to *server* (only
-            unambiguous when a single connection has that name).
+            connection to route calls to.
 
     Returns:
         The wrapper callable, named ``<server>_<tool>``.
@@ -1312,7 +1247,7 @@ def make_mcp_tool_wrapper(
             if value is None and not is_required:
                 continue
             arguments[original] = value
-        return manager.call_tool(connection_key or server, tool_name, arguments)
+        return manager.call_tool(connection_key, tool_name, arguments)
 
     description = _one_line(tool.description or f"MCP tool {tool_name} on server {server}.")
     doc = f"{description}\n"
@@ -1364,7 +1299,7 @@ def make_mcp_tools(work_dir: str) -> list[Any]:
     servers = load_mcp_servers(work_dir)
     if not servers:
         return []
-    rules = load_mcp_permissions()
+    rules = load_permission_rules("mcp_permissions")
     manager = MCPManager.instance()
     tools: list[Any] = []
     taken_names: set[str] = set(_RESERVED_TOOL_NAMES)
@@ -1401,7 +1336,7 @@ def make_mcp_tools(work_dir: str) -> list[Any]:
             taken_names.add(full_name)
             wrapper.__name__ = full_name
             wrapper.__qualname__ = full_name
-            if rules and mcp_tool_permission(full_name, rules) == "deny":
+            if skill_permission(full_name, rules) == "deny":
                 continue
             tools.append(wrapper)
     return tools

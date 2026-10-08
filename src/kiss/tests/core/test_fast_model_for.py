@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from kiss.core.models.model_info import get_fast_model
+from kiss.core.models.model_info import MODEL_INFO, get_fast_model
 
 
 class TestFastModelFor:
@@ -39,15 +39,28 @@ class TestFastModelFor:
 
     def test_openrouter_key_returns_openrouter_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "OPENROUTER_API_KEY")
-        assert get_fast_model() == "openrouter/anthropic/claude-haiku-4.5"
+        assert get_fast_model() == "openrouter/anthropic/claude-sonnet-5.5"
+        assert get_fast_model() in MODEL_INFO
 
     def test_together_key_returns_together_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "TOGETHER_API_KEY")
-        assert get_fast_model() == "deepseek-ai/DeepSeek-R1-0528"
+        assert get_fast_model() == "deepseek-ai/DeepSeek-V4.1-Flash"
+        assert get_fast_model() in MODEL_INFO
 
     def test_openai_key_returns_luna(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "OPENAI_API_KEY")
         assert get_fast_model() == "gpt-6-luna"
+        assert get_fast_model() in MODEL_INFO
+
+    def test_gemini_key_returns_flash_lite(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_key(monkeypatch, "GEMINI_API_KEY")
+        assert get_fast_model() == "gemini-3.5-flash-lite"
+        assert get_fast_model() in MODEL_INFO
+
+    def test_anthropic_key_returns_sonnet(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_key(monkeypatch, "ANTHROPIC_API_KEY")
+        assert get_fast_model() == "claude-sonnet-5-5"
+        assert get_fast_model() in MODEL_INFO
 
     def test_no_keys_returns_cli_or_no_model_fallback(
         self, monkeypatch: pytest.MonkeyPatch

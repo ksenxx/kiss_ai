@@ -46,7 +46,7 @@ from kiss.core.processes import pid_alive
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import install_named_interpreter, posix_only
 
 # Driver process: stands in for a kiss-web daemon whose event loop is
 # wedged (a callback blocking the loop thread — the exact scenario the
@@ -282,7 +282,7 @@ class TestAdoptionPreservesUrlAcrossRestart(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         ws._CLOUDFLARED_PIDFILE = Path(tmp.name) / "cloudflared.pid"
         link = Path(tmp.name) / "cloudflared"
-        os.symlink(sys.executable, link)
+        install_named_interpreter(link)
         proc = subprocess.Popen(
             [str(link), "-c", "import time; time.sleep(60)"],
             stdout=subprocess.DEVNULL,

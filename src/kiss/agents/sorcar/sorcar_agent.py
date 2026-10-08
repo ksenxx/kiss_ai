@@ -7,9 +7,7 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import difflib
-import json
 import logging
 import math
 import os
@@ -19,39 +17,32 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
 import yaml
 
-from kiss.agents.seas.base.base_sea import BaseSea
-from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.agent_dispatch import (
-    RunOptions,
-    fanout_conflict,
-    inherit_from_parent,
     kill_jobs_of,
     live_agent_jobs,
-    options_keyword_hint,
-    parse_run_options,
-    resolve_agent,
+    make_agent_job_tool,
+    make_run_agent_tool,
+    make_run_parallel_tool,
 )
+from kiss.agents.sorcar.commit_message import fallback_commit_message
 from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
 from kiss.agents.sorcar.fanout_guard import (
     is_implementation_task,
-    is_review_task,
-    parse_tasks_json,
 )
-from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
-from kiss.agents.sorcar.relentless_agent import RelentlessAgent, resolve_work_dir
-from kiss.agents.sorcar.run_config import note_pinned, with_run_config
-from kiss.agents.sorcar.sea_commands import evaluate_sea, model_sea, sea_name
+from kiss.agents.sorcar.persistence import _load_last_model
+from kiss.agents.sorcar.relentless_agent import (
+    RelentlessAgent,
+    _session_usage,
+    resolve_work_dir,
+)
+from kiss.agents.sorcar.sea_commands import model_sea
 from kiss.agents.sorcar.sea_settings import (
-    PRECEDENCE_RULE,
-    SeaError,
     alias_free_profile,
-    locked_conflicts,
 )
 from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.task_classifier import (
@@ -62,10 +53,8 @@ from kiss.agents.sorcar.task_classifier import (
 from kiss.agents.sorcar.useful_tools import (
     BackgroundJob,
     UsefulTools,
-    rewrite_parent_repo_paths,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.core import tool_interrupt
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
@@ -83,8 +72,7 @@ from kiss.core.models.model_info import (
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
-from kiss.core.stop_signal import get_thread_stop_event, set_thread_stop_event
-from kiss.core.tool_interrupt import ToolCallInterrupted
+from kiss.core.tool_verdict import Verdict
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
@@ -278,7 +266,7 @@ def summary(description: str) -> str:
         A short confirmation string.
     """
     del description
-    return "Summary recorded."
+    return ""
 
 
 def _memory_root_for_run(
@@ -525,15 +513,7 @@ def auto_commit_changes(
         logger.debug(
             "LLM commit message generation failed; using fallback", exc_info=True,
         )
-        msg = "kiss: auto-commit agent changes"
-        if user_prompt:
-            from kiss.agents.sorcar.commit_message import _append_user_prompt
-
-            msg = _append_user_prompt(msg, user_prompt)
-        if task_result:
-            from kiss.agents.sorcar.commit_message import _append_task_result
-
-            msg = _append_task_result(msg, task_result)
+        msg = fallback_commit_message(user_prompt, task_result)
     GitWorktreeOps.stage_all(commit_dir)
     committed = GitWorktreeOps.commit_staged(commit_dir, msg)
     if committed:
@@ -682,201 +662,6 @@ def _notify_subagent_done(
     _broadcast_subagent_done(printer, viewer_ids, model)
 
 
-# How long the parent may sit in one wait() before re-reading its stop
-# event.  A completed child wakes the wait immediately, so this only
-# bounds flag-checking: the abandon path below allows 15s anyway, and
-# ``_force_stop_thread`` waits 1s before its first injection and retries
-# at +5s.  It must not be much smaller: nested fan-outs put one waiting
-# parent on the stack per level, and every one of them wakes on this
-# interval, so a 0.1s slice made a deeply nested tree crawl under GIL
-# contention.
-_SUBAGENT_POLL_SECONDS = 1.0
-# The slice while the fan-out runs as a tool call (run_parallel): below
-# kiss.core.tool_interrupt's 1 s injection grace, see _await_subagents.
-_SUBAGENT_TOOL_POLL_SECONDS = 0.4
-_SUBAGENT_STOP_GRACE_SECONDS = 15.0
-# Upper bound on how long _LiveUsageMonitor.stop() waits for its polling
-# thread; the thread calls printer.print synchronously and a blocked
-# printer must not hang the parent task's fan-out unwind.
-_LIVE_USAGE_JOIN_TIMEOUT = 2.0
-
-
-class _SubagentStopEvent(threading.Event):
-    """Per-sub-agent stop event chained to the parent task's stop event.
-
-    Each parallel sub-agent worker gets its own instance so the user
-    can stop ONLY that sub-agent's task (``VSCodeServer._stop_task``
-    resolves the sub-agent's registered ``stop_event`` and
-    calls :meth:`set`, which flips just this event).  At the same time
-    a stop of the PARENT task must keep killing the whole fan-out, so
-    :meth:`is_set` and :meth:`wait` also observe the parent event —
-    every consumer (``JsonPrinter._check_stop``'s per-print poll, the
-    ``UsefulTools`` bash process-group killer's poll loop, and the
-    0.1 s ``stop.wait`` loops) sees the union of the two signals.
-    Nested ``run_parallel`` fan-outs chain transitively: the inner
-    event's parent is the outer sub-agent's event.
-    """
-
-    def __init__(self, parent: threading.Event | None = None) -> None:
-        """Create an unset event linked to *parent* (may be ``None``)."""
-        super().__init__()
-        self._parent_event = parent
-
-    def is_set(self) -> bool:
-        """True when this event OR any ancestor parent event is set.
-
-        Walks the parent chain ITERATIVELY: deeply nested
-        ``run_parallel`` fan-outs chain one linked event per level, so
-        a recursive walk could hit the interpreter recursion limit.
-        """
-        ev: threading.Event | None = self
-        while isinstance(ev, _SubagentStopEvent):
-            if threading.Event.is_set(ev):
-                return True
-            ev = ev._parent_event
-        return ev is not None and ev.is_set()
-
-    def wait(self, timeout: float | None = None) -> bool:
-        """Wait until this event or an ancestor is set.
-
-        Polls the parent chain on a short interval (0.05 s) so a
-        parent-task stop wakes waiters promptly even though the parent
-        event has no reference back to this child event.
-
-        Args:
-            timeout: Maximum seconds to wait; ``None`` waits forever.
-
-        Returns:
-            True when the event (or an ancestor) is set, else False
-            after *timeout* elapsed.
-        """
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            if self.is_set():
-                return True
-            slice_s = 0.05
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return self.is_set()
-                slice_s = min(slice_s, remaining)
-            if super().wait(slice_s):
-                return True
-
-
-def _await_subagents(
-    futures: list[Future[str]],
-    stop_event: threading.Event | None,
-) -> list[str]:
-    """Collect fan-out results without becoming unstoppable.
-
-    ``list(pool.map(...))`` parks the parent thread in a C-level lock,
-    where it can neither poll its stop event (a parent prints nothing
-    while its children run) nor accept the ``KeyboardInterrupt`` that
-    ``VSCodeServer._stop_task`` injects — CPython delivers an injected
-    exception only at a bytecode boundary.  That is why the parent of
-    task ``709ebce3`` outlived the Stop click by three minutes
-    (``reports/stop_button_delay_2026-08-05.html``).  Waiting in short
-    slices instead keeps the parent at a bytecode boundary throughout.
-
-    A stopped child normally unwinds in well under a second, and its
-    result is still collected so sibling spend and summaries survive.
-    Only a child that ignores its stop event for
-    ``_SUBAGENT_STOP_GRACE_SECONDS`` is abandoned, so that one wedged
-    sub-agent can no longer hold the whole task hostage.
-
-    Args:
-        futures: One future per fanned-out sub-agent, in task order.
-        stop_event: The parent task's stop event, or ``None`` when the
-            fan-out is not running under a stoppable task.
-
-    Returns:
-        The sub-agent results, in the order the tasks were given.
-
-    The ``run_parallel`` tool panel's own Stop is honored cooperatively
-    too: each wake checks the running tool call's interrupt and raises
-    ``ToolCallInterrupted`` at once (the caller then signals the
-    children through the fan-out's stop event).
-
-    Raises:
-        KeyboardInterrupt: When a stop was requested and at least one
-            child was still running after the grace period.
-        ToolCallInterrupted: When the user stopped the ``run_parallel``
-            tool call while children were still running.
-    """
-    pending = set(futures)
-    give_up_at: float | None = None
-    # Under a tool call the slice stays well inside the interrupt's
-    # cooperative grace, so the raise below always beats the forced
-    # injection (which would otherwise land inside ``wait``).
-    poll = (
-        _SUBAGENT_TOOL_POLL_SECONDS
-        if tool_interrupt.current_tool_call() is not None
-        else _SUBAGENT_POLL_SECONDS
-    )
-    while pending:
-        _done, pending = wait(pending, timeout=poll)
-        if not pending:
-            break
-        tool_interrupt.raise_if_interrupted()
-        if stop_event is None or not stop_event.is_set():
-            continue
-        if give_up_at is None:
-            give_up_at = time.monotonic() + _SUBAGENT_STOP_GRACE_SECONDS
-        elif time.monotonic() >= give_up_at:
-            raise KeyboardInterrupt("Agent stop requested")
-    return [f.result() for f in futures]
-
-
-def _collect_unfinished_usage(
-    futures: list[Future[str]],
-    sub_agents: list[Any],
-    sub_usage: list[tuple[float, int, int]],
-    lock: threading.Lock,
-) -> None:
-    """Fill in the spend of children that never got to report it.
-
-    A child fills its own ``sub_usage`` slot in its ``finally``, so a
-    child the parent abandoned (see :func:`_await_subagents`) would leave
-    a zero there and its cost, tokens and steps would silently vanish
-    from the parent task's totals.  Reading the live figures off the
-    child's agent recovers everything it had spent up to this instant —
-    without waiting for it, which is the whole point of abandoning it.
-
-    Every slot update — the worker's final write in its ``finally`` and
-    this read-modify-write — happens under *lock*, so the two can no
-    longer interleave: before, a child that published its final figure
-    and completed between this function's read and its write had that
-    figure overwritten by the older live read, and, its future now
-    being done, it was not registered as abandoned either — the
-    difference was never banked.  The component-wise maximum remains
-    for a child that has already published but whose future is not yet
-    done: a live read can lag its true spend slightly (mid-handoff
-    between executor sessions), so a slot is only ever raised, never
-    lowered.
-
-    Args:
-        futures: One future per fanned-out sub-agent, in task order.
-        sub_agents: The children's agents, in the same order; entries are
-            ``None`` for children that never started.
-        sub_usage: Per-child ``(cost, tokens, steps)`` slots, raised in
-            place for unfinished children only.
-        lock: The lock the workers hold for their own final slot write.
-    """
-    for idx, future in enumerate(futures):
-        agent = sub_agents[idx]
-        if future.done() or agent is None:
-            continue
-        with lock:
-            live = _live_agent_usage(agent)
-            current = sub_usage[idx]
-            sub_usage[idx] = (
-                max(current[0], live[0]),
-                max(current[1], live[1]),
-                max(current[2], live[2]),
-            )
-
-
 class _ClassifierSpend(NamedTuple):
     """One pre-run task classification's complete, immutable spend.
 
@@ -894,159 +679,6 @@ class _ClassifierSpend(NamedTuple):
     budget: float
     tokens: int
     steps: int
-
-
-class _AbandonedSubagent:
-    """A sub-agent thread its parent gave up waiting for.
-
-    :func:`_await_subagents` abandons a child that ignores its stop
-    event for :data:`_SUBAGENT_STOP_GRACE_SECONDS`, but Python cannot
-    kill a thread: the child keeps running with ``work_dir`` set to the
-    parent's directory (a git worktree, for a server run) and keeps
-    spending budget.  Holding on to it lets the parent (a) refuse to
-    delete a directory a live thread is still writing to and (b) bank
-    the spend the child reports after it was abandoned.
-    """
-
-    def __init__(
-        self,
-        future: Future[str],
-        agent: Any,
-        counted: tuple[float, int, int],
-        epoch: Any = None,
-    ) -> None:
-        """Record *future*/*agent*, the usage already attributed, and the epoch.
-
-        Args:
-            future: The abandoned worker's future.
-            agent: The abandoned child's agent.
-            counted: The ``(budget, tokens, steps)`` the parent has
-                already attributed for this child.
-            epoch: The parent's usage-ledger epoch token
-                (``RelentlessAgent._usage_epoch()``) at registration,
-                or ``None`` when the parent has no ledger.  Every
-                reclaim commit is BOUND to this exact object: after a
-                ``reset_usage()`` (the next run's task boundary) the
-                child's further spend settles into the discarded
-                prior-epoch ledger — it belongs to the finished PRIOR
-                task and must not corrupt the new task's accounting
-                (round-4 finding 3; round-6 finding 2 closed the
-                check-then-commit race by binding the commit itself,
-                not just checking the token first).  The item stays
-                tracked for liveness either way (worktree-deletion
-                safety).
-        """
-        self.future = future
-        self.agent = agent
-        self.epoch = epoch
-        # The transaction identity of this source's reclaim commits:
-        # generation ``g``'s ledger record carries the retry-stable
-        # source ``"reclaim:<txn_id>"`` with sequence ``g`` —
-        # generations are committed in increasing order (the ledger's
-        # per-source monotonic-seq contract), so pre- and post-append
-        # retries deduplicate to exactly one contribution per
-        # generation.
-        self.txn_id = uuid.uuid4().hex
-        # ``(generation, counted)`` advances in ONE store, only AFTER
-        # generation ``generation``'s ledger append: an interrupt
-        # anywhere in the commit retries the SAME transaction.
-        self.checkpoint: tuple[int, tuple[float, int, int]] = (0, counted)
-        # Write-ahead intent ``(generation, live_snapshot)``: fixes the
-        # amount generation ``generation`` banks BEFORE the append, so
-        # a retry re-appends the identical record (same key, same
-        # values) instead of recomputing a different delta that
-        # first-record-wins dedup would silently drop.
-        self.pending: tuple[int, tuple[float, int, int]] | None = None
-
-    @property
-    def counted(self) -> tuple[float, int, int]:
-        """The ``(budget, tokens, steps)`` already attributed to the parent."""
-        return self.checkpoint[1]
-
-    def bank_unbanked(self, parent: Any) -> tuple[float, int, int]:
-        """Attribute the child's spend since the last checkpoint, exactly once.
-
-        The commit order is append-then-advance with a write-ahead
-        intent, so an asynchronously injected stop at ANY point makes
-        the next reclaim retry the SAME transaction:
-
-        1. Load the checkpoint ``(generation, counted)``.
-        2. Reuse (or record — one store) the pending intent
-           ``(generation, live)``; the live snapshot is clamped to
-           ``counted`` because a mid-handoff read can momentarily
-           REGRESS (RelentlessAgent detaches ``_current_executor``
-           before folding its spend), and banking a negative delta or
-           lowering the checkpoint would double-count later.
-        3. Append the delta as ONE keyed ledger record — source
-           ``"reclaim:<txn_id>"``, seq ``generation`` — bound to
-           :attr:`epoch`, the ledger object captured at registration.
-           A retry that finds the intent re-appends the identical
-           record and read-side dedup counts it once; the pre-round-5
-           order (advance ``counted`` first, append second) let a stop
-           between the two permanently drop a finished child's spend.
-           Binding the commit to the captured epoch object (round-6
-           finding 2) means a ``reset_usage()`` racing this step can
-           never divert the delta into the NEW task's ledger: the
-           record lands in the discarded prior-epoch object, which
-           nobody sums.
-        4. Advance the checkpoint in ONE store, then clear the intent.
-           A stale intent from a completed generation (stop between 4
-           and the clear) is recognized by its generation number and
-           discarded.
-
-        Callers serialize on ``_abandoned_lock``; this method is not
-        safe for concurrent calls on one item.
-
-        Args:
-            parent: The agent whose ledger receives the attribution.
-
-        Returns:
-            The ``(budget, tokens, steps)`` delta banked by this call
-            (``(0.0, 0, 0)`` when the child reported nothing new) —
-            callers use it to surface late spend that settled into a
-            superseded epoch.
-        """
-        generation, counted = self.checkpoint
-        pending = self.pending
-        if pending is not None and pending[0] != generation:
-            # A finished generation's leftover intent (the stop landed
-            # between the checkpoint advance and the intent clear).
-            self.pending = None
-            pending = None
-        if pending is None:
-            live = _live_agent_usage(self.agent)
-            live = (
-                max(live[0], counted[0]),
-                max(live[1], counted[1]),
-                max(live[2], counted[2]),
-            )
-            if live == counted:
-                return (0.0, 0, 0)
-            pending = (generation, live)
-            self.pending = pending
-        live = pending[1]
-        delta = (
-            live[0] - counted[0],
-            live[1] - counted[1],
-            live[2] - counted[2],
-        )
-        # Test hook (no-op in production): widens the commit window so
-        # concurrency tests can prove the caller serialises reclaims
-        # (see reclaim_abandoned_subagents).
-        _race_delay()
-        if delta[0] or delta[1] or delta[2]:
-            _attribute_sub_usage(
-                parent,
-                delta[0],
-                delta[1],
-                delta[2],
-                key=f"reclaim:{self.txn_id}",
-                seq=generation,
-                epoch=self.epoch,
-            )
-        self.checkpoint = (generation + 1, live)
-        self.pending = None
-        return delta
 
 
 def subagent_parent_tab_id_of(parent_agent: Any) -> str:
@@ -1091,56 +723,6 @@ def _persisted_task_id(agent: Any) -> str:
     return task_id if isinstance(task_id, str) else ""
 
 
-def _register_abandoned(
-    parent_agent: Any,
-    futures: list[Future[str]],
-    sub_agents: list[Any],
-    sub_usage: list[tuple[float, int, int]],
-) -> None:
-    """Hand every still-running child to *parent_agent* for follow-up.
-
-    Called only on the abandon path.  ``sub_usage`` has just been
-    refreshed from the live children, so it is exactly what the parent
-    has counted for each of them.
-
-    Args:
-        parent_agent: The fanning-out agent, or ``None`` for a bare
-            functional call (nothing can be reclaimed then).
-        futures: One future per child, in task order.
-        sub_agents: The children's agents, in the same order.
-        sub_usage: Per-child ``(cost, tokens, steps)`` already counted.
-    """
-    lock = getattr(parent_agent, "_abandoned_lock", None)
-    if lock is None:
-        return
-    # Tag each item with the parent's CURRENT ledger epoch: every
-    # reclaim commit for the item is bound to this object, so late
-    # spend after the parent's next reset_usage() (a new task) settles
-    # into the discarded epoch instead of the new task's accounting.
-    epoch_of = getattr(parent_agent, "_usage_epoch", None)
-    epoch = epoch_of() if callable(epoch_of) else None
-    with lock:
-        # The tracking list is fetched INSIDE the lock: reading it
-        # before acquisition let a concurrent reclaim (which used to
-        # replace the attribute under the lock) strand a live child in
-        # a detached list, so worktree cleanup saw no abandoned
-        # children while the child's thread still wrote into the
-        # directory (round-6 finding 4).  Reclaim also mutates the
-        # list in place now, so the object registered into is always
-        # the object reclaim scans.
-        pending = getattr(parent_agent, "_abandoned_subagents", None)
-        if pending is None:
-            return
-        for idx, future in enumerate(futures):
-            if future.done() or sub_agents[idx] is None:
-                continue
-            pending.append(
-                _AbandonedSubagent(
-                    future, sub_agents[idx], sub_usage[idx], epoch=epoch,
-                )
-            )
-
-
 def _executor_usage(agent: Any) -> tuple[float, int, int]:
     """Return the in-flight executor session's ``(budget, tokens, steps)``.
 
@@ -1148,10 +730,8 @@ def _executor_usage(agent: Any) -> tuple[float, int, int]:
     session executor's spend into the agent's totals only when the
     session ends, so mid-session the live spend is visible only on
     ``agent._current_executor``.  The single reader of that executor's
-    counters — :func:`_live_agent_usage` and
-    :meth:`_LiveUsageMonitor._emit` used to carry drifting copies (the
-    executor's step counter is ``step_count``, not ``total_steps``, an
-    easy copy to get wrong).
+    counters (the executor's step counter is ``step_count``, not
+    ``total_steps``, an easy copy to get wrong).
 
     Args:
         agent: The agent whose live executor to read.
@@ -1163,189 +743,28 @@ def _executor_usage(agent: Any) -> tuple[float, int, int]:
     executor = getattr(agent, "_current_executor", None)
     if executor is None:
         return 0.0, 0, 0
-    # ONE coherent snapshot when the executor publishes one (KISSAgent
-    # stores its whole triple as one immutable record): this function
-    # is polled from other threads (_LiveUsageMonitor, unfinished-usage
-    # collection, abandoned-child reclaim) while the executor thread
-    # updates the counters, and three separate property reads could
-    # pair one response's tokens with the pre-response cost.
-    snapshot = getattr(executor, "usage_snapshot", None)
-    if callable(snapshot):
-        budget, tokens, steps = cast("tuple[float, int, int]", snapshot())
-        return float(budget or 0.0), int(tokens or 0), int(steps or 0)
-    return (
-        float(getattr(executor, "budget_used", 0.0) or 0.0),
-        int(getattr(executor, "total_tokens_used", 0) or 0),
-        int(getattr(executor, "step_count", 0) or 0),
-    )
+    # ONE coherent snapshot (see _session_usage): this function is
+    # polled from other threads (the daemon's live usage readers)
+    # while the executor thread updates the counters, and three
+    # separate property reads could pair one response's tokens with
+    # the pre-response cost.
+    return _session_usage(executor)
 
 
 def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
     """Return live ``(budget, tokens, steps)`` for *agent*, including its
     in-flight executor session (see :func:`_executor_usage`).
+
+    A :class:`~kiss.agents.sorcar.relentless_agent.RelentlessAgent`
+    answers through ``live_usage_snapshot()``, which counts a session
+    that is being banked at this very moment exactly once; the
+    attribute-based sum serves agent-shaped objects.
     """
+    if isinstance(agent, RelentlessAgent):
+        return agent.live_usage_snapshot()
     budget, tokens, steps = _agent_usage(agent)
     live_budget, live_tokens, live_steps = _executor_usage(agent)
     return budget + live_budget, tokens + live_tokens, steps + live_steps
-
-
-class _LiveUsageMonitor:
-    """Streams the parent task's live cumulative usage while parallel
-    sub-agents run.
-
-    Between the moment ``run_parallel`` blocks the parent's turn and the
-    moment :func:`_attribute_sub_usage` folds the finished sub-agents'
-    spend back into the parent, nothing else emits ``usage_info`` on the
-    PARENT task — the cost/tokens header (chat webview top bar)
-    would otherwise show a stale figure that excludes
-    all live sub-agent spend until every sub-agent finished.  This
-    monitor polls every tracked sub-agent and broadcasts a parent-task
-    ``usage_info`` whenever the totals change, so the header always
-    reflects the agent plus all of its sub-agents at every turn.
-
-    The emitted values are RAW (session-relative), exactly like the
-    per-turn ``usage_info`` from ``KISSAgent``: the printer adds the
-    parent task's budget/tokens/steps offsets (the parent's cumulative
-    spend snapshotted at session start).  :meth:`stop` joins the polling
-    thread and is called BEFORE ``_attribute_sub_usage`` bumps those
-    offsets, so a late emission can never double-count sub-agent spend.
-    """
-
-    def __init__(self, parent: Any, printer: Any, interval: float = 1.0) -> None:
-        self._parent = parent
-        self._printer = printer
-        self._interval = interval
-        self._agents_lock = threading.Lock()
-        self._agents: list[Any] = []
-        self._done = threading.Event()
-        # Set by stop() when the join timed out: _emit() must not START
-        # a print after the caller has moved on to the offsets bump.
-        self._detached = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._last_emitted: tuple[float, int, int] | None = None
-        thread_local = getattr(printer, "_thread_local", None) if printer else None
-        self._parent_task_id = (
-            getattr(thread_local, "task_id", "") if thread_local else ""
-        )
-
-    def track(self, agent: Any) -> None:
-        """Register a spawned sub-agent whose live spend should be polled."""
-        with self._agents_lock:
-            self._agents.append(agent)
-
-    def start(self) -> None:
-        """Start the polling thread (no-op without a printer)."""
-        if self._printer is None:
-            return
-        self._thread = threading.Thread(
-            target=self._loop, name="live-usage-monitor", daemon=True
-        )
-        self._thread.start()
-
-    def stop(self) -> None:
-        """Stop and join the polling thread.
-
-        The monitor emits one final snapshot before its thread exits.
-        Joining then guarantees no later emission can race with the
-        subsequent :func:`_attribute_sub_usage` offset bump (which would
-        double-count the sub-agents' spend in the displayed total).
-
-        Safe to call when :meth:`start` never ran, raised (thread
-        exhaustion) or was interrupted by a stop injected while it was
-        waiting for the thread to come up: ``join`` would raise on a
-        thread that never registered as started, so only a live thread
-        is joined — ``_done`` is set regardless, and a thread that did
-        start exits at its next tick.
-
-        The join is bounded: the monitor calls ``printer.print``
-        synchronously, and a printer whose sink stops consuming (a
-        pipe/file nobody reads) would otherwise hang the fan-out's
-        ``finally`` — and with it the parent task's unwind and usage
-        accounting — forever.  On timeout the monitor is detached:
-        ``_detached`` stops any emission that has not yet reached the
-        printer, a warning is logged, and the caller proceeds.  A print
-        already blocked inside the printer may still complete once
-        after detachment; that is the accepted trade-off for never
-        hanging the task.
-        """
-        self._done.set()
-        thread = self._thread
-        self._thread = None
-        if thread is not None and thread.is_alive():
-            thread.join(_LIVE_USAGE_JOIN_TIMEOUT)
-            if thread.is_alive():
-                self._detached.set()
-                logger.warning(
-                    "Live usage monitor did not stop within %.1fs "
-                    "(printer blocked?); detaching it and continuing",
-                    _LIVE_USAGE_JOIN_TIMEOUT,
-                )
-
-    def _loop(self) -> None:
-        thread_local = getattr(self._printer, "_thread_local", None)
-        if thread_local is not None:
-            thread_local.task_id = self._parent_task_id
-        while True:
-            stopping = self._done.wait(self._interval)
-            try:
-                # A final poll on shutdown captures sub-agents that finished
-                # between regular ticks.  It runs on this thread so the event
-                # retains the parent task id, and _last_emitted suppresses a
-                # duplicate when the preceding regular poll saw the same data.
-                self._emit()
-            except Exception:
-                logger.debug("Live usage emission failed", exc_info=True)
-            if stopping:
-                return
-
-    def _emit(self) -> None:
-        """Broadcast a parent-task ``usage_info`` when the totals changed."""
-        # Only the parent's LIVE executor session, never its folded
-        # totals: the printer adds the parent's cumulative offsets to
-        # every raw usage_info it renders.
-        budget, tokens, steps = _executor_usage(self._parent)
-        with self._agents_lock:
-            agents = list(self._agents)
-        for sub in agents:
-            try:
-                sub_budget, sub_tokens, sub_steps = _live_agent_usage(sub)
-            except Exception:
-                logger.debug("Live usage poll failed", exc_info=True)
-                continue
-            budget += sub_budget
-            tokens += sub_tokens
-            steps += sub_steps
-        snapshot = (budget, tokens, steps)
-        if snapshot == self._last_emitted:
-            return
-        if self._last_emitted is not None:
-            last_budget, last_tokens, last_steps = self._last_emitted
-            if (
-                budget < last_budget - 1e-9
-                or tokens < last_tokens
-                or steps < last_steps
-            ):
-                # Torn read: at every RelentlessAgent session handoff the
-                # executor is detached BEFORE its spend is folded into the
-                # agent fields, so a poll in that window sees neither copy.
-                # Never emit a total where ANY cumulative dimension
-                # (budget, tokens, or steps) regresses — the next poll
-                # repairs it.
-                return
-        if self._detached.is_set():
-            # stop() gave up waiting for this thread; the parent has
-            # already bumped its offsets, so this emission would
-            # double-count the sub-agents' spend.
-            return
-        self._last_emitted = snapshot
-        cost = f"${budget:.4f}"
-        self._printer.print(
-            f"Tokens: {tokens:,}, Budget: {cost} (live, incl. parallel sub-agents), ",
-            type="usage_info",
-            total_tokens=tokens,
-            cost=cost,
-            total_steps=steps,
-        )
 
 
 # Serializes "snapshot the parent's totals, publish them as printer
@@ -1358,7 +777,7 @@ _OFFSET_PUBLISH_LOCK = threading.Lock()
 
 
 def _attribute_sub_usage(
-    agent: Any,
+    agent: RelentlessAgent,
     budget: float,
     tokens: int,
     steps: int,
@@ -1379,22 +798,19 @@ def _attribute_sub_usage(
     immutable record carrying all three dimensions to the agent's
     append-only usage ledger.  No writer can overwrite or lose another
     writer's record: this function is called concurrently by the agent
-    thread (a fan-out's ``finally``, a ``talk`` synthesis bank) and by
-    server threads (:meth:`SorcarAgent.reclaim_abandoned_subagents`
-    from worktree cleanup / teardown / discard), and it can also cross
+    thread (a ``talk`` synthesis bank) and by server threads (a
+    finished sub-task's attribution from the dispatch job thread, the
+    merge-conflict resolver), and it can also cross
     a :meth:`RelentlessAgent._reset` — three separate property stores
     used to let the reset land between them and publish an impossible
     mixed state (zero budget, pre-reset tokens/steps), whereas the
     single record now lands wholly in the old epoch (discarded with
-    it) or wholly in the new one.  The append takes no lock, so a
-    caller holding ``_abandoned_lock`` (``reclaim_abandoned_subagents``)
-    can never deadlock here, even after an injected stop.  A minimal
-    agent-shaped object without ``_attribute_usage`` gets plain
-    attribute increments (no cross-thread protection, but such objects
-    are single-threaded by construction).
+    it) or wholly in the new one.  The append takes no lock, so no
+    caller can deadlock here, even after an injected stop.
 
     Args:
-        agent: The parent agent receiving the attribution.
+        agent: The parent :class:`RelentlessAgent` receiving the
+            attribution.
         budget: USD spend to add.
         tokens: Token count to add.
         steps: Step count to add.
@@ -1411,16 +827,9 @@ def _attribute_sub_usage(
             concurrent reset can never divert a prior task's spend
             into the new task's ledger.
     """
-    attribute = getattr(agent, "_attribute_usage", None)
-    if callable(attribute):
-        attribute(budget, tokens, steps, key=key, seq=seq, epoch=epoch)
-    else:
-        agent.budget_used = float(getattr(agent, "budget_used", 0.0) or 0.0) + budget
-        agent.total_tokens_used = (
-            int(getattr(agent, "total_tokens_used", 0) or 0) + tokens
-        )
-        agent.total_steps = int(getattr(agent, "total_steps", 0) or 0) + steps
-    if agent.printer is not None:
+    agent._attribute_usage(budget, tokens, steps, key=key, seq=seq, epoch=epoch)
+    printer: Any = agent.printer
+    if printer is not None:
         try:
             with _OFFSET_PUBLISH_LOCK:
                 # One coherent triple (see _agent_usage): separate property
@@ -1432,13 +841,13 @@ def _attribute_sub_usage(
                 # thread), so a thread-keyed setter would file them under
                 # that thread's task; name the parent's task when it has one.
                 task_id = str(getattr(agent, "last_task_id", "") or "")
-                set_offsets = getattr(agent.printer, "set_usage_offsets", None)
+                set_offsets = getattr(printer, "set_usage_offsets", None)
                 if task_id and callable(set_offsets):
                     set_offsets(task_id, budget_total, tokens_total, steps_total)
                 else:
-                    agent.printer.budget_offset = budget_total
-                    agent.printer.tokens_offset = tokens_total
-                    agent.printer.steps_offset = steps_total
+                    printer.budget_offset = budget_total
+                    printer.tokens_offset = tokens_total
+                    printer.steps_offset = steps_total
         except Exception:
             pass
 
@@ -1560,7 +969,25 @@ class SorcarAgent(RelentlessAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
-        self.docker_manager: Any = None
+        # Per-run settings taken from :meth:`run`'s arguments; the
+        # defaults are what a run that never reached ``run`` reports.
+        self._launch_model_name: str = ""
+        self._ask_user_question_callback: Callable[[str], str] | None = None
+        self._inherited_tools: list[Callable[..., Any]] = []
+        self._tools_hook: (
+            Callable[[list[Callable[..., Any]]], list[Callable[..., Any]]] | None
+        ) = None
+        self._base_system_prompt: str = ""
+        self._system_prompt_suffix: str = ""
+        # Set by the fan-out engine / task runner on a sub-agent
+        # (parent task and tab ids, reviewer marker); None for a
+        # top-level agent.  Declared here, not on ChatSorcarAgent,
+        # because this class reads it (tool profile, budget share,
+        # browser profile, sub-agent tab ids).
+        self._subagent_info: dict[str, object] | None = None
+        # Frontend tab this agent's events belong to.  The fan-out
+        # engine assigns each sub-agent its own synthetic tab id.
+        self._tab_id: str = ""
         # Persistent agent memory (kiss.core.memoryfield), built per
         # run by :meth:`run` when the ``use_memory`` config flag (or the
         # KISS_USE_MEMORY environment variable) enables it; None keeps
@@ -1580,7 +1007,6 @@ class SorcarAgent(RelentlessAgent):
         # the Browser tab on every surface instead of a local window.
         self._live_browser: Any = None
         self._is_parallel: bool = True
-        self._append_basic_tools: bool = True
         # The caller's extra tools of the current run (``run(tools=...)``:
         # a SEA's ``tools()`` additions, plus whatever this
         # agent itself inherited as a sub-task).  Kept on self so a
@@ -1622,99 +1048,6 @@ class SorcarAgent(RelentlessAgent):
         # stop-interrupted fold retried later re-appends the SAME key
         # and read-side dedup makes the spend count exactly once.
         self._classifier_spend: _ClassifierSpend | None = None
-        # Sub-agent threads this agent stopped waiting for; see
-        # :class:`_AbandonedSubagent` and :meth:`reclaim_abandoned_subagents`.
-        # Touched by the agent thread and by server threads (worktree
-        # cleanup), hence the lock.
-        self._abandoned_subagents: list[_AbandonedSubagent] = []
-        self._abandoned_lock: threading.Lock = threading.Lock()
-
-    def reclaim_abandoned_subagents(self, timeout: float = 0.0) -> bool:
-        """Bank abandoned sub-agents' spend and report whether any live on.
-
-        A child that ignored its stop event is abandoned, not killed
-        (see :func:`_await_subagents`), so two things outlive the
-        fan-out: the thread — which is still writing into this agent's
-        ``work_dir`` — and the budget it keeps spending after the
-        parent froze its totals.  This waits up to *timeout* for those
-        threads, folds whatever they have spent since they were last
-        counted into this agent's totals, and forgets the ones that
-        finished.
-
-        Callers use the return value to decide whether it is safe to
-        delete the shared working directory.
-
-        Args:
-            timeout: Seconds to wait for the abandoned threads.  ``0``
-                polls without waiting.
-
-        Returns:
-            True when no abandoned sub-agent is still running.
-        """
-        with self._abandoned_lock:
-            pending = list(self._abandoned_subagents)
-        if not pending:
-            return True
-        if timeout > 0:
-            # Waiting happens OUTSIDE the lock so a concurrent
-            # zero-timeout poll (e.g. server-side worktree cleanup)
-            # is never blocked for this caller's full timeout.
-            wait([item.future for item in pending], timeout=timeout)
-        # The whole bank-and-forget sequence holds the lock:
-        # ``item.bank_unbanked()`` (an intent/checkpoint transaction on
-        # the item) would otherwise race a concurrent reclaimer — the
-        # agent thread and server-side worktree cleanup call this
-        # concurrently — double-counting the child's spend.
-        # (``_attribute_sub_usage`` itself is one lock-free ledger
-        # append and needs no serialization.)  Neither callee acquires
-        # ``_abandoned_lock``, so this cannot deadlock.
-        #
-        # The pass runs over the CURRENT list, not the pre-wait
-        # snapshot: a child abandoned by a fan-out that ended during
-        # the wait must count towards the return value (callers delete
-        # the shared working directory on True), and one that a
-        # concurrent reclaimer already banked and forgot must not be
-        # banked again.
-        epoch_of = getattr(self, "_usage_epoch", None)
-        current_epoch = epoch_of() if callable(epoch_of) else None
-        with self._abandoned_lock:
-            still_running: list[_AbandonedSubagent] = []
-            for item in self._abandoned_subagents:
-                # Every commit is BOUND to item.epoch (the ledger
-                # object captured at registration), so no epoch
-                # check-then-commit race with reset_usage() exists: an
-                # item registered under a PRIOR epoch settles its
-                # further spend into that finished task's discarded
-                # ledger, never into the current task's totals.  Late
-                # spend settled that way is REAL provider spend that
-                # no live task reports — an explicit, documented
-                # undercount (the finished task's terminal accounting
-                # was already persisted when it ended), surfaced in
-                # the log below.  The thread is still tracked so a
-                # live child keeps blocking worktree deletion.
-                banked = item.bank_unbanked(self)
-                if (
-                    any(banked)
-                    and item.epoch is not None
-                    and item.epoch is not current_epoch
-                ):
-                    logger.info(
-                        "Abandoned sub-agent spend "
-                        "(budget=%.6f tokens=%d steps=%d) arrived after "
-                        "its task's usage epoch ended; settled into the "
-                        "finished task's ledger, not the current task.",
-                        banked[0],
-                        banked[1],
-                        banked[2],
-                    )
-                if not item.future.done():
-                    still_running.append(item)
-            # In-place update: registration appends to the same list
-            # object it fetched under this lock, so replacing the
-            # attribute could strand a concurrent registration's items
-            # in a detached list (round-6 finding 4).
-            self._abandoned_subagents[:] = still_running
-        return not still_running
 
     def _subagent_budget_share(self, num_tasks: int) -> float | None:
         """Return the ``max_budget`` each parallel sub-agent may spend.
@@ -1732,8 +1065,8 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             The per-sub-agent budget share in USD, or ``None`` when this
             agent has no budget context yet (``run``/``_reset`` never
-            ran, e.g. direct ``_run_tasks_parallel`` invocations) — the
-            sub-agents then fall back to their default budget.
+            ran) — the sub-agents then fall back to their default
+            budget.
 
         Raises:
             BudgetExceededError: If the task has no remaining budget.
@@ -1742,9 +1075,7 @@ class SorcarAgent(RelentlessAgent):
         if raw_max_budget is None:
             return None
         max_budget = float(raw_max_budget)
-        executor = getattr(self, "_current_executor", None)
-        live = executor.budget_used if executor is not None else 0.0
-        remaining = max_budget - float(getattr(self, "budget_used", 0.0) or 0.0) - live
+        remaining = max_budget - self._live_budget_used()
         if remaining <= 0:
             raise BudgetExceededError(
                 f"Agent {self.name} has no remaining budget for parallel "
@@ -1766,8 +1097,7 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             True for a reviewer sub-agent or any of its descendants.
         """
-        info = getattr(self, "_subagent_info", None) or {}
-        return bool(info.get("reviewer", False))
+        return bool((self._subagent_info or {}).get("reviewer", False))
 
     def _subagent_parent_tab_id(self) -> str:
         """Return the frontend tab id sub-agents should call their parent.
@@ -1794,13 +1124,13 @@ class SorcarAgent(RelentlessAgent):
         one every surface shows — and a sub-agent of such a chat is
         addressed as ``{new_tab}__sub_{task_id}``.  A sub-agent's own
         synthetic id is never a candidate (a ``run_agent`` dispatch
-        registers it as a subscriber too, see ``register_task_ui``).
+        registers it as a subscriber too, see ``subscribe_tab``).
 
         Returns:
             The tab id, or ``""`` when running headless.
         """
-        tab_id = str(getattr(self, "_tab_id", "") or "")
-        info = getattr(self, "_subagent_info", None)
+        tab_id = self._tab_id
+        info = self._subagent_info
         own_task_id = _persisted_task_id(self)
         if not own_task_id:
             return tab_id
@@ -1818,187 +1148,6 @@ class SorcarAgent(RelentlessAgent):
             return own
         return viewer_ids[0]
 
-    def _run_tasks_parallel(
-        self,
-        tasks: list[str],
-        max_workers: int | None = None,
-        model_name: str | None = None,
-        tool_profile: str = "",
-        agent: str = "",
-        max_budget: float | None = None,
-        options: RunOptions | None = None,
-        timeout: float | None = None,
-    ) -> list[str]:
-        """Execute multiple independent tasks concurrently using parallel agents.
-
-        Each task gets its own ``ChatSorcarAgent`` instance, resuming
-        this agent's chat session and nested under this agent's
-        persisted task, via the single fan-out engine
-        :func:`run_tasks_parallel`.  What the children take over from
-        this agent comes from the one inheritance table
-        :func:`kiss.agents.sorcar.agent_dispatch.inherit_from_parent`
-        (shared with ``run_agent``); the budget is this agent's
-        remaining budget shared among the children.
-
-        This method owns no frontend concepts (tabs, ``new_tab``
-        broadcasts, ...): it only reads this agent's context and hands
-        it to the engine.  Sub-agent-specific frontend behaviour is
-        owned by the sub-agent itself — see :meth:`ChatSorcarAgent.run`,
-        which self-broadcasts a ``new_tab`` message whenever it detects
-        ``self._subagent_info`` is set.
-
-        Args:
-            tasks: List of self-contained task description strings
-                (the ``run_parallel`` tool closure has already coerced
-                the LLM's raw argument via :func:`_coerce_tasks`, and
-                the :func:`run_tasks_parallel` engine re-coerces
-                defensively).
-            max_workers: Maximum concurrent threads (``None`` = auto).
-            model_name: Model for the children; ``None`` uses this
-                agent's.  A different model is run with default provider
-                routing (this agent's ``model_config`` is not forwarded,
-                since its endpoint and key belong to this agent's model).
-            tool_profile: Explicit tool profile for the children (a key
-                of :data:`TOOL_PROFILES`, or several joined with ``+``);
-                ``""`` lets each child pick.
-            agent: The SEA the children run as, in the
-                spelling of ``run_agent``'s ``agent`` argument
-                (:func:`kiss.agents.sorcar.agent_dispatch.resolve_agent`);
-                ``""`` runs plain sub-agents.
-            max_budget: Per-child USD budget; ``None`` shares this
-                agent's remaining budget among the children.
-            options: Parsed ``options`` of the ``run_parallel`` call
-                (:func:`kiss.agents.sorcar.agent_dispatch.parse_run_options`);
-                ``None`` for no overrides.
-            timeout: Maximum seconds each child may run; ``None`` takes
-                the script's ``timeout`` setting, else no limit.
-
-        Returns:
-            List of YAML result strings in the same order as *tasks*.
-
-        Raises:
-            SeaError: When *agent* names no usable SEA, a
-                SEA of its chain is broken, or its settings — or
-                *options* — pin what a fan-out child cannot honour
-                (:func:`kiss.agents.sorcar.agent_dispatch.fanout_conflict`).
-        """
-        from kiss.agents.sorcar.sea_commands import SeaScriptError, base_settings, sea_layers
-
-        run_options = RunOptions(tool_profile=tool_profile) if options is None else options
-        # A call naming no agent runs the bare ``BaseSea`` — the root
-        # layer of every run, so ``base_sea.py`` shapes these children
-        # as it does every other run.
-        layers: list[BaseSea] = [BaseSea()]
-        name = "base_sea.py"
-        if agent.strip():
-            resolved = resolve_agent(agent, self.work_dir)
-            if isinstance(resolved, str):
-                raise SeaScriptError(resolved.removeprefix("Error: "))
-            layers = sea_layers(Path(resolved[0]))
-            name = resolved[1]
-        settings = base_settings(layers)
-        conflict = fanout_conflict(settings)
-        if conflict:
-            raise SeaScriptError(f"{name} {conflict}")
-        # sea_settings.PRECEDENCE_RULE: an explicit argument or option
-        # wins over the SEA's settings unless the SEA locks the key —
-        # then the clash is an error — and the SEA's settings rank
-        # above what the children inherit.
-        pinned = {
-            key: value for key, value in dataclasses.asdict(run_options).items()
-            if value not in (None, "")
-        }
-        if model_name:
-            pinned["model"] = model_name
-        if max_budget is not None:
-            pinned["max_budget"] = max_budget
-        if timeout is not None:
-            pinned["timeout"] = timeout
-        conflict = locked_conflicts(settings, pinned, self.work_dir)
-        if conflict:
-            raise SeaScriptError(f"run_parallel: {conflict}")
-        explicit = set(pinned)
-        conflict = fanout_conflict({**settings, **pinned})
-        if conflict:
-            raise SeaScriptError(f"run_parallel options {conflict}")
-        work_dir = self.work_dir
-        if run_options.work_dir:
-            requested = Path(run_options.work_dir).expanduser()
-            if not requested.is_absolute():
-                requested = Path(self.work_dir) / requested
-            work_dir = str(requested)
-        elif settings.get("work_dir"):
-            work_dir = str(settings["work_dir"])
-        # Bank whatever an earlier fan-out's abandoned children spent
-        # after this agent stopped waiting for them, before the budget
-        # share below is computed from those totals.
-        self.reclaim_abandoned_subagents()
-        monitor = _LiveUsageMonitor(self, self.printer)
-        share = self._subagent_budget_share(len(tasks)) if max_budget is None else max_budget
-        inherited = inherit_from_parent(
-            # ``inherit: false``: the children take nothing from this
-            # task but their budget share (they are threads of it).
-            None if run_options.inherit is False else self,
-            model_name or "", None, run_options,
-            # The SEA's model applies only when the call names none.
-            script_picks_model="model" in settings and not model_name,
-        )
-        totals: dict[str, float | list[float]] = {}
-        try:
-            # Started inside the try: a stop injected between the start
-            # and the try would otherwise leak the polling thread —
-            # emitting every second for the rest of the process.
-            monitor.start()
-            results = run_tasks_parallel(
-                tasks,
-                max_workers=max_workers,
-                model_name=inherited.model_name or None,
-                work_dir=work_dir,
-                docker_image=inherited.docker_image or None,
-                printer=self.printer,
-                totals_out=totals,
-                usage_monitor=monitor,
-                max_budget=share,
-                model_config=inherited.options.model_config,
-                tool_profile=run_options.tool_profile,
-                parent_agent=self,
-                chat_id=inherited.options.chat_id,
-                parent_tab_id=self._subagent_parent_tab_id(),
-                base_system_prompt=inherited.options.system_prompt,
-                system_prompt_suffix=inherited.options.add_to_system_prompt,
-                web_tools=inherited.options.use_web_tools is not False,
-                use_memory=inherited.options.use_memory,
-                live_browser=self._live_browser,
-                sea_layers=layers,
-                explicit=explicit,
-                # > 0 by contract
-                timeout=timeout if timeout is not None else settings.get("timeout"),
-                # Children share the parent's worktree and commit policy
-                # rather than inheriting the flags, and an explicit
-                # ``max_budget`` is not inherited.
-                run_config={"inherited": [
-                    key for key in inherited.fields
-                    if key not in ("use_worktree", "auto_commit")
-                    and (key != "max_budget" or max_budget is None)
-                ]},
-                prompt_suffix=inherited.options.add_to_prompt,
-                is_parallel=inherited.options.allow_fan_out is not False,
-                inherited_tools=list(self._extra_tools) if inherited.fields else [],
-            )
-        finally:
-            # stop() joins the monitor BEFORE the offsets bump below so a
-            # late emission can never double-count.  The attribution runs
-            # in this finally so an interrupt (user stop) that unwinds
-            # the fan-out cannot make the sub-agents' spend disappear
-            # from the parent task's budget/token/step totals.
-            monitor.stop()
-            _attribute_sub_usage(
-                self,
-                float(cast(float, totals.get("budget_used", 0.0))),
-                int(cast(float, totals.get("total_tokens_used", 0))),
-                int(cast(float, totals.get("total_steps", 0))),
-            )
-        return results
 
     def _docker_bash(
         self,
@@ -2009,13 +1158,11 @@ class SorcarAgent(RelentlessAgent):
     ) -> str:
         """Run *command* in the task's container, honouring both limits.
 
-        Widens ``RelentlessAgent._docker_bash``, which forwards only
-        the command and its description.  ``DockerManager.Bash``
-        honours a timeout and truncates its output, but a two-argument
-        forwarder pins both to the manager's defaults, so the model
-        could neither raise the 30-second cap for a slow build nor ask
-        for more than the default slice of a large output — limits the
-        non-docker ``UsefulTools.Bash`` has always exposed.
+        ``DockerManager.Bash`` honours a timeout and truncates its
+        output; both are forwarded so the model can raise the
+        30-second cap for a slow build or ask for more than the
+        default slice of a large output — the limits the non-docker
+        ``UsefulTools.Bash`` exposes.
 
         Args:
             command: The bash command to run.
@@ -2054,13 +1201,12 @@ class SorcarAgent(RelentlessAgent):
             A :data:`TOOL_PROFILES` key or a ``+``-joined composite of
             keys (see :func:`resolve_tool_profile`).
         """
-        explicit = str(getattr(self, "_tool_profile_name", "") or "")
-        if explicit:
+        if self._tool_profile_name:
             try:
-                return canonical_tool_profile(explicit)
+                return canonical_tool_profile(self._tool_profile_name)
             except ValueError:
                 pass  # An unknown name falls through to the default rule.
-        task = task or str(getattr(self, "task_description", "") or "")
+        task = task or self.task_description
         if (
             DEFAULT_CONFIG.tool_profiles
             and self._is_reviewer_subagent()
@@ -2113,9 +1259,8 @@ class SorcarAgent(RelentlessAgent):
                     "reasonable assumption, or report the blocker in your final "
                     "summary and finish."
                 )
-            ask_callback = getattr(self, "_ask_user_question_callback", None)
-            if ask_callback:
-                return str(ask_callback(question))
+            if self._ask_user_question_callback is not None:
+                return str(self._ask_user_question_callback(question))
             return "(ask_user_question not available in this environment)"
 
         def talk(language: str, text: str, emotion: str = "") -> str:
@@ -2184,7 +1329,7 @@ class SorcarAgent(RelentlessAgent):
             from kiss.agents.sorcar.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
-            self.docker_manager.stop_event = getattr(self, "_stop_event", None)
+            self.docker_manager.stop_event = self._stop_event
 
             def Bash(  # noqa: N802
                 command: str,
@@ -2230,7 +1375,7 @@ class SorcarAgent(RelentlessAgent):
         else:
             useful_tools = UsefulTools(
                 stream_callback=_stream,
-                stop_event=getattr(self, "_stop_event", None),
+                stop_event=self._stop_event,
                 work_dir=self.work_dir,
                 jobs=self._background_jobs,
             )
@@ -2251,171 +1396,16 @@ class SorcarAgent(RelentlessAgent):
             # instead of contending for the shared profile's Chromium lock.
             self.web_use_tool = WebUseTool(
                 work_dir=self.work_dir,
-                ephemeral=getattr(self, "_subagent_info", None) is not None,
+                ephemeral=self._subagent_info is not None,
                 live_browser=self._live_browser,
             )
             tools.extend(self.web_use_tool.get_tools())
-
-        def run_parallel(
-            tasks: str, agent: str = "", model: str = "", tool_profile: str = "",
-            max_budget: str = "", timeout: str = "", max_workers: str = "",
-            options: str = "",
-        ) -> str:
-            """Run multiple independent tasks concurrently using parallel agents.
-
-            Spawns a separate ChatSorcarAgent for each task string and executes
-            them in parallel threads.  The children inherit this agent's
-            model, chat, system prompt, web/memory settings and container
-            (the same table as ``run_agent``, whose arguments these
-            mirror); ``agent`` runs each of them as a SEA instead of
-            a plain sub-agent.  {precedence}
-
-            **When to call run_parallel:**
-            - Multi-source / multi-topic research ("research these 5
-              companies", "summarize each of these N PDFs").
-            - Codebase exploration across unrelated modules ("look at the
-              frontend, backend, db layer, and auth in parallel").
-            - Multi-perspective review of one artifact (correctness
-              reviewer + security reviewer + style reviewer +
-              architecture reviewer, each looking at the same diff with
-              a different lens).
-            - Generating N alternative candidates for the same problem
-              so the orchestrator can pick the best.
-            - Independent test suites or validations on disjoint targets.
-            - Bulk file generation when each file is independent and the
-              API contract between them is already pinned down in a
-              spec.
-
-            **When NOT to call run_parallel:** when each task is just a
-            shell command whose output you need (test splits, builds,
-            lints).  Use ``run_commands_parallel`` for those: it runs the
-            commands concurrently without spawning LLM sub-agents.
-
-            **Hard limits (enforced, not advisory):**
-            - ``tasks`` must be a literal JSON array; shell substitutions
-              such as ``"$(cat tasks.json)"`` are not expanded and are
-              rejected.
-
-            Args:
-                tasks: A JSON-encoded list of task description strings.
-                    Example::
-
-                        '["Read src/foo.py and summarize its purpose", '
-                        '"Read src/bar.py and summarize its purpose", '
-                        '"Find the current weather in San Francisco"]'
-                agent: The SEA every child runs as: a ``.py`` path
-                    (relative to this task's work directory) or a
-                    slash-command name (``"write_paper"``), exactly as
-                    ``run_agent``'s ``agent`` argument; its
-                    ``prompt(task)`` shapes each child's prompt.  Empty
-                    (default) runs plain sub-agents.  Channel agents
-                    (``"slack"``, ``"cron"``) and SEAs pinning a
-                    worktree, auto-commit, the classifier or a chat are
-                    refused: run them through ``run_agent``.
-                model: LLM model for the sub-agents (e.g. a cheaper
-                    or a different reviewer model).  Empty (default)
-                    uses this agent's model.  Prefer this over asking
-                    the sub-agent to call ``set_model`` itself, which
-                    costs a whole step on the wrong model.
-                tool_profile: ``"review"`` gives the sub-agents the
-                    read-only toolset (Bash, bash_job, Read,
-                    run_commands_parallel, memory reads, browser tools,
-                    talk, decide, summary);
-                    ``"shell"`` just Bash, bash_job, Read and
-                    run_commands_parallel; ``"assistant"`` the shell set
-                    plus ask_user_question, talk, decide, summary and
-                    set_model.  Tool groups ``"edit"`` (Edit, Write),
-                    ``"browser"``, ``"memory"``, ``"agents"``, ``"mcp"``,
-                    ``"skills"``, ``"user"``, ``"decide"`` and
-                    ``"control"`` (summary, set_model) can be joined
-                    with ``+`` for the union of their tools, e.g.
-                    ``"shell+edit+memory"``; ``"readonly"`` is accepted
-                    for ``"review"``.  Empty (default): a child of a
-                    reviewer, or one whose task reads as a review and
-                    asks for no changes, gets ``"review"`` (its ``ran``
-                    line says ``tools=review(inferred)``), others the
-                    full toolset.
-                max_budget: Per-child USD budget as a number string;
-                    empty shares this task's remaining budget among
-                    the children.
-                timeout: Maximum seconds each child may run, as a
-                    number string; empty takes the SEA's ``timeout``
-                    setting, else no limit.  A child still running when
-                    it expires is stopped and reports ``success: false``.
-                max_workers: Maximum number of concurrent threads, as a
-                    string containing an integer (e.g. ``"4"``).  An empty
-                    string (default) lets Python choose automatically.
-                    Set to a lower number to limit concurrency.
-                options: Optional JSON object of run settings, as for
-                    ``run_agent``: ``model``, ``tool_profile``,
-                    ``max_budget``, ``timeout`` (the arguments above
-                    are shortcuts for these), ``work_dir`` (relative to
-                    this task's), ``add_to_system_prompt`` /
-                    ``add_to_prompt`` (appended text),
-                    ``model_config``, ``docker_image``, and the booleans
-                    ``inherit`` (``false``: the children take nothing
-                    from this task but their budget share),
-                    ``use_web_tools``, ``use_memory``, ``allow_fan_out``.
-                    A child is a thread of this task on its own tree
-                    and chat, so ``use_worktree``, ``auto_commit``,
-                    ``auto_classify``, ``chat_id`` and ``workspace`` are
-                    refused.  Usually leave it empty.
-
-            Returns:
-                A YAML-formatted string containing a list of result
-                objects, one per task, in the same order as the input.
-                Each result object starts with a ``ran`` line (the SEA
-                and kind the child ran as, its model, tool profile and
-                budget, which values it inherited from this task and
-                which inherited or default values the SEA pinned to its
-                own, e.g. ``pinned=use_web_tools(True->False)``) followed
-                by its ``success`` and ``summary`` keys.
-                A string starting with ``Error:`` when the call was
-                refused by one of the hard limits above, ``agent``
-                names no usable SEA, a locked key is contradicted, or
-                the SEA or ``options`` pin what a child cannot honour.
-            """
-            try:
-                task_list = parse_tasks_json(tasks)
-            except ValueError as e:
-                return f"Error: {e.args[0]}"
-            from kiss.agents.sorcar import cron_agent
-
-            if cron_agent.is_unattended(self):
-                task_list = [cron_agent.unattended_child_prompt(t) for t in task_list]
-            try:
-                workers: int | None = int(max_workers) if max_workers else None
-            except ValueError:
-                return (
-                    f"Error: max_workers must be an integer string, "
-                    f"got {max_workers!r}."
-                )
-            if workers is not None and workers < 1:
-                return f"Error: max_workers must be at least 1, got {workers}."
-            try:
-                run_options = parse_run_options(options, tool_profile, model, max_budget, timeout)
-            except ValueError as exc:
-                return f"Error: {exc}"
-            try:
-                results = self._run_tasks_parallel(
-                    task_list, max_workers=workers,
-                    model_name=run_options.model or None,
-                    tool_profile=run_options.tool_profile,
-                    agent=agent,
-                    max_budget=run_options.max_budget,
-                    options=run_options,
-                    timeout=run_options.timeout,
-                )
-            except SeaError as exc:
-                return f"Error: {exc}"
-            result_str: str = yaml.dump(results, sort_keys=False)
-            return result_str
-
         def number_of_cores() -> int:
             """Return the number of CPU cores available on the current machine.
 
-            Useful for choosing a reasonable ``max_workers`` value when
-            calling :func:`run_parallel`.
+            Useful for choosing how many splits to give
+            ``run_commands_parallel`` (``max_workers``) or how many
+            tasks to fan out at once.
 
             Returns:
                 The number of CPU cores available to the process,
@@ -2450,15 +1440,13 @@ class SorcarAgent(RelentlessAgent):
 
             enforce_model_policy(model_name, getattr(self, "model_config", None))
 
-            if getattr(self, "docker_image", None) and model_runs_task_to_completion(
-                model_name
-            ):
+            if self.docker_image and model_runs_task_to_completion(model_name):
                 return (
                     f"Cannot switch to {model_name}: it is a CLI agent "
                     "that runs natively on the host, which would bypass "
                     "this task's docker_image isolation. Pick an API model."
                 )
-            target = getattr(self, "_current_executor", None) or self
+            target = self._current_executor or self
             old_model = getattr(target, "model", None)
             if old_model is None:
                 self.model_name = model_name
@@ -2587,14 +1575,12 @@ class SorcarAgent(RelentlessAgent):
             except Exception:
                 logger.warning("MCP tool setup failed", exc_info=True)
         if allowed is None or "run_agent" in allowed:
-            from kiss.agents.sorcar.agent_dispatch import make_agent_job_tool, make_run_agent_tool
-
             # Scheduled automations (cron) are not a built-in tool: the
             # agent dispatches them via run_agent(agent="cron", ...), which
             # runs kiss.agents.sorcar.cron_agent as a SEA.  Passing
             # self makes each dispatched sub-task's cost/tokens/steps fold
             # into THIS task's accounting, so the end-of-task cost shown
-            # to the user includes run_agent sub-tasks (like run_parallel).
+            # to the user includes run_agent sub-tasks.
             tools.append(make_run_agent_tool(self.work_dir or "", self))
             tools.append(make_agent_job_tool(self))
         tools.append(ask_user_question)
@@ -2618,11 +1604,7 @@ class SorcarAgent(RelentlessAgent):
         # docstring only — there is no mechanical enforcement.
         tools.append(summary)
         if self._is_parallel and (allowed is None or "run_parallel" in allowed):
-            run_parallel.__doc__ = (run_parallel.__doc__ or "").replace(
-                "{precedence}", PRECEDENCE_RULE
-            )
-            run_parallel.unknown_arguments_hint = options_keyword_hint  # type: ignore[attr-defined]
-            tools.append(run_parallel)
+            tools.append(make_run_parallel_tool(self.work_dir or "", self))
             tools.append(number_of_cores)
         if allowed is not None:
             tools = [tool for tool in tools if tool.__name__ in allowed]
@@ -2656,11 +1638,7 @@ class SorcarAgent(RelentlessAgent):
         if not callable(show):
             return
         try:
-            show(
-                model_name,
-                getattr(self, "_tab_id", "") or "",
-                _persisted_task_id(self) or None,
-            )
+            show(model_name, self._tab_id, _persisted_task_id(self) or None)
         except Exception:
             logger.warning("model picker update failed", exc_info=True)
 
@@ -2728,10 +1706,11 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        resolved_model = self._resolve_model_name(model_name)
-        self._launch_model_name = resolved_model
+        # :meth:`run` resolved the model once for the whole run; a
+        # direct ``RelentlessAgent.run`` call (tests) resolves here.
+        self._launch_model_name = self._resolve_model_name(model_name)
         super()._reset(
-            model_name=resolved_model,
+            model_name=self._launch_model_name,
             max_sub_sessions=max_sub_sessions,
             max_steps=max_steps,
             max_budget=max_budget,
@@ -2745,12 +1724,15 @@ class SorcarAgent(RelentlessAgent):
     def _resolve_model_name(model_name: str | None) -> str:
         """The model a run asked to use *model_name* actually runs with.
 
-        The same fallback chain ``_reset`` applies: the caller's model,
-        else the user's last-selected model, else the configured
-        default.  Exposed so callers that record a run's settings
-        BEFORE ``_reset`` executes (``ChatSorcarAgent.run``'s early
-        history row and ``task_settings`` event) persist the resolved
-        value instead of a blank.
+        The caller's model, else the user's last-selected model, else
+        the configured default.  The fallback re-reads the user's
+        config, which another thread (the model picker) may change at
+        any time, so a run resolves it ONCE — :meth:`run` stores the
+        result in ``_launch_model_name`` and passes it to the
+        classifier, the memory-root gate and ``_reset`` — and
+        ``ChatSorcarAgent.run``, which records the run's settings
+        before :meth:`run` executes, resolves first and passes the
+        result down as *model_name*.
 
         The picker persists a model-picker SEA (``autorouter``,
         ``bestrouter``; :func:`kiss.agents.sorcar.sea_commands.model_sea`)
@@ -2833,7 +1815,7 @@ class SorcarAgent(RelentlessAgent):
             model_config: The model configuration the run will use.
             enabled: Per-run override of the persisted
                 ``classify_tasks`` setting — the ``classifyTasks`` wire
-                field of the ``run`` command (the *classify_tasks*
+                field of the ``run`` command (the *auto_classify*
                 parameter of :func:`kiss.server.sorcar.run`).  ``True``
                 forces classification on, ``False`` skips it (the run
                 then behaves exactly as it would without a
@@ -2848,14 +1830,14 @@ class SorcarAgent(RelentlessAgent):
         self._classification_preseeded = False
         self._reset_task_classification()
         verdict = self._classify_task_once(
-            model_name, task, model_config, enabled_override=enabled,
+            self._resolve_model_name(model_name), task, model_config, enabled_override=enabled,
         )
         self._classification_preseeded = True
         return verdict
 
     def _classify_task_once(
         self,
-        model_name: str | None,
+        model_name: str,
         task: str,
         model_config: dict[str, Any] | None,
         arguments: dict[str, str] | None = None,
@@ -2867,14 +1849,15 @@ class SorcarAgent(RelentlessAgent):
         performs the classification — when
         :func:`~kiss.agents.sorcar.task_classifier.classification_enabled`
         allows it — with the same resolved model and model config the
-        main run will use, and banks the classifier's usage counters for
-        :meth:`_fold_classifier_usage`.  Every later call returns the
-        cached verdict, so ``WorktreeSorcarAgent.run`` (worktree
-        decision) and :meth:`run` (system prompt selection) share one
-        classification.
+        main run will use, and publishes the classifier's spend as one
+        ``_classifier_spend`` record for :meth:`_fold_classifier_usage`
+        to bank.  Every later call returns the cached verdict, so
+        ``WorktreeSorcarAgent.run`` (worktree decision) and :meth:`run`
+        (system prompt selection) share one classification.
 
         Args:
-            model_name: The caller-supplied model name, possibly None.
+            model_name: The run's resolved model name (see
+                :meth:`_resolve_model_name`).
             task: The task prompt template about to run.
             model_config: The caller-supplied model configuration.
             arguments: The caller-supplied prompt-template arguments;
@@ -2882,7 +1865,7 @@ class SorcarAgent(RelentlessAgent):
                 classifier sees the prompt the run will actually
                 execute, not the raw ``{placeholder}`` template.
             enabled_override: Per-run override of the persisted
-                ``classify_tasks`` setting (see
+                ``classify_tasks`` config key (see
                 :meth:`classify_task_for_run`); ``None`` follows the
                 config.
 
@@ -2898,7 +1881,7 @@ class SorcarAgent(RelentlessAgent):
             return None
         outcome = classify_task(
             task=substitute_prompt_args(task, arguments),
-            model_name=self._resolve_model_name(model_name),
+            model_name=model_name,
             model_config=model_config,
         )
         # ONE immutable publication: the retry-stable fold key and the
@@ -2990,8 +1973,10 @@ class SorcarAgent(RelentlessAgent):
         base_system_prompt: str = "",
         append_basic_tools: bool = True,
         inherited_tools: list[Callable[..., Any]] | None = None,
-        llm_call_hook: (Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None) = None,
-        tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
+        llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None,
+        tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None,
         use_memory: bool | None = None,
         tool_profile: str = "",
         live_browser: Any = None,
@@ -3029,7 +2014,7 @@ class SorcarAgent(RelentlessAgent):
                 ALREADY appended to *prompt_template*; it is not added
                 again here.  Recorded as ``_prompt_suffix`` so a ``run_agent``
                 sub-task dispatched during the run inherits it as its
-                own ``append_to_prompt`` (see
+                own ``add_to_prompt`` option (see
                 ``agent_dispatch.inherit_from_parent``).  Defaults to
                 "" (the run has no suffix).  Last in the signature so
                 every earlier argument keeps its position.
@@ -3079,9 +2064,10 @@ class SorcarAgent(RelentlessAgent):
                 :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
                 sub-session this agent runs (see that docstring): called
                 before every tool call with the tool's name and
-                arguments; any verdict other than ``"OK"`` suppresses
-                the call and is returned to the model as the tool's
-                result.  Applies to this agent only, not to
+                arguments and returns a
+                :class:`~kiss.core.tool_verdict.Verdict` (``ALLOW``, or
+                ``refuse(text)``: the call is suppressed and the model
+                reads *text* as its result).  Applies to this agent only, not to
                 ``run_parallel`` sub-agents.  Defaults to None (no
                 hook).
             use_memory: Per-run persistent-memory toggle
@@ -3114,9 +2100,11 @@ class SorcarAgent(RelentlessAgent):
                 (:func:`kiss.agents.sorcar.sea_commands.base_system_prompt`):
                 called once with the assembled system prompt (base or
                 *base_system_prompt*, plus *system_prompt*) and its
-                return value replaces it; what it appended is forwarded
-                to sub-agents as their suffix, a replacement as their
-                base prompt.  ``None`` (default) changes nothing.
+                return value is the run's system prompt, verbatim.  Not
+                forwarded to sub-agents (their own SEA layers apply
+                theirs; they inherit *base_system_prompt* and
+                *system_prompt* as given).  ``None`` (default) changes
+                nothing.
             tools_hook: The SEA's ``tools`` method
                 (:func:`kiss.agents.sorcar.sea_commands.base_tools`):
                 called once by :meth:`perform_task` with the built-in
@@ -3154,14 +2142,10 @@ class SorcarAgent(RelentlessAgent):
         self._system_prompt_suffix = system_prompt if system_prompt else ""
         self.web_use_tool = None
         self._memory_tools = None
-        # The thread's own binding first: a fan-out child has one
-        # whatever its printer (``run_tasks_parallel`` binds it so the
-        # per-child timeout and a parent stop reach its shell), and the
-        # JSON printer's thread-local is a view over the same storage.
-        tl = getattr(printer, "_thread_local", None) if printer else None
-        self._stop_event = get_thread_stop_event() or (
-            getattr(tl, "stop_event", None) if tl else None
-        )
+        # Resolved ONCE for the whole run (see _resolve_model_name):
+        # the classifier, the memory-root gate and ``_reset`` all get
+        # this string, so they cannot disagree about the model.
+        model_name = self._launch_model_name = self._resolve_model_name(model_name)
         try:
             # Pre-run task classification (idempotent per run:
             # WorktreeSorcarAgent.run may have classified already for
@@ -3185,21 +2169,18 @@ class SorcarAgent(RelentlessAgent):
                 + (system_prompt if system_prompt else "")
             )
             if system_prompt_hook is not None:
-                hooked = system_prompt_hook(system_instructions)
-                # Sub-agents inherit the SEA's effect the way they inherit
-                # the caller's: an appended text as their suffix, anything
-                # else as their whole base prompt (the suffix it rewrote
-                # or dropped must not come back on a sub-agent).
-                if hooked.startswith(system_instructions):
-                    self._system_prompt_suffix += hooked[len(system_instructions):]
-                else:
-                    self._base_system_prompt = hooked
-                    self._system_prompt_suffix = ""
-                system_instructions = hooked
+                # The SEA's return is the run's system prompt, as its
+                # ``prompt()`` return is the run's prompt.  Neither is
+                # forwarded to sub-agents: they inherit the caller's
+                # *base_system_prompt* and *system_prompt* and their own
+                # SEA layers shape their prompt (the daemon applies
+                # them), so an appended rule is
+                # stated once per run without any deduplication.
+                system_instructions = system_prompt_hook(system_instructions)
             memory_root = _memory_root_for_run(
                 self._append_basic_tools,
                 docker_image,
-                self._resolve_model_name(model_name),
+                model_name,
                 caller_system_instruction=bool(
                     (model_config or {}).get("system_instruction")
                 ),
@@ -3297,14 +2278,8 @@ class SorcarAgent(RelentlessAgent):
             # dropped when the run is already unwinding on an exception.
             unwinding = sys.exc_info()[1] is not None
             interrupted: BaseException | None = None
-            # Totals as of the run's last event: a stopped job's spend
-            # (folded by its thread while joined below) and the
-            # classifier's land after it and must be published.
-            totals_at_last_event = self.usage_snapshot()
-            jobs_stopped = False
             try:
-                jobs_stopped = bool(kill_jobs_of(self))
-                if jobs_stopped:
+                if kill_jobs_of(self):
                     logger.info("stopped run_agent jobs still running at the end of the task")
             except BaseException as exc:  # noqa: BLE001 — held, see above
                 logger.warning("interrupted while waiting for cancelled run_agent jobs")
@@ -3317,13 +2292,19 @@ class SorcarAgent(RelentlessAgent):
             self._ask_user_question_callback = None
             self.pre_step_hook = None
             self.tool_call_guard = None
-            if jobs_stopped or self.usage_snapshot() != totals_at_last_event:
-                # The run's last event predates the folds above, so the
-                # UI's cost would omit them while the persisted row
-                # (read from the totals after ``run``) includes them.
-                # Emitted after the cleanup: printing raises the task's
-                # stop when it is set.
-                self._emit_usage_totals()
+            # The hook is a bound method of this run's UsefulTools;
+            # left in place it would keep that instance (its read
+            # cache, stream callback, stop event) alive for the next
+            # run and be called by a docker run that never installs one.
+            self.context_reset_hook = None
+            # The run's last word on its spend, always: a sub-task's
+            # fold can land on its own thread at any point after the
+            # run's last event (between a session's final event and its
+            # bank, during the join above, or ahead of the classifier
+            # fold), so no snapshot taken here can tell whether that
+            # event already carried it.  The persisted row reads the
+            # same totals after ``run`` returns.
+            self._emit_usage_totals()
             if interrupted is not None:
                 raise interrupted
 
@@ -3349,11 +2330,7 @@ class SorcarAgent(RelentlessAgent):
             model: The live model whose conversation receives the
                 queued user messages.
         """
-        drain = getattr(
-            getattr(self, "printer", None),
-            "drain_pending_user_messages",
-            None,
-        )
+        drain = getattr(self.printer, "drain_pending_user_messages", None)
         queued: list[str] = drain() if drain is not None else []
         for msg in queued:
             model.add_message_to_conversation(
@@ -3387,11 +2364,7 @@ class SorcarAgent(RelentlessAgent):
         del args
         if name != "finish":
             return None
-        has_pending = getattr(
-            getattr(self, "printer", None),
-            "has_pending_user_messages",
-            None,
-        )
+        has_pending = getattr(self.printer, "has_pending_user_messages", None)
         if has_pending is None or not has_pending():
             return None
         return (
@@ -3442,585 +2415,6 @@ class SorcarAgent(RelentlessAgent):
             self._block_finish_when_user_message_pending(name, args)
             or self._block_finish_with_live_jobs(name, args)
         )
-
-
-def _coerce_tasks(tasks: Any) -> list[str]:
-    """Normalize the ``tasks`` argument to a ``list[str]``.
-
-    LLM tool calls sometimes pass ``tasks`` in two malformed shapes that
-    we recover from here:
-
-    1. A JSON-encoded list string such as ``'["task A", "task B"]'``.
-       Without recovery, the entire JSON string would be treated as one
-       task and dispatched to a single sub-agent.  We parse it back into
-       a proper ``list[str]``.
-    2. A bare task string such as ``"hello"``.  Without this guard,
-       ``enumerate(tasks)`` would iterate the string character-by-
-       character and create one sub-agent (and one ``openSubagentTab``
-       event) per character.  We wrap it into ``["hello"]``.
-
-    Args:
-        tasks: Either a ``list[str]``, a JSON-encoded ``list[str]`` string,
-            or a single task ``str``.
-
-    Returns:
-        A ``list[str]``.  JSON-encoded list strings are parsed; other
-        ``str`` inputs are wrapped in a one-element list.
-
-    Raises:
-        TypeError: If *tasks* is neither a ``str`` nor a ``list[str]``.
-    """
-    if isinstance(tasks, str):
-        stripped = tasks.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            try:
-                parsed = json.loads(stripped)
-            except (ValueError, TypeError):
-                parsed = None
-            if isinstance(parsed, list):
-                return [t if isinstance(t, str) else str(t) for t in parsed]
-        return [tasks]
-    if isinstance(tasks, list) and all(isinstance(t, str) for t in tasks):
-        return tasks
-    raise TypeError(
-        f"tasks must be list[str], got {type(tasks).__name__}: {tasks!r}"
-    )
-
-
-def _sea_run_kwargs(
-    seas: list[BaseSea],
-    task: str,
-    defaults: dict[str, Any],
-    parent_agent: Any,
-    explicit: set[str] | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return the ``run()`` keyword overrides a SEA makes for one child.
-
-    The in-process counterpart of the daemon's
-    :func:`kiss.agents.sorcar.agent_file.apply_agent_overrides`: the SEA's
-    settings replace the inherited *defaults* (an explicit fan-out
-    argument was checked against ``locked`` by the caller), its
-    ``prompt(task)`` shapes the prompt, and its ``system_prompt``,
-    ``tools`` and hook methods are passed through as the run's hooks.
-    A fan-out child acts on the parent's tree, in the parent's chat, so
-    a SEA pinning the opposite is refused (see
-    :func:`check_fanout_settings`); ``timeout`` and ``inherit`` do not
-    apply (the caller's own step bounds the children, which always
-    inherit).
-
-    Args:
-        seas: The loaded SEAs.
-        task: The child's task text.
-        defaults: The keyword arguments the child would run with
-            otherwise (read, not modified).
-        parent_agent: The fanning-out agent, whose persisted task id
-            replaces ``{task_id}`` in the prompt.
-        explicit: The setting keys the ``run_parallel`` call passed
-            explicitly; the script's values for them are not applied
-            (the call's win; a locked clash was refused before).
-
-    Returns:
-        The keyword arguments to update the child's with, and the
-        child's run-configuration record (``sea``, ``kind``,
-        ``pinned``; see :mod:`kiss.agents.sorcar.run_config`).
-
-    Raises:
-        SeaScriptError: When a method is broken (see
-            :func:`~kiss.agents.sorcar.sea_commands.evaluate_sea`).
-    """
-    run = evaluate_sea(seas, task, _persisted_task_id(parent_agent))
-    settings = run.settings
-    run_config: dict[str, Any] = {
-        "sea": sea_name(seas),
-        "kind": settings["kind"],
-        "pinned": {},
-    }
-    # ``run()`` only records ``prompt_suffix``: the prompt carries it.
-    overrides: dict[str, Any] = {
-        "prompt_template": run.prompt + str(defaults.get("prompt_suffix") or ""),
-        "system_prompt_hook": run.system_prompt_hook,
-        "tools_hook": run.tools_hook,
-        "llm_call_hook": run.llm_call_hook,
-        "tool_call_hook": run.tool_call_hook,
-    }
-    for key, kwarg in (
-        ("model", "model_name"), ("max_budget", "max_budget"),
-        ("tool_profile", "tool_profile"), ("docker_image", "docker_image"),
-        ("work_dir", "work_dir"), ("use_web_tools", "web_tools"),
-        ("use_memory", "use_memory"), ("allow_fan_out", "is_parallel"),
-    ):
-        if key in settings and settings[key] != "" and key not in (explicit or ()):
-            overrides[kwarg] = settings[key]
-            note_pinned(run_config["pinned"], key, defaults.get(kwarg), settings[key])
-    if "model_name" in overrides and settings["model"] != defaults.get("model_name"):
-        # The parent's model_config belongs to the parent's model.
-        overrides["model_config"] = None
-    if settings.get("model_config") and "model_config" not in (explicit or ()):
-        overrides["model_config"] = settings["model_config"]
-        note_pinned(
-            run_config["pinned"], "model_config",
-            defaults.get("model_config"), settings["model_config"],
-        )
-    if overrides.get("tool_profile", defaults.get("tool_profile")) == "none":
-        # The SEA fixed the whole toolset: no built-ins, no tools
-        # taken over from the parent.
-        overrides["append_basic_tools"] = False
-        overrides["inherited_tools"] = []
-    if (defaults.get("model_config") or {}).get("subscription_only") is True:
-        overrides["model_config"] = dict(
-            overrides.get("model_config") or defaults.get("model_config") or {}
-        ) | {
-            "subscription_only": True,
-            "cli_billing_mode": "subscription",
-        }
-    return overrides, run_config
-
-
-def _expire_child(timed_out: threading.Event, stop_event: threading.Event) -> None:
-    """Stop one fan-out child whose ``timeout`` elapsed (a ``threading.Timer`` body).
-
-    The flag is set first so the child's ``KeyboardInterrupt`` handler
-    reports the timeout rather than a user stop; *stop_event* is the
-    child's own, not the fan-out's, so its siblings go on.
-    """
-    timed_out.set()
-    stop_event.set()
-
-
-def run_tasks_parallel(
-    tasks: list[str],
-    max_workers: int | None = None,
-    model_name: str | None = None,
-    work_dir: str | None = None,
-    printer: Printer | None = None,
-    totals_out: dict[str, Any] | None = None,
-    max_budget: float | None = None,
-    model_config: dict[str, Any] | None = None,
-    usage_monitor: _LiveUsageMonitor | None = None,
-    parent_agent: Any = None,
-    chat_id: str = "",
-    parent_tab_id: str = "",
-    base_system_prompt: str = "",
-    system_prompt_suffix: str = "",
-    web_tools: bool = True,
-    use_memory: bool | None = None,
-    tool_profile: str = "",
-    live_browser: Any = None,
-    docker_image: str | None = None,
-    sea_layers: list[BaseSea] | None = None,
-    run_config: dict[str, Any] | None = None,
-    explicit: set[str] | None = None,
-    timeout: float | None = None,
-    prompt_suffix: str = "",
-    is_parallel: bool = True,
-    inherited_tools: list[Callable[..., Any]] | None = None,
-) -> list[str]:
-    """Execute multiple SorcarAgent tasks concurrently using threads.
-
-    Each task gets its own ``ChatSorcarAgent`` instance and runs in a
-    separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`.
-    This is ideal for I/O-bound workloads (LLM API calls, network
-    requests) where the GIL is released during I/O waits.
-
-    This is the ONE fan-out engine in the codebase.  It used to have a
-    near-identical twin in ``ChatSorcarAgent._run_tasks_parallel``, and
-    four correctness fixes (per-sub-agent stop event, stopped-child
-    recovery, real ``parent_task_id``, chat/tab propagation) had landed
-    only in that twin, so every plain :class:`SorcarAgent` subclass —
-    which is what the third-party channel agents used to be before they
-    became daemon-launched carriers — silently ran the unfixed copy.
-    Keep it single.
-
-    The engine still owns no frontend concepts: it marks each spawned
-    agent as a sub-agent (via ``_subagent_info``) and the sub-agent
-    itself broadcasts its own ``new_tab`` inside ``run()``.
-
-    Args:
-        tasks: List of task description strings.  Each string is passed as
-            the ``prompt_template`` argument to :meth:`SorcarAgent.run`.
-            Example::
-
-                [
-                    "Summarize file A",
-                    "Summarize file B",
-                ]
-        max_workers: Maximum number of threads.  ``None`` lets
-            :class:`~concurrent.futures.ThreadPoolExecutor` pick a default
-            (typically ``min(32, cpu_count + 4)``).
-        model_name: LLM model name for all parallel agents.  ``None`` uses the
-            default from persistence (same as :meth:`SorcarAgent.run`).
-        work_dir: Working directory for all parallel agents.  ``None`` uses
-            the default (``artifact_dir/kiss_workdir``).
-        printer: Optional printer from the parent agent.  Forwarded
-            verbatim to each sub-agent's ``run`` so live events
-            continue to flow through the same channel.  The executor
-            itself does not call any printer methods.
-        totals_out: Optional dict that receives the aggregated usage of
-            all sub-agents.  When provided, the summed spend across
-            every spawned agent is written into it under the keys
-            ``"budget_used"``, ``"total_tokens_used"`` and
-            ``"total_steps"`` so the caller can attribute sub-agent
-            usage back to the parent task (see
-            :func:`_attribute_sub_usage`).
-        max_budget: Per-sub-agent budget cap in USD, forwarded to each
-            sub-agent's ``run``.  Callers spawning sub-agents on behalf
-            of a parent task pass each child one share of the parent's
-            remaining budget and reserve one equal share for the parent
-            (see :meth:`SorcarAgent._subagent_budget_share`), so even a
-            one-child fan-out cannot spend the parent's whole remainder.
-            ``None`` uses the sub-agent's default (config value).
-        model_config: Model configuration (e.g. custom ``base_url`` /
-            ``api_key`` routing) forwarded to each sub-agent's ``run``
-            so sub-agents talk to the same provider endpoint as the
-            parent.  ``None`` uses default provider routing.
-        usage_monitor: Optional :class:`_LiveUsageMonitor` that each
-            spawned sub-agent is registered with, so the parent task's
-            cost/tokens header can stream live aggregate usage while
-            the sub-agents run.  ``None`` disables live tracking.
-        parent_agent: The agent that is fanning out, when there is one.
-            Its persisted ``task_history`` row id is re-read as each
-            worker starts and stamped on the child, so the child is
-            stored as a nested sub-task rather than a bogus top-level
-            history row.  ``None`` (a bare functional call) falls back
-            to the printer's thread-local task id.
-        chat_id: Chat session the children resume, so a sub-agent
-            starts with the parent's conversation context instead of a
-            brand-new empty session.  ``""`` gives each child a fresh
-            chat.
-        parent_tab_id: Frontend tab id of the parent, forwarded in
-            ``_subagent_info`` so the child's ``new_tab`` broadcast
-            tells the owning webview which tab spawned it.
-        base_system_prompt: Custom base system prompt forwarded to each
-            sub-agent's ``run``, so a parent running with a caller-supplied
-            system prompt (see :meth:`SorcarAgent.run`) spawns children
-            that use the same prompt instead of the default ``SYSTEM.md``.
-            ``""`` keeps the default.
-        system_prompt_suffix: Extra text appended to each sub-agent's
-            base system prompt, forwarded as the ``system_prompt``
-            argument of each sub-agent's ``run``.  A parent running
-            with an append-only system-prompt suffix (see
-            :meth:`SorcarAgent.run`'s *system_prompt*) passes it on so
-            the extra instructions constrain the whole task tree,
-            mirroring *base_system_prompt*.  ``""`` appends nothing.
-        web_tools: Whether each sub-agent gets browser/web tools,
-            forwarded to each sub-agent's ``run``.  A parent running
-            without web tools (``run(web_tools=False)``) passes False
-            so its children cannot re-acquire the browser it was denied.
-        use_memory: Per-run persistent-memory toggle forwarded to each
-            sub-agent's ``run`` (see :meth:`SorcarAgent.run`'s
-            *use_memory*), so a parent run's explicit override governs
-            its whole task tree.  ``None`` (the default) lets each
-            sub-agent fall back to the environment/config default,
-            exactly like the parent did.
-        tool_profile: Explicit tool profile for every child (a key of
-            :data:`TOOL_PROFILES`, or several joined with ``+``; see
-            :func:`resolve_tool_profile`).  ``""`` (default) lets each child
-            pick its own: ``review`` for reviewer-marked children when
-            ``DEFAULT_CONFIG.tool_profiles`` is on, ``full`` otherwise.
-        docker_image: ``docker_image`` for every child (normally the
-            parent's live container as ``container:<id>``, so the
-            children's tools act inside the same container); ``None``
-            runs the children's tools on the host.
-        live_browser: The daemon's ``BrowserTabService`` for every child
-            (see :meth:`SorcarAgent.run`), so a child's ``show_browser()``
-            also reaches the user's Browser tab.
-        sea_layers: The loaded SEA every child runs as
-            (:func:`kiss.agents.sorcar.sea_commands.sea_layers`),
-            evaluated per child on its task
-            (:func:`~kiss.agents.sorcar.sea_commands.evaluate_sea`): the
-            SEA's settings apply where *explicit* names no key, its
-            ``prompt(task)`` shapes the child's prompt, its
-            ``system_prompt``, ``tools`` and hook methods apply.
-            ``None``/empty runs plain sub-agents.  A method broken for
-            one task fails that child alone (a YAML failure entry),
-            like any other child error.
-        run_config: The run-configuration record every child starts
-            from (its ``inherited`` keys and ``timeout``; see
-            :mod:`kiss.agents.sorcar.run_config`), extended per child
-            with the tool profile and the SEA's ``sea`` / ``kind`` /
-            ``pinned`` and folded into its ``task_settings`` event;
-            every child's result starts with the matching ``ran:`` line.
-        explicit: The setting keys the ``run_parallel`` call passed
-            explicitly (``model``, ``tool_profile``, ``max_budget``, the
-            options); the SEA's settings do not replace them.
-        timeout: Maximum seconds each child may run; ``None`` for no
-            limit.  A child still running when it expires is stopped
-            and reports ``success: false`` with the elapsed limit.
-        prompt_suffix: Text appended to every child's task prompt (the
-            parent's own ``appendToPrompt``), recorded on the child as
-            its ``prompt_suffix`` so its sub-tasks inherit it in turn.
-        is_parallel: Whether the children may fan out themselves (the
-            parent's ``_is_parallel``).
-        inherited_tools: The parent's extra tools (its ``_extra_tools``:
-            its SEA's ``tools()`` plus what it inherited),
-            added to each child after its own tools under names it
-            lacks; dropped for a child on the ``none`` tool profile.
-
-    Returns:
-        List of YAML result strings in the **same order** as *tasks*.
-        Each string contains ``success`` and ``summary`` keys.  If a task
-        raises an unhandled exception the corresponding entry is a YAML
-        string with ``success: false`` and the traceback in ``summary``.
-
-    Raises:
-        TypeError: If *tasks* is not a list of strings.  As a convenience
-            for LLM tool callers that mistakenly pass a bare string,
-            ``str`` is coerced to a one-element list.
-    """
-    tasks = _coerce_tasks(tasks)
-
-    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-    sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
-    # Held for every slot write: the workers' final figures and the
-    # parent's live refresh of abandoned children must not interleave
-    # (see _collect_unfinished_usage).
-    sub_usage_lock = threading.Lock()
-    # Published as soon as each child exists so an abandoned child's
-    # spend can still be read (see _collect_unfinished_usage).
-    sub_agents: list[Any] = [None] * len(tasks)
-
-    parent_tl = getattr(printer, "_thread_local", None) if printer else None
-    parent_key = str(getattr(parent_tl, "task_id", "") or "") if parent_tl else ""
-    # The thread's own binding first (a headless child of an enclosing
-    # fan-out has one and no printer); the printer's thread-local is a
-    # view over the same storage for the JSON printer.
-    parent_stop_event = get_thread_stop_event() or (
-        getattr(parent_tl, "stop_event", None) if parent_tl else None
-    )
-    persisted_parent_id = _persisted_task_id(parent_agent)
-    parent_is_reviewer = bool(
-        (getattr(parent_agent, "_subagent_info", None) or {}).get("reviewer")
-    )
-    # Stable for the whole fan-out: the children's synthetic tab ids
-    # must not change between submission and the subagentDone
-    # broadcast, even though the parent's persisted id can appear late.
-    # It is a ROUTING key only — never persisted, because a synthetic
-    # id names no row in ``task_history``.
-    routing_key = persisted_parent_id or parent_key or uuid.uuid4().hex
-    # What the children are PERSISTED under.  A parent that keeps no
-    # history row of its own — every third-party channel agent is a
-    # plain ``SorcarAgent`` — still must not turn each of its children
-    # into a top-level history entry, so the fan-out gets one synthetic
-    # parent id in the canonical row-id shape.  It names no row, which
-    # is exactly right: the children are grouped together and hidden
-    # from the root list, and history keeps only entries a user
-    # actually started.
-    fanout_parent_id = persisted_parent_id or (
-        parent_key if is_task_history_id(parent_key) else uuid.uuid4().hex
-    )
-
-    # The whole fan-out's own stop signal, chained to the parent's.  It
-    # is set when the user presses the run_parallel panel's own Stop
-    # button (ToolCallInterrupted lands in the parent's wait): the
-    # parent's stop event stays unset then, so without this the
-    # children would keep running, and spending, after the fan-out the
-    # user just stopped had returned.  Any other reason the parent
-    # unwinds leaves the children alone (they are abandoned, their
-    # spend reclaimed later), exactly as before.
-    fanout_stop_event = _SubagentStopEvent(parent_stop_event)
-
-    def _run_single(args: tuple[int, str]) -> str:
-        idx, task = args
-        if DEFAULT_CONFIG.dispatch_path_rewrite:
-            # A parent in a worktree keeps writing parent-repo paths into
-            # its children's tasks; the children's Bash guard would then
-            # refuse every such command.
-            task = rewrite_parent_repo_paths(task, work_dir)
-        # A per-child event, chained to the fan-out's and through it to
-        # the parent's: stopping ONE sub-agent must not stop the parent
-        # or its siblings, while a parent stop (or an abandoned
-        # fan-out) still reaches every child (_SubagentStopEvent).
-        sub_stop_event = _SubagentStopEvent(fanout_stop_event)
-        # Bound to the thread itself (so a headless fan-out's per-child
-        # ``timeout`` can stop the child) and to the printer's
-        # thread-local, which for the JSON printer is a view over the
-        # same storage and for a plainer printer is where the child's
-        # ``run`` reads its stop event from.
-        set_thread_stop_event(sub_stop_event)
-        tl = getattr(printer, "_thread_local", None) if printer else None
-        if tl is not None:
-            tl.stop_event = sub_stop_event
-        agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
-        # Decided here, on the bare task text: the child's own prompt
-        # will carry the whole chat history, whose earlier tasks would
-        # make every implementation-word heuristic fire.
-        reviewer = parent_is_reviewer or is_review_task(task)
-        child_profile = tool_profile or (
-            "review"
-            if DEFAULT_CONFIG.tool_profiles and reviewer and not is_implementation_task(task)
-            else "full"
-        )
-        inferred_review = not tool_profile and child_profile == "review"
-        sub_agents[idx] = agent
-        if chat_id:
-            agent.resume_chat_by_id(chat_id)
-        sub_tab_id = f"task-{routing_key}__sub_{idx}"
-        agent._tab_id = sub_tab_id
-        # Re-read rather than reuse ``fanout_parent_id``: the parent may
-        # persist its own row while this fan-out is being submitted, and
-        # a child stamped with "" is stored as a top-level history row.
-        agent._subagent_info = {
-            "parent_task_id": _persisted_task_id(parent_agent)
-            or fanout_parent_id,
-            "parent_tab_id": parent_tab_id,
-            # Inherited down the whole sub-tree so a reviewer's helper
-            # children get the same read-only tool profile.
-            "reviewer": reviewer,
-        }
-        if usage_monitor is not None:
-            usage_monitor.track(agent)
-        run_kwargs: dict[str, Any] = {
-            # ``run()`` only records ``prompt_suffix``; the caller appends it.
-            "prompt_template": task + prompt_suffix,
-            "prompt_suffix": prompt_suffix,
-            "model_name": model_name,
-            "work_dir": work_dir,
-            "printer": printer,
-            "is_parallel": is_parallel,
-            "max_budget": max_budget,
-            "model_config": model_config,
-            "base_system_prompt": base_system_prompt,
-            "system_prompt": system_prompt_suffix or None,
-            "web_tools": web_tools,
-            "use_memory": use_memory,
-            "tool_profile": child_profile,
-            "docker_image": docker_image,
-            "live_browser": live_browser,
-            "inherited_tools": [] if child_profile == "none" else list(inherited_tools or []),
-        }
-        agent.run_config = {**(run_config or {}), "timeout": timeout}
-        timer: threading.Timer | None = None
-        timed_out = threading.Event()
-        if timeout is not None:
-            timer = threading.Timer(timeout, _expire_child, args=(timed_out, sub_stop_event))
-            timer.daemon = True
-            timer.start()
-        try:
-            if sea_layers:
-                # Inside the try: a getter broken for THIS task (its
-                # ``prompt(task)`` raised) fails this child alone, with
-                # the usual cleanup, instead of the whole fan-out.
-                overrides, sea_config = _sea_run_kwargs(
-                    sea_layers, task, run_kwargs, parent_agent, explicit,
-                )
-                run_kwargs.update(overrides)
-                agent.run_config.update(sea_config)
-                inferred_review = inferred_review and "tool_profile" not in overrides
-            agent.run_config["tool_profile"] = run_kwargs["tool_profile"]
-            if inferred_review:
-                agent.run_config["tool_profile_inferred"] = True
-            result: str = with_run_config(
-                agent.run(**run_kwargs), agent.task_settings or agent.run_config,
-            )
-            return result
-        except KeyboardInterrupt:
-            # Only THIS child was stopped: report it as a stopped task
-            # so its already-finished siblings' results are still
-            # collected.  A stop of the whole parent task keeps
-            # propagating, because there is nothing left to preserve.
-            if parent_stop_event is not None and parent_stop_event.is_set():
-                raise
-            stopped: str = yaml.dump(
-                {
-                    "success": False,
-                    "summary": (
-                        f"Sub-agent task did not finish within {timeout:g} s and was stopped."
-                        if timed_out.is_set() else "Sub-agent task stopped by user."
-                    ),
-                },
-                sort_keys=False,
-            )
-            return with_run_config(stopped, agent.task_settings or agent.run_config)
-        except Exception as exc:
-            return with_run_config(_yaml_failure(exc), agent.task_settings or agent.run_config)
-        finally:
-            if timer is not None:
-                timer.cancel()
-            # _live_agent_usage (not _agent_usage): an interrupted child
-            # never folds its in-flight executor session's spend into the
-            # agent totals, so the folded-only read would undercount it.
-            with sub_usage_lock:
-                sub_usage[idx] = _live_agent_usage(agent)
-            if printer is not None:
-                # Notify every tab watching the sub-agent: its own
-                # synthetic tab plus any other tabs subscribed to the
-                # sub-agent's task stream via the printer's fan-out
-                # registry.
-                try:
-                    _notify_subagent_done(
-                        printer, _persisted_task_id(agent), sub_tab_id,
-                        model_name or "",
-                    )
-                except Exception:
-                    logger.debug(
-                        "subagentDone broadcast failed", exc_info=True,
-                    )
-            # Pool workers are reused and the binding is per THREAD, so
-            # leaving it behind would let an unrelated sibling inherit a
-            # stop meant for this task.
-            set_thread_stop_event(None)
-            if tl is not None:
-                tl.stop_event = None
-
-    pool: ThreadPoolExecutor | None = None
-    futures: list[Future[str]] = []
-    abandoned = False
-    try:
-        pool = ThreadPoolExecutor(max_workers=max_workers)
-        try:
-            # Submission happens INSIDE the guarded region, appending
-            # one future at a time: a stop injected while the tasks are
-            # still being submitted must see every child submitted so
-            # far, so the abandon path below runs for them instead of
-            # the ``finally`` joining untracked running children with
-            # ``shutdown(wait=True)``.
-            for item in enumerate(tasks):
-                futures.append(pool.submit(_run_single, item))
-            results = _await_subagents(futures, parent_stop_event)
-        except BaseException as exc:
-            abandoned = any(not f.done() for f in futures)
-            if abandoned and isinstance(exc, ToolCallInterrupted):
-                fanout_stop_event.set()
-            raise
-    finally:
-        # Only a child that ignored its stop event is abandoned; every
-        # other path joins (and so RECLAIMS the workers) exactly as the
-        # old `with ThreadPoolExecutor(...)` block did.
-        if pool is not None:
-            pool.shutdown(wait=not abandoned, cancel_futures=abandoned)
-        # Fill totals_out even when a worker propagates an interrupt, and
-        # read the live figures of any child that never got to report its
-        # own, so no completed sibling's spend is lost.
-        _collect_unfinished_usage(futures, sub_agents, sub_usage, sub_usage_lock)
-        # Registration and the totals summation happen under ONE hold of
-        # the slot lock: an abandoned worker that unwound in the
-        # meantime publishes its FINAL slot value under the same lock,
-        # and a publish landing between the two used to make the parent
-        # bank the final figure while the registered ``counted``
-        # baseline kept the older one — the next reclaim then banked
-        # the difference a second time.  Under one hold, the figure
-        # summed into ``totals_out`` for a registered child is exactly
-        # its ``counted`` baseline, so banked-now plus reclaimed-later
-        # is the child's spend exactly once.
-        with sub_usage_lock:
-            if abandoned:
-                # The abandoned threads keep running inside ``work_dir``
-                # and keep spending: hand them to the parent so it can
-                # refuse to delete that directory and can bank the rest
-                # of their spend.
-                _register_abandoned(parent_agent, futures, sub_agents, sub_usage)
-            # Test hook (no-op in production): widens the window between
-            # the registration above and the summation below so
-            # concurrency tests can prove a worker's final publish
-            # cannot land between them
-            # (see test_audit0903_fanout_bank_register_race).
-            _race_delay()
-            if totals_out is not None:
-                totals_out["budget_used"] = sum(u[0] for u in sub_usage)
-                totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
-                totals_out["total_steps"] = sum(u[2] for u in sub_usage)
-    return results
 
 
 def _budget_arg(text: str) -> float:

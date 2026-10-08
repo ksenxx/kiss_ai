@@ -54,6 +54,7 @@ from kiss.core.models.model import (
     ThinkingCallback,
     TokenCallback,
     _iter_balanced_json_objects,
+    _iter_jsonl,
     _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
     billing_checked,
@@ -61,10 +62,6 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
-
-def _dict_field(record: Any, name: str) -> Any:
-    """Return key *name* of the dict *record*, or ``None`` when absent."""
-    return record.get(name) if isinstance(record, dict) else None
 
 
 def _find_claude_cli() -> str:
@@ -97,14 +94,7 @@ def _iter_stream_json_events(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
         The parsed event dicts, with ``stream_event`` wrappers replaced by
         their inner event.
     """
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for event in _iter_jsonl(lines):
         if event.get("type") == "stream_event":
             event = event.get("event", {})
         yield event
@@ -161,14 +151,14 @@ Your own native tools (Bash, Read, Edit, ...) remain available as usual.
 
 
 def _accumulate_usage(total: dict[str, Any], usage: dict[str, Any]) -> None:
-    """Add one message's usage counters into *total* in place.
+    """Add one completed message's usage counters into *total* in place.
 
     Numeric fields are summed; the nested ``cache_creation`` dict is
     merged field-by-field.  Non-numeric fields are ignored.
 
     Args:
         total: The running aggregate, updated in place.
-        usage: One ``message_delta`` event's ``usage`` dict.
+        usage: One finished assistant message's ``usage`` dict.
     """
     for key, value in usage.items():
         if isinstance(value, (int, float)):
@@ -178,6 +168,29 @@ def _accumulate_usage(total: dict[str, Any], usage: dict[str, Any]) -> None:
             for sub_key, sub_value in value.items():
                 if isinstance(sub_value, (int, float)):
                     sub[sub_key] = sub.get(sub_key, 0) + sub_value
+
+
+def _overwrite_usage(current: dict[str, Any], usage: dict[str, Any]) -> None:
+    """Apply one ``message_delta`` usage snapshot to the open message in place.
+
+    The counters in a ``message_delta`` event are *cumulative* for the
+    message (https://platform.claude.com/docs/en/build-with-claude/streaming
+    #event-types), so each snapshot replaces the previous one instead of
+    adding to it; fields a snapshot omits (older models report only
+    ``output_tokens``) keep the values ``message_start`` reported.
+
+    Args:
+        current: The open message's usage, updated in place.
+        usage: One ``message_delta`` event's ``usage`` dict.
+    """
+    for key, value in usage.items():
+        if isinstance(value, (int, float)):
+            current[key] = value
+        elif key == "cache_creation" and isinstance(value, dict):
+            sub = current.setdefault("cache_creation", {})
+            for sub_key, sub_value in value.items():
+                if isinstance(sub_value, (int, float)):
+                    sub[sub_key] = sub_value
 
 
 def _tool_result_text(content: Any) -> str:
@@ -255,10 +268,12 @@ class ClaudeCodeModel(CLITextModel):
         self._last_thinking_content: str = ""
         self._pre_result_content: str = ""
         self._stopped_for_tool_calls: bool = False
-        # Usage accumulated from ``message_delta`` events of the current
+        # Usage of the finished assistant messages of the current
         # generate() call, kept on the instance so a run that raises
-        # mid-stream can still be billed (see take_partial_usage_response).
+        # mid-stream can still be billed (see take_partial_usage_response),
+        # plus the cumulative usage of the message still streaming.
         self._partial_usage: dict[str, Any] = {}
+        self._open_message_usage: dict[str, Any] = {}
 
     def _build_cli_args(self) -> list[str]:
         """Build the ``claude`` CLI argument list.
@@ -350,6 +365,7 @@ class ClaudeCodeModel(CLITextModel):
         args = self._build_cli_args()
         self._stopped_for_tool_calls = False
         self._partial_usage = {}
+        self._open_message_usage = {}
         stop_on_tool_calls = self._tool_bearing_turn
 
         with self._cli_turn(args, "Claude Code CLI") as proc:
@@ -364,24 +380,39 @@ class ClaudeCodeModel(CLITextModel):
         # snapshot must not be billed a second time by a later
         # take_partial_usage_response() call.
         self._partial_usage = {}
+        self._open_message_usage = {}
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
+
+    def _close_open_message(self) -> None:
+        """Fold the message still streaming into the per-call usage aggregate.
+
+        Called at ``message_stop`` and, for a stream cut short before it,
+        when the usage is handed out, so an interrupted message is billed
+        from its last cumulative snapshot exactly once.
+        """
+        if self._open_message_usage:
+            _accumulate_usage(self._partial_usage, self._open_message_usage)
+            self._open_message_usage = {}
 
     def take_partial_usage_response(self) -> Any:
         """Return (and consume) usage seen before a failed generation.
 
-        The Claude CLI reports usage per assistant message via
-        ``message_delta`` events, accumulated in ``self._partial_usage``
-        as the stream is parsed.  When ``generate()`` raises mid-stream
-        (stall timeout, parse error), that accumulated usage is real spend
-        the terminal ``result`` event never got to report; this hands it
-        to the caller in the same shape as a normal response.
+        The Claude CLI reports each assistant message's usage via
+        ``message_start`` (input and cache counts) and cumulative
+        ``message_delta`` snapshots, folded per message into
+        ``self._partial_usage`` as the stream is parsed.  When
+        ``generate()`` raises mid-stream (stall timeout, parse error), that
+        accumulated usage is real spend the terminal ``result`` event never
+        got to report; this hands it to the caller in the same shape as a
+        normal response.
 
         Returns:
             ``{"usage": {...}}`` when partial usage was observed, else
             ``None``.  The stored value is cleared so it is never counted
             twice.
         """
+        self._close_open_message()
         if not self._partial_usage:
             return None
         usage = self._partial_usage
@@ -465,10 +496,11 @@ class ClaudeCodeModel(CLITextModel):
         found_tool_calls = False
         last_tc_end = -1
         seen_tool_use_ids: set[str] = set()
-        # Accumulated on the instance so a stream that raises mid-parse
-        # still leaves its observed usage billable (issue: a whole-task
-        # run timing out otherwise erased ALL of its known spend).
-        aggregated_usage = self._partial_usage
+        # Usage is kept on the instance (``_partial_usage`` for finished
+        # messages, ``_open_message_usage`` for the one streaming) so a
+        # stream that raises mid-parse still leaves its observed usage
+        # billable (issue: a whole-task run timing out otherwise erased
+        # ALL of its known spend).
         current_tool_block: dict[str, Any] | None = None
         current_tool_json = ""
 
@@ -488,9 +520,7 @@ class ClaudeCodeModel(CLITextModel):
                         thinking_text = block.get("thinking", "")
                         if thinking_text:
                             thinking_content += thinking_text
-                            self._invoke_thinking_callback(True)
-                            self._invoke_token_callback(thinking_text)
-                            self._invoke_thinking_callback(False)
+                            self._emit_as_thinking(thinking_text)
                     elif block_type == "text":
                         text = block.get("text", "")
                         if text:
@@ -574,10 +604,25 @@ class ClaudeCodeModel(CLITextModel):
                             output = _tool_result_text(block.get("content"))
                             if output:
                                 self._emit_as_thinking(output)
+            elif event_type == "message_start":
+                # A new assistant message: its input and cache counts are
+                # known now; output_tokens is a placeholder the cumulative
+                # message_delta snapshots replace.
+                self._close_open_message()
+                usage = event.get("message", {}).get("usage")
+                if isinstance(usage, dict):
+                    _overwrite_usage(self._open_message_usage, usage)
             elif event_type == "message_delta":
                 usage = event.get("usage")
                 if isinstance(usage, dict):
-                    _accumulate_usage(aggregated_usage, usage)
+                    _overwrite_usage(self._open_message_usage, usage)
+                # A stop_reason marks the message's final snapshot, so the
+                # message is complete even if its message_stop never
+                # arrives (or the stream carries no message_start/stop).
+                if (event.get("delta") or {}).get("stop_reason"):
+                    self._close_open_message()
+            elif event_type == "message_stop":
+                self._close_open_message()
             elif event_type == "result":
                 result_json = event
                 pre_result_content = content
@@ -592,15 +637,17 @@ class ClaudeCodeModel(CLITextModel):
             content = content[:last_tc_end]
             self._stopped_for_tool_calls = True
 
-        if self._stopped_for_tool_calls and not result_json and aggregated_usage:
+        if self._stopped_for_tool_calls and not result_json:
             # The turn ended at the KISS tool_calls block, before the
             # terminal ``result`` event.  The CLI child is agentic now, so
             # it must be killed immediately — draining it to the terminal
             # event (the old issue #34 rescue) would let it keep executing
             # native tools after the framework already ended the turn.
-            # The per-message ``message_delta`` usage aggregated above
-            # keeps the token accounting instead.
-            result_json = {"usage": aggregated_usage}
+            # The per-message usage folded above (including the message
+            # cut short) keeps the token accounting instead.
+            self._close_open_message()
+            if self._partial_usage:
+                result_json = {"usage": self._partial_usage}
 
         self._last_thinking_content = thinking_content
         self._pre_result_content = pre_result_content
@@ -665,7 +712,7 @@ class ClaudeCodeModel(CLITextModel):
         if not isinstance(response, dict):
             return 0, 0, 0, 0, 0
         usage = response.get("usage") or {}
-        cache_write_5m, cache_write_1h = cache_creation_tokens(usage, _dict_field)
+        cache_write_5m, cache_write_1h = cache_creation_tokens(usage)
         return (
             usage.get("input_tokens") or 0,
             usage.get("output_tokens") or 0,

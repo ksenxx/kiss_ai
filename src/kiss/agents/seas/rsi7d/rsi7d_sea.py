@@ -56,7 +56,7 @@ The mining functions read the persisted task history and return plain
 dicts:
 
 * :func:`_mine_sea_runs` — the runs of every SEA in the last *days*
-  days.  The database does not store which agent script a task ran, so
+  days.  The database does not store which SEA a task ran, so
   a run is recognised through its parent's ``run_agent`` tool call
   (the ``agent`` argument names the SEA: a path ending in ``_sea.py`` or
   a channel name such as ``slack``; the ``task`` argument is the child
@@ -385,8 +385,8 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
    - A task that changes nothing on disk is replayed with
      `replay_in_place(task_id, max_budget=<cap>)`: this checkout's patched SEA file runs the
      verbatim past task in this directory, on the SEA's own prompt in a fresh chat. Never
-     replay with `run_agent`: a `run_agent` sub-task inherits rsi7d's system prompt, chat
-     and budget share, so it does not measure the SEA as a user runs it.
+     replay with `run_agent`: a `run_agent` sub-task shares rsi7d's chat and budget, so
+     it does not measure the SEA as a user runs it.
    Then compare `run_findings(<new task id>)` with the original run (status, cost, steps,
    signal counts). Keep the change when the replay is not worse on status and signals and
    not clearly worse on cost/steps; otherwise revert it through the editor that made it
@@ -726,7 +726,7 @@ def _runs_by_signature(task_ids: list[str], signatures: dict[str, str]) -> dict[
     ``system_prompt`` replaces the prompt, after the default prompt for
     one that appends), so the prefix identifies runs the server dispatched without a
     ``run_agent`` tool call (the side-channel task-update reports, runs
-    started through ``sorcar.run(extension_agent_path=...)``).
+    started through ``sorcar.run(sea_path=...)``).
     """
     found: dict[str, list[str]] = defaultdict(list)
     if not signatures:
@@ -2616,12 +2616,12 @@ def _dispatch_replay(
     """Run a replay of *task* as *sea* through the daemon and return its outcome.
 
     A plain KISS Sorcar replay (*sea* = :data:`SORCAR`) runs with no
-    agent script and *sea_file* (this checkout's ``SYSTEM.md``) as its
-    base system prompt; any other replay runs the agent script
+    SEA and *sea_file* (this checkout's ``SYSTEM.md``) as its
+    base system prompt; any other replay runs the SEA
     *sea_file*.  The replay is dispatched with ``inherit=False``: a
     faithful replay runs on the SEA's own prompt, in its own chat, with
-    *model*, rather than on rsi7d's replacement system prompt, chat
-    and budget share a ``run_agent`` call would hand it.  The replay
+    *model*, rather than in rsi7d's chat and on the budget share a
+    ``run_agent`` call would hand it.  The replay
     runs as an agent job of the calling rsi7d task and is stopped when
     *timeout* expires: a replay tool has no caller to collect a
     detached job, so here the bound is on the replay itself.  Returns
@@ -2632,7 +2632,7 @@ def _dispatch_replay(
     plain = sea == SORCAR
     owner = current_agent()
     job = agent_dispatch.start_agent_job(sea, {
-        "name": sea, "prompt": task, "agent_path": "" if plain else sea_file,
+        "name": sea, "prompt": task, "sea_path": "" if plain else sea_file,
         "work_dir": work_dir, "model_name": model, "budget": max_budget,
         "timeout": timeout, "parent_agent": owner, "scope_work_dir": str(_work_root()),
         "options": agent_dispatch.RunOptions(
@@ -2680,9 +2680,9 @@ def replay_in_place(
     auto-commit, with the original run's model unless *model* is given,
     capped by *max_budget* (USD) and *timeout* (seconds); *name*
     overrides the SEA recorded on the run.  Unlike a ``run_agent`` call,
-    which would hand the SEA rsi7d's own replacement system prompt, chat
-    and budget share, the replay runs on the SEA's own prompt in a fresh
-    chat, so it measures the SEA as a user runs it.  A run of KISS Sorcar
+    which would run the SEA in rsi7d's chat on a share of its budget,
+    the replay runs in a fresh chat with its own budget, so it measures
+    the SEA as a user runs it.  A run of KISS Sorcar
     itself (``sorcar``) is replayed as a plain task on this checkout's
     ``SYSTEM.md``, patched or not.  Returns JSON with ``replay_task_id``
     (pass it to ``run_findings``), ``sea``, ``sea_file``, ``work_dir``,

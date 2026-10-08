@@ -2,6 +2,7 @@
 
 import threading
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 from kiss.core.models import cli_connections as cli
@@ -24,7 +25,9 @@ def test_status_request_is_async_and_scoped(monkeypatch):
         printer=SimpleNamespace(broadcast=events.append),
         _get_models=lambda conn_id: done.set(),
     )
-    _CommandsMixin._cmd_get_cli_connections(server, {"connId": "client", "refresh": True})
+    _CommandsMixin._cmd_get_cli_connections(
+        cast(_CommandsMixin, server), {"connId": "client", "refresh": True}
+    )
     assert entered.wait(2)
     assert not done.is_set(), "status probing must not block the command loop"
     release.set()

@@ -28,14 +28,14 @@ from kiss.agents.sorcar.agent_dispatch import (
     options_keyword_hint,
     parse_run_options,
 )
-from kiss.agents.sorcar.sea_commands import SeaScriptError, sea_settings
+from kiss.agents.sorcar.sea_commands import sea_settings
 from kiss.agents.sorcar.sea_lint import fix_sea, lint_all
 from kiss.agents.sorcar.sea_settings import (
     REMOVED_SETTINGS,
     RENAMED_OPTIONS,
     RENAMED_SETTINGS,
     SETTING_TYPES,
-    SettingsError,
+    SeaError,
     resolve_settings,
 )
 
@@ -77,10 +77,10 @@ def test_rename_tables_point_only_at_keys_that_exist() -> None:
 def test_a_prompt_suffix_in_settings_is_refused_with_the_method_to_use(
     tmp_path: Path, key: str,
 ) -> None:
-    with pytest.raises(SettingsError, match=f"settings\\(\\) key {key!r} was removed: "):
+    with pytest.raises(SeaError, match=f"settings\\(\\) key {key!r} was removed: "):
         resolve_settings({key: "x"})
     path = write_sea(tmp_path, key)
-    with pytest.raises(SeaScriptError, match="was removed") as info:
+    with pytest.raises(SeaError, match="was removed") as info:
         sea_settings(path)
     assert "`run_agent` option, not a setting" in str(info.value)
     # The lint reports the same error and offers no rewrite: the old

@@ -121,14 +121,10 @@
     const view = {
       el,
       tabId,
-      urlInput,
-      screen,
-      img,
       // CSS-pixel size of the page behind the last frame.
       pageWidth: 0,
       pageHeight: 0,
       url: '',
-      title: '',
       visible: false,
       disposed: false,
     };
@@ -417,7 +413,6 @@
 
     view.state = function (ev) {
       view.url = ev.url || '';
-      view.title = ev.title || '';
       if (!urlEditing) urlInput.value = view.url;
       backBtn.disabled = !ev.canGoBack;
       fwdBtn.disabled = !ev.canGoForward;

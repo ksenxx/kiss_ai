@@ -19,9 +19,18 @@ The fix substitutes all ``{key}`` tokens in a single pass over the
 template, so replacement values are never rescanned.
 """
 
+import pytest
+
+from kiss.core import config
 from kiss.core.kiss_agent import KISSAgent
 
 TEST_MODEL = "gemini-3-flash-preview"
+
+
+@pytest.fixture(autouse=True)
+def placeholder_gemini_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prompt construction initializes a real SDK client but never performs inference."""
+    monkeypatch.setattr(config.DEFAULT_CONFIG, "GEMINI_API_KEY", "test-key")
 
 
 def _substituted_prompt(template: str, arguments: dict[str, str]) -> str:

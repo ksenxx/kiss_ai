@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end tests for ``kiss.server.sorcar.run``'s append parameters.
 
-Drive ``kiss.server.sorcar.run(append_to_system_prompt=...,
-append_to_prompt=...)`` against a real daemon with a temporary
+Drive ``kiss.server.sorcar.run(add_to_system_prompt=...,
+add_to_prompt=...)`` against a real daemon with a temporary
 local endpoint, with only the executor LLM stubbed (see
 :class:`kiss.tests.server.test_append_basic_tools.DaemonRunApiHarness`).
 
@@ -22,7 +22,7 @@ wire input by the daemon (non-string appends nothing).
 from __future__ import annotations
 
 import unittest
-from typing import Any, cast
+from typing import Any
 
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.server import sorcar
@@ -65,7 +65,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with a system prompt suffix",
             work_dir=self.repo,
-            append_to_system_prompt=_SYS_MARKER,
+            add_to_system_prompt=_SYS_MARKER,
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -87,7 +87,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with a prompt suffix",
             work_dir=self.repo,
-            append_to_prompt=_PROMPT_MARKER,
+            add_to_prompt=_PROMPT_MARKER,
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -126,7 +126,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "<task>first subtask body</task><task>second subtask body</task>",
             work_dir=self.repo,
-            append_to_prompt=_PROMPT_MARKER,
+            add_to_prompt=_PROMPT_MARKER,
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -155,7 +155,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             "task with custom base and suffix",
             work_dir=self.repo,
             system_prompt=custom_base,
-            append_to_system_prompt=_SYS_MARKER,
+            add_to_system_prompt=_SYS_MARKER,
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -169,7 +169,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
 
     def test_agent_script_additions_override(self) -> None:
         """``system_prompt(system_prompt)`` and ``prompt(task)`` reach both prompts."""
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "append_prompts_agent.py",
             f'''
             """SEA appending to both prompts."""
@@ -192,7 +192,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "script appends to both prompts",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -206,13 +206,13 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
     def test_agent_script_unknown_setting_fails_task(self) -> None:
         """An unknown ``settings()`` key (``add_to_prompt``) stops the task loudly.
 
-        The diagnostic is the ``SettingsError`` text naming the key,
+        The diagnostic is the ``SeaError`` text naming the key,
         prefixed with the script path.
         """
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "bad_append_prompt_agent.py",
             '''
-            """Agent script with an unknown setting."""
+            """SEA with an unknown setting."""
 
             from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -230,14 +230,14 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "script with broken add_to_prompt setting",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False
         assert (
-            f"agent script {agent_path!r}: settings() key 'add_to_prompt' was removed: "
+            f"SEA {sea_path!r}: settings() key 'add_to_prompt' was removed: "
             "a SEA shapes the task text in its `prompt(task)` method"
         ) in result.text, result.text
         assert calls == [], "no executor session may start for a broken script"
@@ -262,67 +262,6 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert "MALFORMED-PROMPT-3341" not in (
             call["arguments"]["task_description"]
         )
-
-    def test_append_to_system_prompt_reaches_subagents(self) -> None:
-        """The fan-out engine passes the suffix to every sub-agent.
-
-        Covers both halves of the sub-agent wiring: the engine's
-        ``system_prompt_suffix`` parameter (called directly) and the
-        parent-agent forwarding of its stored ``_system_prompt_suffix``
-        (``SorcarAgent._run_tasks_parallel``) — mirroring the existing
-        ``base_system_prompt`` inheritance, so a run's extra system
-        instructions constrain its whole task tree.
-        """
-        import threading as _threading
-
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-        from kiss.agents.sorcar.sorcar_agent import (
-            SorcarAgent,
-            run_tasks_parallel,
-        )
-
-        parent_class = cast(Any, SorcarAgent.__mro__[1])
-        original_run = parent_class.run
-        lock = _threading.Lock()
-        composed_prompts: list[str] = []
-
-        def stub_run(self_agent: Any, **kwargs: Any) -> str:
-            with lock:
-                composed_prompts.append(str(kwargs.get("system_prompt")))
-            return "success: true\nis_continue: false\nsummary: ok\n"
-
-        parent_class.run = stub_run
-        try:
-            # Half 1: the engine parameter, as forwarded by a parent.
-            results = run_tasks_parallel(
-                ["child task one", "child task two"],
-                work_dir=self.repo,
-                system_prompt_suffix=_SYS_MARKER,
-            )
-            assert len(results) == 2
-            assert len(composed_prompts) == 2
-            for composed in composed_prompts:
-                assert composed.startswith(SYSTEM_PROMPT)
-                assert _SYS_MARKER in composed
-
-            # Half 2: a parent agent that ran with the suffix stores it
-            # and forwards it through its own fan-out.
-            composed_prompts.clear()
-            parent = ChatSorcarAgent("suffix-parent")
-            parent._system_prompt_suffix = _SYS_MARKER
-            results = parent._run_tasks_parallel(["nested child task"])
-            assert len(results) == 1
-            assert len(composed_prompts) == 1
-            assert _SYS_MARKER in composed_prompts[0]
-
-            # A parent WITHOUT a suffix spawns suffix-free children.
-            composed_prompts.clear()
-            plain_parent = ChatSorcarAgent("plain-parent")
-            plain_parent._run_tasks_parallel(["plain child task"])
-            assert len(composed_prompts) == 1
-            assert _SYS_MARKER not in composed_prompts[0]
-        finally:
-            parent_class.run = original_run
 
     def test_early_panels_mirror_the_suffixes(self) -> None:
         """The optimistic panels show the suffixes the run executes with.

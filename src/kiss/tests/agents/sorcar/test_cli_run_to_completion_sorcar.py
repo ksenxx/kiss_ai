@@ -29,6 +29,8 @@ import yaml
 
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.models import cli_connections
+from kiss.core.vscode_config import save_config
 from kiss.tests.conftest import posix_only
 
 FINAL_TEXT = "sorcar-run-to-completion done."
@@ -47,6 +49,12 @@ _EVENTS = [
 
 _FAKE_CLI = """#!/usr/bin/env python3
 import json, os, sys, pathlib
+if "--version" in sys.argv:
+    print("2.1.300")
+    sys.exit(0)
+if "status" in sys.argv:
+    print('{{"authMethod": "api_key"}}')
+    sys.exit(0)
 record_dir = pathlib.Path({record_dir!r})
 n = len(list(record_dir.glob("call-*.json")))
 prompt = sys.stdin.read()
@@ -74,7 +82,9 @@ def _install_fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     cli = bin_dir / "claude"
     cli.write_text(_FAKE_CLI.format(record_dir=str(record_dir), events=_EVENTS))
     cli.chmod(cli.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    save_config({"claude_cli_billing_mode": "existing"})
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(cli_connections, "_executable", lambda provider: str(cli))
     return record_dir
 
 

@@ -60,6 +60,8 @@ from kiss.server.file_index import FileIndexRegistry
 from kiss.server.json_printer import JsonPrinter, _BashState
 from kiss.server.server import VSCodeServer
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 
 class _CapturePrinter(JsonPrinter):
     """Real printer subclass that records every broadcast event."""
@@ -214,7 +216,7 @@ def test_f6_task_cleanup_leaves_fallback_bash_state_alone(
         printer = _CapturePrinter()
         server = VSCodeServer(printer)
         fallback = _BashState()
-        fallback.generation = 7
+        fallback.streamed = True
         fallback.buffer.append("pending task-less output")
         printer._bash_states[""] = fallback
         agent = _ScriptedAgent("Sorcar VS Code")
@@ -229,7 +231,7 @@ def test_f6_task_cleanup_leaves_fallback_bash_state_alone(
             "model": models[0],
             "_state_key": state.task_id,
         })
-        assert fallback.generation == 7
+        assert fallback.streamed is True
         assert fallback.buffer == ["pending task-less output"]
     finally:
         _pop_states(f"pre-{tab_id}")

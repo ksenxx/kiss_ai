@@ -611,6 +611,55 @@ _ALL_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max"
 """Union of every vendor scale, used when sweeping generated ``-{level}``
 aliases regardless of which scale produced them."""
 
+_ANTHROPIC_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+"""The Anthropic ``output_config.effort`` scale for direct ``claude-*``
+models (https://platform.claude.com/docs/en/build-with-claude/effort),
+sent by ``AnthropicModel`` when ``model_config["reasoning_effort"]`` or a
+generated ``-{level}`` alias selects a level. Opus 4.7 / 4.8 / 5 / 5.5,
+Sonnet 5 / 5.5 and Fable 5 / 5.1 accept all five levels (verified live
+2026-10-07)."""
+
+_ANTHROPIC_EFFORT_LEVELS_NO_XHIGH: tuple[str, ...] = ("low", "medium", "high", "max")
+"""Effort scale of Opus 4.6 and Sonnet 4.6: ``max`` is accepted but ``xhigh``
+returns HTTP 400 ("Not every model that supports max supports xhigh")."""
+
+_ANTHROPIC_EFFORT_LEVELS_OPUS_4_5: tuple[str, ...] = ("low", "medium", "high")
+"""Effort scale of Opus 4.5 (the only extended-thinking-only model with
+effort): ``xhigh`` and ``max`` return HTTP 400."""
+
+
+def _anthropic_effort_scale(model_name: str) -> tuple[str, ...]:
+    """Return the ``output_config.effort`` scale for a direct ``claude-*`` model.
+
+    The ladder depends on the model generation (see the per-model
+    availability table in the effort docs):
+
+    * Opus 4.5 → ``low`` / ``medium`` / ``high``;
+    * Opus 4.6 and Sonnet 4.6 → ``low`` / ``medium`` / ``high`` / ``max``;
+    * every other Claude (Opus 4.7+, Sonnet 5+, Fable, Mythos, ...) → the
+      full :data:`_ANTHROPIC_EFFORT_LEVELS` ladder.
+
+    Models that reject the parameter altogether (Haiku 4.5, Sonnet 4.5)
+    fail every probe in :func:`detect_thinking_level`, so the scale
+    returned for them never materializes an alias.
+
+    Args:
+        model_name: A direct ``claude-*`` catalog key.
+
+    Returns:
+        The ordered tuple of effort levels to probe and alias.
+    """
+    from kiss.core.models.anthropic_model import _parse_claude_version
+
+    version = _parse_claude_version(model_name)
+    if version is not None:
+        family, major, minor = version
+        if family == "opus" and major == 4 and minor == 5:
+            return _ANTHROPIC_EFFORT_LEVELS_OPUS_4_5
+        if family in ("opus", "sonnet") and major == 4 and minor == 6:
+            return _ANTHROPIC_EFFORT_LEVELS_NO_XHIGH
+    return _ANTHROPIC_EFFORT_LEVELS
+
 _MOONSHOT_MODEL_PREFIXES: tuple[str, ...] = (
     "kimi-",
     "moonshot-",
@@ -792,6 +841,9 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
       (``low``/``medium``/``high``).
     * z-ai ``GLM-5.2`` uses :data:`_GLM_5_2_EFFORT_LEVELS`
       (``high``/``max``).
+    * Direct ``claude-*`` models use the Anthropic ``output_config.effort``
+      ladder from :func:`_anthropic_effort_scale` (up to
+      ``low``/``medium``/``high``/``xhigh``/``max``).
     * Every other model uses the OpenAI ladder :data:`_THINKING_LEVELS`
       (``low``/``medium``/``high``/``xhigh``) — including Together's
       OpenAI-compatible ``openai/gpt-oss-*`` entries, which naturally top
@@ -817,6 +869,8 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
         return _GLM_5_2_EFFORT_LEVELS
     if model_name in {"gpt-6.1-sol", "openrouter/openai/gpt-6.1-sol"}:
         return (*_THINKING_LEVELS, "max")
+    if model_name.startswith("claude-"):
+        return _anthropic_effort_scale(model_name)
     return _THINKING_LEVELS
 
 
@@ -841,10 +895,17 @@ def detect_thinking_level(model_name: str) -> str | None:
       via its own ``model_reasoning_effort`` config rather than per-call.
     * ``cc/*`` — routed through the Claude Code CLI, which has no
       ``reasoning_effort`` surface at all.
-    * ``claude-*``, ``gemini-*`` — non-OpenAI providers that don't accept
-      ``reasoning_effort``.
+    * ``gemini-*`` — Gemini's ``thinking_config.thinking_level`` is not
+      wired to ``reasoning_effort``.
     * Variants known to reject ``reasoning_effort`` entirely (``-pro``,
       ``-chat-latest``, ``-image``).
+
+    Direct ``claude-*`` models ARE probed: ``AnthropicModel`` translates
+    ``reasoning_effort`` into ``output_config.effort``, and the Messages
+    API rejects unsupported levels with HTTP 400, so the same descending
+    probe yields the model's ladder top (see :func:`_anthropic_effort_scale`
+    for the per-generation ladders). Claude models without the effort
+    parameter (Haiku 4.5, Sonnet 4.5) fail every level and return ``None``.
     * Moonshot models outside the Kimi K3 family (K2.x controls thinking
       via ``thinking.type``, ``moonshot-v1-*`` has none; see
       :func:`_is_kimi_k3_family`).
@@ -862,13 +923,14 @@ def detect_thinking_level(model_name: str) -> str | None:
     """
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
-    if model_name.startswith(("codex/", "cc/", "claude-", "gemini-")):
+    if model_name.startswith(("codex/", "cc/", "gemini-")):
         return None
     if any(marker in model_name for marker in ("-pro", "chat-latest", "-image")):
         return None
     is_openai = model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith(
         "text-embedding"
     )
+    is_anthropic = model_name.startswith("claude-")
     is_openrouter_openai = model_name.startswith(("openrouter/openai/", "openrouter/~openai/"))
     is_together_gpt_oss = _is_together_gpt_oss(model_name)
     is_moonshot_k3 = model_name.startswith(_MOONSHOT_MODEL_PREFIXES) and _is_kimi_k3_family(
@@ -880,6 +942,7 @@ def detect_thinking_level(model_name: str) -> str | None:
     is_glm_5_2 = _is_glm_5_2_family(model_name)
     if not (
         is_openai
+        or is_anthropic
         or is_openrouter_openai
         or is_together_gpt_oss
         or is_moonshot_k3
@@ -1878,13 +1941,9 @@ def _write_entry_with_thinking_split(
         if remove_stale_siblings:
             _pop_generated_aliases(data, name)
         return
-    top_level = scale[-1]
     max_level = stored_level
-    if not remove_stale_siblings and stored_level != top_level:
-        sibling_name = f"{name}-{top_level}"
-        sibling = data.get(sibling_name)
-        if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
-            max_level = top_level
+    if not remove_stale_siblings:
+        max_level = _recorded_max_level(data, name, scale, stored_level)
     base = dict(entry)
     high_rank = scale.index("high")
     max_rank = scale.index(max_level)
@@ -1918,13 +1977,41 @@ def _stored_max_thinking_level(
     level = entry.get("thinking")
     if level not in scale:
         return None
-    top_level = scale[-1]
-    if level != top_level:
-        sibling_name = f"{name}-{top_level}"
+    return _recorded_max_level(data, name, scale, str(level))
+
+
+def _recorded_max_level(
+    data: dict[str, dict],
+    name: str,
+    scale: tuple[str, ...],
+    stored_level: str,
+) -> str:
+    """Promote ``stored_level`` to the highest generated sibling above it.
+
+    The base entry stores at most ``"high"``, so the real maximum lives in
+    the generated siblings: on a five-level ladder (Anthropic
+    ``low``…``max``) a model whose top is ``xhigh`` has a ``-xhigh`` alias
+    but no ``-max`` one, so every level above ``stored_level`` is checked in
+    descending order — not just the ladder's last rung.
+
+    Args:
+        data: The on-disk catalog.
+        name: The base entry's catalog key.
+        scale: The vendor ladder for ``name``.
+        stored_level: The ``thinking`` level stored on the base entry; must
+            be a member of ``scale``.
+
+    Returns:
+        The highest level with a generated sibling of ``name``, or
+        ``stored_level`` when none exists above it.
+    """
+    stored_rank = scale.index(stored_level)
+    for level in reversed(scale[stored_rank + 1 :]):
+        sibling_name = f"{name}-{level}"
         sibling = data.get(sibling_name)
         if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
-            return top_level
-    return str(level)
+            return level
+    return stored_level
 
 
 def _normalize_thinking_splits(data: dict[str, dict]) -> None:
@@ -2603,11 +2690,7 @@ def main() -> None:
                 name, verbose=args.verbose, decisions=cur.get("dec", False)
             )
             fc_changed = caps["fc"] != cur["fc"]
-            stored_thinking = cur.get("thinking")
-            top_level = _thinking_scale_for(name)[-1]
-            sibling_thinking = current.get(f"{name}-{top_level}", {}).get("thinking")
-            if stored_thinking == "high" and sibling_thinking == top_level:
-                stored_thinking = top_level
+            stored_thinking = _stored_max_thinking_level(current, name, cur)
             thinking_changed = caps["thinking"] != stored_thinking
             responses_verdict = caps.get("use_responses_api")
             # None means the probe never ran or died on transient endpoint

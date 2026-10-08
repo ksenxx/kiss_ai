@@ -35,6 +35,8 @@ from kiss.tests.agents.sorcar.test_worktree_extension_workflow import (  # noqa:
     _unpatch_super_run,
 )
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 
 def _agent(server: VSCodeServer, tab_id: str = "0") -> WorktreeSorcarAgent:
     """Return the tab's registered agent, asserting it exists for mypy."""

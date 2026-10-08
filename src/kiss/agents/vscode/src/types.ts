@@ -166,8 +166,6 @@ export type FromWebviewMessage =
       offset?: number;
       generation?: number;
     }
-  | {type: 'getFrequentTasks'; limit?: number}
-  | {type: 'deleteFrequentTask'; task: string}
   | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
   | {type: 'getFiles'; prefix: string; workDir?: string; tabId?: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
@@ -419,14 +417,10 @@ export type FromWebviewMessage =
   // Editor-tabs mode: a task in this panel just finished — bring the
   // hosting editor tab forward (sidebar mode's finished-task switch).
   | {type: 'revealPanel'}
-  // Both VS Code chat surfaces: an ask_user_question just reached the
-  // tab `tabId` of this webview. The host brings the surface forward
-  // and, when the webview was hidden, raises a native notification
-  // that stays until the user clears it or `askWaitingDone` arrives.
-  | {type: 'askWaiting'; tabId: string; question: string}
-  // The question of tab `tabId` was answered, its task ended or its tab
-  // closed: drop the native notification.
-  | {type: 'askWaitingDone'; tabId: string}
+  // Both VS Code chat surfaces: an ask_user_question just reached a tab
+  // of this webview. The host brings the surface forward (sidebar view
+  // or editor panel) without taking focus; nothing else is shown.
+  | {type: 'revealForQuestion'}
   // Editor-tabs mode: open another chat as a new editor tab — a fresh
   // conversation when chatId is absent, a history resume otherwise.
   | {
@@ -442,6 +436,11 @@ export type FromWebviewMessage =
       // first task as soon as the panel is ready (the Apps subpanel's
       // "connect this app" launch).
       autoSubmit?: boolean;
+      // Only bring the chat on screen when no tab shows it yet: a tab
+      // already bound to chatId is left as it is (no reveal, no task
+      // change). Posted when a chat's panel in the history list is
+      // expanded, as opposed to a click on one of its task rows.
+      onlyIfMissing?: boolean;
     }
   // Editor-tabs mode: close this panel — because the daemon's registry
   // no longer lists its chat tab (another client closed it; retire
@@ -809,7 +808,9 @@ type ToWebviewMessageBody =
       cost?: number;
     }
   | {type: 'system_prompt'; text: string}
-  | {type: 'prompt'; text: string}
+  // ``steer``: a message the user typed into the running task (the
+  // daemon's echo), shown like the task panel rather than as a prompt.
+  | {type: 'prompt'; text: string; steer?: boolean}
   // The finished ``/ask`` side-channel answer, delivered into the
   // running (owner) task's transcript as its own panel.
   | {type: 'ask_answer'; question: string; text: string; success: boolean}
@@ -838,8 +839,8 @@ type ToWebviewMessageBody =
   | {type: 'task_stopped'; startTs?: number; endTs?: number}
   | {type: 'task_interrupted'; startTs?: number; endTs?: number}
   // Emitted once per run (chat_sorcar_agent.py) and synthesised into a
-  // replay (json_printer.py task_settings_event); the static task panel
-  // renders these like a history row.
+  // replay (json_printer.py task_settings_event); the Task Info rows
+  // and the shared page's task panel render these like a history row.
   | {
       type: 'task_settings';
       settings: {
@@ -854,7 +855,7 @@ type ToWebviewMessageBody =
         is_subagent: boolean;
         parent_task_id?: string;
         // The run configuration (kiss.agents.sorcar.run_config): the
-        // agent script the task ran as, its kind, the effective tool
+        // SEA the task ran as, its kind, the effective tool
         // profile, the caller's timeout, the setting keys inherited
         // from the calling task and the inherited or default values the
         // SEA pinned to its own ({key: [before, pinned]}).  Absent for a
@@ -954,10 +955,6 @@ type ToWebviewMessageBody =
   | {type: 'ghost'; suggestion: string; query: string}
   | {type: 'commitMessage'; message: string; error?: string}
   | {type: 'inputHistory'; tasks: string[]}
-  | {
-      type: 'frequentTasks';
-      tasks: Array<{task: string; count: number; timestamp: number}>;
-    }
   | {type: 'setTaskText'; text: string}
   | {type: 'appendToInput'; text: string}
   | {type: 'insertAndSubmit'; text: string}
@@ -1066,6 +1063,8 @@ type ToWebviewMessageBody =
       chatId: string;
       taskId: string | number | null;
       title: string;
+      // A tab already bound to chatId is left alone (see openChatPanel).
+      onlyIfMissing: boolean;
     }
   // Daemon: answer to a `complete` command (the input-box ghost /
   // autocomplete list), scoped to the requesting connection and tab.
@@ -1239,8 +1238,6 @@ export interface AgentCommand {
     | 'getModels'
     | 'selectModel'
     | 'getHistory'
-    | 'getFrequentTasks'
-    | 'deleteFrequentTask'
     | 'setFavorite'
     | 'getFiles'
     | 'userAnswer'

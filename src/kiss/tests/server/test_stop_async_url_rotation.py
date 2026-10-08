@@ -47,6 +47,7 @@ from unittest import IsolatedAsyncioTestCase
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import install_named_interpreter
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
 
 _PINNED_URL = "https://stop-async-pinned.trycloudflare.com"
@@ -99,10 +100,10 @@ class TestAdoptedTunnelUrlStableAcrossStopAsync(IsolatedAsyncioTestCase):
         metrics_port = self._httpd.server_address[1]
 
         # Fake adopted cloudflared: a live process whose argv[0] is
-        # literally "cloudflared" (python behind a symlink), exactly
+        # literally "cloudflared" (a named Python runtime), exactly
         # like the harness in test_tunnel_survives_install_restart.py.
         link = tmp / "cloudflared"
-        os.symlink(sys.executable, link)
+        install_named_interpreter(link)
         self._cf_proc = subprocess.Popen(
             [str(link), "-c", "import time; time.sleep(300)"],
             stdout=subprocess.DEVNULL,

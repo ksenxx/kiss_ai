@@ -359,3 +359,33 @@ class TestResponsesTransportCarriesTheCost:
             _OUTPUT_TOKENS,
         )
         assert model.extract_cost_from_response(response) == pytest.approx(0.0031)
+
+
+class TestCustomEndpointOnOpenRouterHost:
+    """A MY_MODELS-style custom name served from openrouter.ai is still OpenRouter.
+
+    The settings panel lets a user point any model name at
+    ``https://openrouter.ai/api/v1``; the reported ``usage.cost`` is the
+    real bill there too, so recognition keys on the endpoint host as
+    well as on the ``openrouter/`` name prefix.
+    """
+
+    _USAGE = {"usage": {"cost": 0.123, "is_byok": False}}
+
+    def test_openrouter_host_bills_the_reported_cost(self) -> None:
+        for base_url in ("https://openrouter.ai/api/v1", "https://OPENROUTER.ai/api/v1/"):
+            for cls in (OpenAICompatibleModel, OpenAICompatibleModel2):
+                model = cls("~openai/gpt-astra-latest", base_url=base_url, api_key="k")
+                assert model.extract_cost_from_response(self._USAGE) == pytest.approx(0.123), (
+                    cls.__name__,
+                    base_url,
+                )
+
+    def test_other_hosts_keep_the_catalog_estimate(self) -> None:
+        for base_url in ("https://api.openai.com/v1", "http://127.0.0.1:9/v1", ""):
+            model = OpenAICompatibleModel("gpt-5.4", base_url=base_url, api_key="k")
+            assert model.extract_cost_from_response(self._USAGE) is None, base_url
+        lookalike = OpenAICompatibleModel(
+            "gpt-5.4", base_url="https://notopenrouter.ai/api/v1", api_key="k"
+        )
+        assert lookalike.extract_cost_from_response(self._USAGE) is None

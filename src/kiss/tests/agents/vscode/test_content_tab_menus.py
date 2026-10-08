@@ -33,11 +33,13 @@ from kiss.tests.agents.vscode.test_content_tab_editing import (
     _dismiss_toasts,
     _fresh_file,
     _open_editor,
+    _uncover_pane,
     _wait_for_disk,
 )
 from kiss.tests.agents.vscode.test_content_tab_file_links import (
     _inject_file_link,
     _open_page,
+    _wait_ready,
     browser,  # noqa: F401  (module fixture used by param name)
 )
 from kiss.tests.conftest import goto_retrying_network_change
@@ -138,7 +140,14 @@ class TestContentTabMenuBar:
             page.keyboard.press("Escape")
             assert page.locator(_DROPDOWN).count() == 0
             _menu_btn(page, "Selection").click()
-            page.click(_MONACO + " .view-lines")
+            # A click elsewhere: the editor's lower-right corner, clear
+            # of the dropdown (which spans the top-left of the narrower
+            # content pane).
+            box = page.locator(_MONACO).bounding_box()
+            assert box is not None
+            page.mouse.click(
+                box["x"] + box["width"] - 20, box["y"] + box["height"] - 20,
+            )
             assert page.locator(_DROPDOWN).count() == 0
             _menu_btn(page, "File").click()
             page.set_viewport_size({"width": 1000, "height": 700})
@@ -316,6 +325,7 @@ class TestContentTabMenuBar:
             page.click("#lnk-m7")
             page.wait_for_selector(_VIEW + ".content-html-frame", timeout=30000)
             assert page.locator(_MENUBAR).count() == 0
+            _uncover_pane(page)
             _dismiss_toasts(page)
             page.click(_MODE_BTN)
             page.wait_for_selector(_MONACO + ", " + _FALLBACK, timeout=30000)
@@ -432,8 +442,7 @@ class TestContentTabMenuBar:
         page = context.new_page()
         try:
             goto_retrying_network_change(page, harness.base_url + "/")
-            page.wait_for_selector("#task-input", state="visible", timeout=30000)
-            page.wait_for_selector(".chat-tab", timeout=30000)
+            _wait_ready(page)
             path = _fresh_file(harness, "menus_touch.py")
             _open_editor(page, str(path), "lnk-t1")
             _dismiss_toasts(page)
@@ -460,19 +469,31 @@ class TestContentTabMenuBar:
         try:
             path = _fresh_file(harness, "menus_switch.py")
             _open_editor(page, str(path), "lnk-s1")
+            # In the split layout the chat never replaces a content tab:
+            # the editor is hidden by showing ANOTHER content tab in the
+            # content pane. Open a second file (a Markdown preview: no
+            # menu bar of its own), then come back to the first so its
+            # menu can be opened.
+            other = _fresh_file(harness, "menus_switch_other.md", "# other\n")
+            _inject_file_link(page, str(other), "lnk-s1-other")
+            page.click("#lnk-s1-other")
+            _this = "#content-tab-list .chat-tab.content-tab:has-text('menus_switch.py')"
+            _other = (
+                "#content-tab-list .chat-tab.content-tab:has-text('menus_switch_other.md')"
+            )
+            page.wait_for_selector(_other + ".active", timeout=30000)
+            page.wait_for_selector(_VIEW + ".content-html-frame", timeout=30000)
+            page.locator(_this).evaluate("el => el.click()")
+            page.wait_for_selector(_this + ".active", timeout=10000)
+            page.wait_for_selector(_MENUBAR, state="visible")
             _dismiss_toasts(page)
             _menu_btn(page, "Edit").click()
-            # The chat's entry on the group strip; the main-row entry
-            # would return to the tab last viewed, i.e. this editor.
-            page.evaluate(
-                "() => document.querySelector("
-                "'#tab-list .chat-tab:not(.content-tab)').click()",
-            )
-            page.wait_for_selector("#content-tab-area", state="hidden")
+            assert page.locator(_DROPDOWN).count() == 1
+            page.locator(_other).evaluate("el => el.click()")
+            page.wait_for_selector(_other + ".active", timeout=10000)
+            page.wait_for_selector(_MENUBAR, state="hidden")
             assert page.locator(_DROPDOWN).count() == 0
-            page.evaluate(
-                "() => document.querySelector('.chat-tab.content-tab').click()",
-            )
+            page.locator(_this).evaluate("el => el.click()")
             page.wait_for_selector(_MENUBAR, state="visible")
         finally:
             context.close()
@@ -484,8 +505,7 @@ class TestContentTabMenuBar:
         page = context.new_page()
         try:
             goto_retrying_network_change(page, harness.base_url + "/")
-            page.wait_for_selector("#task-input", state="visible", timeout=30000)
-            page.wait_for_selector(".chat-tab", timeout=30000)
+            _wait_ready(page)
             path = _fresh_file(harness, "menus_fb.py")
             _inject_file_link(page, str(path), "lnk-m9")
             page.click("#lnk-m9")

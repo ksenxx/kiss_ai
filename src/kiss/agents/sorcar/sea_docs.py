@@ -4,11 +4,11 @@
 # add your name here
 """``sea docs``: render the SEA vocabulary tables from the code that defines them.
 
-The precedence rule, the settings keys, the kinds, the ``run_agent``
-options and the bundled commands each have one source of truth in the
-code (:data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`,
+The precedence rule, the settings keys, the base classes, the
+``run_agent`` options and the bundled commands each have one source of
+truth in the code (:data:`~kiss.agents.sorcar.sea_settings.PRECEDENCE_RULE`,
 :data:`~kiss.agents.sorcar.sea_settings.SETTING_TYPES`,
-:func:`~kiss.agents.sorcar.sea_settings.kind_defaults`,
+:func:`~kiss.agents.sorcar.sea_settings.base_class_defaults`,
 :data:`~kiss.agents.sorcar.agent_dispatch.OPTION_TYPES`,
 :func:`~kiss.agents.sorcar.sea_commands.bundled_commands`).  The
 Markdown pages that describe them carry marked blocks::
@@ -31,19 +31,20 @@ from pathlib import Path, PurePath
 
 from kiss.agents.sorcar.agent_dispatch import OPTION_DOCS, OPTION_TYPES
 from kiss.agents.sorcar.sea_commands import (
+    base_settings,
     bundled_commands,
     load_sea,
     own_settings,
     sea_description,
-    sea_settings,
 )
 from kiss.agents.sorcar.sea_settings import (
+    BASE_CLASS_DOCS,
+    CHANNEL_BEHAVIOURS,
     DISPATCHER_SETTINGS,
-    KIND_DOCS,
     PRECEDENCE_RULE,
     SETTING_DOCS,
     SETTING_TYPES,
-    kind_defaults,
+    base_class_defaults,
     locked_conflicts,
     wire_field,
 )
@@ -91,8 +92,9 @@ def precedence_example() -> str:
     """
     name = "sh"
     path = bundled_commands()[name]
-    declared = own_settings(load_sea(path))
-    refused = locked_conflicts(sea_settings(path), {"tool_profile": "review"})
+    sea = load_sea(path)
+    declared = own_settings(sea)
+    refused = locked_conflicts(base_settings([sea]), {"tool_profile": "review"})
     if not refused:
         raise ValueError(f"/{name} no longer locks tool_profile; the precedence example needs one")
     return (
@@ -113,28 +115,38 @@ def settings_table() -> str:
     return "\n".join(rows)
 
 
-def kinds_table() -> str:
-    """The kinds: name, the defaults each lays under the explicit keys, when to use it.
+def bases_table() -> str:
+    """The base classes: name, the settings each lays under the subclass's keys, when to use it.
 
     A path under the Sorcar home is rendered as ``<home>/...`` with forward
     slashes so the generated page does not depend on the machine (or OS) it
     was built on.
     """
-    rows = ["| Kind | Defaults | Use |", "|---|---|---|"]
-    for name, values in kind_defaults().items():
+    rows = ["| Base class | Lays | Use |", "|---|---|---|"]
+    for name, values in base_class_defaults().items():
         sets = (
             ", ".join(f"`{key}={portable_default(value)!r}`" for key, value in values.items())
             or "nothing"
         )
-        rows.append(f"| `{name}` | {sets} | {KIND_DOCS[name]} |")
+        rows.append(f"| `{name}` | {sets} | {BASE_CLASS_DOCS[name]} |")
+    return "\n".join(rows)
+
+
+def channel_table() -> str:
+    """The behaviours of deriving from ``ChannelSea``: name, what it does and where it is
+    enforced."""
+    rows = ["| Behaviour | What deriving from `ChannelSea` does |", "|---|---|"]
+    for name, what in CHANNEL_BEHAVIOURS:
+        rows.append(f"| {name} | {what} |")
     return "\n".join(rows)
 
 
 def portable_default(value: object) -> object:
-    """A kind default as the docs show it: a path under the Sorcar home becomes ``<home>/...``.
+    """A base-class default as the docs show it: a path under the Sorcar home becomes
+    ``<home>/...``.
 
     Args:
-        value: One default from ``kind_defaults()``.
+        value: One default from ``base_class_defaults()``.
 
     Returns:
         The value unchanged, or the ``<home>``-relative POSIX form of a path under ``kiss_home()``.
@@ -177,7 +189,8 @@ def commands_table() -> str:
 TABLES = {
     "precedence": precedence_block,
     "settings": settings_table,
-    "kinds": kinds_table,
+    "bases": bases_table,
+    "channel": channel_table,
     "options": options_table,
     "commands": commands_table,
 }
@@ -211,21 +224,6 @@ def update_file(path: Path, check: bool) -> bool:
     return new != old
 
 
-def main(argv: list[str] | None = None) -> int:
-    """``sea docs [--check] [FILE ...]``: regenerate (or verify) the vocabulary tables.
-
-    Args:
-        argv: Command-line arguments; ``None`` reads ``sys.argv``.
-
-    Returns:
-        ``0`` when every page is up to date (after writing), ``1`` when
-        ``--check`` found stale blocks.
-    """
-    parser = argparse.ArgumentParser(prog="sea docs", description=(__doc__ or "").split("\n\n")[0])
-    add_arguments(parser)
-    return run(parser.parse_args(argv))
-
-
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Attach the ``sea docs`` arguments to *parser*."""
     parser.add_argument("files", nargs="*", help="pages to regenerate; default: the bundled docs")
@@ -235,7 +233,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    """Execute ``sea docs`` with parsed *args* (see :func:`main`)."""
+    """Execute ``sea docs`` with parsed *args* (:func:`add_arguments`).
+
+    Returns:
+        ``0`` when every page is up to date (after writing), ``1`` when
+        ``--check`` found stale blocks.
+    """
     files = [Path(f) for f in args.files] or [REPO_ROOT / rel for rel in GENERATED_FILES]
     stale = [path for path in files if path.exists() and update_file(path, args.check)]
     for path in stale:

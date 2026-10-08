@@ -230,7 +230,6 @@ class FakePanelManager {
   closeAll() {}
   setMetaSink() {}
   setActiveTaskSink() {}
-  markShutdown() {}
   adoptRegistryTabs() {}
   activeController() {
     return undefined;

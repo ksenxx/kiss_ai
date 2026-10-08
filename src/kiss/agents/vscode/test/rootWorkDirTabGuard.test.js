@@ -108,10 +108,15 @@ function replay(win, workDir, tabFields) {
   });
 }
 
+// Chat tabs have no row of their own: the Chats panel's pick is
+// switchToTab.
 function activateTab(win, tabId) {
-  const el = win.document.querySelector(`.chat-tab[data-tab-id="${tabId}"]`);
-  assert.ok(el, `the ${tabId} tab must be rendered`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `the ${tabId} tab must be open`,
+  );
+  win._testApi.switchToTab(tabId);
+  assert.strictEqual(win._testApi.getActiveTabId(), tabId);
 }
 
 const BG_TABS = [

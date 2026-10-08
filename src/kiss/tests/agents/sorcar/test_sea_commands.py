@@ -592,7 +592,7 @@ def test_dataclass_sea_with_future_annotations_loads(tmp_path: Path) -> None:
 
     assert sea_commands.slash_command_task("/verdict go") == ("go", sea.resolve())
     settings = sea_commands.sea_settings(sea)
-    assert settings == {"kind": "session", "use_worktree": False, "auto_commit": True}
+    assert settings == {"use_worktree": False, "auto_commit": True}
     loaded = sea_commands.load_sea(sea)
     name = type(loaded).__module__
     assert name.startswith("_kiss_sea_verdict_sea_")
@@ -611,7 +611,7 @@ def test_failed_sea_import_leaves_no_sys_modules_entry(tmp_path: Path) -> None:
     """An SEA raising at import is reported and unregistered again."""
     sea = tmp_path / "boom_sea.py"
     sea.write_text("raise SystemExit(3)\n", encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="SystemExit: 3") as info:
+    with pytest.raises(sea_commands.SeaError, match="SystemExit: 3") as info:
         sea_commands.sea_settings(sea)
     assert isinstance(info.value.__cause__, SystemExit)
     assert not [n for n in sys.modules if n.startswith("_kiss_sea_boom_sea_")]
@@ -667,7 +667,7 @@ def test_concurrent_same_stem_loads_do_not_clobber_each_other(
     def _evaluate(label: str, sea: Path) -> None:
         try:
             results[label] = sea_commands.sea_settings(sea)["use_worktree"] is False
-        except sea_commands.SeaScriptError as exc:
+        except sea_commands.SeaError as exc:
             results[label] = exc
 
     thread_a = threading.Thread(target=_evaluate, args=("a", sea_a))
@@ -729,7 +729,7 @@ def test_help_reports_missing_or_broken_description(tmp_path: Path) -> None:
 
     missing = _touch_sea(folder, "nodesc")  # no SEA class at all
     sea_commands.refresh_registry()
-    with pytest.raises(sea_commands.SeaScriptError, match="exactly one subclass.*found none"):
+    with pytest.raises(sea_commands.SeaError, match="exactly one subclass.*found none"):
         sea_commands.help_text_if_command("/nodesc help")
 
     missing.write_text("""
@@ -738,7 +738,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 class Sea(BaseSea):
     pass
 """, encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="description.*non-empty string"):
+    with pytest.raises(sea_commands.SeaError, match="description.*non-empty string"):
         sea_commands.help_text_if_command("/nodesc help")
 
     # A class attribute shadowing the method: a SEA diagnostic, not a crash.
@@ -748,7 +748,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 class Sea(BaseSea):
     description = 'not callable'
 """, encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="description.*must be a method, got str"):
+    with pytest.raises(sea_commands.SeaError, match="description.*must be a method, got str"):
         sea_commands.sea_description(sea_commands.load_sea(missing))
 
     missing.write_text("""
@@ -758,7 +758,7 @@ class Sea(BaseSea):
     def description(self):
         return 42
 """, encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="must return a string, got int"):
+    with pytest.raises(sea_commands.SeaError, match="must return a string, got int"):
         sea_commands.sea_description(sea_commands.load_sea(missing))
 
     missing.write_text("""
@@ -768,7 +768,7 @@ class Sea(BaseSea):
     def description(self):
         return '   '
 """, encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="must return a non-empty string"):
+    with pytest.raises(sea_commands.SeaError, match="must return a non-empty string"):
         sea_commands.sea_description(sea_commands.load_sea(missing))
 
     missing.write_text("""
@@ -778,12 +778,12 @@ class Sea(BaseSea):
     def description(self):
         raise KeyError('k')
 """, encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="KeyError") as info:
+    with pytest.raises(sea_commands.SeaError, match="KeyError") as info:
         sea_commands.sea_description(sea_commands.load_sea(missing))
     assert isinstance(info.value.__cause__, KeyError)
 
     missing.write_text("raise SystemExit(2)\n", encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="SystemExit: 2"):
+    with pytest.raises(sea_commands.SeaError, match="SystemExit: 2"):
         sea_commands.load_sea(missing)
 
 
@@ -901,11 +901,13 @@ def test_unreadable_sea_does_not_break_the_model_picker_registry(tmp_path: Path)
 def test_model_sea_finds_a_router_installed_after_the_registry_was_built(
     tmp_path: Path,
 ) -> None:
-    """Without a watcher, a miss rescans the folders like ``get_command`` does."""
+    """A miss reads the snapshot only; the next refresh (the watcher's) finds the router."""
     folder = tmp_path / "seas"
     _write_router(folder, "early", _ROUTER_TRUE)
     _write_seas_md([str(folder)])
     sea_commands.refresh_registry()
     assert sea_commands.model_sea("late") is None
     late = _write_router(folder, "late", _ROUTER_TRUE)
+    assert sea_commands.model_sea("late") is None
+    sea_commands.refresh_registry()
     assert sea_commands.model_sea("late") == late

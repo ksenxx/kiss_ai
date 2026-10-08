@@ -28,14 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.seas.base.base_sea import BaseSea
-from kiss.agents.sorcar.agent_file import (
-    NO_TOOLS_PROFILE,
-    RUN_CONFIG_FIELD,
-    AgentFileError,
-    apply_agent_overrides,
-    channel_workspace,
-    load_layers,
-)
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.channel_workspace import (
     WORKSPACE_WAIT_TIMEOUT_SECONDS,
     enter_workspace,
@@ -48,6 +41,7 @@ from kiss.agents.sorcar.git_worktree import (
     strip_worktree_suffix,
 )
 from kiss.agents.sorcar.persistence import (
+    TASK_USAGE_LOCK,
     _add_task,
     _append_chat_event,
     _load_last_model,
@@ -55,18 +49,21 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.run_config import inherited_keys, is_explicit
+from kiss.agents.sorcar.sea_apply import (
+    NO_TOOLS_PROFILE,
+    RUN_CONFIG_FIELD,
+    apply_sea,
+    channel_workspace,
+    load_layers,
+)
 from kiss.agents.sorcar.sea_commands import (
-    SeaScriptError,
+    SeaError,
     base_settings,
+    help_text_if_command,
     model_sea,
     run_picked_hook,
     sea_layers,
-)
-from kiss.agents.sorcar.sea_commands import (
-    help_text_if_command as _sea_help_text,
-)
-from kiss.agents.sorcar.sea_commands import (
-    slash_command_task as _slash_command_task,
+    slash_command_task,
 )
 from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, canonical_tool_profile
 from kiss.agents.sorcar.task_classifier import classification_enabled
@@ -109,6 +106,39 @@ def inject_keyboard_interrupt(tid: int) -> int:
         have already been rolled back).
     """
     return tool_interrupt.inject_async_exception(tid, KeyboardInterrupt)
+
+
+def inject_if_owned(
+    thread: threading.Thread,
+    still_owns: Callable[[], bool] | None,
+) -> int | None:
+    """Inject ``KeyboardInterrupt`` into *thread* unless ownership was lost.
+
+    The one guarded-injection step shared by the Stop watchdog
+    (:meth:`_TaskRunnerMixin._force_stop_thread`) and the shutdown
+    sweep (``RemoteAccessServer._stop_active_agent_tasks``): the
+    ownership guard is evaluated and the interrupt injected under
+    :data:`agent_state.STATE_LOCK`, the same lock under which a
+    finishing run clears ``state.task_thread`` — so a recycled thread
+    ident can never route the interrupt into an unrelated thread, and
+    a run already inside its acknowledged-stop cleanup is left alone.
+
+    Args:
+        thread: The live worker thread to interrupt.
+        still_owns: Ownership guard (``None`` injects unconditionally).
+
+    Returns:
+        ``None`` when *still_owns* refused (nothing injected), else the
+        :func:`inject_keyboard_interrupt` count (``0`` when the thread
+        has already died).
+    """
+    tid = thread.ident
+    if tid is None:  # pragma: no cover — callers only pass started threads
+        return 0
+    with agent_state.STATE_LOCK:
+        if still_owns is not None and not still_owns():
+            return None
+        return inject_keyboard_interrupt(tid)
 
 
 def wait_for_thread_start(
@@ -180,7 +210,10 @@ def _state_owns_thread(
     persisting the row — SQLite's busy timeout alone allows a 30 s
     wait —, presenting the worktree and broadcasting.  Injecting again
     there aborted that cleanup ("Cleanup interrupted"), so an
-    acknowledged stop also answers ``False``.
+    acknowledged stop also answers ``False``.  The post-run cleanup of
+    a run whose agent loop ended normally raises the same flag, so a
+    Stop clicked while the spinner outlives the agent's last output
+    is honoured cooperatively rather than injected.
 
     A merge is awaited, never stopped: the post-task auto-finalize
     runs ``wt.merge()`` on the task thread itself, claiming
@@ -218,12 +251,12 @@ def _state_owns_thread(
 def _stop_interrupt_wrapped(exc: BaseException, state: AgentState) -> bool:
     """True when *exc* wraps the run-cancelling ``KeyboardInterrupt``.
 
-    The untrusted-code loader (:func:`apply_agent_overrides`) executes
+    The untrusted-code loader (:func:`apply_sea`) executes
     caller-supplied Python on the task thread and converts EVERY raise
     — ``BaseException`` included — into its diagnostic error type.  The
     asynchronous ``KeyboardInterrupt`` the Stop watchdog (or the
     shutdown path) injects while such a getter runs therefore surfaced
-    as an ``AgentFileError``: the run was reported
+    as an ``SeaError``: the run was reported
     ``"Task failed: ... KeyboardInterrupt"`` instead of stopped, and
     with :meth:`_TaskRunnerMixin._cancel_outcome` never called the
     stop stayed unacknowledged, so the watchdog's retry could land a
@@ -317,11 +350,6 @@ def build_task_extra_payload(
     }
 
 
-def _loaded_picker_sea(seas: list[BaseSea], picker: Path) -> BaseSea:
-    """Return the loaded model-picker SEA among *seas* (the one loaded from *picker*)."""
-    return next(sea for sea in seas if sea.path == picker)
-
-
 def _picker_model(seas: list[BaseSea], picker: Path) -> str:
     """Return the real model a run submitted under a model-picker SEA names.
 
@@ -330,7 +358,7 @@ def _picker_model(seas: list[BaseSea], picker: Path) -> str:
     blanks ``model`` back to ``""`` ("the tab's pick", which is the
     picker entry itself).
     """
-    settings = base_settings([_loaded_picker_sea(seas, picker)])
+    settings = base_settings([next(sea for sea in seas if sea.path == picker)])
     return str(settings.get("model") or get_default_model())
 
 
@@ -647,7 +675,7 @@ def _zero_usage_counters(agent: Any) -> None:
     first (and every run on an agent reused from the tab's previous
     task) as ``max(0, own - previous)``.  Zeroing here as well covers
     the runs that never reach ``_reset`` (a worktree setup or
-    agent-script failure on a reused agent), whose failure banner would
+    SEA failure on a reused agent), whose failure banner would
     otherwise carry the previous run's numbers.
 
     A ``RelentlessAgent``-derived agent is reset through its
@@ -716,7 +744,27 @@ def _subtask_metrics(agent: object) -> tuple[int, float, int]:
     return tokens, cost, steps
 
 
-_STOP_SENTINEL: object = object()
+def _result_event(text: str, *, success: bool, agent: object = None) -> dict[str, Any]:
+    """Return an unaddressed terminal ``result`` event.
+
+    Args:
+        text: The result text shown to the user.
+        success: The run's verdict.
+        agent: The agent whose usage the event carries; ``None`` for a
+            run that never ran one (zero usage).
+
+    Returns:
+        The event without ``tabId``/``taskId``; the caller addresses it.
+    """
+    tokens, cost, steps = _subtask_metrics(agent)
+    return {
+        "type": "result",
+        "text": text,
+        "success": success,
+        "total_tokens": tokens,
+        "cost": f"${cost:.4f}",
+        "step_count": steps,
+    }
 
 
 class _TaskRunnerMixin:
@@ -762,9 +810,6 @@ class _TaskRunnerMixin:
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _cmd_run(self, cmd: dict[str, Any]) -> None: ...
         def _broadcast_run_notice(self, cmd: dict[str, Any], tab_id: str) -> None: ...
-        def _user_answer_clear_tabs(
-            self, ans_tab: str, answered_task_id: str,
-        ) -> list[str]: ...
         def _main_dirty_files(self, work_dir: str = "") -> list[str]: ...
         def _autocommit_changes(
             self,
@@ -812,7 +857,7 @@ class _TaskRunnerMixin:
         run's model — the wire field ``model``, else the tab's pick (the
         same lookup ``_run_task_inner`` makes) — is such an entry, the
         SEA becomes the OUTERMOST layer of the run (``load_layers(cmd,
-        base=...)``): a run naming no ``agentPath`` runs the picker SEA
+        base=...)``): a run naming no ``seaPath`` runs the picker SEA
         itself; a run naming one (a ``run_agent`` child, the ``/ask``
         side channel, a ``/xxx`` slash command) runs its own SEA on top
         of the picker's, keeping the picker's model and routing
@@ -834,7 +879,7 @@ class _TaskRunnerMixin:
         return None if sea_path is None else (model, sea_path)
 
     def _apply_sea(self, cmd: dict[str, Any]) -> set[str]:
-        """Execute the run's agent scripts ONCE and apply them to *cmd*, in place.
+        """Execute the run's SEAs ONCE and apply them to *cmd*, in place.
 
         The SEA pipeline of a run, in order: a ``/xxx text`` slash
         command becomes a run of the SEA ``xxx`` on ``text`` (the raw
@@ -845,7 +890,7 @@ class _TaskRunnerMixin:
         names no SEA, so ``base_sea.py`` shapes every run); a channel
         agent's workspace is entered on this thread (released by
         ``_run_task``'s outer ``finally``); the layers are applied
-        (:func:`apply_agent_overrides`); a picker entry a layer's
+        (:func:`apply_sea`); a picker entry a layer's
         ``model`` setting names is resolved to a real model; and the
         picker's ``on_picked_as_model`` hook runs with the effective
         work directory.
@@ -858,7 +903,7 @@ class _TaskRunnerMixin:
             tab's registry entry is re-pinned only for those.
 
         Raises:
-            AgentFileError: When a script is broken.
+            SeaError: When a script is broken.
         """
         overridden: set[str] = set()
         from kiss.core.models.cli_connections import (
@@ -868,22 +913,23 @@ class _TaskRunnerMixin:
         )
 
         initial_model = cmd.get("model") or self._tab_model(cmd.get("tabId", ""))
-        initial_config = cmd.get("modelConfig") or {}
+        raw_initial_config = cmd.get("modelConfig")
+        initial_config = raw_initial_config if isinstance(raw_initial_config, dict) else {}
         restricted = initial_config.get("subscription_only") is True or bool(
             cli_provider(initial_model)
             and billing_mode(initial_model, initial_config) == "subscription"
         )
-        _slash = _slash_command_task(cmd.get("prompt", ""))
+        _slash = slash_command_task(cmd.get("prompt", ""))
         if _slash is not None:
             cmd["displayPrompt"] = cmd["prompt"]
-            cmd["prompt"], cmd["agentPath"] = _slash[0], str(_slash[1])
+            cmd["prompt"], cmd["seaPath"] = _slash[0], str(_slash[1])
         else:
             cmd.pop("displayPrompt", None)
         picked = self._picker_sea(cmd)
         layers = load_layers(cmd, base=None if picked is None else picked[1])
         if picked is not None:
             cmd["model"] = _picker_model(layers, picked[1])
-        # A ``kind: "channel"`` run holds its workspace (the account its
+        # A ``channel: True`` run holds its workspace (the account its
         # channel tools load credentials for) from BEFORE its tools are
         # built — the SEA's ``tools()`` binds the workspace active at that
         # moment — until ``_run_task``'s outer ``finally`` releases what
@@ -895,7 +941,7 @@ class _TaskRunnerMixin:
         # credentials.
         workspace = channel_workspace(cmd, layers)
         if workspace and not enter_workspace(workspace, timeout=WORKSPACE_WAIT_TIMEOUT_SECONDS):
-            raise AgentFileError(
+            raise SeaError(
                 f"workspace {workspace!r} could not be activated within "
                 f"{WORKSPACE_WAIT_TIMEOUT_SECONDS:g}s because a concurrent "
                 f"channel task is still using a different workspace; retry "
@@ -904,7 +950,7 @@ class _TaskRunnerMixin:
         # Writes every daemon-side field (tool callables, hooks), so
         # whatever a client sent in them is overwritten rather than read
         # as input.
-        overridden |= apply_agent_overrides(cmd, layers)
+        overridden |= apply_sea(cmd, layers)
         if restricted:
             cmd["modelConfig"] = dict(cmd.get("modelConfig") or {}) | {
                 "subscription_only": True,
@@ -918,11 +964,8 @@ class _TaskRunnerMixin:
         if picked is not None and (not model or chosen == picked[1]):
             cmd["model"] = _picker_model(layers, picked[1])
         elif chosen is not None:
-            try:
-                picked = (str(model), chosen)
-                layers = sea_layers(chosen)
-            except SeaScriptError as exc:
-                raise AgentFileError(str(exc)) from exc
+            picked = (str(model), chosen)
+            layers = sea_layers(chosen)
             cmd["model"] = _picker_model(layers, chosen)
         if restricted:
             enforce_model_policy(cmd.get("model") or initial_model, cmd["modelConfig"])
@@ -934,7 +977,7 @@ class _TaskRunnerMixin:
             # starts.  The already-executed namespace is reused.
             run_picked_hook(
                 picked[0], str(cmd.get("workDir") or self.work_dir),
-                sea=_loaded_picker_sea(layers, picked[1]),
+                sea=next(sea for sea in layers if sea.path == picked[1]),
             )
         return overridden
 
@@ -944,7 +987,7 @@ class _TaskRunnerMixin:
         An outer try/finally guarantees that ``status: running: False``
         is **always** broadcast when this method exits, regardless of
         which code-path is taken.  The ENTIRE body runs inside it
-        (C-RC2): the agent-script override executes untrusted user
+        (C-RC2): the SEA override executes untrusted user
         code of unbounded duration, so ``_stop_task``'s watchdog can
         inject a ``KeyboardInterrupt`` before the run reaches the
         status broadcast; unwinding outside the try/finally would skip
@@ -957,7 +1000,7 @@ class _TaskRunnerMixin:
         cmd["_start_ms"] = start_ms
         # The command as submitted: ``_apply_sea`` rewrites ``cmd`` in
         # place (a ``/xxx text`` slash command becomes a run of the SEA
-        # ``xxx`` with ``agentPath`` set, a picker model becomes a real
+        # ``xxx`` with ``seaPath`` set, a picker model becomes a real
         # one, the scripts pin their settings), and the leftover-prompt
         # re-dispatch at the end must restart from what the USER sent,
         # not from the SEA run this turned into.
@@ -971,10 +1014,10 @@ class _TaskRunnerMixin:
                 # the worker thread was never started, and this call
                 # runs on the dispatch thread purely to route the run
                 # through the normal cancellation handlers below — no
-                # user setup (agent-script getters) may execute.
+                # user setup (SEA getters) may execute.
                 client_task_id = _client_task_id_of(cmd)
                 raise KeyboardInterrupt("run cancelled before start")
-            # Agent-script overrides (wire field ``agentPath``) rewrite the
+            # Agent-script overrides (wire field ``seaPath``) rewrite the
             # run command's parameter fields, so they run FIRST — before
             # any field is read, including the ``chatId`` that
             # ``_resolve_run_state`` below consumes.  The script is
@@ -983,13 +1026,13 @@ class _TaskRunnerMixin:
             # broken script must still fail the task with the
             # status-running → result → status-end guarantees of the try
             # below, so the raise is deferred until after the start status.
-            agent_file_error: AgentFileError | None = None
+            sea_error: SeaError | None = None
             overridden_fields: set[str] = set()
             try:
                 overridden_fields = self._apply_sea(cmd)
-            except AgentFileError as exc:
-                agent_file_error = exc
-            # A ``use_worktree`` an agent script pinned, or the calling
+            except SeaError as exc:
+                sea_error = exc
+            # A ``use_worktree`` a SEA pinned, or the calling
             # tool passed explicitly, is a decision, not a default:
             # ``_run_task_inner``'s classifier must not demote it (it
             # still demotes a client/persisted default).
@@ -1012,13 +1055,10 @@ class _TaskRunnerMixin:
             if overridden_fields & {"chatId", "prompt", "workDir"}:
                 override_chat_id: str | None = None
                 if "chatId" in overridden_fields:
-                    # An empty override means "fresh chat" — mint the id
-                    # here, exactly like the dispatch handler does for an
-                    # empty client-sent ``chatId``, so the announced and
-                    # the persisted chat agree.
-                    override_chat_id = (
-                        str(cmd["chatId"] or "") or uuid.uuid4().hex
-                    )
+                    # A script's ``chat_id`` is never empty
+                    # (``resolve_settings`` drops ``""``): it names the
+                    # chat to resume.
+                    override_chat_id = str(cmd["chatId"])
                     state.chat_id = override_chat_id
                     with self._state_lock:
                         self._tab_chat_views[tab_id] = override_chat_id
@@ -1033,13 +1073,9 @@ class _TaskRunnerMixin:
                         else None
                     ),
                     work_dir=(
-                        # ``TabRegistry.update_tab`` keeps the current
-                        # value for an empty work dir, so an empty override
-                        # (meaning "the daemon's default") must be pinned
-                        # as the EFFECTIVE directory the run uses.
-                        (cmd["workDir"] or self.work_dir)
-                        if "workDir" in overridden_fields
-                        else None
+                        # A script's ``work_dir`` is never empty either:
+                        # the override is the directory the run uses.
+                        cmd["workDir"] if "workDir" in overridden_fields else None
                     ),
                 )
                 if override_chat_id is not None:
@@ -1048,7 +1084,17 @@ class _TaskRunnerMixin:
                     # chat id — so every client tracking the run's chat
                     # from that event (e.g. ``kiss.server.sorcar.run``)
                     # would report a chat this run never touches.
-                    # Re-announce the overridden one.
+                    # Re-announce the overridden one.  A ``clear`` opens
+                    # the transcript with the prompt echoed just before
+                    # it (the ``setTaskText`` of ``_cmd_run``), and a
+                    # follow-up submitted during this setup window was
+                    # echoed since, so the run's own prompt is echoed
+                    # again first.
+                    self.printer.broadcast({
+                        "type": "setTaskText",
+                        "text": str(cmd.get("prompt", "") or ""),
+                        "tabId": tab_id,
+                    })
                     self.printer.broadcast({
                         "type": "clear",
                         "chat_id": override_chat_id,
@@ -1066,8 +1112,8 @@ class _TaskRunnerMixin:
             if client_task_id:
                 status_start["taskId"] = client_task_id
             self.printer.broadcast(status_start)
-            if agent_file_error is not None:
-                raise agent_file_error
+            if sea_error is not None:
+                raise sea_error
             self._run_task_inner(cmd)
         except BaseException as exc:
             if state is None:
@@ -1083,7 +1129,7 @@ class _TaskRunnerMixin:
                 # A cancellation that landed before ``_run_task_inner``'s
                 # own handlers (setup, or the inner prologue) — as the
                 # bare ``KeyboardInterrupt``, or wrapped into the
-                # agent-script loader's ``AgentFileError`` when the
+                # SEA loader's ``SeaError`` when the
                 # injection hit inside a getter.  It goes
                 # through the SAME helper as the inner sites, FIRST:
                 # ``_cancel_outcome`` acknowledges the stop, and until
@@ -1103,13 +1149,8 @@ class _TaskRunnerMixin:
                     exc_info=True,
                 )
                 setup_fail_text = f"Task failed: {type(exc).__name__}: {exc}"
-            setup_result: dict[str, Any] = {
-                "type": "result",
-                "text": setup_fail_text,
-                "success": False,
-                "total_tokens": 0,
-                "cost": "$0.0000",
-                "step_count": 0,
+            setup_result = {
+                **_result_event(setup_fail_text, success=False),
                 "tabId": tab_id,
             }
             # pragma-no-branch: the false arm needs a state that is
@@ -1302,7 +1343,7 @@ class _TaskRunnerMixin:
         user typed the prompt one second later.  The follow-up inherits
         the finished run's settings as the user submitted them (work
         dir, model, worktree and auto-commit choices) — not what its
-        SEA pipeline made of them (a ``/xxx`` command's ``agentPath``,
+        SEA pipeline made of them (a ``/xxx`` command's ``seaPath``,
         a script's pinned fields) — and not its client stamp: the run
         token (``taskId``) belongs to the submission that has just
         ended, and the routing key (``_state_key``) to the state that
@@ -1359,7 +1400,7 @@ class _TaskRunnerMixin:
         verbatim by the printer's transport (no per-task subscriber
         fan-out).  Without an explicit per-viewer broadcast, a tab
         that joined the running task via ``_replay_session`` /
-        ``_reattach_running_chat`` (history-resume click) or via
+        ``_attach_viewer_to_running_chat`` (history-resume click) or via
         ``_subscribe_chat_viewers`` (idle viewer of the chat) would
         never receive a ``running=False`` event stamped with its own
         tab id — its frontend would keep ``isRunning=true`` forever,
@@ -1422,9 +1463,8 @@ class _TaskRunnerMixin:
     ) -> None:
         """Broadcast ``subagentDone`` for a finished ``run_agent`` child.
 
-        The completion signal a ``run_tasks_parallel`` worker sends
-        for its sub-agent, emitted here for a daemon-dispatched
-        sub-agent instead (a run submitted with ``parentTaskId``):
+        The completion signal of a daemon-dispatched sub-agent (a run
+        submitted with ``parentTaskId``):
         every tab watching the child's task stream — subscribed via
         ``resumeSession`` after the child's ``new_tab`` broadcast —
         stops its running indicator and gets the user's model pick
@@ -1599,7 +1639,7 @@ class _TaskRunnerMixin:
             is_subagent: Whether the run was submitted with a
                 ``parentTaskId`` (a ``run_agent`` child).
         """
-        self.printer.register_task_ui(task_id, source_tab_id)
+        self.printer.subscribe_tab(task_id, source_tab_id)
         if is_subagent:
             return
         self._subscribe_chat_viewers(
@@ -1656,9 +1696,8 @@ class _TaskRunnerMixin:
         agent._task_start_ms = start_ms
         # A ``run_agent`` dispatch on behalf of a calling task (wire
         # fields ``parentTaskId`` / ``parentTabId``, see
-        # ``daemon_client.run``) runs as that task's SUB-AGENT — the
-        # exact marking ``run_tasks_parallel`` gives its children, so
-        # the run inherits their whole frontend contract for free:
+        # ``daemon_client.run``) runs as that task's SUB-AGENT, so the
+        # run gets the sub-agent frontend contract:
         # ``ChatSorcarAgent.run`` self-broadcasts ``new_tab`` (every
         # client viewing the parent opens a nested sub-agent tab), the
         # history row nests under the parent task via the persisted
@@ -1670,22 +1709,22 @@ class _TaskRunnerMixin:
             _raw_parent_task_id.strip()
             if isinstance(_raw_parent_task_id, str) else ""
         )
-        # An agent-script run (``agentPath``, e.g. the SEA an
+        # An SEA run (``seaPath``, e.g. the SEA an
         # ``/xxx text`` relay dispatches) or another agent's sub-task
         # (``parentTaskId``) is not a user typing into a chat box: a
         # task that is nothing but a path is the script's/parent's
         # business (``/git_extract_knowledge /path/to/repo`` indexes
         # the repository), not a request to open it — see
         # ``ChatSorcarAgent.run`` and ``bare_path_task``.
-        _raw_agent_path = cmd.get("agentPath")
-        _agent_script_run = bool(
-            _raw_agent_path.strip() if isinstance(_raw_agent_path, str) else "",
+        _raw_sea_path = cmd.get("seaPath")
+        _sea_run = bool(
+            _raw_sea_path.strip() if isinstance(_raw_sea_path, str) else "",
         )
         # Recorded in the row's ``sea`` column (see ChatSorcarAgent.sea_name).
         agent.sea_name = (
-            Path(str(_raw_agent_path).strip()).stem if _agent_script_run else ""
+            Path(str(_raw_sea_path).strip()).stem if _sea_run else ""
         )
-        _open_bare_path = not _agent_script_run and not parent_task_id
+        _open_bare_path = not _sea_run and not parent_task_id
         _raw_parent_tab_id = cmd.get("parentTabId")
         parent_tab_id = (
             _raw_parent_tab_id if isinstance(_raw_parent_tab_id, str) else ""
@@ -1697,9 +1736,9 @@ class _TaskRunnerMixin:
                 # Reviewer sub-tree marker (see fanout_guard): a
                 # daemon-dispatched child of a reviewer gets the same
                 # read-only ``review`` tool profile.  The EFFECTIVE
-                # prompt is re-checked here because an agent script's
+                # prompt is re-checked here because a SEA's
                 # ``prompt()`` override (applied above by
-                # ``apply_agent_overrides``) can turn an innocuous
+                # ``apply_sea``) can turn an innocuous
                 # dispatch into a review task after the caller-side
                 # check in ``agent_dispatch._dispatch`` already passed.
                 "reviewer": bool(cmd.get("parentReviewer"))
@@ -1731,9 +1770,9 @@ class _TaskRunnerMixin:
         # broadcasts ``status running:False``.
         if isinstance(display_prompt, str) and display_prompt:
             try:
-                help_text = _sea_help_text(display_prompt)
+                help_text = help_text_if_command(display_prompt)
                 help_ok = True
-            except SeaScriptError as exc:
+            except SeaError as exc:
                 help_text, help_ok = str(exc), False
             if help_text is not None:
                 self._finish_sea_help_task(
@@ -1801,17 +1840,10 @@ class _TaskRunnerMixin:
                 "No model available. Sign in to a CLI subscription "
                 "or configure an API key in Settings."
             )
-            self.printer.broadcast(
-                {
-                    "type": "result",
-                    "text": no_model_msg,
-                    "success": False,
-                    "total_tokens": 0,
-                    "cost": "$0.0000",
-                    "step_count": 0,
-                    "tabId": tab_id,
-                }
-            )
+            self.printer.broadcast({
+                **_result_event(no_model_msg, success=False),
+                "tabId": tab_id,
+            })
             return
 
         with self._state_lock:
@@ -1856,7 +1888,7 @@ class _TaskRunnerMixin:
         # written.  A disabled or failed classification leaves
         # ``use_worktree`` exactly as the client requested.
         # Per-run classification toggle: the ``classifyTasks`` wire
-        # field (``classify_tasks`` on ``kiss.server.sorcar.run``).
+        # field (``auto_classify`` on ``kiss.server.sorcar.run``).
         # Absent or malformed means "no override" — the persisted
         # "Classify tasks before running" setting decides, exactly
         # like ``useWebTools`` falls back to "Use web tools".
@@ -1886,7 +1918,7 @@ class _TaskRunnerMixin:
             enabled=_classify_enabled,
         )
         # The verdict only ever DEMOTES a default; a ``use_worktree`` the
-        # run's agent script pinned or the caller passed explicitly
+        # run's SEA pinned or the caller passed explicitly
         # stands (``_run_task`` marks it), here and in ``agent.run``
         # below.  A demotion is recorded for the run's ``ran:`` line.
         worktree_pinned = bool(cmd.pop("_worktreeDecided", False))
@@ -2013,19 +2045,41 @@ class _TaskRunnerMixin:
                     # attribute for every cleanup that happens later, but
                     # this release runs before it.
                     agent.auto_commit_enabled = state.auto_commit_mode
-                    if merge_blocked:
-                        _release_worktree_without_merging(
-                            agent, bool(self._get_worktree_changed_files(tab_id)),
-                        )
-                    elif retires:
-                        # The main tree is unoccupied, or occupied but
-                        # untouched, so the carried-over worktree can
-                        # still be merged — and it must be merged NOW,
-                        # under the claim, before this run starts (a
-                        # direct run writes the tree next; a worktree
-                        # run's ``_try_setup_worktree`` then finds
-                        # nothing pending).
-                        agent._retire_previous_worktree()
+                    # The retire rewrites the user's main tree (stash,
+                    # checkout, squash merge, pop — or ``git worktree
+                    # remove``), so it holds the merge claim exactly as
+                    # the post-task merge does: ``_state_owns_thread``
+                    # then refuses the Stop watchdog's asynchronous
+                    # ``KeyboardInterrupt``, which would otherwise land
+                    # mid-sequence and leave the checkout half-merged
+                    # with the user's edits stranded in the stash.  A
+                    # Stop pressed meanwhile is honoured right after.
+                    with self._state_lock:
+                        prev_merging = state.is_merging
+                        prev_merge_thread = state.merge_thread
+                        state.is_merging = True
+                        state.merge_thread = threading.current_thread()
+                    try:
+                        if merge_blocked:
+                            _release_worktree_without_merging(
+                                agent, bool(self._get_worktree_changed_files(tab_id)),
+                            )
+                        elif retires:
+                            # The main tree is unoccupied, or occupied
+                            # but untouched, so the carried-over
+                            # worktree can still be merged — and it
+                            # must be merged NOW, under the claim,
+                            # before this run starts (a direct run
+                            # writes the tree next; a worktree run's
+                            # ``_try_setup_worktree`` then finds
+                            # nothing pending).
+                            agent._retire_previous_worktree()
+                    finally:
+                        with self._state_lock:
+                            state.is_merging = prev_merging
+                            state.merge_thread = prev_merge_thread
+                    if stop_event is not None and stop_event.is_set():
+                        raise KeyboardInterrupt("Stopped during worktree retire")
             finally:
                 for claim in retire_claims:
                     with self._state_lock:
@@ -2050,10 +2104,9 @@ class _TaskRunnerMixin:
         suggested_next_task = ""
         task_end_event: dict[str, Any] | None = None
         sub_start_ms = start_ms
-        # A failure before the first ``agent.run`` (agent script, config)
+        # A failure before the first ``agent.run`` (SEA, config)
         # must not report the previous run's usage of a reused agent.
         _zero_usage_counters(agent)
-        agent_returned: str = ""
         task_history_id: str | None = None
         # Changed-path records (and history ids) of EARLIER sequential
         # <task> runs of this submission, taken before their
@@ -2064,8 +2117,8 @@ class _TaskRunnerMixin:
         run_task_ids: list[str] = []
         try:
             subtasks = parse_task_tags(prompt)
-            if _agent_script_run and isinstance(prompt, str):
-                # An agent-script run (a ``/xxx text`` command, a
+            if _sea_run and isinstance(prompt, str):
+                # An SEA run (a ``/xxx text`` command, a
                 # ``run_agent`` child) gets its text as ONE atomic
                 # task: ``<task>`` blocks in it are the SEA's to
                 # interpret, and splitting them here would hand the
@@ -2107,7 +2160,7 @@ class _TaskRunnerMixin:
             )
             # The run's effective configuration, folded into its
             # ``task_settings`` event (see kiss.agents.sorcar.run_config):
-            # the script's provenance record (``apply_agent_overrides``),
+            # the script's provenance record (``apply_sea``),
             # the caller's ``provenance`` / ``timeout`` wire fields and
             # the resolved tool profile.
             _raw_run_config = cmd.get(RUN_CONFIG_FIELD)
@@ -2125,7 +2178,7 @@ class _TaskRunnerMixin:
             _docker_image = _raw_docker if isinstance(_raw_docker, str) else ""
             # Agent-script hooks (``llm_call_hook`` /
             # ``tool_call_hook``), staged onto the command dict by
-            # ``apply_agent_overrides``.  Guarded with ``callable``:
+            # ``apply_sea``.  Guarded with ``callable``:
             # the fields never travel the wire as callables, so a
             # (buggy or malicious) client that sends them as JSON
             # values must not crash the executor — anything
@@ -2301,17 +2354,33 @@ class _TaskRunnerMixin:
                         task_history_id,
                     )
                 except Exception as e:
-                    result_summary = f"Task failed: {e}"
-                    task_end_event = {"type": "task_error", "text": str(e)}
                     subtask_failed = True
                     subtask_exc = e
-                    logger.warning(
-                        "Task failed: tab_id=%s task_id=%s error=%s",
-                        tab_id,
-                        task_history_id,
-                        e,
-                        exc_info=True,
-                    )
+                    if stop_event is not None and stop_event.is_set():
+                        # The agent raised while a Stop was pending
+                        # (a tool aborted by the stop, typically): the
+                        # run is a stop, and acknowledging it here
+                        # keeps the watchdog from injecting into the
+                        # failure broadcast below, which would have
+                        # produced a SECOND terminal result.
+                        result_summary, task_end_event = self._cancel_outcome(state)
+                        logger.info(
+                            "%s (agent raised %s): tab_id=%s task_id=%s",
+                            result_summary,
+                            type(e).__name__,
+                            tab_id,
+                            task_history_id,
+                        )
+                    else:
+                        result_summary = f"Task failed: {e}"
+                        task_end_event = {"type": "task_error", "text": str(e)}
+                        logger.warning(
+                            "Task failed: tab_id=%s task_id=%s error=%s",
+                            tab_id,
+                            task_history_id,
+                            e,
+                            exc_info=True,
+                        )
                 finally:
                     # ``or None`` keeps this local on the ``is not
                     # None`` protocol the teardown below relies on:
@@ -2409,8 +2478,8 @@ class _TaskRunnerMixin:
         except BaseException as _outer_exc:
             if result_summary == "Agent Failed Abruptly":
                 # ``_stop_interrupt_wrapped``: a stop injected while
-                # the agent-script loader ran caller code surfaces here
-                # as an ``AgentFileError`` wrapping the interrupt — a
+                # the SEA loader ran caller code surfaces here
+                # as an ``SeaError`` wrapping the interrupt — a
                 # cancellation, not a task error.
                 if isinstance(
                     _outer_exc, KeyboardInterrupt,
@@ -2458,6 +2527,15 @@ class _TaskRunnerMixin:
                 # steering path (see ``_route_prompt_to_owner``)
                 # rather than be queued, echoed and silently dropped.
                 state.followup_queue_closed = True
+                # The agent loop is over, so a Stop from here on has
+                # nothing left to interrupt: acknowledge it up front
+                # (as ``_cancel_outcome`` does for a stop caught in
+                # the loop) so the watchdog never injects
+                # ``KeyboardInterrupt`` into the persistence,
+                # auto-commit and presentation below.  The thread's
+                # stop binding still aborts their LLM calls
+                # cooperatively.
+                state.stop_acknowledged = True
             end_event_broadcast = False
             # Whether the LAST child row's ``subagentDone`` went out on
             # the normal path below; the mandatory-cleanup finally
@@ -2474,7 +2552,7 @@ class _TaskRunnerMixin:
                 # / ``_release_worktree_without_merging`` above) are
                 # normally broadcast by ``agent.run``.  A failure
                 # BEFORE the first ``agent.run`` (tool profile, config,
-                # agent script) would otherwise swallow them and the user
+                # SEA) would otherwise swallow them and the user
                 # would never learn where that worktree's work went.
                 # The flush is a take-and-clear, so it never
                 # re-delivers what ``run`` already broadcast; it sits
@@ -2483,17 +2561,16 @@ class _TaskRunnerMixin:
                 _flush_warnings = getattr(agent, "_flush_warnings", None)
                 if _flush_warnings is not None:
                     _flush_warnings(self.printer)
-                _agent_parsed = parse_result_yaml(agent_returned) if agent_returned else None
-                _agent_reported_failure = bool(
-                    _agent_parsed and _agent_parsed.get("success") is False
-                )
+                # ``task_end_event`` carries the last subtask's own
+                # ``success`` verdict (parsed from its result YAML in
+                # the loop above), or a failure type.
                 task_failed = bool(
-                    (
-                        task_end_event
-                        and task_end_event.get("type")
+                    task_end_event
+                    and (
+                        task_end_event.get("type")
                         in ("task_error", "task_stopped", "task_interrupted")
+                        or task_end_event.get("success") is False
                     )
-                    or _agent_reported_failure
                 )
                 effective_auto_commit = state.auto_commit_mode and not task_failed
                 if not use_worktree:
@@ -2825,26 +2902,32 @@ class _TaskRunnerMixin:
                 task_id=task_id,
                 task=task_prompt,
             )
-            tokens, cost, steps = _subtask_metrics(state.agent)
-            _save_task_extra(
-                build_task_extra_payload(
-                    model=model,
-                    work_dir=work_dir,
-                    version=__version__,
-                    tokens=tokens,
-                    cost=round(cost, 6),
-                    steps=steps,
-                    is_parallel=state.use_parallel,
-                    is_worktree=use_worktree,
-                    auto_commit_mode=state.auto_commit_mode,
-                    start_ms=sub_start_ms,
-                    end_ms=(
-                        end_ms if end_ms is not None
-                        else int(time.time() * 1000)
+            # Read and saved under TASK_USAGE_LOCK, so a sub-task's late
+            # charge either lands on the ledger before this read or
+            # finds the finished row and adds to it
+            # (charge_side_channel_usage).
+            with TASK_USAGE_LOCK:
+                tokens, cost, steps = _subtask_metrics(state.agent)
+                _race_delay()  # test hook: widens the snapshot-to-save window
+                _save_task_extra(
+                    build_task_extra_payload(
+                        model=model,
+                        work_dir=work_dir,
+                        version=__version__,
+                        tokens=tokens,
+                        cost=round(cost, 6),
+                        steps=steps,
+                        is_parallel=state.use_parallel,
+                        is_worktree=use_worktree,
+                        auto_commit_mode=state.auto_commit_mode,
+                        start_ms=sub_start_ms,
+                        end_ms=(
+                            end_ms if end_ms is not None
+                            else int(time.time() * 1000)
+                        ),
                     ),
-                ),
-                task_id=task_id,
-            )
+                    task_id=task_id,
+                )
             self.printer.broadcast({"type": "tasks_updated"})
             logger.info(
                 "Task result persisted: task_id=%s result=%r",
@@ -2891,7 +2974,7 @@ class _TaskRunnerMixin:
                 continued (or created) by the new row.
             prompt: The raw ``/xxx help`` prompt.
             text: The SEA's ``description()`` text, or the diagnostic.
-            success: ``False`` when *text* is a ``SeaScriptError`` message.
+            success: ``False`` when *text* is a ``SeaError`` message.
             tab_id: The launcher tab id.
             model: The model the run would have used (for the row's extra).
             work_dir: The run's working directory (for the row's extra).
@@ -2918,13 +3001,8 @@ class _TaskRunnerMixin:
         if agent is not None:
             agent._chat_id = state.chat_id
         _append_chat_event({"type": "prompt", "text": prompt}, task_id=task_id)
-        result: dict[str, Any] = {
-            "type": "result",
-            "text": text,
-            "success": success,
-            "total_tokens": 0,
-            "cost": "$0.0000",
-            "step_count": 0,
+        result = {
+            **_result_event(text, success=success),
             "taskId": str(task_id),
             "tabId": tab_id,
         }
@@ -2960,15 +3038,7 @@ class _TaskRunnerMixin:
                 or ``None``/empty when none was allocated.
             tab_id: The launcher tab, used when no task id exists.
         """
-        tokens, cost, steps = _subtask_metrics(agent)
-        failure_result: dict[str, Any] = {
-            "type": "result",
-            "text": result_summary,
-            "success": False,
-            "total_tokens": tokens,
-            "cost": f"${cost:.4f}",
-            "step_count": steps,
-        }
+        failure_result = _result_event(result_summary, success=False, agent=agent)
         if task_history_id:
             failure_result["taskId"] = str(task_history_id)
         else:
@@ -3036,7 +3106,7 @@ class _TaskRunnerMixin:
         any VS Code window or remote browser window — that has that
         chat open must see the task's events streaming live.  Tabs
         that open the chat WHILE the task is already running are
-        handled by ``_replay_session`` → ``_reattach_running_chat``;
+        handled by ``_replay_session`` → ``_attach_viewer_to_running_chat``;
         this hook covers the tabs that opened the chat BEFORE the
         task started (e.g. the tab that ran the previous task of the
         chat, or a history viewer in a sibling window).
@@ -3063,10 +3133,27 @@ class _TaskRunnerMixin:
         if not chat_id:
             return
         with self._state_lock:
-            viewers = []
-            for viewer_tab_id, viewed_chat_id in self._tab_chat_views.items():
-                if viewed_chat_id != chat_id or viewer_tab_id == source_tab_id:
-                    continue
+            viewers = [
+                viewer_tab_id
+                for viewer_tab_id, viewed_chat_id in self._tab_chat_views.items()
+                if viewed_chat_id == chat_id and viewer_tab_id != source_tab_id
+            ]
+        _race_delay()  # test hook: widens the scan-to-subscribe window
+        viewer_status: dict[str, Any] = {
+            "type": "status",
+            "running": True,
+            "startTs": start_ms,
+        }
+        if client_task_id:
+            viewer_status["taskId"] = client_task_id
+        for viewer_tab_id in viewers:
+            # Guard, subscribe AND broadcast under one ``_state_lock``
+            # hold, as ``_broadcast_status_end_to_viewers`` does: with
+            # the lock released in between, ``_cmd_run`` could install
+            # the viewer's OWN run after the check passed, and this
+            # ``clear`` would wipe that run's fresh transcript while
+            # every later event of THIS task fanned out into it.
+            with self._state_lock:
                 viewer_state = agent_state.find_by_tab(viewer_tab_id)
                 # ``busy()``, not ``is_task_active`` (C-RC1): the
                 # worker raises the flag only after its thread starts
@@ -3076,25 +3163,11 @@ class _TaskRunnerMixin:
                 # status hijacked by a task it never launched.
                 if viewer_state is not None and viewer_state.busy():
                     continue
-                viewers.append(viewer_tab_id)
-        for viewer_tab_id in viewers:
-            self.printer.subscribe_tab(task_id, viewer_tab_id)
-            self.printer.broadcast(
-                {
-                    "type": "clear",
-                    "chat_id": chat_id,
-                    "tabId": viewer_tab_id,
-                }
-            )
-            viewer_status: dict[str, Any] = {
-                "type": "status",
-                "running": True,
-                "tabId": viewer_tab_id,
-                "startTs": start_ms,
-            }
-            if client_task_id:
-                viewer_status["taskId"] = client_task_id
-            self.printer.broadcast(viewer_status)
+                self.printer.subscribe_tab(task_id, viewer_tab_id)
+                self.printer.broadcast(
+                    {"type": "clear", "chat_id": chat_id, "tabId": viewer_tab_id},
+                )
+                self.printer.broadcast({**viewer_status, "tabId": viewer_tab_id})
 
     def _resolve_running_state(
         self, tab_id: str, run_token: str = "",
@@ -3214,8 +3287,9 @@ class _TaskRunnerMixin:
             # answer wait is aborted, so the question prompt must close
             # on every tab showing it (an answer would do this through
             # _cmd_user_answer's askUserDone).
-            for clear_tab in self._user_answer_clear_tabs(tab_id, owner_task_id):
-                self.printer.broadcast({"type": "askUserDone", "tabId": clear_tab})
+            self.printer.broadcast_transient(
+                {"type": "askUserDone"}, owner_task_id, tab_id,
+            )
 
     def _stop_task(self, tab_id: str = "", run_token: str = "") -> None:
         """Signal the agent to stop.
@@ -3264,7 +3338,7 @@ class _TaskRunnerMixin:
         # that window (daemon_client's stop-on-timeout / abort-cascade
         # frames) used to see ``is_alive() == False`` and arm no
         # watchdog — leaving nothing to enforce the stop against the
-        # run's untrusted setup code (agent-script getters, tools
+        # run's untrusted setup code (SEA getters, tools
         # files), which never checks the cooperative event.
         thread_alive = task_thread is not None and (
             task_thread.ident is None or task_thread.is_alive()
@@ -3419,14 +3493,8 @@ class _TaskRunnerMixin:
         for _ in range(2):  # pragma: no branch — thread always dies within 2 attempts
             if not task_thread.is_alive():
                 return
-            tid = task_thread.ident
-            if tid is not None:  # pragma: no branch — running thread always has ident
-                with agent_state.STATE_LOCK:
-                    if still_owns is not None and not still_owns():
-                        return
-                    rc = inject_keyboard_interrupt(tid)
-                if rc == 0:
-                    return
+            if inject_if_owned(task_thread, still_owns) in (None, 0):
+                return
             task_thread.join(timeout=5)
 
     def _await_user_response(
@@ -3436,8 +3504,8 @@ class _TaskRunnerMixin:
         """Block until the user sends a response, checking stop_event periodically.
 
         Args:
-            q: The answer queue to wait on.  When ``None`` it is
-                resolved via :meth:`_resolve_task_answer_queue`.
+            q: The answer queue to wait on.  When ``None`` it is the
+                calling task's own queue (:meth:`_resolve_task_state`).
                 W2-F9: :meth:`_ask_user_question` passes the queue it
                 already resolved (and drained / registered in the
                 pending-answer registry) so both steps operate on the
@@ -3454,46 +3522,33 @@ class _TaskRunnerMixin:
         Raises:
             KeyboardInterrupt: If the stop event is set before an answer arrives.
             ToolCallInterrupted: If the user pressed the tool call's own
-                Stop button (``interruptTool``) before answering.  The
-                ``queue.get`` below is a C-level wait, so the watcher
-                also observes the tool call's interrupt event, wakes the
-                wait, and the interrupt is raised here cooperatively.
+                Stop button (``interruptTool``) before answering: the
+                timed ``queue.get`` below observes the tool call's
+                interrupt event between waits, and the interrupt is
+                raised here cooperatively.
         """
         stop = getattr(self.printer._thread_local, "stop_event", None)
         if stop is None:
             raise KeyboardInterrupt("No stop event set")
         if q is None:
-            q = self._resolve_task_answer_queue()
+            state = self._resolve_task_state()
+            q = state.user_answer_queue if state is not None else None
         if q is None:
             raise KeyboardInterrupt(
                 "User answer queue is missing (tab closed?); aborting wait",
             )
         interrupt = tool_interrupt.current_tool_interrupt_event()
-        sentinel = _STOP_SENTINEL
-        cancelled = threading.Event()
-
-        def _wake_on_stop() -> None:
-            while not cancelled.is_set():
-                if stop.wait(0.1) or (interrupt is not None and interrupt.is_set()):
-                    if not cancelled.is_set():
-                        with suppress(queue.Full):
-                            q.put_nowait(cast(str, sentinel))
-                    return
-
-        watcher = threading.Thread(target=_wake_on_stop, daemon=True)
-        watcher.start()
-        try:
-            item = q.get()
-        finally:
-            cancelled.set()
-        if item is sentinel:
-            if not stop.is_set():
+        while True:
+            with suppress(queue.Empty):
+                return q.get(timeout=0.1)
+            if stop.is_set():
+                raise KeyboardInterrupt("Stopped while waiting for user")
+            if interrupt is not None and interrupt.is_set():
                 # Woken by the tool call's own Stop: raise its
                 # ToolCallInterrupted cooperatively (draining an injected
                 # one first if the grace period had already passed).
                 tool_interrupt.raise_if_interrupted()
-            raise KeyboardInterrupt("Stopped while waiting for user")
-        return item
+                raise KeyboardInterrupt("Stopped while waiting for user")
 
     def _resolve_task_state(self) -> AgentState | None:
         """Resolve the calling thread's task to its registered agent state.
@@ -3513,16 +3568,6 @@ class _TaskRunnerMixin:
             ),
         )
 
-    def _resolve_task_answer_queue(self) -> queue.Queue[str] | None:
-        """Resolve the current task's user-answer queue.
-
-        Returns:
-            The task's answer queue, or ``None`` when the task has no
-            live queue (see :meth:`_resolve_task_state`).
-        """
-        state = self._resolve_task_state()
-        return state.user_answer_queue if state is not None else None
-
     def _ask_user_question(self, question: str) -> str:
         """Callback for agent questions.
 
@@ -3535,6 +3580,16 @@ class _TaskRunnerMixin:
         concurrent replay can never re-show an answered question); the
         ``finally`` below also clears it when the wait aborts (task
         stopped) without an answer.
+
+        The History panel marks a task waiting on a question with a
+        ``?`` in place of its spinner (``awaiting_answer`` in
+        ``_get_history``), so a ``tasks_updated`` is broadcast when the
+        question opens and again when the wait ends, for every surface
+        to repaint its rows.  The explicit empty ``tabId`` keeps it on
+        the printer's verbatim all-clients path: this runs on the agent
+        thread, where an unstamped event is routed to the task's tab
+        subscribers only (none, once the user closed the task's tabs)
+        and a History panel with no tab on the task would miss it.
         """
         state = self._resolve_task_state()
         q = state.user_answer_queue if state is not None else None
@@ -3561,8 +3616,10 @@ class _TaskRunnerMixin:
                         "question": question,
                     }
                 )
+            self.printer.broadcast({"type": "tasks_updated", "tabId": ""})
             return self._await_user_response(q)
         finally:
             if state is not None:
                 with self._state_lock:
                     state.pending_ask_question = ""
+            self.printer.broadcast({"type": "tasks_updated", "tabId": ""})

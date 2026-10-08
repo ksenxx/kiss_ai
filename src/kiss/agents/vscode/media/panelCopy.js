@@ -267,6 +267,42 @@
     return ok;
   }
 
+  /**
+   * Copy `text` to the clipboard: the async clipboard API first, then
+   * `fallbackCopyText` when the API is missing, throws or rejects.
+   * Every same-page copy control (main.js, tips.js and this module)
+   * goes through here; contentContextMenu.js keeps its own copy because
+   * it also runs inside the sandboxed preview iframe, where this module
+   * is not loaded.
+   *
+   * @param {string} text What to place on the clipboard.
+   * @param {Document} [doc] Owner document; defaults to the page's.
+   * @returns {Promise<boolean>} Resolves true when either path succeeded.
+   */
+  function copyText(text, doc) {
+    const d = doc || document;
+    const win =
+      d.defaultView || (typeof window !== 'undefined' ? window : null);
+    const nav = win ? win.navigator : null;
+    if (
+      !nav ||
+      !nav.clipboard ||
+      typeof nav.clipboard.writeText !== 'function'
+    ) {
+      return Promise.resolve(fallbackCopyText(text, d));
+    }
+    let written;
+    try {
+      written = nav.clipboard.writeText(text);
+    } catch (_err) {
+      return Promise.resolve(fallbackCopyText(text, d));
+    }
+    return Promise.resolve(written).then(
+      () => true,
+      () => fallbackCopyText(text, d),
+    );
+  }
+
   function addCopyButton(panelEl) {
     if (!panelEl || panelEl.querySelector(':scope > .panel-copy-btn')) return;
     panelEl.classList.add('copyable');
@@ -304,18 +340,8 @@
     btn.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
-      const text = normalise(getRawText(panelEl));
-      const done = () => flash(true);
-      const failed = () => flash(fallbackCopyText(text, doc));
+      copyText(normalise(getRawText(panelEl)), doc).then(flash);
       // copyflash0903-coverage:end
-      const win =
-        doc.defaultView || (typeof window !== 'undefined' ? window : null);
-      const nav = win ? win.navigator : null;
-      if (nav && nav.clipboard && nav.clipboard.writeText) {
-        nav.clipboard.writeText(text).then(done, failed);
-      } else {
-        failed();
-      }
     });
     panelEl.appendChild(btn);
   }
@@ -490,6 +516,7 @@
     addCopyButton: addCopyButton,
     addStopButton: addStopButton,
     fallbackCopyText: fallbackCopyText,
+    copyText: copyText,
     formatEventTs: formatEventTs,
     ensurePanelFoot: ensurePanelFoot,
     addPanelTimestamp: addPanelTimestamp,

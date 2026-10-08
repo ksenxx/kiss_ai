@@ -187,6 +187,7 @@ class TestRWLockRealAsyncInjection:
         assert lock._readers == 0 and not lock._writer
         assert lock._pending_writers == 0
 
+    @pytest.mark.process_killer
     def test_stress_random_time_injections_never_deadlock(self) -> None:
         """Thousands of real acquisitions under hundreds of real
         ``PyThreadState_SetAsyncExc`` injections at random times: the

@@ -28,7 +28,6 @@ approach used by :class:`kiss.core.models.claude_code_model.ClaudeCodeModel`
 and by DeepSeek R1 in :mod:`kiss.core.models.openai_compatible_model`.
 """
 
-import json
 import logging
 import os
 import shutil
@@ -40,6 +39,7 @@ from kiss.core.models.model import (
     CLITextModel,
     ThinkingCallback,
     TokenCallback,
+    _iter_jsonl,
     _parse_text_based_tool_calls,
     billing_checked,
 )
@@ -262,15 +262,7 @@ class CodexModel(CLITextModel):
         result_json: dict[str, Any] = {}
         error_message: str | None = None
 
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
+        for event in _iter_jsonl(lines):
             event_type = event.get("type")
 
             if event_type == "thread.started":

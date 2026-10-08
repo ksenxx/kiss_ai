@@ -3,14 +3,18 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (JSDOM) tests for tab-bar scroll discipline: the tab bar
-// must NOT auto-scroll the active tab into view on the many re-renders
+// End-to-end (JSDOM) tests for tab-strip scroll discipline: the group
+// strip (#tab-list: the chat on screen and its sub-agent tabs) must NOT
+// auto-scroll the active tab into view on the many re-renders
 // renderTabBar() runs for unrelated reasons (task status events, title
-// updates from tabs_state snapshots), because that would yank the bar
-// away from wherever the user manually scrolled it.  The bar scrolls
-// the active tab into view ONLY when the active tab actually changes:
-// a click on another tab, creating a new tab, or the successor switch
-// after the active tab is closed.
+// updates from tabs_state snapshots), because that would yank the strip
+// away from wherever the user manually scrolled it.  The strip scrolls
+// the active tab into view ONLY when the active tab actually changes
+// (a click on another entry, the successor switch after the active
+// entry is closed) and only while it is shown, i.e. has more than one
+// entry: a lone chat has no strip and nothing to scroll.  Chats
+// themselves are picked in the sidebar's Chats panel
+// (_testApi.switchToTab), not on a tab row.
 
 'use strict';
 
@@ -80,13 +84,11 @@ function entry(tabId, title, workDir) {
   };
 }
 
-// The tab's entry on the group strip when its group is on screen, else
-// its main-row entry.
+// The tab's entry on the group strip (only the group on screen is
+// rendered there), else null.
 function tabEl(win, tabId) {
-  const sel = '.chat-tab[data-tab-id="' + tabId + '"]';
-  return (
-    win.document.querySelector('#tab-list ' + sel) ||
-    win.document.querySelector('#main-tab-list ' + sel)
+  return win.document.querySelector(
+    '#tab-list .chat-tab[data-tab-id="' + tabId + '"]',
   );
 }
 
@@ -95,8 +97,27 @@ function activeTabId(win) {
   return el ? el.dataset.tabId : null;
 }
 
+function stripShown(win) {
+  return win.document.getElementById('tab-bar').style.display !== 'none';
+}
+
 function clickEl(win, el) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+}
+
+// Opens sub-agent tab *id* under t1 (the daemon's announcement of a
+// run_parallel child), which puts the group on the strip.
+function openSubagent(win, id, index) {
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: id,
+    parent_tab_id: 't1',
+    description: 'sub-agent ' + id,
+    task_id: 'task-' + id,
+    taskIndex: index,
+    isSubagentTab: true,
+  });
+  assert.ok(tabEl(win, id), 'setup: sub-agent ' + id + ' is on the strip');
 }
 
 // Puts the webview in a known state: three shared tabs t1/t2/t3 with
@@ -163,28 +184,42 @@ function testTitleUpdateDoesNotScroll() {
 }
 
 function testSwitchingTabsScrollsExactlyTheNewActiveTab() {
-  // Clicking another tab IS a switch: the newly active tab must be
-  // scrolled into view (and only it).
+  // Clicking another entry on the strip IS a switch: the newly active
+  // tab must be scrolled into view (and only it).
   const {win, tabScrolls} = makeThreeTabs();
+  openSubagent(win, 's1', 0);
+  assert.ok(stripShown(win), 'setup: a group of two shows the strip');
+  tabScrolls.length = 0;
 
-  clickEl(win, tabEl(win, 't3'));
-  assert.strictEqual(activeTabId(win), 't3', 't3 must become active');
+  clickEl(win, tabEl(win, 's1'));
+  assert.strictEqual(activeTabId(win), 's1', 's1 must become active');
   assert.deepStrictEqual(
     tabScrolls,
-    ['t3'],
-    'switching to t3 must scroll exactly t3 into view, got: ' +
+    ['s1'],
+    'switching to s1 must scroll exactly s1 into view, got: ' +
       JSON.stringify(tabScrolls),
   );
 
   // Re-renders after the switch must stay quiet again.
   tabScrolls.length = 0;
-  send(win, {type: 'status', running: true, tabId: 't3', startTs: 2000});
-  send(win, {type: 'status', running: false, tabId: 't3'});
+  send(win, {type: 'status', running: true, tabId: 's1', startTs: 2000});
+  send(win, {type: 'status', running: false, tabId: 's1'});
   assert.deepStrictEqual(
     tabScrolls,
     [],
     'post-switch re-renders must not scroll, got: ' +
       JSON.stringify(tabScrolls),
+  );
+
+  // Picking another chat in the Chats panel shows a lone chat: its
+  // strip is hidden, so there is nothing to scroll.
+  win._testApi.switchToTab('t3');
+  assert.strictEqual(activeTabId(win), 't3', 't3 must become active');
+  assert.ok(!stripShown(win), 'a lone chat has no strip');
+  assert.deepStrictEqual(
+    tabScrolls,
+    [],
+    'a hidden strip must not scroll, got: ' + JSON.stringify(tabScrolls),
   );
 }
 
@@ -203,39 +238,49 @@ function testClickingActiveTabDoesNotScroll() {
   );
 }
 
-function testNewTabScrollsIntoView() {
-  // The "+" button creates AND activates a new tab: that is a switch,
-  // so the new tab must be brought into view.
+function testNewChatHasNoStripToScroll() {
+  // The "+" button creates AND activates a new, lone chat: it has no
+  // strip (one entry), so the switch scrolls nothing.
   const {win, tabScrolls} = makeThreeTabs();
 
   clickEl(win, win.document.querySelector('#new-chat-btn'));
-  const newId = activeTabId(win);
+  const newId = win._testApi.getActiveTabId();
   assert.ok(newId && newId !== 't1', 'a new tab must become active');
-  assert.ok(
-    tabScrolls.includes(newId),
-    'the newly created tab must be scrolled into view, got: ' +
-      JSON.stringify(tabScrolls),
+  assert.strictEqual(
+    activeTabId(win),
+    newId,
+    'the strip entry is the new chat',
   );
-  assert.ok(
-    tabScrolls.every(id => id === newId),
-    'only the new tab may be scrolled, got: ' + JSON.stringify(tabScrolls),
+  assert.ok(!stripShown(win), 'a lone chat has no strip');
+  assert.deepStrictEqual(
+    tabScrolls,
+    [],
+    'a hidden strip must not scroll, got: ' + JSON.stringify(tabScrolls),
   );
 }
 
 function testCloseSuccessorScrollsIntoView() {
-  // Closing the active tab activates a successor: that is a switch, so
-  // the successor must be brought into view.
+  // Closing the active entry activates a successor: that is a switch,
+  // so the successor must be brought into view (the group keeps three
+  // entries, so the strip stays shown).
   const {win, tabScrolls} = makeThreeTabs();
+  openSubagent(win, 's1', 0);
+  openSubagent(win, 's2', 1);
+  openSubagent(win, 's3', 2);
+  clickEl(win, tabEl(win, 's2'));
+  assert.strictEqual(activeTabId(win), 's2', 'setup: s2 is active');
+  tabScrolls.length = 0;
 
-  const closeBtn = tabEl(win, 't1').querySelector('.chat-tab-close');
-  assert.ok(closeBtn, 'setup: the active tab must have a close control');
+  const closeBtn = tabEl(win, 's2').querySelector('.chat-tab-close');
+  assert.ok(closeBtn, 'setup: the active entry must have a close control');
   clickEl(win, closeBtn);
 
   const successor = activeTabId(win);
   assert.ok(
-    successor && successor !== 't1',
-    'closing the active tab must activate a successor',
+    successor && successor !== 's2',
+    'closing the active entry must activate a successor',
   );
+  assert.ok(stripShown(win), 'the group still shows its strip');
   assert.ok(
     tabScrolls.includes(successor),
     'the successor tab must be scrolled into view, got: ' +
@@ -248,20 +293,25 @@ function testCloseSuccessorScrollsIntoView() {
 }
 
 function testClosingBackgroundTabDoesNotScroll() {
-  // Closing a background tab re-renders the bar but the active tab is
-  // unchanged: no switch, no scroll.
+  // Closing a background entry of the group re-renders the strip but
+  // the active tab is unchanged: no switch, no scroll.
   const {win, tabScrolls} = makeThreeTabs();
+  openSubagent(win, 's1', 0);
+  openSubagent(win, 's2', 1);
+  assert.strictEqual(activeTabId(win), 't1', 'setup: t1 stays active');
+  tabScrolls.length = 0;
 
-  const closeBtn = tabEl(win, 't2').querySelector('.chat-tab-close');
-  assert.ok(closeBtn, 'setup: t2 must have a close control');
+  const closeBtn = tabEl(win, 's2').querySelector('.chat-tab-close');
+  assert.ok(closeBtn, 'setup: s2 must have a close control');
   clickEl(win, closeBtn);
 
   assert.strictEqual(activeTabId(win), 't1', 't1 must stay active');
-  assert.strictEqual(tabEl(win, 't2'), null, 't2 must be gone from the bar');
+  assert.strictEqual(tabEl(win, 's2'), null, 's2 must be gone from the strip');
+  assert.ok(tabEl(win, 's1'), 's1 stays on the strip');
   assert.deepStrictEqual(
     tabScrolls,
     [],
-    'closing a background tab must not scroll the bar, got: ' +
+    'closing a background entry must not scroll the strip, got: ' +
       JSON.stringify(tabScrolls),
   );
 }
@@ -324,7 +374,7 @@ const tests = [
   testTitleUpdateDoesNotScroll,
   testSwitchingTabsScrollsExactlyTheNewActiveTab,
   testClickingActiveTabDoesNotScroll,
-  testNewTabScrollsIntoView,
+  testNewChatHasNoStripToScroll,
   testCloseSuccessorScrollsIntoView,
   testClosingBackgroundTabDoesNotScroll,
   testSubagentRetagDoesNotScroll,

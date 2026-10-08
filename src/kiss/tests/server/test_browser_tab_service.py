@@ -44,9 +44,8 @@ from kiss.server.browser_tab import (
     normalize_url,
 )
 from kiss.server.server import VSCodeServer
+from kiss.tests.conftest import PLAYWRIGHT_CHROMIUM_INSTALLED
 from kiss.tests.server._memory_printer import MemoryPrinter
-
-_PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
 
 
 class ConnPrinter(MemoryPrinter):
@@ -320,7 +319,7 @@ def _evaluate(service: BrowserTabService, tab_id: str, expression: str) -> Any:
     return asyncio.run_coroutine_threadsafe(rec.page.evaluate(expression), service._loop).result(10)
 
 
-@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(not PLAYWRIGHT_CHROMIUM_INSTALLED, reason="Playwright browsers not installed")
 def test_browser_commands_end_to_end(daemon: Any, page_server: str) -> None:
     server, printer = daemon
     service = server.browser_tabs
@@ -440,7 +439,7 @@ def test_browser_commands_end_to_end(daemon: Any, page_server: str) -> None:
     assert len(_events(printer, "openBrowserTab")) == 2  # the pair from the first open only
 
 
-@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(not PLAYWRIGHT_CHROMIUM_INSTALLED, reason="Playwright browsers not installed")
 def test_browser_that_cannot_launch_reports_to_requester(
     daemon: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -460,7 +459,7 @@ def test_browser_that_cannot_launch_reports_to_requester(
     shutil.rmtree(fake.parent, ignore_errors=True)
 
 
-@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(not PLAYWRIGHT_CHROMIUM_INSTALLED, reason="Playwright browsers not installed")
 def test_headed_launch_falls_back_to_headless(
     daemon: Any, monkeypatch: pytest.MonkeyPatch, page_server: str
 ) -> None:
@@ -476,7 +475,7 @@ def test_headed_launch_falls_back_to_headless(
     _wait(lambda: _events(printer, "browserState", tab_id=opened["tab_id"], title="Tall"), "state")
 
 
-@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(not PLAYWRIGHT_CHROMIUM_INSTALLED, reason="Playwright browsers not installed")
 @pytest.mark.skipif(shutil.which("Xvfb") is None, reason="Xvfb not installed")
 def test_headless_environment_runs_a_headed_browser_on_xvfb(
     daemon: Any, monkeypatch: pytest.MonkeyPatch, page_server: str
@@ -521,7 +520,7 @@ def _click_other_options(server: VSCodeServer, tab_id: str) -> None:
         )
 
 
-@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(not PLAYWRIGHT_CHROMIUM_INSTALLED, reason="Playwright browsers not installed")
 @pytest.mark.skipif(shutil.which("Xvfb") is None, reason="Xvfb not installed")
 def test_security_key_prompt_does_not_wedge_the_streamed_tab(
     daemon: Any, monkeypatch: pytest.MonkeyPatch, page_server: str
@@ -551,7 +550,7 @@ def test_security_key_prompt_does_not_wedge_the_streamed_tab(
     )
 
 
-@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(not PLAYWRIGHT_CHROMIUM_INSTALLED, reason="Playwright browsers not installed")
 def test_without_xvfb_the_tab_falls_back_to_masked_headless(
     daemon: Any, monkeypatch: pytest.MonkeyPatch, page_server: str, tmp_path: Path
 ) -> None:
@@ -580,7 +579,7 @@ def test_without_xvfb_the_tab_falls_back_to_masked_headless(
     assert _evaluate(service, tab_id, "typeof window.PublicKeyCredential") == "undefined"
 
 
-@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(not PLAYWRIGHT_CHROMIUM_INSTALLED, reason="Playwright browsers not installed")
 def test_open_for_user_focuses_every_surface_and_reports_failures(
     daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

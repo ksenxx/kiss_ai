@@ -30,16 +30,9 @@ class TestGetAvailableModels:
             for k in env_keys:
                 os.environ.pop(k, None)
             config_module.DEFAULT_CONFIG = config_module.Config()
-            import shutil
-
-            from kiss.core.models.codex_model import find_codex_executable
-
-            if shutil.which("claude") is not None:
-                assert get_default_model() == "cc/opus"
-            elif find_codex_executable() is not None:
-                assert get_default_model() == "codex/default"
-            else:
-                assert get_default_model() == "No model"
+            # The offline fixture reports no authenticated CLI, even if the
+            # developer happens to have a binary on PATH.
+            assert get_default_model() == "No model"
 
             os.environ["TOGETHER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
@@ -50,25 +43,25 @@ class TestGetAvailableModels:
             os.environ["OPENROUTER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             selected = get_default_model()
-            assert selected == "openrouter/anthropic/claude-opus-4.7"
+            assert selected == "openrouter/anthropic/claude-opus-5.5"
             assert selected in MODEL_INFO
 
             os.environ["GEMINI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             selected = get_default_model()
-            assert selected == "gemini-3.6-flash"
+            assert selected == "gemini-3.8-flash"
             assert selected in MODEL_INFO
 
             os.environ["OPENAI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             selected = get_default_model()
-            assert selected == "gpt-5.6-sol-medium"
+            assert selected == "gpt-6.1-sol-medium"
             assert selected in MODEL_INFO
 
             os.environ["ANTHROPIC_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             selected = get_default_model()
-            assert selected == "claude-opus-4-7"
+            assert selected == "claude-opus-5-5"
             assert selected in MODEL_INFO
         finally:
             for k in env_keys:

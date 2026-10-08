@@ -20,7 +20,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,7 +33,6 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.agents.sorcar.shell_guards import destructive_command_guard, lift_install_timeout
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
-from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.models.model import (
     READ_TOOL_BINARY_MIME_TYPES,
     encode_binary_attachment,
@@ -62,43 +61,6 @@ _OUTLINE_HEADING_RE = re.compile(r"^#{1,6}\s+\S")
 _MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".mdx"})
 _OUTLINE_MAX_ENTRIES = 400
 _OUTLINE_MIN_ENTRIES = 5
-
-
-@contextmanager
-def _file_lock(lock_path: Path, blocking: bool = True) -> Any:
-    """Hold an exclusive advisory inter-process lock on *lock_path*.
-
-    Serializes check-then-use sequences on resources shared by every
-    kiss process on the machine — MCP configs and OAuth token stores,
-    the cron job store, and the Chromium profile directory — across
-    daemons, CLI runs, channel-agent processes, and event loops.  A
-    ``threading`` lock cannot do this: the resources live on disk, not
-    in one process.  The lock file itself is created mode ``0600``.
-    The locking primitive is :mod:`kiss.core.file_lock` (``fcntl`` on
-    POSIX, ``msvcrt`` on Windows).
-
-    Args:
-        lock_path: The lock file to hold; parent directories are created.
-        blocking: Whether to wait for the lock.  ``False`` gives up
-            immediately when another process holds it (the cron
-            scheduler's overlapping-tick skip) instead of waiting.
-
-    Yields:
-        ``True`` while the lock is held, or ``None`` when *blocking* is
-        ``False`` and another process holds the lock.
-    """
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    locked = False
-    try:
-        locked = lock_exclusive(descriptor, blocking=blocking)
-        yield True if locked else None
-    finally:
-        try:
-            if locked:
-                unlock(descriptor)
-        finally:
-            os.close(descriptor)
 
 
 def _worktree_index(parts: tuple[str, ...]) -> int | None:
@@ -346,16 +308,25 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
         of running the command, or ``None`` when the command is
         allowed to proceed.
     """
-    if not work_dir:
-        return None
-    checked: set[tuple[str, ...]] = set()
-    for wd_parts in (Path(work_dir).parts, Path(work_dir).resolve().parts):
-        if wd_parts in checked:
-            continue
-        checked.add(wd_parts)
-        err = _parent_repo_guard_for_parts(command, wd_parts)
-        if err is not None:
-            return err
+    for main_repo, wt_root in _worktree_roots(work_dir):
+        pattern = re.escape(main_repo) + rf"(?={_PATH_SEPARATOR_CLASS}|{_PATH_END}|$)"
+        for m in re.finditer(pattern, command, flags=_PATH_RE_FLAGS):
+            end = m.end()
+            while end < len(command) and not re.match(_PATH_END, command[end]):
+                end += 1
+            hit = command[m.start():end]
+            if Path(hit) == Path(wt_root) or Path(hit).is_relative_to(wt_root):
+                continue
+            suggested = rewrite_parent_repo_paths(command, wt_root)
+            return (
+                f"Error: command references the parent-repo path "
+                f"{hit!r}, which is outside the active worktree "
+                f"{wt_root!r}.  Rewrite the command to use the "
+                f"worktree path (or a path relative to it) so the "
+                f"change is captured by the framework's auto-commit "
+                f"and does not mutate the user's main checkout. "
+                f"Suggested command: {suggested[:2000]}"
+            )
     return None
 
 
@@ -394,6 +365,10 @@ def _worktree_roots(work_dir: str | None) -> list[tuple[str, str]]:
 # POSIX stays exact.  Likewise only Windows treats ``\`` as a separator.
 _PATH_RE_FLAGS = re.IGNORECASE if sys.platform == "win32" else 0
 _PATH_SEPARATOR_CLASS = r"[/\\]" if sys.platform == "win32" else "/"
+# Characters that end a path inside a shell command or task text; shared by
+# the parent-repo guard and the rewrite so the two never disagree on where
+# a path stops.
+_PATH_END = r"[\s'\";|&<>()`,:]"
 
 
 def rewrite_parent_repo_paths(text: str, work_dir: str | None) -> str:
@@ -420,7 +395,7 @@ def rewrite_parent_repo_paths(text: str, work_dir: str | None) -> str:
         is not inside a live worktree.
     """
     for main_repo, wt_root in _worktree_roots(work_dir):
-        pattern = re.escape(main_repo) + rf"(?={_PATH_SEPARATOR_CLASS}|[\s'\";|&<>()`,:]|$)"
+        pattern = re.escape(main_repo) + rf"(?={_PATH_SEPARATOR_CLASS}|{_PATH_END}|$)"
         text = re.sub(
             pattern, functools.partial(_swap_root, wt_root=wt_root), text, flags=_PATH_RE_FLAGS
         )
@@ -435,51 +410,6 @@ def _swap_root(match: re.Match[str], wt_root: str) -> str:
     ):
         return match.group(0)
     return wt_root
-
-
-def _parent_repo_guard_for_parts(
-    command: str, wd_parts: tuple[str, ...]
-) -> str | None:
-    """Apply the parent-repo guard for one spelling of the work_dir parts.
-
-    Args:
-        command: The Bash command line the model wants to run.
-        wd_parts: ``Path.parts`` of one spelling (given or resolved) of
-            the agent's working directory.
-
-    Returns:
-        The refusal message, or ``None`` when the command is allowed.
-    """
-    i = _worktree_index(wd_parts)
-    if i is None:
-        return None
-    main_repo = str(Path(*wd_parts[:i]))
-    wt_root = str(Path(*wd_parts[: i + 2]))
-    if not os.path.isdir(wt_root):
-        return None
-    # Git bash on Windows accepts ``C:/repo`` as well as ``C:\repo``, so
-    # the guard matches both separator spellings there (one on POSIX).
-    for spelled in dict.fromkeys((main_repo, main_repo.replace(os.sep, "/"))):
-        pattern = re.escape(spelled) + rf"(?={_PATH_SEPARATOR_CLASS}|[\s'\";|&<>()`]|$)"
-        for m in re.finditer(pattern, command, flags=_PATH_RE_FLAGS):
-            tail_start = m.start()
-            end = tail_start + len(spelled)
-            while end < len(command) and command[end] not in " \t\n'\";|&<>()`":
-                end += 1
-            hit = command[tail_start:end]
-            if Path(hit) == Path(wt_root) or Path(hit).is_relative_to(wt_root):
-                continue
-            suggested = rewrite_parent_repo_paths(command, wt_root)
-            return (
-                f"Error: command references the parent-repo path "
-                f"{hit!r}, which is outside the active worktree "
-                f"{wt_root!r}.  Rewrite the command to use the "
-                f"worktree path (or a path relative to it) so the "
-                f"change is captured by the framework's auto-commit "
-                f"and does not mutate the user's main checkout. "
-                f"Suggested command: {suggested[:2000]}"
-            )
-    return None
 
 
 def _suggest_close_path(resolved: Path) -> str:
@@ -642,6 +572,28 @@ def _format_bash_timeout(output: str, timeout_seconds: float, max_output_chars: 
     return _truncate_output(msg, max_output_chars)
 
 
+def _refuse_or_lift(
+    command: str, work_dir: str | None, timeout_seconds: float,
+) -> tuple[str | None, float]:
+    """Apply the shell guards to *command* and lift its timeout for installs.
+
+    Shared by :meth:`UsefulTools.Bash` and :func:`_run_one_command` so a
+    command is refused, and its deadline raised, identically on both paths.
+
+    Args:
+        command: The shell command the model wants to run.
+        work_dir: The agent's working directory (worktree + destructive guards).
+        timeout_seconds: The caller's deadline.
+
+    Returns:
+        ``(refusal, timeout_seconds)``: the guard's error message (``None``
+        when the command may run) and the possibly lifted deadline.
+    """
+    guard = _bash_parent_repo_guard(command, work_dir) or destructive_command_guard(
+        command, work_dir)
+    return guard, lift_install_timeout(command, timeout_seconds)
+
+
 def _run_one_command(
     command: str, cancel: threading.Event, work_dir: str | None, timeout_seconds: float,
 ) -> tuple[int | None, str, float]:
@@ -658,11 +610,9 @@ def _run_one_command(
         timeout, ``-1`` when the command was refused or failed to
         launch), the combined output, and the wall time spent.
     """
-    guard = _bash_parent_repo_guard(command, work_dir) or destructive_command_guard(
-        command, work_dir)
+    guard, timeout_seconds = _refuse_or_lift(command, work_dir, timeout_seconds)
     if guard is not None:
         return -1, guard, 0.0
-    timeout_seconds = lift_install_timeout(command, timeout_seconds)
     started = time.monotonic()
     try:
         # Stream-less: printers attribute output by thread-local task
@@ -1459,14 +1409,11 @@ class UsefulTools:
         """
         del description
 
-        guard = _bash_parent_repo_guard(command, self.work_dir) or destructive_command_guard(
-            command, self.work_dir)
+        guard, timeout_seconds = _refuse_or_lift(command, self.work_dir, timeout_seconds)
         if guard is not None:
             return guard
-
         if background:
             return self._start_background_job(command)
-        timeout_seconds = lift_install_timeout(command, timeout_seconds)
 
         if self.stream_callback:
             # Contract (see test_bash_background_pipe_hang): an exception
@@ -1698,9 +1645,9 @@ class UsefulTools:
             self._start_stop_monitor(process, done)
             reader.start()
             interrupt = tool_interrupt.current_tool_interrupt_event()
+            deadline = time.monotonic() + timeout_seconds
             eof = self._consume_stream(
-                out_queue, chunks, time.monotonic() + timeout_seconds,
-                stop=self.stop_event, interrupt=interrupt,
+                out_queue, chunks, deadline, stop=self.stop_event, interrupt=interrupt,
             )
             if not eof:
                 # A stop is not a timeout: the shell is killed (the
@@ -1722,15 +1669,16 @@ class UsefulTools:
                 )
                 if not eof:
                     abandoned.set()
-                    if timed_out:
-                        try:
-                            process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:  # pragma: no cover
-                            pass
             else:
+                # EOF only says every writer closed the pipe: a shell that
+                # redirects its own stdout away (``exec >log 2>&1; …``) is
+                # still running, so wait for it until the caller's
+                # deadline — expiry there is a genuine timeout, and a stop
+                # ends the wait through the monitor's group kill.
                 try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:  # pragma: no cover
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    timed_out = True
                     _kill_process_group(process)
         except BaseException:
             # The reader thread outlives this frame: in discard mode it

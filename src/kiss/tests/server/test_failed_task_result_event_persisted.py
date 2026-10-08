@@ -39,11 +39,15 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.web_server import Payload, WebPrinter
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 class _CapturingWebPrinter(WebPrinter):

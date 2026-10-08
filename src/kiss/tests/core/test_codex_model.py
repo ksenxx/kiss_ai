@@ -39,7 +39,7 @@ class TestUnsupportedMethods:
 
 @requires_codex_cli
 @pytest.mark.slow
-@pytest.mark.live_cli
+@pytest.mark.live_cli("codex")
 class TestGenerateIntegration:
     """Integration tests that actually call the codex CLI."""
 

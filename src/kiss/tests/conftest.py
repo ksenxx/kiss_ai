@@ -60,10 +60,22 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence as _th
+from kiss.core import config as _config
 from kiss.core import stop_signal, vscode_config
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
 from kiss.tests import subprocess_reaper
+
+
+def _playwright_chromium_installed() -> bool:
+    """Use Playwright's own path so browser tests run on every host platform."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        return Path(playwright.chromium.executable_path).is_file()
+
+
+PLAYWRIGHT_CHROMIUM_INSTALLED = _playwright_chromium_installed()
 
 # Generous: a sweep only walks the sentinel rows of one temporary
 # database, so it finishes in milliseconds unless the machine is badly
@@ -91,15 +103,48 @@ def offline_cli_connections(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
     """Never inspect a developer's real CLI authentication in automated tests."""
-    if request.node.get_closest_marker("live_cli") is not None:
+    from kiss.core.models import cli_connections
+
+    live = request.node.get_closest_marker("live_cli")
+    if live is not None:
+        if live.args:
+            connection = cli_connections.get_cli_connection(live.args[0], mode="subscription")
+            if connection.status != "connected":
+                pytest.skip(connection.message)
         yield
         return
-    from kiss.core.models import cli_connections
 
     cli_connections._CACHE.clear()
     monkeypatch.setattr(cli_connections, "_executable", lambda provider: None)
     yield
     cli_connections._CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def stubbed_agent_model(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admit deterministic server runs whose model execution is replaced by a stub.
+
+    These tests exercise task lifecycle and git operations, not account admission.
+    Supply an explicit model catalog without inspecting real credentials or CLIs.
+    """
+    if not any(
+        "stubbed_agent_model" in marker.args
+        for marker in request.node.iter_markers("usefixtures")
+    ):
+        return
+    from kiss.core.models import model_info
+    from kiss.server import server, task_runner
+
+    name = "claude-opus-5-5"
+    providers = {model_info.get_model_provider(name): True for name in model_info.MODEL_INFO}
+    monkeypatch.setattr(model_info, "_configured_providers", lambda: providers)
+    monkeypatch.setattr(model_info, "get_default_model", lambda: name)
+    monkeypatch.setattr(model_info, "get_available_models", lambda: list(model_info.MODEL_INFO))
+    monkeypatch.setattr(server, "get_default_model", lambda: name)
+    monkeypatch.setattr(task_runner, "get_default_model", lambda: name)
+    monkeypatch.setattr(task_runner, "get_available_models", lambda: list(model_info.MODEL_INFO))
 
 
 def _seed_voice_models(test_home: str, real_home: Path) -> None:
@@ -445,6 +490,15 @@ os._exit(code)
 """
 
 
+def install_named_interpreter(path: Path) -> None:
+    """Install Python under a process basename retained by the host platform."""
+    if sys.platform == "darwin":
+        runtime = Path(sys.base_prefix) / "Resources/Python.app/Contents/MacOS/Python"
+        shutil.copy(runtime if runtime.is_file() else sys.executable, path)
+    else:
+        path.symlink_to(sys.executable)
+
+
 def install_fake_cloudflared(directory: Path, body: str) -> Path:
     """Install a fake ``cloudflared`` executable running the Python *body*.
 
@@ -455,7 +509,7 @@ def install_fake_cloudflared(directory: Path, body: str) -> Path:
     script is not: macOS ``ps -o comm=`` reports the *interpreter* for
     a shebang script (Linux reports the script), and Windows cannot run
     one at all.  So the fake is the interpreter itself under the name
-    ``cloudflared``: a symlink to it on POSIX (the kernel names the
+    ``cloudflared``: a copy on macOS, a symlink on Linux (the kernel names the
     process after the exec'd path), and on Windows -- where the kernel
     reports a symlink's *target* as the image path and a ``.cmd`` shim
     would make the visible process ``cmd.exe`` -- a copy of the base
@@ -479,6 +533,11 @@ def install_fake_cloudflared(directory: Path, body: str) -> Path:
         Path of the executable (``cloudflared`` or ``cloudflared.exe``).
     """
     base = Path(getattr(sys, "_base_executable", sys.executable))
+    framework_runtime = Path(sys.base_prefix) / "Resources/Python.app/Contents/MacOS/Python"
+    if sys.platform == "darwin" and framework_runtime.is_file():
+        # Homebrew's bin/python launcher execs the framework runtime; copying
+        # the launcher would still replace the intended process name.
+        base = framework_runtime
     if IS_WINDOWS:
         fake = directory / "cloudflared.exe"
         shutil.copy2(base, fake)
@@ -488,7 +547,10 @@ def install_fake_cloudflared(directory: Path, body: str) -> Path:
     else:
         fake = directory / "cloudflared"
         fake.unlink(missing_ok=True)
-        fake.symlink_to(base)
+        if sys.platform == "darwin":
+            shutil.copy(base, fake)
+        else:
+            fake.symlink_to(base)
         base_vars = {"base": sys.base_prefix, "platbase": sys.base_exec_prefix}
         stdlib_dirs = [
             Path(sysconfig.get_path("stdlib", vars=base_vars)),
@@ -920,6 +982,17 @@ def _isolated_shared_config() -> Iterator[None]:
         for name in override_names
         if name in module_dict
     }
+    # Loading a test's key store also mutates os.environ and the shared config
+    # object. Restore both so fake credentials cannot admit later live tests.
+    saved_credentials = {
+        name: os.environ.get(name) for name in vscode_config.API_KEY_ENV_VARS
+    }
+    shared_config = _config.DEFAULT_CONFIG
+    saved_config_keys = {
+        name: getattr(shared_config, name)
+        for name in vscode_config.API_KEY_ENV_VARS
+        if hasattr(shared_config, name)
+    }
     # api_keys.env is the canonical API-key store, written by
     # ``save_api_key`` and the legacy-RC key migration inside
     # ``load_api_keys``.  Like ``config.json`` it lives in the
@@ -937,6 +1010,14 @@ def _isolated_shared_config() -> Iterator[None]:
         except OSError:
             saved_contents[shared] = None
     yield
+    for name, value in saved_credentials.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+    for name, value in saved_config_keys.items():
+        setattr(shared_config, name, value)
+    _config.DEFAULT_CONFIG = shared_config
     for name in override_names:
         if name in saved_overrides:
             setattr(vscode_config, name, saved_overrides[name])

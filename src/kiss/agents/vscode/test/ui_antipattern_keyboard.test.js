@@ -6,9 +6,9 @@
 // End-to-end (jsdom) tests for anti-pattern fixes A5/A7/A15 in
 // media/main.js: the custom tooltip opens on keyboard focus (and closes
 // on blur / Escape) with role="tooltip"; toolbar buttons keep focus after
-// a keyboard-originated click; collapsible transcript panel headers and
-// the thinking block's header are focusable buttons toggled by Enter /
-// Space with aria-expanded kept in sync.
+// a keyboard-originated click; collapsible transcript panel headers are
+// focusable buttons toggled by Enter / Space with aria-expanded kept in
+// sync (the thinking text inside a Thoughts panel has no header of its own).
 'use strict';
 
 const assert = require('assert');
@@ -147,8 +147,12 @@ async function main() {
     );
     // Only the header itself answers Enter / Space: a key pressed on a
     // focusable child (a button placed in the header) must be its own.
-    const inner = header.querySelector('.collapse-chv');
-    assert.ok(inner, 'the header carries a chevron');
+    assert.ok(
+      !header.querySelector('.collapse-chv'),
+      'the header carries no chevron',
+    );
+    const inner = header.querySelector('.collapse-preview');
+    assert.ok(inner, 'the header carries the collapse preview');
     h.key(win, inner, 'Enter');
     assert.strictEqual(
       panel.classList.contains('collapsed'),
@@ -185,7 +189,9 @@ async function main() {
     win.close();
   });
 
-  await test('the thinking header is a keyboard-operable button', () => {
+  await test('the thinking text has no header of its own to operate', () => {
+    // Thinking tokens are plain text inside the Thoughts panel; the
+    // panel's own header (tested above) is the one disclosure control.
     const {win} = h.makeWebview();
     const tab = startRun(win);
     stream(win, tab, [
@@ -193,25 +199,13 @@ async function main() {
       {type: 'thinking_delta', text: 'pondering'},
       {type: 'thinking_end'},
     ]);
-    const lbl = win.document.querySelector('.ev.think > .lbl');
-    assert.ok(lbl, 'the thinking block rendered its header');
-    const cnt = lbl.parentElement.querySelector('.cnt');
-    assert.strictEqual(lbl.getAttribute('tabindex'), '0');
-    assert.strictEqual(lbl.getAttribute('role'), 'button');
-    assert.strictEqual(lbl.getAttribute('aria-expanded'), 'true');
-    assert.ok(!cnt.classList.contains('hidden'));
-    h.key(win, lbl, 'Enter');
-    assert.ok(cnt.classList.contains('hidden'), 'Enter folds the thoughts');
-    assert.strictEqual(lbl.getAttribute('aria-expanded'), 'false');
-    assert.ok(lbl.querySelector('.arrow').classList.contains('collapsed'));
-    h.key(win, lbl, ' ');
-    assert.ok(!cnt.classList.contains('hidden'), 'Space unfolds them');
-    assert.strictEqual(lbl.getAttribute('aria-expanded'), 'true');
-    // A click still toggles exactly once (the delegated handler yields
-    // to a live inline one).
-    h.click(win, lbl);
-    assert.ok(cnt.classList.contains('hidden'), 'a click folds once');
-    assert.strictEqual(lbl.getAttribute('aria-expanded'), 'false');
+    const think = win.document.querySelector('.llm-panel > .think');
+    assert.ok(think, 'the thinking text block rendered inside the Thoughts panel');
+    assert.strictEqual(think.textContent, 'pondering');
+    assert.ok(!think.querySelector('[role="button"]'), 'no button inside the thinking text');
+    assert.ok(!win.document.querySelector('.think .lbl'), 'no "Thinking" header');
+    const hdr = think.parentElement.querySelector(':scope > .llm-panel-hdr');
+    assert.strictEqual(hdr.getAttribute('role'), 'button', "the Thoughts header is the control");
     win.close();
   });
 

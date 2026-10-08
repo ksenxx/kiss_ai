@@ -10,17 +10,17 @@ against it.  The only replaced boundary is the LLM itself: the
 per-session executor's :meth:`kiss.core.kiss_agent.KISSAgent.run` is
 swapped for a stub that records the ``tools`` it was handed, so the
 daemon's full run pipeline — ``run`` command dispatch → worker thread →
-agent-script overrides → ``WorktreeSorcarAgent.run`` →
+SEA overrides → ``WorktreeSorcarAgent.run`` →
 ``SorcarAgent.perform_task`` tool assembly →
 ``RelentlessAgent.perform_task``'s ``finish`` prepend — executes for
 real without any model API calls.
 
-Contract under test: without an agent script, or with one defining
+Contract under test: without a SEA, or with one defining
 ``tools()``, the agent gets the built-in basic toolset (plus the
 script's tools); with a script whose ``settings()`` picks the ``none``
 tool profile the agent's ONLY tools are ``finish`` and the tools its
 ``tools()`` returned.  Extra tools reach the agent through the
-agent script alone: the ``run`` command has no tools or
+SEA alone: the ``run`` command has no tools or
 append-basic-tools wire field, and a client sending either anyway is
 ignored.
 """
@@ -47,7 +47,7 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.server.test_agent_path import _init_repo
+from kiss.tests.server.test_sea_path import _init_repo
 
 
 class DaemonRunApiHarness(unittest.TestCase):
@@ -206,7 +206,7 @@ class DaemonRunApiHarness(unittest.TestCase):
                 ``trajectory_path``), the call's ``system_prompt``,
                 and the ``llm_call_hook`` / ``tool_call_hook``
                 callables handed to the session (``None`` when the
-                run carries no agent-script hook).
+                run carries no SEA hook).
             fail_first_executor: When True, the FIRST task-executor
                 session raises a retryable :class:`KISSError` after
                 two steps, driving ``RelentlessAgent.perform_task``
@@ -401,7 +401,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with basic tools",
             work_dir=self.repo,
-            extension_agent_path=self._write_tools_agent(),
+            sea_path=self._write_tools_agent(),
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -431,7 +431,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with only script tools",
             work_dir=self.repo,
-            extension_agent_path=self._write_tools_agent(only_script_tools=True),
+            sea_path=self._write_tools_agent(only_script_tools=True),
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -446,7 +446,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with no tools at all",
             work_dir=self.repo,
-            extension_agent_path=self._write_tools_agent("[]", only_script_tools=True),
+            sea_path=self._write_tools_agent("[]", only_script_tools=True),
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -460,10 +460,10 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         The executor sees exactly ``finish`` and the script's tool — no
         basic tool, whatever the script also defines at top level.
         """
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "own_tools_agent.py",
             '''
-            """Agent script whose tools() is the whole tool set."""
+            """SEA whose tools() is the whole tool set."""
 
             from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -495,7 +495,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "script strips basic tools",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -509,10 +509,10 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         The executor sees Bash/Read/... plus ``finish`` and the
         script's tool.
         """
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "add_tools_agent.py",
             '''
-            """Agent script adding a tool to the basic toolset."""
+            """SEA adding a tool to the basic toolset."""
 
             from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -535,7 +535,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "script adds to basic tools",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -548,7 +548,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
     def test_agent_script_tools_path_fails_task(self) -> None:
         """A ``tools()`` returning a file path stops the task loudly."""
         other_script = self._write_tools_agent()
-        agent_path = self._write_py(
+        sea_path = self._write_py(
             "path_tools_agent.py",
             f'''
             """SEA with a path-returning tools()."""
@@ -567,7 +567,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "script with broken tools()",
             work_dir=self.repo,
-            extension_agent_path=agent_path,
+            sea_path=sea_path,
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -581,7 +581,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         persisted = {
             row["id"]: str(row["result"]) for row in _persistence._load_history()
         }
-        assert "tools() of agent script" in persisted[result.task_id]
+        assert "tools() of SEA" in persisted[result.task_id]
         assert "list of tool callables" in persisted[result.task_id]
 
     def test_restricted_failure_skips_summarizer(self) -> None:
@@ -598,7 +598,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "restricted task whose first session fails",
             work_dir=self.repo,
-            extension_agent_path=self._write_tools_agent("[]", only_script_tools=True),
+            sea_path=self._write_tools_agent("[]", only_script_tools=True),
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -617,7 +617,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
     def test_default_failure_uses_summarizer(self) -> None:
         """The default (basic-tools) failure path keeps its summarizer.
 
-        Counterpart of the restricted test above: with no agent script
+        Counterpart of the restricted test above: with no SEA
         restricting the toolset, the failed first sub-session is
         followed by the Read/Bash-equipped trajectory summarizer before
         the second sub-session continues.
@@ -656,7 +656,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
     def test_client_sent_wire_fields_are_ignored(self) -> None:
         """``appendBasicTools`` / ``toolsHook`` sent by a client are ignored.
 
-        Both are daemon-side fields staged by the agent-script loader,
+        Both are daemon-side fields staged by the SEA loader,
         never wire input: a raw command carrying ``appendBasicTools``
         (a bool ``False`` or a string ``"false"``) or a ``toolsHook`` JSON
         value keeps the full toolset instead of stripping tools or

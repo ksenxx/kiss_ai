@@ -36,10 +36,14 @@ import threading
 import time
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _clear_registry() -> None:
@@ -84,10 +88,9 @@ class _RecordingModel:
 
 
 def _make_drain_agent(printer: Any = None) -> SorcarAgent:
-    """Bare ``SorcarAgent`` carrying only what the drain hook reads."""
-    agent = SorcarAgent.__new__(SorcarAgent)
-    if printer is not None:
-        agent.printer = printer
+    """A ``SorcarAgent`` whose printer is *printer* (``None`` = no bridge)."""
+    agent = SorcarAgent("drain")
+    agent.printer = printer
     return agent
 
 
@@ -135,9 +138,11 @@ class TestAppendUserMessageHandler:
             "follow up A", "follow up B",
         ]
         echoes = [e for e in events if e.get("type") == "prompt"]
+        # ``steer`` marks the echo as a message typed into a running
+        # task, which the chat webview shows like the task panel.
         assert echoes == [
-            {"type": "prompt", "text": "follow up A", "tabId": "tab-1"},
-            {"type": "prompt", "text": "follow up B", "tabId": "tab-1"},
+            {"type": "prompt", "text": "follow up A", "tabId": "tab-1", "steer": True},
+            {"type": "prompt", "text": "follow up B", "tabId": "tab-1", "steer": True},
         ]
 
     def test_dropped_when_no_live_task(self) -> None:

@@ -46,10 +46,14 @@ import time
 from typing import Any, cast
 from unittest import TestCase
 
+import pytest
+
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 _LOCK_RELEASED_AT = 2.5  # after the watchdog's 1 s injection, before its 5 s retry
 

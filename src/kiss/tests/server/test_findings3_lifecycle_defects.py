@@ -58,11 +58,15 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer, _subagent_is_done
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -270,12 +274,12 @@ class TestSubagentDoneConsistency(unittest.TestCase):
     def test_reattach_and_done_never_contradict(self) -> None:
         """The exact audit contradiction: reattached AND reported done."""
         self._install_state(active=True, thread_alive=False)
-        reattached = self.server._reattach_running_chat(
+        reattached = self.server._attach_viewer_to_running_chat(
             "s309-chat",
             "s309-viewer-tab",
             task_id=self.task_id,
             is_subagent=True,
-        )
+        )[0] is not None
         self.assertTrue(reattached)
         self.assertFalse(
             _subagent_is_done(self.task_id),

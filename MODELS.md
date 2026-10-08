@@ -1,25 +1,25 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **715 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **778 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 112 |
-| Anthropic | 16 |
+| Anthropic | 76 |
 | Gemini | 20 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 420 |
-| Claude Code CLI (`cc/*`) | 16 |
+| OpenRouter | 422 |
+| Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **691** generation-capable models
-- **528** function-calling-capable models
+- **752** generation-capable models
+- **590** function-calling-capable models
 - **7** embedding models
-- **9** decision models
+- **11** decision models
 
 CLI entries have no API per-token price in the catalog. This does not mean unlimited or free usage: the picker shows Subscription, possible usage credits, or existing CLI billing instead. See [model setup](README.md#configure-model-access) for login and billing controls. To check documentation offline, run `uv run python -m kiss.scripts.update_models --check-docs`; use `--sync-docs` to regenerate totals and lists without contacting providers.
 
@@ -144,24 +144,84 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Anthropic (16)</strong></summary>
+<summary><strong>Anthropic (76)</strong></summary>
 
 - `claude-fable-5`
 - `claude-fable-5-1`
+- `claude-fable-5-1-high`
+- `claude-fable-5-1-low`
+- `claude-fable-5-1-max`
+- `claude-fable-5-1-medium`
+- `claude-fable-5-1-xhigh`
+- `claude-fable-5-high`
+- `claude-fable-5-low`
+- `claude-fable-5-max`
+- `claude-fable-5-medium`
+- `claude-fable-5-xhigh`
 - `claude-haiku-4-5`
 - `claude-haiku-4-5-20251001`
+- `claude-haiku-5-5`
+- `claude-haiku-5-5-high`
+- `claude-haiku-5-5-low`
+- `claude-haiku-5-5-max`
+- `claude-haiku-5-5-medium`
+- `claude-haiku-5-5-xhigh`
 - `claude-opus-4-5`
 - `claude-opus-4-5-20251101`
+- `claude-opus-4-5-20251101-high`
+- `claude-opus-4-5-20251101-low`
+- `claude-opus-4-5-20251101-medium`
+- `claude-opus-4-5-high`
+- `claude-opus-4-5-low`
+- `claude-opus-4-5-medium`
 - `claude-opus-4-6`
+- `claude-opus-4-6-high`
+- `claude-opus-4-6-low`
+- `claude-opus-4-6-max`
+- `claude-opus-4-6-medium`
 - `claude-opus-4-7`
+- `claude-opus-4-7-high`
+- `claude-opus-4-7-low`
+- `claude-opus-4-7-max`
+- `claude-opus-4-7-medium`
+- `claude-opus-4-7-xhigh`
 - `claude-opus-4-8`
+- `claude-opus-4-8-high`
+- `claude-opus-4-8-low`
+- `claude-opus-4-8-max`
+- `claude-opus-4-8-medium`
+- `claude-opus-4-8-xhigh`
 - `claude-opus-5`
 - `claude-opus-5-5`
+- `claude-opus-5-5-high`
+- `claude-opus-5-5-low`
+- `claude-opus-5-5-max`
+- `claude-opus-5-5-medium`
+- `claude-opus-5-5-xhigh`
+- `claude-opus-5-high`
+- `claude-opus-5-low`
+- `claude-opus-5-max`
+- `claude-opus-5-medium`
+- `claude-opus-5-xhigh`
 - `claude-sonnet-4-5`
 - `claude-sonnet-4-5-20250929`
 - `claude-sonnet-4-6`
+- `claude-sonnet-4-6-high`
+- `claude-sonnet-4-6-low`
+- `claude-sonnet-4-6-max`
+- `claude-sonnet-4-6-medium`
 - `claude-sonnet-5`
 - `claude-sonnet-5-5`
+- `claude-sonnet-5-5-high`
+- `claude-sonnet-5-5-low`
+- `claude-sonnet-5-5-max`
+- `claude-sonnet-5-5-medium`
+- `claude-sonnet-5-5-xhigh`
+- `claude-sonnet-5-high`
+- `claude-sonnet-5-low`
+- `claude-sonnet-5-max`
+- `claude-sonnet-5-medium`
+- `claude-sonnet-5-xhigh`
 
 </details>
 
@@ -331,7 +391,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (420)</strong></summary>
+<summary><strong>OpenRouter (422)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -349,6 +409,7 @@ Full model list:
 - `openrouter/anthropic/claude-fable-5`
 - `openrouter/anthropic/claude-fable-5.1`
 - `openrouter/anthropic/claude-haiku-4.5`
+- `openrouter/anthropic/claude-haiku-5.5`
 - `openrouter/anthropic/claude-opus-4.1`
 - `openrouter/anthropic/claude-opus-4.5`
 - `openrouter/anthropic/claude-opus-4.6`
@@ -362,7 +423,6 @@ Full model list:
 - `openrouter/anthropic/claude-sonnet-5`
 - `openrouter/anthropic/claude-sonnet-5.5`
 - `openrouter/arcee-ai/trinity-large-thinking`
-- `openrouter/baidu/ernie-4.5-vl-424b-a47b`
 - `openrouter/bytedance-seed/seed-1.6`
 - `openrouter/bytedance-seed/seed-1.6-flash`
 - `openrouter/bytedance-seed/seed-2-1-turbo`
@@ -432,7 +492,6 @@ Full model list:
 - `openrouter/inference-net/schematron-v2-small`
 - `openrouter/inference-net/schematron-v2-turbo`
 - `openrouter/jaredpalmer/kev-4b`
-- `openrouter/kwaipilot/kat-coder-pro-v2.5`
 - `openrouter/liquid/d1`
 - `openrouter/mancer/weaver`
 - `openrouter/meituan/longcat-2.0`
@@ -458,6 +517,7 @@ Full model list:
 - `openrouter/mistralai/mistral-large`
 - `openrouter/mistralai/mistral-large-2407`
 - `openrouter/mistralai/mistral-large-2512`
+- `openrouter/mistralai/mistral-large-4-0`
 - `openrouter/mistralai/mistral-medium-3`
 - `openrouter/mistralai/mistral-medium-3-5`
 - `openrouter/mistralai/mistral-medium-3.1`
@@ -545,6 +605,7 @@ Full model list:
 - `openrouter/openai/gpt-6-astra-medium`
 - `openrouter/openai/gpt-6-astra-xhigh`
 - `openrouter/openai/gpt-6-luna`
+- `openrouter/openai/gpt-6-luna-decisions`
 - `openrouter/openai/gpt-6-luna-high`
 - `openrouter/openai/gpt-6-luna-low`
 - `openrouter/openai/gpt-6-luna-medium`
@@ -585,7 +646,7 @@ Full model list:
 - `openrouter/openai/o4-mini-high`
 - `openrouter/perceptron/perceptron-mk1`
 - `openrouter/perceptron/perceptron-mk1.5`
-- `openrouter/perplexity/pplx-decider-v1-27b`
+- `openrouter/perplexity/pplx-decider-v1.1-27b`
 - `openrouter/perplexity/sonar`
 - `openrouter/perplexity/sonar-deep-research`
 - `openrouter/perplexity/sonar-pro`
@@ -617,7 +678,6 @@ Full model list:
 - `openrouter/qwen/qwen3-coder-plus`
 - `openrouter/qwen/qwen3-max`
 - `openrouter/qwen/qwen3-max-thinking`
-- `openrouter/qwen/qwen3-next-80b-a3b-instruct`
 - `openrouter/qwen/qwen3-next-80b-a3b-thinking`
 - `openrouter/qwen/qwen3-vl-235b-a22b-instruct`
 - `openrouter/qwen/qwen3-vl-235b-a22b-thinking`
@@ -660,6 +720,7 @@ Full model list:
 - `openrouter/sao10k/l3.3-euryale-70b`
 - `openrouter/stepfun/step-3.5-flash`
 - `openrouter/stepfun/step-3.7-flash`
+- `openrouter/stepfun/step-5-preview`
 - `openrouter/tencent/hunyuan-a13b-instruct`
 - `openrouter/tencent/hy-mt2-1.8b`
 - `openrouter/tencent/hy-mt2-30b-a3b`
@@ -678,6 +739,7 @@ Full model list:
 - `openrouter/unbiased/pareto-26.10-preview`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-decide`
+- `openrouter/upstage/solar-decide-flash`
 - `openrouter/upstage/solar-mini4`
 - `openrouter/upstage/solar-pro-3`
 - `openrouter/upstage/solar-pro4`
@@ -757,11 +819,12 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Claude Code CLI (cc/*) (16)</strong></summary>
+<summary><strong>Claude Code CLI (cc/*) (17)</strong></summary>
 
 - `cc/claude-fable-5`
 - `cc/claude-fable-5-1`
 - `cc/claude-haiku-4-5-20251001`
+- `cc/claude-haiku-5-5`
 - `cc/claude-opus-4-5-20251101`
 - `cc/claude-opus-4-6`
 - `cc/claude-opus-4-7`

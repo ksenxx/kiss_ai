@@ -48,6 +48,7 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml
 
 import kiss.agents.sorcar.persistence as th
@@ -60,6 +61,8 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _redirect_db(tmpdir: str) -> tuple:

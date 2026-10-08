@@ -30,7 +30,7 @@ requires_claude = pytest.mark.skipif(
 
 
 @requires_claude
-@pytest.mark.live_cli
+@pytest.mark.live_cli("claude")
 class TestCCAgenticLive:
     """Live agentic runs against the real claude CLI."""
 

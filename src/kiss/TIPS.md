@@ -36,7 +36,7 @@ Any SEA whose `register_as_model()` returns `True` appears in the model picker t
 
 ## Sorcar Extension Agents (SEAs)
 
-A **Sorcar Extension Agent (SEA)** is a plain Python file that defines a complete custom agent: its top-level `X()` functions — named after `sorcar.run()`'s parameters — compute the run's task prompt, system prompt, model, budget, tools, and safety hooks. Pass the file's path as `extension_agent_path` to `sorcar.run()` and the daemon imports it on every run. All third-party agents, such as the Slack and Gmail agents, are implemented in {{PRODUCT_NAME}} as SEAs. See the "Sorcar Extension Agents (SEAs)" section in `README.md` for a full example, and the detailed SEA guide at <https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md>.
+A **Sorcar Extension Agent (SEA)** is a Python file that defines one `BaseSea` subclass, a complete custom agent: its methods (`settings`, `prompt`, `system_prompt`, `tools` and the two call hooks) compute the run's settings, task prompt, system prompt, model, budget, tools, and safety hooks. Pass the file's path as `sea_path` to `sorcar.run()` and the daemon executes it on every run. All third-party agents, such as the Slack and Gmail agents, are implemented in {{PRODUCT_NAME}} as SEAs. See the "Sorcar Extension Agents (SEAs)" section in `README.md` for a full example, and the detailed SEA guide at <https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md>.
 
 # Tip
 
@@ -127,7 +127,7 @@ print(result.text, result.success, result.cost)
 sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-Extra tools come from a Sorcar Extension Agent: pass `extension_agent_path="/path/to/my_agent.py"`, a Python file whose `BaseSea` subclass defines `tools(self, tools)` returning `tools + [the extra tool functions]`.
+Extra tools come from a Sorcar Extension Agent: pass `sea_path="/path/to/my_agent.py"`, a Python file whose `BaseSea` subclass defines `tools(self, tools)` returning `tools + [the extra tool functions]`.
 
 # Tip
 

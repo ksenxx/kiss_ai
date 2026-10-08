@@ -23,7 +23,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -42,7 +42,7 @@ _config = ChannelConfig(_TELEGRAM_DIR, ("bot_token",))
 _DEFAULT_API_BASE = "https://api.telegram.org"
 
 
-class TelegramSea(BaseSea):
+class TelegramSea(ChannelSea):
     """The ``/telegram`` SEA."""
 
     def description(self) -> str:
@@ -60,20 +60,11 @@ class TelegramSea(BaseSea):
         """Return the Telegram channel tools (the SEA ``tools`` method).
 
         Called by the kiss-web daemon when this module's path is passed as
-        the API's ``extension_agent_path``: builds a fresh agent from the
+        the API's ``sea_path``: builds a fresh agent from the
         credentials persisted under ``$KISS_HOME`` and returns its
         authentication and backend tools.
         """
         return tools + TelegramAgent()._get_tools()
-
-    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-        No git lifecycle, nothing inherited from the calling task, the
-        channel preamble in the system prompt (see
-        :mod:`kiss.agents.sorcar.sea_settings`).
-        """
-        return settings | {"kind": "channel"}
 
 
 def _raw_config() -> dict[str, Any]:

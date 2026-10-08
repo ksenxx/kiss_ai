@@ -5,7 +5,7 @@
 """End-to-end tests for dispatch hygiene (WP7 of the cost levers).
 
 * parent-repo paths in sub-agent task text are rewritten to the active
-  worktree at dispatch (fan-out engine and ``run_agent`` path mode);
+  worktree at dispatch (``run_agent`` / ``run_parallel``);
 * the Bash guard's refusal suggests the rewritten command;
 * ``run_agent`` with a generic name runs the plain sub-agent; a
   misspelled name gets a useful hint.
@@ -17,7 +17,6 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import sorcar_agent as sa
 from kiss.agents.sorcar.agent_dispatch import (
     DEFAULT_AGENT_PATH,
     _run_agent,
@@ -29,8 +28,6 @@ from kiss.agents.sorcar.useful_tools import (
     _bash_parent_repo_guard,
     rewrite_parent_repo_paths,
 )
-from kiss.core.config import DEFAULT_CONFIG
-from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
 
 
 @pytest.fixture
@@ -78,31 +75,6 @@ class TestRewrite:
         assert not (Path(repo) / "note.txt").exists()
 
 
-def test_fanout_rewrites_child_task_text(worktree, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo, wt = worktree
-    script = [finish_body("<p>ok</p>", prompt_tokens=500)]
-    with serve(script) as (url, requests):
-        sa.run_tasks_parallel(
-            [f"Summarize {repo}/src/a.py"],
-            model_name=MODEL, work_dir=wt, max_budget=1.0,
-            model_config={"base_url": url, "api_key": "local"},
-            web_tools=False, use_memory=False,
-        )
-    prompt = requests[0]["messages"][-1]["content"]
-    assert f"Summarize {wt}/src/a.py" in prompt
-    assert f"Summarize {repo}/src/a.py" not in prompt
-
-    monkeypatch.setattr(DEFAULT_CONFIG, "dispatch_path_rewrite", False)
-    with serve(script) as (url, requests):
-        sa.run_tasks_parallel(
-            [f"Summarize {repo}/src/a.py"],
-            model_name=MODEL, work_dir=wt, max_budget=1.0,
-            model_config={"base_url": url, "api_key": "local"},
-            web_tools=False, use_memory=False,
-        )
-    assert f"Summarize {repo}/src/a.py" in requests[0]["messages"][-1]["content"]
-
-
 class TestUnknownAgentHints:
     def test_generic_name_runs_the_plain_sub_agent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -134,7 +106,7 @@ class TestUnknownAgentHints:
             out = _run_agent("", "review it", name)
             assert out.startswith(f"Error: {name!r} is not an agent.")
             assert 'pass tool_profile="review"' in out
-        # ``worker`` is a kind, not a generic label: naming it is the usual error.
+        # ``worker`` is a base class, not a generic label: naming it is the usual error.
         for name in ("worker", "subagent", "helper"):
             assert str(resolve_agent(name, "")).startswith(f"Error: unknown agent '{name}'")
 

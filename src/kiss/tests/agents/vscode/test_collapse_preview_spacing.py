@@ -211,12 +211,7 @@ function buildPanel(bodyChildren) {
     hdr.textContent = 'Bash';
     panel.appendChild(hdr);
 
-    // Add collapse infrastructure: chevron and preview on header
-    var chv = mkTestEl('span');
-    chv.classList.add('collapse-chv');
-    chv.textContent = '\u25BE';
-    hdr.insertBefore(chv, hdr.firstChild);
-
+    // Add collapse infrastructure: the preview on the header
     var prev = mkTestEl('span');
     prev.classList.add('collapse-preview');
     hdr.appendChild(prev);
@@ -255,12 +250,18 @@ def _build_test_script(body_children_json: str, collapse: bool = True) -> str:
     collapse_fn = _extract_function(source, "collapsePreview")
     sync_aria_fn = _extract_function(source, "syncCollapseAria")
     mkel_fn = _extract_function(source, "mkEl")
+    brief_fn = _extract_function(source, "briefPreviewText")
+    # collapsePreview computes the text (collapsePreviewText) and writes
+    # it into the preview span.
+    preview_text_fn = _extract_function(source, "collapsePreviewText")
 
     script = _NODE_SHIM + "\n"
     script += "var document = { createElement: mkTestEl };\n"
     script += mkel_fn + "\n"
     script += collect_fn + "\n"
     script += sync_aria_fn + "\n"
+    script += brief_fn + "\n"
+    script += preview_text_fn + "\n"
     script += collapse_fn + "\n"
     script += f"var bodyChildren = {body_children_json};\n"
     script += "var panel = buildPanel(bodyChildren);\n"
@@ -281,13 +282,14 @@ class TestCollapsePreviewSpacingStructural(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = _MAIN_JS.read_text()
-        cls.fn_source = _extract_function(cls.source, "collapsePreview")
+        cls.fn_source = _extract_function(cls.source, "collapsePreviewText")
 
     def test_uses_collect_text_not_inner_text(self) -> None:
-        """collapsePreview must use collectText (or equivalent) instead of ch.innerText."""
+        """collapsePreviewText must use collectText (or equivalent) instead of ch.innerText."""
         assert "ch.innerText" not in self.fn_source, (
-            "collapsePreview still uses ch.innerText which fails on hidden elements"
+            "collapsePreviewText still uses ch.innerText which fails on hidden elements"
         )
+        assert "collectText(" in self.fn_source
 
     def test_collect_text_function_exists(self) -> None:
         """A collectText helper function must exist in main.js."""

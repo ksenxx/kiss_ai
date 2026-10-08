@@ -29,9 +29,10 @@ construction, each regression-tested here:
    publisher's stale store
    (``test_interrupted_bank_then_concurrent_banks_lose_nothing``).
 2. Terminal readers tore the triple across separate property reads
-   (``test_final_reclaim_reads_one_coherent_snapshot``; the server-side
-   readers are covered in
-   ``kiss/tests/server/test_conc2026_task_runner_usage_readers.py``).
+   (the server-side readers are covered in
+   ``kiss/tests/server/test_conc2026_task_runner_usage_readers.py``;
+   the in-process abandoned-child reclaim that was pinned here is gone
+   with the thread fan-out engine).
 3. A reset racing an attribution produced mixed states
    (``test_reset_lands_wholly_before_or_after_attribution`` and
    ``test_attribution_holding_old_epoch_is_discarded_by_reset``).
@@ -49,18 +50,16 @@ import sys
 import threading
 import types
 from collections.abc import Callable
-from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar import relentless_agent, sorcar_agent
+from kiss.agents.sorcar import relentless_agent
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent, _UsageEvent
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
-    _AbandonedSubagent,
     _attribute_sub_usage,
     _ClassifierSpend,
 )
@@ -94,7 +93,7 @@ def _session_records(agent: RelentlessAgent, executor: KISSAgent) -> list[_Usage
     key = executor.__dict__.get("_usage_session_key")
     return [
         event
-        for event in agent._usage_events()
+        for event in agent._usage_ledger.records
         if key is not None and event.source == key
     ]
 
@@ -478,75 +477,6 @@ def test_sorcar_run_finally_folds_classifier_after_interrupted_bank(
     assert agent._classifier_spend is None
 
 
-def test_final_reclaim_reads_one_coherent_snapshot() -> None:
-    """A final abandoned-child reclaim must never lose spend to a torn read.
-
-    Round-2 demonstration: the reclaim's ``_agent_usage`` read the
-    three properties separately; paused after materializing the old
-    budget, eight real banks then published eight coherent records,
-    and the resumed reader combined the OLD budget with the NEW
-    tokens/steps — the completed child was discarded with $8 of its
-    spend permanently missing from the parent.  The reader now sums
-    ONE ledger reference (``usage_snapshot``), so the same
-    interleaving — reader paused at the read boundary, eight
-    concurrent banks, child future completing before the resume —
-    must attribute the full triple.
-    """
-    child = RelentlessAgent("child")
-    parent = SorcarAgent("parent")
-    future: Future[str] = Future()
-    item = _AbandonedSubagent(future, child, (0.0, 0, 0))
-    parent._abandoned_subagents.append(item)
-
-    paused = threading.Event()
-    resume = threading.Event()
-
-    reader = threading.Thread(
-        target=_run_paused_at,
-        args=(
-            lambda: parent.reclaim_abandoned_subagents(),
-            sorcar_agent._agent_usage.__code__,
-            "call",
-            paused,
-            resume,
-        ),
-    )
-    reader.start()
-    assert paused.wait(timeout=_WAIT), "reclaimer never reached the usage read"
-
-    executors = [
-        _executor_with_spend(f"bank-{i}", 1.0, 100, 3) for i in range(8)
-    ]
-    barrier = threading.Barrier(8)
-
-    def bank(executor: KISSAgent) -> None:
-        barrier.wait()
-        child._accumulate_usage(executor)
-
-    bankers = [
-        threading.Thread(target=bank, args=(executor,)) for executor in executors
-    ]
-    for banker in bankers:
-        banker.start()
-    for banker in bankers:
-        banker.join(timeout=_WAIT)
-        assert not banker.is_alive()
-    assert child.usage_snapshot() == (8.0, 800, 24)
-
-    # The child completes while the reclaimer is paused at the read:
-    # this reclaim is the LAST look at the child, so a torn read here
-    # is never repaired.
-    future.set_result("done")
-    resume.set()
-    reader.join(timeout=_WAIT)
-    assert not reader.is_alive(), "reclaimer hung"
-
-    assert parent.usage_snapshot() == (8.0, 800, 24), (
-        f"final reclaim lost spend: {parent.usage_snapshot()}"
-    )
-    assert parent._abandoned_subagents == []
-
-
 def test_reset_lands_wholly_before_or_after_attribution(tmp_path: Path) -> None:
     """A reset crossing a live attribution never yields a mixed state.
 
@@ -606,7 +536,7 @@ def test_attribution_holding_old_epoch_is_discarded_by_reset() -> None:
     """
     agent = RelentlessAgent("reset-epoch")
     agent._attribute_usage(5.0, 500, 15)
-    old_ledger = agent._usage_events()
+    old_ledger = agent._usage_ledger.records
 
     paused = threading.Event()
     resume = threading.Event()
@@ -718,8 +648,7 @@ def test_distinct_executors_still_accumulate() -> None:
 def test_concurrent_double_bank_races_count_once() -> None:
     """Racing bank attempts for ONE executor never double-count.
 
-    The reclaim path (``reclaim_abandoned_subagents``) runs on server
-    threads while the agent thread ends a session; racing bankers can
+    Server threads read usage while the agent thread ends a session; racing bankers can
     each append a record, but they share one retry-stable session key,
     so readers count the session once.
     """
@@ -744,9 +673,9 @@ def test_zero_delta_attribution_appends_nothing() -> None:
     """A zero delta (an empty classifier fold) grows no ledger."""
     agent = RelentlessAgent("t")
     agent._attribute_usage(1.0, 10, 1)
-    before = len(agent._usage_events())
+    before = len(agent._usage_ledger.records)
     agent._attribute_usage(0.0, 0, 0)
-    assert len(agent._usage_events()) == before
+    assert len(agent._usage_ledger.records) == before
     assert agent.usage_snapshot() == (1.0, 10, 1)
 
 
@@ -763,7 +692,7 @@ def test_duplicate_ledger_records_count_once() -> None:
     agent._accumulate_usage(executor)
     key = executor.__dict__["_usage_session_key"]
     # Exactly the record a fast-path-bypassing racer would append.
-    agent._usage_events().append(_UsageEvent(key, 0, 1.25, 100, 3))
+    agent._usage_ledger.records.append(_UsageEvent(key, 0, 1.25, 100, 3))
     assert agent.usage_snapshot() == (1.25, 100, 3)
     assert len(_session_records(agent, executor)) == 2
 
@@ -776,12 +705,12 @@ def test_property_setters_overwrite_coherently() -> None:
     agent.total_tokens_used = 7
     agent.total_steps = 2
     assert agent.usage_snapshot() == (5.0, 7, 2)
-    before = len(agent._usage_events())
+    before = len(agent._usage_ledger.records)
     # Overwriting with the current value appends nothing.
     agent.budget_used = 5.0
     agent.total_tokens_used = 7
     agent.total_steps = 2
-    assert len(agent._usage_events()) == before
+    assert len(agent._usage_ledger.records) == before
     assert agent.usage_snapshot() == (5.0, 7, 2)
 
 

@@ -1,0 +1,366 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+
+// The ask_user_question "Question" panel and its separate user response
+// once the tool returns are never folded or hidden by any
+// automatic pass of the chat webview, on any surface the tab is loaded
+// on (the VS Code sidebar, an editor panel, the remote webapp, a share
+// export):
+//
+//   * collapseOlderPanels  -- the streaming sweep of a running task;
+//   * collapseAllExceptResult -- a task_events replay (reload, reattach,
+//     background tab, neighbouring task) and the share export;
+//   * applyChevronState -- the finished-task digest that folds every
+//     plain panel;
+//   * the `summary` tool call, which adopts the panels before it into a
+//     collapsed .summary-sub.
+//
+// Only the user folds it, by clicking its header.
+
+'use strict';
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const {JSDOM} = require('jsdom');
+
+const MEDIA = path.join(__dirname, '..', 'media');
+
+function makeWebview() {
+  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
+  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
+  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
+  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
+
+  const dom = new JSDOM(html, {
+    runScripts: 'dangerously',
+    pretendToBeVisual: true,
+    url: 'https://localhost/',
+  });
+  const win = dom.window;
+
+  win.Element.prototype.scrollIntoView = function () {};
+  win.Element.prototype.scrollTo = function () {};
+  win.HTMLElement.prototype.scrollTo = function () {};
+  win.requestAnimationFrame = function (cb) {
+    cb();
+    return 0;
+  };
+  win.cancelAnimationFrame = function () {};
+
+  const posted = [];
+  win.acquireVsCodeApi = function () {
+    let state;
+    return {
+      postMessage: msg => posted.push(msg),
+      getState: () => state,
+      setState: s => {
+        state = s;
+      },
+    };
+  };
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  return {win, posted};
+}
+
+function send(win, data) {
+  win.dispatchEvent(new win.MessageEvent('message', {data}));
+}
+
+// One event-loop turn before closing: the theme MutationObserver that a
+// tab switch queues must run while the document still exists, so
+// win.close() tears down a quiet window.
+async function closeQuietly(win) {
+  await new Promise(r => setTimeout(r, 0));
+  win.close();
+}
+
+const QUESTION = 'Which branch should I push to?';
+const ANSWER = 'release/2026.10';
+
+function questionCall(extra) {
+  return Object.assign(
+    {
+      type: 'tool_call',
+      name: 'ask_user_question',
+      callId: 'ask-1',
+      extras: {question: QUESTION},
+    },
+    extra || {},
+  );
+}
+
+function questionResult(extra) {
+  return Object.assign(
+    {type: 'tool_result', tool_name: 'ask_user_question', content: ANSWER},
+    extra || {},
+  );
+}
+
+/** Persisted events of a finished task with a question in the middle. */
+function finishedTaskEvents(taskId) {
+  const events = [{type: 'prompt', text: 'ship it'}];
+  for (let i = 0; i < 3; i++) {
+    events.push({type: 'tool_call', name: 'Read', path: '/tmp/r' + i});
+    events.push({type: 'tool_result', name: 'Read', content: 'x' + i});
+  }
+  events.push(questionCall({taskId: taskId}));
+  events.push(questionResult({taskId: taskId}));
+  events.push({type: 'tool_call', name: 'Read', path: '/tmp/last'});
+  events.push({type: 'tool_result', name: 'Read', content: 'last'});
+  events.push({type: 'result', text: 'done', summary: 'done', success: true});
+  return events;
+}
+
+function questionPanelIn(root) {
+  const panels = root.querySelectorAll('.tc-question');
+  assert.strictEqual(panels.length, 1, 'exactly one question panel renders');
+  return panels[0];
+}
+
+function assertOpenAndOnScreen(panel, where) {
+  assert.ok(
+    !panel.classList.contains('collapsed'),
+    'BUG: the question panel was auto-collapsed ' + where,
+  );
+  assert.ok(
+    !panel.classList.contains('chv-hidden'),
+    'BUG: the question panel was hidden by the digest ' + where,
+  );
+  assert.ok(
+    !panel.closest('.summary-sub'),
+    'BUG: the question panel was swallowed by a summary ' + where,
+  );
+  const response = panel.nextElementSibling;
+  assert.ok(response.classList.contains('user-msg'), 'the response is a user message ' + where);
+  assert.ok(!response.classList.contains('collapsed'), 'the response stays open ' + where);
+  assert.strictEqual(response.querySelector('.task-panel-text').textContent, ANSWER);
+  assert.ok(
+    !panel.classList.contains('tc-question-pending'),
+    'an answered question is not marked pending ' + where,
+  );
+}
+
+async function testReplayOfFinishedTaskKeepsQuestionOpen() {
+  const {win} = makeWebview();
+  send(win, {
+    type: 'task_events',
+    task: 'ship it',
+    task_id: 42,
+    events: finishedTaskEvents(42),
+  });
+  const out = win.document.getElementById('output');
+  const tools = out.querySelectorAll('.tc:not(.tc-question)');
+  assert.strictEqual(tools.length, 4, 'four plain tool panels replay');
+  assert.ok(
+    Array.from(tools).every(p => p.classList.contains('collapsed')),
+    'plain replayed tool panels are folded',
+  );
+  assertOpenAndOnScreen(questionPanelIn(out), 'on a finished-task replay');
+  await closeQuietly(win);
+  console.log('  ok - a finished-task replay keeps the question and answer open');
+}
+
+async function testReplayOfRunningTaskKeepsQuestionOpen() {
+  // A client reconnecting to a task that is still running: the replay
+  // folds everything but the result; the question must survive both the
+  // replay pass and the streaming sweep that follows.
+  const {win} = makeWebview();
+  const tab = win._testApi.getActiveTabId();
+  send(win, {type: 'status', running: true, tabId: tab});
+  const events = finishedTaskEvents(43);
+  events.pop(); // still running: no result yet
+  send(win, {
+    type: 'task_events',
+    task: 'ship it',
+    task_id: 43,
+    tabId: tab,
+    events: events,
+  });
+  const out = win.document.getElementById('output');
+  assertOpenAndOnScreen(questionPanelIn(out), 'on a mid-run replay');
+  for (let i = 0; i < 3; i++) {
+    send(win, {type: 'tool_call', name: 'Bash', command: 'ls ' + i, tabId: tab});
+    send(win, {type: 'tool_result', content: 'a', tool_name: 'Bash', tabId: tab});
+  }
+  assertOpenAndOnScreen(questionPanelIn(out), 'after the run streamed on');
+  await closeQuietly(win);
+  console.log('  ok - a mid-run replay keeps the question open through the stream');
+}
+
+async function testBackgroundTabRestoreKeepsQuestionOpen() {
+  // The question is asked and answered in a tab that is not on screen;
+  // the tab is later restored, which runs the collapse pass over its
+  // fragment -- the same path a tab takes when another surface loads it.
+  const {win} = makeWebview();
+  const api = win._testApi;
+  const tab1 = api.getActiveTabId();
+  send(win, {type: 'status', running: true, tabId: tab1});
+  send(win, {type: 'task_settings', task_id: '42', tabId: tab1});
+  api.createNewTab();
+  const tab2 = api.getActiveTabId();
+  assert.notStrictEqual(tab2, tab1);
+  send(win, {type: 'prompt', text: 'ship it', tabId: tab1});
+  send(win, questionCall({tabId: tab1, taskId: '42'}));
+  send(win, {type: 'askUser', question: QUESTION, tabId: tab1});
+  assert.strictEqual(api.getActiveTabId(), tab1, 'the question pulls the user over');
+  // Chats are picked from the sidebar's Chats panel; switchToTab is that pick.
+  api.switchToTab(tab2);
+  assert.strictEqual(api.getActiveTabId(), tab2);
+  send(win, {type: 'askUserDone', tabId: tab1});
+  send(win, questionResult({tabId: tab1, taskId: '42'}));
+  for (let i = 0; i < 3; i++) {
+    send(win, {type: 'tool_call', name: 'Bash', command: 'ls ' + i, tabId: tab1});
+    send(win, {type: 'tool_result', content: 'a', tool_name: 'Bash', tabId: tab1});
+  }
+  api.switchToTab(tab1);
+  assert.strictEqual(api.getActiveTabId(), tab1);
+  const out = win.document.getElementById('output');
+  const prompt = out.querySelector('.ev.prompt');
+  assert.ok(prompt.classList.contains('collapsed'), 'the prompt echo folds');
+  assertOpenAndOnScreen(questionPanelIn(out), 'when a background tab came back');
+  await closeQuietly(win);
+  console.log('  ok - restoring a background tab keeps the question open');
+}
+
+async function testSummaryToolLeavesQuestionOnTranscript() {
+  const {win} = makeWebview();
+  const tab = win._testApi.getActiveTabId();
+  send(win, {type: 'status', running: true, tabId: tab});
+  send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: tab});
+  send(win, {type: 'tool_result', content: 'a', tool_name: 'Bash', tabId: tab});
+  send(win, questionCall({tabId: tab}));
+  send(win, {type: 'askUser', question: QUESTION, tabId: tab});
+  send(win, {type: 'askUserDone', tabId: tab});
+  send(win, questionResult({tabId: tab}));
+  send(win, {type: 'tool_call', name: 'Bash', command: 'pwd', tabId: tab});
+  send(win, {type: 'tool_result', content: '/', tool_name: 'Bash', tabId: tab});
+  send(win, {type: 'tool_call', name: 'summary', description: 'so far', tabId: tab});
+  const out = win.document.getElementById('output');
+  const summary = out.querySelector('.tc-summary');
+  assert.ok(summary, 'the summary panel renders');
+  assert.ok(summary.classList.contains('collapsed'), 'the summary folds');
+  const adopted = summary.querySelectorAll('.summary-sub > .tc');
+  assert.strictEqual(
+    adopted.length,
+    2,
+    'the summary adopts the tool panels on both sides of the question',
+  );
+  const panel = questionPanelIn(out);
+  assertOpenAndOnScreen(panel, 'when a summary adopted its neighbours');
+  assert.strictEqual(
+    panel.previousElementSibling,
+    summary,
+    'the question sits on the transcript right after the summary',
+  );
+  await closeQuietly(win);
+  console.log('  ok - the summary tool leaves the question on the transcript');
+}
+
+async function testReplayedSummaryLeavesQuestionVisible() {
+  // The same on a finished replay, where the chevron pass also hides
+  // every plain panel and re-collapses the summary.
+  const {win} = makeWebview();
+  const events = finishedTaskEvents(44);
+  events.splice(events.length - 1, 0, {
+    type: 'tool_call',
+    name: 'summary',
+    description: 'so far',
+  });
+  send(win, {type: 'task_events', task: 'ship it', task_id: 44, events});
+  const out = win.document.getElementById('output');
+  const summary = out.querySelector('.tc-summary');
+  assert.ok(summary.classList.contains('collapsed'), 'the summary folds');
+  assert.strictEqual(
+    summary.querySelectorAll('.summary-sub > .tc').length,
+    4,
+    'the summary adopts the plain tool panels, never the question',
+  );
+  assertOpenAndOnScreen(questionPanelIn(out), 'on a replay with a summary');
+  await closeQuietly(win);
+  console.log('  ok - a replayed summary leaves the question visible');
+}
+
+async function testShareExportKeepsQuestionOpen() {
+  const {win, posted} = makeWebview();
+  const tab = win._testApi.getActiveTabId();
+  send(win, {type: 'clear', chat_id: 'chat-1', tabId: tab});
+  send(win, {type: 'status', running: true, tabId: tab});
+  send(win, {type: 'setTaskText', text: 'ship it', tabId: tab});
+  send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: tab, taskId: 'task-1'});
+  send(win, {type: 'result', text: 'done', tabId: tab, taskId: 'task-1'});
+  send(win, {type: 'status', running: false, tabId: tab});
+  win.document.getElementById('share-btn').dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  const req = posted.filter(m => m.type === 'shareChatTasks').pop();
+  assert.ok(req, 'share asks the daemon for the chat tasks');
+  // The on-screen task is exported as it stands; an earlier task of the
+  // chat is rebuilt from its persisted events -- the replay path the
+  // export shares with a reload.
+  send(win, {
+    type: 'share_tasks',
+    tabId: req.tabId,
+    chatId: req.chatId,
+    tasks: [
+      {task: 'earlier task', task_id: 'task-0', events: finishedTaskEvents('task-0')},
+      {task: 'ship it', task_id: 'task-1', events: []},
+    ],
+    truncated: false,
+  });
+  const msg = posted.filter(m => m.type === 'shareChat').pop();
+  assert.ok(msg, 'the share_tasks reply produces a shareChat command');
+  const page = new JSDOM('<!doctype html><html><body>' + msg.html + '</body></html>');
+  const panel = questionPanelIn(page.window.document.body);
+  const out = panel.closest('[id="output"]');
+  assert.ok(out, 'the exported question sits in a transcript');
+  const tools = Array.from(out.querySelectorAll('.tc')).filter(p =>
+    p.textContent.includes('/tmp/'),
+  );
+  assert.strictEqual(tools.length, 4, 'the earlier task exports its tools');
+  assert.ok(
+    tools.every(p => p.classList.contains('collapsed')),
+    'exported tool panels are folded',
+  );
+  assertOpenAndOnScreen(panel, 'in the share export');
+  await closeQuietly(win);
+  console.log('  ok - the share export shows the question and answer open');
+}
+
+async function testUserStillFoldsByHand() {
+  const {win} = makeWebview();
+  const tab = win._testApi.getActiveTabId();
+  send(win, questionCall({tabId: tab}));
+  send(win, questionResult({tabId: tab}));
+  const panel = questionPanelIn(win.document.getElementById('output'));
+  panel.querySelector('.tc-h').click();
+  assert.ok(panel.classList.contains('collapsed'), 'a header click folds it');
+  panel.querySelector('.tc-h').click();
+  assert.ok(!panel.classList.contains('collapsed'), 'and unfolds it again');
+  await closeQuietly(win);
+  console.log('  ok - the user still folds the question by its header');
+}
+
+const tests = [
+  testReplayOfFinishedTaskKeepsQuestionOpen,
+  testReplayOfRunningTaskKeepsQuestionOpen,
+  testBackgroundTabRestoreKeepsQuestionOpen,
+  testSummaryToolLeavesQuestionOnTranscript,
+  testReplayedSummaryLeavesQuestionVisible,
+  testShareExportKeepsQuestionOpen,
+  testUserStillFoldsByHand,
+];
+
+(async () => {
+  for (const t of tests) await t();
+  console.log('\n' + tests.length + ' passed, 0 failed');
+})().catch(e => {
+  console.error(e);
+  process.exit(1);
+});

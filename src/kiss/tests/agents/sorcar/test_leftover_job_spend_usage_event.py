@@ -193,10 +193,16 @@ def test_leftover_job_spend_is_published_after_the_result(
     ), earlier
 
 
-def test_no_leftover_job_emits_no_extra_event(
+def test_no_leftover_job_trailing_totals_equal_the_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A run whose jobs all finished (or that had none) ends on its ``result``."""
+    """A run with nothing folded after its ``result`` ends on the same totals.
+
+    The trailing ``usage_info`` is unconditional (a fold on another
+    thread can land at any point after the run's last event, so no
+    snapshot can prove the ``result`` already carried everything); when
+    nothing was folded it repeats the ``result``'s totals exactly.
+    """
     monkeypatch.setenv("KISS_DISABLE_TASK_CLASSIFIER", "1")
 
     class _FinishOnly(_RunAgentThenFinishHandler):
@@ -208,5 +214,11 @@ def test_no_leftover_job_emits_no_extra_event(
         agent = _run(printer, tmp_path, url)
     finally:
         srv.shutdown()
-    assert agent.usage_snapshot()[0] > 0
-    assert printer.events[-1]["type"] == "result", [e.get("type") for e in printer.events]
+    budget, tokens, steps = agent.usage_snapshot()
+    assert budget > 0
+    types = [e.get("type") for e in printer.events]
+    assert types[-2:] == ["result", "usage_info"], types
+    result, last = printer.events[-2], printer.events[-1]
+    assert last["cost"] == result["cost"] == f"${budget:.4f}"
+    assert last["total_tokens"] == result["total_tokens"] == tokens
+    assert last["total_steps"] == result["step_count"] == steps

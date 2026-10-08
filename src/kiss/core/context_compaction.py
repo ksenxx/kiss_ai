@@ -9,9 +9,10 @@ read at step 5 is paid for again at step 50, 100 and 150 although the
 model never looks at it again.  The 7-day audit of 2026-09-19 measured
 steps above 200k context at 12 % of all steps but 19 % of all spend.
 
-:func:`compact_tool_results` replaces the text of *old, large* tool
-results with a short stub that says how to get the text back (re-run the
-call).  It edits the conversation in place and never changes its length,
+:func:`apply_compaction` replaces the text of *old, large* tool results
+(selected by :func:`plan_compaction`) with a short stub that says how to
+get the text back (re-run the call).  It edits the conversation in place
+and never changes its length,
 so message indices held elsewhere (``KISSAgent._llm_hook_conversation_index``)
 stay valid.  The agent's own trajectory (``KISSAgent.messages``) and the
 persisted events keep the full text.
@@ -232,26 +233,3 @@ def apply_compaction(plan: list[tuple[dict[str, Any], str]]) -> int:
     for holder, key in plan:
         holder[key] = make_stub(holder[key])
     return len(plan)
-
-
-def compact_tool_results(
-    conversation: list[Any],
-    keep_recent: int = KEEP_RECENT_TOOL_RESULTS,
-    min_chars: int = MIN_COMPACT_CHARS,
-    protected_tools: frozenset[str] = PROTECTED_TOOLS,
-) -> int:
-    """Replace old, large tool outputs in *conversation* with stubs, in place.
-
-    Unconditional (no cache-economics gate); the agent uses
-    :func:`plan_compaction` + :func:`should_compact` + :func:`apply_compaction`.
-
-    Args:
-        conversation: The model conversation.
-        keep_recent: Number of newest tool results left untouched.
-        min_chars: Results shorter than this are left untouched.
-        protected_tools: Tool names whose results are never compacted.
-
-    Returns:
-        The number of tool results that were replaced.
-    """
-    return apply_compaction(plan_compaction(conversation, keep_recent, min_chars, protected_tools))

@@ -55,7 +55,6 @@ import html
 import ipaddress
 import json
 import logging
-import math
 import mimetypes
 import os
 import platform
@@ -99,7 +98,6 @@ from kiss.core.browser_handoff import set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive
-from kiss.core.models.model_info import get_default_model
 from kiss.core.processes import find_bash
 from kiss.core.processes import pid_alive as _is_pid_alive
 from kiss.core.processes import process_identity as _process_identity
@@ -108,16 +106,16 @@ from kiss.core.vscode_config import (
     apply_config_to_env,
     load_api_keys,
     load_config,
-    save_config,
 )
 from kiss.server import agent_state, tls_certs
 from kiss.server import sorcar as sorcar_api
+from kiss.server.commands import broadcast_to_conn
 from kiss.server.json_printer import (
     JsonPrinter,
     stamp_event_ts,
     with_task_settings_event,
 )
-from kiss.server.server import VSCodeServer, broadcast_to_conn
+from kiss.server.server import VSCodeServer
 from kiss.server.stall_watchdog import start_stall_watchdog
 from kiss.server.task_update import TaskUpdateRunner
 from kiss.server.tips import tips_data
@@ -130,7 +128,6 @@ from kiss.server.voice_wake import (
     default_models_dir,
     transcribe_pcm,
 )
-from kiss.server.voice_wake_control import VoiceWakeController
 from kiss.viz_trajectory.server import find_job_dir as find_job_dir
 from kiss.viz_trajectory.server import list_jobs as list_jobs
 from kiss.viz_trajectory.server import (
@@ -518,18 +515,12 @@ _TLS_LOCK_TIMEOUT_S = 30.0
 
 _MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 
-_KISS_HOME: Path | None = None
 _TLS_DIR: Path | None = None
-
-
-def _kiss_home_dir() -> Path:
-    """Return the KISS home dir ($KISS_HOME or ~/.kiss), resolved lazily."""
-    return _KISS_HOME if _KISS_HOME is not None else kiss_home()
 
 
 def _tls_dir() -> Path:
     """Return the directory holding the self-signed TLS cert/key pair."""
-    return _TLS_DIR if _TLS_DIR is not None else _kiss_home_dir() / "tls"
+    return _TLS_DIR if _TLS_DIR is not None else kiss_home() / "tls"
 
 
 def _url_file_path() -> Path:
@@ -543,7 +534,7 @@ def _url_file_path() -> Path:
     call this accessor directly.
     """
     override = globals().get("_URL_FILE")
-    return override if override is not None else _kiss_home_dir() / "remote-url.json"
+    return override if override is not None else kiss_home() / "remote-url.json"
 
 
 if TYPE_CHECKING:
@@ -1055,6 +1046,23 @@ def _discover_tunnel_url_from_metrics() -> str | None:
     return None
 
 
+def _reap_proc(proc: subprocess.Popen[str], kill: bool = False) -> None:
+    """Close *proc*'s stderr pipe and wait for it (killing it first if asked).
+
+    The tunnel spawn retains a failed ``cloudflared`` child between
+    attempts; releasing it here keeps its pipe from lingering until GC.
+
+    Args:
+        proc: The child process to reap.
+        kill: Kill a still-running child before waiting for it.
+    """
+    if kill:
+        proc.kill()
+    if proc.stderr is not None:
+        proc.stderr.close()
+    proc.wait()
+
+
 def _pick_free_local_port() -> int:
     """Return a currently free TCP port on 127.0.0.1.
 
@@ -1078,7 +1086,7 @@ def _cloudflared_pidfile() -> Path:
     """Return the path of the persisted cloudflared PID file."""
     if _CLOUDFLARED_PIDFILE is not None:
         return _CLOUDFLARED_PIDFILE
-    return _kiss_home_dir() / "cloudflared.pid"
+    return kiss_home() / "cloudflared.pid"
 
 
 _SYSTEMD_RUN_SCOPE_PREFIX = (
@@ -1961,7 +1969,7 @@ def _get_machine_topic() -> str:
     Returns:
         A hex string suitable for use as an ntfy.sh topic name.
     """
-    kiss_home_path = _kiss_home_dir()
+    kiss_home_path = kiss_home()
     topic_file = kiss_home_path / "ntfy_topic"
     try:
         stored = topic_file.read_text(encoding="utf-8").strip()
@@ -2814,8 +2822,8 @@ class WebPrinter(JsonPrinter):
           ``update_available``, etc.) and are broadcast verbatim to
           every connected client.
         * Events stamped with a non-empty ``connId`` are request/reply
-          events (``models``, ``history``, ``frequentTasks``,
-          ``inputHistory``, ``files``, ``ghost``, ``configData``,
+          events (``models``, ``history``, ``inputHistory``,
+          ``files``, ``ghost``, ``configData``,
           unknown-command ``error``): the stamp is stripped and the
           event is sent ONLY to the connection (= VS Code window /
           browser tab) that issued the request, so one window's
@@ -2898,13 +2906,7 @@ class WebPrinter(JsonPrinter):
         # The tabId branch above returned, so ``event`` has no tabId.
         data = "" if talk else json.dumps(event)
         with self.delivery_lock:
-            with self._lock:
-                self._record_event(event)
-                # Mirror JsonPrinter.broadcast: record the file paths of
-                # mutating tool calls so the end-of-task cross-repo
-                # auto-commit (_autocommit_changed_repos) also sees tasks
-                # run through the web printer.
-                self._track_changed_path(event)
+            self._record_task_event(event)
             if persist_id:
                 _queue_chat_event(data, task_id=persist_id)
             if not record_only and not talk:
@@ -3333,10 +3335,7 @@ class WebPrinter(JsonPrinter):
             return lock
 
     async def _locked_send(
-        self,
-        endpoint: ServerConnection,
-        data: Payload,
-        admit: Callable[[], bool] | None = None,
+        self, endpoint: ServerConnection, data: Payload,
     ) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
 
@@ -3344,16 +3343,6 @@ class WebPrinter(JsonPrinter):
             endpoint: The client connection to write to.
             data: The JSON payload (already encoded with ``json.dumps``)
                 or a reserved replay slot that resolves to it.
-            admit: Optional last-moment admission check, evaluated
-                AFTER the send lock is acquired; a ``False`` result
-                drops the payload without touching the wire.  The
-                voice-wake delivery boundary re-validates its listener
-                generation here: a report validated before queueing
-                behind an in-flight send can be retired by a
-                concurrent ``stop()`` while it waits, and a check that
-                runs only before the lock would still write the stale
-                payload once the lock opens (gpt-5.6-sol round-4
-                review, finding 6).
         """
         async with self.send_lock(endpoint):
             if isinstance(data, ConcurrentFuture):
@@ -3365,8 +3354,6 @@ class WebPrinter(JsonPrinter):
                 text = await asyncio.shield(asyncio.wrap_future(data))
             else:
                 text = data
-            if admit is not None and not admit():
-                return
             await self._timed_send(endpoint, text)
 
     def _schedule_send(self, endpoint: ServerConnection, data: Payload) -> None:
@@ -3779,7 +3766,7 @@ html, body { height: auto; overflow: auto; }
 #app { height: auto; display: block; }
 #output { overflow: visible; }
 /* Chrome that only works inside the live chat webview. */
-.panel-copy-btn, .panel-stop-btn, #task-panel-copy { display: none !important; }
+.panel-copy-btn, .panel-stop-btn { display: none !important; }
 /* The sub-agent tab strip (created and driven by share.js, styled by
    the inlined main.css's #tab-bar / .chat-tab rules). It rides along
    the top of the scrolling document, with room on the right for the
@@ -3817,20 +3804,6 @@ html, body { height: auto; overflow: auto; }
   margin-top: var(--space-3);
   border-top: 1px solid var(--border);
 }
-/* Each task's panel text carries a per-task unique id (its drawer's
-   aria-controls target), so main.css's #task-panel-text rules are
-   replicated here by id prefix. */
-[id^='task-panel-text'] {
-  max-height: 60vh;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-#task-panel.drawer-collapsed [id^='task-panel-text'] {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
 """
 """Layout overrides appended after main.css on a shared chat page."""
 
@@ -3865,7 +3838,7 @@ def _build_share_page(title: str, body_html: str) -> str:
     """Build one standalone, self-contained shared chat page.
 
     Wraps *body_html* — the chat webview's serialized chat, one
-    ``.share-task`` section (static task panel + transcript) per task
+    ``.share-task`` section (task panel + transcript) per task
     of the chat, plus one hidden ``.share-task.share-subagent``
     section per sub-agent the chat fanned out (see
     ``buildShareableHtml`` in ``media/main.js``) —
@@ -3874,7 +3847,7 @@ def _build_share_page(title: str, body_html: str) -> str:
     uses), both highlight.js themes, the VS Code palette variables
     (dark plus the light-mode overrides behind the page's theme
     toggle) and ``media/share.js`` (collapse / expand behaviour for
-    the event panels, the static task panel, the sub-agent tab strip
+    the event panels, the task panel, the sub-agent tab strip
     that opens and closes the sub-agent sections like the live
     webview's tabs, and the light/dark toggle) are all inlined.
 
@@ -4224,7 +4197,7 @@ def _read_version() -> str:
     version caused the sticky "update available" toast to re-appear
     with the same NEW-version text the user just clicked.
 
-    Fix: pick the newest ``__version__`` found under
+    Fix: pick the newest version of the running daemon and each ``__version__`` found under
     ``<extensions_root>/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/core/
     _version.py`` so a freshly-installed extension dominates the answer even when
     the running daemon is still the stale one.  Falls back to the
@@ -4234,9 +4207,12 @@ def _read_version() -> str:
     root = _INSTALLED_EXTENSIONS_ROOT
     if root is None:
         root = Path.home() / ".vscode" / "extensions"
+    bundled = _parse_version_py(
+        Path(__file__).parent.parent / "core" / "_version.py",
+    )
     best: tuple[int, ...] | None = None
     best_str = ""
-    for v in _scan_installed_extension_versions(root):
+    for v in [bundled, *_scan_installed_extension_versions(root)]:
         t = _version_tuple(v)
         if t is None:
             continue
@@ -4245,9 +4221,7 @@ def _read_version() -> str:
             best_str = v
     if best_str:
         return best_str
-    return _parse_version_py(
-        Path(__file__).parent.parent / "core" / "_version.py",
-    )
+    return bundled
 
 
 def _version_tuple(v: str) -> tuple[int, ...] | None:
@@ -4340,7 +4314,7 @@ def _update_check_cache_path() -> Path:
     popup — the extension host's native notification, the sidebar
     webview toast, and the remote webapp toast.
     """
-    return _kiss_home_dir() / ".update-check.json"
+    return kiss_home() / ".update-check.json"
 
 
 def _read_update_check_cache() -> dict[str, Any]:
@@ -4392,20 +4366,10 @@ def _record_update_snooze(latest: str) -> None:
         "snoozedLatest": latest
         or (last_latest if isinstance(last_latest, str) else ""),
     }
-    cache_path = _update_check_cache_path()
-    tmp = cache_path.with_name(
-        f"{cache_path.name}.{os.getpid()}.{time.time_ns()}.tmp",
-    )
     try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(cache_path)
+        _atomic_write_text(_update_check_cache_path(), json.dumps(payload))
     except Exception:
         logger.debug("Failed to record update snooze", exc_info=True)
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
 
 
 _ASSET_LOAD_GUARD_JS = r"""
@@ -5619,7 +5583,6 @@ class RemoteAccessServer:
         if self.work_dir:
             self._vscode_server.work_dir = self.work_dir
         self._server_api = sorcar_api.ServerApi(self)
-        self._voice_wake = VoiceWakeController()
 
         self._tunnel_proc: subprocess.Popen[str] | None = None
         self._tunnel_metrics_port: int | None = None
@@ -5680,7 +5643,7 @@ class RemoteAccessServer:
         self._pending_ip_change_count: int = 0
         self._auth_failures: dict[str, list[float]] = {}
         self._install_root: Path = _KISS_AI_ROOT
-        self._update_log_path: Path = _kiss_home_dir() / "update.log"
+        self._update_log_path: Path = kiss_home() / "update.log"
         self._update_proc: subprocess.Popen[bytes] | None = None
         self._update_starting = False
         self._update_watch_task: asyncio.Task[None] | None = None
@@ -5692,14 +5655,14 @@ class RemoteAccessServer:
         self._update_when_idle_task: asyncio.Task[None] | None = None
         self._update_when_idle_armed = False
         self._update_models_log_path: Path = (
-            _kiss_home_dir() / "update_models.log"
+            kiss_home() / "update_models.log"
         )
         self._update_models_argv: list[str] = [
             sys.executable,
             "-m",
             "kiss.scripts.update_models",
             "--model-info",
-            str(_kiss_home_dir() / "MODEL_INFO.json"),
+            str(kiss_home() / "MODEL_INFO.json"),
         ]
         self._update_models_proc: subprocess.Popen[bytes] | None = None
         self._update_models_starting = False
@@ -5909,15 +5872,26 @@ class RemoteAccessServer:
         exactly when to retry.
         """
         now = time.monotonic()
-        fails = self._auth_failures.get(ip, [])
-        fails = [t for t in fails if now - t <= _AUTH_FAIL_WINDOW]
+        fails = self._prune_auth_failures(ip, now)
+        if len(fails) < _AUTH_FAIL_MAX:
+            return 0.0
+        return max(0.0, _AUTH_LOCKOUT - (now - fails[-1]))
+
+    def _prune_auth_failures(self, ip: str, now: float) -> list[float]:
+        """Drop *ip*'s failures older than the window; return the rest.
+
+        An IP with no recent failure loses its entry altogether, so
+        the dict stays bounded to IPs that failed recently.
+        """
+        fails = [
+            t for t in self._auth_failures.get(ip, ())
+            if now - t <= _AUTH_FAIL_WINDOW
+        ]
         if fails:
             self._auth_failures[ip] = fails
         else:
             self._auth_failures.pop(ip, None)
-        if len(fails) < _AUTH_FAIL_MAX:
-            return 0.0
-        return max(0.0, _AUTH_LOCKOUT - (now - fails[-1]))
+        return fails
 
     def _record_auth_failure(self, ip: str) -> None:
         """Record a failed authentication attempt from *ip*.
@@ -5931,14 +5905,7 @@ class RemoteAccessServer:
         """
         now = time.monotonic()
         for other_ip in list(self._auth_failures):
-            kept = [
-                t for t in self._auth_failures[other_ip]
-                if now - t <= _AUTH_FAIL_WINDOW
-            ]
-            if kept:
-                self._auth_failures[other_ip] = kept
-            else:
-                del self._auth_failures[other_ip]
+            self._prune_auth_failures(other_ip, now)
         self._auth_failures.setdefault(ip, []).append(now)
 
     async def _authenticate_ws(
@@ -6010,9 +5977,9 @@ class RemoteAccessServer:
         token: the VS Code extension, ``daemon_client`` runs) joins the
         printer's local-client set — so talk arbitration can send it
         muted copies — and its commands run with ``is_local`` set,
-        which unlocks the local-only commands (``readKissConfig``,
-        voice wake, local-tab registration).  A remote browser joins
-        the plain client set.
+        which unlocks the local-only commands (file saves, directory
+        listings, terminals, local-tab registration).  A remote
+        browser joins the plain client set.
 
         Args:
             websocket: The WebSocket server connection.
@@ -6051,17 +6018,6 @@ class RemoteAccessServer:
             logger.debug("WS handler error", exc_info=True)
         finally:
             if is_local:
-                # A daemon-hosted wake-word listener is owned by
-                # exactly this connection: reap it here so a closed VS
-                # Code window can never leak a mic-holding child
-                # process.
-                try:
-                    await self._voice_wake.stop(conn_state["conn_id"])
-                except Exception:
-                    logger.debug(
-                        "voice-wake stop on disconnect failed",
-                        exc_info=True,
-                    )
                 self._printer.unregister_local_tabs(conn_state["conn_id"])
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
@@ -6481,7 +6437,7 @@ class RemoteAccessServer:
         # $KISS_HOME, and defaults to the stock ``~/.kiss`` otherwise —
         # which a white-label brand's daemon never reads.
         env = dict(os.environ)
-        env["KISS_HOME"] = str(_kiss_home_dir())
+        env["KISS_HOME"] = str(kiss_home())
         if script is not None:
             bootstrap = script.parent / "scripts" / "install.sh"
             # os.path.isfile, not Path.is_file: an unreadable ``scripts``
@@ -6837,173 +6793,6 @@ class RemoteAccessServer:
                 },
             ),
         )
-
-    async def _handle_get_default_model(
-        self, cmd: dict[str, Any], endpoint: Any,
-    ) -> None:
-        """Reply with the key-derived default model name.
-
-        Services the ``getDefaultModel`` command (routed by
-        :meth:`kiss.server.sorcar.ServerApi.get_default_model`): the
-        VS Code extension host historically shelled out to ``uv run
-        python -c ...`` for this value; over the socket the daemon
-        answers from its own environment instead.  The reply is a
-        single direct ``{"type": "defaultModel", "model": <name>}``
-        event to the requesting *endpoint* — never broadcast.
-
-        Args:
-            cmd: The parsed ``getDefaultModel`` command (unused).
-            endpoint: The client connection to reply to.
-        """
-        model = await asyncio.to_thread(get_default_model)
-        await self._endpoint_send(
-            endpoint,
-            json.dumps({"type": "defaultModel", "model": model}),
-        )
-
-    async def _handle_read_kiss_config(
-        self, cmd: dict[str, Any], endpoint: Any,
-    ) -> None:
-        """Reply with the raw merged ``~/.kiss/config.json`` contents.
-
-        Services the ``readKissConfig`` command (routed — and gated to
-        local clients — by
-        :meth:`kiss.server.sorcar.ServerApi.read_kiss_config`).  The
-        reply is a single direct ``{"type": "kissConfig", "config":
-        {...}}`` event to the requesting *endpoint* — never broadcast
-        — carrying :func:`kiss.core.vscode_config.load_config`'s
-        sanitized, defaults-merged view of the file, i.e. exactly
-        what the daemon itself acts on.
-
-        Args:
-            cmd: The parsed ``readKissConfig`` command (unused).
-            endpoint: The client connection to reply to.
-        """
-        cfg = await asyncio.to_thread(load_config)
-        await self._endpoint_send(
-            endpoint,
-            json.dumps({"type": "kissConfig", "config": cfg}),
-        )
-
-    async def _handle_write_kiss_config(
-        self, cmd: dict[str, Any], endpoint: Any,
-    ) -> None:
-        """Merge the command's ``config`` keys into ``config.json``.
-
-        Services the ``writeKissConfig`` command (routed — and gated
-        to local clients — by
-        :meth:`kiss.server.sorcar.ServerApi.write_kiss_config`).
-        Delegates to :func:`kiss.core.vscode_config.save_config`, so
-        the write shares the daemon's atomic, lock-guarded merge path
-        (existing keys are preserved, API keys are never written) and
-        the freshly saved state is re-applied to the daemon's
-        environment exactly like a settings-panel ``saveConfig``.
-        The reply is a single direct ``{"type": "kissConfigSaved",
-        "ok": <bool>[, "error": <msg>]}`` acknowledgement to the
-        requesting *endpoint* — never broadcast.
-
-        Args:
-            cmd: The parsed ``writeKissConfig`` command whose
-                ``config`` field must be a JSON object.
-            endpoint: The client connection to reply to.
-        """
-        data = cmd.get("config")
-        if not isinstance(data, dict):
-            await self._endpoint_send(endpoint, json.dumps({
-                "type": "kissConfigSaved",
-                "ok": False,
-                "error": "config must be a JSON object",
-            }))
-            return
-        try:
-            await asyncio.to_thread(save_config, data)
-            await asyncio.to_thread(
-                lambda: apply_config_to_env(load_config())
-            )
-        except OSError as err:
-            await self._endpoint_send(endpoint, json.dumps({
-                "type": "kissConfigSaved",
-                "ok": False,
-                "error": f"failed to save config: {err}",
-            }))
-            return
-        await self._endpoint_send(
-            endpoint, json.dumps({"type": "kissConfigSaved", "ok": True}),
-        )
-
-    async def _handle_voice_wake_start(
-        self, cmd: dict[str, Any], endpoint: Any, conn_id: str,
-    ) -> None:
-        """Start a daemon-hosted wake-word listener for one connection.
-
-        Services the ``voiceWakeStart`` command (routed — and gated to
-        local clients — by
-        :meth:`kiss.server.sorcar.ServerApi.voice_wake_start`).  The
-        listener child process is owned by *conn_id*: its protocol
-        lines stream back to the requesting *endpoint* as
-        ``voiceWakeEvent`` / ``voiceWakeState`` events (see
-        :mod:`kiss.server.voice_wake_control`), and the
-        :meth:`_ws_handler` disconnect cleanup stops it when the
-        connection goes away.
-
-        Args:
-            cmd: The parsed ``voiceWakeStart`` command; its optional
-                ``sensitivity`` field (0..100) tunes wake eagerness.
-            endpoint: The client connection to stream events to.
-            conn_id: The owning connection's id.
-        """
-        raw = cmd.get("sensitivity")
-        sensitivity = (
-            round(raw)
-            if isinstance(raw, (int, float))
-            and not isinstance(raw, bool)
-            and math.isfinite(raw)
-            else None
-        )
-
-        async def _send(event: dict[str, Any]) -> None:
-            # The delivery boundary of the controller's generation
-            # tag: drop a report whose listener generation was retired
-            # (a stop or a replacement spawn superseded it) so a
-            # wedged stale ``listening: false`` can never contradict a
-            # successor's ``listening: true``, and strip the tag so
-            # the wire protocol is unchanged.  Payloads that pass are
-            # written under the per-endpoint FIFO send lock
-            # (``_endpoint_send``), so accepted reports reach the wire
-            # in send-start order (gpt-5.6-sol round-3 review,
-            # findings 2-3).  The generation is RE-validated inside
-            # that lock (the ``admit`` callable): a report that passed
-            # the pre-check can queue behind an in-flight send and be
-            # retired by a concurrent stop before the lock opens —
-            # validation only before the wait would still write the
-            # stale payload (gpt-5.6-sol round-4 review, finding 6).
-            gen = event.pop("voiceGen", None)
-            if isinstance(gen, int):
-                if not self._voice_wake.accepts(conn_id, gen):
-                    return
-                await self._endpoint_send(
-                    endpoint,
-                    json.dumps(event),
-                    admit=partial(self._voice_wake.accepts, conn_id, gen),
-                )
-                return
-            await self._endpoint_send(endpoint, json.dumps(event))
-
-        await self._voice_wake.start(conn_id, sensitivity, _send)
-
-    async def _handle_voice_wake_stop(self, conn_id: str) -> None:
-        """Stop *conn_id*'s daemon-hosted wake-word listener, if any.
-
-        Services the ``voiceWakeStop`` command (routed — and gated to
-        local clients — by
-        :meth:`kiss.server.sorcar.ServerApi.voice_wake_stop`); also
-        called by the local-connection disconnect cleanup, so it is a no-op when
-        the connection owns no listener.
-
-        Args:
-            conn_id: The owning connection's id.
-        """
-        await self._voice_wake.stop(conn_id)
 
     @staticmethod
     def _cmd_str(cmd: dict[str, Any], key: str) -> str:
@@ -7394,7 +7183,7 @@ class RemoteAccessServer:
 
         Handles the ``shareChat`` command sent by ``media/main.js``
         when the user clicks the share button next to the mic button:
-        the webview serialized the highlighted tab's static task panel
+        the webview serialized the highlighted tab's task panel
         and every event panel of its transcript, and this handler
         wraps them into a self-contained page
         (:func:`_build_share_page`) written to
@@ -7718,22 +7507,51 @@ class RemoteAccessServer:
         reply = await asyncio.to_thread(_list)
         await self._reply_direct(endpoint, reply, "listDir")
 
-    @staticmethod
-    def _git_provider_result(
-        provider: Any, work_dir: str, *args: Any,
-    ) -> dict[str, Any]:
-        """Run a ``kiss.server.explorer`` git provider, never raising.
+    async def _git_reply(
+        self,
+        cmd: dict[str, Any],
+        endpoint: Any,
+        reply_type: str,
+        provider: Callable[..., dict[str, Any]],
+        *args: Any,
+        **fields: Any,
+    ) -> None:
+        """Run a ``kiss.server.explorer`` git provider and reply to *endpoint*.
 
-        The provider returns either data or ``{"error": ...}``; an
-        unexpected exception (a path with a NUL byte, a broken git
-        install, ...) becomes an ``error`` reply too, so the client's
-        view never sits at "Loading..." for a command that was accepted.
+        The shared body of the Source Control handlers: every reply
+        carries ``type``, the command's ``workDir`` (falling back to
+        the daemon work dir), the echoed ``tabId`` / ``token`` and the
+        handler's extra *fields*, then either the provider's result
+        (data or ``{"error": ...}``) or an ``error`` when the work dir
+        does not exist or the provider raised (a path with a NUL byte,
+        a broken git install, ...), so the client's view never sits at
+        "Loading..." for a command that was accepted.
+
+        Args:
+            cmd: The parsed client command.
+            endpoint: The requesting WSS connection.
+            reply_type: The reply's ``type`` field.
+            provider: The git provider, called with the work dir
+                and *args* on a worker thread.
+            *args: Extra positional arguments for *provider*.
+            **fields: Extra fields echoed in the reply.
         """
-        try:
-            result: dict[str, Any] = provider(work_dir, *args)
-            return result
-        except Exception as exc:
-            return {"error": f"{type(exc).__name__}: {exc}"}
+        work_dir = self._cmd_work_dir(cmd)
+        reply: dict[str, Any] = {
+            "type": reply_type,
+            "workDir": work_dir,
+            "tabId": self._cmd_str(cmd, "tabId"),
+            "token": self._cmd_str(cmd, "token"),
+            **fields,
+        }
+        if not os.path.isdir(work_dir):
+            reply["error"] = f"Directory not found: {work_dir}"
+        else:
+            try:
+                reply.update(await asyncio.to_thread(provider, work_dir, *args))
+            except Exception as exc:
+                reply["error"] = f"{type(exc).__name__}: {exc}"
+        await self._reply_direct(endpoint, reply, reply_type)
 
     async def _handle_git_status(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -7761,22 +7579,7 @@ class RemoteAccessServer:
         """
         from kiss.server.explorer import git_status
 
-        work_dir = self._cmd_work_dir(cmd)
-        reply: dict[str, Any] = {
-            "type": "gitStatus",
-            "workDir": work_dir,
-            "tabId": self._cmd_str(cmd, "tabId"),
-            "token": self._cmd_str(cmd, "token"),
-        }
-        if not os.path.isdir(work_dir):
-            reply["error"] = f"Directory not found: {work_dir}"
-        else:
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_status, work_dir,
-                )
-            )
-        await self._reply_direct(endpoint, reply, "gitStatus")
+        await self._git_reply(cmd, endpoint, "gitStatus", git_status)
 
     async def _handle_git_log(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -7807,25 +7610,10 @@ class RemoteAccessServer:
         """
         from kiss.server.explorer import GIT_LOG_DEFAULT_LIMIT, git_log
 
-        work_dir = self._cmd_work_dir(cmd)
         limit = cmd.get("limit")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             limit = GIT_LOG_DEFAULT_LIMIT
-        reply: dict[str, Any] = {
-            "type": "gitLog",
-            "workDir": work_dir,
-            "tabId": self._cmd_str(cmd, "tabId"),
-            "token": self._cmd_str(cmd, "token"),
-        }
-        if not os.path.isdir(work_dir):
-            reply["error"] = f"Directory not found: {work_dir}"
-        else:
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_log, work_dir, limit,
-                )
-            )
-        await self._reply_direct(endpoint, reply, "gitLog")
+        await self._git_reply(cmd, endpoint, "gitLog", git_log, limit)
 
     async def _handle_git_show(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -7863,53 +7651,29 @@ class RemoteAccessServer:
             git_show,
         )
 
-        work_dir = self._cmd_work_dir(cmd)
         sha = self._cmd_str(cmd, "sha")
         path = self._cmd_str(cmd, "path")
         base = self._cmd_str(cmd, "base")
         mode = self._cmd_str(cmd, "mode") or "patch"
-        reply: dict[str, Any] = {
-            "type": "gitShow",
-            "workDir": work_dir,
-            "tabId": self._cmd_str(cmd, "tabId"),
-            "token": self._cmd_str(cmd, "token"),
-            "sha": sha,
-            "path": path,
-            "base": base,
-            "mode": mode,
-        }
-        if not os.path.isdir(work_dir):
-            reply["error"] = f"Directory not found: {work_dir}"
-        elif base:
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_compare, work_dir, base, sha,
-                )
-            )
+        provider: Callable[..., dict[str, Any]]
+        args: tuple[str, ...]
+        if base:
+            provider, args = git_compare, (base, sha)
         elif mode == "diff":
             # Both sides of one file's change (``mode: "diff"``): the
             # commit against its parent, or the working tree against
             # HEAD when ``sha`` is empty; ``origPath`` is the name
             # before a rename.
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_file_diff, work_dir, sha,
-                    path, self._cmd_str(cmd, "origPath"),
-                )
-            )
+            provider = git_file_diff
+            args = (sha, path, self._cmd_str(cmd, "origPath"))
         elif mode == "file":
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_file_at, work_dir, sha, path,
-                )
-            )
+            provider, args = git_file_at, (sha, path)
         else:
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result, git_show, work_dir, sha, path,
-                )
-            )
-        await self._reply_direct(endpoint, reply, "gitShow")
+            provider, args = git_show, (sha, path)
+        await self._git_reply(
+            cmd, endpoint, "gitShow", provider, *args,
+            sha=sha, path=path, base=base, mode=mode,
+        )
 
     async def _handle_git_action(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -7933,32 +7697,13 @@ class RemoteAccessServer:
         """
         from kiss.server.explorer import git_action
 
-        work_dir = self._cmd_work_dir(cmd)
         action = self._cmd_str(cmd, "action")
         sha = self._cmd_str(cmd, "sha")
-        reply: dict[str, Any] = {
-            "type": "gitActionResult",
-            "workDir": work_dir,
-            "tabId": self._cmd_str(cmd, "tabId"),
-            "token": self._cmd_str(cmd, "token"),
-            "action": action,
-            "sha": sha,
-        }
-        if not os.path.isdir(work_dir):
-            reply["error"] = f"Directory not found: {work_dir}"
-        else:
-            reply.update(
-                await asyncio.to_thread(
-                    self._git_provider_result,
-                    git_action,
-                    work_dir,
-                    action,
-                    sha,
-                    self._cmd_str(cmd, "name"),
-                    self._cmd_str(cmd, "message"),
-                )
-            )
-        await self._reply_direct(endpoint, reply, "gitAction")
+        await self._git_reply(
+            cmd, endpoint, "gitActionResult", git_action,
+            action, sha, self._cmd_str(cmd, "name"), self._cmd_str(cmd, "message"),
+            action=action, sha=sha,
+        )
 
     def _abs_cmd_path(self, raw: str, work_dir: str) -> str:
         """*raw* as an absolute LEXICAL path (``~`` expanded, relative to *work_dir*).
@@ -8611,10 +8356,7 @@ class RemoteAccessServer:
         await self._broadcast_update_available()
 
     async def _endpoint_send(
-        self,
-        endpoint: ServerConnection,
-        data: str,
-        admit: Callable[[], bool] | None = None,
+        self, endpoint: ServerConnection, data: str,
     ) -> None:
         """Send ``data`` to one client connection.
 
@@ -8631,20 +8373,17 @@ class RemoteAccessServer:
         Args:
             endpoint: The connection to send to.
             data: The JSON payload (already encoded with ``json.dumps``).
-            admit: Optional admission check evaluated under the
-                endpoint's send lock — see
-                :meth:`WebPrinter._locked_send`.
         """
-        await self._printer._locked_send(endpoint, data, admit)
+        await self._printer._locked_send(endpoint, data)
 
     @staticmethod
     def _sanitized_restored_tabs(cmd: dict[str, Any]) -> list[dict[str, str]]:
         """Sanitize the ``restoredTabs`` field of a ``ready`` command.
 
-        Single source of the M7 hardening shared by the ``ready``
-        handler of the server API
-        (:meth:`kiss.server.sorcar.ServerApi.ready`) and
-        :meth:`_handle_ready`:
+        The M7 hardening, applied ONCE by the ``ready`` handler of the
+        server API (:meth:`kiss.server.sorcar.ServerApi.ready`), which
+        writes the cleaned list back into the command before
+        :meth:`_handle_ready` reads it:
 
         * caps the list at ``_MAX_RESTORED_TABS`` so an
           authenticated-but-malicious or buggy client cannot flood the
@@ -8656,11 +8395,7 @@ class RemoteAccessServer:
           ``chatId`` would flow into backend handlers that assume
           strings.
 
-        Every rejection is logged with a ``warning``.  The dispatch
-        path writes the cleaned list back into ``cmd`` so the second
-        pass inside :meth:`_handle_ready` is a no-op (no duplicate
-        warnings); direct callers of :meth:`_handle_ready` (replays,
-        tests) still get the full sanitize.
+        Every rejection is logged with a ``warning``.
 
         Args:
             cmd: The ``ready`` command dict.
@@ -8734,7 +8469,9 @@ class RemoteAccessServer:
         Args:
             cmd: The ``ready`` message from the client (already
                 stamped with the connection's ``connId`` by
-                :meth:`kiss.server.sorcar.ServerApi.dispatch`).
+                :meth:`kiss.server.sorcar.ServerApi.dispatch`, its
+                ``restoredTabs`` already sanitized by
+                :meth:`kiss.server.sorcar.ServerApi.ready`).
             websocket: The client connection (for direct replies).
         """
         tab_id = self._cmd_str(cmd, "tabId")
@@ -8774,10 +8511,9 @@ class RemoteAccessServer:
             )
         except Exception:
             pass
-        restored = self._sanitized_restored_tabs(cmd)
         try:
             bound, adopted = await asyncio.to_thread(
-                self._vscode_server.ready_tab_sync, restored,
+                self._vscode_server.ready_tab_sync, cmd["restoredTabs"],
             )
         except Exception:
             logger.exception("ready tab-registry sync failed")
@@ -9068,9 +8804,7 @@ class RemoteAccessServer:
                     # Release any failed prefixed proc retained above
                     # so its stderr pipe does not linger until GC.
                     if last_proc is not None:
-                        if last_proc.stderr is not None:
-                            last_proc.stderr.close()
-                        last_proc.wait()
+                        _reap_proc(last_proc)
                     raise
                 logger.warning(
                     "%s not found; spawning cloudflared inside the "
@@ -9085,19 +8819,14 @@ class RemoteAccessServer:
                 pass
             if proc.poll() is None:
                 if last_proc is not None:
-                    if last_proc.stderr is not None:
-                        last_proc.stderr.close()
-                    last_proc.wait()
+                    _reap_proc(last_proc)
                 with self._tunnel_lock:
                     if self._tunnel_stopped:
                         # ``_stop_tunnel`` already ran (the watchdog
                         # tick that started us was cancelled by
                         # ``stop_async``); publishing now would leak
                         # a live cloudflared past shutdown.
-                        proc.kill()
-                        proc.wait()
-                        if proc.stderr is not None:
-                            proc.stderr.close()
+                        _reap_proc(proc, kill=True)
                         raise RuntimeError(
                             "tunnel stopped while cloudflared was starting",
                         )
@@ -9109,9 +8838,7 @@ class RemoteAccessServer:
                     )
                 return
             if last_proc is not None:
-                if last_proc.stderr is not None:
-                    last_proc.stderr.close()
-                last_proc.wait()
+                _reap_proc(last_proc)
             last_proc = proc
             if prefix:
                 # Bounded: at most two prefixed failures before the
@@ -9146,9 +8873,7 @@ class RemoteAccessServer:
         # whose stderr pipe would then outlive ``stop_async``.
         with self._tunnel_lock:
             if self._tunnel_stopped and last_proc is not None:
-                if last_proc.stderr is not None:
-                    last_proc.stderr.close()
-                last_proc.wait()
+                _reap_proc(last_proc)
                 raise RuntimeError(
                     "tunnel stopped while cloudflared was starting",
                 )
@@ -9316,10 +9041,10 @@ class RemoteAccessServer:
                 "Adopted cloudflared (pid=%d) is gone; restarting…",
                 adopted_pid,
             )
-            self._tunnel_adopted_pid = None
-            self._tunnel_metrics_port = None
-            self._tunnel_started_at = None
-            self._tunnel_unhealthy_ticks = 0
+            # An adopted tunnel never coexists with an own ``Popen``
+            # (adoption happens only at start-up, a spawn clears the
+            # adopted pid), so the full reset is exact here.
+            self._reset_tunnel_proc_state()
             adopted_pid = None
 
         cfg = await asyncio.to_thread(load_config)
@@ -10323,20 +10048,18 @@ class RemoteAccessServer:
             # is empty RIGHT NOW the orphan is terminated immediately.
             # Cost of the eager kill: a password saved during the wait
             # rotates the public URL instead of re-adopting it.
-            initial_cfg = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                None, load_config,
-            )
+            initial_cfg = await asyncio.to_thread(load_config)
             if not initial_cfg.get("remote_password", ""):
-                await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _terminate_orphan_cloudflared, self.port,
+                await asyncio.to_thread(
+                    _terminate_orphan_cloudflared, self.port,
                 )
-            password = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                None, _wait_for_remote_password, 30.0,
+            password = await asyncio.to_thread(
+                _wait_for_remote_password, 30.0,
             )
             own_tunnel_pid: int | None = None
             if password:
-                adopted = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _try_adopt_existing_cloudflared, self.port,
+                adopted = await asyncio.to_thread(
+                    _try_adopt_existing_cloudflared, self.port,
                 )
                 if adopted is not None:
                     adopted_pid, adopted_port, adopted_url = adopted
@@ -10349,8 +10072,8 @@ class RemoteAccessServer:
                         adopted_pid, adopted_port, adopted_url,
                     )
             if not password:
-                await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _terminate_orphan_cloudflared, self.port,
+                await asyncio.to_thread(
+                    _terminate_orphan_cloudflared, self.port,
                 )
                 logger.warning(
                     "remote_password is not set in ~/%s/config.json; "
@@ -10367,8 +10090,8 @@ class RemoteAccessServer:
                     file=sys.stderr,
                 )
             elif tunnel_url is None:
-                tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, self._start_tunnel,
+                tunnel_url = await asyncio.to_thread(
+                    self._start_tunnel,
                 )
                 spawned = self._tunnel_proc
                 if spawned is not None:
@@ -10385,9 +10108,8 @@ class RemoteAccessServer:
                 # while leaving the tunnel alive for the next daemon —
                 # a cleanup with ``keep_pid=None`` would kill exactly
                 # that tunnel.
-                await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _terminate_stray_cloudflared, self.port,
-                    own_tunnel_pid,
+                await asyncio.to_thread(
+                    _terminate_stray_cloudflared, self.port, own_tunnel_pid,
                 )
 
         self._last_ips = await asyncio.to_thread(_get_local_ips)
@@ -10785,7 +10507,7 @@ class RemoteAccessServer:
         from kiss.server.agent_state import AgentState
         from kiss.server.task_runner import (
             _state_owns_thread,
-            inject_keyboard_interrupt,
+            inject_if_owned,
             wait_for_thread_start,
         )
 
@@ -10857,27 +10579,21 @@ class RemoteAccessServer:
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(timeout=min(1.0, remaining))
             if thread.is_alive():
-                # Re-check ownership under STATE_LOCK immediately
-                # before injecting, exactly like the Stop watchdog
-                # (``_force_stop_thread``).  "Still alive" does not
-                # mean "still ignoring the stop": the worker may have
-                # honoured the cooperative event already and be inside
-                # its legitimate cleanup ``finally`` (persisting the
-                # interrupted row can wait out SQLite's busy timeout),
-                # which this sweep exists to let finish — injecting
-                # there aborted the very persistence/broadcast it
-                # wants.  The predicate also refuses while the thread
-                # performs the state's own post-task worktree merge (a
-                # merge is awaited, never stopped) and, because
-                # ``task_thread`` is cleared under the same lock when a
-                # run finishes, closes the window where a recycled
-                # thread ident would route the interrupt into an
-                # unrelated freshly spawned thread.
-                with agent_state.STATE_LOCK:
-                    if _state_owns_thread(state, thread):
-                        tid = thread.ident
-                        if tid is not None:  # pragma: no branch — live thread has ident
-                            inject_keyboard_interrupt(tid)
+                # Ownership is re-checked under STATE_LOCK immediately
+                # before injecting, exactly like the Stop watchdog.
+                # "Still alive" does not mean "still ignoring the
+                # stop": the worker may have honoured the cooperative
+                # event already and be inside its legitimate cleanup
+                # ``finally`` (persisting the interrupted row can wait
+                # out SQLite's busy timeout), which this sweep exists
+                # to let finish — injecting there aborted the very
+                # persistence/broadcast it wants.  The predicate also
+                # refuses while the thread performs the state's own
+                # post-task worktree merge (a merge is awaited, never
+                # stopped).  Unlike the watchdog, the sweep keeps
+                # joining after a refusal: the cleanup must finish
+                # before the process exits.
+                inject_if_owned(thread, partial(_state_owns_thread, state, thread))
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
                 logger.warning(
@@ -11085,10 +10801,6 @@ class RemoteAccessServer:
                 local_endpoint.remove_endpoint_if_owned,
                 self._local_endpoint_file, self._local_token,
             )
-            # Reap daemon-hosted wake-word listeners: their owning
-            # connections are gone (or going), and a leaked child
-            # would keep the microphone open past shutdown.
-            await self._voice_wake.stop_all()
             # The streamed browser (if one was opened) is a child of this
             # daemon: close it so no orphan browser survives shutdown.
             set_browser_tab_opener(None)

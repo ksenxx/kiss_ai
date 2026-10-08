@@ -22,7 +22,7 @@ Covers, over REAL objects (no mocks, patches, or fakes):
   the fish branch dumped unconditionally.  Exercised with a real
   ``/bin/bash`` and a temp ``$HOME`` whose ``.bashrc`` exports a key
   and then ends with ``false``.
-* D3: ``vscode_config.save_config`` and ``_atomic_write_text_secure``
+* D3: ``vscode_config.save_config`` and the secure RC-file writer
   leaked their ``mkstemp`` staging files (``.kiss-config-*`` in
   ``~/.kiss/``, ``.kiss-rc-*`` in ``$HOME``) whenever the write or the
   ``os.replace`` raised.  Exercised by making the destination a
@@ -157,8 +157,8 @@ class TestD1DownloadTimeout:
 
 
 
-_WAKE_DIR = voice_wake.DEFAULT_MODELS_DIR / voice_wake.MODEL_NAME
-_SPK_DIR = voice_wake.DEFAULT_MODELS_DIR / voice_wake.SPK_MODEL_NAME
+_WAKE_DIR = voice_wake.default_models_dir() / voice_wake.MODEL_NAME
+_SPK_DIR = voice_wake.default_models_dir() / voice_wake.SPK_MODEL_NAME
 
 
 @pytest.mark.skipif(
@@ -176,7 +176,7 @@ class TestD5SharedVoskModel:
         shared = voice_wake.load_shared_vosk_model(_WAKE_DIR)
 
         identifier = voice_wake.SpeakerIdentifier(
-            voice_wake.DEFAULT_MODELS_DIR
+            voice_wake.default_models_dir()
         )
         assert len(voice_wake._VOSK_MODEL_CACHE) == 1
         assert voice_wake.load_shared_vosk_model(_WAKE_DIR) is shared

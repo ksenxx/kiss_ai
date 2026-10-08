@@ -29,9 +29,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _is_inside_git_repo(path: str) -> bool:

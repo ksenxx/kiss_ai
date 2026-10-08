@@ -27,6 +27,8 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.tests.conftest import has_api_key_for_model
 
+pytestmark = pytest.mark.live_api
+
 TEST_MODELS = ["gemini-3-flash-preview", "gpt-5.4-mini", "claude-haiku-4-5"]
 
 VISITED_URLS: list[str] = []

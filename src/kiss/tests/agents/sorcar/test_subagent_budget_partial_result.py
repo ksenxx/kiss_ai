@@ -21,22 +21,17 @@ runs the real agents; no mocks.
 from __future__ import annotations
 
 import json
-import shutil
-import sqlite3
 import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.printer import Printer
@@ -272,60 +267,3 @@ class TestLimitHitAfterToolRanIsRecorded:
         assert len(model_messages) == 1
         assert "spend(note='children')" in model_messages[0]["content"]
         assert "[spend]: spent on children" in agent.messages[-1]["content"]
-
-
-class TestFanOutReceivesPartialResult:
-    """Through the real fan-out engine, the parent sees the partial result."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        kiss_dir = Path(self.tmpdir) / ".kiss"
-        kiss_dir.mkdir(parents=True)
-        th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
-
-    def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self.saved
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_child_partial_result_reaches_parent_and_history(self) -> None:
-        # $0.051 per step (85k output tokens, under the 70 % context
-        # hand-off of the 128k window): the child's $0.50 share is gone
-        # at step 10, after nine recorded steps — one more than the
-        # quoted tail holds.
-        body = _tool_call_body(
-            "Bash", {"command": "echo probing", "description": "d"}, 100, 85_000,
-        )
-        with _serve(body) as base_url:
-            parent = SorcarAgent("fanout-parent")
-            parent.model_name = _MODEL
-            parent.model_config = {"base_url": base_url, "api_key": "local"}
-            parent.work_dir = self.tmpdir
-            parent.max_budget = 1.0
-            parent.budget_used = 0.0
-            parent._use_web_tools = False
-            results = parent._run_tasks_parallel(["probe the budget"], max_workers=1)
-
-        assert len(results) == 1
-        payload = yaml.safe_load(results[0])
-        assert payload["success"] is False
-        assert "Unhandled exception" not in payload["summary"]
-        assert "<h3>Partial result: " in payload["summary"]
-        assert "budget exceeded" in payload["summary"]
-        assert "Bash(command=&#x27;echo probing&#x27;" in payload["summary"]
-        assert "(1 earlier steps omitted.)" in payload["summary"]
-        assert payload["summary"].count("<li><pre>") == 8
-        # The child's spend was attributed to the parent.
-        assert parent.budget_used >= 0.5
-
-        conn = sqlite3.connect(th._DB_PATH)
-        rows = conn.execute("SELECT result FROM task_history").fetchall()
-        conn.close()
-        assert len(rows) == 1
-        assert rows[0][0] != "Task failed"
-        assert "Partial result" in rows[0][0]

@@ -32,6 +32,8 @@ from collections.abc import Callable
 from typing import Any
 
 from kiss.agents.seas.ask.ask_sea import AskSea
+from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK
 from kiss.agents.sorcar.sea_commands import evaluate_sea
 from kiss.server.json_printer import stamp_event_ts
 
@@ -146,13 +148,6 @@ def mark_legacy_updates_as_side_channels() -> int:
     return _mark_legacy_side_channel_rows(task_update_sea.PROMPT_TEMPLATE)
 
 
-# Serializes charge_side_channel_usage: each charge's row update and the
-# usage_info snapshots it publishes happen together, so a concurrent
-# charge's older, smaller snapshot can never be shown (or replayed) after
-# a newer one.
-_LATE_USAGE_LOCK = threading.Lock()
-
-
 def charge_side_channel_usage(
     printer: Any,
     task_agent: Any,
@@ -175,7 +170,9 @@ def charge_side_channel_usage(
     ``usage_info``, and a still-running ancestor, when there is one,
     banks the spend on its live agent.  A running task's new totals
     are broadcast as its own ``usage_info`` (recorded and persisted),
-    so its replayed transcript ends with the cost its row will store.  A task that finishes in the
+    so its replayed transcript ends with the cost its row will store.  A task
+    with no row at all (a run that persists none) is banked on its
+    live agent like an unfinished one.  A task that finishes in the
     moment between the row check and the bank, after its final save
     read its counters, loses the spend (the same narrow window every
     live-agent bank has).
@@ -200,7 +197,7 @@ def charge_side_channel_usage(
 
     if not task_id or (budget <= 0 and tokens <= 0 and steps <= 0):
         return
-    with _LATE_USAGE_LOCK:
+    with TASK_USAGE_LOCK:
         try:
             updated, running = _add_late_task_usage(task_id, tokens, budget, steps)
         except Exception:
@@ -209,6 +206,12 @@ def charge_side_channel_usage(
                 exc_info=True,
             )
             return
+        _race_delay()  # test hook: widens the row-check-to-bank window
+        if not updated and not running:
+            # No row for the task (its run persists none, or has not
+            # saved one yet): the live agent is the only place the
+            # spend can go, exactly as for an unfinished row.
+            running = task_id
         banked = False
         if running:
             # Banked first: the task can finish (saving its counters) at
@@ -366,7 +369,6 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
             tool_call_hook=ask.tool_call_hook,
             append_basic_tools=False,
             tool_profile=ask_settings["tool_profile"],
-            is_parallel=ask_settings["allow_fan_out"],
             max_budget=UPDATE_BUDGET_USD,
             model_config=(
                 getattr(parent_agent, "model_config", None)
@@ -452,13 +454,18 @@ class TaskUpdateRunner:
         upd = self._update_for(task_id, now)
         with self._lock:
             if (force or now >= upd.due_at) and not upd.running:
-                upd.running = True
+                # ``running`` is set only once the thread exists (a
+                # failed ``start()`` under thread exhaustion would
+                # otherwise pin the update on "running" for good);
+                # ``_run``'s finishing write waits for this lock, so
+                # it cannot be overtaken.
                 threading.Thread(
                     target=self._run,
                     args=(task_id, parent_agent),
                     name=f"task-update-{task_id[:8]}",
                     daemon=True,
                 ).start()
+                upd.running = True
             return dataclasses.replace(upd)
 
     def _update_for(self, task_id: str, now: float) -> TaskUpdate:

@@ -4,7 +4,7 @@
 # add your name here
 """C-RC2: ``_run_task``'s try/finally must cover the ENTIRE body.
 
-Before the fix, the agent-script override, ``_resolve_run_state``,
+Before the fix, the SEA override, ``_resolve_run_state``,
 the registry re-pin, and the ``clear`` re-announcement all executed
 BEFORE the ``try:`` in ``_run_task``.  ``_stop_task``'s watchdog
 injects a ``KeyboardInterrupt`` into the worker thread after a 1s
@@ -22,7 +22,7 @@ signals arrival and then sleeps in small interruptible increments,
 and the test injects the KeyboardInterrupt exactly there via
 ``PyThreadState_SetAsyncExc`` (what the stop watchdog does).
 
-No mocks: a real ``VSCodeServer``, a real agent script file, a real
+No mocks: a real ``VSCodeServer``, a real SEA file, a real
 worker thread, real KI injection.
 """
 
@@ -37,9 +37,13 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
     ctypes.c_ulong,
@@ -105,7 +109,7 @@ class TestRunTaskGuardCoversWholeBody(unittest.TestCase):
         """KI in the setup region → running=False + task_thread cleared."""
         work_dir = str(Path(self.tmpdir) / "plain")
         Path(work_dir).mkdir()
-        # A real agent script whose prompt(task) override forces the
+        # A real SEA whose prompt(task) override forces the
         # registry re-pin (the instrumented setup step) to run.
         script = Path(self.tmpdir) / "agent_script.py"
         script.write_text(
@@ -124,7 +128,7 @@ class TestRunTaskGuardCoversWholeBody(unittest.TestCase):
             "useWorktree": False,
             "autoCommit": False,
             "model": "",
-            "agentPath": str(script),
+            "seaPath": str(script),
         }
         self.server._cmd_run(dict(cmd))
         assert self.in_setup_region.wait(timeout=30), (
@@ -173,7 +177,7 @@ class TestRunTaskGuardCoversWholeBody(unittest.TestCase):
         # restore the fast registry update first.
         self.server._registry_update_tab = self._orig_update_tab  # type: ignore[assignment]
         cmd2 = dict(cmd)
-        cmd2.pop("agentPath")
+        cmd2.pop("seaPath")
         self.server._cmd_run(cmd2)
         state2 = agent_state.find_by_tab(tab_id)
         assert state2 is not None, "second submit created no state"

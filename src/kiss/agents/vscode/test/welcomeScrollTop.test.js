@@ -175,12 +175,15 @@ async function testWelcomeTabActivationScrollsToTop(remote) {
       'showing the welcome screen from the top',
   );
 
-  // Switching back to the conversation must still land at its end...
-  const chatTabEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="' + chatTabId + '"]',
+  // Switching back to the conversation (a Chats-panel pick; chats have no
+  // tab row of their own any more) must still land at its end...
+  const openIds = () => win._testApi.openTabs().map((t) => t.id);
+  assert.ok(
+    openIds().includes(chatTabId),
+    'the conversation chat must still be open',
   );
-  assert.ok(chatTabEl, 'the conversation tab must appear in the tab bar');
-  chatTabEl.click();
+  win._testApi.switchToTab(chatTabId);
+  assert.strictEqual(win._testApi.getActiveTabId(), chatTabId);
   assert.strictEqual(
     O.scrollTop,
     Math.max(0, geo.sh - geo.ch),
@@ -190,11 +193,12 @@ async function testWelcomeTabActivationScrollsToTop(remote) {
   );
 
   // ...and switching to the welcome tab again must land at the top.
-  const welcomeTabEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="' + welcomeTabId + '"]',
+  assert.ok(
+    openIds().includes(welcomeTabId),
+    'the welcome chat must still be open',
   );
-  assert.ok(welcomeTabEl, 'the welcome tab must appear in the tab bar');
-  welcomeTabEl.click();
+  win._testApi.switchToTab(welcomeTabId);
+  assert.strictEqual(win._testApi.getActiveTabId(), welcomeTabId);
   assertWelcomeAtTop(
     win,
     'BUG (' +

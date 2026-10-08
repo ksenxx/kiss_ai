@@ -13,7 +13,6 @@ import contextlib
 import json
 import logging
 import os
-import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -27,6 +26,7 @@ from kiss.core.brand import HOME_DIR
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, ThinkingCallback, TokenCallback
+from kiss.core.utils import seed_file_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -207,44 +207,6 @@ MY_MODELS_DEFAULT_CONTENT = json.dumps(
 ) + "\n"
 
 
-def _seed_file_atomically(path: Path, content: str) -> None:
-    """Create *path* holding *content*, if it does not exist yet.
-
-    The seed is **atomic and non-clobbering**: *content* is staged in a
-    sibling temp file and hard-linked into place, so a concurrent reader
-    never observes the empty file that a plain ``write_text`` exposes
-    between creating the target and writing to it.  If the target
-    appears between the existence check and the link (a concurrent
-    seeder, or a user edit), the existing file wins.
-
-    Same guarantee and same technique as
-    :func:`kiss.server.user_assets.ensure_user_asset_from_default`, which
-    documents the torn read a plain ``write_text`` seed caused there.
-
-    Args:
-        path: The file to create.
-        content: UTF-8 text written on first creation only.
-
-    Raises:
-        OSError: When the directory cannot be created or written.
-    """
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, staged = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
-    try:
-        # A buffered file object (rather than a bare os.write, whose
-        # partial-write count would have to be handled) guarantees the
-        # whole payload is on disk before the link publishes it.
-        with os.fdopen(fd, "wb") as f:
-            f.write(content.encode("utf-8"))
-        os.link(staged, path)
-    except FileExistsError:
-        logger.debug("Exception caught", exc_info=True)
-    finally:
-        Path(staged).unlink(missing_ok=True)
-
-
 def _seed_my_models_file() -> None:
     """Create ``~/.kiss/MY_MODELS.json`` from the inline default if absent.
 
@@ -257,7 +219,7 @@ def _seed_my_models_file() -> None:
     silently missing for the life of that process.
     """
     try:
-        _seed_file_atomically(USER_MY_MODELS_PATH, MY_MODELS_DEFAULT_CONTENT)
+        seed_file_atomically(USER_MY_MODELS_PATH, MY_MODELS_DEFAULT_CONTENT)
     except OSError:
         logger.debug("Exception caught", exc_info=True)
 
@@ -1096,19 +1058,28 @@ def _decisions_model(
 
 MODEL_INFO: dict[str, ModelInfo] = _load_model_info()
 
-_ANTHROPIC_CACHE_PREFIXES = (
-    "claude-",
-    "openrouter/anthropic/",
-    "openrouter/~anthropic/",
-)
+_ANTHROPIC_OPENROUTER_PREFIXES = ("openrouter/anthropic/", "openrouter/~anthropic/")
+_ANTHROPIC_CACHE_PREFIXES = ("claude-",) + _ANTHROPIC_OPENROUTER_PREFIXES
 # Anthropic bills cache hits at 0.1x the base input price, except on the
 # families below: Fable 5.1 / Mythos 5.1 read at 0.025x ($0.25/MTok on a
-# $10 base) and Opus 5.5 at 0.05x ($0.20/MTok on a $4 base).  Fable 5
-# (without the .1) is a plain 0.1x model, so the prefixes carry the minor
-# version: https://platform.claude.com/docs/en/about-claude/pricing
+# $10 base), Opus 5.5 at 0.05x ($0.20/MTok on a $4 base) and Sonnet 5.5
+# at 0.05x ($0.10/MTok on a $2 base).  Fable 5 / Opus 5 / Sonnet 5
+# (without the .5 or .1) are plain 0.1x models, so the prefixes carry the
+# minor version: https://platform.claude.com/docs/en/about-claude/pricing
 _ANTHROPIC_CACHE_READ_MULTIPLIERS = (
     (("claude-fable-5-1", "claude-fable-5.1", "claude-mythos-5-1", "claude-mythos-5.1"), 0.025),
-    (("claude-opus-5-5", "claude-opus-5.5"), 0.05),
+    (("claude-opus-5-5", "claude-opus-5.5", "claude-sonnet-5-5", "claude-sonnet-5.5"), 0.05),
+)
+# Claude Haiku 5.5 is the one Claude model priced by prompt length: prompts
+# over 100K tokens (input + cache read + cache write) bill the whole request
+# at 5x every rate ($0.10/$0.50 -> $0.50/$2.50; 5m write $0.125 -> $0.625;
+# 1h write $0.20 -> $1; read $0.01 -> $0.05).  Every other 1M-context Claude
+# model bills long prompts at standard rates:
+# https://platform.claude.com/docs/en/models/haiku-5-5/overview
+_ANTHROPIC_LONG_CONTEXT_FAMILIES = (
+    "claude-haiku-5-5",
+    "claude-haiku-5.5",
+    "claude-haiku-latest",
 )
 _OPENAI_OPENROUTER_PREFIXES = ("openrouter/openai/", "openrouter/~openai/")
 _GOOGLE_OPENROUTER_PREFIXES = ("openrouter/google/", "openrouter/~google/")
@@ -1431,18 +1402,24 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     Returns:
         The matching :class:`ModelInfo`, or ``None``.
     """
-    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    bare = _strip_provider_prefix(model_name)
+    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(bare)
     if info is not None:
         return info
-    entry = _read_my_models().get(model_name) or _read_my_models().get(
-        _strip_provider_prefix(model_name)
-    )
+    my_models = _read_my_models()
+    key = model_name if model_name in my_models else bare
+    entry = my_models.get(key)
     if entry is None:
         return None
     try:
-        return _build_model_info_entry(entry)
+        info = _build_model_info_entry(entry)
     except (KeyError, TypeError, ValueError):
         return None
+    # Same normalization the import-time catalog gets, so a hot-added
+    # custom model bills cache hits at the provider's discount instead
+    # of the full input price until the next restart.
+    _apply_cache_pricing(key, info)
+    return info
 
 
 def model_runs_task_to_completion(model_name: str) -> bool:
@@ -1808,11 +1785,11 @@ def get_fast_model() -> str:
     """
     return _model_for_first_configured_provider(
         {
-            "ANTHROPIC_API_KEY": "claude-haiku-4-5-20251001",
+            "ANTHROPIC_API_KEY": "claude-sonnet-5-5",
             "OPENAI_API_KEY": "gpt-6-luna",
             "GEMINI_API_KEY": "gemini-3.5-flash-lite",
-            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-haiku-4.5",
-            "TOGETHER_API_KEY": "deepseek-ai/DeepSeek-R1-0528",
+            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-sonnet-5.5",
+            "TOGETHER_API_KEY": "deepseek-ai/DeepSeek-V4.1-Flash",
             "cc": "cc/haiku",
             "codex": "codex/gpt-6-luna",
         },
@@ -1866,6 +1843,13 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     ``gpt-mini-latest`` tracks gpt-5.4-mini, which has no long-context
     tier.
 
+    Anthropic prices only Claude Haiku 5.5 by prompt length
+    (:data:`_ANTHROPIC_LONG_CONTEXT_FAMILIES`): prompts over 100K tokens
+    bill at 5x every rate, $0.10/$0.50 -> $0.50/$2.50 with cache
+    read/write scaled the same way (OpenRouter publishes the same
+    ``min_prompt_tokens: 100000`` override).  Every other 1M-context
+    Claude model bills long prompts at its standard rates.
+
     Multipliers (not absolute prices) are returned so OpenRouter
     passthrough entries, whose base prices follow OpenRouter's own
     listings rather than the provider's direct rates, scale from their
@@ -1881,8 +1865,12 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
         tier.
     """
     bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
-    if bare.startswith(_OPENAI_OPENROUTER_PREFIXES + _GOOGLE_OPENROUTER_PREFIXES):
+    if bare.startswith(
+        _OPENAI_OPENROUTER_PREFIXES + _GOOGLE_OPENROUTER_PREFIXES + _ANTHROPIC_OPENROUTER_PREFIXES
+    ):
         bare = bare.split("/", 2)[2]
+    if bare.startswith(_ANTHROPIC_LONG_CONTEXT_FAMILIES):
+        return 100_000, 5.0, 5.0
     if bare.startswith(
         ("gpt-6-", "gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
         + _OPENAI_ROLLING_LATEST
@@ -2091,6 +2079,12 @@ def openrouter_twin(model_name: str) -> str | None:
     request for a billing or availability reason: the same model keeps
     running, only the billing route changes.
 
+    A generated ``-{level}`` effort alias (``claude-opus-5-5-medium``,
+    ``gpt-6.1-sol-medium``) is matched by its base id; the twin keeps the
+    same level when OpenRouter's side has a matching generated alias
+    (``openrouter/openai/gpt-6.1-sol-medium``) and falls back to the bare
+    twin otherwise (``openrouter/anthropic/claude-opus-5.5``).
+
     Args:
         model_name: A model name from the catalog.
 
@@ -2098,14 +2092,25 @@ def openrouter_twin(model_name: str) -> str | None:
         The OpenRouter catalog key, or ``None`` when *model_name* already
         names a routed model (contains ``/``) or has no twin.
     """
-    bare = _strip_provider_prefix(model_name)
-    if "/" in bare:
+    # Harbor-style ``anthropic/`` / ``openai/`` / ``google/`` prefixes are
+    # dropped first so the alias lookup below sees the exact catalog key;
+    # anything still routed (``openrouter/...``, ``meta-llama/...``) has no
+    # twin.  The alias lookup needs the exact key, which is why the
+    # alias is resolved only after the redundant prefix is gone.
+    bare_alias = _strip_provider_prefix(model_name)
+    if "/" in bare_alias:
         return None
+    bare = _strip_thinking_alias(bare_alias)
+    level_suffix = bare_alias[len(bare) :] if bare != bare_alias else ""
     wanted = _twin_key(bare)
     for key in MODEL_INFO:
         if not key.startswith("openrouter/") or "/~" in key:
             continue
         if _twin_key(key.rsplit("/", 1)[-1]) == wanted:
+            if level_suffix:
+                leveled = MODEL_INFO.get(key + level_suffix)
+                if leveled is not None and leveled.alias_of == key:
+                    return key + level_suffix
             return key
     return None
 

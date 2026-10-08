@@ -11,8 +11,8 @@ Every agent in ``kiss/agents/third_party_agents/`` must launch through
 synchronous client API :func:`kiss.server.sorcar.run`: the launcher
 connects to a daemon's local endpoint, sends the documented ``run``
 command, and supplies the agent's channel tools through the API's
-``extension_agent_path`` agent-script contract: the agent's OWN
-module is the agent script, and the daemon imports it and calls its
+``sea_path`` SEA contract: the agent's OWN
+module is the SEA, and the daemon imports it and calls its
 SEA class's ``tools()`` to build a fresh agent from the
 credentials persisted under the active kiss home.  No bridge,
 registry, wrapper, or generated file is involved.  The task is executed
@@ -45,7 +45,6 @@ import threading
 import time
 import unittest
 from collections.abc import Callable
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 
@@ -54,6 +53,7 @@ import yaml
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
+from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents._kiss_web_launcher import (
     KissWebChatAgent,
     run_agent_via_kiss_web,
@@ -79,7 +79,8 @@ USAGE = {"prompt_tokens": 1000, "completion_tokens": 234, "total_tokens": 1234}
 def _failed_finish(summary: str) -> dict[str, Any]:
     """Build a completion whose ``finish`` call reports ``success=False``."""
     return tool_call_response(
-        "finish", {"success": "false", "summary_in_html": summary},
+        "finish",
+        {"success": "false", "summary_in_html": summary},
     )
 
 
@@ -97,11 +98,7 @@ def _system_text(request: dict[str, Any]) -> str:
 
 def _task_text(request: dict[str, Any]) -> str:
     """Return the user messages of *request* (the executed prompt)."""
-    return "\n".join(
-        str(m.get("content"))
-        for m in request["messages"]
-        if m["role"] == "user"
-    )
+    return "\n".join(str(m.get("content")) for m in request["messages"] if m["role"] == "user")
 
 
 def _tool_results(request: dict[str, Any]) -> list[str]:
@@ -110,9 +107,7 @@ def _tool_results(request: dict[str, Any]) -> list[str]:
     The agent appends its step/budget footer to every tool result, so
     callers match the tool's own output with ``startswith``.
     """
-    return [
-        str(m.get("content")) for m in request["messages"] if m["role"] == "tool"
-    ]
+    return [str(m.get("content")) for m in request["messages"] if m["role"] == "tool"]
 
 
 def _only_tool_result(request: dict[str, Any]) -> str:
@@ -148,9 +143,7 @@ class _LaunchHandler(_StandInHandler):
     def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
         """Record the headers, then fail with ``fail_status`` or answer normally."""
         model_server = cast(Any, self.server).launch
-        model_server.headers.append(
-            {k.lower(): v for k, v in self.headers.items()}
-        )
+        model_server.headers.append({k.lower(): v for k, v in self.headers.items()})
         if model_server.fail_status:
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
             self.send_error(model_server.fail_status, "scripted model failure")
@@ -178,7 +171,7 @@ class LaunchModelServer:
         self.answer: Callable[[dict[str, Any]], dict[str, Any]] = self._scripted
         self._holding = False
         self._gate = threading.Event()
-        server = ThreadingHTTPServer(("127.0.0.1", 0), _LaunchHandler)
+        server = ThreadedHTTPServer(("127.0.0.1", 0), _LaunchHandler)
         cast(Any, server).launch = self
         cast(Any, server).responder = self._record_and_answer
         self._server = server
@@ -206,9 +199,7 @@ class LaunchModelServer:
     def stop(self) -> None:
         """Release held calls, stop serving and join the server thread."""
         self.release()
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join(timeout=5)
+        stop_http_server(self._server, self._thread)
 
     def _record_and_answer(self, request: dict[str, Any]) -> dict[str, Any]:
         self.requests.append(request)
@@ -238,7 +229,7 @@ class _ApiLaunchBase(unittest.TestCase):
         self.repo = str(self.home.repo)
         self.endpoint_file = str(self.home.tmpdir / "sorcar-local.json")
         # The daemon imports each channel agent's module as the task's
-        # agent script, so credential paths under ``~`` are re-evaluated
+        # SEA, so credential paths under ``~`` are re-evaluated
         # there: point HOME at the empty tmpdir so every test observes
         # the deterministic "not authenticated" state and never the
         # developer machine's real credentials.
@@ -254,29 +245,36 @@ class _ApiLaunchBase(unittest.TestCase):
         model_info.USER_MY_MODELS_PATH = self.home.kiss_home / "MY_MODELS.json"
         self.addCleanup(self._restore_my_models)
         error = model_info.save_custom_model(
-            STANDIN_MODEL, endpoint=self.model_server.url, api_key="kiss-test-key",
+            STANDIN_MODEL,
+            endpoint=self.model_server.url,
+            api_key="kiss-test-key",
         )
         assert error is None, error
         # No pre-run classifier and no auto-commit: the scripted
         # endpoint then sees exactly the agentic calls.
         self.home.write_config(
-            last_model=STANDIN_MODEL, classify_tasks=False, auto_commit_mode=False,
+            last_model=STANDIN_MODEL,
+            classify_tasks=False,
+            auto_commit_mode=False,
         )
 
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
-            target=self.loop.run_forever, daemon=True,
+            target=self.loop.run_forever,
+            daemon=True,
         )
         self.loop_thread.start()
         self.addCleanup(self._stop_loop)
         self.server = RemoteAccessServer(
-            local_endpoint_file=self.endpoint_file, work_dir=self.repo,
+            local_endpoint_file=self.endpoint_file,
+            work_dir=self.repo,
         )
         # Registered before the start is awaited so a start that times
         # out is still shut down.
         self.addCleanup(self._shutdown_server)
         asyncio.run_coroutine_threadsafe(
-            self.server.start_private_async(), self.loop,
+            self.server.start_private_async(),
+            self.loop,
         ).result(timeout=30)
 
         self._saved_endpoint_override = launcher._ENDPOINT_FILE_OVERRIDE
@@ -318,10 +316,7 @@ class _ApiLaunchBase(unittest.TestCase):
             # Closes the listener (and with it every established local
             # connection) and joins the handlers before the loop stops.
             await self.server.stop_async()
-            pending = [
-                t for t in asyncio.all_tasks()
-                if t is not asyncio.current_task()
-            ]
+            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
             for t in pending:
                 t.cancel()
             if pending:
@@ -329,7 +324,8 @@ class _ApiLaunchBase(unittest.TestCase):
 
         try:
             asyncio.run_coroutine_threadsafe(
-                _shutdown(), self.loop,
+                _shutdown(),
+                self.loop,
             ).result(timeout=30)
         except Exception:
             pass
@@ -356,15 +352,15 @@ class _ApiLaunchBase(unittest.TestCase):
         model_server.hold()
         results: list[str] = []
         thread = threading.Thread(
-            target=_call_and_store, args=(launch, results), daemon=True,
+            target=_call_and_store,
+            args=(launch, results),
+            daemon=True,
         )
         thread.start()
         try:
             deadline = time.monotonic() + 30
             while (
-                not model_server.seen.is_set()
-                and thread.is_alive()
-                and time.monotonic() < deadline
+                not model_server.seen.is_set() and thread.is_alive() and time.monotonic() < deadline
             ):
                 model_server.seen.wait(timeout=0.1)
             assert model_server.seen.is_set(), "the task never ran"
@@ -404,8 +400,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         request = self._only_request()
         assert "hello slack task" in _task_text(request)
         assert daemon_agent is not agent, (
-            "the task must run on a daemon-built agent, not the passed "
-            "third-party agent instance"
+            "the task must run on a daemon-built agent, not the passed third-party agent instance"
         )
         assert isinstance(daemon_agent, ChatSorcarAgent)
         assert task_thread is not threading.main_thread(), (
@@ -443,9 +438,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
         agent = SlackAgent()
-        assert agent.sea_path == str(slack_sea.__file__), (
-            "the agent's own module must be its agent script"
-        )
+        assert agent.sea_path == str(slack_sea.__file__), "the agent's own module must be its SEA"
         assert not hasattr(agent, "tools_file")
 
         self.model_server.script = [
@@ -466,9 +459,9 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "clear_slack_auth",
         ):
             assert expected in names, f"missing channel tool {expected}"
-        assert any(
-            "Not authenticated with Slack" in out for out in _tool_results(second)
-        ), "check_slack_auth must have run against the empty kiss home"
+        assert any("Not authenticated with Slack" in out for out in _tool_results(second)), (
+            "check_slack_auth must have run against the empty kiss home"
+        )
         assert "module tools loaded ok" in yaml.safe_load(result)["summary"]
 
     def test_launcher_has_no_tools_path_parameters(self) -> None:
@@ -488,7 +481,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         params = inspect.signature(run_agent_via_kiss_web).parameters
         assert "tools" not in params
         assert "append_basic_tools" not in params
-        assert "extension_agent_path" not in params
+        assert "sea_path" not in params
         assert filter_launch_kwargs(
             {"tools": "/x.py", "append_basic_tools": False, "max_budget": 2.0}
         ) == {"max_budget": 2.0}
@@ -626,12 +619,10 @@ class TestLaunchViaApi(_ApiLaunchBase):
             # of overwriting the env var A's daemon-side tools()
             # reads — that would load the wrong account's credentials.
             assert not started["B"].wait(timeout=1.0), (
-                "a launch must not reach the model while a different "
-                "workspace is still exported"
+                "a launch must not reach the model while a different workspace is still exported"
             )
             assert os.environ.get("KISS_CHANNEL_WORKSPACE") == "wsA", (
-                "a blocked launch must not clobber the env var of a "
-                "still-running launch"
+                "a blocked launch must not clobber the env var of a still-running launch"
             )
             release["A"].set()
             thread_a.join(timeout=30)
@@ -661,9 +652,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         )
         names = _tool_names(self._only_request())
         assert "check_slack_auth" in names
-        assert "post_message" not in names, (
-            "backend tools must not be exposed when unauthenticated"
-        )
+        assert "post_message" not in names, "backend tools must not be exposed when unauthenticated"
 
     def test_overrides_forwarded_through_run_command(self) -> None:
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
@@ -687,18 +676,17 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert _budget_line(request) == 1.25
         names = _tool_names(request)
         assert "go_to_url" not in names, "web_tools=False must drop the browser tools"
-        # The channel module's ``settings()`` (the ``channel`` preset:
-        # no fan-out) win over the launcher's ``is_parallel=True`` on
-        # the daemon, like every agent script's settings do.
-        assert "run_parallel" not in names
-        assert "Parallel mode: sequential" in _system_text(request)
+        # ``run_parallel`` is N x ``run_agent``: a ChannelSea no longer
+        # forces it off, so the launcher's ``is_parallel=True`` stands.
+        assert "run_parallel" in names
+        assert "Parallel mode: parallel" in _system_text(request)
 
     def test_carrier_tools_getter_restricts_the_daemon_built_agent(self) -> None:
         """A carrier's ``sea_path`` script restricts the run to its ``tools()``.
 
         The channel runner hands its channel module to the
         :class:`KissWebChatAgent` carrier as ``sea_path``; the launcher
-        must pass it on as ``extension_agent_path`` so the daemon-built
+        must pass it on as ``sea_path`` so the daemon-built
         agent gets exactly what that script decides: the ``none`` tool
         profile drops the built-in tools and ``tools()`` adds
         the script's own.
@@ -765,16 +753,15 @@ class Sea(BaseSea):
             "endpoint_file": "/nonexistent/sorcar-local.json",
         }
         keyword_only = {
-            name for name, p in inspect.signature(run_agent_via_kiss_web).parameters.items()
+            name
+            for name, p in inspect.signature(run_agent_via_kiss_web).parameters.items()
             if p.kind is inspect.Parameter.KEYWORD_ONLY
         }
         assert keyword_only == LAUNCH_KWARG_NAMES, (
             "the filter and the launcher signature must name the same kwargs"
         )
         assert not retired.keys() & keyword_only
-        assert filter_launch_kwargs({**retired, "max_budget": 2.0}) == {
-            "max_budget": 2.0
-        }
+        assert filter_launch_kwargs({**retired, "max_budget": 2.0}) == {"max_budget": 2.0}
         agent = SlackAgent()
         result = agent.run(prompt_template="task", work_dir=self.repo, **retired)
         assert SUMMARY in yaml.safe_load(result)["summary"]
@@ -808,9 +795,7 @@ class Sea(BaseSea):
             work_dir=self.repo,
         )
         request = self._only_request()
-        assert _budget_line(request) > 0, (
-            "without an override the daemon config budget applies"
-        )
+        assert _budget_line(request) > 0, "without an override the daemon config budget applies"
         assert request["model"] == STANDIN_MODEL
         assert f"Model name: {STANDIN_MODEL}" in _system_text(request), (
             "the daemon default model applies when none is passed"
@@ -880,9 +865,7 @@ class Sea(BaseSea):
         assert self.model_server.headers, "the run never reached the model"
         parsed = yaml.safe_load(result)
         assert parsed["success"] is False
-        assert str(parsed["summary"]).strip(), (
-            "an abrupt crash must not produce an empty summary"
-        )
+        assert str(parsed["summary"]).strip(), "an abrupt crash must not produce an empty summary"
         assert agent.last_run_result == result
 
     def test_blank_prompt_returns_failure_yaml(self) -> None:
@@ -907,9 +890,7 @@ class Sea(BaseSea):
                 "task",
                 work_dir=self.repo,
             )
-        assert self.model_server.requests == [], (
-            "no task may start for a bad agent script"
-        )
+        assert self.model_server.requests == [], "no task may start for a bad SEA"
         assert agent_state.snapshot() == []
 
 
@@ -992,14 +973,13 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
         self.model_server.fail_status = 500
         agent = KissWebChatAgent("Direct Chat")
         result = agent.run(
-            prompt_template="direct task", work_dir=self.repo,
+            prompt_template="direct task",
+            work_dir=self.repo,
         )
         assert self.model_server.headers, "the run never reached the model"
         parsed = yaml.safe_load(result)
         assert parsed["success"] is False
-        assert str(parsed["summary"]).strip(), (
-            "a crashed task must not produce an empty summary"
-        )
+        assert str(parsed["summary"]).strip(), "a crashed task must not produce an empty summary"
         assert agent.last_run_result == result
 
 
@@ -1048,7 +1028,8 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
     def test_direct_run_without_channel_prompt(self) -> None:
         agent = self._plain_agent()
         result = agent.run(
-            prompt_template="direct plain", work_dir=self.repo,
+            prompt_template="direct plain",
+            work_dir=self.repo,
         )
         assert SUMMARY in yaml.safe_load(result)["summary"]
         request = self._only_request()
@@ -1060,14 +1041,13 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         self.model_server.fail_status = 500
         agent = self._plain_agent()
         result = agent.run(
-            prompt_template="direct plain", work_dir=self.repo,
+            prompt_template="direct plain",
+            work_dir=self.repo,
         )
         assert self.model_server.headers, "the run never reached the model"
         parsed = yaml.safe_load(result)
         assert parsed["success"] is False
-        assert str(parsed["summary"]).strip(), (
-            "a crashed task must not produce an empty summary"
-        )
+        assert str(parsed["summary"]).strip(), "a crashed task must not produce an empty summary"
         assert agent.last_run_result == result
 
     def test_direct_run_bridges_channel_auth_tools(self) -> None:
@@ -1076,7 +1056,8 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         self.model_server.script = [finish_response("auth tools bridged")]
         agent = SlackAgent()
         result = agent.run(
-            prompt_template="direct slack tools", work_dir=self.repo,
+            prompt_template="direct slack tools",
+            work_dir=self.repo,
         )
         assert "check_slack_auth" in _tool_names(self._only_request())
         assert "auth tools bridged" in yaml.safe_load(result)["summary"]
@@ -1170,7 +1151,11 @@ class _ThreadPollingBackend(_RecordingBackend):
         self.thread_replies = thread_replies
 
     def poll_thread_messages(
-        self, channel_id: str, thread_ts: str, oldest: str, limit: int = 100,
+        self,
+        channel_id: str,
+        thread_ts: str,
+        oldest: str,
+        limit: int = 100,
     ) -> tuple[list[dict[str, Any]], str]:
         """Return the fixed thread replies and a zero cursor."""
         return list(self.thread_replies), "0"
@@ -1189,9 +1174,7 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
         )
 
         backend: _RecordingBackend = (
-            _RecordingBackend()
-            if thread_replies is None
-            else _ThreadPollingBackend(thread_replies)
+            _RecordingBackend() if thread_replies is None else _ThreadPollingBackend(thread_replies)
         )
         runner = ChannelRunner(
             backend=backend,
@@ -1230,9 +1213,7 @@ class Sea(BaseSea):
         ]
         runner._handle_message("C123", {"text": "hi", "ts": "1.0"})
         first, second = self.model_server.requests
-        assert "shout" in _tool_names(first), (
-            "the runner's agent script must supply the task's tools"
-        )
+        assert "shout" in _tool_names(first), "the runner's SEA must supply the task's tools"
         assert _only_tool_result(second).startswith("HI")
         prompt = _task_text(first)
         assert "'C123'" in prompt and "'1.0'" in prompt, (
@@ -1280,7 +1261,8 @@ class Sea(BaseSea):
             encoding="utf-8",
         )
         runner, outbox = self._make_runner(
-            sea_path=str(tools_py), thread_replies=[],
+            sea_path=str(tools_py),
+            thread_replies=[],
         )
         self.model_server.script = [finish_response("suppression promised")]
         runner._handle_message("C123", {"text": "hi", "ts": "1.0"})
@@ -1289,9 +1271,7 @@ class Sea(BaseSea):
             "a thread-polling backend suppresses duplicate summaries, "
             "so the agent may be promised suppression"
         )
-        assert len(outbox) == 1, (
-            "with no bot reply in the thread the summary is still posted"
-        )
+        assert len(outbox) == 1, "with no bot reply in the thread the summary is still posted"
         channel, text, ts = outbox[0]
         assert (channel, ts) == ("C123", "1.0")
         assert "suppression promised" in text
@@ -1357,18 +1337,27 @@ class TestChannelMainInteractiveViaApi(_ApiLaunchBase):
         explicit = LaunchModelServer()
         self.addCleanup(explicit.stop)
         (self.home.kiss_home / "api_keys.env").write_text(
-            "OPENAI_API_KEY=kiss-cli-key\n", encoding="utf-8",
+            "OPENAI_API_KEY=kiss-cli-key\n",
+            encoding="utf-8",
         )
-        launch = self._run_cli([
-            "-t", "do the interactive thing",
-            "-w", self.repo,
-            "-m", STANDIN_MODEL,
-            "-b", "2.5",
-            "-e", explicit.url,
-            "--header", "X-Test: yes",
-            "--no-web",
-            "--no-parallel",
-        ])
+        launch = self._run_cli(
+            [
+                "-t",
+                "do the interactive thing",
+                "-w",
+                self.repo,
+                "-m",
+                STANDIN_MODEL,
+                "-b",
+                "2.5",
+                "-e",
+                explicit.url,
+                "--header",
+                "X-Test: yes",
+                "--no-web",
+                "--no-parallel",
+            ]
+        )
         daemon_agent, _, _ = self._run_while_held(launch, explicit)
         assert isinstance(daemon_agent, ChatSorcarAgent)
         assert self.model_server.requests == []
@@ -1395,11 +1384,21 @@ class TestChannelMainInteractiveViaApi(_ApiLaunchBase):
         explicit = LaunchModelServer()
         self.addCleanup(explicit.stop)
         (self.home.kiss_home / "api_keys.env").write_text(
-            "ANTHROPIC_API_KEY=kiss-anthropic-key\n", encoding="utf-8",
+            "ANTHROPIC_API_KEY=kiss-anthropic-key\n",
+            encoding="utf-8",
         )
-        launch = self._run_cli([
-            "-t", "keyless", "-w", self.repo, "-m", "claude-haiku-4-5", "-e", explicit.url,
-        ])
+        launch = self._run_cli(
+            [
+                "-t",
+                "keyless",
+                "-w",
+                self.repo,
+                "-m",
+                "claude-haiku-4-5",
+                "-e",
+                explicit.url,
+            ]
+        )
         self._run_while_held(launch, explicit)
         assert len(explicit.requests) == 1
         assert explicit.requests[0]["model"] == "claude-haiku-4-5"
@@ -1415,11 +1414,20 @@ class TestChannelMainInteractiveViaApi(_ApiLaunchBase):
         # the store's key (the daemon admits the model only because
         # that vendor key is configured).
         (self.home.kiss_home / "api_keys.env").write_text(
-            "OPENAI_API_KEY=kiss-cli-key\n", encoding="utf-8",
+            "OPENAI_API_KEY=kiss-cli-key\n",
+            encoding="utf-8",
         )
-        launch = self._run_cli([
-            "-t", "registered endpoint", "-w", self.repo, "-m", STANDIN_MODEL, "--no-web",
-        ])
+        launch = self._run_cli(
+            [
+                "-t",
+                "registered endpoint",
+                "-w",
+                self.repo,
+                "-m",
+                STANDIN_MODEL,
+                "--no-web",
+            ]
+        )
         self._run_while_held(launch)
         request = self._only_request()
         assert self.model_server.headers[0].get("authorization") == "Bearer kiss-test-key"

@@ -7,17 +7,19 @@
 // (collapseOlderPanels in media/main.js).
 //
 // While a task streams, the transcript folds its older panels so the
-// screen is not a wall of finished tool calls, but it keeps the NEWEST
-// TWO open: the panel that just finished stays readable next to the one
-// being streamed. It used to keep only the newest one.
+// screen is not a wall of finished tool calls, keeping the NEWEST TWO
+// open.  A tool-call panel, though, starts folded the moment it
+// renders (its header carries the call) and only a click of the user
+// unfolds it; a Thoughts panel (the agent's own words) is never folded
+// by the pass.
 //
 // Covered here, on the visible tab and on a tab that ran while hidden:
-//   * after every event, every collapsible panel but the newest two is
-//     folded and the newest two are open;
-//   * a transcript of one or two panels folds nothing;
+//   * after every event, every tool-call panel is folded unless the
+//     user pinned it, every Thoughts panel is open;
+//   * a tool-call panel is folded even when it is one of only two;
 //   * a panel the user expanded by hand stays open however old it gets;
-//   * the result event folds nothing, so the two panels that were open
-//     when the task ended stay open.
+//   * the result event folds nothing, so what was open when the task
+//     ended stays open.
 
 'use strict';
 
@@ -74,18 +76,22 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// The Chats-panel pick: chat tabs have no row of their own any more.
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
   );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  win._testApi.switchToTab(tabId);
 }
 
 /** Top-level collapsible panels of the visible transcript, in order. */
+/** The task's event panels: on the transcript while the task runs,
+ * inside its Trajectory panel once it has ended. */
 function panels(win) {
   const out = win.document.getElementById('output');
-  return Array.from(out.children).filter(
+  const traj = out.querySelector(':scope > .trajectory > .trajectory-sub');
+  return Array.from((traj || out).children).filter(
     el => el.classList.contains('collapsible') && !el.classList.contains('rc'),
   );
 }
@@ -95,20 +101,35 @@ function isCollapsed(p) {
 }
 
 /**
- * Assert the streaming invariant: every panel but the newest two is
- * folded, the newest two are open (a user-pinned panel is allowed to be
- * open anywhere).
+ * Assert the streaming invariant: a Thoughts panel is open anywhere, a
+ * tool-call panel is folded (it starts so) unless the user pinned it,
+ * and any other panel but the newest two is folded.
  */
-function assertNewestTwoOpen(win, label) {
+function assertStreamFolding(win, label) {
   const ps = panels(win);
   ps.forEach((p, i) => {
     const isNewestTwo = i >= ps.length - 2;
-    if (isNewestTwo) {
+    if (p.classList.contains('llm-panel')) {
+      assert.ok(
+        !isCollapsed(p),
+        `${label}: Thoughts panel #${i + 1} of ${ps.length} is never folded`,
+      );
+    } else if (p.classList.contains('user-pinned')) {
+      assert.ok(
+        !isCollapsed(p),
+        `${label}: pinned panel #${i + 1} of ${ps.length} stays open`,
+      );
+    } else if (p.classList.contains('tc')) {
+      assert.ok(
+        isCollapsed(p),
+        `${label}: tool panel #${i + 1} of ${ps.length} is folded`,
+      );
+    } else if (isNewestTwo) {
       assert.ok(
         !isCollapsed(p),
         `${label}: panel #${i + 1} of ${ps.length} (one of the newest two) must be open`,
       );
-    } else if (!p.classList.contains('user-pinned')) {
+    } else {
       assert.ok(
         isCollapsed(p),
         `${label}: panel #${i + 1} of ${ps.length} must be folded`,
@@ -148,17 +169,21 @@ function testVisibleStreamKeepsNewestTwoOpen() {
   const events = run();
   events.forEach((ev, i) => {
     send(win, {...ev, tabId: tab});
-    assertNewestTwoOpen(win, `after event #${i + 1} (${ev.type})`);
+    assertStreamFolding(win, `after event #${i + 1} (${ev.type})`);
   });
   const ps = panels(win);
   assert.strictEqual(ps.length, 7, 'the run renders seven panels');
   assert.deepStrictEqual(
     ps.map(isCollapsed),
-    [true, true, true, true, true, false, false],
-    'the five oldest panels are folded, the newest two are open',
+    [false, true, false, true, false, true, false],
+    'every tool panel is folded, every Thoughts panel is open',
   );
 
-  // The result folds nothing: the same two panels stay open.
+  // The end of the task moves the panels into the Trajectory panel as
+  // they are: the same open panels stay open inside it.  The seventh,
+  // the empty Thoughts panel opened on spec after the last tool result,
+  // is withdrawn by the result (nothing was ever said into it), as
+  // task_stopped would withdraw it.
   send(win, {
     type: 'result',
     text: 'summary: Done.\nsuccess: true\n',
@@ -170,11 +195,11 @@ function testVisibleStreamKeepsNewestTwoOpen() {
   send(win, {type: 'status', running: false, tabId: tab});
   assert.deepStrictEqual(
     panels(win).map(isCollapsed),
-    [true, true, true, true, true, false, false],
-    'the result event leaves the two open panels open',
+    [false, true, false, true, false, true],
+    'the end of the task leaves the open panels open inside the Trajectory',
   );
   win.close();
-  console.log('  ok - a visible stream keeps its newest two panels open');
+  console.log('  ok - a visible stream folds its tool panels, keeps Thoughts open');
 }
 
 function testOneOrTwoPanelsFoldNothing() {
@@ -186,11 +211,11 @@ function testOneOrTwoPanelsFoldNothing() {
   assert.strictEqual(ps.length, 2, 'thoughts + one tool call = two panels');
   assert.deepStrictEqual(
     ps.map(isCollapsed),
-    [false, false],
-    'with two panels there is nothing older than the newest two',
+    [false, true],
+    'the tool panel starts folded even with nothing older than it',
   );
   win.close();
-  console.log('  ok - a one- or two-panel transcript folds nothing');
+  console.log('  ok - a tool panel starts folded in a two-panel transcript');
 }
 
 function testUserPinnedPanelStaysOpen() {
@@ -198,26 +223,26 @@ function testUserPinnedPanelStaysOpen() {
   const tab = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tab, startTs: TS});
   const events = run();
-  // First thoughts + Read: two panels, both open. The Read's result
-  // arms the next Thoughts panel: three panels, #1 folds. The user
-  // reopens it.
-  for (const ev of events.slice(0, 5)) send(win, {...ev, tabId: tab});
+  // Two steps: thoughts, Read one, thoughts, Read two, and the armed
+  // Thoughts panel of the next step: five panels, the first Read (#2)
+  // folds. The user reopens it.
+  for (const ev of events.slice(0, 10)) send(win, {...ev, tabId: tab});
   let ps = panels(win);
-  assert.strictEqual(ps.length, 3);
-  assert.ok(isCollapsed(ps[0]), 'panel #1 folds once two newer panels exist');
-  ps[0]
+  assert.strictEqual(ps.length, 5);
+  assert.ok(isCollapsed(ps[1]), 'panel #2, a tool call, started folded');
+  ps[1]
     .querySelector(':scope > .collapse-header')
     .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.ok(!isCollapsed(ps[0]), 'the user reopened panel #1');
-  assert.ok(ps[0].classList.contains('user-pinned'));
+  assert.ok(!isCollapsed(ps[1]), 'the user reopened panel #2');
+  assert.ok(ps[1].classList.contains('user-pinned'));
 
-  for (const ev of events.slice(5)) send(win, {...ev, tabId: tab});
+  for (const ev of events.slice(10)) send(win, {...ev, tabId: tab});
   ps = panels(win);
   assert.strictEqual(ps.length, 7);
   assert.deepStrictEqual(
     ps.map(isCollapsed),
-    [false, true, true, true, true, false, false],
-    'the pinned panel stays open; the other older panels fold',
+    [false, false, false, true, false, true, false],
+    'the pinned panel stays open; the other tool panels are folded',
   );
   win.close();
   console.log('  ok - a user-pinned panel is never folded by the stream');
@@ -244,12 +269,13 @@ function testHiddenTabComesBackWithNewestTwoOpen() {
   assert.strictEqual(ps.length, 7, 'the hidden run renders seven panels');
   assert.deepStrictEqual(
     ps.map(isCollapsed),
-    [true, true, true, true, true, false, false],
-    'a tab restored mid-run shows its newest two panels open',
+    [false, true, false, true, false, true, false],
+    'a tab restored mid-run shows its tool panels folded and its ' +
+      'Thoughts panels open',
   );
   win.close();
   console.log(
-    '  ok - a tab that ran hidden comes back with its newest two open',
+    '  ok - a tab that ran hidden comes back with its Thoughts panels open',
   );
 }
 

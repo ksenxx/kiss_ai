@@ -37,12 +37,16 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.file_index import FileIndex
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 class TestGitignoreRootAnchoredEntry(unittest.TestCase):

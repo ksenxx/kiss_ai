@@ -10,6 +10,7 @@ import logging
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import httpx
 from openai import APIConnectionError, APITimeoutError, BadRequestError, OpenAI
@@ -28,16 +29,13 @@ from kiss.core.models.model import (
     TokenCallback,
     _audio_mime_to_format,
     _build_text_based_tools_prompt,
+    _get_attr_or_key,
     _parse_text_based_tool_calls,
     accepted_request_params,
     billing_checked,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import (
-    CONNECT_TIMEOUT,
-    stop_aware_events,
-    stop_or_stall_error,
-)
+from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_or_stall_error
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +55,50 @@ _CHAT_REQUEST_PARAMS = accepted_request_params(Completions.create)
 # One retry keeps resilience against one-off connect failures while
 # bounding the duplication, matching ``anthropic_model._MAX_RETRIES``.
 _MAX_RETRIES = 1
+
+# OpenAI processing tiers as a factor on the Standard rate the catalog
+# holds (https://developers.openai.com/api/docs/pricing, tier switcher).
+# Flex bills Batch rates (half of Standard) and Ultrafast six times
+# (gpt-6-astra $60/$6/$75/$300 on $10/$1/$12.50/$50) for every model
+# offering the tier; ``default``/``auto``/``scale`` bill Standard.  Fast
+# (formerly Priority) is twice Standard on the GPT-5.x/GPT-6 line
+# (gpt-6-astra $20/$2/$25/$100, gpt-5.4 $5/$0.50/$30, gpt-5.2
+# $3.50/$0.35/$28, gpt-5 $2.50/$0.25/$20) but not uniformly so on older
+# or smaller models; the exceptions below are the published Fast rate
+# over the Standard rate, longest prefix first.
+_OPENAI_FLEX_MULTIPLIER = 0.5
+_OPENAI_ULTRAFAST_MULTIPLIER = 6.0
+_OPENAI_FAST_MULTIPLIER = 2.0
+_OPENAI_FAST_EXCEPTIONS = (
+    ("gpt-5.5", 2.5),  # $12.50/$1.25/$75 on $5/$0.50/$30
+    ("gpt-5-mini", 1.8),  # $0.45/$0.045/$3.60 on $0.25/$0.025/$2
+    ("gpt-4.1-nano", 2.0),  # $0.20/$0.05/$0.80 on $0.10/$0.025/$0.40
+    ("gpt-4.1", 1.75),  # $3.50/$0.875/$14 on $2/$0.50/$8; -mini $0.70/$0.175/$2.80
+    ("gpt-4o-mini", 0.25 / 0.15),  # $0.25/$0.125/$1 on $0.15/$0.075/$0.60
+    ("gpt-4o", 1.7),  # $4.25/$2.125/$17 on $2.50/$1.25/$10
+    ("o4-mini", 2.0 / 1.1),  # $2/$0.50/$8 on $1.10/$0.275/$4.40
+    ("o3", 1.75),  # $3.50/$0.875/$14 on $2/$0.50/$8
+)
+
+
+def _openai_fast_multiplier(model_name: str) -> float:
+    """Return the Fast-tier factor over Standard for *model_name*.
+
+    Args:
+        model_name: The catalog model name (thinking aliases and
+            provider prefixes are ignored).
+
+    Returns:
+        The published Fast/Standard ratio from
+        :data:`_OPENAI_FAST_EXCEPTIONS`, else :data:`_OPENAI_FAST_MULTIPLIER`.
+    """
+    from kiss.core.models.model_info import _strip_provider_prefix, _strip_thinking_alias
+
+    bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
+    for prefix, factor in _OPENAI_FAST_EXCEPTIONS:
+        if bare.startswith(prefix):
+            return factor
+    return _OPENAI_FAST_MULTIPLIER
 
 # Streaming requests get a per-request ``httpx.Timeout`` instead of the
 # client's scalar 1800 s, so the wait for the response headers is bounded
@@ -234,28 +276,6 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
         return "", content
     answer_parts.append(content[cursor:])
     return reasoning, "".join(answer_parts).strip()
-
-
-def _usage_field(obj: Any, name: str) -> Any:
-    """Read field *name* from a usage-like object or its dict form.
-
-    OpenRouter's extra usage fields (``cost``, ``cost_details``) are not
-    declared on the SDK's ``CompletionUsage`` / ``ResponseUsage`` models,
-    which keep them as pydantic extras readable by attribute; the
-    Responses-delegate path hands over plain dicts instead.
-
-    Args:
-        obj: A pydantic response/usage object, a dict, or ``None``.
-        name: The field to read.
-
-    Returns:
-        The field value, or ``None`` when *obj* is ``None`` or lacks it.
-    """
-    if obj is None:
-        return None
-    if isinstance(obj, dict):
-        return obj.get(name)
-    return getattr(obj, name, None)
 
 
 def _delta_reasoning_text(delta: Any) -> str | None:
@@ -635,6 +655,40 @@ class OpenAICompatibleBase(Model):
         """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
         return self.model_name.startswith("openrouter/anthropic/")
 
+    def _base_url_is_openrouter(self) -> bool:
+        """Whether this adapter's endpoint host is OpenRouter (any ``openrouter.ai`` host)."""
+        host = urlparse(self.base_url or "").hostname or ""
+        return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+    def cost_multiplier_for_response(self, response: Any) -> float:
+        """Return OpenAI's processing-tier factor for the tier that served *response*.
+
+        OpenAI prices every token rate of a model by processing tier
+        (https://developers.openai.com/api/docs/pricing, tier switcher):
+        Flex at half the Standard rate, Fast (``service_tier`` ``fast``,
+        or ``priority`` as GPT-5.6 and earlier still report it) at the
+        model's published Fast ratio (see :func:`_openai_fast_multiplier`),
+        and Ultrafast at six times.  The response's ``service_tier``
+        names the tier actually used, so a Fast request downgraded under
+        the ramp-rate limit comes back ``default`` and bills Standard.
+        Endpoints without tiers never send the field and bill Standard.
+
+        Args:
+            response: A chat completion, Responses object, final stream
+                chunk, or the dict form of any of them.
+
+        Returns:
+            The factor to apply to the Standard-rate catalog estimate.
+        """
+        tier = _get_attr_or_key(response, "service_tier")
+        if tier == "flex":
+            return _OPENAI_FLEX_MULTIPLIER
+        if tier in ("fast", "priority"):
+            return _openai_fast_multiplier(self.model_name)
+        if tier == "ultrafast":
+            return _OPENAI_ULTRAFAST_MULTIPLIER
+        return 1.0
+
     def extract_cost_from_response(self, response: Any) -> float | None:
         """Return the USD amount OpenRouter reports it charged for *response*.
 
@@ -659,19 +713,23 @@ class OpenAICompatibleBase(Model):
 
         Returns:
             ``cost`` (plus ``upstream_inference_cost`` when
-            ``usage.is_byok`` is true) for an ``openrouter/`` model whose
-            response carries a numeric ``usage.cost``, else
-            ``None`` so the agent falls back to ``calculate_cost``.
+            ``usage.is_byok`` is true) for a model served by OpenRouter
+            (an ``openrouter/`` name or a custom endpoint whose base URL
+            is openrouter.ai) whose response carries a numeric
+            ``usage.cost``, else ``None`` so the agent falls back to
+            ``calculate_cost``.
         """
-        if not self.model_name.startswith("openrouter/"):
+        if not self.model_name.startswith("openrouter/") and not self._base_url_is_openrouter():
             return None
-        usage = _usage_field(response, "usage")
-        cost = _usage_field(usage, "cost")
+        usage = _get_attr_or_key(response, "usage")
+        cost = _get_attr_or_key(usage, "cost")
         if isinstance(cost, bool) or not isinstance(cost, int | float):
             return None
-        upstream = _usage_field(_usage_field(usage, "cost_details"), "upstream_inference_cost")
+        upstream = _get_attr_or_key(
+            _get_attr_or_key(usage, "cost_details"), "upstream_inference_cost"
+        )
         if (
-            _usage_field(usage, "is_byok") is not True
+            _get_attr_or_key(usage, "is_byok") is not True
             or isinstance(upstream, bool)
             or not isinstance(upstream, int | float)
         ):
@@ -1229,97 +1287,80 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         response = None
         last_chunk = None
         finish_reason: str | None = None
-        events = None
-        # The bracket is closed in `finally`, not after the loop:
-        # `stop_aware_events` runs `on_abort` for a stop and for a stall
-        # but re-raises every other transport failure untouched, and
-        # KISSAgent retries those in the SAME run without resetting the
-        # model — so a provider that drops the connection mid-reasoning
-        # would leave the printer rendering the retry's answer as
-        # thinking.  `_close_thinking_if_open` is a no-op when the turn
-        # ended outside a reasoning block.
-        #
-        # `events` is closed in the same `finally`, mirroring v2's
-        # `_consume_stream`: the loop body can raise (a token callback
-        # propagating Stop, most commonly), and an abandoned generator
-        # runs its cleanup only when the traceback holding its frame is
-        # released — until then a daemon watchdog thread stays alive and
-        # armed over a connection that never returns to the pool.
+        watchdog_name = (
+            "openai-tools-stream-abort-watchdog"
+            if adaptive
+            else "openai-stream-abort-watchdog"
+        )
         try:
             stream = (
                 self._create_chat_completion_adaptive(kwargs)
                 if adaptive
                 else self.client.chat.completions.create(**kwargs)
             )
-            events = stop_aware_events(
-                stream,
-                stall_timeout=self._stream_stall_timeout,
-                on_abort=self._close_thinking_if_open,
-                name=(
-                    "openai-tools-stream-abort-watchdog"
-                    if adaptive
-                    else "openai-stream-abort-watchdog"
-                ),
-            )
-            for chunk in events:
-                last_chunk = chunk
-                if chunk.usage is not None:
-                    # Billed already: kept for take_partial_usage_response
-                    # if the stream fails before it ends.  Recorded before
-                    # the callbacks below run, since a provider may put the
-                    # usage on a chunk that also carries content and a
-                    # callback may raise (Stop) on that content.
-                    response = self._rejected_response = chunk
-                if chunk.choices:
+        except (httpx.TimeoutException, APITimeoutError) as err:
+            # No headers before the per-request clock fired; see below.
+            raise stop_or_stall_error(self._stream_stall_timeout) from err
+        # The transport handlers sit inside the watched block so that the
+        # generator and the thinking bracket are closed only after they
+        # ran: an error raised by that cleanup is not a transport failure.
+        with self._watched_events(stream, watchdog_name) as events:
+            try:
+                for chunk in events:
+                    last_chunk = chunk
+                    if chunk.usage is not None:
+                        # Billed already: kept for take_partial_usage_response
+                        # if the stream fails before it ends.  Recorded
+                        # before the callbacks below run, since a provider
+                        # may put the usage on a chunk that also carries
+                        # content and a callback may raise (Stop) on it.
+                        response = self._rejected_response = chunk
+                    if not chunk.choices:
+                        continue
                     choice = chunk.choices[0]
                     if getattr(choice, "finish_reason", None):
                         finish_reason = choice.finish_reason
                     delta = choice.delta
-                    if delta:
-                        reasoning = _delta_reasoning_text(delta)
-                        if reasoning:
-                            self._open_thinking_if_closed()
-                            self._invoke_token_callback(reasoning)
-                        if delta.content:
-                            self._close_thinking_if_open()
-                            content += delta.content
-                            self._invoke_token_callback(delta.content)
-                        if delta.tool_calls:
-                            self._close_thinking_if_open()
-                            _accumulate_tool_call_deltas(
-                                tool_calls_accum, delta.tool_calls
-                            )
-        except (httpx.TimeoutException, APITimeoutError) as err:
-            # The per-request clock fired (no headers, or no bytes between
-            # events) before the watchdog did.  A Stop pressed while the
-            # headers were still pending has no watchdog to act on it, so
-            # ask the thread's stop signal before calling this a stall:
-            # a stall is retried, a stop must not be.
-            raise stop_or_stall_error(self._stream_stall_timeout) from err
-        except (httpx.HTTPError, APIConnectionError) as err:
-            # A transport failure AFTER ``finish_reason`` arrived lost only
-            # the stream's tail (the usage chunk / ``[DONE]``); the answer
-            # itself — text and tool-call arguments — is complete.  Raising
-            # here would make the agent loop re-send the whole conversation
-            # and the provider regenerate (and bill) the same answer, which
-            # the user sees as a repeated request and response.  A failure
-            # BEFORE ``finish_reason`` means real content was lost, so it
-            # still propagates for the agent-level retry.  Stops
-            # (``KeyboardInterrupt``) and stalls (``TimeoutError``) raised
-            # by ``stop_aware_events`` are not transport errors and are
-            # never swallowed.
-            if finish_reason is None:
-                raise
-            logger.warning(
-                "Stream connection lost after finish_reason=%r; keeping the "
-                "complete response instead of retrying: %s",
-                finish_reason,
-                err,
-            )
-        finally:
-            if events is not None:
-                events.close()
-            self._close_thinking_if_open()
+                    if not delta:
+                        continue
+                    reasoning = _delta_reasoning_text(delta)
+                    if reasoning:
+                        self._open_thinking_if_closed()
+                        self._invoke_token_callback(reasoning)
+                    if delta.content:
+                        self._close_thinking_if_open()
+                        content += delta.content
+                        self._invoke_token_callback(delta.content)
+                    if delta.tool_calls:
+                        self._close_thinking_if_open()
+                        _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
+            except (httpx.TimeoutException, APITimeoutError) as err:
+                # The per-request clock fired (no headers, or no bytes
+                # between events) before the watchdog did.  A Stop pressed
+                # while the headers were still pending has no watchdog to
+                # act on it, so ask the thread's stop signal before calling
+                # this a stall: a stall is retried, a stop must not be.
+                raise stop_or_stall_error(self._stream_stall_timeout) from err
+            except (httpx.HTTPError, APIConnectionError) as err:
+                # A transport failure AFTER ``finish_reason`` arrived lost
+                # only the stream's tail (the usage chunk / ``[DONE]``); the
+                # answer itself — text and tool-call arguments — is
+                # complete.  Raising here would make the agent loop re-send
+                # the whole conversation and the provider regenerate (and
+                # bill) the same answer, which the user sees as a repeated
+                # request and response.  A failure BEFORE ``finish_reason``
+                # means real content was lost, so it still propagates for
+                # the agent-level retry.  Stops (``KeyboardInterrupt``) and
+                # stalls (``TimeoutError``) raised by ``stop_aware_events``
+                # are not transport errors and are never swallowed.
+                if finish_reason is None:
+                    raise
+                logger.warning(
+                    "Stream connection lost after finish_reason=%r; keeping "
+                    "the complete response instead of retrying: %s",
+                    finish_reason,
+                    err,
+                )
         self._rejected_response = None
         response = self._finalize_stream_response(response, last_chunk)
         return content, tool_calls_accum, response, finish_reason
@@ -1956,17 +1997,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             instead; those are routed to the delegate's extractor.
         """
         if self._responses_delegate is not None:
-            response_alias: Any = response
-            usage_obj: Any = (
-                response_alias.get("usage")
-                if isinstance(response_alias, dict)
-                else getattr(response_alias, "usage", None)
-            )
-            has_responses_usage = (
-                usage_obj.get("input_tokens") if isinstance(usage_obj, dict)
-                else getattr(usage_obj, "input_tokens", None)
-            ) is not None
-            if has_responses_usage:
+            usage_obj = _get_attr_or_key(response, "usage")
+            if _get_attr_or_key(usage_obj, "input_tokens") is not None:
                 return (
                     self._responses_delegate
                     .extract_input_output_token_counts_from_response(response)

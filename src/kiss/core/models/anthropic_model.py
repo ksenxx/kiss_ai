@@ -29,6 +29,7 @@ from kiss.core.models.model import (
     Model,
     ThinkingCallback,
     TokenCallback,
+    _get_attr_or_key,
     accepted_request_params,
     billing_checked,
     merge_system_texts,
@@ -37,12 +38,7 @@ from kiss.core.models.model import (
     strip_system_cache_break,
     transcribe_audio,
 )
-from kiss.core.models.stream_abort import (
-    CONNECT_TIMEOUT,
-    stall_error,
-    stop_aware_events,
-    stop_error,
-)
+from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stall_error, stop_error
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +72,54 @@ _WORKSPACE_ID_HINT = (
 # model_config key is reported instead of raising TypeError.
 _ANTHROPIC_REQUEST_PARAMS = accepted_request_params(Messages.stream)
 
+ANTHROPIC_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+"""The Anthropic ``output_config.effort`` scale, in ascending order.
+
+Verified live on 2026-10-07 against every ``claude-*`` catalog entry
+(https://platform.claude.com/docs/en/build-with-claude/effort): Opus 4.7 /
+4.8 / 5 / 5.5, Sonnet 5 / 5.5 and Fable 5 / 5.1 accept all five levels;
+Opus 4.6 and Sonnet 4.6 accept every level except ``xhigh``; Opus 4.5
+accepts only ``low`` / ``medium`` / ``high``; Haiku 4.5 and Sonnet 4.5
+reject the parameter.  Omitting ``effort`` is the vendor default
+(``medium`` on Opus 5.5, ``high`` elsewhere)."""
+
+
+def _effort_level_for(model_name: str, model_config: dict[str, Any]) -> str | None:
+    """Return the ``output_config.effort`` level to send for *model_name*.
+
+    Resolution order:
+
+    1. An explicit ``reasoning_effort`` in ``model_config`` (the
+       framework-wide spelling shared with the OpenAI adapters) wins.
+    2. Otherwise the ``thinking`` level of a generated ``-{level}``
+       catalog alias (``claude-opus-5-5-medium`` → ``"medium"``): an
+       entry whose ``alias_of`` marker names its base.  A base entry's
+       own ``thinking`` field is deliberately NOT applied — the base
+       name means "vendor default effort" (``medium`` on Opus 5.5,
+       ``high`` elsewhere), so ``claude-opus-5-5`` costs exactly what
+       the bare API call costs.
+
+    A native ``output_config`` already carrying ``effort`` is left to the
+    caller (see :meth:`AnthropicModel._build_create_kwargs`).
+
+    Args:
+        model_name: The catalog model name as passed to the adapter.
+        model_config: The adapter's model configuration.
+
+    Returns:
+        The effort level string, or ``None`` when nothing selects one.
+    """
+    from kiss.core.models.model_info import MODEL_INFO
+
+    explicit = model_config.get("reasoning_effort")
+    if explicit is not None:
+        return str(explicit)
+    info = MODEL_INFO.get(model_name)
+    if info is not None and info.alias_of and info.thinking in ANTHROPIC_EFFORT_LEVELS:
+        return str(info.thinking)
+    return None
+
+
 KEEP_ALIVE_TEXT = "Tool still running. Reply with the single word: ok."
 """Placeholder tool result of a prompt-cache keep-alive ping (see
 :meth:`AnthropicModel.keep_prompt_cache_warm`)."""
@@ -99,7 +143,7 @@ def _last_assistant_blocks(messages: list[Any]) -> list[dict[str, Any]]:
     return []
 
 
-def cache_creation_tokens(usage: Any, get: Callable[[Any, str], Any]) -> tuple[int, int]:
+def cache_creation_tokens(usage: Any) -> tuple[int, int]:
     """Return the 5-minute and 1-hour cache-creation token counts.
 
     Anthropic reports cache writes either split by TTL under
@@ -107,30 +151,23 @@ def cache_creation_tokens(usage: Any, get: Callable[[Any, str], Any]) -> tuple[i
     attributed to the one-hour bucket, the more expensive of the two, so
     an unknown TTL is never under-billed.  The Claude Code CLI re-emits
     exactly this shape as JSON, so :mod:`kiss.core.models.claude_code_model`
-    shares this parser and differs only in *get* — otherwise a change to
-    Anthropic's cache tiers would have to be made twice.
+    shares this parser — otherwise a change to Anthropic's cache tiers
+    would have to be made twice.
 
     Args:
         usage: The provider's usage record — an SDK object for the API
             transport, a decoded JSON dict for the CLI transport.
-        get: Reads a named field off *usage* or a nested record,
-            returning ``None`` when the field is absent.
 
     Returns:
         ``(cache_write_5m_tokens, cache_write_1h_tokens)``.
     """
-    cache_creation = get(usage, "cache_creation")
+    cache_creation = _get_attr_or_key(usage, "cache_creation")
     if cache_creation is not None:
         return (
-            get(cache_creation, "ephemeral_5m_input_tokens") or 0,
-            get(cache_creation, "ephemeral_1h_input_tokens") or 0,
+            _get_attr_or_key(cache_creation, "ephemeral_5m_input_tokens") or 0,
+            _get_attr_or_key(cache_creation, "ephemeral_1h_input_tokens") or 0,
         )
-    return 0, get(usage, "cache_creation_input_tokens") or 0
-
-
-def _attribute_field(record: Any, name: str) -> Any:
-    """Return attribute *name* of *record*, or ``None`` when it is absent."""
-    return getattr(record, name, None)
+    return 0, _get_attr_or_key(usage, "cache_creation_input_tokens") or 0
 
 
 _THINKING_FAMILIES = ("opus", "sonnet", "haiku", "fable")
@@ -214,8 +251,12 @@ def _uses_adaptive_thinking(model_name: str) -> bool:
          4.x still use ``enabled``. An 8-digit date segment (e.g.
          ``claude-opus-4-20250514``) is not treated as a minor version.
     """
-    from kiss.core.models.model_info import MODEL_INFO
+    from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
 
+    # A generated effort alias (``claude-opus-5-5-medium``) is judged by
+    # its base id: the alias name itself falls outside the version
+    # grammar below.
+    model_name = _strip_thinking_alias(model_name)
     info = MODEL_INFO.get(model_name)
     if info is not None and info.adaptive_thinking is not None:
         return info.adaptive_thinking
@@ -254,8 +295,12 @@ def _supports_extended_thinking(model_name: str) -> bool:
     model's reasoning stayed invisible (or came back encrypted-only and
     ``KISSAgent`` misread it as "empty response").
     """
-    from kiss.core.models.model_info import MODEL_INFO
+    from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
 
+    # A generated effort alias (``claude-opus-5-5-medium``) is judged by
+    # its base id: the alias name itself falls outside the version
+    # grammar below.
+    model_name = _strip_thinking_alias(model_name)
     info = MODEL_INFO.get(model_name)
     if info is not None and info.extended_thinking is not None:
         return info.extended_thinking
@@ -505,6 +550,13 @@ class AnthropicModel(Model):
         # The (api_key, workspace_id) pair the current client was built
         # from, so initialize() rebuilds it only on a real change.
         self._client_inputs: tuple[str, str] | None = None
+        # The id sent as ``model=`` over the wire.  A generated effort
+        # alias (``claude-opus-5-5-medium``, ``alias_of`` marker in the
+        # catalog) maps back to its base id: the Messages API only knows
+        # the base names and answers 404 ``not_found_error`` otherwise.
+        from kiss.core.models.model_info import _strip_thinking_alias
+
+        self._api_model_name = _strip_thinking_alias(model_name)
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
@@ -780,6 +832,18 @@ class AnthropicModel(Model):
             for key, value in self.model_config.items()
             if key not in FRAMEWORK_ONLY_CONFIG_KEYS
         }
+        # ``reasoning_effort`` is the framework-wide spelling (shared with
+        # the OpenAI adapters); the Messages API wants it as
+        # ``output_config.effort``.  A native ``output_config.effort`` set
+        # by the caller wins over both the framework key and a catalog
+        # alias level.
+        kwargs.pop("reasoning_effort", None)
+        effort_level = _effort_level_for(self.model_name, self.model_config)
+        if effort_level is not None:
+            output_config = kwargs.get("output_config")
+            output_config = dict(output_config) if isinstance(output_config, dict) else {}
+            output_config.setdefault("effort", effort_level)
+            kwargs["output_config"] = output_config
         enable_cache = self.model_config.get("enable_cache", True)
         # The same hoisting Gemini applies (see Model docstring of
         # merge_system_texts): the Messages API rejects the "system" role,
@@ -808,12 +872,20 @@ class AnthropicModel(Model):
             "Anthropic Messages",
         )
 
-        if "thinking" not in kwargs and _supports_extended_thinking(self.model_name):
+        if "thinking" not in kwargs and _supports_extended_thinking(self._api_model_name):
             if not user_set_max_tokens:
-                version = _parse_claude_version(self.model_name)
-                is_opus = version is not None and version[0] == "opus"
-                max_tokens = 65536 if is_opus else 64000
-            if _uses_adaptive_thinking(self.model_name):
+                version = _parse_claude_version(self._api_model_name)
+                # Opus 4.6+ allows 65536 output tokens; Opus 4.5 (like
+                # every Sonnet) is capped at 64000 and answers HTTP 400
+                # "max_tokens: 65536 > 64000" otherwise (verified live
+                # 2026-10-07).
+                is_big_opus = (
+                    version is not None
+                    and version[0] == "opus"
+                    and (version[1], version[2] or 0) >= (4, 6)
+                )
+                max_tokens = 65536 if is_big_opus else 64000
+            if _uses_adaptive_thinking(self._api_model_name):
                 kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             else:
                 budget = min(10000, max_tokens - 1)
@@ -844,7 +916,7 @@ class AnthropicModel(Model):
             )
         kwargs.update(
             {
-                "model": self.model_name,
+                "model": self._api_model_name,
                 "messages": normalized_messages,
                 "max_tokens": max_tokens,
             }
@@ -911,69 +983,40 @@ class AnthropicModel(Model):
             TimeoutError: When the streaming connection delivers no data
                 (or no events) for ``stream_stall_timeout`` seconds.
         """
-        try:
-            return self._stream_message(kwargs)
-        finally:
-            self._close_thinking_if_open()
-
-    def _stream_message(self, kwargs: dict[str, Any]) -> Any:
-        """Run the watched stream behind :meth:`_create_message`.
-
-        The thinking bracket is tracked on the base class's
-        :attr:`Model._thinking_open` (set by ``_invoke_thinking_callback``)
-        rather than on a local flag, so the caller's ``finally`` and the
-        stop/stall paths all close the same bracket.
-
-        Args:
-            kwargs: Keyword arguments for the Anthropic API call.
-
-        Returns:
-            The raw Anthropic response message.
-        """
         in_thinking = False
         try:
-            with self.client.messages.stream(**kwargs) as stream:
-                # `events` is closed in `finally` like the other
-                # transports: a token callback can raise out of the loop
-                # body, and an abandoned generator would keep its watchdog
-                # thread armed until the traceback is released.
-                # `get_final_message()` only drains the already-exhausted
-                # iterator and returns the in-memory snapshot, so it is
-                # safe after the wrapper has closed the response.
-                events = stop_aware_events(
-                    stream,
-                    stall_timeout=self._stream_stall_timeout,
-                    name="anthropic-stream-abort-watchdog",
-                )
-                try:
-                    for event in events:
-                        # The SDK accumulates message_start / message_delta
-                        # usage here; kept for take_partial_usage_response
-                        # if the stream fails before message_stop.
-                        self._rejected_response = stream.current_message_snapshot
-                        if self.token_callback is None:
-                            continue
-                        if event.type == "content_block_start":
-                            block = getattr(event, "content_block", None)
-                            if block and getattr(block, "type", "") == "thinking":
-                                in_thinking = True
-                        elif event.type == "content_block_delta":
-                            delta = event.delta
-                            delta_type = getattr(delta, "type", "")
-                            if delta_type == "thinking_delta":
-                                text = getattr(delta, "thinking", "")
-                                if text:
-                                    if in_thinking:
-                                        self._open_thinking_if_closed()
-                                    self._invoke_token_callback(text)
-                            elif delta_type == "text_delta":
-                                self._invoke_token_callback(getattr(delta, "text", ""))
-                        elif event.type == "content_block_stop":
-                            if in_thinking:
-                                in_thinking = False
-                                self._close_thinking_if_open()
-                finally:
-                    events.close()
+            # `get_final_message()` only drains the already-exhausted
+            # iterator and returns the in-memory snapshot, so it is safe
+            # after the watchdog wrapper has closed the response.
+            with (
+                self.client.messages.stream(**kwargs) as stream,
+                self._watched_events(stream, "anthropic-stream-abort-watchdog") as events,
+            ):
+                for event in events:
+                    # The SDK accumulates message_start / message_delta
+                    # usage here; kept for take_partial_usage_response
+                    # if the stream fails before message_stop.
+                    self._rejected_response = stream.current_message_snapshot
+                    if self.token_callback is None:
+                        continue
+                    if event.type == "content_block_start":
+                        block = getattr(event, "content_block", None)
+                        if block and getattr(block, "type", "") == "thinking":
+                            in_thinking = True
+                    elif event.type == "content_block_delta":
+                        delta = event.delta
+                        delta_type = getattr(delta, "type", "")
+                        if delta_type == "thinking_delta":
+                            text = getattr(delta, "thinking", "")
+                            if text:
+                                if in_thinking:
+                                    self._open_thinking_if_closed()
+                                self._invoke_token_callback(text)
+                        elif delta_type == "text_delta":
+                            self._invoke_token_callback(getattr(delta, "text", ""))
+                    elif event.type == "content_block_stop" and in_thinking:
+                        in_thinking = False
+                        self._close_thinking_if_open()
                 self._rejected_response = None
                 return stream.get_final_message()
         except (httpx2.TimeoutException, APITimeoutError, TimeoutError) as exc:
@@ -1213,7 +1256,7 @@ class AnthropicModel(Model):
         """
         if hasattr(response, "usage") and response.usage:
             cache_write_5m, cache_write_1h = cache_creation_tokens(
-                response.usage, _attribute_field
+                response.usage
             )
             return (
                 getattr(response.usage, "input_tokens", 0) or 0,

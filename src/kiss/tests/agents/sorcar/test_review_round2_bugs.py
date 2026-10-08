@@ -284,40 +284,6 @@ def test_migration_rejects_non_uuid_string_parent_in_extra(
 
 
 
-def test_run_tasks_parallel_does_not_persist_synthetic_parent(
-    temp_db: Path,
-) -> None:
-    """When a caller invokes ``_run_tasks_parallel`` without a real
-    parent task_id, no row in ``task_history`` may end up with a
-    ``parent_task_id`` that is not the id of an existing row."""
-    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-    parent = ChatSorcarAgent("Parent")
-    parent._last_task_id = None
-    parent._chat_id = ""
-
-    def _noop_run(*args: Any, **kwargs: Any) -> str:
-        return "ok"
-
-    real_run = ChatSorcarAgent.run
-
-    def _stub_run(self: ChatSorcarAgent, *args: Any, **kwargs: Any) -> str:
-        sub_info = self._subagent_info or {}
-        ptid = sub_info.get("parent_task_id")
-        assert ptid in ("", None), (
-            f"sub-agent _subagent_info.parent_task_id was {ptid!r}; "
-            "must be empty/None when parent has no real id."
-        )
-        return "ok"
-
-    try:
-        ChatSorcarAgent.run = _stub_run  # type: ignore[method-assign]
-        parent._run_tasks_parallel(["task A"])
-    finally:
-        ChatSorcarAgent.run = real_run  # type: ignore[method-assign]
-
-
-
 def test_on_task_id_allocated_callback_logs_on_exception(
     temp_db: Path,
     caplog: pytest.LogCaptureFixture,

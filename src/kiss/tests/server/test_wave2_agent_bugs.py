@@ -45,6 +45,8 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 import kiss.agents.sorcar.chat_sorcar_agent as chat_module
 import kiss.agents.sorcar.persistence as _persistence
 import kiss.agents.sorcar.worktree_sorcar_agent as wt_module
@@ -52,6 +54,8 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server.json_printer import JsonPrinter
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 _PARENT_CLASS = cast(Any, SorcarAgent.__mro__[1])
 

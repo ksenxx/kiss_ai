@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
 from unittest import IsolatedAsyncioTestCase
+from unittest.mock import patch
 
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as ws
@@ -288,19 +289,19 @@ class TestUpdateAvailableUsesLatestInstalledExtension(_UpdateCheckTestBase):
     dismisses when ``available === false``).
 
     This test seeds a tempdir that simulates ``~/.vscode/extensions/``
-    with both an OLD (2026.6.30) and a NEW (2026.7.5) extension dir,
+    with both an OLD (2099.6.30) and a NEW (2099.7.5) extension dir,
     plus a decoy non-KISS extension.  The PyPI stub reports the NEW
     version.  Before the fix the daemon (whose bundled ``_version.py``
-    is anything other than 2026.7.5) reported ``available: True``.
-    After the fix it reports ``available: False`` and ``current: 2026.7.5``.
+    is anything other than 2099.7.5) reported ``available: True``.
+    After the fix it reports ``available: False`` and ``current: 2099.7.5``.
     """
 
-    PYPI_VERSION = "2026.7.5"
-    PYPI_PAYLOAD = {"info": {"version": "2026.7.5"}}
+    PYPI_VERSION = "2099.7.5"
+    PYPI_PAYLOAD = {"info": {"version": "2099.7.5"}}
 
     async def asyncSetUp(self) -> None:
         self._ext_root_tmp = tempfile.mkdtemp(prefix="kiss-extroot-")
-        for ver in ("2026.6.30", "2026.7.5"):
+        for ver in ("2099.6.30", "2099.7.5"):
             ext_dir = (
                 Path(self._ext_root_tmp)
                 / f"ksenxx.kiss-sorcar-{ver}"
@@ -323,7 +324,7 @@ class TestUpdateAvailableUsesLatestInstalledExtension(_UpdateCheckTestBase):
         ).mkdir(parents=True)
         bad = (
             Path(self._ext_root_tmp)
-            / "ksenxx.kiss-sorcar-2026.6.99"
+            / "ksenxx.kiss-sorcar-2099.6.99"
             / "kiss_project"
             / "src"
             / "kiss"
@@ -351,15 +352,15 @@ class TestUpdateAvailableUsesLatestInstalledExtension(_UpdateCheckTestBase):
             ev = await self._wait_for_event(reader, "update_available")
             self.assertEqual(
                 ev.get("current"),
-                "2026.7.5",
+                "2099.7.5",
                 "daemon must report the newest installed extension "
                 "version as the current one, not its own stale bundled "
                 "_version.py",
             )
             self.assertEqual(
                 ev.get("latest"),
-                "2026.7.5",
-                "PyPI stub is pinned to 2026.7.5",
+                "2099.7.5",
+                "PyPI stub is pinned to 2099.7.5",
             )
             self.assertEqual(
                 ev.get("available"),
@@ -425,6 +426,20 @@ class TestUpdateAvailableEmptyExtensionsRootFallback(_UpdateCheckTestBase):
 
 class TestVersionCompare(IsolatedAsyncioTestCase):
     """Unit-style coverage for the version compare helper."""
+
+    async def test_running_version_is_not_downgraded_by_older_extensions(self) -> None:
+        from kiss.core._version import __version__
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            version_file = (
+                root / "ksenxx.kiss-sorcar-2000.1.1" / "kiss_project"
+                / "src" / "kiss" / "core" / "_version.py"
+            )
+            version_file.parent.mkdir(parents=True)
+            version_file.write_text('__version__ = "2000.1.1"\n')
+            with patch.object(ws, "_INSTALLED_EXTENSIONS_ROOT", root):
+                self.assertEqual(ws._read_version(), __version__)
 
     async def test_compare_versions_ordering(self) -> None:
         self.assertEqual(ws._compare_versions("2026.6.10", "2026.6.9"), 1)

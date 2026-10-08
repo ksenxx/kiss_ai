@@ -19,10 +19,11 @@ event instead of processing it) and invokes the :class:`ServerApi`
 method the command's catalog entry names.  The only exception is a
 WSS connection's pre-dispatch ``auth`` handshake, serviced by
 :meth:`ServerApi.authenticate`.  The user interfaces consume the
-catalog through thin client facades — ``media/api.js`` (chat webview
-and remote webapp) and ``src/SorcarApi.ts`` (VS Code extension host)
-— whose methods map 1:1 onto the catalog's command names; the remote
-webapp's bootstrap shim (``_WS_SHIM_JS`` in
+catalog through the ``media/api.js`` facade (chat webview and remote
+webapp), whose methods map 1:1 onto the catalog's command names, and
+the VS Code extension host relays the webview's commands through
+``FORWARDED_COMMANDS`` in ``src/SorcarSidebarView.ts``; the remote webapp's
+bootstrap shim (``_WS_SHIM_JS`` in
 :mod:`kiss.server.web_server`) additionally sends the ``auth``
 handshake, itself a catalog command.
 
@@ -38,7 +39,7 @@ already-running daemon and block until it finishes::
     # Continue the same chat (the agent sees the prior task as context):
     follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
-``extension_agent_path="/path/to/my_agent.py"`` names a Sorcar
+``sea_path="/path/to/my_agent.py"`` names a Sorcar
 Extension Agent (SEA): a file defining one subclass of
 :class:`kiss.agents.seas.base.base_sea.BaseSea` whose ``settings``
 method computes the run's parameters on the daemon — e.g. a
@@ -70,7 +71,7 @@ functions — the daemon loads the file itself, so the tools execute
             return tools + [get_temperature]
 
     result = sorcar.run("What's the temperature in Paris?",
-                        extension_agent_path="my_agent.py")
+                        sea_path="my_agent.py")
 
 The class may also define ``system_prompt(system_prompt)``,
 ``llm_call_hook(new_messages)`` and ``tool_call_hook(name, args)``,
@@ -107,19 +108,7 @@ from typing import Any, Literal, Protocol
 # re-exported here unchanged: ``kiss.server.sorcar.run`` and
 # ``kiss.server.sorcar.TaskResult`` stay the public client API.
 from kiss.agents.sorcar.daemon_client import (
-    _MAX_LINE_BYTES as _MAX_LINE_BYTES,
-)
-from kiss.agents.sorcar.daemon_client import (
     TaskResult as TaskResult,
-)
-from kiss.agents.sorcar.daemon_client import (
-    _parse_cost as _parse_cost,
-)
-from kiss.agents.sorcar.daemon_client import (
-    _resolve_endpoint_file as _resolve_endpoint_file,
-)
-from kiss.agents.sorcar.daemon_client import (
-    _to_task_result as _to_task_result,
 )
 from kiss.agents.sorcar.daemon_client import (
     run as run,
@@ -274,8 +263,6 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("ready", handler="ready"),
     ApiCommand("getHistory"),
     ApiCommand("getAdjacentTask", required=("direction",)),
-    ApiCommand("getFrequentTasks"),
-    ApiCommand("deleteFrequentTask", required=("task",)),
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("getInputHistory"),
     ApiCommand("getSeaCommands"),
@@ -292,13 +279,6 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("addTrick", required=("text",)),
     ApiCommand("deleteTrick", required=("text",)),
     ApiCommand("editTrick", required=("text", "newText")),
-    ApiCommand("getDefaultModel", handler="get_default_model"),
-    ApiCommand("readKissConfig", handler="read_kiss_config"),
-    ApiCommand(
-        "writeKissConfig", required=("config",), handler="write_kiss_config"
-    ),
-    ApiCommand("voiceWakeStart", handler="voice_wake_start"),
-    ApiCommand("voiceWakeStop", handler="voice_wake_stop"),
     ApiCommand("browserOpen"),
     ApiCommand("browserClose", required=("tab_id",)),
     ApiCommand("browserNavigate", required=("tab_id", "action")),
@@ -462,6 +442,29 @@ def passwords_equal(a: str, b: str) -> bool:
 AuthKind = Literal["local", "remote"]
 """How a connection authenticated: local token or remote password."""
 
+_NO_PASSWORD_LOG = (
+    "Refusing non-localhost auth handshake from %s: remote_password is empty"
+)
+_NO_PASSWORD_REFUSAL: dict[str, Any] = {
+    "type": "error",
+    "code": "localhost_only",
+    "text": "Remote access is turned off: no remote password is set, so "
+            "only this computer may connect. On it, open Settings and "
+            "set a Remote password.",
+}
+
+
+def _auth_locked(lock_remaining: float) -> dict[str, Any]:
+    """Return the ``auth_locked`` event for a rate-limited peer.
+
+    Args:
+        lock_remaining: Seconds left on the peer's brute-force lockout.
+
+    Returns:
+        The event, with ``retry_after`` rounded up to whole seconds.
+    """
+    return {"type": "auth_locked", "retry_after": math.ceil(lock_remaining)}
+
 
 @dataclass(frozen=True)
 class ApiContext:
@@ -564,24 +567,6 @@ class ServerBackend(Protocol):
     async def _handle_voice_transcribe(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
-
-    async def _handle_get_default_model(
-        self, cmd: dict[str, Any], endpoint: Any,
-    ) -> None: ...
-
-    async def _handle_read_kiss_config(
-        self, cmd: dict[str, Any], endpoint: Any,
-    ) -> None: ...
-
-    async def _handle_write_kiss_config(
-        self, cmd: dict[str, Any], endpoint: Any,
-    ) -> None: ...
-
-    async def _handle_voice_wake_start(
-        self, cmd: dict[str, Any], endpoint: Any, conn_id: str,
-    ) -> None: ...
-
-    async def _handle_voice_wake_stop(self, conn_id: str) -> None: ...
 
     async def _handle_active_tasks_query(self, endpoint: Any) -> None: ...
 
@@ -804,32 +789,21 @@ class ServerApi:
             and passwords_equal(self._backend.local_token, token)
         )
 
-    async def _refuse_no_password_remote(
-        self, websocket: Any, ip: str,
-    ) -> None:
-        """Refuse a non-loopback peer while no password is configured.
+    async def _refuse(self, websocket: Any, payload: dict[str, Any]) -> None:
+        """Send *payload* and close *websocket*, both best-effort.
 
-        Sends the explanatory ``error`` event and closes the socket
-        (both best-effort).  Shared by :meth:`authenticate`'s
-        pre-handshake gate and its per-attempt re-check.
+        Every refusal :meth:`authenticate` issues ends the handshake
+        this way: the client learns WHY (instead of a bare close that
+        leaves its loading overlay spinning) and the socket is closed.
+        A send or close that fails is ignored; the peer is gone
+        either way.
 
         Args:
-            websocket: The remote client's WebSocket connection.
-            ip: The client's rate-limit key, for the log line only.
+            websocket: The client's WebSocket connection.
+            payload: The ``auth_locked`` or ``error`` event to send.
         """
-        logger.warning(
-            "Refusing non-localhost auth handshake from %s: "
-            "remote_password is empty", ip,
-        )
         try:
-            await websocket.send(json.dumps({
-                "type": "error",
-                "code": "localhost_only",
-                "text": "Remote access is turned off: no remote "
-                        "password is set, so only this computer may "
-                        "connect. On it, open Settings and set a "
-                        "Remote password.",
-            }))
+            await websocket.send(json.dumps(payload))
             await websocket.close()
         except Exception:
             pass
@@ -909,14 +883,7 @@ class ServerApi:
                     return "local"
             except Exception:
                 logger.debug("Locked peer %s sent no usable frame", ip, exc_info=True)
-            try:
-                await websocket.send(json.dumps({
-                    "type": "auth_locked",
-                    "retry_after": math.ceil(lock_remaining),
-                }))
-                await websocket.close()
-            except Exception:
-                pass
+            await self._refuse(websocket, _auth_locked(lock_remaining))
             return None
         password = (await asyncio.to_thread(load_config)).get("remote_password", "")
         if not password and not backend._peer_is_loopback(websocket):
@@ -926,7 +893,8 @@ class ServerApi:
             # before the WS upgrade).  Re-applied per attempt below,
             # so clearing the password at ANY point before a frame is
             # examined refuses an already-admitted non-loopback peer.
-            await self._refuse_no_password_remote(websocket, ip)
+            logger.warning(_NO_PASSWORD_LOG, ip)
+            await self._refuse(websocket, _NO_PASSWORD_REFUSAL)
             return None
         try:
             for is_retry, timeout in ((False, 30), (True, 60)):
@@ -943,12 +911,11 @@ class ServerApi:
                     return "local"
                 if backend.local_only:
                     # The private daemon admits no password at all.
-                    await websocket.send(json.dumps({
+                    await self._refuse(websocket, {
                         "type": "error",
                         "code": "auth_failed",
                         "text": "This daemon accepts local clients only.",
-                    }))
-                    await websocket.close()
+                    })
                     return None
                 # Re-load the configured password before every compare
                 # so a change made while this connection awaited
@@ -963,7 +930,8 @@ class ServerApi:
                 if not password and not backend._peer_is_loopback(
                     websocket,
                 ):
-                    await self._refuse_no_password_remote(websocket, ip)
+                    logger.warning(_NO_PASSWORD_LOG, ip)
+                    await self._refuse(websocket, _NO_PASSWORD_REFUSAL)
                     return None
                 # Re-check the lockout BEFORE comparing or accepting the
                 # submitted credential, with no await between this check
@@ -980,11 +948,7 @@ class ServerApi:
                         "Auth rate-limit engaged while %s awaited "
                         "credentials; closing socket", ip,
                     )
-                    await websocket.send(json.dumps({
-                        "type": "auth_locked",
-                        "retry_after": math.ceil(lock_remaining),
-                    }))
-                    await websocket.close()
+                    await self._refuse(websocket, _auth_locked(lock_remaining))
                     return None
                 client_pw = msg.get("password", "")
                 if not isinstance(client_pw, str):
@@ -1018,23 +982,18 @@ class ServerApi:
                         "Auth rate-limit tripped mid-handshake for %s; "
                         "closing socket", ip,
                     )
-                    await websocket.send(json.dumps({
-                        "type": "auth_locked",
-                        "retry_after": math.ceil(lock_remaining),
-                    }))
-                    await websocket.close()
+                    await self._refuse(websocket, _auth_locked(lock_remaining))
                     return None
                 if not is_retry:
                     await websocket.send(json.dumps({"type": "auth_required"}))
             # ``code`` lets the webapp shim tell this apart from other
             # pre-auth errors (it shows the text inside the password
             # dialog and keeps the dialog open across the close below).
-            await websocket.send(json.dumps({
+            await self._refuse(websocket, {
                 "type": "error",
                 "code": "auth_failed",
                 "text": "That password is not correct. Try again.",
-            }))
-            await websocket.close()
+            })
             return None
         except Exception:
             logger.debug("WS auth failed", exc_info=True)
@@ -1075,10 +1034,9 @@ class ServerApi:
     async def ready(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Initialize a (re)loaded chat webview.
 
-        Sanitizes the command's ``restoredTabs`` ONCE (warnings
-        included) and writes the cleaned list back so the backend's
-        own sanitize pass finds nothing left to reject or truncate.
-        For a local connection it then (1) marks the connection as
+        Sanitizes the command's ``restoredTabs`` (warnings included)
+        and writes the cleaned list back for the backend's ready
+        handler.  For a local connection it then (1) marks the connection as
         hosting a chat webview — every attached webview mirrors the
         whole canonical tab registry from ``tabs_state``, so this flag
         is what makes a registry tab's talk play natively on this
@@ -1336,7 +1294,11 @@ class ServerApi:
         """
         if ctx.is_local:
             return
-        self._backend._vscode_server.terminals.open(
+        # Off the event loop: opening forks the shell (a fork of the
+        # whole daemon process), during which nothing else would be
+        # served — no fan-out to any connection, no other dispatch.
+        await asyncio.to_thread(
+            self._backend._vscode_server.terminals.open,
             str(cmd["tab_id"]),
             ctx.conn_state["conn_id"],
             self._backend._cmd_work_dir(cmd),
@@ -1540,124 +1502,6 @@ class ServerApi:
             ctx: The transport context of the current call.
         """
         await self._backend._handle_voice_transcribe(cmd, ctx.endpoint)
-
-    async def get_default_model(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Reply with the daemon's key-derived default model name.
-
-        Services ``getDefaultModel`` so the VS Code extension host can
-        obtain :func:`kiss.core.models.model_info.get_default_model`
-        over the socket instead of spawning a throwaway ``uv run
-        python -c ...`` interpreter (its historical out-of-band
-        channel, still used as a fallback while the daemon is down).
-        The reply is a direct ``defaultModel`` event to the requester.
-
-        Args:
-            cmd: The ``getDefaultModel`` command.
-            ctx: The transport context of the current call.
-        """
-        await self._backend._handle_get_default_model(cmd, ctx.endpoint)
-
-    async def read_kiss_config(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Serve the raw merged ``~/.kiss/config.json`` to a local client.
-
-        Services ``readKissConfig`` so the extension host can read the
-        daemon-owned config file through the socket instead of parsing
-        the file itself.  The reply is a direct ``kissConfig`` event.
-
-        LOCAL CLIENTS ONLY: unlike ``getConfig`` (whose reply is
-        shaped for the settings panel), this returns the config
-        verbatim — including ``remote_password`` — so a remote
-        browser must never receive it.  A command from a remote,
-        password-authenticated connection is dropped as a defensive
-        no-op.
-
-        Args:
-            cmd: The ``readKissConfig`` command.
-            ctx: The transport context of the current call.
-        """
-        if not ctx.is_local:
-            return
-        await self._backend._handle_read_kiss_config(cmd, ctx.endpoint)
-
-    async def write_kiss_config(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Merge a local client's keys into ``~/.kiss/config.json``.
-
-        Services ``writeKissConfig`` so the extension host can update
-        daemon-owned config keys (e.g. ``remote_password``) through
-        the socket — sharing the daemon's atomic, lock-guarded
-        :func:`kiss.core.vscode_config.save_config` write path —
-        instead of rewriting the file itself.  The reply is a direct
-        ``kissConfigSaved`` acknowledgement event.
-
-        LOCAL CLIENTS ONLY: a remote browser must not be
-        able to change ``remote_password`` or any other daemon
-        setting through this raw channel; a command from a remote,
-        password-authenticated connection is dropped as a defensive
-        no-op.
-
-        Args:
-            cmd: The ``writeKissConfig`` command carrying ``config``.
-            ctx: The transport context of the current call.
-        """
-        if not ctx.is_local:
-            return
-        await self._backend._handle_write_kiss_config(cmd, ctx.endpoint)
-
-    async def voice_wake_start(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Start the daemon-hosted wake-word listener for this client.
-
-        Services ``voiceWakeStart`` so the extension host can run
-        :mod:`kiss.server.voice_wake` as a daemon child over the
-        socket — receiving its protocol as ``voiceWakeEvent`` /
-        ``voiceWakeState`` events — instead of spawning the listener
-        process itself and parsing its stdout (its historical
-        out-of-band channel).  The optional ``sensitivity`` field
-        (0..100) tunes wake-word eagerness.  The listener is bound to
-        this connection and stopped on disconnect.
-
-        LOCAL CLIENTS ONLY: the listener captures this
-        machine's microphone, so a remote browser must not
-        control it (browser-mode voice capture stays in-page via
-        ``voiceTranscribe``); a command from a remote,
-        password-authenticated connection is dropped as a defensive
-        no-op.
-
-        Args:
-            cmd: The ``voiceWakeStart`` command.
-            ctx: The transport context of the current call.
-        """
-        if not ctx.is_local:
-            return
-        await self._backend._handle_voice_wake_start(
-            cmd, ctx.endpoint, ctx.conn_state["conn_id"],
-        )
-
-    async def voice_wake_stop(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Stop this client's daemon-hosted wake-word listener.
-
-        Services ``voiceWakeStop``; a no-op when the connection has no
-        running listener.  LOCAL CLIENTS ONLY, matching
-        ``voiceWakeStart``.
-
-        Args:
-            cmd: The ``voiceWakeStop`` command (unused).
-            ctx: The transport context of the current call.
-        """
-        if not ctx.is_local:
-            return
-        await self._backend._handle_voice_wake_stop(
-            ctx.conn_state["conn_id"],
-        )
 
     async def active_tasks_query(
         self, cmd: dict[str, Any], ctx: ApiContext,

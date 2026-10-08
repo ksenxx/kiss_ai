@@ -37,7 +37,7 @@ from pathlib import Path
 # Resolve the scanners from the project virtualenv first (the "verified"
 # invocations the task requires), then fall back to whatever is on PATH.
 # A Windows venv keeps its entry points as ``.venv\Scripts\<name>.exe``.
-_VENV_BIN = Path(__file__).resolve().parents[2] / ".venv" / (
+_VENV_BIN = Path(__file__).resolve().parents[3] / ".venv" / (
     "Scripts" if os.name == "nt" else "bin"
 )
 _EXE_SUFFIX = ".exe" if os.name == "nt" else ""

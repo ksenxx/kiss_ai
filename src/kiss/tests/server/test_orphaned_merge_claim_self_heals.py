@@ -41,6 +41,8 @@ from kiss.server.server import VSCodeServer
 from kiss.server.task_runner import _wt_merge_on_repo
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 _MERGE_IN_PROGRESS = "A worktree merge is in progress"
 _TAB_MERGE_IN_PROGRESS = "Cannot run a task while a merge is in progress"
 

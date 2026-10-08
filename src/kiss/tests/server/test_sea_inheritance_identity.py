@@ -8,19 +8,20 @@
   executed by ``load_sea``: it contributes once to a chain even when the
   picker base is the file-loaded copy and the script derives from the
   imported one.
-* A relative ``work_dir`` belongs to the file whose ``settings`` set it,
+* A relative ``work_dir`` is kept as written by the fold (the launcher
+  anchors it at the calling task's directory, whichever file set it),
   whichever picker or subclass sits above or below it in the chain.
 * A SEA that only inherits ``register_as_model()`` is a model-picker
   entry.
 * ``check_sea`` never runs ``on_picked_as_model`` (picking has side
   effects) but still rejects one of the wrong shape.
-* A ``system_prompt`` method that rewrites the assembled prompt leaves
-  sub-agents with the rewritten prompt only, not the suffix it rewrote.
+* A ``system_prompt`` method's return is the run's system prompt as
+  given, appended to or rewritten alike, and is not forwarded to
+  sub-agents: they inherit the caller-supplied base prompt and suffix.
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -31,14 +32,17 @@ from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions, inherit_from_parent
 from kiss.agents.sorcar.sea_commands import (
-    SeaScriptError,
+    SeaError,
     base_settings,
     base_system_prompt,
     check_sea,
     load_sea,
 )
+from kiss.agents.sorcar.sea_settings import anchored_work_dir
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.config import kiss_home
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 PICKER_SEA = """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -98,7 +102,7 @@ def test_an_imported_class_and_its_file_loaded_copy_are_one_class(
     assert base_system_prompt([child], "BASE") == "BASE\n\nPICKER PROTOCOL\n\nCHILD"
 
 
-def test_relative_work_dir_belongs_to_the_file_that_set_it(registry: Path) -> None:
+def test_relative_work_dir_is_kept_as_written_whichever_file_set_it(registry: Path) -> None:
     picker = _write(registry / "picker" / "picker_sea.py", PICKER_SEA)
     plain = _write(registry / "plain" / "plain_sea.py", """
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -121,16 +125,15 @@ class OverridingSea(sea_class('picker')):
         return settings | {'work_dir': 'out'}
 """)
     sea_commands.refresh_registry()
-    picker_assets = os.path.normpath(registry / "picker" / "assets")
-    assert base_settings([load_sea(picker)])["work_dir"] == picker_assets
-    # Layering an unrelated command under the picker, or inheriting the
-    # setting, keeps the picker's folder.
-    assert base_settings([load_sea(picker), load_sea(plain)])["work_dir"] == picker_assets
-    assert base_settings([load_sea(inheriting)])["work_dir"] == picker_assets
-    # A subclass that sets its own relative path means its own folder.
-    assert base_settings([load_sea(overriding)])["work_dir"] == os.path.normpath(
-        registry / "overriding" / "out"
-    )
+    # The fold never anchors a relative path: the launcher resolves it
+    # against the calling task's directory, whichever file set it.
+    assert base_settings([load_sea(picker)])["work_dir"] == "assets"
+    assert base_settings([load_sea(picker), load_sea(plain)])["work_dir"] == "assets"
+    assert base_settings([load_sea(inheriting)])["work_dir"] == "assets"
+    assert base_settings([load_sea(overriding)])["work_dir"] == "out"
+    # A native absolute base: Path renders the result with the OS
+    # separator, so a POSIX literal would not round-trip on Windows.
+    assert anchored_work_dir("out", str(registry)) == str(registry / "out")
 
 
 def test_inherited_model_registration_is_discovered(registry: Path) -> None:
@@ -168,8 +171,7 @@ class RouterSea(BaseSea):
         Path({str(tally)!r}).write_text(work_dir)
         return 'picked'
 """)
-    _, _, description = check_sea(sea)
-    assert description == "router"
+    assert check_sea(sea).description == "router"
     assert not tally.exists(), "check_sea must not run on_picked_as_model"
     sea.write_text("""
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -180,13 +182,14 @@ class RouterSea(BaseSea):
     def on_picked_as_model(self):
         return 'picked'
 """, encoding="utf-8")
-    with pytest.raises(SeaScriptError, match="on_picked_as_model.*must accept the work directory"):
+    with pytest.raises(SeaError, match="on_picked_as_model.*must accept the work directory"):
         check_sea(sea)
 
 
-def test_a_rewritten_system_prompt_does_not_bring_the_suffix_back_on_subagents(
+def test_system_prompt_hook_result_is_the_run_prompt_and_is_not_forwarded(
     tmp_path: Path,
 ) -> None:
+    """The hook's return is used as given; children inherit only the caller's base and suffix."""
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original_run = parent_class.run
     composed: list[str] = []
@@ -201,29 +204,27 @@ def test_a_rewritten_system_prompt_does_not_bring_the_suffix_back_on_subagents(
     def append(system_prompt: str) -> str:
         return system_prompt + "APPENDED"
 
+    def replace(system_prompt: str) -> str:
+        return "ONLY THIS"
+
     parent_class.run = stub_run
     try:
-        agent = SorcarAgent("parent")
-        agent.run(
-            prompt_template="t", work_dir=str(tmp_path), base_system_prompt="BASE",
-            system_prompt="SUFFIX", system_prompt_hook=rewrite, web_tools=False,
-        )
-        # (The daemon appends its own operational notes after the hook.)
-        assert composed[-1].startswith("BASEREWRITTEN")
-        assert "SUFFIX" not in composed[-1]
-        options = inherit_from_parent(agent, "m", None, RunOptions()).options
-        assert options.system_prompt == "BASEREWRITTEN"
-        assert options.add_to_system_prompt == ""
-        # An appending method is inherited as a suffix, on top of the caller's.
-        agent = SorcarAgent("parent")
-        agent.run(
-            prompt_template="t", work_dir=str(tmp_path), base_system_prompt="BASE",
-            system_prompt="SUFFIX", system_prompt_hook=append, web_tools=False,
-        )
-        assert composed[-1].startswith("BASESUFFIXAPPENDED")
-        options = inherit_from_parent(agent, "m", None, RunOptions()).options
-        assert options.system_prompt == "BASE"
-        assert options.add_to_system_prompt == "SUFFIXAPPENDED"
+        for hook, expected in ((rewrite, "BASEREWRITTEN"), (append, "BASESUFFIXAPPENDED"),
+                               (replace, "ONLY THIS")):
+            agent = SorcarAgent("parent")
+            agent.run(
+                prompt_template="t", work_dir=str(tmp_path), base_system_prompt="BASE",
+                system_prompt="SUFFIX", system_prompt_hook=hook, web_tools=False,
+            )
+            # (The daemon appends its own operational notes after the hook.)
+            assert composed[-1].startswith(expected), (hook.__name__, composed[-1])
+            if hook is not append:
+                assert "SUFFIX" not in composed[-1]
+            # Appended, rewritten or replaced: the caller's own base prompt and
+            # suffix are what a sub-agent inherits, as with ``prompt()``.
+            options = inherit_from_parent(agent, "m", None, RunOptions()).options
+            assert options.system_prompt == "BASE", hook.__name__
+            assert options.add_to_system_prompt == "SUFFIX", hook.__name__
     finally:
         parent_class.run = original_run
 

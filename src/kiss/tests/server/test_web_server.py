@@ -861,11 +861,18 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
             await ws.send(json.dumps({"type": "stop", "tabId": "no-task"}))
             await ws.send(json.dumps({"type": "getModels"}))
-            ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            # The startup PyPI check broadcasts ``update_available`` to
+            # every client whenever it completes, so an unrelated
+            # broadcast may land between the two replies.
+            replies: list[dict[str, Any]] = []
+            while len(replies) < 2:
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                if msg["type"] != "update_available":
+                    replies.append(msg)
+            ack, resp = replies
             self.assertEqual(ack["type"], "stop_ack")
             self.assertIs(ack["accepted"], False)
             self.assertEqual(ack["tabId"], "no-task")
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
 
     async def test_ws_record_file_usage(self) -> None:
@@ -3026,26 +3033,32 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
         ws_mod.TUNNEL_CHECK_INTERVAL = 0
         try:
             task = asyncio.create_task(self.server._watchdog())
-            await asyncio.sleep(0.3)
+            # Every watchdog round pushes a ``heartbeat`` frame (the shim's
+            # proof of life) after the ping/pong round trip.  Wait for the
+            # frame itself rather than for a fixed interval: one tick hops
+            # through several worker threads, and on a loaded machine a
+            # sleep-then-cancel leaves the first heartbeat unsent.
+            seen: list[object] = []
+            while "heartbeat" not in seen:
+                seen.append(
+                    json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                    .get("type"),
+                )
             task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
+            # The reply to a request follows the heartbeats already queued.
             await ws.send(json.dumps({"type": "getModels"}))
-            # Every watchdog round also pushed a ``heartbeat`` frame (the
-            # shim's proof of life); the reply follows them.
             resp: dict[str, object] = {}
-            seen: list[object] = []
             for _ in range(2000):
                 resp = json.loads(
                     await asyncio.wait_for(ws.recv(), timeout=5),
                 )
-                seen.append(resp.get("type"))
                 if resp.get("type") == "models":
                     break
             self.assertEqual(resp["type"], "models")
-            self.assertIn("heartbeat", seen)
         finally:
             ws_mod.TUNNEL_CHECK_INTERVAL = original_interval
             await ws.close()

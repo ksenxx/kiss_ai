@@ -206,7 +206,10 @@ def test_children_cannot_weaken_billing_policy():
     parent = SimpleNamespace(
         model_name="cc/opus", model_config={"subscription_only": True, "timeout": 7}
     )
-    got = inherit_from_parent(parent, "", None, RunOptions())
+    parent._subagent_budget_share = lambda siblings: 12 / (siblings + 1)
+    got = inherit_from_parent(parent, "", None, RunOptions(), siblings=3)
+    assert got.budget == 3
+    assert got.options.model_config is not None
     assert got.options.model_config["timeout"] == 7
     assert got.options.model_config["subscription_only"] is True
     with pytest.raises(KISSError):
@@ -265,12 +268,12 @@ def test_fresh_and_legacy_billing_settings(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "key,expected,fast",
     [
-        ("ANTHROPIC_API_KEY", "claude-opus-5-5", "claude-haiku-4-5-20251001"),
+        ("ANTHROPIC_API_KEY", "claude-opus-5-5", "claude-sonnet-5-5"),
         ("OPENAI_API_KEY", "gpt-6.1-sol-medium", "gpt-6-luna"),
         ("GEMINI_API_KEY", "gemini-3.8-flash", "gemini-3.5-flash-lite"),
     ],
 )
-def test_api_defaults_and_lightweight_helpers(monkeypatch, key, expected, fast):
+def test_api_defaults_and_fast_helpers(monkeypatch, key, expected, fast):
     from kiss.core import config
     from kiss.core.models.model_info import get_default_model, get_fast_model
 
@@ -422,11 +425,13 @@ def test_malformed_codex_profiles_fail_closed(probe, tmp_path):
 
 def test_max_alias_preserves_native_id_and_responses_parameters():
     from kiss.core.models.model_info import model
+    from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
     adapter = model(
         "gpt-6.1-sol-max",
         model_config={"base_url": "https://api.openai.com/v1", "api_key": "dummy"},
     )
+    assert isinstance(adapter, OpenAICompatibleModel2)
     adapter.initialize("test")
     request = adapter._build_request_kwargs(tools=None)
     assert request["model"] == "gpt-6.1-sol"
@@ -467,7 +472,7 @@ def test_native_child_client_forwards_inherited_subscription_policy(monkeypatch)
 
     monkeypatch.setenv("KISS_SUBSCRIPTION_ONLY", "1")
     monkeypatch.setenv("KISS_SUBSCRIPTION_MODEL", "codex/gpt-6.1-sol")
-    monkeypatch.setattr(daemon_client, "resolve_agent_path", lambda path: "")
+    monkeypatch.setattr(daemon_client, "resolve_sea_path", lambda path: "")
     monkeypatch.setattr(daemon_client, "_resolve_endpoint_file", lambda path: "fake")
     ws = Mock()
     sent = []
@@ -625,7 +630,7 @@ def test_api_task_helpers_keep_api_priority_over_subscriptions(monkeypatch):
     monkeypatch.setattr(
         cli, "get_cli_connection", lambda provider, **kw: cli.CLIConnection(provider, "connected")
     )
-    assert get_fast_model() == "claude-haiku-4-5-20251001"
+    assert get_fast_model() == "claude-sonnet-5-5"
     assert get_default_model() == "cc/opus"
     with cli.subscription_scope(True):
         assert get_fast_model() == "cc/haiku"
