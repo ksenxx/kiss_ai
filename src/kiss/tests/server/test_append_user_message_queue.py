@@ -84,10 +84,9 @@ class _RecordingModel:
 
 
 def _make_drain_agent(printer: Any = None) -> SorcarAgent:
-    """Bare ``SorcarAgent`` carrying only what the drain hook reads."""
-    agent = SorcarAgent.__new__(SorcarAgent)
-    if printer is not None:
-        agent.printer = printer
+    """A ``SorcarAgent`` whose printer is *printer* (``None`` = no bridge)."""
+    agent = SorcarAgent("drain")
+    agent.printer = printer
     return agent
 
 

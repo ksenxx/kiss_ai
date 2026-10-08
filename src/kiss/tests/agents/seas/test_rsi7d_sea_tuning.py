@@ -392,8 +392,9 @@ def shout(text: str) -> str:
 ''',
     )
     assert report.startswith(f"Patched {path}:") and "+12 lines" in report
-    seas, _cmd, _d = sea_commands.check_sea(path)
-    assert sorted(t.__name__ for t in sea_commands.base_tools(seas, [])) == ["count_words", "shout"]
+    check = sea_commands.check_sea(path)
+    seas = check.seas
+    assert sorted(t.__name__ for t in check.tools) == ["count_words", "shout"]
     patched = seas[-1]
     assert patched.tool_call_hook("Bash", {"command": "rm -rf /"}) == refuse("refused")
     assert patched.tool_call_hook("Bash", {"command": "ls"}) == ALLOW

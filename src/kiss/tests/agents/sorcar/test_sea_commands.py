@@ -901,11 +901,13 @@ def test_unreadable_sea_does_not_break_the_model_picker_registry(tmp_path: Path)
 def test_model_sea_finds_a_router_installed_after_the_registry_was_built(
     tmp_path: Path,
 ) -> None:
-    """Without a watcher, a miss rescans the folders like ``get_command`` does."""
+    """A miss reads the snapshot only; the next refresh (the watcher's) finds the router."""
     folder = tmp_path / "seas"
     _write_router(folder, "early", _ROUTER_TRUE)
     _write_seas_md([str(folder)])
     sea_commands.refresh_registry()
     assert sea_commands.model_sea("late") is None
     late = _write_router(folder, "late", _ROUTER_TRUE)
+    assert sea_commands.model_sea("late") is None
+    sea_commands.refresh_registry()
     assert sea_commands.model_sea("late") == late

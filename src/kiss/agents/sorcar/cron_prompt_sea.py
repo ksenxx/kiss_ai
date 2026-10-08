@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The SEA (SEA) of one scheduled run of a cron prompt job.
+"""The SEA of one scheduled run of a cron prompt job.
 
 :func:`kiss.agents.sorcar.cron_agent._run_prompt_job` runs every LLM
 cron job through ``run_agent(agent=<this file>, task=<preamble + job
@@ -19,7 +19,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 
 
 class CronPromptSea(BaseSea):
-    """The ``/cron_prompt`` SEA."""
+    """The SEA a scheduled cron prompt job runs as (not a slash command)."""
 
     def description(self) -> str:
         """Return the help text of this script."""

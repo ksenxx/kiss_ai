@@ -217,7 +217,7 @@ runs the task text as its prompt.
    then evaluates the SEA on the task (`evaluate_sea`), writes each
    setting into the command dict's wire field and the result of the
    `prompt(task)` chain into `prompt`, and stages the four daemon-side
-   hooks (`DAEMON_SIDE_FIELDS`: `systemPromptHook`, `toolsHook`,
+   hooks (`systemPromptHook`, `toolsHook`,
    `llmCallHook`, `toolCallHook`), each a fold of that method over
    the chain, base first.  Overrides are staged: they apply atomically
    only after everything succeeds.  A broken script raises
@@ -1057,9 +1057,8 @@ The `run()` parameters without a `settings()` key (the allowlist is
 The class may also define two per-call hooks with no corresponding
 `sorcar.run()` parameter or `settings()` key — a callable cannot be
 JSON-serialized, so the hooks exist ONLY as SEA methods, called in
-the daemon process (`sea_apply.DAEMON_SIDE_FIELDS` names the staged
-command fields that carry them, together with `systemPromptHook` and
-`toolsHook`):
+the daemon process (`sea_apply.apply_run` stages them on the command
+fields below, together with `systemPromptHook` and `toolsHook`):
 
 | Method                                 | Returns      | Staged command field |
 |----------------------------------------|--------------|----------------------|

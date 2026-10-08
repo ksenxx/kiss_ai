@@ -612,7 +612,9 @@ def test_prompt_job_runs_the_cron_prompt_sea(
         "id": "abcd1234", "name": "greeter", "prompt": "say 'hi'\n",
         "model_name": "some-model", "max_budget": 1.5,
     }
-    status, text = cron_agent._run_prompt_job(job, work_dir)
+    status, text = cron_agent._run_prompt_job(
+        job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS,
+    )
     assert (status, text) == ("ok", "hello")
     assert not list(work_dir.iterdir())
     sent = captured[0]
@@ -653,7 +655,9 @@ def test_prompt_job_defaults_and_silent_result(
     work_dir = tmp_path / "run"
     work_dir.mkdir()
     job = {"id": "abcd1234", "prompt": "say hi", "max_budget": 0}
-    assert cron_agent._run_prompt_job(job, work_dir) == ("silent", None)
+    assert cron_agent._run_prompt_job(
+        job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS,
+    ) == ("silent", None)
     assert captured[0]["max_budget"] is None
     assert captured[0]["model"] == ""
 
@@ -674,7 +678,7 @@ def test_prompt_job_text_survives_adversarial_text(
     name = 'bad """ name ' + "''' with \\ backslash"
     prompt = 'line1\n"""\n' + "'''\n\\n ünïcode \x00 {braces} #comment"
     job = {"id": "abcd1234", "name": name, "prompt": prompt, "model_name": name}
-    cron_agent._run_prompt_job(job, tmp_path)
+    cron_agent._run_prompt_job(job, tmp_path, tmp_path, cron_agent.PROMPT_TIMEOUT_SECONDS)
     assert captured[0]["prompt"] == cron_agent.PROMPT_PREAMBLE + prompt
     assert captured[0]["model"] == name
 
@@ -693,7 +697,9 @@ def test_prompt_job_marker_in_endpoint_path_is_not_a_timeout(
     work_dir = tmp_path / "run"
     work_dir.mkdir()
     job = {"id": "abcd1234", "name": "hi", "prompt": "say hi", "max_budget": 0}
-    status, text = cron_agent._run_prompt_job(job, work_dir)
+    status, text = cron_agent._run_prompt_job(
+        job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS,
+    )
     assert status == "error"
     assert text is not None and str(endpoint) in text
 
@@ -939,8 +945,6 @@ def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
     monkeypatch.setattr(daemon_client, "run", capture_run)
     project = tmp_path / "project"
     project.mkdir()
-    scratch = tmp_path / "run"
-    scratch.mkdir()
     job = _create(cron_job(
         "create", name="nightly", prompt="run the tests", schedule="every 1d",
         model_name="some-model", work_dir=str(project), use_worktree=True,
@@ -950,8 +954,11 @@ def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
         str(project.resolve()), True, True,
     )
     assert job["timeout"] == 21600.0
-    stored = load_jobs()[0]
-    assert cron_agent._run_prompt_job(stored, scratch) == ("ok", "done")
+    # The full run path: _execute_job derives the run directory and
+    # timeout from the stored job and hands them to the dispatch.
+    cron_agent._execute_job(load_jobs()[0])
+    ran = load_jobs()[0]
+    assert (ran["last_status"], ran["last_summary"]) == ("ok", "done")
     sent = captured[0]
     assert sent["sea_path"] == str(cron_agent.PROMPT_SEA_PATH)
     assert sent["record_timeout"] == 21600.0
