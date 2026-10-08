@@ -76,7 +76,6 @@ from kiss.server.json_printer import (
 from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.server.tab_registry import TabRegistry
 from kiss.server.task_runner import (
-    _subtask_metrics,
     _TaskRunnerMixin,
     parse_task_tags,
 )
@@ -1152,17 +1151,23 @@ class VSCodeServer(
         internally (re-entrant, so safe to call with it already held).
 
         The usage triple is read through ONE
-        :func:`_subtask_metrics` call (``usage_snapshot()`` on a
-        ``RelentlessAgent``, per-attribute fallback on plain agents):
-        three separate property reads each sum the append-only usage
-        ledger afresh, and a concurrent attribution between two of
-        those reads shows the monitor an impossible mix (e.g. the old
-        cost with the new tokens/steps).
+        :func:`~kiss.agents.sorcar.sorcar_agent._live_agent_usage` call
+        (the banked ledger via ``usage_snapshot()`` on a
+        ``RelentlessAgent`` plus the in-flight executor session, each a
+        coherent snapshot): three separate property reads each sum the
+        append-only usage ledger afresh, and a concurrent attribution
+        between two of those reads shows the monitor an impossible mix
+        (e.g. the old cost with the new tokens/steps).  The executor's
+        spend is included for all three fields, so the History row of a
+        running task shows the same figure as its chat header rather
+        than only the previous sessions' banked total.
 
         Args:
             session: The history session dict to update in place.
             task_id: The ``task_history.id`` of the running task.
         """
+        from kiss.agents.sorcar.sorcar_agent import _live_agent_usage
+
         with self._state_lock:
             state = agent_state.get(task_id)
             if state is None:
@@ -1171,13 +1176,10 @@ class VSCodeServer(
             agent = state.agent
             if agent is None:
                 return
-            tokens, cost, steps = _subtask_metrics(agent)
+            cost, tokens, steps = _live_agent_usage(agent)
             session["tokens"] = tokens
             session["cost"] = cost
-            cur = getattr(agent, "_current_executor", None)
-            if cur is not None:
-                steps += int(getattr(cur, "step_count", 0) or 0)
-            session["steps"] = steps
+            session["steps"] = steps or int(getattr(agent, "step_count", 0) or 0)
             mdl_live = getattr(agent, "model_name", "")
             if isinstance(mdl_live, str) and mdl_live:
                 session["model"] = mdl_live

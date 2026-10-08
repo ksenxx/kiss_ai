@@ -13781,10 +13781,10 @@
       '<div class="rc-h"><h3>' +
       esc(titleOverride || 'Result') +
       '</h3><div class="rs">' +
-      '<span>Tokens <b>' +
+      '<span>Tokens <b class="rs-tokens">' +
       fmtTokens(ev.total_tokens || 0) +
       '</b></span>' +
-      '<span>Cost <b>' +
+      '<span>Cost <b class="rs-cost">' +
       esc(fmtCost(ev.cost || 'N/A')) +
       '</b></span>' +
       '</div></div><div class="rc-body md-body' +
@@ -14218,6 +14218,10 @@
     const evOwnerTab = ownerTabId === undefined ? activeTabId : ownerTabId;
     // tableak-coverage:end
     const t = ev.type;
+    // A Result panel follows the run total only until anything else is
+    // said in the transcript: a continuation session's first event ends
+    // the earlier session's panel's claim on later usage totals.
+    if (t !== 'usage_info' && t !== 'result') tState.resultPanelEl = null;
     switch (t) {
       // The model's thinking tokens stream as plain text straight into
       // the Thoughts panel (a dim `.think` block, no header or box of
@@ -14733,6 +14737,7 @@
             ),
           );
         }
+        tState.resultPanelEl = target.lastElementChild;
         if (statusTokens && ev.total_tokens)
           statusTokens.textContent = 'Tokens: ' + fmtTokens(ev.total_tokens);
         if (statusBudget && ev.cost && ev.cost !== 'N/A')
@@ -14805,6 +14810,21 @@
             statusBudget.textContent = 'Cost: ' + fmtCost(ev.cost);
           if (statusSteps && ev.total_steps != null)
             statusSteps.textContent = 'Steps: ' + ev.total_steps;
+          // Spend folded after the run's terminal result (the pre-run
+          // classifier, a sub-task reclaimed at the end) arrives as this
+          // run total, so the Result panel just rendered must show the
+          // same figure as the header.  Only the panel nothing has
+          // followed yet is refreshed (see the reset at the top of this
+          // function): once a continuation session says anything after
+          // it, its figures are that session's history.
+          const panel = tState.resultPanelEl;
+          if (panel) {
+            const tokensEl = panel.querySelector('.rs-tokens');
+            if (tokensEl) tokensEl.textContent = fmtTokens(ev.total_tokens);
+            const costEl = panel.querySelector('.rs-cost');
+            if (costEl && ev.cost !== 'N/A')
+              costEl.textContent = fmtCost(ev.cost);
+          }
         } else {
           updateUsageMetrics(ev.text || '');
         }

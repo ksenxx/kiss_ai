@@ -1365,6 +1365,13 @@ class KISSAgent(Base):
                     num_audio_cache_read_tokens=audio_cache_read,
                     num_image_output_tokens=image_output,
                 )
+                # The catalog holds Standard-tier rates; a provider that
+                # served a differently priced tier (OpenAI Flex/Fast) says
+                # so in the response.
+                tier_multiplier = getattr(self.model, "cost_multiplier_for_response", None)
+                factor = tier_multiplier(response) if callable(tier_multiplier) else 1.0
+                if isinstance(factor, int | float):
+                    cost *= float(factor)
             self.last_call_usage = {
                 "input_tokens": input_tokens + audio_input,
                 "output_tokens": output_tokens + audio_output + image_output,
