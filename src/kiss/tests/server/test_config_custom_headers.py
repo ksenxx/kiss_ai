@@ -50,6 +50,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
 
     def test_save_config_persists_headers(self) -> None:
         from kiss.server.commands import _CommandsMixin
+        from kiss.server.server import broadcast_to_conn
 
         class FakePrinter:
             def __init__(self) -> None:
@@ -67,6 +68,11 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
 
             def _get_models(self, conn_id: str = "") -> None:
                 pass
+
+            def _broadcast_to_conn(
+                self, event: dict[str, Any], conn_id: str,
+            ) -> None:
+                broadcast_to_conn(self.printer, event, conn_id)
 
         server = FakeServer()
         server._cmd_save_config({

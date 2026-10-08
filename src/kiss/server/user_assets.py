@@ -11,9 +11,7 @@ file whose only "bundled" content is a tiny ``## Trick`` test-first
 starter.  Returns ``None`` when ``~/.kiss/`` is not
 writable so the caller can skip silently.
 
-``KISS_HOME`` overrides the default ``~/.kiss`` location, matching the
-rest of the kiss codebase (``persistence.py``, ``web_server.py``,
-``vscode_config.py``).
+``$KISS_HOME`` is honoured through :func:`kiss.core.config.kiss_home`.
 """
 
 from __future__ import annotations

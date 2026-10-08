@@ -195,7 +195,7 @@ def _signal_group(pid: int, sig: signal.Signals) -> bool:
     try:
         killpg(pid, sig)
         return True
-    except (ProcessLookupError, PermissionError, OSError):
+    except OSError:
         return False
 
 
@@ -271,16 +271,10 @@ class TalkPlayer:
 
         Blank events (no clip and no text) and already-spoken
         ``talkId`` values are dropped, matching the webview client.
-        Copies stamped ``muted`` by the daemon are dropped too: the
-        daemon mutes a talk copy when another player on THIS machine
-        (a local webview) already owns the playback, so honouring the
-        flag is what keeps each utterance to one playback per device.
 
         Args:
             event: The broadcast ``talk`` event dictionary.
         """
-        if event.get("muted"):
-            return
         text = str(event.get("text") or "").strip()
         if not text and not event.get("audioB64"):
             return
