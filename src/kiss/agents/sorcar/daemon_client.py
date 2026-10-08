@@ -431,6 +431,9 @@ def _stop_and_await_confirmation(
             stopped"; the broken daemon connection is surfaced instead,
             like every other mid-run connection failure.
     """
+    # Clocked before the send: a slow but
+    # successful send must not extend the caller's wait.
+    deadline = time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
     try:
         _send_stop(ws, tab_id, run_token)
     except OSError as send_exc:
@@ -438,7 +441,7 @@ def _stop_and_await_confirmation(
             "The sorcar daemon connection failed while "
             f"stopping the {what} task: {send_exc}"
         ) from send_exc
-    return time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
+    return deadline
 
 
 def run(

@@ -536,12 +536,18 @@ class BrowserTabService:
             if page.is_closed():
                 raise RuntimeError("page closed while attaching")
             rec.target_id = (await cdp.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
-        except Exception as exc:  # noqa: BLE001 — a vanished popup is not an error
+        except BaseException as exc:  # noqa: BLE001 — a vanished popup is not an error
+            # ``BaseException``: the ``asyncio.wait_for`` around
+            # :meth:`_open` cancels this coroutine on timeout, and a
+            # cancelled attach must forget the page too, or a second
+            # ``_register`` for it would wait on ``attached`` forever.
             logger.debug("browser tab: %s not attached: %s", rec.tab_id, exc)
             with self._lock:
                 self._pages.pop(rec.tab_id, None)
                 self._by_page.pop(id(page), None)
             rec.attached.set()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return None
         rec.cdp = cdp
         rec.attached.set()

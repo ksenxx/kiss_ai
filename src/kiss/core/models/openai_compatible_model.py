@@ -1214,7 +1214,14 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 if adaptive
                 else self.client.chat.completions.create(**kwargs)
             )
-            with self._watched_events(stream, watchdog_name) as events:
+        except (httpx.TimeoutException, APITimeoutError) as err:
+            # No headers before the per-request clock fired; see below.
+            raise stop_or_stall_error(self._stream_stall_timeout) from err
+        # The transport handlers sit inside the watched block so that the
+        # generator and the thinking bracket are closed only after they
+        # ran: an error raised by that cleanup is not a transport failure.
+        with self._watched_events(stream, watchdog_name) as events:
+            try:
                 for chunk in events:
                     last_chunk = chunk
                     if chunk.usage is not None:
@@ -1243,33 +1250,33 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                     if delta.tool_calls:
                         self._close_thinking_if_open()
                         _accumulate_tool_call_deltas(tool_calls_accum, delta.tool_calls)
-        except (httpx.TimeoutException, APITimeoutError) as err:
-            # The per-request clock fired (no headers, or no bytes between
-            # events) before the watchdog did.  A Stop pressed while the
-            # headers were still pending has no watchdog to act on it, so
-            # ask the thread's stop signal before calling this a stall:
-            # a stall is retried, a stop must not be.
-            raise stop_or_stall_error(self._stream_stall_timeout) from err
-        except (httpx.HTTPError, APIConnectionError) as err:
-            # A transport failure AFTER ``finish_reason`` arrived lost only
-            # the stream's tail (the usage chunk / ``[DONE]``); the answer
-            # itself — text and tool-call arguments — is complete.  Raising
-            # here would make the agent loop re-send the whole conversation
-            # and the provider regenerate (and bill) the same answer, which
-            # the user sees as a repeated request and response.  A failure
-            # BEFORE ``finish_reason`` means real content was lost, so it
-            # still propagates for the agent-level retry.  Stops
-            # (``KeyboardInterrupt``) and stalls (``TimeoutError``) raised
-            # by ``stop_aware_events`` are not transport errors and are
-            # never swallowed.
-            if finish_reason is None:
-                raise
-            logger.warning(
-                "Stream connection lost after finish_reason=%r; keeping the "
-                "complete response instead of retrying: %s",
-                finish_reason,
-                err,
-            )
+            except (httpx.TimeoutException, APITimeoutError) as err:
+                # The per-request clock fired (no headers, or no bytes
+                # between events) before the watchdog did.  A Stop pressed
+                # while the headers were still pending has no watchdog to
+                # act on it, so ask the thread's stop signal before calling
+                # this a stall: a stall is retried, a stop must not be.
+                raise stop_or_stall_error(self._stream_stall_timeout) from err
+            except (httpx.HTTPError, APIConnectionError) as err:
+                # A transport failure AFTER ``finish_reason`` arrived lost
+                # only the stream's tail (the usage chunk / ``[DONE]``); the
+                # answer itself — text and tool-call arguments — is
+                # complete.  Raising here would make the agent loop re-send
+                # the whole conversation and the provider regenerate (and
+                # bill) the same answer, which the user sees as a repeated
+                # request and response.  A failure BEFORE ``finish_reason``
+                # means real content was lost, so it still propagates for
+                # the agent-level retry.  Stops (``KeyboardInterrupt``) and
+                # stalls (``TimeoutError``) raised by ``stop_aware_events``
+                # are not transport errors and are never swallowed.
+                if finish_reason is None:
+                    raise
+                logger.warning(
+                    "Stream connection lost after finish_reason=%r; keeping "
+                    "the complete response instead of retrying: %s",
+                    finish_reason,
+                    err,
+                )
         self._rejected_response = None
         response = self._finalize_stream_response(response, last_chunk)
         return content, tool_calls_accum, response, finish_reason

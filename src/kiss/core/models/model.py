@@ -914,8 +914,12 @@ class Model(ABC):
         try:
             yield events
         finally:
-            events.close()
-            self._close_thinking_if_open()
+            # Nested so the bracket closes even when closing the generator
+            # itself raises (a Stop delivered during teardown).
+            try:
+                events.close()
+            finally:
+                self._close_thinking_if_open()
 
     def reset_conversation(self) -> None:
         """Reset conversation state for reuse across sub-sessions.
