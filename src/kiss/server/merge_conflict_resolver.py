@@ -57,6 +57,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
             by the :class:`MergeSea` ``prompt``.
         repo: The repository root holding the conflicted merge.
     """
+    from kiss.agents.sorcar.agent_dispatch import dispatch_epoch
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
     from kiss.agents.sorcar.sorcar_agent import (
         _attribute_sub_usage,
@@ -90,6 +91,10 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
         "reviewer": False,
         "side_channel": True,
     }
+    # Bind the attribution to the parent's usage epoch of NOW: an
+    # interactive merge can finish after the parent reset for its
+    # next task, whose budget must not absorb this one's spend.
+    epoch = dispatch_epoch(parent_agent)
     try:
         agent.run(
             prompt_template=merge.prompt,
@@ -110,7 +115,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
         )
     finally:
         budget, tokens, steps = _live_agent_usage(agent)
-        _attribute_sub_usage(parent_agent, budget, tokens, steps)
+        _attribute_sub_usage(parent_agent, budget, tokens, steps, epoch=epoch)
         if printer is not None:
             _notify_subagent_done(
                 printer, _persisted_task_id(agent), sub_tab_id, model_name,

@@ -5,7 +5,7 @@
 """End-to-end test: the mic listener exits when its spawner dies abruptly.
 
 The listener is spawned in its own session with stdin on /dev/null
-(``voice_wake_control.py`` and ``voiceWake.ts`` both do this), so a
+(``voiceWake.ts`` does this), so a
 spawner that is SIGKILLed or crashes without running its shutdown path
 leaves the listener no SIGHUP and no stdin EOF.  Before the fix
 ``run_mic`` only blocked on its audio queue and fed Vosk; its first
@@ -40,7 +40,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
-# Spawns the listener the way voice_wake_control.py does (own session,
+# Spawns the listener the way voiceWake.ts does (own session,
 # stdin on /dev/null, stdout piped to the spawner), then prints the
 # listener pid after READY and idles forever — until the test kills it.
 SPAWNER_SCRIPT = """

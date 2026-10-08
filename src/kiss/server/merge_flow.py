@@ -1572,7 +1572,7 @@ class _MergeFlowMixin:
         # about to run in (the worker then sees ``is_merging`` and
         # refuses the run).  Same predicate ``AgentState.busy`` and
         # ``_finalize_pending_worktree`` use.
-        if not internal and (state.is_task_active or state.thread_alive()):
+        if not internal and state.running():
             return {
                 "success": False,
                 "message": (

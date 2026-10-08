@@ -27,7 +27,6 @@ from typing import Any
 
 from kiss.server import tricks
 from kiss.server.commands import _CommandsMixin
-from kiss.server.server import broadcast_to_conn
 from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import is_root, posix_only
@@ -360,8 +359,6 @@ class _FakeServer(_CommandsMixin):
         self.work_dir = "/tmp"
         self._state_lock = threading.RLock()
 
-    def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
-        broadcast_to_conn(self.printer, event, conn_id)
 
     def last(self, event_type: str) -> dict[str, Any] | None:
         for msg in reversed(self.printer.messages):

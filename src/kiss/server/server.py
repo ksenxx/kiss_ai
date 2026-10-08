@@ -267,30 +267,6 @@ def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
     return _coalesce_events(evs)
 
 
-def broadcast_to_conn(
-    printer: Any,
-    event: dict[str, Any],
-    conn_id: str,
-) -> None:
-    """Broadcast *event* on *printer*, stamped with *conn_id* when non-empty.
-
-    Stamping ``connId`` makes the printer deliver the event ONLY to the
-    requesting connection (the VS Code window / browser tab whose user
-    triggered the command), so one window's request never repaints — or
-    pops a banner in — another window's UI; ``""`` broadcasts to all.
-    Shared by :meth:`VSCodeServer._broadcast_to_conn` and
-    ``RemoteAccessServer._broadcast_to_conn`` (web_server.py).
-
-    Args:
-        printer: Any printer exposing ``broadcast(event)``.
-        event: The event payload to broadcast (mutated in place).
-        conn_id: Requesting connection id (``""`` reaches all).
-    """
-    if conn_id:
-        event["connId"] = conn_id
-    printer.broadcast(event)
-
-
 def _subagent_is_done(sub_task_id: Any) -> bool:
     """True when the sub-agent owning *sub_task_id* is no longer running.
 
@@ -309,7 +285,7 @@ def _subagent_is_done(sub_task_id: Any) -> bool:
         return True
     with agent_state.STATE_LOCK:
         state = agent_state.get(sub_task_id)
-        return state is None or not (state.is_task_active or state.thread_alive())
+        return state is None or not state.running()
 
 
 def _is_side_channel_row(row: dict[str, object]) -> bool:
@@ -997,19 +973,6 @@ class VSCodeServer(
                 event["tabId"] = tab_id
             self._broadcast_to_conn(event, cmd.get("connId", ""))
 
-    def _broadcast_to_conn(
-        self,
-        event: dict[str, Any],
-        conn_id: str,
-    ) -> None:
-        """Broadcast *event*, stamped with *conn_id* when non-empty.
-
-        Args:
-            event: The event payload to broadcast (mutated in place).
-            conn_id: Requesting connection id (``""`` reaches all).
-        """
-        broadcast_to_conn(self.printer, event, conn_id)
-
     def _refresh_default_model(self, valid: set[str] | None = None) -> None:
         """Re-read the persisted last model and adopt it as the default.
 
@@ -1587,9 +1550,7 @@ class VSCodeServer(
                     # publication (which performs its own commit)
                     # superseded it: this stale commit owns nothing.
                     return
-            if source is not None and (
-                source.is_task_active or source.thread_alive()
-            ):
+            if source is not None and source.running():
                 self.printer.subscribe_tab(source.task_id, tab_id)
             state = agent_state.find_by_tab(tab_id)
             if state is not None:
@@ -2730,15 +2691,13 @@ class VSCodeServer(
                 # run-startup window is real, and a viewer resuming
                 # its chat must attach to it rather than be treated
                 # as opening a finished session.
-                if candidate is not None and (
-                    candidate.is_task_active or candidate.thread_alive()
-                ):
+                if candidate is not None and candidate.running():
                     source = candidate
             if source is None and chat_id and not is_subagent:
                 for t in agent_state.agent_states.values():
                     if t.chat_id != chat_id or t.is_subagent:
                         continue
-                    if t.thread_alive() or t.is_task_active:
+                    if t.running():
                         source = t
                         break
             source_task_id = source.task_id if source is not None else ""
@@ -2872,7 +2831,7 @@ class VSCodeServer(
                 ``connId``-scoped replay stays scoped).
         """
         with self._state_lock:
-            if source.is_task_active or source.thread_alive():
+            if source.running():
                 return
             if self._viewer_owns_other_busy_run(tab_id, source):
                 return
