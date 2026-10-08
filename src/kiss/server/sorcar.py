@@ -19,10 +19,11 @@ event instead of processing it) and invokes the :class:`ServerApi`
 method the command's catalog entry names.  The only exception is a
 WSS connection's pre-dispatch ``auth`` handshake, serviced by
 :meth:`ServerApi.authenticate`.  The user interfaces consume the
-catalog through thin client facades — ``media/api.js`` (chat webview
-and remote webapp) and ``src/SorcarApi.ts`` (VS Code extension host)
-— whose methods map 1:1 onto the catalog's command names; the remote
-webapp's bootstrap shim (``_WS_SHIM_JS`` in
+catalog through the ``media/api.js`` facade (chat webview and remote
+webapp), whose methods map 1:1 onto the catalog's command names, and
+the VS Code extension host relays the webview's commands through
+``FORWARDED_COMMANDS`` in ``src/SorcarSidebarView.ts``; the remote webapp's
+bootstrap shim (``_WS_SHIM_JS`` in
 :mod:`kiss.server.web_server`) additionally sends the ``auth``
 handshake, itself a catalog command.
 
@@ -262,8 +263,6 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("ready", handler="ready"),
     ApiCommand("getHistory"),
     ApiCommand("getAdjacentTask", required=("direction",)),
-    ApiCommand("getFrequentTasks"),
-    ApiCommand("deleteFrequentTask", required=("task",)),
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("getInputHistory"),
     ApiCommand("getSeaCommands"),

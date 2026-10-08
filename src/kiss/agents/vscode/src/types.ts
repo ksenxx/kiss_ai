@@ -166,8 +166,6 @@ export type FromWebviewMessage =
       offset?: number;
       generation?: number;
     }
-  | {type: 'getFrequentTasks'; limit?: number}
-  | {type: 'deleteFrequentTask'; task: string}
   | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
   | {type: 'getFiles'; prefix: string; workDir?: string; tabId?: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
@@ -950,10 +948,6 @@ type ToWebviewMessageBody =
   | {type: 'ghost'; suggestion: string; query: string}
   | {type: 'commitMessage'; message: string; error?: string}
   | {type: 'inputHistory'; tasks: string[]}
-  | {
-      type: 'frequentTasks';
-      tasks: Array<{task: string; count: number; timestamp: number}>;
-    }
   | {type: 'setTaskText'; text: string}
   | {type: 'appendToInput'; text: string}
   | {type: 'insertAndSubmit'; text: string}
@@ -1224,8 +1218,6 @@ export interface AgentCommand {
     | 'getModels'
     | 'selectModel'
     | 'getHistory'
-    | 'getFrequentTasks'
-    | 'deleteFrequentTask'
     | 'setFavorite'
     | 'getFiles'
     | 'userAnswer'

@@ -41,7 +41,6 @@ from kiss.agents.sorcar.persistence import (
     _history_date_range,
     _is_failed_result,
     _load_chat_events_by_task_id,
-    _load_frequent_tasks,
     _load_input_history,
     _load_last_model,
     _load_latest_chat_events_by_chat_id,
@@ -1307,25 +1306,6 @@ class VSCodeServer(
             "offset": offset,
             "generation": generation,
             "dateRange": {"min": min_ts, "max": max_ts},
-        }
-        self._broadcast_to_conn(event, conn_id)
-
-    def _get_frequent_tasks(self, limit: int = 50, conn_id: str = "") -> None:
-        """Send the top *limit* most-frequent tasks (highest count first).
-
-        Emits a ``frequentTasks`` event whose ``tasks`` field is a
-        list of ``{task, count, timestamp}`` dicts ordered by ``count``
-        descending.  Stamped with the requesting connection's
-        ``conn_id`` (when non-empty) so the reply reaches only the
-        window that asked.
-
-        Args:
-            limit: Maximum number of frequent tasks to return.
-            conn_id: Requesting connection id (``""`` for direct callers).
-        """
-        event: dict[str, Any] = {
-            "type": "frequentTasks",
-            "tasks": _load_frequent_tasks(limit=limit),
         }
         self._broadcast_to_conn(event, conn_id)
 

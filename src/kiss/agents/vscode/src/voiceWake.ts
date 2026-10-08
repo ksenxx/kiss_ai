@@ -182,9 +182,7 @@ export class VoiceWakeService {
           let language: string | undefined;
           try {
             const payload = JSON.parse(line.slice('SPEECH '.length));
-            if (typeof payload === 'string') {
-              text = payload;
-            } else if (
+            if (
               payload &&
               typeof payload === 'object' &&
               typeof payload.text === 'string'

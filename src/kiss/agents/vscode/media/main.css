@@ -2279,6 +2279,7 @@ button.app-row-main .app-state { color: var(--accent); }
 
 .spend-cell.blank { visibility: hidden; }
 
+/* .l1-.l4: spend level, built as 'l' + spendLevel() in main.js. */
 .spend-cell.l1,
 .spend-model-bar.l1 { background: color-mix(in srgb, var(--accent) 30%, transparent); }
 
@@ -2573,12 +2574,11 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
 }
 
 /* The dimming backdrop behind every side panel -- history sidebar,
-   task info drawer, settings, frequent tasks, tricks, working
-   directory: one rule, six ids. */
+   task info drawer, settings, tricks, working directory: one rule,
+   five ids. */
 #sidebar-overlay,
 #meta-overlay,
 #settings-overlay,
-#frequent-overlay,
 #tricks-overlay,
 #workdir-overlay {
   position: fixed; inset: 0; background: var(--scrim);
@@ -2588,7 +2588,6 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
 #sidebar-overlay.open,
 #meta-overlay.open,
 #settings-overlay.open,
-#frequent-overlay.open,
 #tricks-overlay.open,
 #workdir-overlay.open { opacity: 1; pointer-events: auto; }
 
@@ -2622,9 +2621,8 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
 
 #settings-panel.open { visibility: visible; }
 
-/* The bottom sheets ("..." menu): frequent tasks, promptlets and the
-   working directory share one geometry; only their height differs. */
-#frequent-panel,
+/* The bottom sheets ("..." menu): promptlets and the working
+   directory share one geometry. */
 #tricks-panel,
 #workdir-panel {
   position: fixed;
@@ -2647,9 +2645,6 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
   flex-direction: column;
 }
 
-#frequent-panel { height: 75vh; }
-
-#frequent-panel.open,
 #tricks-panel.open,
 #workdir-panel.open { transform: translateY(0); }
 
@@ -2657,25 +2652,21 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
    above their own list pane. */
 #sidebar-close,
 #settings-panel-close,
-#frequent-panel-close,
 #tricks-panel-close,
 #workdir-panel-close {
   position: absolute; top: 12px; right: 12px; background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); font-size: var(--fs-2xl); cursor: pointer; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm);
 }
 
-#frequent-panel-close,
 #tricks-panel-close,
 #workdir-panel-close { z-index: var(--z-raised); }
 
 #sidebar-close:hover,
 #settings-panel-close:hover,
-#frequent-panel-close:hover,
 #tricks-panel-close:hover,
 #workdir-panel-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
 /* The scrolling list pane of the bottom sheets. */
-#frequent-list,
 #tricks-list,
 #workdir-list {
   flex: 1;
@@ -2799,35 +2790,6 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
   overflow: hidden;
   min-height: 0;
   margin-top: var(--space-0-5);
-}
-
-.frequent-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  white-space: normal;
-}
-
-.frequent-item > .sidebar-item-text {
-  white-space: normal;
-  word-break: break-word;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.frequent-item-count {
-  flex-shrink: 0;
-  font-size: var(--fs-sm);
-  font-variant-numeric: tabular-nums;
-  color: var(--dim);
-  padding: var(--space-0-5) var(--space-1-5);
-  border-radius: var(--radius-xl);
-  background: color-mix(in srgb, var(--fg) 8%, transparent);
 }
 
 .sidebar-section {
@@ -3166,6 +3128,7 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
   font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
 }
 
+/* Built as 'scm-status-' + git's one-letter status in main.js. */
 .scm-status-M, .scm-status-T { color: var(--yellow); }
 .scm-status-A, .scm-status-U { color: var(--green); }
 .scm-status-D { color: var(--red); }

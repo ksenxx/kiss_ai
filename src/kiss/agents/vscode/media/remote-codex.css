@@ -397,7 +397,6 @@ body.remote-chat .file-chip.error {
 }
 
 body.remote-chat #sidebar,
-body.remote-chat #frequent-panel,
 body.remote-chat #tricks-panel,
 body.remote-chat #workdir-panel {
   background: var(--surface);
@@ -489,25 +488,6 @@ body.remote-chat .sidebar-confirm-no {
 body.remote-chat .sidebar-confirm-yes:hover,
 body.remote-chat .sidebar-confirm-no:hover {
   background: var(--hover);
-}
-
-/* The frequent-tasks list: main.js skips its hashed pastel row
-   backgrounds on the remote page (renderFrequentTasks), so the inline
-   buttons and the count badge, which main.css tunes for dark text on
-   pastel, take the theme foregrounds here. */
-body.remote-chat .frequent-item .sidebar-item-delete,
-body.remote-chat .frequent-item .sidebar-item-copy {
-  color: var(--icon);
-}
-
-body.remote-chat .frequent-item .sidebar-item-delete:hover,
-body.remote-chat .frequent-item .sidebar-item-copy:hover {
-  background: var(--hover-strong);
-}
-
-body.remote-chat .frequent-item-count {
-  color: var(--dim);
-  background: var(--selected);
 }
 
 @media (width <= 600px) {
