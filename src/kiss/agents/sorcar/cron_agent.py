@@ -95,8 +95,9 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from kiss.agents.seas.base.base_sea import ChannelSea
-from kiss.agents.sorcar.useful_tools import _file_lock, _popen_kwargs
+from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
 from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
 
@@ -230,7 +231,7 @@ def _jobs_lock(blocking: bool) -> Any:
     overlapping tick skips) and the tool's read-modify-write
     (blocking: the tool waits for a running tick to finish), so a job
     edit can never be overwritten by a stale in-memory save.  The lock
-    is :func:`kiss.agents.sorcar.useful_tools._file_lock`, which owns
+    is :func:`kiss.core.file_lock.exclusive_file_lock`, which owns
     the cross-platform (fcntl/msvcrt/no-op) mechanics.
 
     Args:
@@ -238,11 +239,11 @@ def _jobs_lock(blocking: bool) -> Any:
             immediately when it is held (tick path).
 
     Returns:
-        A context manager yielding a truthy value while the lock is
-        held, or ``None`` when *blocking* is ``False`` and another
-        process holds it.
+        A context manager yielding ``True`` while the lock is held, or
+        ``False`` when *blocking* is ``False`` and another process
+        holds it.
     """
-    return _file_lock(_jobs_path().with_suffix(".lock"), blocking=blocking)
+    return exclusive_file_lock(_jobs_path().with_suffix(".lock"), blocking=blocking)
 
 
 def load_jobs() -> list[dict[str, Any]]:
@@ -1060,8 +1061,8 @@ def tick(now: float | None = None, wait: bool = True) -> int:
         lock).
     """
     now = time.time() if now is None else now
-    with _jobs_lock(blocking=False) as lock_fp:
-        if lock_fp is None:
+    with _jobs_lock(blocking=False) as held:
+        if not held:
             return 0
         jobs = load_jobs()
         running = running_job_ids()

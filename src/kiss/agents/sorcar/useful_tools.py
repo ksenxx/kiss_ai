@@ -20,7 +20,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,7 +33,6 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.agents.sorcar.shell_guards import destructive_command_guard, lift_install_timeout
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
-from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.models.model import (
     READ_TOOL_BINARY_MIME_TYPES,
     encode_binary_attachment,
@@ -62,43 +61,6 @@ _OUTLINE_HEADING_RE = re.compile(r"^#{1,6}\s+\S")
 _MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".mdx"})
 _OUTLINE_MAX_ENTRIES = 400
 _OUTLINE_MIN_ENTRIES = 5
-
-
-@contextmanager
-def _file_lock(lock_path: Path, blocking: bool = True) -> Any:
-    """Hold an exclusive advisory inter-process lock on *lock_path*.
-
-    Serializes check-then-use sequences on resources shared by every
-    kiss process on the machine — MCP configs and OAuth token stores,
-    the cron job store, and the Chromium profile directory — across
-    daemons, CLI runs, channel-agent processes, and event loops.  A
-    ``threading`` lock cannot do this: the resources live on disk, not
-    in one process.  The lock file itself is created mode ``0600``.
-    The locking primitive is :mod:`kiss.core.file_lock` (``fcntl`` on
-    POSIX, ``msvcrt`` on Windows).
-
-    Args:
-        lock_path: The lock file to hold; parent directories are created.
-        blocking: Whether to wait for the lock.  ``False`` gives up
-            immediately when another process holds it (the cron
-            scheduler's overlapping-tick skip) instead of waiting.
-
-    Yields:
-        ``True`` while the lock is held, or ``None`` when *blocking* is
-        ``False`` and another process holds the lock.
-    """
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    locked = False
-    try:
-        locked = lock_exclusive(descriptor, blocking=blocking)
-        yield True if locked else None
-    finally:
-        try:
-            if locked:
-                unlock(descriptor)
-        finally:
-            os.close(descriptor)
 
 
 def _worktree_index(parts: tuple[str, ...]) -> int | None:
