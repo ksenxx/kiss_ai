@@ -80,6 +80,12 @@ _PAGE_READ_NAVIGATIONS = 3
 # browser to show up in this tool's own CDP client.
 _LIVE_PAGE_TIMEOUT = 15.0
 
+# Upper bound of the liveness round trip to a Browser-tab page
+# (``WebUseTool._is_alive``).  A closed page or an exited browser fails
+# it at once; the bound only caps the wait on a page that is not
+# answering, which counts as alive.
+_LIVE_PROBE_TIMEOUT_MS = 3000
+
 # Deadline for raw input operations (keyboard.press/type, mouse.move/wheel)
 # that have no Playwright timeout parameter.  A page event handler that
 # wedges the renderer in response to our own input (e.g. a ``keydown``
@@ -496,6 +502,9 @@ class WebUseTool:
         # _live_tab is the id of the tab this tool opened there.
         self._live = False
         self._live_tab: str | None = None
+        # The DevTools endpoint _browser is connected to in the Browser
+        # tab; a relaunched browser listens on a new one (see _attach_live).
+        self._live_cdp_url: str | None = None
         # Page -> its CDP session, kept open for the page's lifetime (see
         # _target_id); dropped with the connection in _detach_live.
         self._cdp_sessions: dict[Any, Any] = {}
@@ -571,13 +580,22 @@ class WebUseTool:
             # this client only hears of that while it talks to the browser:
             # a round trip first, so a closed tab, an exited browser and the
             # page's current URL are all up to date when ``is_closed()``/
-            # ``url`` are read next.  On the browser-level session: a page
-            # session's ``detach()`` waits for the renderer, forever when a
-            # script has wedged it.
+            # ``url`` are read next.  A bounded page read, not a CDP
+            # session's ``detach()``: the driver fails a pending request of
+            # such a session only on the session's own detach event, never
+            # when the browser exits under it, so that round trip hung
+            # forever on a browser closing at that very moment.  A closed
+            # page fails the read at once; a slow or wedged page merely
+            # times out, and is alive.
             try:
-                self._browser.new_browser_cdp_session().detach()
-            except Exception:  # noqa: BLE001 - the browser is gone
+                self._page.wait_for_function(
+                    "() => 1", timeout=_LIVE_PROBE_TIMEOUT_MS, polling=100,
+                )
+            except Exception:  # noqa: BLE001 - closed, exited, or not answering
                 logger.debug("Exception caught", exc_info=True)
+            # The round trip delivers a crash or an exit to the handlers
+            # that drop the page.
+            if self._page is None:
                 return False
         try:
             return not self._page.is_closed()
@@ -654,9 +672,10 @@ class WebUseTool:
             self._playwright = web_stealth.playwright_api().sync_playwright().start()
         tab = self._live_browser.open_for_agent()
         try:
-            if not self._live_connected():
+            if not self._live_connected(tab.cdp_url):
                 self._browser = self._playwright.chromium.connect_over_cdp(tab.cdp_url)
                 self._browser.on("disconnected", self._on_browser_lost)
+                self._live_cdp_url = tab.cdp_url
             self._context = self._browser.contexts[0]
             page = self._find_live_page(tab.target_id)
         except Exception:
@@ -665,21 +684,21 @@ class WebUseTool:
         self._adopt_page(page)
         self._live_tab = tab.tab_id
 
-    def _live_connected(self) -> bool:
+    def _live_connected(self, cdp_url: str) -> bool:
         """Whether the CDP connection to the Browser tab's browser is still usable.
 
-        A round trip, not just ``is_connected()``: the sync client learns
-        of a dropped connection (and of pages closed meanwhile) only
-        while it talks to the browser.
+        The browser the daemon runs now listens at *cdp_url*, whose path
+        carries an id minted at launch; a relaunched one (the last tab
+        closed, a crash) has another, so a connection to a different
+        endpoint is stale even before this client has heard that it
+        dropped.  No round trip: there is none that a browser exiting at
+        that moment is guaranteed to fail (see :meth:`_is_alive`).
         """
-        if self._browser is None:
-            return False
-        try:
-            self._browser.new_browser_cdp_session().detach()
-        except Exception:  # noqa: BLE001 - the browser exited
-            logger.debug("Exception caught", exc_info=True)
-            return False
-        return bool(self._browser.is_connected())
+        return (
+            self._browser is not None
+            and self._live_cdp_url == cdp_url
+            and bool(self._browser.is_connected())
+        )
 
     def _target_id(self, page: Any) -> str:
         """Chromium's target id of *page* (what the daemon's service knows it by).

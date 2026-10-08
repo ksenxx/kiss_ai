@@ -3033,26 +3033,32 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
         ws_mod.TUNNEL_CHECK_INTERVAL = 0
         try:
             task = asyncio.create_task(self.server._watchdog())
-            await asyncio.sleep(0.3)
+            # Every watchdog round pushes a ``heartbeat`` frame (the shim's
+            # proof of life) after the ping/pong round trip.  Wait for the
+            # frame itself rather than for a fixed interval: one tick hops
+            # through several worker threads, and on a loaded machine a
+            # sleep-then-cancel leaves the first heartbeat unsent.
+            seen: list[object] = []
+            while "heartbeat" not in seen:
+                seen.append(
+                    json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                    .get("type"),
+                )
             task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
+            # The reply to a request follows the heartbeats already queued.
             await ws.send(json.dumps({"type": "getModels"}))
-            # Every watchdog round also pushed a ``heartbeat`` frame (the
-            # shim's proof of life); the reply follows them.
             resp: dict[str, object] = {}
-            seen: list[object] = []
             for _ in range(2000):
                 resp = json.loads(
                     await asyncio.wait_for(ws.recv(), timeout=5),
                 )
-                seen.append(resp.get("type"))
                 if resp.get("type") == "models":
                     break
             self.assertEqual(resp["type"], "models")
-            self.assertIn("heartbeat", seen)
         finally:
             ws_mod.TUNNEL_CHECK_INTERVAL = original_interval
             await ws.close()
