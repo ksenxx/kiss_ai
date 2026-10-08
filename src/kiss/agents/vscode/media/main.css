@@ -19,6 +19,12 @@
   --border: var(--vscode-panel-border, #2b2b2b);
   --input-bg: var(--vscode-input-background, #313131);
 
+  /* Scrollbar thumb: the foreground at two strengths - resting, and
+     under the pointer or while dragged - so the bar reads on any
+     theme without a track of its own. */
+  --scrollbar-thumb: color-mix(in srgb, var(--fg) 20%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--fg) 45%, transparent);
+
   /* Accent hues come from the theme's charts palette, which VS Code
      tunes for UI in every theme (Dark+ charts.yellow #cca700), not from
      the terminal ANSI colours (Dark+ ansiYellow #e5e510), which are
@@ -889,7 +895,6 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  scrollbar-color: var(--dim) transparent;
 }
 
 .task-panel.collapsed .task-panel-text,
@@ -2738,7 +2743,6 @@ body.sidebar-chat-mode #meta-info-content {
 #workdir-list {
   flex: 1;
   overflow-y: auto;
-  scrollbar-width: thin;
   margin-top: var(--space-0-5);
 }
 
@@ -4935,10 +4939,38 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .tr.collapsed .tr-content { display: none; }
 
 
+/* Scrollbars: a 4px pill thumb riding in a 6px bare gutter (the 1px
+   transparent border keeps it off the content edge), faint at rest
+   and stronger under the pointer or while dragged.  (Chromium does
+   not restyle the thumb when an ancestor is hovered, so there is no
+   "pointer over the list" tier.)  Chromium (VS Code webviews, the
+   remote page in Chrome, Edge, Electron) draws these ::-webkit-
+   parts.  It ignores them on any element that also sets the standard
+   scrollbar-width or scrollbar-color, falling back to its wide native
+   bar there, so those two properties are set only where the pseudo-
+   elements are unsupported (Firefox), and nowhere else in the
+   stylesheet except to hide a bar outright. */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius-sm); }
-::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner { background: transparent; }
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+}
+
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active { background-color: var(--scrollbar-thumb-hover); }
+
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
+}
 
 #kiss-server-loading {
   position: fixed;

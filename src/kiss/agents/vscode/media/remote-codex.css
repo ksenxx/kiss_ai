@@ -57,7 +57,6 @@ body.remote-chat {
   --menu-bg: var(--vscode-editorWidget-background, #202020);
   --link: var(--vscode-textLink-foreground, #4daafc);
   --link-active: var(--vscode-textLink-activeForeground, #4daafc);
-  --scrollbar: var(--vscode-scrollbarSlider-background, #79797966);
   --tabs-bg: var(--vscode-editorGroupHeader-tabsBackground, #2b2b2b);
   --tab-active-line: var(--vscode-tab-activeBorderTop, #0078d4);
   --activity-active: var(--vscode-activityBar-foreground, #d7d7d7);
@@ -94,6 +93,8 @@ body.remote-chat {
   --accent-line: color-mix(in srgb, var(--accent) 45%, var(--border));
   --bubble-user-tint: color-mix(in srgb, var(--accent) 16%, transparent);
   --bubble-agent-tint: color-mix(in srgb, var(--fg) 7%, var(--bg));
+  --scrollbar-thumb: color-mix(in srgb, var(--fg) 20%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--fg) 45%, transparent);
 
   /* The settings dialog's outline (see #settings-panel below): the
      theme's widget border, so the dialog reads like a native VS Code
@@ -452,18 +453,14 @@ body.remote-chat .server-reset-confirm-btn {
 }
 
 /* VS Code hands every webview a base stylesheet (links in
-   textLink.foreground, the scrollbar slider) that main.css relies on;
-   the remote page has no host, so it declares those defaults here. */
+   textLink.foreground) that main.css relies on; the remote page has
+   no host, so it declares those defaults here. */
 body.remote-chat a {
   color: var(--link);
 }
 
 body.remote-chat a:hover {
   color: var(--link-active);
-}
-
-body.remote-chat ::-webkit-scrollbar-thumb {
-  background: var(--scrollbar);
 }
 
 /* The delete-confirmation pair: VS Code secondary buttons instead of
