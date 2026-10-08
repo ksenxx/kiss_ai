@@ -6,10 +6,11 @@
 'use strict';
 
 // The panels holding the user's own words -- the task panel and a
-// steering Message -- are right-justified at four fifths of the chat's
-// width; every other transcript panel (Prompt, System Prompt, tool
-// calls, Thoughts, results, status lines) is left-justified at seven
-// eighths, so the thread reads as a conversation.  A panel nested
+// steering Message -- are right-justified, a tenth of the chat's width
+// clear on their left; every other transcript panel (Prompt, System
+// Prompt, tool calls, Thoughts, results, status lines) is
+// left-justified, a twentieth clear on its right, so the thread reads
+// as a conversation.  A panel nested
 // inside another (a tool error under its tool call) fills its parent.
 // The thinking tokens inside a Thoughts panel are plain text, not a
 // boxed "Thinking" subpanel with a header of its own.
@@ -101,7 +102,7 @@ function testUserPanelsRightAgentPanelsLeft() {
   for (const [name, panel] of Object.entries(userPanels)) {
     assert.ok(panel, 'the transcript rendered the ' + name);
     const cs = win.getComputedStyle(panel);
-    assert.strictEqual(cs.width, '80%', 'the ' + name + ' is 4/5 of the chat wide');
+    assert.strictEqual(cs.width, '90%', 'the ' + name + ' leaves a tenth of the chat clear');
     assert.strictEqual(cs.marginLeft, 'auto', 'the ' + name + ' is pushed to the right edge');
     assert.notStrictEqual(cs.marginRight, 'auto', 'the ' + name + ' touches the right edge');
     assert.strictEqual(cs.boxSizing, 'border-box', 'the ' + name + ' width includes its border');
@@ -115,12 +116,12 @@ function testUserPanelsRightAgentPanelsLeft() {
   for (const [name, panel] of Object.entries(agentPanels)) {
     assert.ok(panel, 'the transcript rendered the ' + name);
     const cs = win.getComputedStyle(panel);
-    assert.strictEqual(cs.width, '87.5%', 'the ' + name + ' is 7/8 of the chat wide');
+    assert.strictEqual(cs.width, '95%', 'the ' + name + ' leaves a twentieth of the chat clear');
     assert.notStrictEqual(cs.marginLeft, 'auto', 'the ' + name + ' stays on the left edge');
     assert.strictEqual(cs.boxSizing, 'border-box', 'the ' + name + ' width includes its border');
   }
   win.close();
-  console.log('  ok - user panels are right-justified at 80%, the rest left at 87.5%');
+  console.log('  ok - user panels are right-justified at 90%, the rest left at 95%');
 }
 
 function testNestedPanelFillsItsParent() {
@@ -134,7 +135,7 @@ function testNestedPanelFillsItsParent() {
   assert.strictEqual(
     win.getComputedStyle(nested).width,
     'auto',
-    'a panel nested in another fills its parent instead of 7/8 of it',
+    'a panel nested in another fills its parent instead of 95% of it',
   );
   win.close();
   console.log('  ok - a nested panel fills its parent');
@@ -156,7 +157,7 @@ function testSummaryAdoptedPanelsFillTheSummary() {
     assert.strictEqual(
       win.getComputedStyle(panel).width,
       'auto',
-      'the adopted ' + name + ' fills the summary instead of 7/8 of it',
+      'the adopted ' + name + ' fills the summary instead of 95% of it',
     );
   }
   win.close();
@@ -185,7 +186,7 @@ function testThinkingIsPlainTextInsideThoughts() {
   console.log('  ok - thinking tokens are plain text inside the Thoughts panel');
 }
 
-// On a narrow sidebar 80% and 87.5% look alike, so the bubbles carry
+// On a narrow sidebar 90% and 95% look alike, so the bubbles carry
 // the cue themselves: the user's panels wear the deeper accent wash
 // (--bubble-user-tint, not the --accent-tint of other accent-marked
 // panels) with a tight top-right corner; the result card wears the
@@ -220,7 +221,7 @@ function testBubbleTintsAndTailCorners() {
   assert.strictEqual(rcs.background, 'var(--bubble-agent-tint)', 'the result card wears the agent bubble tint');
   assert.strictEqual(rcs.borderTopLeftRadius, 'var(--radius-sm)', 'the result card has a tight top-left corner');
   assert.strictEqual(rcs.borderRadius, 'var(--radius-xl)', 'the result card keeps its round corners elsewhere');
-  assert.strictEqual(rcs.width, '87.5%', 'the result card stays a left-justified agent panel');
+  assert.strictEqual(rcs.width, '95%', 'the result card stays a left-justified agent panel');
   assert.notStrictEqual(rcs.marginLeft, 'auto', 'the result card stays on the left edge');
   const tool = out.querySelector(':scope > .ev.tc');
   const tcs = win.getComputedStyle(tool);

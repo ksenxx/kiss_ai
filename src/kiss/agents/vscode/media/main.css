@@ -888,10 +888,11 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
    the eye should find first, an accent hairline over the accent tint,
    the transcript panels being neutral. A message the user typed into
    the running task (.user-msg) is the user's words too and looks the
-   same.  The user's panels (these two) sit against the right edge at
-   four fifths of the chat's width, the rest of the transcript against
-   the left edge at seven eighths (see .ev below), so the thread reads
-   as a conversation: the user on the right, the agent on the left.
+   same.  The user's panels (these two) sit against the right edge,
+   leaving a tenth of the chat's width clear on their left; the rest
+   of the transcript sits against the left edge, leaving a twentieth
+   clear on its right (see .ev below), so the thread reads as a
+   conversation: the user on the right, the agent on the left.
    On a narrow sidebar the two widths are nearly the same, so the
    bubble itself carries the cue: a deeper accent wash than the other
    accent-marked panels and a tight top-right corner, the speech-bubble
@@ -901,7 +902,7 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
   border-top-right-radius: var(--radius-sm);
   margin: var(--space-2) 0; margin-left: auto; overflow: hidden;
   background: var(--bubble-user-tint);
-  width: 80%;
+  width: 90%;
 }
 
 .task-panel-h {
@@ -1029,12 +1030,13 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 .remote-url-tls-hint a:hover { text-decoration: underline; }
 
 /* Every transcript panel (tool calls, results, Thoughts, prompts, status
-   lines) is left-justified at seven eighths of the chat's width; the
-   user's own panels (.task-panel, .user-msg above) are the exception,
-   right-justified at four fifths.  A panel nested inside another (a
-   tool error under its tool call, the panels a summary adopts into its
-   .summary-sub) fills its parent instead. */
-.ev, .llm-panel { width: 87.5%; box-sizing: border-box; }
+   lines) is left-justified, a twentieth of the chat's width clear on
+   its right; the user's own panels (.task-panel, .user-msg above) are
+   the exception, right-justified with a tenth clear on their left.  A
+   panel nested inside another (a tool error under its tool call, the
+   panels a summary adopts into its .summary-sub) fills its parent
+   instead. */
+.ev, .llm-panel { width: 95%; box-sizing: border-box; }
 .ev .ev, .ev .llm-panel { width: auto; }
 .ev { margin-bottom: var(--space-1-5); animation: fadeIn var(--dur-base) var(--ease); }
 
@@ -1089,24 +1091,23 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 }
 .tc-h:hover { color: var(--fg); }
 
-/* While a tool call runs (panel.tc-running, from its tool_call to its
-   tool_result), main.js renders the header's text — the tool name and
-   the folded preview — one character per .wave-ch span, and the
-   characters bob in turn: a wave travelling along the line. */
-.tc.tc-running > .tc-h .wave-ch {
-  display: inline-block;
-  white-space: pre;
-  animation: tc-wave 1.4s ease-in-out infinite;
-  animation-delay: calc(var(--i, 0) * 60ms);
+/* While a panel is active (panel.panel-active: a tool call from its
+   tool_call to its tool_result, the Thoughts panel while the model
+   thinks and writes; stampPanelStart / finalizePanelTime in main.js),
+   its header text breathes: a mild, slow opacity pulse. */
+.panel-active > .tc-h,
+.panel-active > .llm-panel-hdr {
+  animation: panel-pulse 1.8s ease-in-out infinite;
 }
 
-@keyframes tc-wave {
-  0%, 60%, 100% { transform: translateY(0); }
-  30% { transform: translateY(-3px); }
+@keyframes panel-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tc.tc-running > .tc-h .wave-ch { animation: none; }
+  .panel-active > .tc-h,
+  .panel-active > .llm-panel-hdr { animation: none; }
 }
 
 /* The Trajectory panel a finished task's event panels fold into

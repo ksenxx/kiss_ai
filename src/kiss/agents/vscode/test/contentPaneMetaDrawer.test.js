@@ -18,8 +18,8 @@
 //   * the Explorer and Source Control sections catch up on task news
 //     that arrived while the panel was hidden;
 //   * the machine name from configData shows above the transcript;
-//   * a tool-call panel starts folded and its header text waves
-//     (one .wave-ch span per character) until its tool_result, a
+//   * a tool-call panel starts folded and is active (panel.panel-active,
+//     main.css pulses its header text) until its tool_result, a
 //     Question and a fan-out panel start open.
 
 'use strict';
@@ -290,7 +290,7 @@ test('the machine name shows above the transcript', () => {
   win.close();
 });
 
-test('a tool-call panel starts folded and waves until its result', () => {
+test('a tool-call panel starts folded and pulses until its result', () => {
   const {win} = makeWebview({remote: false});
   const tab = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tab, startTs: 1000});
@@ -305,58 +305,48 @@ test('a tool-call panel starts folded and waves until its result', () => {
   const O = byId(win, 'output');
   const tc = O.querySelector('.ev.tc');
   assert.ok(tc.classList.contains('collapsed'), 'folded at birth');
-  assert.ok(tc.classList.contains('tc-running'), 'running until the result');
+  assert.ok(tc.classList.contains('panel-active'), 'active until the result');
   const hdr = tc.querySelector(':scope > .tc-h');
   const name = hdr.querySelector('.tc-h-name');
   const prev = hdr.querySelector('.collapse-preview');
   assert.strictEqual(name.textContent, 'Bash');
+  assert.strictEqual(name.children.length, 0, 'the name is plain text');
   assert.strictEqual(prev.textContent, 'list files', 'the folded preview');
-  const nameChars = name.querySelectorAll('.wave-ch');
-  assert.strictEqual(nameChars.length, 4, 'one span per character');
-  assert.strictEqual(nameChars[2].style.getPropertyValue('--i'), '2');
-  assert.strictEqual(
-    prev.querySelectorAll('.wave-ch').length,
-    'list files'.length,
-    'the preview waves too (its space kept in its own span)',
-  );
+  assert.strictEqual(prev.children.length, 0, 'the preview is plain text');
   assert.strictEqual(hdr.getAttribute('aria-expanded'), 'false');
-  // The user may unfold it; the preview empties, the name keeps waving.
+  // The user may unfold it; the preview empties, the header keeps pulsing.
   click(win, hdr);
   assert.ok(!tc.classList.contains('collapsed'));
   assert.strictEqual(prev.textContent, '');
-  assert.strictEqual(name.querySelectorAll('.wave-ch').length, 4);
+  assert.ok(tc.classList.contains('panel-active'));
   click(win, hdr);
   assert.strictEqual(prev.textContent, 'list files');
 
   send(win, {type: 'tool_result', name: 'Bash', content: 'ok', tabId: tab, ts: 2000});
-  assert.ok(!tc.classList.contains('tc-running'), 'the result ends the wave');
-  assert.strictEqual(name.querySelectorAll('.wave-ch').length, 0, 'plain text');
+  assert.ok(!tc.classList.contains('panel-active'), 'the result ends the pulse');
   assert.strictEqual(name.textContent, 'Bash');
-  assert.strictEqual(prev.querySelectorAll('.wave-ch').length, 0);
   assert.strictEqual(prev.textContent, 'list files');
   win.close();
 });
 
-test('a long preview waves its first 80 characters only', () => {
+test('the Thoughts panel pulses while the model thinks and writes', () => {
   const {win} = makeWebview({remote: false});
   const tab = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tab, startTs: 1000});
-  const desc = 'x'.repeat(100);
-  send(win, {
-    type: 'tool_call',
-    name: 'Bash',
-    command: 'true',
-    description: desc,
-    tabId: tab,
-    ts: 1000,
-  });
-  const prev = byId(win, 'output').querySelector('.ev.tc .collapse-preview');
-  assert.strictEqual(prev.querySelectorAll('.wave-ch').length, 80);
-  assert.strictEqual(prev.textContent, desc, 'the rest is plain text');
+  send(win, {type: 'thinking_start', tabId: tab, ts: 1000});
+  send(win, {type: 'thinking_delta', text: 'hmm', tabId: tab});
+  const panel = byId(win, 'output').querySelector('.llm-panel');
+  assert.ok(panel.classList.contains('panel-active'), 'active from the first token');
+  assert.ok(panel.querySelector(':scope > .llm-panel-hdr'), 'the pulsing header');
+  send(win, {type: 'thinking_end', tabId: tab});
+  send(win, {type: 'text_delta', text: 'Done.', tabId: tab});
+  send(win, {type: 'text_end', tabId: tab, ts: 1500});
+  send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: tab, ts: 2000});
+  assert.ok(!panel.classList.contains('panel-active'), 'the next event ends it');
   win.close();
 });
 
-test('Question and fan-out panels start open; the task end stops every wave', () => {
+test('Question and fan-out panels start open; the task end stops every pulse', () => {
   const {win} = makeWebview({remote: false});
   const tab = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tab, startTs: 1000});
@@ -380,11 +370,18 @@ test('Question and fan-out panels start open; the task end stops every wave', ()
   const rp = O.querySelector('.tc-run-parallel');
   assert.ok(q && !q.classList.contains('collapsed'), 'a Question is read, not folded');
   assert.ok(rp && !rp.classList.contains('collapsed'), 'a fan-out keeps its sub-agent tabs open');
-  assert.ok(rp.classList.contains('tc-running'));
+  assert.ok(rp.classList.contains('panel-active'));
+  assert.ok(!q.classList.contains('panel-active'), 'the answered Question is done');
   // The task stops without a tool_result (or task_done) for the
-  // fan-out: the bare status flip ends the wave.
+  // fan-out: the bare status flip ends the pulse.
   send(win, {type: 'status', running: false, tabId: tab});
-  assert.strictEqual(O.querySelectorAll('.tc-running').length, 0);
+  assert.strictEqual(O.querySelectorAll('.panel-active').length, 0);
+  // Not sealed, though: a refused submit on a busy tab sends the same
+  // status while the task runs on, so a late tool_result still times it.
+  assert.ok(!rp.dataset.timeDone, 'paused, not sealed');
+  send(win, {type: 'tool_result', name: 'run_parallel', content: 'ok', tabId: tab, ts: 9000});
+  assert.strictEqual(rp.dataset.timeDone, '1', 'the result seals it');
+  assert.ok(rp.querySelector('.panel-elapsed'), 'with its duration');
   win.close();
 });
 
@@ -435,22 +432,18 @@ test('a copied running panel reads the tool name as one word', () => {
   send(win, {type: 'status', running: true, tabId: tab, startTs: 1000});
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: tab, ts: 1000});
   const tc = byId(win, 'output').querySelector('.ev.tc');
-  const name = tc.querySelector('.tc-h-name');
-  assert.strictEqual(name.dataset.rawText, 'Bash', 'copy text beside the spans');
   assert.ok(win.PanelCopy, 'panelCopy.js loaded');
   const copied = win.PanelCopy.getRawText(tc.querySelector(':scope > .tc-h'));
   assert.strictEqual(copied.split('\n')[0], 'Bash', 'copied as a word');
-  send(win, {type: 'tool_result', name: 'Bash', content: 'ok', tabId: tab, ts: 2000});
-  assert.ok(!('rawText' in name.dataset), 'plain text needs no copy text');
   win.close();
 });
 
-test('replaying a finished task leaves no header waving', () => {
+test('replaying a finished task leaves no header pulsing', () => {
   const {win} = makeWebview({remote: false});
   const tab = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: false, tabId: tab});
   // A call that never got its result (the task was stopped); replay
-  // skips the terminal event that would have stopped its wave.
+  // skips the terminal event that would have closed it.
   send(win, {
     type: 'task_events',
     tabId: tab,
@@ -462,12 +455,11 @@ test('replaying a finished task leaves no header waving', () => {
   });
   const O = byId(win, 'output');
   assert.ok(O.querySelector('.tc'), 'the call replayed');
-  assert.strictEqual(O.querySelectorAll('.tc-running').length, 0);
-  assert.strictEqual(O.querySelectorAll('.wave-ch').length, 0);
+  assert.strictEqual(O.querySelectorAll('.panel-active').length, 0);
   win.close();
 });
 
-test('the stylesheets carry the layout, the wave and the machine strip', () => {
+test('the stylesheets carry the layout, the pulse and the machine strip', () => {
   const remote = inlineDesignTokens(
     fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8'),
   );
@@ -534,11 +526,14 @@ test('the stylesheets carry the layout, the wave and the machine strip', () => {
   assert.ok(/font-weight:\s*700/.test(machine));
   assert.ok(/color:\s*var\(--green\)/.test(machine));
   assert.ok(/display:\s*none/.test(rule(main, '#chat-machine:empty')));
-  // The wave: per-character animation, staggered by --i.
-  const wave = rule(main, '.tc.tc-running > .tc-h .wave-ch');
-  assert.ok(/animation:\s*tc-wave/.test(wave));
-  assert.ok(/animation-delay:\s*calc\(var\(--i, 0\)/.test(wave));
-  assert.ok(/@keyframes tc-wave/.test(main));
+  // The pulse: an active panel's header text, tool call and Thoughts
+  // alike, breathes; it holds still under prefers-reduced-motion.
+  const pulse = rule(main, '.panel-active > .tc-h');
+  assert.ok(/animation:\s*panel-pulse/.test(pulse));
+  assert.ok(/animation:\s*none/.test(pulse));
+  assert.ok(/\.panel-active > \.llm-panel-hdr\s*\{/.test(main), 'Thoughts pulse too');
+  assert.ok(/@keyframes panel-pulse/.test(main));
+  assert.ok(!/wave-ch|tc-running/.test(main), 'the wave is gone');
   // The activity bar is gone from the markup.
   const html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   assert.ok(!/id="activity-bar"/.test(html));

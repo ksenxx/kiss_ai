@@ -133,62 +133,32 @@
   const _activePanels = new Set();
   let _activePanelTickIv = null;
 
-  // How many leading characters of a running tool panel's header get a
-  // .wave-ch span of their own (main.css ripples them); the rest of a
-  // long preview stays plain text.
-  const WAVE_MAX_CHARS = 80;
-
   /**
-   * Set *el*'s text: one `.wave-ch` span per character (its index in
-   * `--i`) while *wavy*, so main.css can send a wave along a running
-   * tool call's header; plain text otherwise.
+   * Make *el* an active panel: from its opening event (a tool_call, the
+   * first thinking token) until the one that closes it (its
+   * tool_result, the task's end; _deactivatePanel) its elapsed time
+   * ticks on the shared interval (_startActivePanelTick) and its header
+   * text pulses (main.css, `.panel-active`).
    *
-   * @param {Element} el The header's name or preview span.
-   * @param {string} text The text to show.
-   * @param {boolean} wavy Whether to split it into animated spans.
+   * @param {Element} el The panel.
    */
-  function setHeaderText(el, text, wavy) {
-    el.textContent = '';
-    // Copy reads the text, not the one-span-per-character markup
-    // (PanelCopy.getRawText breaks lines between element children).
-    if (wavy) el.dataset.rawText = text;
-    else delete el.dataset.rawText;
-    if (!wavy) {
-      el.textContent = text;
-      return;
-    }
-    const chars = Array.from(text);
-    for (let i = 0; i < chars.length && i < WAVE_MAX_CHARS; i++) {
-      const ch = document.createElement('span');
-      ch.className = 'wave-ch';
-      ch.style.setProperty('--i', String(i));
-      ch.textContent = chars[i];
-      el.appendChild(ch);
-    }
-    if (chars.length > WAVE_MAX_CHARS)
-      el.appendChild(
-        document.createTextNode(chars.slice(WAVE_MAX_CHARS).join('')),
-      );
+  function _activatePanel(el) {
+    _activePanels.add(el);
+    el.classList.add('panel-active');
   }
 
   /**
-   * Mark a tool-call panel as running — from its tool_call until its
-   * tool_result or the task's end (finalizePanelTime) — or not.  The
-   * header's tool name and folded preview are re-rendered for the
-   * state: wavy while running, plain text after.
+   * The reverse of _activatePanel: *el* stops ticking and pulsing, and
+   * the shared interval ends with the last active panel.
    *
-   * @param {Element} panel A `.tc` panel (anything else is left alone).
-   * @param {boolean} running Whether the call is still running.
+   * @param {Element} el The panel.
    */
-  function setToolPanelRunning(panel, running) {
-    if (!panel || !panel.classList || !panel.classList.contains('tc')) return;
-    if (panel.classList.contains('tc-running') === running) return;
-    panel.classList.toggle('tc-running', running);
-    const hdr = panel.querySelector(':scope > .tc-h');
-    if (!hdr) return;
-    for (const sel of ['.tc-h-name', '.collapse-preview']) {
-      const el = hdr.querySelector(':scope > ' + sel);
-      if (el) setHeaderText(el, el.textContent, running);
+  function _deactivatePanel(el) {
+    _activePanels.delete(el);
+    if (el && el.classList) el.classList.remove('panel-active');
+    if (_activePanels.size === 0 && _activePanelTickIv) {
+      clearInterval(_activePanelTickIv);
+      _activePanelTickIv = null;
     }
   }
 
@@ -209,7 +179,7 @@
     }
     if (el.dataset.startMs) return;
     el.dataset.startMs = String(Date.now());
-    _activePanels.add(el);
+    _activatePanel(el);
     _renderPanelTime(el);
     _startActivePanelTick();
   }
@@ -240,32 +210,20 @@
     if (_activePanels.size === 0) return;
     _activePanelTickIv = setInterval(() => {
       for (const el of Array.from(_activePanels)) {
-        if (!el || !el.isConnected) {
-          _activePanels.delete(el);
-          continue;
-        }
-        _renderPanelTime(el);
-      }
-      if (_activePanels.size === 0) {
-        clearInterval(_activePanelTickIv);
-        _activePanelTickIv = null;
+        if (el && el.isConnected) _renderPanelTime(el);
+        else _deactivatePanel(el);
       }
     }, 1000);
   }
 
   function finalizePanelTime(el, endTs) {
     if (!el) return;
-    setToolPanelRunning(el, false);
     // Idempotent: a panel already sealed keeps its frozen duration. A
     // second close (a `result` sweeping the last tool panel it already
     // sealed, a terminal event after the tool_result) must not
     // re-render it against a later clock.
     if (el.dataset.timeDone) {
-      _activePanels.delete(el);
-      if (_activePanels.size === 0 && _activePanelTickIv) {
-        clearInterval(_activePanelTickIv);
-        _activePanelTickIv = null;
-      }
+      _deactivatePanel(el);
       return;
     }
     const startMs = Number(el.dataset.startMs || 0);
@@ -290,11 +248,7 @@
     // historical start — but is still sealed below so it can never
     // resume ticking.
     el.dataset.timeDone = '1';
-    _activePanels.delete(el);
-    if (_activePanels.size === 0 && _activePanelTickIv) {
-      clearInterval(_activePanelTickIv);
-      _activePanelTickIv = null;
-    }
+    _deactivatePanel(el);
   }
 
   function reviveActivePanelTimes(root) {
@@ -303,7 +257,7 @@
       '[data-start-ms]:not([data-time-done])',
     );
     for (let i = 0; i < stamped.length; i++) {
-      _activePanels.add(stamped[i]);
+      _activatePanel(stamped[i]);
       _renderPanelTime(stamped[i]);
     }
     _startActivePanelTick();
@@ -315,8 +269,8 @@
    * Called when a task ends (task_done / task_error / task_stopped /
    * task_interrupted): whatever panels its transcript still has open —
    * a tool call that never reported back, a finish panel — stop at the
-   * task's end instead of counting time the task no longer spends, and
-   * can never be revived by a later tab switch.
+   * task's end instead of counting time the task no longer spends,
+   * stop pulsing, and can never be revived by a later tab switch.
    *
    * @param {Element|DocumentFragment|null} root The tab's transcript.
    * @param {number|undefined} endTs The terminal event's timestamp.
@@ -328,19 +282,23 @@
         '[data-start-ts]:not([data-time-done])',
     );
     for (let i = 0; i < open.length; i++) finalizePanelTime(open[i], endTs);
-    stopToolWaves(root);
   }
 
   /**
-   * Stop the wave of every tool-call header under *root*: the task
-   * ended (sealPanelTimes, or a bare `status running: false`), so no
-   * tool of it runs any more, tool_result or not.
+   * Stop the ticking and pulsing of every active panel under *root*
+   * without sealing it.  A bare `status running: false` says the task
+   * is not running but is not a terminal event — a refused submit on a
+   * busy tab broadcasts one too (commands.py, _refuse_run) — so a later
+   * tool_result must still render the panel's true duration
+   * (finalizePanelTime) and a tab switch may revive it
+   * (reviveActivePanelTimes).
+   *
+   * @param {Element|DocumentFragment|null} root The tab's transcript.
    */
-  function stopToolWaves(root) {
+  function pauseActivePanels(root) {
     if (!root || !root.querySelectorAll) return;
-    const running = root.querySelectorAll('.tc.tc-running');
-    for (let i = 0; i < running.length; i++)
-      setToolPanelRunning(running[i], false);
+    const active = root.querySelectorAll('.panel-active');
+    for (let i = 0; i < active.length; i++) _deactivatePanel(active[i]);
   }
 
   /**
@@ -439,11 +397,7 @@
 
   function discardProvisionalPanel(el) {
     if (!el) return;
-    _activePanels.delete(el);
-    if (_activePanels.size === 0 && _activePanelTickIv) {
-      clearInterval(_activePanelTickIv);
-      _activePanelTickIv = null;
-    }
+    _deactivatePanel(el);
     if (el.parentNode) el.parentNode.removeChild(el);
   }
 
@@ -12938,12 +12892,7 @@
     syncCollapseAria(panelEl);
     const prev = panelEl.querySelector('.collapse-preview');
     if (!prev) return;
-    // A running tool call's preview waves with its name (main.css).
-    setHeaderText(
-      prev,
-      collapsePreviewText(panelEl),
-      panelEl.classList.contains('tc-running'),
-    );
+    prev.textContent = collapsePreviewText(panelEl);
   }
 
   /** The text a folded panel's header shows after its title ('' when open). */
@@ -14362,8 +14311,6 @@
         // report-coverage:end
         const c = mkEl('div', 'ev tc');
         const hdr = mkEl('div', 'tc-h');
-        // The tool name in its own span: setToolPanelRunning re-renders
-        // it (and the folded preview) wavy while the call runs.
         const hdrName = mkEl('span', 'tc-h-name');
         hdrName.textContent = ev.name || 'Tool';
         hdr.appendChild(hdrName);
@@ -14595,9 +14542,9 @@
           syncCollapseAria(c);
         }
         tState.lastToolCallEl = c;
+        // Active (ticking, header pulsing) until the tool_result
+        // (finalizePanelTime).
         stampPanelStart(c, ev.ts);
-        // The header waves until the tool_result (finalizePanelTime).
-        setToolPanelRunning(c, true);
         if (ev.command) {
           const bp = mkEl('div', 'bash-panel');
           const bpContent = mkEl('div', 'bash-panel-content');
@@ -16579,9 +16526,10 @@
           else if (!isAddressed(ev)) phaseHome = O;
           if (phaseHome) {
             setLaunchPhase(phaseHome, '');
-            // No tool of a stopped task is running: its headers stop
-            // waving even when no tool_result or task_done arrives.
-            stopToolWaves(phaseHome);
+            // Nothing of a stopped task runs: its open panels stop
+            // ticking and pulsing even when no tool_result or
+            // task_done arrives.
+            pauseActivePanels(phaseHome);
           }
         }
         if (evTab) {
@@ -19234,9 +19182,6 @@
     // task's replay keeps its panels in the open: they are still the
     // live stream's, and the terminal event folds them when it ends.
     if (isAdjacentReplay || !(replayOwnerTab && replayOwnerTab.isRunning)) {
-      // Replay skips the terminal event that stops the header waves of
-      // a call that never got its result: nothing runs any more.
-      stopToolWaves(container);
       foldTrajectory(container);
     }
     // trajectory-coverage:end

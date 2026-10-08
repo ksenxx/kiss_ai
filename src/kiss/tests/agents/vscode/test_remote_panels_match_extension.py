@@ -446,9 +446,9 @@ _PROBE_STYLES_JS = (
     styles,
     taskPanelCollapsedTextDisplay: collapsedTextDisplay,
     taskPanelTextMaxHeight: tpText.maxHeight,
-    // The user's task panel sits against the right edge at 4/5 of the
+    // The user's task panel sits against the right edge at 9/10 of the
     // chat's content width and every other event against the left edge
-    // at 7/8 of it (main.css).  The gap on the anchored side is the
+    // at 19/20 of it (main.css).  The gap on the anchored side is the
     // chat's padding on both surfaces; the gap on the open side is a
     // share of the content width, which differs between the two pages,
     // so that side is checked as the width share instead.
@@ -675,8 +675,8 @@ def _assert_probe_parity(
             f"extension (extension={ext_gap}px, remote={rem_gap}px)"
         )
     for key, share, words in (
-        ("taskPanelWidthShare", 0.8, "the task panel is 4/5"),
-        ("eventWidthShare", 0.875, "an event panel is 7/8"),
+        ("taskPanelWidthShare", 0.9, "the task panel is 9/10"),
+        ("eventWidthShare", 0.95, "an event panel is 19/20"),
     ):
         ext_share = float(ext_probes[key])
         rem_share = float(rem_probes[key])
