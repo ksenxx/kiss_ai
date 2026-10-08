@@ -51,6 +51,7 @@ from kiss.server.merge_flow import _effective_commit_repo
 from kiss.server.tab_registry import OpenTabOutcome
 from kiss.server.task_runner import (
     _client_task_id_of,
+    _result_event,
     contains_task_tags,
     parse_task_tags,
 )
@@ -891,12 +892,7 @@ class _CommandsMixin:
             exc_info=True,
         )
         self.printer.broadcast({
-            "type": "result",
-            "text": f"Task failed: {type(exc).__name__}: {exc}",
-            "success": False,
-            "total_tokens": 0,
-            "cost": "$0.0000",
-            "step_count": 0,
+            **_result_event(f"Task failed: {type(exc).__name__}: {exc}", success=False),
             "tabId": tab_id,
         })
         status_end: dict[str, Any] = {
