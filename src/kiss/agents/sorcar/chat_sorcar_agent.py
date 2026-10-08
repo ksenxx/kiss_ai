@@ -766,7 +766,7 @@ class ChatSorcarAgent(SorcarAgent):
                 )
             # Emitted AFTER on_task_id_allocated: the server's
             # WebPrinter only sends a task event's stamped copies
-            # to tabs subscribed via register_task_ui, which that
+            # to tabs subscribed via ``subscribe_tab``, which that
             # callback performs.  The event is also recorded and
             # persisted (``task_settings`` is a display event), so
             # replays and shares repopulate the static task

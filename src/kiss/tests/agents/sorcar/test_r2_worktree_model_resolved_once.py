@@ -76,6 +76,13 @@ def test_run_without_a_model_keeps_its_first_resolution(
         assert [request["model"] for request in standin.requests] == [STANDIN_MODEL]
         (row,) = _load_history()
         assert row["model"] == STANDIN_MODEL
+        # The public accessor exposes the pending worktree the private
+        # ``_wt_*`` properties redirect to.
+        worktree = agent.worktree
+        assert worktree is not None
+        assert worktree.wt_dir == agent._wt_dir
+        assert worktree.branch == agent._wt_branch
     finally:
         agent.discard()
         standin.stop()
+    assert agent.worktree is None
