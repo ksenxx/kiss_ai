@@ -1034,10 +1034,9 @@ class ServerApi:
     async def ready(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Initialize a (re)loaded chat webview.
 
-        Sanitizes the command's ``restoredTabs`` ONCE (warnings
-        included) and writes the cleaned list back so the backend's
-        own sanitize pass finds nothing left to reject or truncate.
-        For a local connection it then (1) marks the connection as
+        Sanitizes the command's ``restoredTabs`` (warnings included)
+        and writes the cleaned list back for the backend's ready
+        handler.  For a local connection it then (1) marks the connection as
         hosting a chat webview — every attached webview mirrors the
         whole canonical tab registry from ``tabs_state``, so this flag
         is what makes a registry tab's talk play natively on this
