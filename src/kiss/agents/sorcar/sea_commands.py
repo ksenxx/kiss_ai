@@ -89,6 +89,7 @@ from typing import Any, cast
 from kiss.agents.seas.base.base_sea import BaseSea, ChannelSea
 from kiss.agents.sorcar.sea_settings import (
     SeaError,
+    declared_bases,
     declares_hidden,
     execute_python_file,
     resolve_settings,
@@ -521,7 +522,7 @@ def load_sea(sea_path: Path) -> BaseSea:
             subclasses of :class:`BaseSea`, or its class cannot be
             instantiated without arguments.
     """
-    namespace = execute_python_file(str(sea_path), SeaError, "SEA")
+    namespace = execute_python_file(str(sea_path))
     classes = [
         value for value in namespace.values()
         if isinstance(value, type) and issubclass(value, BaseSea) and value is not BaseSea
@@ -770,8 +771,10 @@ def base_settings(seas: list[BaseSea]) -> dict[str, Any]:
 def sea_settings(sea_path: Path) -> dict[str, Any]:
     """Return the effective settings of the SEA at *sea_path* (:func:`base_settings`).
 
-    The dispatcher reads the ``timeout``, ``work_dir`` and ``model``
-    from it; the task runner the ``model`` and ``work_dir``.
+    For a caller that holds only the path (a SEA such as ``rsi7d``
+    reading another SEA's settings); the daemon's own run path loads the
+    layers once (``sea_apply.load_layers``) and evaluates them with
+    :func:`evaluate_sea`.
 
     Raises:
         SeaError: When the file is broken or its settings are
@@ -1023,10 +1026,8 @@ def run_picked_hook(
         )
 
 
-# A ``class X(Base):`` line whose base is not plain ``BaseSea``.
-_DERIVED_CLASS = re.compile(
-    r"^class\s+\w+\s*\((?!\s*(?:BaseSea|WorkerSea|ChannelSea)\s*\))", re.MULTILINE
-)
+_PLAIN_BASES = frozenset({"BaseSea", "WorkerSea", "ChannelSea"})
+"""The base classes that register as no model; a class deriving from anything else may."""
 
 
 def _registers_as_model(sea_path: Path) -> bool:
@@ -1035,13 +1036,13 @@ def _registers_as_model(sea_path: Path) -> bool:
     The verdict is cached per file stamp (mtime, size, inode), so both an
     edit and an atomic replacement are re-read.  Only a script whose
     source mentions ``register_as_model`` or derives its class from
-    something other than ``BaseSea`` (so it may inherit the
-    registration) is imported: importing every registered SEA (channel
-    agents with heavy dependencies among them) on each picker refresh
-    would be slow for nothing.  A script that
-    cannot be read, fails to import or whose method raises is logged and
-    treated as not registered, so one broken SEA cannot break the model
-    picker.
+    something other than the plain bases (so it may inherit the
+    registration; :func:`~kiss.agents.sorcar.sea_settings.declared_bases`)
+    is imported: importing every registered SEA (channel agents with
+    heavy dependencies among them) on each picker refresh would be slow
+    for nothing.  A script that cannot be read, fails to import or whose
+    method raises is logged and treated as not registered, so one
+    broken SEA cannot break the model picker.
     """
     try:
         st = sea_path.stat()
@@ -1055,7 +1056,7 @@ def _registers_as_model(sea_path: Path) -> bool:
         logger.warning("SEA %s: cannot be read", sea_path, exc_info=True)
         return False
     verdict = False
-    if "register_as_model" in source or _DERIVED_CLASS.search(source):
+    if "register_as_model" in source or declared_bases(sea_path) - _PLAIN_BASES:
         try:
             verdict = _call(_method(load_sea(sea_path), "register_as_model")) is True
         except SeaError:
@@ -1085,11 +1086,12 @@ def model_seas() -> dict[str, Path]:
 def model_sea(name: str) -> Path | None:
     """Return the script of the model-picker SEA *name*, or ``None``.
 
-    A *name* that is no registered command (every real model name)
-    costs one :func:`get_command` lookup — a folder rescan on the miss,
-    as for an unknown slash command — and touches no script, so the
-    task runner can ask this for every run's model and a SEA installed
-    after the registry was built is still found.
+    Reads the registry snapshot only: a *name* that is no registered
+    command (every real model name) costs one dict lookup and touches no
+    script, so the task runner can ask this for every run's model.  The
+    picker offers a SEA only once the registry holds it (the watcher
+    refreshes every :data:`_WATCHER_POLL_SECONDS`), so unlike
+    :func:`get_command` a miss here does not rescan the folders.
 
     Args:
         name: The model-picker value, e.g. ``"autorouter"`` or
@@ -1099,7 +1101,11 @@ def model_sea(name: str) -> Path | None:
         The absolute SEA path when *name* is a registered command whose
         ``register_as_model()`` returns ``True``, else ``None``.
     """
-    path = get_command(name) if name else None
+    if not name:
+        return None
+    list_commands()  # populate the registry on a cold start
+    with _lock:
+        path = _registry.get(name)
     if path is None or not _registers_as_model(path):
         return None
     return path
@@ -1129,16 +1135,39 @@ RESERVED_SUBCOMMANDS = ("help", "check")
 """The ``/xxx <word>`` prompts the daemon answers itself instead of running the SEA."""
 
 
-def check_sea(
-    sea_path: Path, require_description: bool = True,
-) -> tuple[list[BaseSea], dict[str, Any], str]:
+@dataclass(frozen=True)
+class SeaCheck:
+    """What :func:`check_sea` found: the one evaluation ``sea_check`` and the linter read.
+
+    Attributes:
+        seas: The loaded SEAs (:func:`sea_layers`).
+        cmd: The ``run`` command for :data:`CHECK_SAMPLE_TASK` with the
+            SEA's overrides applied (``sea_apply.apply_run``).
+        description: The ``description()`` text (``""`` when not
+            required and absent).
+        settings: The effective settings (:func:`base_settings`), the
+            ones ``cmd`` carries.
+        tools: What ``tools()`` adds to an empty toolset.
+    """
+
+    seas: list[BaseSea]
+    cmd: dict[str, Any]
+    description: str
+    settings: dict[str, Any]
+    tools: list[Any]
+
+
+def check_sea(sea_path: Path, require_description: bool = True) -> SeaCheck:
     """Load the SEA at *sea_path* the way a run would and exercise every method.
 
-    The daemon's own path (``load_layers`` + ``apply_sea``
-    on a ``run`` command for :data:`CHECK_SAMPLE_TASK`), so a SEA that
+    The daemon's own path (``load_layers``, :func:`evaluate_sea` and
+    ``sea_apply.apply_run`` on a ``run`` command for
+    :data:`CHECK_SAMPLE_TASK`), so a SEA that
     reads the run command from those frames works; then the hooks are
     applied to sample values and the ``description()`` and
-    model-picker methods are checked.
+    model-picker methods are checked.  Each method runs as often as a
+    run makes it run: the result carries the settings and tools so the
+    callers need not run them again.
 
     Args:
         sea_path: The SEA's file.
@@ -1147,26 +1176,25 @@ def check_sea(
             or used as a base class needs none).
 
     Returns:
-        ``(seas, cmd, description)``: the loaded SEAs, the ``run``
-        command with the SEA's overrides applied, and the description
-        text (``""`` when not required and absent).
+        The :class:`SeaCheck`.
 
     Raises:
         SeaError: The SEA breaks the contract, in the words the daemon
             would use.
     """
     # Imported here: ``sea_apply`` imports this module.
-    from kiss.agents.sorcar.sea_apply import apply_sea, load_layers
+    from kiss.agents.sorcar.sea_apply import apply_run, load_layers
 
     cmd: dict[str, Any] = {
         "seaPath": str(sea_path), "prompt": CHECK_SAMPLE_TASK, "parentTaskId": "<task id>",
     }
     seas = load_layers(cmd)
-    apply_sea(cmd, seas)
-    base_system_prompt(seas, "<the system prompt>")
-    base_tools(seas, [])
-    base_tool_call_hook(seas, "finish", {})
-    base_llm_call_hook(seas, [])
+    run = evaluate_sea(seas, CHECK_SAMPLE_TASK, "<task id>")
+    apply_run(cmd, seas, run)
+    run.system_prompt_hook("<the system prompt>")
+    tools = run.tools_hook([])
+    run.tool_call_hook("finish", {})
+    run.llm_call_hook([])
     description = ""
     if require_description or defines(seas, "description"):
         description = sea_description(seas[-1])
@@ -1185,7 +1213,7 @@ def check_sea(
         raise SeaError(
             f"{_label(picked)} must accept the work directory as its one argument: {exc}"
         ) from exc
-    return seas, cmd, description
+    return SeaCheck(seas, cmd, description, run.settings, tools)
 
 
 def sea_check(name: str, sea_path: Path) -> str:
@@ -1207,10 +1235,10 @@ def sea_check(name: str, sea_path: Path) -> str:
         The report, one item per line.
     """
     try:
-        seas, cmd, description = check_sea(sea_path)
+        check = check_sea(sea_path)
     except SeaError as exc:
         return f"/{name} is broken: {exc}"
-    settings = base_settings(seas)
+    seas, settings = check.seas, check.settings
     model = settings.get("model") or "the calling task's model (else the default model)"
     classes = [
         cls.__name__ for cls in reversed(type(seas[-1]).__mro__) if issubclass(cls, BaseSea)
@@ -1222,13 +1250,13 @@ def sea_check(name: str, sea_path: Path) -> str:
         ) if defines(seas, method)
     ]
     lines = [
-        f"/{name}: {description}",
+        f"/{name}: {check.description}",
         "classes: " + " > ".join(classes),
         "settings: " + (json.dumps(settings, sort_keys=True, default=str) or "{}"),
         f"model: {model}",
-        "tools added: " + (", ".join(_tool_name(tool) for tool in base_tools(seas, [])) or "none"),
+        "tools added: " + (", ".join(_tool_name(tool) for tool in check.tools) or "none"),
         "methods defined: " + (", ".join(defined) or "none"),
-        f"prompt for {CHECK_SAMPLE_TASK}: {cmd['prompt']}",
+        f"prompt for {CHECK_SAMPLE_TASK}: {check.cmd['prompt']}",
     ]
     if "description" not in vars(type(seas[-1])):
         lines.append("note: description() comes from a base class")

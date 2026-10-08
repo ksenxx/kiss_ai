@@ -44,7 +44,7 @@ per call:
   non-generative call: ~0.2 s, ~$0.00003 per task, and it cannot execute
   the task, so it also classifies for the run-to-completion CLI models
   (``cc/*``, ``codex/*``) the LLM classifier must skip.  Measured on
-  ``benchmarkings/task_classifier/`` (415 real and synthetic prompts)
+  a benchmark of 415 real and synthetic prompts,
   its verdicts agreed with the hand labels more often than any of the
   four LLM classifiers measured (89% against 84% for the best), at
   about 1/200 of that LLM's cost and 1/15 of its latency.  It runs only
@@ -147,9 +147,8 @@ _GIT_OPERATIONS = (
 
 # The five kinds of task the decisions classifier chooses between.  The
 # descriptions are contrastive on purpose: Jev reads them literally and
-# picks the best-matching option.  Selected on
-# ``benchmarkings/task_classifier/`` against four-``noul`` and hybrid
-# designs (see ``run_benchmark.py`` there).
+# picks the best-matching option.  Selected on the same 415-prompt
+# benchmark against four-``noul`` and hybrid designs.
 _DECISIONS_KIND_CRITERIA: dict[str, str] = {
     "development": (
         "any work that could create or modify ANY file in the current git "
@@ -797,12 +796,7 @@ def _attempt_classification(
             "Task classifier returned an unparseable verdict: %.200s",
             result,
         )
-    return (
-        classification,
-        float(getattr(agent, "budget_used", 0.0) or 0.0),
-        int(getattr(agent, "total_tokens_used", 0) or 0),
-        int(getattr(agent, "step_count", 0) or 0),
-    )
+    return classification, agent.budget_used, agent.total_tokens_used, agent.step_count
 
 
 def _verdict_from_decision(answers: Any) -> TaskClassification | None:
@@ -846,13 +840,14 @@ def _decisions_model_config() -> dict[str, Any]:
 
 
 def _attempt_decisions_classification(
-    task: str,
+    task: str, model_config: dict[str, Any],
 ) -> tuple[TaskClassification | None, float, int]:
     """Classify *task* once with the ``decide`` tool on the decisions model.
 
     Args:
         task: The (truncated) task prompt to classify; it is the
             ``state`` the single ``kind`` question is asked about.
+        model_config: The decisions model settings (:func:`_decisions_model_config`).
 
     Returns:
         Tuple of the verdict (or ``None`` when the tool reported an
@@ -861,7 +856,7 @@ def _attempt_decisions_classification(
         tokens, as the tool priced them from the catalog.
     """
     try:
-        decide = make_decide_tool(None, DEFAULT_DECISIONS_MODEL, _decisions_model_config())
+        decide = make_decide_tool(None, DEFAULT_DECISIONS_MODEL, model_config)
         result = decide(task, _DECISIONS_QUESTIONS_JSON)
         if result.startswith("Error:"):
             logger.warning("Decisions task classification failed: %.300s", result)
@@ -918,16 +913,14 @@ def _truncate_task(task: str) -> str:
     return task[:CLASSIFIER_TASK_MAX_CHARS] + "\n... [task truncated for classification]"
 
 
-def _cached_decision(task: str) -> TaskClassification | None:
-    """Return the memoised decisions-classifier verdict for *task*, if any.
-
-    Keyed by :data:`_DECISIONS_CRITERIA`, the decisions model and its
-    endpoint settings (:func:`_decisions_model_config`), so a verdict
-    from one endpoint is never served for another.
-    """
-    return cached_classification(
-        task, DEFAULT_DECISIONS_MODEL, _decisions_model_config(), _DECISIONS_CRITERIA,
+def _cached_run(cached: TaskClassification) -> ClassifierRun:
+    """Return the zero-usage :class:`ClassifierRun` for a memoised verdict."""
+    logger.info(
+        "Task classification served from cache: is_simple=%s is_development=%s",
+        cached.is_simple,
+        cached.is_development,
     )
+    return ClassifierRun(classification=cached, budget_used=0.0, tokens_used=0, steps=0)
 
 
 def classify_task(
@@ -989,25 +982,16 @@ def _classify_with_decisions(task: str) -> ClassifierRun:
         outcome of one :func:`_attempt_decisions_classification`; a
         fresh verdict is memoised under the decisions criteria.
     """
-    cached = _cached_decision(task)
+    # The memo is keyed by the decisions criteria, model and endpoint
+    # settings, so a verdict from one endpoint is never served for another.
+    config = _decisions_model_config()
+    cached = cached_classification(task, DEFAULT_DECISIONS_MODEL, config, _DECISIONS_CRITERIA)
     if cached is not None:
-        logger.info(
-            "Task classification served from cache: is_simple=%s "
-            "is_development=%s",
-            cached.is_simple,
-            cached.is_development,
-        )
-        return ClassifierRun(
-            classification=cached, budget_used=0.0, tokens_used=0, steps=0,
-        )
-    classification, budget, tokens = _attempt_decisions_classification(task)
+        return _cached_run(cached)
+    classification, budget, tokens = _attempt_decisions_classification(task, config)
     if classification is not None:
         remember_classification(
-            task,
-            DEFAULT_DECISIONS_MODEL,
-            _decisions_model_config(),
-            classification,
-            _DECISIONS_CRITERIA,
+            task, DEFAULT_DECISIONS_MODEL, config, classification, _DECISIONS_CRITERIA,
         )
     return ClassifierRun(
         classification=classification, budget_used=budget, tokens_used=tokens, steps=0,
@@ -1050,15 +1034,7 @@ def _classify_with_llm(
         )
     cached = cached_classification(task, model_name, model_config)
     if cached is not None:
-        logger.info(
-            "Task classification served from cache: is_simple=%s "
-            "is_development=%s",
-            cached.is_simple,
-            cached.is_development,
-        )
-        return ClassifierRun(
-            classification=cached, budget_used=0.0, tokens_used=0, steps=0,
-        )
+        return _cached_run(cached)
     base_config = _classifier_model_config(model_config)
     structured_config = _structured_output_config(base_config, model_name)
     attempts = [structured_config] if structured_config is not None else []

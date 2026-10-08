@@ -28,9 +28,9 @@ and applies the result in place on the command dict
   channel run (a SEA deriving from ``ChannelSea``);
 * the ``system_prompt``, ``tools``, ``llm_call_hook`` and
   ``tool_call_hook`` methods — callables no wire field can carry —
-  staged on the daemon-side fields :data:`DAEMON_SIDE_FIELDS`, which
-  the run applies where it assembles its system prompt, builds its
-  toolset and makes its calls;
+  staged on the daemon-side fields ``systemPromptHook``, ``toolsHook``,
+  ``llmCallHook`` and ``toolCallHook``, which the run applies where it
+  assembles its system prompt, builds its toolset and makes its calls;
 * for a channel, the workspace the run holds for its lifetime
   (:func:`channel_workspace`), which the task runner enters BEFORE the
   tools are built — a channel's ``tools()`` binds the credentials of
@@ -53,7 +53,7 @@ from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT, sea_pinned
-from kiss.agents.sorcar.sea_commands import evaluate_sea, is_channel, sea_layers, sea_name
+from kiss.agents.sorcar.sea_commands import SeaRun, evaluate_sea, is_channel, sea_layers, sea_name
 from kiss.agents.sorcar.sea_settings import (
     DISPATCHER_SETTINGS,
     SETTING_TYPES,
@@ -92,10 +92,11 @@ CHANNEL_PREAMBLE = (
 NO_TOOLS_PROFILE = "none"
 """The tool profile of a run whose only built-in tool is ``finish``."""
 
-DAEMON_SIDE_FIELDS = ("systemPromptHook", "toolsHook", "llmCallHook", "toolCallHook")
-"""Command fields only the daemon's SEA pipeline may set; a client-sent value is dropped.
+RUN_CONFIG_FIELD = "_runConfig"
+"""The daemon-side ``run`` command field :func:`apply_sea` leaves its provenance record in.
 
-The :class:`~kiss.agents.sorcar.sea_commands.SeaRun` hooks, by field.
+``{"sea": <SEA name, "" for a plain run>, "channel": <bool>,
+"pinned": {key: [before, pinned]}}``.
 """
 
 
@@ -169,17 +170,7 @@ def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str
     Evaluates the SEAs
     (:func:`~kiss.agents.sorcar.sea_commands.evaluate_sea` on the
     command's ``prompt`` and ``parentTaskId``) and writes the result
-    over the command: one wire field per effective setting
-    (:data:`SETTING_FIELDS`; a relative ``work_dir`` anchored at
-    :func:`calling_work_dir`); ``prompt`` when the evaluated prompt
-    differs from the task (a ``prompt`` method rewrote it, or a
-    ``{task_id}`` of the task text was filled in); ``appendToSystemPrompt``
-    extended with :data:`CHANNEL_PREAMBLE` for a channel; the
-    daemon-side fields :data:`DAEMON_SIDE_FIELDS`, always (every chain
-    starts at :class:`BaseSea`, whose methods are identities unless
-    ``base_sea.py`` is customized).  The writes are atomic: they happen
-    only after everything has succeeded, so a broken SEA leaves the
-    command untouched.
+    over the command (:func:`apply_run`).
 
     Args:
         cmd: The ``run`` command dict; mutated in place.
@@ -190,9 +181,7 @@ def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str
 
     Returns:
         The set of setting and prompt wire fields that were overridden
-        (empty when the SEAs pin nothing; the daemon-side hook fields,
-        written on every run, are not listed), so the caller can tell
-        an actual SEA override apart from a client-sent value.
+        (:func:`apply_run`).
 
     Raises:
         SeaError: When the ``seaPath`` field is not a string, is not
@@ -216,6 +205,42 @@ def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str
     except SeaError:
         logger.warning("SEA %s rejected", seas[-1].path, exc_info=True)
         raise
+    return apply_run(cmd, seas, run)
+
+
+def apply_run(cmd: dict[str, Any], seas: list[BaseSea], run: SeaRun) -> set[str]:
+    """Write what the SEAs evaluated to (*run*) over the ``run`` command, in place.
+
+    One wire field per effective setting (:data:`SETTING_FIELDS`; a
+    relative ``work_dir`` anchored at :func:`calling_work_dir`);
+    ``prompt`` when the evaluated prompt differs from the task (a
+    ``prompt`` method rewrote it, or a ``{task_id}`` of the task text
+    was filled in); ``appendToSystemPrompt`` extended with
+    :data:`CHANNEL_PREAMBLE` for a channel; the daemon-side hook fields
+    ``systemPromptHook``, ``toolsHook``, ``llmCallHook`` and
+    ``toolCallHook``, always (every chain starts at :class:`BaseSea`,
+    whose methods are identities unless ``base_sea.py`` is customized),
+    so a client-sent value there is dropped.  The writes are atomic:
+    they happen only after everything has succeeded, so a broken SEA
+    leaves the command untouched.
+
+    Args:
+        cmd: The ``run`` command dict; mutated in place.
+        seas: The loaded SEAs *run* came from.
+        run: Their evaluation on the command's task
+            (:func:`~kiss.agents.sorcar.sea_commands.evaluate_sea`).
+
+    Returns:
+        The set of setting and prompt wire fields that were overridden
+        (empty when the SEAs pin nothing; the hook fields, written on
+        every run, are not listed), so the caller can tell an actual
+        SEA override apart from a client-sent value.
+
+    Raises:
+        SeaError: An explicit value clashes with a locked setting.
+    """
+    raw_prompt = cmd.get("prompt")
+    task = raw_prompt if isinstance(raw_prompt, str) else ""
     base_dir = calling_work_dir(cmd)
     # Everything below is STAGED and applied to the command only after
     # every getter has succeeded: a broken getter must leave the command
@@ -280,11 +305,3 @@ def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str
     }
     cmd.update(staged)
     return overridden
-
-
-RUN_CONFIG_FIELD = "_runConfig"
-"""The daemon-side ``run`` command field :func:`apply_sea` leaves its provenance record in.
-
-``{"sea": <SEA name, "" for a plain run>, "channel": <bool>,
-"pinned": {key: [before, pinned]}}``.
-"""

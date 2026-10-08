@@ -29,7 +29,7 @@ from kiss.agents.sorcar.sea_lint import (
     fix_sea,
     lint_all,
     lint_sea,
-    registered_seas,
+    registered_commands,
 )
 from kiss.agents.sorcar.sea_settings import declares_channel, declares_hidden
 
@@ -622,11 +622,13 @@ class Sea(BaseSea):
 """, "silent")
     (isolated_home / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
     sea_commands.refresh_registry()
-    assert silent in registered_seas()
+    commands = registered_commands()
+    assert commands[silent] == "silent"
     # Without ``--registered`` a user's script is never a target: ``uv run
     # check`` stays deterministic and ``--fix`` never rewrites a file
     # outside the checkout.
-    assert silent not in default_targets(False) and silent in default_targets(True)
+    assert silent not in default_targets(False, commands)
+    assert silent in default_targets(True, commands)
     assert all(f.path != silent for f in lint_all())
     found = [f for f in lint_all(registered=True) if f.path == silent]
     assert codes(found) == ["no-description"]
