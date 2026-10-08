@@ -619,7 +619,12 @@ def explicit_values(
 
 
 def _filled_keys(asked: Inherited, got: Inherited) -> tuple[str, ...]:
-    """Return the setting keys whose value *got* has and *asked* left empty."""
+    """Return the setting keys whose value *got* has and *asked* left empty.
+
+    The five settings :class:`Inherited` resolves outside ``options``
+    are compared on those attributes; the rest on the ``options``
+    fields.
+    """
     pairs = [
         ("model", asked.model_name, got.model_name),
         ("max_budget", asked.budget, got.budget),
@@ -627,9 +632,10 @@ def _filled_keys(asked: Inherited, got: Inherited) -> tuple[str, ...]:
         ("use_worktree", asked.use_worktree, got.use_worktree),
         ("auto_commit", asked.auto_commit, got.auto_commit),
     ]
+    resolved_outside_options = {key for key, _, _ in pairs}
     pairs.extend(
         (key, getattr(asked.options, key), getattr(got.options, key))
-        for key in RUN_OPTION_KEYS if key != "docker_image"
+        for key in RUN_OPTION_KEYS if key not in resolved_outside_options
     )
     pairs.append(("system_prompt", asked.options.system_prompt, got.options.system_prompt))
     return tuple(
@@ -769,8 +775,9 @@ def inherit_from_parent(
 
     Raises:
         BudgetExceededError: When the budget is inherited and the
-            caller has nothing left to spend (the same signal a
-            ``run_parallel`` fan-out raises).
+            caller has nothing left to spend.  Raised through a job's
+            thread (``run_agent``, a ``run_parallel`` child) it becomes
+            that sub-task's error result text instead.
     """
     asked = Inherited(model_name, budget, options, options.docker_image, None, None)
     if parent_agent is None:
@@ -1325,8 +1332,11 @@ def _run_agent(
         # or while it ran: the sub-task is cancelled too, as a blocking
         # call's sub-task always has been.  Not joined here, so the Stop
         # stays prompt: the job thread stops the sub-task on its own and
-        # the run's end (:func:`kill_jobs_of`) collects what is left.
+        # the run's end (:func:`kill_jobs_of`) collects what is left.  A
+        # job without an owner has no run end, so it is dropped here.
         job.cancel.set()
+        if parent_agent is None:
+            forget_agent_job(job)
         raise
     if finished:
         forget_agent_job(job)
@@ -1428,8 +1438,9 @@ class AgentJob:
         running: Set once the sub-task's tab exists on every client
             (its initial ``status running=true``) or, after ``result``
             is recorded, when the dispatch ended without one.
-        thread: The thread running :func:`dispatch_result`, already
-            started.
+        thread: The thread running :func:`dispatch_result`, assigned
+            (already started) by :func:`start_agent_job` after the job
+            exists, since the thread's arguments name the job.
         started: ``time.monotonic()`` when the thread was started.
         timeout: The seconds the starting call blocks for the result
             (:func:`resolve_timeout`), shown on the ``ran`` line.
@@ -1447,7 +1458,7 @@ class AgentJob:
     owner: Any
     cancel: threading.Event
     running: threading.Event
-    thread: threading.Thread
+    thread: threading.Thread = dataclasses.field(init=False)
     started: float = 0.0
     timeout: float = DEFAULT_DISPATCH_TIMEOUT_SECONDS
     workspace: str = ""
@@ -1501,7 +1512,7 @@ def start_agent_job(name: str, kwargs: dict[str, Any], owner: Any) -> AgentJob:
     job_id = f"agent-{uuid.uuid4().hex[:8]}"
     cancel, running = threading.Event(), threading.Event()
     job = AgentJob(
-        job_id, name, owner, cancel, running, threading.Thread(),
+        job_id, name, owner, cancel, running,
         timeout=float(kwargs["timeout"]), workspace=str(kwargs.get("workspace") or ""),
     )
     job.thread = threading.Thread(
@@ -1610,8 +1621,10 @@ def kill_agent_job(job: AgentJob) -> str:
 
     Sets the job's cancel event, which the dispatch's read loop turns
     into a daemon ``stop`` and a bounded wait for its confirmation, and
-    joins the thread for :data:`_JOB_KILL_GRACE_SECONDS`.  A finished
-    job is left as it is.
+    joins the thread for :data:`_JOB_KILL_GRACE_SECONDS` through
+    :func:`join_agent_job`, so a Stop of the killing call (or of its
+    task) lands during the wait and propagates with the cancel already
+    sent.  A finished job is left as it is.
 
     Returns:
         The job's result text (the stop error, or the result it had
@@ -1619,7 +1632,7 @@ def kill_agent_job(job: AgentJob) -> str:
         did not answer within the grace.
     """
     job.cancel.set()
-    job.thread.join(_JOB_KILL_GRACE_SECONDS)
+    join_agent_job(job, _JOB_KILL_GRACE_SECONDS)
     if not job.finished:
         return f"Job {job.job_id} ({job.name} agent task) is still running."
     return job.result
@@ -1870,17 +1883,16 @@ def resolve_timeout(timeout: float | None, settings: dict[str, Any]) -> float:
         timeout: The call's parsed ``timeout`` argument
             (:attr:`RunOptions.timeout`), ``None`` when not passed.
         settings: The resolved settings of the script the sub-task
-            runs.
+            runs (:func:`~kiss.agents.sorcar.sea_settings.resolve_settings`
+            has already refused a non-positive or non-numeric
+            ``timeout``).
 
     Returns:
         The seconds to wait.
     """
     if timeout is not None:
         return timeout
-    declared = settings.get("timeout")
-    if isinstance(declared, int | float) and declared > 0:
-        return float(declared)
-    return DEFAULT_DISPATCH_TIMEOUT_SECONDS
+    return float(settings.get("timeout") or DEFAULT_DISPATCH_TIMEOUT_SECONDS)
 
 
 def _unknown_agent_error(agent: str, squashed: str, commands: list[str]) -> str:

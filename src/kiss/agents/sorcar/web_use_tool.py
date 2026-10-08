@@ -38,7 +38,7 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 from urllib.parse import urlparse
 
 from kiss.agents.sorcar import web_stealth
@@ -108,17 +108,6 @@ def _abort_route(route: Any) -> None:
     route.abort()
 
 
-def _evaluate_list(page: Any, expression: str) -> Any:
-    """Evaluate *expression* (a function returning a non-empty list) on *page*, bounded.
-
-    ``wait_for_function`` (not ``evaluate``) so a wedged renderer raises
-    ``TimeoutError`` after ``_PAGE_READ_TIMEOUT_MS``; ``polling=100`` so
-    throttled background tabs still answer.  See ``WebUseTool._read_page``.
-    """
-    handle = page.wait_for_function(expression, timeout=_PAGE_READ_TIMEOUT_MS, polling=100)
-    return handle.json_value()
-
-
 def _get_frontmost_app() -> str | None:
     """Return the name of the frontmost macOS application, or None on failure."""
     if sys.platform != "darwin":
@@ -184,10 +173,6 @@ _SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (
 
 _CLOSE_WATCHDOG_SECS = 15.0
 
-_LAUNCH_LOCK = threading.RLock()
-
-_BROWSER_CMD_MARKERS = ("chrom", "playwright", "headless")
-
 
 def _wait_pid_exit(pid: int, timeout: float) -> bool:
     """Poll until *pid* exits, returning True if it died within *timeout*.
@@ -244,11 +229,12 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
         if _wait_pid_exit(pid, 2.0):
             return
     logger.error(  # pragma: no cover — SIGKILL cannot be ignored
-        "Chromium (pid %d) could not be killed", pid,
+        "Chromium (pid %d) could not be killed",
+        pid,
     )
 
 
-def _killable_live_pid(pid: int | None) -> bool:
+def _killable_live_pid(pid: int | None) -> TypeGuard[int]:
     """Return whether *pid* names a live process a watchdog may target.
 
     The shared arming guard of the graceful-close watchdog
@@ -264,11 +250,10 @@ def _killable_live_pid(pid: int | None) -> bool:
             captured.
 
     Returns:
-        True when a watchdog may be armed against *pid*.
+        True when a watchdog may be armed against *pid* (narrowing it to
+        ``int`` for the caller).
     """
-    return (
-        pid is not None and pid > 0 and pid != os.getpid() and _pid_alive(pid)
-    )
+    return pid is not None and pid > 0 and pid != os.getpid() and _pid_alive(pid)
 
 
 def _watchdog_kill(
@@ -326,12 +311,13 @@ class _Session:
 
 # Writes *items* and drops *removed* in the page's localStorage, unless
 # the page landed on another origin (a redirect): a token must never be
-# handed to a site it was not set by.
+# handed to a site it was not set by.  Returns ``[written]`` (a list, as
+# ``WebUseTool._read_page`` requires).
 _RESTORE_STORAGE_JS = """([origin, items, removed]) => {
-  if (location.origin !== origin) return false;
+  if (location.origin !== origin) return [false];
   for (const [k, v] of items) localStorage.setItem(k, v);
   for (const k of removed) localStorage.removeItem(k);
-  return true;
+  return [true];
 }"""
 
 
@@ -357,7 +343,9 @@ def _rmtree_logged(path: str) -> None:
 
 
 def _read_lock_pid(
-    profile_dir: str, *, propagate_permission_error: bool = False,
+    profile_dir: str,
+    *,
+    propagate_permission_error: bool = False,
 ) -> int | None:
     """Return the PID recorded in a profile's ``SingletonLock`` symlink.
 
@@ -453,12 +441,14 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
         role_occurrence = role_counts[role]
         pair_counts[(role, name)] += 1
         role_counts[role] += 1
-        elements.append({
-            "role": role,
-            "name": name,
-            "occurrence": str(occurrence),
-            "role_occurrence": str(role_occurrence),
-        })
+        elements.append(
+            {
+                "role": role,
+                "name": name,
+                "occurrence": str(occurrence),
+                "role_occurrence": str(role_occurrence),
+            }
+        )
         result_lines.append(f"{indent}- [{counter}] {quote}{role} {rest}".rstrip())
     return "\n".join(result_lines), elements
 
@@ -490,33 +480,39 @@ class WebUseTool:
 
     _DEFAULT_USER_DATA_DIR = "__kiss_default_browser_profile__"
 
+    # Window size of a headed launch and the viewport of a real headless one.
+    viewport: tuple[int, int] = (1280, 900)
+
     def __init__(
         self,
-        viewport: tuple[int, int] = (1280, 900),
         user_data_dir: str | None = _DEFAULT_USER_DATA_DIR,
         headless: bool = True,
         work_dir: str | None = None,
         ephemeral: bool = False,
         live_browser: Any = None,
-        **_kwargs: Any,
     ) -> None:
         self._live_browser = live_browser
         # True while the session lives in the Browser tab (show_browser);
         # _live_tab is the id of the tab this tool opened there.
         self._live = False
         self._live_tab: str | None = None
+        # Page -> its CDP session, kept open for the page's lifetime (see
+        # _target_id); dropped with the connection in _detach_live.
+        self._cdp_sessions: dict[Any, Any] = {}
         # What the last switch of browser carried in: cookies, and the
         # localStorage keys of one origin.  Those that have died by the
         # next switch are deleted on the other side too.
         self._carried_cookies: list[Any] = []
         self._carried_storage: tuple[str, set[str]] = ("", set())
+        # A throwaway profile (sub-agents): the directory is created by the
+        # first launch, not here, so a tool that never opens a page leaves
+        # nothing behind when its process dies without ``close()``.
+        self._ephemeral = ephemeral
         self._ephemeral_dir: str | None = None
         if ephemeral:
-            self._ephemeral_dir = tempfile.mkdtemp(prefix="kiss_web_profile_")
-            user_data_dir = self._ephemeral_dir
+            user_data_dir = None
         elif user_data_dir == self._DEFAULT_USER_DATA_DIR:
             user_data_dir = str(_default_kiss_dir() / "browser_profile")
-        self.viewport = viewport
         self.user_data_dir = user_data_dir
         self._headless = headless
         self.work_dir = work_dir
@@ -563,10 +559,7 @@ class WebUseTool:
         size = self._page.viewport_size
         if size:
             return int(size["width"]), int(size["height"])
-        handle = self._page.wait_for_function(
-            "() => [innerWidth, innerHeight]", timeout=_PAGE_READ_TIMEOUT_MS, polling=100
-        )
-        width, height = handle.json_value()
+        width, height = self._read_page(self._page, "() => [innerWidth, innerHeight]")
         return int(width), int(height)
 
     def _is_alive(self) -> bool:
@@ -576,12 +569,14 @@ class WebUseTool:
         if self._live:
             # In the Browser tab the user closes tabs and navigates too, and
             # this client only hears of that while it talks to the browser:
-            # a round trip (browser-side, no renderer involved) first, so a
-            # closed tab, an exited browser and the page's current URL are
-            # all up to date when ``is_closed()``/``url`` are read next.
+            # a round trip first, so a closed tab, an exited browser and the
+            # page's current URL are all up to date when ``is_closed()``/
+            # ``url`` are read next.  On the browser-level session: a page
+            # session's ``detach()`` waits for the renderer, forever when a
+            # script has wedged it.
             try:
-                self._context.new_cdp_session(self._page).detach()
-            except Exception:  # noqa: BLE001 - the tab or the browser is gone
+                self._browser.new_browser_cdp_session().detach()
+            except Exception:  # noqa: BLE001 - the browser is gone
                 logger.debug("Exception caught", exc_info=True)
                 return False
         try:
@@ -593,13 +588,23 @@ class WebUseTool:
     def _adopt_page(self, page: Any) -> None:
         """Make *page* the active page and arm the renderer-crash handler.
 
-        Every path that points ``self._page`` at a page must register
-        ``_on_page_crash`` too: a renderer crash on an unwatched page
-        leaves ``_page`` referencing a crashed-but-not-closed page that
-        ``_is_alive`` still reports live, wedging every later call.
+        Every path that points ``self._page`` at a page must go through
+        here: a renderer crash on an unwatched page leaves ``_page``
+        referencing a crashed-but-not-closed page that ``_is_alive``
+        still reports live, wedging every later call.  The per-page
+        state is reset with it — the element ids of the old page, the
+        pointer position, and the Browser-tab id (resolved again from
+        the new page when needed, see :meth:`_live_tab_id`), so the
+        hang watchdog interrupts the page it is driving, not the one
+        it left.  Adopting the current page again changes nothing.
         """
+        if page is self._page:
+            return
         self._page = page
-        self._page.on("crash", self._on_page_crash)
+        self._elements = []
+        self._mouse_xy = None
+        self._live_tab = None
+        page.on("crash", self._on_page_crash)
 
     def _on_page_crash(self, _page: Any = None) -> None:
         """Handle a renderer (page) crash without dropping the browser reference.
@@ -627,8 +632,8 @@ class WebUseTool:
 
         Called when the browser main process exits (``context.on("close")``).
         The Playwright driver (``self._playwright``) is kept running so that the
-        next tool call can launch a fresh browser without restarting the driver
-        (sync_playwright cannot be restarted in the same process).
+        next tool call can launch a fresh browser without paying the driver
+        start-up again (:meth:`close` is what stops it).
         """
         self._page = None
         self._context = None
@@ -657,10 +662,8 @@ class WebUseTool:
         except Exception:
             self._live_browser.close(tab.tab_id)
             raise
-        self._live_tab = tab.tab_id
         self._adopt_page(page)
-        self._elements = []
-        self._mouse_xy = None
+        self._live_tab = tab.tab_id
 
     def _live_connected(self) -> bool:
         """Whether the CDP connection to the Browser tab's browser is still usable.
@@ -679,12 +682,18 @@ class WebUseTool:
         return bool(self._browser.is_connected())
 
     def _target_id(self, page: Any) -> str:
-        """Chromium's target id of *page* (what the daemon's service knows it by)."""
-        session = self._context.new_cdp_session(page)
-        try:
-            return str(session.send("Target.getTargetInfo")["targetInfo"]["targetId"])
-        finally:
-            session.detach()
+        """Chromium's target id of *page* (what the daemon's service knows it by).
+
+        Read over a CDP session of the page that is kept for the page's
+        lifetime (:attr:`_cdp_sessions`): attaching and the read answer
+        at once even when a script has wedged the renderer, but
+        ``detach()`` waits for the renderer and would hang forever.
+        """
+        session = self._cdp_sessions.get(page)
+        if session is None:
+            self._cdp_sessions = {p: s for p, s in self._cdp_sessions.items() if not p.is_closed()}
+            session = self._cdp_sessions[page] = self._context.new_cdp_session(page)
+        return str(session.send("Target.getTargetInfo")["targetInfo"]["targetId"])
 
     def _find_live_page(self, target_id: str) -> Any:
         """Return the shared context's page whose Chromium target id is *target_id*.
@@ -737,6 +746,7 @@ class WebUseTool:
             except Exception:  # noqa: BLE001 - closed by the user meanwhile
                 logger.debug("Could not close the Browser tab's page", exc_info=True)
         self._live_tab = None
+        self._cdp_sessions = {}
         browser, self._browser = self._browser, None
         if browser is not None:
             try:
@@ -766,11 +776,11 @@ class WebUseTool:
         pid = self._browser_pid
         identity = self._browser_identity
         watchdog: threading.Timer | None = None
-        if (
-            self._context is not None or self._browser is not None
-        ) and _killable_live_pid(pid):
+        if (self._context is not None or self._browser is not None) and _killable_live_pid(pid):
             watchdog = threading.Timer(
-                _CLOSE_WATCHDOG_SECS, _watchdog_kill, args=(pid, identity),
+                _CLOSE_WATCHDOG_SECS,
+                _watchdog_kill,
+                args=(pid, identity),
             )
             watchdog.daemon = True
             watchdog.start()
@@ -806,81 +816,38 @@ class WebUseTool:
         identity = self._browser_identity
         self._browser_pid = None
         self._browser_identity = None
-        if pid is None or pid <= 0 or pid == os.getpid():
-            return
-        if _wait_pid_exit(pid, 2.0):
+        if not _killable_live_pid(pid) or _wait_pid_exit(pid, 2.0):
             return
         logger.warning("Chromium (pid %d) survived graceful close", pid)
         _terminate_pid_escalating(pid, identity)
 
-    def _capture_browser_pid(self, profile_dir: str | None) -> None:
+    def _capture_browser_pid(self) -> None:
         """Record the OS PID of the just-launched Chromium main process.
 
-        Primary source: a browser-level CDP session
-        (``SystemInfo.getProcessInfo``), which works for both persistent
-        and non-persistent contexts.  Fallback: the profile's
-        ``SingletonLock`` symlink (older Chromium versions).  A recorded
-        PID lets :meth:`_kill_browser_process` guarantee the process dies
-        even when the graceful Playwright close fails.
-
-        Args:
-            profile_dir: The effective user-data directory of the launch,
-                or ``None`` for a non-persistent context.
+        Read over a browser-level CDP session (``SystemInfo.getProcessInfo``),
+        which a persistent context exposes through its ``browser`` as well.
+        A recorded PID lets :meth:`_kill_browser_process` guarantee the
+        process dies even when the graceful Playwright close fails.
         """
         self._browser_pid = None
         self._browser_identity = None
-        browser = self._browser
-        if browser is None and self._context is not None:
-            browser = getattr(self._context, "browser", None)
-        if browser is not None:
+        browser = self._browser or self._context.browser
+        try:
+            cdp = browser.new_browser_cdp_session()
             try:
-                cdp = browser.new_browser_cdp_session()
+                info = cdp.send("SystemInfo.getProcessInfo")
+            finally:
                 try:
-                    info = cdp.send("SystemInfo.getProcessInfo")
-                finally:
-                    try:
-                        cdp.detach()
-                    except Exception:  # pragma: no cover — detach rarely fails
-                        logger.debug("CDP detach failed", exc_info=True)
-                for proc in info.get("processInfo", []):
-                    if proc.get("type") == "browser":
-                        self._browser_pid = int(proc["id"])
-                        self._browser_identity = _process_identity(
-                            self._browser_pid,
-                        )
-                        return
-            except Exception:  # pragma: no cover — CDP rarely fails
-                logger.debug("CDP browser PID capture failed", exc_info=True)
-        if profile_dir:  # pragma: no cover — lock-file fallback path
-            pid = _read_lock_pid(profile_dir)
-            if pid is None:
-                return
-            identity = _process_identity(pid)
-            if identity and any(
-                marker in identity.lower() for marker in _BROWSER_CMD_MARKERS
-            ):
-                self._browser_pid = pid
-                self._browser_identity = identity
-
-    def _cleanup_stale_escalation_dirs(self) -> None:
-        """Delete stale ``<user_data_dir>_N`` escalation profile directories.
-
-        ``_resolve_user_data_dir`` escalates to numbered profile variants
-        when the base profile is locked by a live Chromium.  Crashed or
-        leaked Chromiums leave those directories behind with dead
-        ``SingletonLock`` PIDs; remove them so escalation dirs cannot
-        accumulate across crash/relaunch cycles.  Only directories whose
-        lock PID is provably dead are removed — the base profile, live
-        profiles, and lock-less directories are never touched.
-        """
-        if not self.user_data_dir or self._ephemeral_dir:
-            return
-        for i in range(1, 100):
-            candidate = f"{self.user_data_dir}_{i}"
-            pid = _read_lock_pid(candidate)
-            if pid is None or _pid_alive(pid):
-                continue
-            _rmtree_logged(candidate)
+                    cdp.detach()
+                except Exception:  # pragma: no cover — detach rarely fails
+                    logger.debug("CDP detach failed", exc_info=True)
+            for proc in info.get("processInfo", []):
+                if proc.get("type") == "browser":
+                    self._browser_pid = int(proc["id"])
+                    self._browser_identity = _process_identity(self._browser_pid)
+                    return
+        except Exception:  # pragma: no cover — CDP rarely fails
+            logger.debug("CDP browser PID capture failed", exc_info=True)
 
     def _ensure_browser(self) -> None:
         """Ensure a Playwright browser page is ready, installing Chromium if needed.
@@ -904,7 +871,6 @@ class WebUseTool:
                 pages = []
             if pages:
                 self._adopt_page(pages[-1])
-                self._elements = []
                 return
         atexit.unregister(self.close)
         atexit.register(self.close)
@@ -967,15 +933,16 @@ class WebUseTool:
                 logger.info("Playwright Chromium not found, installing...")
                 self._close_browser_only()
                 subprocess.run(
-                    [sys.executable, "-m", web_stealth.playwright_package(),
-                     "install", "chromium"],
+                    [sys.executable, "-m", web_stealth.playwright_package(), "install", "chromium"],
                     check=True,
                     capture_output=True,
                     timeout=900,
                 )
                 self._launch_browser(launcher, kwargs)
         except Exception:  # pragma: no cover — Playwright init failure
-            self.close()
+            # Only the half-launched browser goes; the driver, the atexit
+            # hook and an ephemeral profile stay for the next attempt.
+            self._close_browser_only()
             raise
         finally:
             _activate_app(prev_app)
@@ -1009,7 +976,13 @@ class WebUseTool:
         If ``self.user_data_dir`` is ``None``, returns ``None`` (non-persistent).
         If the configured directory is already locked by a live Chromium,
         numbered variants (``<dir>_1``, ``<dir>_2``, …) are tried until a
-        free one is found.
+        free one is found.  Crashed or leaked Chromiums leave such
+        variants behind with dead ``SingletonLock`` PIDs; every one of
+        those is deleted on the way (whether or not the base profile is
+        free) so escalation dirs cannot accumulate across crash/relaunch
+        cycles.  Live profiles and lock-less directories are never
+        touched.  An ephemeral profile is private to this process and
+        is used as is.
 
         Returns:
             An available profile directory path, or ``None`` to fall back to
@@ -1017,13 +990,17 @@ class WebUseTool:
         """
         if not self.user_data_dir:
             return None
-        if not _is_profile_in_use(self.user_data_dir):
+        if self._ephemeral:
             return self.user_data_dir
+        chosen = None if _is_profile_in_use(self.user_data_dir) else self.user_data_dir
         for i in range(1, 100):
             candidate = f"{self.user_data_dir}_{i}"
-            if not _is_profile_in_use(candidate):
-                return candidate
-        return None  # pragma: no cover — 100 concurrent instances is unlikely
+            pid = _read_lock_pid(candidate)
+            if pid is not None and not _pid_alive(pid):
+                _rmtree_logged(candidate)
+            if chosen is None and not _is_profile_in_use(candidate):
+                chosen = candidate
+        return chosen
 
     def _profile_lock(self) -> Any:
         """Return a machine-wide lock over this tool's profile family.
@@ -1035,22 +1012,28 @@ class WebUseTool:
         lock-free profile, the second deletes the first's live
         ``SingletonLock``, and Chromium either opens one profile twice
         (corrupting the stored logins) or aborts with "Failed to create
-        a ProcessSingleton for your profile directory".
+        a ProcessSingleton for your profile directory".  Threads of one
+        process are excluded the same way: each holder opens its own
+        file description.
 
         One lock file sits beside the base profile and therefore covers
         every escalation variant derived from it.
 
         Returns:
             A context manager holding the lock, or a no-op context
-            manager when this tool uses no persistent profile.
+            manager when this tool uses no persistent profile or an
+            ephemeral one (nobody else can open it, and the lock file
+            would outlive the directory).
         """
-        if not self.user_data_dir:
+        if not self.user_data_dir or self._ephemeral:
             return nullcontext()
         return _file_lock(Path(f"{self.user_data_dir}.lock"))
 
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
-        with _LAUNCH_LOCK, self._profile_lock():
-            self._cleanup_stale_escalation_dirs()
+        if self._ephemeral and self._ephemeral_dir is None:
+            self._ephemeral_dir = tempfile.mkdtemp(prefix="kiss_web_profile_")
+            self.user_data_dir = self._ephemeral_dir
+        with self._profile_lock():
             effective_dir = self._resolve_user_data_dir()
             self.effective_user_data_dir = effective_dir
             if effective_dir:
@@ -1059,20 +1042,16 @@ class WebUseTool:
                 self._context = launcher.launch_persistent_context(
                     effective_dir, **kwargs, **self._context_args()
                 )
-                self._capture_browser_pid(effective_dir)
-                page = (
-                    self._context.pages[0] if self._context.pages
-                    else self._context.new_page()
-                )
+                self._capture_browser_pid()
+                page = self._context.pages[0] if self._context.pages else self._context.new_page()
             else:
                 self._browser = launcher.launch(**kwargs)
-                self._capture_browser_pid(None)
+                self._capture_browser_pid()
                 self._context = self._browser.new_context(**self._context_args())
                 page = self._context.new_page()
         self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
         self._context.on("close", self._on_browser_lost)
         self._adopt_page(page)
-        self._mouse_xy = None
         self._mask_headless_user_agent()
 
     def _mask_headless_user_agent(self) -> None:
@@ -1128,39 +1107,48 @@ class WebUseTool:
         return str(WebUseTool._read_page(page, "() => [document.title]")[0])
 
     @staticmethod
-    def _read_page(page: Any, expression: str) -> Any:
+    def _read_page(page: Any, expression: str, arg: Any = None) -> Any:
         """Evaluate *expression* (a function returning a non-empty list) on *page*.
 
-        ``wait_for_function`` bounds the read (see :meth:`_page_title`) and
-        survives navigations: Playwright re-arms it in the new document.
-        The follow-up ``json_value()`` does not.  A page that navigates
-        itself — a Cloudflare challenge reloading the real page once its
-        checks pass, a redirecting landing page — can destroy the execution
-        context between the two calls, which surfaced as ``Error navigating
-        to ...: JSHandle.json_value: Execution context was destroyed``.
-        The read is then repeated on the new document, following up to
+        ``wait_for_function`` (not ``evaluate``) bounds the read (see
+        :meth:`_page_title`); ``polling=100`` so throttled background
+        tabs still answer.  It also survives navigations: Playwright
+        re-arms it in the new document.  The follow-up ``json_value()``
+        does not.  A page that navigates itself — a Cloudflare challenge
+        reloading the real page once its checks pass, a redirecting
+        landing page — can destroy the execution context between the two
+        calls, which surfaced as ``Error navigating to ...:
+        JSHandle.json_value: Execution context was destroyed``.  The read
+        is then repeated on the new document, following up to
         ``_PAGE_READ_NAVIGATIONS`` navigations in a row (a challenge page
         that reloads into the real page, which then redirects again).
 
         Args:
             page: The Playwright page to read.
             expression: JavaScript function source returning a list.
+            arg: Optional argument passed to the function.
 
         Returns:
             The list the expression returned, as Python values.
         """
-        for _ in range(_PAGE_READ_NAVIGATIONS):
+        for attempt in range(_PAGE_READ_NAVIGATIONS + 1):
             try:
-                return _evaluate_list(page, expression)
+                handle = page.wait_for_function(
+                    expression, arg=arg, timeout=_PAGE_READ_TIMEOUT_MS, polling=100
+                )
+                return handle.json_value()
             except web_stealth.playwright_api().Error as exc:
-                if "Execution context was destroyed" not in str(exc):
+                # A page that keeps navigating surfaces its error like any other.
+                if (
+                    "Execution context was destroyed" not in str(exc)
+                    or attempt == _PAGE_READ_NAVIGATIONS
+                ):
                     raise
                 logger.debug(
                     "page navigated under the read; reading the new document", exc_info=True
                 )
                 page.wait_for_load_state("domcontentloaded", timeout=_PAGE_READ_TIMEOUT_MS)
-        # A page that keeps navigating surfaces its error like any other.
-        return _evaluate_list(page, expression)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def _require_responsive_renderer(self) -> None:
         """Raise ``TimeoutError`` unless the page's renderer answers promptly.
@@ -1175,9 +1163,7 @@ class WebUseTool:
         probe first — so the callers also wrap the input in
         :meth:`_input_hang_watchdog`.
         """
-        self._page.wait_for_function(
-            "() => 1", timeout=_PAGE_READ_TIMEOUT_MS, polling=100
-        )
+        self._page.wait_for_function("() => 1", timeout=_PAGE_READ_TIMEOUT_MS, polling=100)
 
     def _input_hang_watchdog(self, deadline_secs: float = _INPUT_WATCHDOG_SECS) -> Any:
         """Kill Chromium if the guarded raw input call outlives *deadline_secs*.
@@ -1240,7 +1226,8 @@ class WebUseTool:
         if self._mouse_xy is None:
             vw, vh = self._viewport_size()
             self._mouse_xy = (
-                random.uniform(vw * 0.2, vw * 0.8), random.uniform(vh * 0.2, vh * 0.8)
+                random.uniform(vw * 0.2, vw * 0.8),
+                random.uniform(vh * 0.2, vh * 0.8),
             )
         for px, py in web_stealth.mouse_path(self._mouse_xy, (x, y)):
             self._page.mouse.move(px, py, steps=2)
@@ -1342,9 +1329,7 @@ class WebUseTool:
             The checkbox's bounding box in main-frame viewport pixels, or
             ``None`` while no widget, or only its spinner, is showing.
         """
-        frame = next(
-            (f for f in self._page.frames if "challenges.cloudflare.com" in f.url), None
-        )
+        frame = next((f for f in self._page.frames if "challenges.cloudflare.com" in f.url), None)
         if frame is None:
             return None
         try:
@@ -1378,7 +1363,7 @@ class WebUseTool:
             self._page.mouse.up()
         logger.info("ticked the Cloudflare Turnstile checkbox on %s", self._page.url)
 
-    def _settle_challenge(self, response: Any) -> str:
+    def _settle_challenge(self) -> str:
         """Wait out a bot-protection interstitial; describe it when it stays.
 
         Cloudflare's managed challenge (and Anubis' proof-of-work page)
@@ -1388,27 +1373,23 @@ class WebUseTool:
         give up, so the tool waits up to :data:`_CHALLENGE_WAIT_SECS`
         with small pointer movements for the page to clear.  A Google
         "unusual traffic" page is not waited on: it rates the network's
-        IP, not the browser, so the same query is opened on Bing.
-
-        Args:
-            response: The navigation response from ``page.goto`` (may be
-                ``None`` for ``about:`` and same-document navigations).
+        IP, not the browser, so the same query is opened on Bing.  The
+        interstitial is recognised by what the page shows
+        (:func:`web_stealth.challenge_vendor`), which is also what tells
+        when it has cleared.
 
         Returns:
             ``""`` when the page is content, otherwise a ``Note:`` line
             for the agent explaining what blocked the page.
         """
-        mitigated = response is not None and response.headers.get("cf-mitigated") == "challenge"
         vendor = self._challenge_vendor()
-        if vendor is None and not mitigated:
+        if vendor is None:
             return ""
         deadline = time.monotonic() + _CHALLENGE_WAIT_SECS
         box_seen_at: float | None = None
         ticked = False
         while (
-            vendor is not None
-            and not vendor.startswith("Google")
-            and time.monotonic() < deadline
+            vendor is not None and not vendor.startswith("Google") and time.monotonic() < deadline
         ):
             box = None
             if vendor == "Cloudflare challenge" and not ticked:
@@ -1485,9 +1466,8 @@ class WebUseTool:
         if self._context is None:
             return
         pages = self._context.pages
-        if len(pages) > 1 and pages[-1] != self._page:  # pragma: no branch
+        if len(pages) > 1:  # pragma: no branch
             self._adopt_page(pages[-1])
-            self._live_tab = None  # resolved from the page when needed
 
     def _resolve_locator(self, element_id: int) -> Any:
         element_id = int(element_id)
@@ -1581,9 +1561,9 @@ class WebUseTool:
                     return self._get_ax_tree()
                 return f"Error: Tab index {idx} out of range (0-{len(pages) - 1})."
 
-            response = self._goto_retrying_network_change(url)
+            self._goto_retrying_network_change(url)
             self._wait_for_stable()
-            notice = self._settle_challenge(response)
+            notice = self._settle_challenge()
             tree = self._get_ax_tree()
             return f"{notice}\n\n{tree}" if notice else tree
         except Exception as e:
@@ -1841,10 +1821,7 @@ class WebUseTool:
         Returns:
             "Browser closed. It will relaunch automatically on the next web tool call."."""
         self._close_browser_only()
-        return (
-            "Browser closed. It will relaunch automatically on the next "
-            "web tool call."
-        )
+        return "Browser closed. It will relaunch automatically on the next web tool call."
 
     def show_browser(self, visible: bool = True) -> str:
         """Show the page to the user, live, in a Browser tab on every KISS surface.
@@ -1873,9 +1850,10 @@ class WebUseTool:
             headless." when no page was open, or
             "Error <doing something>: <message>" on failure."""
         state = "visible" if visible else "headless"
-        if visible == (self._live or not self._headless) and self._is_alive():
+        alive = self._is_alive()
+        if visible == (self._live or not self._headless) and alive:
             return f"Browser is already {state}."
-        session = self._capture_session()
+        session = self._capture_session() if alive else None
         self._close_browser_only()
         self._live = visible and self._live_browser is not None
         self._headless = not visible or self._live
@@ -1892,7 +1870,7 @@ class WebUseTool:
             return "Browser is now visible in the Browser tab."
         return f"Browser is now {state}."
 
-    def _capture_session(self) -> _Session | None:
+    def _capture_session(self) -> _Session:
         """Return what to carry into the browser that takes over the session.
 
         Chromium cannot switch between headless and visible without being
@@ -1900,15 +1878,13 @@ class WebUseTool:
         so the page's URL, the context's cookies (a login or bot-check
         flow is usually mid-way through setting them) and the page
         origin's ``localStorage`` (token-based logins) travel along; they
-        are handed to the new browser by :meth:`_restore_session`.
+        are handed to the new browser by :meth:`_restore_session`.  The
+        caller checks :meth:`_is_alive` first.
 
         Returns:
             The session to restore (``url`` empty when nothing worth
-            reopening is loaded), or ``None`` when there is no live page
-            to capture from.
+            reopening is loaded).
         """
-        if not self._is_alive():
-            return None
         # The user may have opened a tab themselves while the window was
         # visible; that newest tab is the one worth carrying over.  In the
         # Browser tab the newest page may be an unrelated tab of the user's.
@@ -1924,11 +1900,9 @@ class WebUseTool:
             logger.debug("Could not read cookies before relaunch", exc_info=True)
         if url:
             try:
-                session.origin, session.local_storage = self._page.wait_for_function(
-                    "() => [location.origin, Object.entries(localStorage)]",
-                    timeout=_PAGE_READ_TIMEOUT_MS,
-                    polling=100,
-                ).json_value()
+                session.origin, session.local_storage = self._read_page(
+                    self._page, "() => [location.origin, Object.entries(localStorage)]"
+                )
             except Exception:  # noqa: BLE001 - opaque origin (data:) or a stuck page
                 logger.debug("Could not read localStorage before relaunch", exc_info=True)
         return session
@@ -1972,7 +1946,10 @@ class WebUseTool:
 
         Keys carried in at the previous switch for the same origin that
         are gone now are removed.  The page is opened once for the write,
-        which is skipped if it lands on another origin.
+        which is skipped if it lands on another origin.  The write is
+        bounded like every page read (:meth:`_read_page`): a page whose
+        script wedges the renderer right after commit must not hang the
+        switch of browser forever.
         """
         keys = {key for key, _ in session.local_storage}
         carried_origin, carried_keys = self._carried_storage
@@ -1984,8 +1961,8 @@ class WebUseTool:
             return
         try:
             self._page.goto(session.url, wait_until="commit")
-            written = self._page.evaluate(
-                _RESTORE_STORAGE_JS, [session.origin, session.local_storage, removed]
+            [written] = self._read_page(
+                self._page, _RESTORE_STORAGE_JS, [session.origin, session.local_storage, removed]
             )
         except Exception:  # noqa: BLE001 - the origin is unreachable right now
             logger.debug("Could not restore localStorage after relaunch", exc_info=True)

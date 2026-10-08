@@ -29,12 +29,17 @@ from kiss.agents.sorcar.agent_dispatch import (
     make_run_agent_tool,
     make_run_parallel_tool,
 )
+from kiss.agents.sorcar.commit_message import fallback_commit_message
 from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
 from kiss.agents.sorcar.fanout_guard import (
     is_implementation_task,
 )
 from kiss.agents.sorcar.persistence import _load_last_model
-from kiss.agents.sorcar.relentless_agent import RelentlessAgent, resolve_work_dir
+from kiss.agents.sorcar.relentless_agent import (
+    RelentlessAgent,
+    _session_usage,
+    resolve_work_dir,
+)
 from kiss.agents.sorcar.sea_commands import model_sea
 from kiss.agents.sorcar.sea_settings import (
     alias_free_profile,
@@ -66,7 +71,6 @@ from kiss.core.models.model_info import (
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
-from kiss.core.stop_signal import get_thread_stop_event
 from kiss.core.tool_verdict import Verdict
 from kiss.core.utils import substitute_prompt_args
 
@@ -509,15 +513,7 @@ def auto_commit_changes(
         logger.debug(
             "LLM commit message generation failed; using fallback", exc_info=True,
         )
-        msg = "kiss: auto-commit agent changes"
-        if user_prompt:
-            from kiss.agents.sorcar.commit_message import _append_user_prompt
-
-            msg = _append_user_prompt(msg, user_prompt)
-        if task_result:
-            from kiss.agents.sorcar.commit_message import _append_task_result
-
-            msg = _append_task_result(msg, task_result)
+        msg = fallback_commit_message(user_prompt, task_result)
     GitWorktreeOps.stage_all(commit_dir)
     committed = GitWorktreeOps.commit_staged(commit_dir, msg)
     if committed:
@@ -747,21 +743,12 @@ def _executor_usage(agent: Any) -> tuple[float, int, int]:
     executor = getattr(agent, "_current_executor", None)
     if executor is None:
         return 0.0, 0, 0
-    # ONE coherent snapshot when the executor publishes one (KISSAgent
-    # stores its whole triple as one immutable record): this function
-    # is polled from other threads (the daemon's live usage readers)
-    # while the executor thread
-    # updates the counters, and three separate property reads could
-    # pair one response's tokens with the pre-response cost.
-    snapshot = getattr(executor, "usage_snapshot", None)
-    if callable(snapshot):
-        budget, tokens, steps = cast("tuple[float, int, int]", snapshot())
-        return float(budget or 0.0), int(tokens or 0), int(steps or 0)
-    return (
-        float(getattr(executor, "budget_used", 0.0) or 0.0),
-        int(getattr(executor, "total_tokens_used", 0) or 0),
-        int(getattr(executor, "step_count", 0) or 0),
-    )
+    # ONE coherent snapshot (see _session_usage): this function is
+    # polled from other threads (the daemon's live usage readers)
+    # while the executor thread updates the counters, and three
+    # separate property reads could pair one response's tokens with
+    # the pre-response cost.
+    return _session_usage(executor)
 
 
 def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
@@ -783,7 +770,7 @@ _OFFSET_PUBLISH_LOCK = threading.Lock()
 
 
 def _attribute_sub_usage(
-    agent: Any,
+    agent: RelentlessAgent,
     budget: float,
     tokens: int,
     steps: int,
@@ -812,13 +799,11 @@ def _attribute_sub_usage(
     mixed state (zero budget, pre-reset tokens/steps), whereas the
     single record now lands wholly in the old epoch (discarded with
     it) or wholly in the new one.  The append takes no lock, so no
-    caller can deadlock here, even after an injected stop.  A minimal
-    agent-shaped object without ``_attribute_usage`` gets plain
-    attribute increments (no cross-thread protection, but such objects
-    are single-threaded by construction).
+    caller can deadlock here, even after an injected stop.
 
     Args:
-        agent: The parent agent receiving the attribution.
+        agent: The parent :class:`RelentlessAgent` receiving the
+            attribution.
         budget: USD spend to add.
         tokens: Token count to add.
         steps: Step count to add.
@@ -835,16 +820,9 @@ def _attribute_sub_usage(
             concurrent reset can never divert a prior task's spend
             into the new task's ledger.
     """
-    attribute = getattr(agent, "_attribute_usage", None)
-    if callable(attribute):
-        attribute(budget, tokens, steps, key=key, seq=seq, epoch=epoch)
-    else:
-        agent.budget_used = float(getattr(agent, "budget_used", 0.0) or 0.0) + budget
-        agent.total_tokens_used = (
-            int(getattr(agent, "total_tokens_used", 0) or 0) + tokens
-        )
-        agent.total_steps = int(getattr(agent, "total_steps", 0) or 0) + steps
-    if agent.printer is not None:
+    agent._attribute_usage(budget, tokens, steps, key=key, seq=seq, epoch=epoch)
+    printer: Any = agent.printer
+    if printer is not None:
         try:
             with _OFFSET_PUBLISH_LOCK:
                 # One coherent triple (see _agent_usage): separate property
@@ -856,13 +834,13 @@ def _attribute_sub_usage(
                 # thread), so a thread-keyed setter would file them under
                 # that thread's task; name the parent's task when it has one.
                 task_id = str(getattr(agent, "last_task_id", "") or "")
-                set_offsets = getattr(agent.printer, "set_usage_offsets", None)
+                set_offsets = getattr(printer, "set_usage_offsets", None)
                 if task_id and callable(set_offsets):
                     set_offsets(task_id, budget_total, tokens_total, steps_total)
                 else:
-                    agent.printer.budget_offset = budget_total
-                    agent.printer.tokens_offset = tokens_total
-                    agent.printer.steps_offset = steps_total
+                    printer.budget_offset = budget_total
+                    printer.tokens_offset = tokens_total
+                    printer.steps_offset = steps_total
         except Exception:
             pass
 
@@ -984,7 +962,25 @@ class SorcarAgent(RelentlessAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
-        self.docker_manager: Any = None
+        # Per-run settings taken from :meth:`run`'s arguments; the
+        # defaults are what a run that never reached ``run`` reports.
+        self._launch_model_name: str = ""
+        self._ask_user_question_callback: Callable[[str], str] | None = None
+        self._inherited_tools: list[Callable[..., Any]] = []
+        self._tools_hook: (
+            Callable[[list[Callable[..., Any]]], list[Callable[..., Any]]] | None
+        ) = None
+        self._base_system_prompt: str = ""
+        self._system_prompt_suffix: str = ""
+        # Set by the fan-out engine / task runner on a sub-agent
+        # (parent task and tab ids, reviewer marker); None for a
+        # top-level agent.  Declared here, not on ChatSorcarAgent,
+        # because this class reads it (tool profile, budget share,
+        # browser profile, sub-agent tab ids).
+        self._subagent_info: dict[str, object] | None = None
+        # Frontend tab this agent's events belong to.  The fan-out
+        # engine assigns each sub-agent its own synthetic tab id.
+        self._tab_id: str = ""
         # Persistent agent memory (kiss.core.memoryfield), built per
         # run by :meth:`run` when the ``use_memory`` config flag (or the
         # KISS_USE_MEMORY environment variable) enables it; None keeps
@@ -1004,7 +1000,6 @@ class SorcarAgent(RelentlessAgent):
         # the Browser tab on every surface instead of a local window.
         self._live_browser: Any = None
         self._is_parallel: bool = True
-        self._append_basic_tools: bool = True
         # The caller's extra tools of the current run (``run(tools=...)``:
         # a SEA's ``tools()`` additions, plus whatever this
         # agent itself inherited as a sub-task).  Kept on self so a
@@ -1073,9 +1068,7 @@ class SorcarAgent(RelentlessAgent):
         if raw_max_budget is None:
             return None
         max_budget = float(raw_max_budget)
-        executor = getattr(self, "_current_executor", None)
-        live = executor.budget_used if executor is not None else 0.0
-        remaining = max_budget - float(getattr(self, "budget_used", 0.0) or 0.0) - live
+        remaining = max_budget - self._live_budget_used()
         if remaining <= 0:
             raise BudgetExceededError(
                 f"Agent {self.name} has no remaining budget for parallel "
@@ -1097,8 +1090,7 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             True for a reviewer sub-agent or any of its descendants.
         """
-        info = getattr(self, "_subagent_info", None) or {}
-        return bool(info.get("reviewer", False))
+        return bool((self._subagent_info or {}).get("reviewer", False))
 
     def _subagent_parent_tab_id(self) -> str:
         """Return the frontend tab id sub-agents should call their parent.
@@ -1130,8 +1122,8 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             The tab id, or ``""`` when running headless.
         """
-        tab_id = str(getattr(self, "_tab_id", "") or "")
-        info = getattr(self, "_subagent_info", None)
+        tab_id = self._tab_id
+        info = self._subagent_info
         own_task_id = _persisted_task_id(self)
         if not own_task_id:
             return tab_id
@@ -1159,13 +1151,11 @@ class SorcarAgent(RelentlessAgent):
     ) -> str:
         """Run *command* in the task's container, honouring both limits.
 
-        Widens ``RelentlessAgent._docker_bash``, which forwards only
-        the command and its description.  ``DockerManager.Bash``
-        honours a timeout and truncates its output, but a two-argument
-        forwarder pins both to the manager's defaults, so the model
-        could neither raise the 30-second cap for a slow build nor ask
-        for more than the default slice of a large output — limits the
-        non-docker ``UsefulTools.Bash`` has always exposed.
+        ``DockerManager.Bash`` honours a timeout and truncates its
+        output; both are forwarded so the model can raise the
+        30-second cap for a slow build or ask for more than the
+        default slice of a large output — the limits the non-docker
+        ``UsefulTools.Bash`` exposes.
 
         Args:
             command: The bash command to run.
@@ -1204,13 +1194,12 @@ class SorcarAgent(RelentlessAgent):
             A :data:`TOOL_PROFILES` key or a ``+``-joined composite of
             keys (see :func:`resolve_tool_profile`).
         """
-        explicit = str(getattr(self, "_tool_profile_name", "") or "")
-        if explicit:
+        if self._tool_profile_name:
             try:
-                return canonical_tool_profile(explicit)
+                return canonical_tool_profile(self._tool_profile_name)
             except ValueError:
                 pass  # An unknown name falls through to the default rule.
-        task = task or str(getattr(self, "task_description", "") or "")
+        task = task or self.task_description
         if (
             DEFAULT_CONFIG.tool_profiles
             and self._is_reviewer_subagent()
@@ -1263,9 +1252,8 @@ class SorcarAgent(RelentlessAgent):
                     "reasonable assumption, or report the blocker in your final "
                     "summary and finish."
                 )
-            ask_callback = getattr(self, "_ask_user_question_callback", None)
-            if ask_callback:
-                return str(ask_callback(question))
+            if self._ask_user_question_callback is not None:
+                return str(self._ask_user_question_callback(question))
             return "(ask_user_question not available in this environment)"
 
         def talk(language: str, text: str, emotion: str = "") -> str:
@@ -1334,7 +1322,7 @@ class SorcarAgent(RelentlessAgent):
             from kiss.agents.sorcar.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
-            self.docker_manager.stop_event = getattr(self, "_stop_event", None)
+            self.docker_manager.stop_event = self._stop_event
 
             def Bash(  # noqa: N802
                 command: str,
@@ -1380,7 +1368,7 @@ class SorcarAgent(RelentlessAgent):
         else:
             useful_tools = UsefulTools(
                 stream_callback=_stream,
-                stop_event=getattr(self, "_stop_event", None),
+                stop_event=self._stop_event,
                 work_dir=self.work_dir,
                 jobs=self._background_jobs,
             )
@@ -1401,7 +1389,7 @@ class SorcarAgent(RelentlessAgent):
             # instead of contending for the shared profile's Chromium lock.
             self.web_use_tool = WebUseTool(
                 work_dir=self.work_dir,
-                ephemeral=getattr(self, "_subagent_info", None) is not None,
+                ephemeral=self._subagent_info is not None,
                 live_browser=self._live_browser,
             )
             tools.extend(self.web_use_tool.get_tools())
@@ -1442,15 +1430,13 @@ class SorcarAgent(RelentlessAgent):
                 model_runs_task_to_completion,
             )
 
-            if getattr(self, "docker_image", None) and model_runs_task_to_completion(
-                model_name
-            ):
+            if self.docker_image and model_runs_task_to_completion(model_name):
                 return (
                     f"Cannot switch to {model_name}: it is a CLI agent "
                     "that runs natively on the host, which would bypass "
                     "this task's docker_image isolation. Pick an API model."
                 )
-            target = getattr(self, "_current_executor", None) or self
+            target = self._current_executor or self
             old_model = getattr(target, "model", None)
             if old_model is None:
                 self.model_name = model_name
@@ -1642,11 +1628,7 @@ class SorcarAgent(RelentlessAgent):
         if not callable(show):
             return
         try:
-            show(
-                model_name,
-                getattr(self, "_tab_id", "") or "",
-                _persisted_task_id(self) or None,
-            )
+            show(model_name, self._tab_id, _persisted_task_id(self) or None)
         except Exception:
             logger.warning("model picker update failed", exc_info=True)
 
@@ -1714,10 +1696,11 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        resolved_model = self._resolve_model_name(model_name)
-        self._launch_model_name = resolved_model
+        # :meth:`run` resolved the model once for the whole run; a
+        # direct ``RelentlessAgent.run`` call (tests) resolves here.
+        self._launch_model_name = self._resolve_model_name(model_name)
         super()._reset(
-            model_name=resolved_model,
+            model_name=self._launch_model_name,
             max_sub_sessions=max_sub_sessions,
             max_steps=max_steps,
             max_budget=max_budget,
@@ -1731,12 +1714,15 @@ class SorcarAgent(RelentlessAgent):
     def _resolve_model_name(model_name: str | None) -> str:
         """The model a run asked to use *model_name* actually runs with.
 
-        The same fallback chain ``_reset`` applies: the caller's model,
-        else the user's last-selected model, else the configured
-        default.  Exposed so callers that record a run's settings
-        BEFORE ``_reset`` executes (``ChatSorcarAgent.run``'s early
-        history row and ``task_settings`` event) persist the resolved
-        value instead of a blank.
+        The caller's model, else the user's last-selected model, else
+        the configured default.  The fallback re-reads the user's
+        config, which another thread (the model picker) may change at
+        any time, so a run resolves it ONCE — :meth:`run` stores the
+        result in ``_launch_model_name`` and passes it to the
+        classifier, the memory-root gate and ``_reset`` — and
+        ``ChatSorcarAgent.run``, which records the run's settings
+        before :meth:`run` executes, resolves first and passes the
+        result down as *model_name*.
 
         The picker persists a model-picker SEA (``autorouter``,
         ``bestrouter``; :func:`kiss.agents.sorcar.sea_commands.model_sea`)
@@ -1853,14 +1839,16 @@ class SorcarAgent(RelentlessAgent):
         performs the classification — when
         :func:`~kiss.agents.sorcar.task_classifier.classification_enabled`
         allows it — with the same resolved model and model config the
-        main run will use, and banks the classifier's usage counters for
-        :meth:`_fold_classifier_usage`.  Every later call returns the
-        cached verdict, so ``WorktreeSorcarAgent.run`` (worktree
-        decision) and :meth:`run` (system prompt selection) share one
-        classification.
+        main run will use, and publishes the classifier's spend as one
+        ``_classifier_spend`` record for :meth:`_fold_classifier_usage`
+        to bank.  Every later call returns the cached verdict, so
+        ``WorktreeSorcarAgent.run`` (worktree decision) and :meth:`run`
+        (system prompt selection) share one classification.
 
         Args:
-            model_name: The caller-supplied model name, possibly None.
+            model_name: The model name, possibly None or unresolved
+                (:meth:`run` passes the run's resolved model, which
+                :meth:`_resolve_model_name` returns unchanged).
             task: The task prompt template about to run.
             model_config: The caller-supplied model configuration.
             arguments: The caller-supplied prompt-template arguments;
@@ -2144,13 +2132,10 @@ class SorcarAgent(RelentlessAgent):
         self._system_prompt_suffix = system_prompt if system_prompt else ""
         self.web_use_tool = None
         self._memory_tools = None
-        # The thread's own binding first (the daemon binds one per
-        # task thread), and the JSON printer's thread-local is a view
-        # over the same storage.
-        tl = getattr(printer, "_thread_local", None) if printer else None
-        self._stop_event = get_thread_stop_event() or (
-            getattr(tl, "stop_event", None) if tl else None
-        )
+        # Resolved ONCE for the whole run (see _resolve_model_name):
+        # the classifier, the memory-root gate and ``_reset`` all get
+        # this string, so they cannot disagree about the model.
+        model_name = self._launch_model_name = self._resolve_model_name(model_name)
         try:
             # Pre-run task classification (idempotent per run:
             # WorktreeSorcarAgent.run may have classified already for
@@ -2185,7 +2170,7 @@ class SorcarAgent(RelentlessAgent):
             memory_root = _memory_root_for_run(
                 self._append_basic_tools,
                 docker_image,
-                self._resolve_model_name(model_name),
+                model_name,
                 caller_system_instruction=bool(
                     (model_config or {}).get("system_instruction")
                 ),
@@ -2297,6 +2282,11 @@ class SorcarAgent(RelentlessAgent):
             self._ask_user_question_callback = None
             self.pre_step_hook = None
             self.tool_call_guard = None
+            # The hook is a bound method of this run's UsefulTools;
+            # left in place it would keep that instance (its read
+            # cache, stream callback, stop event) alive for the next
+            # run and be called by a docker run that never installs one.
+            self.context_reset_hook = None
             # The run's last word on its spend, always: a sub-task's
             # fold can land on its own thread at any point after the
             # run's last event (between a session's final event and its
@@ -2330,11 +2320,7 @@ class SorcarAgent(RelentlessAgent):
             model: The live model whose conversation receives the
                 queued user messages.
         """
-        drain = getattr(
-            getattr(self, "printer", None),
-            "drain_pending_user_messages",
-            None,
-        )
+        drain = getattr(self.printer, "drain_pending_user_messages", None)
         queued: list[str] = drain() if drain is not None else []
         for msg in queued:
             model.add_message_to_conversation(
@@ -2368,11 +2354,7 @@ class SorcarAgent(RelentlessAgent):
         del args
         if name != "finish":
             return None
-        has_pending = getattr(
-            getattr(self, "printer", None),
-            "has_pending_user_messages",
-            None,
-        )
+        has_pending = getattr(self.printer, "has_pending_user_messages", None)
         if has_pending is None or not has_pending():
             return None
         return (

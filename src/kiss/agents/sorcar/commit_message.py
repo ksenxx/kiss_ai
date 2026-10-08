@@ -24,6 +24,9 @@ from kiss.core.models.model_info import get_fast_model
 
 logger = logging.getLogger(__name__)
 
+FALLBACK_SUBJECT = "kiss: auto-commit agent work"
+"""Commit subject used when no model-written message is available."""
+
 
 def clean_llm_output(text: str) -> str:
     """Strip whitespace and *paired* surrounding quotes from LLM output.
@@ -125,12 +128,40 @@ def generate_commit_message_from_diff(
             commit message, or ``None`` when not available.
 
     Returns:
-        The cleaned commit-message string, or ``"kiss: auto-commit agent work"``
-        on failure.
+        The cleaned commit-message string, or
+        :func:`fallback_commit_message` on failure.
     """
-    msg = "kiss: auto-commit agent work"
+    subject = FALLBACK_SUBJECT
     if diff_text:
-        msg = _commit_message_from_llm(diff_text, user_prompt, msg)
+        subject = _commit_message_from_llm(diff_text, user_prompt, subject)
+    return _with_trailers(subject, user_prompt, task_result)
+
+
+def fallback_commit_message(
+    user_prompt: str | None = None, task_result: str | None = None,
+) -> str:
+    """The commit message used when no model-written one can be produced.
+
+    The fixed :data:`FALLBACK_SUBJECT` plus the same ``User prompt:`` /
+    ``Result:`` trailers :func:`generate_commit_message_from_diff`
+    appends, so a commit made after the diff could not even be read
+    still records what the agent was asked and what it reported.
+
+    Args:
+        user_prompt: The user's task prompt, or ``None``.
+        task_result: The task's result summary, or ``None``.
+
+    Returns:
+        The fallback commit message.
+    """
+    return _with_trailers(FALLBACK_SUBJECT, user_prompt, task_result)
+
+
+def _with_trailers(
+    subject: str, user_prompt: str | None, task_result: str | None,
+) -> str:
+    """Append the non-empty *user_prompt* and *task_result* trailers to *subject*."""
+    msg = subject
     if user_prompt:
         msg = _append_user_prompt(msg, user_prompt)
     if task_result:

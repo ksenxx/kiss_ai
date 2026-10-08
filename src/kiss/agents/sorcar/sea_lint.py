@@ -92,15 +92,13 @@ import argparse
 import ast
 import json
 import re
-import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 from kiss.agents.sorcar.sea_commands import (
     BASE_FOLDER,
-    base_settings,
     bundled_commands,
     check_sea,
     defines,
@@ -175,23 +173,23 @@ def bundled_seas() -> list[Path]:
     return sorted(scripts | set(bundled_commands().values()))
 
 
-def registered_seas() -> list[Path]:
-    """Return the scripts of every registered ``/command`` (bundled and user folders)."""
-    paths = [get_command(name) for name in list_commands()]
-    return sorted({path for path in paths if path is not None})
+def registered_commands() -> dict[Path, str]:
+    """Return ``script -> /command name`` of every registered command (bundled and user folders)."""
+    return {path: name for name in list_commands() if (path := get_command(name))}
 
 
-def default_targets(registered: bool) -> list[Path]:
+def default_targets(registered: bool, commands: Mapping[Path, str]) -> list[Path]:
     """Return the scripts ``sea lint`` checks when no path is given.
 
     The bundled scripts always; the user's registered ``SEAS.md``
-    scripts only when *registered* is true (``--registered``), so
-    ``uv run check`` never fails on, and ``--fix`` never rewrites, a
-    file outside this checkout.
+    scripts (the keys of *commands*, :func:`registered_commands`) only
+    when *registered* is true (``--registered``), so ``uv run check``
+    never fails on, and ``--fix`` never rewrites, a file outside this
+    checkout.
     """
     scripts = set(bundled_seas())
     if registered:
-        scripts |= set(registered_seas())
+        scripts |= set(commands)
     return sorted(scripts)
 
 
@@ -207,8 +205,11 @@ def lint_all(paths: Iterable[Path] | None = None, registered: bool = False) -> l
     Returns:
         The findings, in path order.
     """
-    scripts = default_targets(registered) if paths is None else [_script_of(Path(p)) for p in paths]
-    commands = {path: name for name in list_commands() if (path := get_command(name))}
+    commands = registered_commands()
+    if paths is None:
+        scripts = default_targets(registered, commands)
+    else:
+        scripts = [_script_of(Path(p)) for p in paths]
     findings: list[Finding] = []
     for script in scripts:
         findings.extend(lint_sea(script, commands.get(script)))
@@ -344,8 +345,8 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
     try:
         # Exactly what the daemon does for a run of the script, plus the
         # method checks ``/<name> check`` makes.
-        seas, _cmd, _description = check_sea(path, require_description=False)
-        merged = base_settings(seas)
+        check = check_sea(path, require_description=False)
+        seas, merged = check.seas, check.settings
         declared = own_settings(seas[-1])
     except SeaError as exc:
         findings.append(Finding(path, "broken", str(exc)))
@@ -912,20 +913,6 @@ def fix_sea(path: Path) -> list[str]:
     return list(reversed(changed))
 
 
-def main(argv: list[str] | None = None) -> int:
-    """``sea lint [--fix] [PATH ...]``: check (and rewrite) SEAs.
-
-    Args:
-        argv: Command-line arguments; ``None`` reads ``sys.argv``.
-
-    Returns:
-        ``0`` when there are no findings (after ``--fix``), else ``1``.
-    """
-    parser = argparse.ArgumentParser(prog="sea lint", description=(__doc__ or "").split("\n\n")[0])
-    add_arguments(parser)
-    return run(parser.parse_args(argv))
-
-
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Attach the ``sea lint`` arguments to *parser*."""
     parser.add_argument(
@@ -941,10 +928,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    """Execute ``sea lint`` with parsed *args* (see :func:`main`)."""
+    """Execute ``sea lint`` with parsed *args* (:func:`add_arguments`); return the exit code."""
     paths = [Path(p) for p in args.paths] or None
     if args.fix:
-        targets = [_script_of(p) for p in paths] if paths else default_targets(args.registered)
+        if paths:
+            targets = [_script_of(p) for p in paths]
+        else:
+            targets = default_targets(args.registered, registered_commands())
         for script in targets:
             for line in fix_sea(script):
                 print(f"fixed {line}")
@@ -953,7 +943,3 @@ def run(args: argparse.Namespace) -> int:
         print(finding)
     print(f"sea lint: {len(findings)} finding(s)")
     return 1 if findings else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

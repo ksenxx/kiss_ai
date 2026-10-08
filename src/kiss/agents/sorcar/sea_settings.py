@@ -65,14 +65,13 @@ import hashlib
 import logging
 import math
 import sys
+import threading
 import types
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from kiss.agents.seas.base.base_sea import WORKER_DEFAULTS, channel_work_dir
-
-__all__ = ["WORKER_DEFAULTS", "channel_work_dir"]
 
 logger = logging.getLogger(__name__)
 
@@ -346,15 +345,18 @@ def wire_field(key: str) -> str:
     client side: settings keys, ``options`` keys and ``run()`` keywords
     all use the snake_case name.
     """
-    aliases = {
-        "add_to_prompt": "appendToPrompt",
-        "add_to_system_prompt": "appendToSystemPrompt",
-        "auto_classify": "classifyTasks",
-    }
-    if key in aliases:
-        return aliases[key]
+    if key in _WIRE_ALIASES:
+        return _WIRE_ALIASES[key]
     first, *rest = key.split("_")
     return first + "".join(part.capitalize() for part in rest)
+
+
+_WIRE_ALIASES = {
+    "add_to_prompt": "appendToPrompt",
+    "add_to_system_prompt": "appendToSystemPrompt",
+    "auto_classify": "classifyTasks",
+}
+"""The settings keys whose wire field is not their camelCase spelling (:func:`wire_field`)."""
 
 
 def script_name(path: str) -> str:
@@ -387,11 +389,15 @@ def safe_message(exc: BaseException) -> str:
         return name
 
 
-def execute_python_file(
-    raw_path: Any,
-    error_cls: type[Exception] = SeaError,
-    label: str = "SEA",
-) -> dict[str, Any]:
+_EXECUTE_LOCK = threading.RLock()
+"""Serialises :func:`execute_python_file`'s ``sys.modules`` swap and the execution it brackets.
+
+Re-entrant: a SEA that loads another SEA at import time executes it on
+the same thread.
+"""
+
+
+def execute_python_file(raw_path: Any) -> dict[str, Any]:
     """Execute a caller-supplied Python file and return its namespace.
 
     The one loader of SEAs (the daemon's ``seaPath``, the
@@ -410,35 +416,32 @@ def execute_python_file(
     not one per run, and an earlier execution's classes resolve their
     annotations through the latest execution of the same source; two
     files with the same stem in different folders get different names.
+    Executions are serialised (:data:`_EXECUTE_LOCK`): task threads
+    evaluate SEAs concurrently, and a failed execution in one thread
+    must restore the entry that is current when it fails, not the one
+    it saw before another thread replaced it.
 
     Args:
         raw_path: The path of the file — expected to be an absolute path
             string, but treated as untrusted.
-        error_cls: The exception class to raise on any failure, so each
-            caller keeps its own diagnostic type.
-        label: Human-readable name of the file kind (``"SEA"``,
-            ``"SEA"``), used in diagnostic messages.
 
     Returns:
         The executed module's namespace dict.
 
     Raises:
-        Exception: An *error_cls* instance when *raw_path* is not a
-            string, is not the path of an existing ``.py`` file, or
-            names a module that raises at import time (``BaseException``
-            included: a file raising ``KeyboardInterrupt`` or
-            ``SystemExit`` at import time is a broken file, not a
-            cancelled task; the original raise stays reachable as
-            ``__cause__``).
+        SeaError: *raw_path* is not a string, is not the path of an
+            existing ``.py`` file, or names a module that raises at
+            import time (``BaseException`` included: a file raising
+            ``KeyboardInterrupt`` or ``SystemExit`` at import time is a
+            broken file, not a cancelled task; the original raise stays
+            reachable as ``__cause__``).
     """
     # Type-check FIRST: comparing or repr-ing an untrusted non-string
     # object could run arbitrary code (raising ``__eq__``/``__repr__``),
     # so nothing touches *raw_path* beyond isinstance until it is known
     # to be a plain string.
     if not isinstance(raw_path, str):
-        raise error_cls(
-            f"{label} field must be a path string, got {type(raw_path).__name__}"
-        )
+        raise SeaError(f"SEA field must be a path string, got {type(raw_path).__name__}")
     path = Path(raw_path)
     try:
         is_py_file = path.suffix == ".py" and path.is_file()
@@ -446,28 +449,28 @@ def execute_python_file(
         # e.g. an embedded NUL byte makes ``is_file`` raise ValueError.
         is_py_file = False
     if not is_py_file:
-        raise error_cls(f"{label} {raw_path!r} is not an existing Python (.py) file")
+        raise SeaError(f"SEA {raw_path!r} is not an existing Python (.py) file")
     module_name = f"_kiss_sea_{path.stem}_{hashlib.sha1(str(path).encode()).hexdigest()[:12]}"
     module = types.ModuleType(module_name)
     module.__file__ = str(path)
-    # A failed re-execution must not unregister the module of an earlier,
-    # successful execution of the same file whose classes still resolve
-    # their annotations through this name: the previous entry is put back.
-    previous = sys.modules.get(module_name)
-    sys.modules[module_name] = module
-    try:
-        source = path.read_text(encoding="utf-8")
-        code = compile(source, str(path), "exec", dont_inherit=True)
-        exec(code, module.__dict__)  # noqa: S102 — the script is the user's own code
-    except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
-        logger.warning("Failed to import %s %r", label, raw_path, exc_info=True)
-        if previous is None:
-            sys.modules.pop(module_name, None)
-        else:
-            sys.modules[module_name] = previous
-        raise error_cls(
-            f"{label} {raw_path!r} failed to import: {safe_message(exc)}"
-        ) from exc
+    with _EXECUTE_LOCK:
+        # A failed re-execution must not unregister the module of an
+        # earlier, successful execution of the same file whose classes
+        # still resolve their annotations through this name: the previous
+        # entry is put back.
+        previous = sys.modules.get(module_name)
+        sys.modules[module_name] = module
+        try:
+            source = path.read_text(encoding="utf-8")
+            code = compile(source, str(path), "exec", dont_inherit=True)
+            exec(code, module.__dict__)  # noqa: S102 — the script is the user's own code
+        except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
+            logger.warning("Failed to import SEA %r", raw_path, exc_info=True)
+            if previous is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
+            raise SeaError(f"SEA {raw_path!r} failed to import: {safe_message(exc)}") from exc
     return module.__dict__
 
 
@@ -517,37 +520,68 @@ def declares_channel(path: Path) -> bool:
     base class of another file is still a channel when loaded
     (``isinstance``), but is not listed.
     """
-    return "ChannelSea" in _declared_bases(path)
+    return "ChannelSea" in declared_bases(path)
 
 
-def _declared_bases(path: Path) -> set[str]:
-    """Return the names of every base class of every class *path* defines (cached per stamp)."""
-    try:
-        stat = path.stat()
-        stamp = (stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        return set()
-    cached = _BASES_CACHE.get(path)
-    if cached is None or cached[0] != stamp:
-        cached = (stamp, _class_bases(path))
-        _BASES_CACHE[path] = cached
-    return cached[1]
+def declared_bases(path: Path) -> set[str]:
+    """Return the last name of every base of every class the SEA at *path* defines.
 
-
-_BASES_CACHE: dict[Path, tuple[tuple[int, int], set[str]]] = {}
-"""``path -> ((mtime_ns, size), {base class name})`` memo of :func:`_declared_bases`."""
-
-
-def _class_bases(path: Path) -> set[str]:
-    """Parse *path*; return the last name of every base of every class definition in it.
-
+    Parsed from the source, never executed (see :func:`declares_hidden`).
     A base imported under an alias (``from ... import ChannelSea as C``)
-    counts under its imported name.
+    counts under its imported name; a dotted base (``base_sea.BaseSea``)
+    under its last attribute; a computed base (``sea_class('picker')``)
+    under its source text.  Empty for an unreadable or unparsable file.
+    """
+    return _parsed(path)[0]
+
+
+def declared_literal(path: Path, key: str) -> Any:
+    """Return the literal value the SEA at *path* writes for *key* in ``settings``, or ``None``.
+
+    Parsed from the source, never executed (see :func:`declares_hidden`);
+    only a constant value under a string-literal key in a dict inside
+    the file's own ``settings`` method counts.
+    """
+    return _parsed(path)[1].get(key)
+
+
+_PARSE_CACHE: dict[Path, tuple[tuple[int, int, int], set[str], dict[str, Any]]] = {}
+"""``path -> ((mtime_ns, size, inode), {base class name}, {settings key: literal})``.
+
+The memo of :func:`_parsed`: one parse per file revision, so a registry
+refresh costs one ``stat`` per SEA.
+"""
+
+
+def _parsed(path: Path) -> tuple[set[str], dict[str, Any]]:
+    """Return ``(base class names, settings literals)`` of *path*, parsed once per revision.
+
+    The revision is the file's mtime, size and inode, so an atomic
+    replacement that keeps the mtime and size is still re-read.  A
+    revision that does not parse is memoised as empty, so the registry
+    watcher does not re-read a broken SEA on every poll.
     """
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, ValueError):
-        return set()
+        stat = path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+    except OSError:
+        return set(), {}
+    cached = _PARSE_CACHE.get(path)
+    if cached is None or cached[0] != stamp:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except OSError:
+            return set(), {}
+        except (SyntaxError, ValueError):
+            cached = (stamp, set(), {})
+        else:
+            cached = (stamp, _class_bases(tree), _settings_literals(tree))
+        _PARSE_CACHE[path] = cached
+    return cached[1], cached[2]
+
+
+def _class_bases(tree: ast.Module) -> set[str]:
+    """Return the last name of every base of every class definition in *tree*."""
     imported = {
         alias.asname: alias.name
         for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
@@ -561,40 +595,13 @@ def _class_bases(path: Path) -> set[str]:
                     names.add(imported.get(base.id, base.id))
                 elif isinstance(base, ast.Attribute):
                     names.add(base.attr)
+                else:
+                    names.add(ast.unparse(base))
     return names
 
 
-def declared_literal(path: Path, key: str) -> Any:
-    """Return the literal value the SEA at *path* writes for *key* in ``settings``, or ``None``.
-
-    Parsed from the source, never executed (see :func:`declares_hidden`);
-    only a constant value under a string-literal key in a dict inside
-    the file's own ``settings`` method counts.  The parse is cached per path until the
-    file's size or mtime changes, so a registry refresh costs one
-    ``stat`` per SEA.
-    """
-    try:
-        stat = path.stat()
-        stamp = (stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        return None
-    cached = _LITERAL_CACHE.get(path)
-    if cached is None or cached[0] != stamp:
-        cached = (stamp, _settings_literals(path))
-        _LITERAL_CACHE[path] = cached
-    return cached[1].get(key)
-
-
-_LITERAL_CACHE: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
-"""``path -> ((mtime_ns, size), {key: literal value})`` memo of :func:`declared_literal`."""
-
-
-def _settings_literals(path: Path) -> dict[str, Any]:
-    """Parse *path*; return the constant ``"key": value`` entries of the dicts in ``settings()``."""
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, ValueError):
-        return {}
+def _settings_literals(tree: ast.Module) -> dict[str, Any]:
+    """Return the constant ``"key": value`` entries of the dicts in the ``settings()`` of *tree*."""
     literals: dict[str, Any] = {}
     for node in settings_functions(tree):
         for sub in ast.walk(node):

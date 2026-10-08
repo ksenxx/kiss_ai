@@ -169,8 +169,7 @@ class RouterSea(BaseSea):
         Path({str(tally)!r}).write_text(work_dir)
         return 'picked'
 """)
-    _, _, description = check_sea(sea)
-    assert description == "router"
+    assert check_sea(sea).description == "router"
     assert not tally.exists(), "check_sea must not run on_picked_as_model"
     sea.write_text("""
 from kiss.agents.seas.base.base_sea import BaseSea

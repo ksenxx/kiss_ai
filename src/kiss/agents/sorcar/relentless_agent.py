@@ -34,6 +34,7 @@ from kiss.core.kiss_error import (
 from kiss.core.models.model import SYSTEM_CACHE_BREAK, Attachment
 from kiss.core.models.model_info import model_runs_task_to_completion
 from kiss.core.printer import Printer
+from kiss.core.stop_signal import get_thread_stop_event
 from kiss.core.tool_verdict import Verdict
 from kiss.core.utils import _coerce_bool as _str_to_bool
 from kiss.core.utils import finish, read_text_waiting_for_writer, substitute_prompt_args
@@ -269,6 +270,31 @@ def _session_key(agent: Base) -> str:
     if key is None:
         key = agent.__dict__.setdefault("_usage_session_key", uuid4().hex)
     return str(key)
+
+
+def _session_usage(agent: Base) -> tuple[float, int, int]:
+    """Return a session executor's ``(budget, tokens, steps)`` triple.
+
+    ONE coherent snapshot when the executor publishes one
+    (:meth:`KISSAgent.usage_snapshot` stores its whole triple as one
+    immutable record), so a reader on another thread — the bank at
+    session end, the daemon's live usage pollers — can never pair one
+    response's tokens with the pre-response cost.  A plain
+    :class:`Base` is read field by field; its third field is the
+    session's ``step_count``.
+
+    Args:
+        agent: The session executor to read.
+
+    Returns:
+        The executor's ``(budget, tokens, steps)``.
+    """
+    snapshot = getattr(agent, "usage_snapshot", None)
+    if callable(snapshot):
+        budget, tokens, steps = cast("tuple[float, int, int]", snapshot())
+    else:
+        budget, tokens, steps = agent.budget_used, agent.total_tokens_used, agent.step_count
+    return float(budget or 0.0), int(tokens or 0), int(steps or 0)
 
 
 def _ledger_totals(ledger: _UsageLedger) -> tuple[float, int, int]:
@@ -656,6 +682,34 @@ class RelentlessAgent(Base):
         # through the property setters (zero deltas append nothing);
         # this swap just pins the canonical empty ledger.
         self.reset_usage()
+        # Per-run state, (re)assigned by :meth:`_reset`; the defaults
+        # are what a reader (a server-thread usage poller, a test)
+        # sees on an agent that never ran.
+        self._current_executor: KISSAgent | None = None
+        self.docker_image: str | None = None
+        self.docker_manager: Any = None
+        self.task_description: str = ""
+        self.system_prompt: str = ""
+        self.model_config: dict[str, Any] | None = None
+        # The stop event of the thread running the task, resolved by
+        # :meth:`_reset`; the shell tools and the trajectory summarizer
+        # poll it so Stop kills a running command.
+        self._stop_event: threading.Event | None = None
+        # Hooks installed on every per-session executor (see
+        # :class:`~kiss.core.kiss_agent.KISSAgent`).
+        self.pre_step_hook: Callable[..., None] | None = None
+        self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
+        self.context_reset_hook: Callable[[], None] | None = None
+        self.llm_call_hook: (
+            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
+        ) = None
+        self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
+        # Whether the run has the built-in toolset (``SorcarAgent.run``'s
+        # *append_basic_tools*).  A restricted run (False) promises that
+        # no LLM session gets tools beyond ``finish`` and the caller's,
+        # so :meth:`perform_task` skips the Read/Bash-equipped
+        # trajectory summarizer for it.
+        self._append_basic_tools: bool = True
 
     def _reset(
         self,
@@ -685,18 +739,26 @@ class RelentlessAgent(Base):
         # (discarded with it) or wholly in the new one — never a mixed
         # state, and never a torn triple.
         self._begin_run_usage_epoch()
-        self._current_executor: KISSAgent | None = None
+        self._current_executor = None
         self.docker_image = docker_image
-        self.docker_manager: Any = None
-        self.task_description: str = ""
-        self.system_prompt: str = ""
-        self.model_config: dict[str, Any] | None = None
-        self.pre_step_hook: Callable[..., None] | None = None
-        self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
-        self.llm_call_hook: (
-            Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
-        ) = None
-        self.tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None
+        self.docker_manager = None
+        self.task_description = ""
+        self.system_prompt = ""
+        self.model_config = None
+        self.pre_step_hook = None
+        self.tool_call_guard = None
+        self.context_reset_hook = None
+        self.llm_call_hook = None
+        self.tool_call_hook = None
+        # The thread's own binding first (the daemon binds one per
+        # task thread), then the JSON printer's thread-local, a view
+        # over the same storage.  Resolved once here so every user —
+        # the shell tools, the docker manager, the summarizer — polls
+        # the same event.
+        tl = getattr(printer, "_thread_local", None) if printer else None
+        self._stop_event = get_thread_stop_event() or (
+            getattr(tl, "stop_event", None) if tl else None
+        )
         self.set_printer(printer, verbose=verbose)
 
     @property
@@ -772,16 +834,6 @@ class RelentlessAgent(Base):
         if ledger is None:
             ledger = self.__dict__.setdefault("_usage_ledger", _UsageLedger())
         return cast("_UsageLedger", ledger)
-
-    def _usage_events(self) -> list[_UsageEvent]:
-        """Return the current epoch's append-only record list.
-
-        The list contains EVERY record banked in the epoch, including
-        the prefix already folded into the published view; totals must
-        always be read through :meth:`usage_snapshot` /
-        :func:`_ledger_totals`, never by summing this list.
-        """
-        return self._usage_ledger_object().records
 
     def _usage_epoch(self) -> _UsageLedger:
         """Return the current epoch token (the ledger object itself).
@@ -1029,11 +1081,9 @@ class RelentlessAgent(Base):
         proves the exactly-once property by injecting at every opcode
         boundary and by racing concurrent bankers.
 
-        The banked triple itself is read through the executor's
-        ``usage_snapshot()`` when it has one (``KISSAgent`` publishes
-        its whole triple as one immutable snapshot), so a concurrent
-        or interrupted response-accounting update on the executor can
-        never hand this bank a torn source triple.
+        The banked triple is read through :func:`_session_usage`, so a
+        concurrent or interrupted response-accounting update on the
+        executor can never hand this bank a torn source triple.
         """
         key = _session_key(agent)
         ledger = self._usage_ledger_object()
@@ -1043,51 +1093,41 @@ class RelentlessAgent(Base):
             for event in ledger.records[view.fold_index:]
         ):
             return
-        snapshot = getattr(agent, "usage_snapshot", None)
-        if callable(snapshot):
-            budget, tokens, steps = cast("tuple[float, int, int]", snapshot())
-        else:
-            budget = agent.budget_used
-            tokens = agent.total_tokens_used
-            steps = agent.step_count
-        self._commit_usage_event(
-            ledger,
-            _UsageEvent(
-                key,
-                0,
-                float(budget or 0.0),
-                int(tokens or 0),
-                int(steps or 0),
-            ),
-        )
+        budget, tokens, steps = _session_usage(agent)
+        self._commit_usage_event(ledger, _UsageEvent(key, 0, budget, tokens, steps))
+
+    def _live_budget_used(self) -> float:
+        """The task's spend so far, including the live session's.
+
+        ``self.budget_used`` holds the spend of prior sub-sessions plus
+        any spend attributed mid-session by sub-agents
+        (``_attribute_sub_usage``); the live executor's own spend is
+        added on top because it is only folded into ``self.budget_used``
+        when its session ends.
+
+        Returns:
+            Banked USD spend plus the in-flight session's.
+        """
+        executor = self._current_executor
+        return self.budget_used + (executor.budget_used if executor is not None else 0.0)
 
     def _check_total_budget(self) -> None:
         """Raise :class:`KISSError` when the task's cumulative spend exceeds max_budget.
 
         Installed as :attr:`KISSAgent.budget_check_hook` on every
         per-session executor, so the executor's ``_check_limits`` also
-        enforces the PARENT task's total budget.  ``self.budget_used``
-        holds the spend of prior sub-sessions plus any spend attributed
-        mid-session by parallel sub-agents (``_attribute_sub_usage``);
-        the live executor's own spend is added on top because it is only
-        folded into ``self.budget_used`` when its session ends.
+        enforces the PARENT task's total budget
+        (:meth:`_live_budget_used`).
 
         Raises:
             KISSError: If the cumulative spend exceeds ``self.max_budget``.
         """
-        executor = self._current_executor
-        live = executor.budget_used if executor is not None else 0.0
-        total = self.budget_used + live
+        total = self._live_budget_used()
         if total >= self.max_budget:
             raise BudgetExceededError(
                 f"Agent {self.name} budget exceeded "
                 f"(${total:.4f} / ${self.max_budget:.2f})."
             )
-
-    def _docker_bash(self, command: str, description: str) -> str:
-        if self.docker_manager is None:
-            raise KISSError("Docker manager not initialized")
-        return str(self.docker_manager.Bash(command, description))
 
     def _system_prompt_task_settings(self) -> dict[str, str]:
         """Label → value pairs appended to the system prompt as "# Task Settings".
@@ -1120,15 +1160,11 @@ class RelentlessAgent(Base):
         the system prompt.
 
         Returns:
-            The formatted section, or ``""`` when
-            :meth:`_system_prompt_task_settings` yields nothing.
+            The formatted section.
         """
-        settings = self._system_prompt_task_settings()
-        if not settings:  # pragma: no cover — base hook never empty
-            return ""
         lines = "".join(
             f"- {label}: {' '.join(str(value).split())}\n"
-            for label, value in settings.items()
+            for label, value in self._system_prompt_task_settings().items()
         )
         return TASK_SETTINGS_HEADER + lines
 
@@ -1243,18 +1279,22 @@ class RelentlessAgent(Base):
                 steps_banked,
             )
             executor = KISSAgent(f"{self.name} Session-{session}")
-            executor.pre_step_hook = getattr(self, "pre_step_hook", None)
-            executor.tool_call_guard = getattr(self, "tool_call_guard", None)
-            context_reset_hook = getattr(self, "context_reset_hook", None)
-            executor.context_reset_hook = context_reset_hook
-            if session > 0 and context_reset_hook is not None:
+            executor.pre_step_hook = self.pre_step_hook
+            executor.tool_call_guard = self.tool_call_guard
+            executor.context_reset_hook = self.context_reset_hook
+            if session > 0 and self.context_reset_hook is not None:
                 # A new session starts from an empty context: nothing
                 # shown to the previous session's model is visible now.
-                context_reset_hook()
-            llm_call_hook = getattr(self, "llm_call_hook", None)
-            tool_call_hook = getattr(self, "tool_call_hook", None)
+                self.context_reset_hook()
             executor.budget_check_hook = self._check_total_budget
             self._current_executor = executor
+            # Every exit below banks the session BEFORE dropping it from
+            # ``_current_executor``: a server-thread reader summing
+            # "banked + live" (``_live_agent_usage``) between the two
+            # statements then sees the session twice for a few
+            # bytecodes rather than not at all, and a re-read of a
+            # banked session is exact (``_accumulate_usage`` dedups by
+            # session key).
             try:
                 result = executor.run(
                     model_name=self.model_name,
@@ -1271,14 +1311,14 @@ class RelentlessAgent(Base):
                     printer=self.printer,
                     verbose=self.verbose,
                     attachments=attachments if session == 0 else None,
-                    llm_call_hook=llm_call_hook,
-                    tool_call_hook=tool_call_hook,
+                    llm_call_hook=self.llm_call_hook,
+                    tool_call_hook=self.tool_call_hook,
                 )
-                self._current_executor = None
                 self._accumulate_usage(executor)
+                self._current_executor = None
             except BudgetExceededError as exc:
-                self._current_executor = None
                 self._accumulate_usage(executor)
+                self._current_executor = None
                 partial = self._budget_exhausted_result(executor, summaries, exc)
                 if partial is None:
                     raise
@@ -1294,8 +1334,8 @@ class RelentlessAgent(Base):
                 # relies on this: its budget math subtracts only
                 # ``self.budget_used``, which now includes the failed
                 # executor's spend.
-                self._current_executor = None
                 self._accumulate_usage(executor)
+                self._current_executor = None
                 is_context_overflow = isinstance(exc, ContextWindowExceededError)
                 if (
                     (
@@ -1314,7 +1354,7 @@ class RelentlessAgent(Base):
                             cost=f"${executor.budget_used:.4f}",
                         )
                     return error_result
-                if not getattr(self, "_append_basic_tools", True):
+                if not self._append_basic_tools:
                     # Restricted runs (``append_basic_tools=False``)
                     # promise that NO LLM session of the task gets
                     # tools beyond ``finish`` and the caller's own —
@@ -1336,8 +1376,8 @@ class RelentlessAgent(Base):
                 # ``task_history`` row read these counters
                 # (``_subtask_metrics``), which otherwise report a
                 # $0.0000 cost for a task that burned real money.
-                self._current_executor = None
                 self._accumulate_usage(executor)
+                self._current_executor = None
                 raise
 
             try:
@@ -1353,18 +1393,11 @@ class RelentlessAgent(Base):
 
             if not is_continue or success:
                 if summaries:
-                    final_summary = payload.get("summary", "")
-                    prior_section = _prior_sessions_section(summaries)
-                    if final_summary:
-                        payload["summary"] = (
-                            f"{prior_section}\n\n---\n\n<h3>Final Session</h3>\n"
-                            f"{final_summary}"
-                        )
-                    else:
-                        payload["summary"] = (
-                            f"{prior_section}\n\n---\n\n<h3>Final Session</h3>\n"
-                            "(no summary)"
-                        )
+                    payload["summary"] = (
+                        f"{_prior_sessions_section(summaries)}\n\n---\n\n"
+                        f"<h3>Final Session</h3>\n"
+                        f"{payload.get('summary', '') or '(no summary)'}"
+                    )
                     result = yaml.dump(payload, sort_keys=False)
                     self._emit_merged_result_event(payload)
                 return result
@@ -1526,16 +1559,11 @@ class RelentlessAgent(Base):
             tmp_dir.mkdir(parents=True, exist_ok=True)
             trajectory_path = tmp_dir / f"trajectory_{session}.json"
             trajectory_path.write_text(executor.get_trajectory(), encoding="utf-8")
-            # The stop event lives on the printer's THREAD-LOCAL
-            # (``_PrinterThreadLocal.stop_event``), not on the
-            # printer: reading it off the printer always yields
-            # None, which leaves the summarizer's shell command
-            # unkillable by Stop.
-            _tl = getattr(self.printer, "_thread_local", None) if self.printer else None
-            _stop_ev = getattr(_tl, "stop_event", None) if _tl else None
             from kiss.agents.sorcar.useful_tools import UsefulTools
 
-            shell_tools = UsefulTools(stop_event=_stop_ev)
+            # The run's stop event (resolved once by ``_reset``), so
+            # Stop kills the summarizer's shell command too.
+            shell_tools = UsefulTools(stop_event=self._stop_event)
             # The caller (``perform_task``'s failure handler) banked
             # the failed executor's spend into ``self.budget_used``
             # before calling here, so the remaining budget is a plain
@@ -1660,9 +1688,7 @@ class RelentlessAgent(Base):
                 text, type="usage_info", total_tokens=tokens, cost=cost, total_steps=steps,
             )
 
-    def _usage_net_of_printer_offsets(
-        self, snapshot: tuple[float, int, int] | None = None,
-    ) -> tuple[float, int, int]:
+    def _usage_net_of_printer_offsets(self) -> tuple[float, int, int]:
         """Return this task's cumulative ``(budget, tokens, steps)`` minus the printer offsets.
 
         The printer adds its per-task offsets to every event's totals,
@@ -1672,10 +1698,6 @@ class RelentlessAgent(Base):
         them around the print, and an asynchronously injected stop
         could skip the restoration (round-4 finding 5).
 
-        Args:
-            snapshot: A :meth:`usage_snapshot` triple already taken by
-                the caller; a fresh one is taken when ``None``.
-
         Returns:
             The net ``(budget, tokens, steps)`` triple.
         """
@@ -1684,7 +1706,7 @@ class RelentlessAgent(Base):
         steps_offset = int(getattr(self.printer, "steps_offset", 0) or 0)
         # One coherent triple (see usage_snapshot): three separate
         # property reads could tear across a concurrent bank.
-        budget, tokens, steps = snapshot if snapshot is not None else self.usage_snapshot()
+        budget, tokens, steps = self.usage_snapshot()
         return budget - budget_offset, tokens - tokens_offset, steps - steps_offset
 
     def run(

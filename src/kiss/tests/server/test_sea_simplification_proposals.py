@@ -694,8 +694,8 @@ def test_agent_job_validates_its_arguments_and_sees_only_its_owners_jobs() -> No
     assert agent_job("nope") == "Error: unknown agent job 'nope'; this task's jobs: none."
     job = agent_dispatch.AgentJob(
         "agent-test0001", "x", owner, threading.Event(), threading.Event(),
-        threading.Thread(target=lambda: None),
     )
+    job.thread = threading.Thread(target=lambda: None)
     job.thread.start()
     job.thread.join()
     job.result = "done"

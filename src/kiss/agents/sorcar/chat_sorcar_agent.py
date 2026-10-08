@@ -41,6 +41,8 @@ from kiss.core._version import __version__
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.printer import parse_result_yaml
 
+logger = logging.getLogger(__name__)
+
 MAX_TASKS = 10
 DIGEST_FULL_RESULTS = 2
 """The newest prior tasks whose result is quoted in full in the chat prefix."""
@@ -101,6 +103,25 @@ def _digest_history(entries: list[dict[str, object]]) -> str:
             full -= 1
         else:
             return body[:DIGEST_MAX_PREFIX_CHARS].rstrip() + " …"
+
+
+def _safe_broadcast(broadcast: Any, event: dict[str, Any]) -> None:
+    """Send *event* through the printer's ``broadcast``, if it has one.
+
+    A UI-only notification (``new_tab``, ``tasks_updated``,
+    ``task_settings``): a failing transport is logged and never fails
+    the run.
+
+    Args:
+        broadcast: The printer's ``broadcast`` callable, or ``None``.
+        event: The event payload.
+    """
+    if broadcast is None:
+        return
+    try:
+        broadcast(event)
+    except Exception:
+        logger.warning("%s broadcast raised", event.get("type"), exc_info=True)
 
 
 def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
@@ -185,7 +206,6 @@ class ChatSorcarAgent(SorcarAgent):
         super().__init__(name)
         self._chat_id: str = ""
         self._context_task_id: str = ""
-        self._subagent_info: dict[str, object] | None = None
         # File stem of the SEA (SEA, wire field ``seaPath``)
         # this run executes on behalf of, e.g. ``write_paper_sea`` or
         # ``cron_agent``; set by the task runner and persisted in the
@@ -200,11 +220,6 @@ class ChatSorcarAgent(SorcarAgent):
         # The ``task_settings`` payload of the latest run (model, work
         # dir, budget and ``run_config``); empty before the first run.
         self.task_settings: dict[str, object] = {}
-        # Frontend tab this agent's events belong to.  The fan-out
-        # engine assigns each sub-agent its own synthetic tab id, so
-        # the attribute lives here rather than on the worktree
-        # subclass that also sets it.
-        self._tab_id: str = ""
         self._last_task_id: str | None = None
         self._last_user_prompt: str = ""
         self._last_result_summary: str = ""
@@ -465,7 +480,7 @@ class ChatSorcarAgent(SorcarAgent):
         prompt: str,
         result_raw: str,
         result_summary: str,
-        usage: tuple[float, int, int] | None = None,
+        usage: tuple[float, int, int],
     ) -> None:
         """Persist a minimal replayable event stream when none was recorded.
 
@@ -496,17 +511,14 @@ class ChatSorcarAgent(SorcarAgent):
                 (used to recover ``success`` / ``is_continue``).
             result_summary: The extracted human-readable summary text.
             usage: One coherent ``(budget_used, total_tokens_used,
-                total_steps)`` triple to stamp on the ``result`` event;
-                taken from :meth:`usage_snapshot` when ``None``.
+                total_steps)`` triple (:meth:`usage_snapshot`) to stamp
+                on the ``result`` event.
         """
         if _task_has_transcript_events(task_id):
             return
-        prompt_text = prompt or ""
-        if prompt_text:
-            _append_chat_event(
-                {"type": "prompt", "text": prompt_text}, task_id=task_id,
-            )
-        cost, tokens, steps = usage if usage is not None else self.usage_snapshot()
+        if prompt:
+            _append_chat_event({"type": "prompt", "text": prompt}, task_id=task_id)
+        cost, tokens, steps = usage
         event: dict[str, object] = {
             "type": "result",
             "text": result_summary or "(no result)",
@@ -627,8 +639,13 @@ class ChatSorcarAgent(SorcarAgent):
         # the way ``_reset`` will resolve them: the early history row,
         # the ``task_settings`` event, and the final save must all
         # agree with the run itself — not echo raw (possibly omitted)
-        # kwargs that the run later resolves differently.
-        resolved_model = self._resolve_model_name(kwargs.get("model_name"))
+        # kwargs that the run later resolves differently.  The model
+        # is resolved HERE, once, and passed down: the fallback reads
+        # the user's config, which the picker may change between two
+        # reads (see ``SorcarAgent._resolve_model_name``).
+        resolved_model = kwargs["model_name"] = self._resolve_model_name(
+            kwargs.get("model_name"),
+        )
         resolved_budget = (
             run_max_budget if run_max_budget is not None else DEFAULT_MAX_BUDGET
         )
@@ -694,6 +711,7 @@ class ChatSorcarAgent(SorcarAgent):
         # orphan key, so the parent's tab under-counted until its own
         # thread rewrote the offset.
         previous_task_id = ""
+        broadcast = getattr(printer, "broadcast", None)
         try:
             if printer is not None:
                 tl = getattr(printer, "_thread_local", None)
@@ -704,38 +722,22 @@ class ChatSorcarAgent(SorcarAgent):
                 if allocated is not None:
                     allocated(self, task_id, self._chat_id)
                 if self._subagent_info is not None:
-                    broadcast = getattr(printer, "broadcast", None)
-                    if broadcast is not None:
-                        try:
-                            sub_info = self._subagent_info or {}
-                            parent_tab_id_payload = sub_info.get(
-                                "parent_tab_id", "",
-                            )
-                            broadcast({
-                                "type": "new_tab",
-                                "task_id": task_id,
-                                "parent_tab_id": parent_tab_id_payload,
-                                "taskId": "",
-                            })
-                        except Exception:
-                            pass
+                    _safe_broadcast(broadcast, {
+                        "type": "new_tab",
+                        "task_id": task_id,
+                        "parent_tab_id": self._subagent_info.get("parent_tab_id", ""),
+                        "taskId": "",
+                    })
                 start_rec = getattr(printer, "start_recording", None)
                 if start_rec is not None:
                     start_rec()
-                broadcast = getattr(printer, "broadcast", None)
-                if broadcast is not None:
-                    try:
-                        broadcast({"type": "tasks_updated", "taskId": ""})
-                    except Exception:
-                        pass
+                _safe_broadcast(broadcast, {"type": "tasks_updated", "taskId": ""})
             if on_task_id_allocated is not None:
                 try:
                     on_task_id_allocated(task_id, self._chat_id)
                 except Exception:
-                    logging.getLogger(__name__).warning(
-                        "on_task_id_allocated(%r) raised",
-                        task_id,
-                        exc_info=True,
+                    logger.warning(
+                        "on_task_id_allocated(%r) raised", task_id, exc_info=True,
                     )
             # Kept on the agent too: a fan-out parent reads the child's
             # settings back for the ``ran:`` line of its result.  The
@@ -762,22 +764,16 @@ class ChatSorcarAgent(SorcarAgent):
                     {"type": "task_settings", "settings": self.task_settings},
                     task_id=task_id,
                 )
-            if printer is not None:
-                # Emitted AFTER on_task_id_allocated: the server's
-                # WebPrinter only sends a task event's stamped copies
-                # to tabs subscribed via register_task_ui, which that
-                # callback performs.  The event is also recorded and
-                # persisted (``task_settings`` is a display event), so
-                # replays and shares repopulate the static task
-                # panel's settings info.
-                broadcast = getattr(printer, "broadcast", None)
-                if broadcast is not None:
-                    try:
-                        broadcast({"type": "task_settings", "settings": self.task_settings})
-                    except Exception:
-                        logging.getLogger(__name__).warning(
-                            "task_settings broadcast raised", exc_info=True,
-                        )
+            # Emitted AFTER on_task_id_allocated: the server's
+            # WebPrinter only sends a task event's stamped copies
+            # to tabs subscribed via register_task_ui, which that
+            # callback performs.  The event is also recorded and
+            # persisted (``task_settings`` is a display event), so
+            # replays and shares repopulate the static task
+            # panel's settings info.
+            _safe_broadcast(
+                broadcast, {"type": "task_settings", "settings": self.task_settings},
+            )
             if self._subagent_info is None:
                 _record_frequent_task(history_prompt)
 
@@ -800,10 +796,8 @@ class ChatSorcarAgent(SorcarAgent):
                     try:
                         finished(self, task_key)
                     except Exception:
-                        logging.getLogger(__name__).warning(
-                            "agent_task_finished(%r) raised",
-                            task_key,
-                            exc_info=True,
+                        logger.warning(
+                            "agent_task_finished(%r) raised", task_key, exc_info=True,
                         )
                 stop_rec = getattr(printer, "stop_recording", None)
                 if stop_rec is not None:
@@ -830,11 +824,7 @@ class ChatSorcarAgent(SorcarAgent):
                 # carry a blank or the previous run's directory/budget
                 # into this row.
                 if run_started:
-                    final_model = (
-                        getattr(self, "_launch_model_name", "")
-                        or getattr(self, "model_name", "")
-                        or resolved_model
-                    )
+                    final_model = self._launch_model_name or resolved_model
                     final_is_parallel = self._is_parallel
                 else:
                     final_model = resolved_model
