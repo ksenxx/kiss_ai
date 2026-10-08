@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.persistence import (
-    _delete_frequent_task,
     _record_file_usage,
     _record_model_usage,
     _record_steer_input,
@@ -386,9 +385,6 @@ class _CommandsMixin:
             generation: int = 0,
             conn_id: str = "",
             tag: str = "",
-        ) -> None: ...
-        def _get_frequent_tasks(
-            self, limit: int = 50, conn_id: str = "",
         ) -> None: ...
         def _get_files(
             self,
@@ -991,22 +987,6 @@ class _CommandsMixin:
             cmd.get("connId", ""),
             tag if isinstance(tag, str) else "",
         )
-
-    def _cmd_get_frequent_tasks(self, cmd: dict[str, Any]) -> None:
-        """Send the top-N most-frequent tasks (default 50)."""
-        limit = _parse_int(cmd.get("limit", 50))
-        self._get_frequent_tasks(
-            50 if limit is None else limit, cmd.get("connId", ""),
-        )
-
-    def _cmd_delete_frequent_task(self, cmd: dict[str, Any]) -> None:
-        """Delete a row from the ``frequent_tasks`` table by task text."""
-        task = cmd.get("task")
-        if isinstance(task, str) and task and _delete_frequent_task(task):
-            # Re-emit the list so every other open webview rerenders
-            # without the row (the originating one removed it
-            # optimistically).
-            self._get_frequent_tasks()
 
     def _cmd_set_favorite(self, cmd: dict[str, Any]) -> None:
         """Persist the favourite flag on a task history row."""
@@ -2559,8 +2539,6 @@ class _CommandsMixin:
         "getModels": _cmd_get_models,
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,
-        "getFrequentTasks": _cmd_get_frequent_tasks,
-        "deleteFrequentTask": _cmd_delete_frequent_task,
         "setFavorite": _cmd_set_favorite,
         "getFiles": _cmd_get_files,
         "recordFileUsage": _cmd_record_file_usage,

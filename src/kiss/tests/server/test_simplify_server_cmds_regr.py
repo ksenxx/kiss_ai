@@ -140,18 +140,6 @@ def test_bad_task_ids_are_ignored_without_broadcast() -> None:
 
 
 
-def test_get_frequent_tasks_conn_id_stamping() -> None:
-    server, printer = _make_server()
-    printer.events.clear()
-    server._get_frequent_tasks(conn_id="c9")
-    server._get_frequent_tasks()
-    assert len(printer.events) == 2
-    assert printer.events[0]["type"] == "frequentTasks"
-    assert printer.events[0]["connId"] == "c9"
-    assert printer.events[1]["type"] == "frequentTasks"
-    assert "connId" not in printer.events[1]
-
-
 def test_get_input_history_conn_id_stamping() -> None:
     server, printer = _make_server()
     printer.events.clear()

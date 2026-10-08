@@ -310,9 +310,7 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   newChat: ['tabId'],
   openTab: ['tabId', 'title', 'workDir'],
   getHistory: ['query', 'tag', 'offset', 'generation'],
-  getFrequentTasks: ['limit'],
   setFavorite: ['taskId', 'isFavorite'],
-  deleteFrequentTask: ['task'],
   // tabId must survive: the daemon echoes it on the `files` reply so the
   // webview can tell whether the @-mention picker still belongs to the
   // conversation on screen.
