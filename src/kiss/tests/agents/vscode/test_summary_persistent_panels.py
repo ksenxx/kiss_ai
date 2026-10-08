@@ -198,14 +198,22 @@ def test_user_response_is_a_right_aligned_user_message(chat_page: Page) -> None:
     "media",
     ["![diagram](/media/kiss-icon.png)", '<video controls width="160" height="90"></video>'],
 )
-def test_rendered_media_stays_after_summary(chat_page: Page, media: str) -> None:
-    """Markdown images and HTML video survive streaming, summaries, and replay."""
+def test_thoughts_with_media_fold_into_summary(chat_page: Page, media: str) -> None:
+    """A Thoughts panel joins the digest even when its Markdown shows media.
+
+    Only tool-result media panels stay expanded after the summary; the
+    agent's own Thoughts are folded like every other recounted step.
+    """
     page = chat_page
-    events = [
+    events: list[dict[str, Any]] = [
         {"type": "text_delta", "text": "ordinary thoughts"},
         {"type": "text_end"},
-        {"type": "tool_call", "name": "Read"},
-        {"type": "tool_result", "content": "plain"},
+        {"type": "tool_call", "name": "screenshot"},
+        {
+            "type": "tool_result",
+            "content": "image",
+            "images": [{"path": "shot.png", "mime": "image/png", "b64": PNG}],
+        },
         {"type": "text_delta", "text": media},
         {"type": "text_end"},
         {"type": "tool_call", "name": "Read"},
@@ -215,13 +223,19 @@ def test_rendered_media_stays_after_summary(chat_page: Page, media: str) -> None
     _send(page, [{"type": "clear"}, {"type": "status", "running": True}, *events])
     summary = page.locator("#output > .tc-summary")
     expect(summary.locator(":scope > .tc-h")).to_have_attribute("aria-expanded", "false")
-    expect(summary.locator(".summary-sub .llm-panel")).to_have_count(1)
-    visual = page.locator("#output > .llm-panel img, #output > .llm-panel video")
-    expect(visual).to_be_visible()
-    assert visual.evaluate(
-        "el => el.closest('.llm-panel').previousElementSibling.classList.contains('tc-summary')"
-    )
-    # Finished-task replay retains the independent outer Trajectory fold.
+    expect(summary.locator(".summary-sub > .llm-panel")).to_have_count(2)
+    expect(summary.locator(".summary-sub > .tc")).to_have_count(1)
+    expect(page.locator("#output > .llm-panel")).to_have_count(0)
+    expect(page.locator("#output > .tc-summary ~ .tc:has(img.tr-img)")).to_be_visible()
+    thought_media = summary.locator(".summary-sub .llm-panel img, .summary-sub .llm-panel video")
+    expect(thought_media).to_have_count(1)
+    expect(thought_media).to_be_hidden()
+    # Opening the digest shows the folded Thoughts and its media again.
+    summary.locator(":scope > .tc-h").click()
+    expect(thought_media).to_be_visible()
+    summary.locator(":scope > .tc-h").click()
+    # Finished-task replay folds the Thoughts the same way inside the
+    # independent outer Trajectory fold.
     events.append({"type": "result", "summary": "done", "success": True})
     _send(
         page,
@@ -231,8 +245,9 @@ def test_rendered_media_stays_after_summary(chat_page: Page, media: str) -> None
         ],
     )
     page.locator("#output > .trajectory > .trajectory-h").click()
-    visual = page.locator(".trajectory-sub > .llm-panel img, .trajectory-sub > .llm-panel video")
-    expect(visual).to_be_visible()
+    expect(page.locator(".trajectory-sub > .llm-panel")).to_have_count(0)
+    expect(page.locator(".trajectory-sub > .tc-summary .summary-sub > .llm-panel")).to_have_count(2)
+    expect(page.locator(".trajectory-sub > .tc-summary ~ .tc:has(img.tr-img)")).to_be_visible()
     expect(page.locator(".tc-summary > .summary-sub")).to_be_hidden()
 
 
