@@ -99,11 +99,11 @@ function snapshotEntry(tabId, title, chatId, workDir) {
 
 // --- ready / boot ---------------------------------------------------------
 
-function testReadyCarriesLegacyTabsOnce() {
-  // A pre-registry client persisted its tab set locally; the first
-  // `ready` must carry it (with title + workDir) for the one-time
-  // migration into an empty daemon registry.
-  const legacyState = {
+function testReadyIgnoresStaleLocalTabSet() {
+  // Tabs come from the daemon's registry alone: a `tabs` key left in
+  // local storage by a pre-registry client is neither restored on
+  // screen nor carried into `ready`.
+  const staleState = {
     tabs: [
       {
         title: 'Old task',
@@ -111,22 +111,14 @@ function testReadyCarriesLegacyTabsOnce() {
         backendChatId: 'chat-1',
         workDir: '/w1',
       },
-      // Unbound legacy tabs carry no content: not announced.
-      {title: 'empty', chatId: 'legacy-tab-2', backendChatId: ''},
-      // Duplicate chat binding: announced once.
-      {title: 'dup', chatId: 'legacy-tab-3', backendChatId: 'chat-1'},
     ],
     chatId: 'legacy-tab-1',
   };
-  const {win, posted} = makeWebview(legacyState);
+  const {win, posted} = makeWebview(staleState);
   const readies = msgsOf(posted, 'ready');
   assert.strictEqual(readies.length, 1, 'exactly one ready at boot');
-  assert.deepStrictEqual(plain(readies[0].restoredTabs), [
-    {tabId: 'legacy-tab-1', chatId: 'chat-1', title: 'Old task',
-     workDir: '/w1'},
-  ]);
-  // The legacy tab set is NOT restored locally: the placeholder tab is
-  // on screen until the daemon's snapshot arrives.
+  assert.deepStrictEqual(plain(readies[0].restoredTabs), []);
+  // The placeholder tab is on screen until the daemon's snapshot arrives.
   assert.strictEqual(tabBarIds(win).length, 1);
 }
 
@@ -422,7 +414,7 @@ function testCloseTabStillAnnouncedToDaemon() {
 }
 
 const tests = [
-  testReadyCarriesLegacyTabsOnce,
+  testReadyIgnoresStaleLocalTabSet,
   testReadyWithoutLegacyStateSendsEmptyRestoredTabs,
   testTabsAreNoLongerPersistedLocally,
   testSnapshotAdoptsTabsAndDropsPlaceholder,
