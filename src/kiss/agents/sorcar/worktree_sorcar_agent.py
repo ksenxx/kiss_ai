@@ -142,6 +142,27 @@ def _rescue_failed_warning(wt: GitWorktree) -> str:
     )
 
 
+def _rescue_ignored_files(wt: GitWorktree) -> bool:
+    """Copy *wt*'s git-ignored task output into its main repository.
+
+    Wraps :meth:`GitWorktreeOps.rescue_ignored_files` so a filesystem
+    failure inside the rescue is logged and reported as a failed
+    rescue instead of escaping into a teardown path.
+
+    Args:
+        wt: The worktree about to be removed.
+
+    Returns:
+        True when every ignored file was landed (or none existed).
+    """
+    try:
+        _, rescue_ok = GitWorktreeOps.rescue_ignored_files(wt.wt_dir, wt.repo_root)
+    except Exception:  # pragma: no cover — filesystem failure
+        logger.warning("Ignored-file rescue failed for %s", wt.wt_dir, exc_info=True)
+        return False
+    return rescue_ok
+
+
 def _merge_fix_steps(wt: GitWorktree, fix_lines: str) -> str:
     """Return the shell command block for manually completing a failed merge.
 
@@ -491,17 +512,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             # rescue fails closed: when a file could not be landed in
             # the main repo, the worktree is preserved — removing it
             # would destroy the only copy.
-            try:
-                _, rescue_ok = GitWorktreeOps.rescue_ignored_files(
-                    wt.wt_dir, wt.repo_root,
-                )
-            except Exception:  # pragma: no cover — filesystem failure
-                logger.warning(
-                    "Ignored-file rescue failed for %s",
-                    wt.wt_dir, exc_info=True,
-                )
-                rescue_ok = False
-            if not rescue_ok:
+            if not _rescue_ignored_files(wt):
                 return _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED, ""
         # No separate ``prune`` is issued: :meth:`GitWorktreeOps.remove`
         # prunes on every path that can leave a stale registration —
@@ -665,21 +676,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 
             user_prompt = getattr(self, "_last_user_prompt", "") or None
             task_result = getattr(self, "_last_result_summary", "") or None
-            if wt.baseline_commit:
-                result = GitWorktreeOps.squash_merge_from_baseline(
-                    wt.repo_root,
-                    wt.branch,
-                    wt.baseline_commit,
-                    user_prompt=user_prompt,
-                    task_result=task_result,
-                )
-            else:
-                result = GitWorktreeOps.squash_merge_branch(
-                    wt.repo_root,
-                    wt.branch,
-                    user_prompt=user_prompt,
-                    task_result=task_result,
-                )
+            result = GitWorktreeOps.squash_merge(
+                wt.repo_root, wt.branch, wt.baseline_commit,
+                user_prompt=user_prompt, task_result=task_result,
+            )
             if result == MergeResult.CONFLICT and conflict_resolver is not None:
                 try:
                     result = conflict_resolver(self, wt, user_prompt, task_result)
@@ -1880,17 +1880,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # behind.  Same ``repo_lock`` → flock order as everywhere else.
         with repo_lock(wt.repo_root), _reclaim_process_lock(wt.repo_root):
             if rescue_ignored and wt.wt_dir.exists():
-                try:
-                    _, rescue_ok = GitWorktreeOps.rescue_ignored_files(
-                        wt.wt_dir, wt.repo_root,
-                    )
-                except Exception:  # pragma: no cover — filesystem failure
-                    logger.warning(
-                        "Ignored-file rescue failed for %s",
-                        wt.wt_dir, exc_info=True,
-                    )
-                    rescue_ok = False
-                if not rescue_ok:
+                if not _rescue_ignored_files(wt):
                     # Fail closed: this automatic discard runs because
                     # the changed-files probe saw nothing, so the
                     # ignored files are the worktree's ONLY content —
