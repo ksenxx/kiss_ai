@@ -472,14 +472,17 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
         (harness.work_dir / "dir" / "main-only.txt").write_text("keep\n")
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
-        message = _answer_confirm(page, "fs-overwrite", accept=False)
+        # One question per destination (a multi-entry paste asks once
+        # per clash): the toast id carries the destination folder.
+        overwrite_id = f"fs-overwrite:{harness.work_dir}/dir"
+        message = _answer_confirm(page, overwrite_id, accept=False)
         assert "already exists" in message
         page.wait_for_timeout(300)
         assert (harness.work_dir / "dir" / "main-only.txt").read_text() == "keep\n"
         # "Replace" replaces it.
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
-        _answer_confirm(page, "fs-overwrite", accept=True)
+        _answer_confirm(page, overwrite_id, accept=True)
         # The server renames the old file aside and copies the new one in;
         # a read landing inside that window finds no file or, on Windows,
         # a copy still holding the target exclusively.  Neither is torn.
