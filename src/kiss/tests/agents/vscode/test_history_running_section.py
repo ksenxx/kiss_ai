@@ -121,7 +121,10 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
         endpoint_file=Path(harness.tmpdir) / "sorcar-local.json",
         running=started,
         cancel=cancel,
-        timeout=180,
+        # The task must outlive every UI step below: a parallel full-suite
+        # run stretches them well past 180 s, and a task stopped early
+        # drops out of the Running section before the test releases it.
+        timeout=600,
         stop_on_timeout=True,
     )
     try:
