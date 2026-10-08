@@ -452,7 +452,6 @@ body.content-tab-open #chat-machine { display: none; }
 .status-metric:not(:empty)::before { content: '·'; margin-right: var(--space-0-5); }
 #status-text { color: var(--dim); }
 
-
 /* The tab rows (renderTabBar).  There is no row of chat tabs: the
    chat on screen is the one picked in the Chats panel.  #tab-bar, the
    group strip, lists the chat on screen with its sub-agents (and, on a
@@ -496,9 +495,6 @@ body.content-tab-open #chat-machine { display: none; }
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
-
-
-
 
 .config-label {
   display: block;
@@ -704,8 +700,6 @@ body.content-tab-open #chat-machine { display: none; }
 .config-password-toggle:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 .config-password-toggle:focus-visible { outline: 1px solid var(--accent); }
 
-
-
 #tab-list::-webkit-scrollbar { display: none; }
 
 .chat-tab {
@@ -809,7 +803,6 @@ body.content-tab-open #chat-machine { display: none; }
   line-height: 1;
   color: var(--dim);
   flex-shrink: 0;
-  opacity: 1;
 }
 .chat-tab-close:hover { background: color-mix(in srgb, var(--fg) 15%, transparent); color: var(--fg); }
 
@@ -905,12 +898,7 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
   width: 90%;
 }
 
-.task-panel-h {
-  padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
-  font-weight: 400; letter-spacing: .04em;
-  color: var(--dim);
-}
-.task-panel-h:hover { color: var(--fg); }
+/* .task-panel-h shares the panel-header style below (.tc-h). */
 
 .task-panel-text {
   padding: var(--space-2) var(--space-3);
@@ -1072,7 +1060,7 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 }
 .txt pre code { background: none; padding: 0; }
 
-.tc {
+.tc, .trajectory, .system-prompt, .prompt, .ask-answer {
   border: 1px solid var(--border); border-radius: var(--radius-lg); margin: var(--space-2) 0;
   overflow: hidden; background: var(--surface);
 }
@@ -1084,12 +1072,12 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
    Small caps at the regular weight, never bold; no chevron, no
    background and no border of its own: the header is a plain text
    line inside the panel's single outer border. */
-.tc-h {
+.tc-h, .task-panel-h, .trajectory-h, .system-prompt-h, .prompt-h {
   padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
   font-weight: 400; letter-spacing: .04em;
   color: var(--dim);
 }
-.tc-h:hover { color: var(--fg); }
+.tc-h:hover, .task-panel-h:hover, .trajectory-h:hover { color: var(--fg); }
 
 /* While a panel is active (panel.panel-active: a tool call from its
    tool_call to its tool_result, the Thoughts panel while the model
@@ -1112,18 +1100,8 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 
 /* The Trajectory panel a finished task's event panels fold into
    (foldTrajectory in main.js): the tool-call panel's frame and quiet
-   header around the task's panels (.trajectory-sub below). */
-.trajectory {
-  border: 1px solid var(--border); border-radius: var(--radius-lg); margin: var(--space-2) 0;
-  overflow: hidden; background: var(--surface);
-}
-
-.trajectory-h {
-  padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
-  font-weight: 400; letter-spacing: .04em;
-  color: var(--dim);
-}
-.trajectory-h:hover { color: var(--fg); }
+   header (.trajectory / .trajectory-h share .tc's rules above) around
+   the task's panels (.trajectory-sub below). */
 .trajectory.collapsed > :not(.trajectory-h, .panel-copy-btn) { display: none; }
 
 /* ask_user_question renders as the "Question" panel: translucent red
@@ -1299,28 +1277,15 @@ body.ask-answering #input-container {
 .rc-status { color: var(--status-ok); font-weight: 700; font-size: var(--fs-xl); margin-bottom: var(--space-2-5); }
 .rc-status.rc-status-fail { color: var(--status-fail); }
 
-.system-prompt, .prompt {
-  border: 1px solid var(--border); border-radius: var(--radius-lg); margin: var(--space-2) 0;
-  overflow: hidden; background: var(--surface);
-}
-
-.system-prompt-h, .prompt-h {
-  padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
-  font-weight: 400; letter-spacing: .04em;
-  color: var(--dim);
-}
-
+/* .system-prompt / .prompt and their headers share .tc's rules above. */
 .system-prompt-body, .prompt-body {
   padding: var(--space-2) var(--space-3); font-size: var(--fs-md); word-break: break-word;
   line-height: 1.6; max-height: 400px; overflow-y: auto;
 }
 
 /* The finished `/ask` answer, shown inside the running task's transcript
-   (the answering sub-agent's nested tab closes when it ends). */
-.ask-answer {
-  border: 1px solid var(--border); border-radius: var(--radius-lg); margin: var(--space-2) 0;
-  overflow: hidden; background: var(--surface);
-}
+   (the answering sub-agent's nested tab closes when it ends); its frame
+   is .tc's above. */
 .ask-answer.failed { border-color: var(--status-fail); }
 
 .ask-answer-h {
@@ -1473,8 +1438,6 @@ body.ask-answering #input-container {
 @keyframes kiss-listening-blink {
   50% { opacity: 0; }
 }
-
-
 
 #task-input:disabled {
   opacity: 0.45;
@@ -2501,12 +2464,13 @@ body.meta-panel-mode #meta-panel {
   overflow: hidden;
 }
 
-body.meta-panel-mode #meta-close,
 body.meta-panel-mode #meta-resizer { display: none !important; }
 
 /* Section bodies flex and scroll per the generic .meta-section-body
-   rules above; the per-mode rules here only style the content. */
-body.meta-panel-mode #meta-list {
+   rules above; the per-mode rules here only style the content, and
+   sidebar-chat mode (the drawer below) styles it the same way. */
+body.meta-panel-mode #meta-list,
+body.sidebar-chat-mode #meta-list {
   list-style: disc outside;
   margin: 0;
   padding-left: var(--space-4);
@@ -2526,23 +2490,27 @@ body.meta-panel-mode #meta-list {
    bold: which daemon's machine a task runs on is read first. */
 #meta-machine { font-weight: 700; }
 
-body.meta-panel-mode .meta-item {
+body.meta-panel-mode .meta-item,
+body.sidebar-chat-mode .meta-item {
   display: list-item;
   font-size: var(--fs-sm);
   color: var(--fg);
   overflow-wrap: anywhere;
 }
 
-body.meta-panel-mode .meta-item .meta-label {
+body.meta-panel-mode .meta-item .meta-label,
+body.sidebar-chat-mode .meta-item .meta-label {
   color: var(--dim);
   margin-right: var(--space-1-5);
 }
 
-body.meta-panel-mode .meta-item .meta-value {
+body.meta-panel-mode .meta-item .meta-value,
+body.sidebar-chat-mode .meta-item .meta-value {
   color: var(--fg);
 }
 
-body.meta-panel-mode #meta-info-content {
+body.meta-panel-mode #meta-info-content,
+body.sidebar-chat-mode #meta-info-content {
   font-size: var(--fs-sm);
   color: var(--fg);
   overflow-wrap: anywhere;
@@ -2604,37 +2572,6 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
   padding-right: var(--space-10);
 }
 
-body.sidebar-chat-mode #meta-list {
-  list-style: disc outside;
-  margin: 0;
-  padding-left: var(--space-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-body.sidebar-chat-mode .meta-item {
-  display: list-item;
-  font-size: var(--fs-sm);
-  color: var(--fg);
-  overflow-wrap: anywhere;
-}
-
-body.sidebar-chat-mode .meta-item .meta-label {
-  color: var(--dim);
-  margin-right: var(--space-1-5);
-}
-
-body.sidebar-chat-mode .meta-item .meta-value {
-  color: var(--fg);
-}
-
-body.sidebar-chat-mode #meta-info-content {
-  font-size: var(--fs-sm);
-  color: var(--fg);
-  overflow-wrap: anywhere;
-}
-
 /* The dimming backdrop behind every side panel -- history sidebar,
    task info drawer, settings, frequent tasks, tricks, working
    directory: one rule, six ids. */
@@ -2685,54 +2622,10 @@ body.sidebar-chat-mode #meta-info-content {
 
 #settings-panel.open { visibility: visible; }
 
-#frequent-panel {
-  position: fixed;
-  left: 5%;
-  right: 5%;
-  bottom: 0;
-  width: 90%;
-  height: 75vh;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-top-left-radius: var(--radius-lg);
-  border-top-right-radius: var(--radius-lg);
-  transform: translateY(100%);
-  transition: transform var(--dur-slow) var(--ease);
-  z-index: var(--z-drawer);
-  padding: var(--space-4);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-#frequent-panel.open { transform: translateY(0); }
-
-#tricks-panel {
-  position: fixed;
-  left: 5%;
-  right: 5%;
-  bottom: 0;
-  width: 90%;
-  height: 60vh;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-top-left-radius: var(--radius-lg);
-  border-top-right-radius: var(--radius-lg);
-  transform: translateY(100%);
-  transition: transform var(--dur-slow) var(--ease);
-  z-index: var(--z-drawer);
-  padding: var(--space-4);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-#tricks-panel.open { transform: translateY(0); }
-
-/* The "Working directory" bottom sheet ("..." menu): same geometry as
-   the Inject sheet. */
+/* The bottom sheets ("..." menu): frequent tasks, promptlets and the
+   working directory share one geometry; only their height differs. */
+#frequent-panel,
+#tricks-panel,
 #workdir-panel {
   position: fixed;
   left: 5%;
@@ -2754,6 +2647,10 @@ body.sidebar-chat-mode #meta-info-content {
   flex-direction: column;
 }
 
+#frequent-panel { height: 75vh; }
+
+#frequent-panel.open,
+#tricks-panel.open,
 #workdir-panel.open { transform: translateY(0); }
 
 /* The "x" of every side panel; the bottom sheets' buttons also stack
@@ -4264,7 +4161,8 @@ body.pdf-preview-body {
    (.chat-tab-attention) in the spinner's place while the task waits
    for the user's answer. */
 .sidebar-item-failed { color: var(--status-fail); margin-right: var(--space-2); }
-.sidebar-item-running { color: var(--status-ok); margin-right: var(--space-2); }
+
+.sidebar-item-running,
 .sidebar-item-completed { color: var(--status-ok); margin-right: var(--space-2); }
 
 .sidebar-item-running.sidebar-item-asking {
@@ -4471,7 +4369,7 @@ body.remote-chat .running-item.history-active-task:hover {
 
 .sidebar-item-copy.copied { opacity: 0.9; color: var(--status-ok); }
 
-.sidebar-item-favorite.favorited { color: var(--favorite); opacity: 1; }
+.sidebar-item-favorite.favorited,
 .sidebar-item-favorite.favorited:hover { color: var(--favorite); opacity: 1; }
 
 /* A task panel in the task-history list gives its favourite / copy /
@@ -4521,7 +4419,10 @@ body.remote-chat .running-item.history-active-task:hover {
   box-sizing: border-box;
 }
 
-.auth-modal-title {
+/* The title, button row and buttons are shared with the server-reset
+   confirm dialog below. */
+.auth-modal-title,
+.server-reset-confirm-title {
   font-size: var(--fs-xl); font-weight: 600; color: var(--fg); margin-bottom: var(--space-3);
 }
 
@@ -4533,21 +4434,27 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 .auth-modal-input:focus { border-color: var(--accent); }
 
-.auth-modal-actions {
+.auth-modal-actions,
+.server-reset-confirm-actions {
   display: flex; justify-content: flex-end; gap: var(--space-2);
 }
 
-.auth-modal-btn {
+.auth-modal-btn,
+.server-reset-confirm-btn {
   border-radius: var(--radius-md); font-size: var(--fs-base); font-weight: 500;
   padding: var(--space-1-5) var(--space-3); cursor: pointer; transition: opacity var(--dur-base), background var(--dur-base);
 }
-.auth-modal-btn:hover { opacity: 0.9; }
 
-.auth-modal-cancel {
+.auth-modal-btn:hover,
+.server-reset-confirm-btn:hover { opacity: 0.9; }
+
+.auth-modal-cancel,
+.server-reset-confirm-cancel {
   background: transparent; border: 1px solid var(--border); color: var(--fg);
 }
 
-.auth-modal-ok {
+.auth-modal-ok,
+.server-reset-confirm-ok {
   background: var(--accent); border: 1px solid var(--accent);
   color: var(--vscode-button-foreground);
 }
@@ -4567,34 +4474,10 @@ body.remote-chat .running-item.history-active-task:hover {
   box-sizing: border-box; box-shadow: var(--shadow-lg);
 }
 
-.server-reset-confirm-title {
-  font-size: var(--fs-xl); font-weight: 600; color: var(--fg);
-  margin-bottom: var(--space-3);
-}
-
 .server-reset-confirm-message {
   font-size: var(--fs-lg); color: color-mix(in srgb, var(--fg) 83%, transparent);
   margin-bottom: var(--space-4); line-height: 1.5;
   overflow-wrap: anywhere; word-break: break-word;
-}
-
-.server-reset-confirm-actions {
-  display: flex; justify-content: flex-end; gap: var(--space-2);
-}
-
-.server-reset-confirm-btn {
-  border-radius: var(--radius-md); font-size: var(--fs-base); font-weight: 500;
-  padding: var(--space-1-5) var(--space-3); cursor: pointer; transition: opacity var(--dur-base), background var(--dur-base);
-}
-.server-reset-confirm-btn:hover { opacity: 0.9; }
-
-.server-reset-confirm-cancel {
-  background: transparent; border: 1px solid var(--border); color: var(--fg);
-}
-
-.server-reset-confirm-ok {
-  background: var(--accent); border: 1px solid var(--accent);
-  color: var(--vscode-button-foreground);
 }
 
 .md-body p { margin: var(--space-1) 0; }
@@ -4900,7 +4783,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .ask-answer.collapsed .ask-answer-body { display: none; }
 
 .tr.collapsed .tr-content { display: none; }
-
 
 /* Scrollbars: a 4px pill thumb riding in a 6px bare gutter (the 1px
    transparent border keeps it off the content edge), faint at rest

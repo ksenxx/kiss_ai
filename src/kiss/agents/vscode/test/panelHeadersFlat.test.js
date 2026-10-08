@@ -133,7 +133,13 @@ function testToolCallHeaderIsFlat() {
   let tcRule = null;
   for (const sheet of win.document.styleSheets) {
     for (const rule of sheet.cssRules) {
-      if (rule.selectorText === '.tc') tcRule = rule;
+      // .tc shares its frame rule with the other panel frames: the
+      // selector list names them all.
+      if (
+        rule.selectorText &&
+        rule.selectorText.split(',').some(x => x.trim() === '.tc')
+      )
+        tcRule = rule;
     }
   }
   assert.ok(tcRule, 'main.css declares .tc');

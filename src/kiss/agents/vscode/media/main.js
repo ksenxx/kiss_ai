@@ -1006,11 +1006,6 @@
   // undecodable HEIC on a browser without HEIC support, an unreadable file).
   // Rendered next to the file chips so a failed attachment is never silent.
   let attachErrors = [];
-  // While a send is parked waiting for an attachment to finish converting,
-  // `tab.awaitingAttachments` is set on the tab that submitted, so repeated
-  // Enter presses cannot submit the same prompt twice.  It lives on the tab,
-  // like the attachments themselves: a wait in one tab must not swallow the
-  // Enter of another.
   let _deferHighlight = false;
   // True while renderReplayedEvents rebuilds a transcript from recorded
   // events.  Per-event work that only matters for a live stream (folding
@@ -1458,7 +1453,6 @@
     tab.attachments = attachments;
     tab.attachErrors = attachErrors;
     tab.inputValue = inp.value;
-    tab.isRunning = isActiveTabRunning();
     tab.t0 = t0;
     tab.endTs = endTs;
     tab.streamState = state;
@@ -1500,6 +1494,24 @@
     reportChatTab(chatTabIdForHost());
   }
 
+  /**
+   * The chat tab at the root of *tab*'s owner chain: *tab* itself when
+   * it is a chat; for a content tab, the chat whose work produced it
+   * (a file opened FROM a file view names that view as its owner, so
+   * the chain is walked; the visited set fails closed on a cycle).
+   *
+   * @param {object|undefined} tab A tab object.
+   * @returns {object|null} The chat tab, or null when none is reached.
+   */
+  function rootChatTab(tab) {
+    const visited = new Set();
+    while (tab && tab.isContentTab && !visited.has(tab.id)) {
+      visited.add(tab.id);
+      tab = getTab(tab.ownerTabId);
+    }
+    return tab && !tab.isContentTab ? tab : null;
+  }
+
   // readychat-coverage:start
   /**
    * The id of the CHAT tab that represents this window to the host
@@ -1515,13 +1527,10 @@
    * @returns {string} A chat tab id, or ''.
    */
   function chatTabIdForHost() {
-    const active = getTab(activeTabId);
-    let chat = active && !active.isContentTab ? active : null;
-    if (!chat && active && active.isContentTab && active.ownerTabId) {
-      const ownerTab = getTab(active.ownerTabId);
-      if (ownerTab && !ownerTab.isContentTab) chat = ownerTab;
-    }
-    if (!chat) chat = tabs.find(t => !t.isContentTab) || null;
+    const chat =
+      rootChatTab(getTab(activeTabId)) ||
+      tabs.find(t => !t.isContentTab) ||
+      null;
     return chat ? chat.id : '';
   }
   // readychat-coverage:end
@@ -1537,16 +1546,8 @@
    * @returns {string} The id of the chat tab the action belongs to.
    */
   function chatTargetTabId() {
-    let tab = getTab(activeTabId);
-    // A file opened FROM a file view names that view as its owner, so
-    // the chain is walked to the chat at its root; the visited set
-    // fails closed on a cycle.
-    const visited = new Set();
-    while (tab && tab.isContentTab && !visited.has(tab.id)) {
-      visited.add(tab.id);
-      tab = getTab(tab.ownerTabId);
-    }
-    return tab && !tab.isContentTab ? tab.id : activeTabId;
+    const chat = rootChatTab(getTab(activeTabId));
+    return chat ? chat.id : activeTabId;
   }
 
   function restoreTab(tab) {
@@ -1632,8 +1633,7 @@
     clearGhost();
     hideAC();
     syncClearBtn();
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     t0 = tab.t0 || null;
     endTs = tab.endTs || 0;
     state = tab.streamState || mkS();
@@ -1866,8 +1866,7 @@
   // '×' controls keep tabindex=0 (they are separate buttons, not tabs,
   // and this keeps them directly Tab-reachable -- the simplest correct
   // option under the pattern).
-  // The arrow keys move within the row the focused tab is in (the main
-  // row or the group strip), never across rows.
+  // The arrow keys move within the group strip the focused tab is in.
   function moveTabFocus(fromEl, key) {
     const tabList = fromEl.parentElement;
     if (!tabList) return;
@@ -2053,10 +2052,6 @@
         }),
       );
     });
-
-    // The "+" (new chat), settings and theme controls used to live in
-    // this bar; they are now in the input footer (#new-chat-btn and the
-    // "..." overflow menu), so the bar carries only the tabs.
 
     // A hidden strip (a lone tab in the group) has nothing to scroll.
     const activeEl =
@@ -4033,11 +4028,7 @@
     // a straggling reply is ignored.
     clearTimeout(tab.contentSaveTimer);
     tab.contentSaveTimer = setTimeout(() => {
-      if (!tab.contentSaving) return;
-      tab.contentSaving = false;
-      tab.contentSaveToken = '';
-      tab.contentCloseAfterSave = false;
-      setContentSaveStatus(tab, 'Save failed: no reply from the server', true);
+      failContentSave(tab, 'Save failed: no reply from the server');
     }, 30000);
     api.saveFile({
       path: tab.contentPath,
@@ -4048,6 +4039,21 @@
       version: tab.contentFileVersion,
       force: !!force,
     });
+  }
+
+  /**
+   * Give up on the save *tab* is waiting for (its reply timed out or the
+   * connection that carried the request dropped): the tab stays dirty
+   * and the Save button works again, and a straggling reply is ignored
+   * because the token is retired.
+   */
+  function failContentSave(tab, message) {
+    if (!tab.contentSaving) return;
+    clearTimeout(tab.contentSaveTimer);
+    tab.contentSaving = false;
+    tab.contentSaveToken = '';
+    tab.contentCloseAfterSave = false;
+    setContentSaveStatus(tab, message, true);
   }
 
   // Re-read the file from disk into the tab, dropping its edits: the
@@ -4592,15 +4598,19 @@
       // Unsaved edits win over a fresh copy of the file: like VS Code,
       // opening a file that is already open in a dirty editor merely
       // brings that editor forward (and jumps to the requested line).
-      // Only an explicit reload replaces the text.
-      if (existing.contentDirty && !existing.contentReloadRequested) {
+      // Only an explicit reload replaces the text, and only the reply
+      // to the chat that asked for it is that reload (as in the error
+      // path above): another chat's open of the same path meanwhile
+      // must neither replace the edits nor consume the pending reload.
+      const reloading = existing.contentReloadRequested === owner;
+      if (existing.contentDirty && !reloading) {
         const line = parseInt(ev.line, 10);
         existing.contentRevealLine = line > 0 ? line : 0;
         revealPendingContentLine(existing);
       } else {
         renderContentView(existing, ev);
       }
-      existing.contentReloadRequested = false;
+      if (reloading) existing.contentReloadRequested = false;
       if (shownContentTabId() === existing.id) showContentTab(existing);
       else if (mayFocus) switchToTab(existing.id);
       return;
@@ -5092,12 +5102,8 @@
     restoreTab(tab);
     renderTabBar();
     persistTabState();
-    setRunningState(tab.isRunning);
-    if (!tab.isRunning) {
-      t0 = null;
-      stopTimer();
-      removeSpinner();
-    }
+    setRunningState(false);
+    t0 = null;
     registerTab(tab);
     api.newChat({tabId: tab.id});
     api.getWelcomeInfo();
@@ -5559,9 +5565,6 @@
   // from local storage. The boot placeholder below is replaced by the
   // first snapshot; `savedActiveTabId` restores this client's own tab
   // selection (selection stays client-local) once that snapshot lands.
-  // `legacyRestoredTabs` carries a pre-registry client's locally
-  // persisted tab set into `ready` exactly once, so the first daemon
-  // with an empty registry can adopt it (one-time migration).
   let savedActiveTabId = '';
   // The composer drafts the previous page instance persisted on its way
   // out (persistTabState), by tab id: the selected tab's is shown in the
@@ -5573,7 +5576,6 @@
   // every replay), dropped when it asks nothing or something else — the
   // answer had arrived after all.
   let savedAskDrafts = null;
-  const legacyRestoredTabs = [];
   (function () {
     const saved = vscode.getState();
     const drafts = saved && saved.inputDrafts;
@@ -5596,21 +5598,6 @@
             answer: typeof d.answer === 'string' ? d.answer : '',
           };
         }
-      });
-    }
-    if (saved && saved.tabs && saved.tabs.length > 0) {
-      const seenChatIds = new Set();
-      saved.tabs.forEach(st => {
-        if (!st || st.isSubagentTab) return;
-        const chatId = st.backendChatId ? String(st.backendChatId) : '';
-        if (!st.chatId || !chatId || seenChatIds.has(chatId)) return;
-        seenChatIds.add(chatId);
-        legacyRestoredTabs.push({
-          tabId: String(st.chatId),
-          chatId: chatId,
-          title: st.title || '',
-          workDir: st.workDir || '',
-        });
       });
     }
     if (saved && saved.chatId) savedActiveTabId = String(saved.chatId);
@@ -6101,8 +6088,8 @@
   const metaInfoContent = document.getElementById('meta-info-content');
   const metaInfoStatus = document.getElementById('meta-info-status');
   const metaInfoRefreshBtn = document.getElementById('meta-info-refresh');
-  // The task-info panel and its mobile-drawer controls (the toggle at
-  // the tab bar's right edge, the in-panel close button, the dimming
+  // The task-info panel and its mobile-drawer controls (the toggle in
+  // the composer's footer tools, the in-panel close button, the dimming
   // backdrop — all remote mobile only, see remote-codex.css).
   const metaPanel = document.getElementById('meta-panel');
   const metaOverlay = document.getElementById('meta-overlay');
@@ -6295,7 +6282,7 @@
     // here: retarget — which clears and repolls — instead of polling
     // the new tab under the old tab's signature and generation.
     if (metaInfoChatTabId() !== metaInfoTabId) {
-      setMetaInfoTarget();
+      setMetaInfoTarget(refresh);
       return;
     }
     if (!metaInfoTabId) return;
@@ -6318,8 +6305,11 @@
    * tab switch, and a late reply for the former target no longer
    * matches — then polls immediately instead of waiting out the
    * interval.
+   *
+   * @param {boolean} [refresh] Forwarded to that first poll (the refresh
+   *   button pressed right after a tab switch must still run the agent).
    */
-  function setMetaInfoTarget() {
+  function setMetaInfoTarget(refresh) {
     const tabId = metaInfoChatTabId();
     if (tabId === metaInfoTabId) return;
     metaInfoTabId = tabId;
@@ -6328,7 +6318,7 @@
     metaInfoState = null;
     renderTaskUpdate(null);
     postMetaUpdateSoon();
-    requestTaskUpdate();
+    requestTaskUpdate(refresh);
   }
 
   // Whether the last syncMetaInfoRunning call saw a running task, so
@@ -8188,6 +8178,7 @@
       }
       node.loading = true;
       row.classList.add('loading');
+      node.kids.textContent = '';
       explorerNote(node.kids, node.depth + 1, 'Loading...');
       api.listDir({
         path: path,
@@ -8196,6 +8187,23 @@
         token: explorerToken(key),
       });
     }
+  }
+
+  /**
+   * Forget every folder listing still in flight: the daemon connection
+   * dropped, so its reply is never coming.  A folder whose first listing
+   * was lost is collapsed again (its next expansion asks afresh); a
+   * folder listed before keeps its rows and is re-listed by the refresh
+   * that follows the reconnect.
+   */
+  function abandonExplorerListings() {
+    explorerDirs.forEach(node => {
+      if (!node.loading) return;
+      node.loading = false;
+      node.refreshAfterLoad = false;
+      node.row.classList.remove('loading');
+      if (!node.loaded) toggleExplorerDir(node.row, false);
+    });
   }
 
   /**
@@ -9456,8 +9464,11 @@
    * Open a read-only text tab that is not a file on disk (a commit's
    * patch, search results, a comparison).  *key* identifies the tab so
    * repeating the action refreshes it instead of opening a second one.
+   * *ownerTabId* is the tab the request was sent as (the reply echoes
+   * it): a reply landing after a tab switch opens in that tab's
+   * workspace, not the current one's.
    */
-  function openTextResultTab(key, name, text, languageName) {
+  function openTextResultTab(key, name, text, languageName, ownerTabId) {
     handleFileContent(
       {
         path: key,
@@ -9467,7 +9478,7 @@
         isVirtual: true,
       },
       true,
-      activeTabId,
+      ownerTabId || activeTabId,
     );
   }
 
@@ -9524,7 +9535,10 @@
           request.action === 'rename' ? request.dest : request.path,
         );
         confirmAction({
-          id: 'fs-overwrite',
+          // One toast per destination: a multi-entry paste or move asks
+          // once per clash, and a shared id would replace the earlier
+          // question (and lose its Replace) with the later one.
+          id: 'fs-overwrite:' + (request.dest || request.path),
           message:
             "A file or folder named '" +
             target +
@@ -9552,6 +9566,8 @@
         (ev.count ? ev.count + ' result' + (ev.count === 1 ? '' : 's') : '') +
           (ev.count ? ' in ' + request.path + '\n\n' : '') +
           text,
+        '',
+        ev.tabId,
       );
       return;
     }
@@ -9561,6 +9577,7 @@
         pathBaseName(request.path) + ' \u2194 ' + pathBaseName(request.dest),
         ev.text || '',
         'x.diff',
+        ev.tabId,
       );
       return;
     }
@@ -9756,15 +9773,116 @@
    * Delete on every row.  Items that only make sense for one entry
    * (New File, Paste, Rename, Find in Folder) are left out.
    */
-  function explorerMultiMenuItems(rows) {
+  /** Whether *row* is a top-level Explorer folder. */
+  function explorerRowIsRoot(row) {
+    return (
+      row.classList.contains('is-root') ||
+      row.dataset.explorerPath === explorerRowRoot(row)
+    );
+  }
+
+  /**
+   * The Cut and Copy items of an Explorer menu acting on *rows*: a
+   * top-level folder cannot be cut or copied.
+   */
+  function explorerCutCopyItems(rows) {
     const paths = rows.map(r => r.dataset.explorerPath);
+    const enabled = !rows.some(explorerRowIsRoot);
+    return [
+      {
+        id: 'cut',
+        label: 'Cut',
+        key: keyLabel('Ctrl+X', '\u2318X'),
+        enabled: enabled,
+        run: () => {
+          explorerClipboard = {paths: paths, cut: true};
+        },
+      },
+      {
+        id: 'copy',
+        label: 'Copy',
+        key: keyLabel('Ctrl+C', '\u2318C'),
+        enabled: enabled,
+        run: () => {
+          explorerClipboard = {paths: paths, cut: false};
+        },
+      },
+    ];
+  }
+
+  /** The Copy Path and Copy Relative Path items for *rows*. */
+  function explorerCopyPathItems(rows) {
+    return [
+      {
+        id: 'copy-path',
+        label: 'Copy Path',
+        key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
+        run: () =>
+          copyTextToClipboard(rows.map(r => r.dataset.explorerPath).join('\n')),
+      },
+      {
+        id: 'copy-relative-path',
+        label: 'Copy Relative Path',
+        key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
+        run: () =>
+          copyTextToClipboard(
+            rows
+              .map(r => {
+                return (
+                  explorerRelativePath(
+                    r.dataset.explorerPath,
+                    explorerRowRoot(r),
+                  ) || '.'
+                );
+              })
+              .join('\n'),
+          ),
+      },
+    ];
+  }
+
+  /**
+   * The Delete item for *rows*: asks first, since the server has no
+   * trash.  A top-level folder is removed from the Explorer instead
+   * (see explorerMenuItems), never deleted.
+   */
+  function explorerDeleteItem(rows) {
+    const what =
+      rows.length === 1
+        ? "'" +
+          (pathBaseName(rows[0].dataset.explorerPath) ||
+            rows[0].dataset.explorerPath) +
+          "'? The server has no trash, so it cannot be restored."
+        : rows.length +
+          ' items? The server has no trash, so they cannot be restored.';
+    return {
+      id: 'delete',
+      label: 'Delete',
+      key: keyLabel('Delete', '\u2318\u232B'),
+      enabled: !rows.some(explorerRowIsRoot),
+      run: () => {
+        confirmAction({
+          id: 'fs-delete',
+          message: 'Delete ' + what,
+          confirmLabel: 'Delete',
+          cancelLabel: 'Keep',
+          danger: true,
+          onConfirm: function () {
+            rows.forEach(r => {
+              sendFsAction({
+                action: 'delete',
+                path: r.dataset.explorerPath,
+                root: explorerRowRoot(r),
+              });
+            });
+          },
+        });
+      },
+    };
+  }
+
+  function explorerMultiMenuItems(rows) {
     const files = rows.filter(r => !r.classList.contains('is-dir'));
-    const hasRoot = rows.some(r => {
-      return (
-        r.classList.contains('is-root') ||
-        r.dataset.explorerPath === explorerRowRoot(r)
-      );
-    });
     const items = [];
     if (files.length) {
       items.push({
@@ -9794,77 +9912,11 @@
       });
       items.push({separator: true});
     }
-    items.push({
-      id: 'cut',
-      label: 'Cut',
-      key: keyLabel('Ctrl+X', '\u2318X'),
-      enabled: !hasRoot,
-      run: () => {
-        explorerClipboard = {paths: paths, cut: true};
-      },
-    });
-    items.push({
-      id: 'copy',
-      label: 'Copy',
-      key: keyLabel('Ctrl+C', '\u2318C'),
-      enabled: !hasRoot,
-      run: () => {
-        explorerClipboard = {paths: paths, cut: false};
-      },
-    });
+    items.push(...explorerCutCopyItems(rows));
     items.push({separator: true});
-    items.push({
-      id: 'copy-path',
-      label: 'Copy Path',
-      key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
-      run: () => copyTextToClipboard(paths.join('\n')),
-    });
-    items.push({
-      id: 'copy-relative-path',
-      label: 'Copy Relative Path',
-      key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
-      run: () =>
-        copyTextToClipboard(
-          rows
-            .map(r => {
-              return (
-                explorerRelativePath(
-                  r.dataset.explorerPath,
-                  explorerRowRoot(r),
-                ) || '.'
-              );
-            })
-            .join('\n'),
-        ),
-    });
+    items.push(...explorerCopyPathItems(rows));
     items.push({separator: true});
-    items.push({
-      id: 'delete',
-      label: 'Delete',
-      key: keyLabel('Delete', '\u2318\u232B'),
-      enabled: !hasRoot,
-      run: () => {
-        confirmAction({
-          id: 'fs-delete',
-          message:
-            'Delete ' +
-            rows.length +
-            ' items? The server has no trash, so they cannot be restored.',
-          confirmLabel: 'Delete',
-          cancelLabel: 'Keep',
-          danger: true,
-          onConfirm: function () {
-            rows.forEach(r => {
-              sendFsAction({
-                action: 'delete',
-                path: r.dataset.explorerPath,
-                root: explorerRowRoot(r),
-              });
-            });
-          },
-        });
-      },
-    });
+    items.push(explorerDeleteItem(rows));
     return items;
   }
 
@@ -9877,7 +9929,7 @@
     const path = row.dataset.explorerPath;
     const root = explorerRowRoot(row);
     const isDir = row.classList.contains('is-dir');
-    const isRoot = row.classList.contains('is-root') || path === root;
+    const isRoot = explorerRowIsRoot(row);
     const isWorkDir = isRoot && path === explorerRoot;
     const parent = isDir ? path : explorerParentPath(row);
     const name = pathBaseName(path) || path;
@@ -9971,24 +10023,7 @@
       });
       items.push({separator: true});
     }
-    items.push({
-      id: 'cut',
-      label: 'Cut',
-      key: keyLabel('Ctrl+X', '\u2318X'),
-      enabled: !isRoot,
-      run: () => {
-        explorerClipboard = {paths: [path], cut: true};
-      },
-    });
-    items.push({
-      id: 'copy',
-      label: 'Copy',
-      key: keyLabel('Ctrl+C', '\u2318C'),
-      enabled: !isRoot,
-      run: () => {
-        explorerClipboard = {paths: [path], cut: false};
-      },
-    });
+    items.push(...explorerCutCopyItems(rows));
     items.push({
       id: 'paste',
       label: 'Paste',
@@ -10007,18 +10042,7 @@
       },
     });
     items.push({separator: true});
-    items.push({
-      id: 'copy-path',
-      label: 'Copy Path',
-      key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
-      run: () => copyTextToClipboard(path),
-    });
-    items.push({
-      id: 'copy-relative-path',
-      label: 'Copy Relative Path',
-      key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
-      run: () => copyTextToClipboard(explorerRelativePath(path, root) || '.'),
-    });
+    items.push(...explorerCopyPathItems(rows));
     items.push({separator: true});
     if (isRoot) {
       // The top-level folder items VS Code's root menu ends with (Add
@@ -10059,26 +10083,7 @@
         });
       },
     });
-    items.push({
-      id: 'delete',
-      label: 'Delete',
-      key: keyLabel('Delete', '\u2318\u232B'),
-      run: () => {
-        confirmAction({
-          id: 'fs-delete',
-          message:
-            "Delete '" +
-            name +
-            "'? The server has no trash, so it cannot be restored.",
-          confirmLabel: 'Delete',
-          cancelLabel: 'Keep',
-          danger: true,
-          onConfirm: function () {
-            sendFsAction({action: 'delete', path: path, root: root});
-          },
-        });
-      },
-    });
+    items.push(explorerDeleteItem(rows));
     return items;
   }
 
@@ -10243,6 +10248,7 @@
         ev.base + ' \u2194 ' + short,
         text,
         'x.diff',
+        ev.tabId,
       );
       return;
     }
@@ -10253,6 +10259,7 @@
         pathBaseName(ev.path) + ' (' + short + ')',
         text,
         pathBaseName(ev.path),
+        ev.tabId,
       );
       return;
     }
@@ -11719,23 +11726,13 @@
         ? adjacentContainer.dataset.task || ''
         : currentTaskName;
       if (taskName && panelTask !== taskName) continue;
-      if (
-        inRunning ||
-        p.classList.contains('rc') ||
-        p.classList.contains('task-panel') ||
-        panelShowsMedia(p) ||
-        panelStaysOpen(p)
-      )
-        continue;
+      if (inRunning || panelNeverFolds(p)) continue;
       if (p.closest('.summary-sub') || p.closest('.trajectory-sub')) continue;
       if (p.classList.contains('user-pinned')) continue;
       // Already folded: its preview was built when it collapsed and
       // its nested fan-outs were folded with it.
       if (p.classList.contains('collapsed')) continue;
-      p.classList.add('collapsed');
-      collapsePreview(p);
-      syncRunParallelPanel(p);
-      collapseNestedRunParallel(p);
+      foldPanel(p);
     }
   }
   // chevron-coverage:end
@@ -11871,6 +11868,12 @@
 
   function syncClearBtn() {
     if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
+  }
+
+  /** Grow or shrink the composer to fit its text. */
+  function autosizeComposer() {
+    inp.style.height = 'auto';
+    inp.style.height = inp.scrollHeight + 'px';
   }
 
   let state = mkS();
@@ -12177,8 +12180,7 @@
     if (/\S$/.test(inp.value)) inp.value += ' ';
     clearGhost();
     syncClearBtn();
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     return true;
   }
 
@@ -12189,8 +12191,7 @@
     if (histCache.length > 0 && (histIdx >= 0 || !inp.value)) {
       histIdx = Math.min(histIdx + 1, histCache.length - 1);
       inp.value = histCache[histIdx];
-      inp.style.height = 'auto';
-      inp.style.height = inp.scrollHeight + 'px';
+      autosizeComposer();
       syncClearBtn();
       clearGhost();
       return true;
@@ -12202,8 +12203,7 @@
     if (histIdx < 0) return false;
     histIdx--;
     inp.value = histIdx >= 0 ? histCache[histIdx] : '';
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     syncClearBtn();
     clearGhost();
     return true;
@@ -13534,6 +13534,33 @@
    *
    * @param {Element} panelEl The fan-out panel.
    */
+  /**
+   * Whether the software never folds panel *p*: a result card, the
+   * task's own text (it heads its thread like a user message), a panel
+   * showing an image or video, or a `/ask` question and its answer (a
+   * reloaded, shared or neighbouring transcript shows it exactly as the
+   * live one did; see panelStaysOpen).
+   */
+  function panelNeverFolds(p) {
+    return (
+      p.classList.contains('rc') ||
+      p.classList.contains('task-panel') ||
+      panelShowsMedia(p) ||
+      panelStaysOpen(p)
+    );
+  }
+
+  /**
+   * Fold event panel *p* the way the auto-fold does: build its preview,
+   * refresh a fan-out's summary and fold the fan-outs it hides.
+   */
+  function foldPanel(p) {
+    p.classList.add('collapsed');
+    collapsePreview(p);
+    syncRunParallelPanel(p);
+    collapseNestedRunParallel(p);
+  }
+
   function rpCollapsePanel(panelEl) {
     if (!panelEl.classList.contains('collapsed')) {
       panelEl.classList.add('collapsed');
@@ -13598,14 +13625,7 @@
     const panels = container.querySelectorAll('.collapsible');
     for (let i = 0; i < panels.length; i++) {
       const p = panels[i];
-      if (p.classList.contains('rc')) continue;
-      // The task's own text opens its transcript and stays readable.
-      if (p.classList.contains('task-panel')) continue;
-      if (panelShowsMedia(p)) continue;
-      // A `/ask` answer is never folded by the software (see
-      // panelStaysOpen): a reloaded, shared or neighbouring
-      // transcript shows it exactly as the live one did.
-      if (panelStaysOpen(p)) continue;
+      if (panelNeverFolds(p)) continue;
       if (p.classList.contains('tc-run-parallel')) {
         rpAdoptOpenSubagents(p, ownerId);
         // A fan-out still running when its task's own transcript is
@@ -13623,10 +13643,7 @@
           continue;
       }
       if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
-      p.classList.add('collapsed');
-      collapsePreview(p);
-      syncRunParallelPanel(p);
-      collapseNestedRunParallel(p);
+      foldPanel(p);
     }
   }
 
@@ -13688,22 +13705,11 @@
       // rebuilding it from the panel's DOM on every event is the
       // quadratic cost that freezes long transcripts.
       if (p.classList.contains('collapsed')) continue;
-      if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
-        continue;
-      // The task text heads its thread like a user message: it stays open.
-      if (p.classList.contains('task-panel')) continue;
-      // A `/ask` answer the user is reading, or a question and its
-      // answer, while the task keeps streaming: the next event must not
-      // fold it away.
-      if (panelStaysOpen(p)) continue;
-      if (panelShowsMedia(p)) continue;
+      if (p.classList.contains('user-pinned') || panelNeverFolds(p)) continue;
       if (p.classList.contains('tc-run-parallel'))
         rpAdoptOpenSubagents(p, tabId);
       if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
-      p.classList.add('collapsed');
-      collapsePreview(p);
-      syncRunParallelPanel(p);
-      collapseNestedRunParallel(p);
+      foldPanel(p);
     }
   }
 
@@ -13872,36 +13878,48 @@
     return el;
   }
 
+  // Largest edit the line diff aligns by LCS; a bigger one (an Edit
+  // tool call rewriting thousands of lines) is shown as the old block
+  // removed and the new block added, since the (m+1)*(n+1) table would
+  // otherwise take hundreds of megabytes and freeze the webview.
+  const LINE_DIFF_MAX_CELLS = 16000000;
+
   function lineDiff(a, b) {
     const al = a.split('\n'),
       bl = b.split('\n'),
       m = al.length,
       n = bl.length;
-    const dp = [];
-    for (let i = 0; i <= m; i++) {
-      dp[i] = new Array(n + 1);
-      dp[i][0] = 0;
+    const w = n + 1;
+    const ops = [];
+    if ((m + 1) * w > LINE_DIFF_MAX_CELLS) {
+      for (let i = 0; i < m; i++) ops.push({t: '-', o: al[i]});
+      for (let j = 0; j < n; j++) ops.push({t: '+', n: bl[j]});
+      return ops;
     }
-    for (let j = 0; j <= n; j++) dp[0][j] = 0;
+    // dp[i * w + j] is the LCS length of al[0..i) and bl[0..j); row and
+    // column 0 stay at their initial 0.
+    const dp = new Int32Array((m + 1) * w);
     for (let i = 1; i <= m; i++)
       for (let j = 1; j <= n; j++)
-        dp[i][j] =
+        dp[i * w + j] =
           al[i - 1] === bl[j - 1]
-            ? dp[i - 1][j - 1] + 1
-            : Math.max(dp[i - 1][j], dp[i][j - 1]);
-    const ops = [];
+            ? dp[(i - 1) * w + j - 1] + 1
+            : Math.max(dp[(i - 1) * w + j], dp[i * w + j - 1]);
     let ci = m,
       cj = n;
     while (ci > 0 || cj > 0) {
       if (ci > 0 && cj > 0 && al[ci - 1] === bl[cj - 1]) {
-        ops.unshift({t: '=', o: al[--ci], n: bl[--cj]});
-      } else if (cj > 0 && (ci === 0 || dp[ci][cj - 1] >= dp[ci - 1][cj])) {
-        ops.unshift({t: '+', n: bl[--cj]});
+        ops.push({t: '=', o: al[--ci], n: bl[--cj]});
+      } else if (
+        cj > 0 &&
+        (ci === 0 || dp[ci * w + cj - 1] >= dp[(ci - 1) * w + cj])
+      ) {
+        ops.push({t: '+', n: bl[--cj]});
       } else {
-        ops.unshift({t: '-', o: al[--ci]});
+        ops.push({t: '-', o: al[--ci]});
       }
     }
-    return ops;
+    return ops.reverse();
   }
 
   function hlInline(oldL, newL) {
@@ -14183,6 +14201,25 @@
     tState.thinkBuf = '';
   }
 
+  /**
+   * A panel body of class *cls* holding *raw* rendered as Markdown
+   * (highlighted, file paths linkified) — or as plain text without
+   * marked — with the raw text kept for the copy button.
+   */
+  function markdownBody(cls, raw, workDir, ownerTabId) {
+    const el = mkEl('div', cls);
+    if (typeof marked !== 'undefined' && raw) {
+      el.classList.add('md-body');
+      el.innerHTML = kissSanitize(marked.parse(raw));
+      hlBlock(el);
+      linkifyFilePaths(el, workDir, ownerTabId);
+    } else {
+      el.textContent = raw;
+    }
+    el.dataset.rawText = raw;
+    return el;
+  }
+
   function handleOutputEvent(ev, target, tState, ownerWorkDir, ownerTabId) {
     const evWorkDir =
       typeof ownerWorkDir === 'string'
@@ -14430,18 +14467,10 @@
           b || '<em style="color:var(--dim)">No arguments</em>';
         c.appendChild(hdr);
         if (isQuestion) {
-          const qd = mkEl('div', 'tc-question-body');
           const rawQ = (ev.extras && ev.extras.question) || '';
-          if (typeof marked !== 'undefined' && rawQ) {
-            qd.classList.add('md-body');
-            qd.innerHTML = kissSanitize(marked.parse(rawQ));
-            hlBlock(qd);
-            linkifyFilePaths(qd, evWorkDir, evOwnerTab);
-          } else {
-            qd.textContent = rawQ;
-          }
-          qd.dataset.rawText = rawQ;
-          c.appendChild(qd);
+          c.appendChild(
+            markdownBody('tc-question-body', rawQ, evWorkDir, evOwnerTab),
+          );
           // Replay rebuilds the panel without clearing the pending question.
           // Duplicate askUser events preserve drafts and do not re-mark it.
           // An earlier answered call is cleared by its replayed tool_result.
@@ -14449,18 +14478,14 @@
           if (qTab && qTab.askPendingQuestion === rawQ)
             setQuestionPanelPending(c, true);
         } else if (isSummary) {
-          const sd = mkEl('div', 'tc-summary-desc');
-          const rawDesc = ev.description || '';
-          if (typeof marked !== 'undefined' && rawDesc) {
-            sd.classList.add('md-body');
-            sd.innerHTML = kissSanitize(marked.parse(rawDesc));
-            hlBlock(sd);
-            linkifyFilePaths(sd, evWorkDir, evOwnerTab);
-          } else {
-            sd.textContent = rawDesc;
-          }
-          sd.dataset.rawText = rawDesc;
-          c.appendChild(sd);
+          c.appendChild(
+            markdownBody(
+              'tc-summary-desc',
+              ev.description || '',
+              evWorkDir,
+              evOwnerTab,
+            ),
+          );
         } else {
           c.appendChild(tcBody);
           verifyFileLinkCandidates(tcBody, evWorkDir, evOwnerTab);
@@ -15045,6 +15070,11 @@
       if (reported) ctx.stepCount = reported;
     }
     if (t === 'result') {
+      // A failure's result follows the last tool_result directly, so the
+      // Thoughts panel opened on spec above is still empty: withdraw it
+      // rather than seal it into the transcript.
+      if (ctx.llmPanel && ctx.llmPanel._provisional)
+        discardProvisionalPanel(ctx.llmPanel);
       ctx.llmPanel = null;
       // The daemon's own count is the authoritative one.
       if (ev.step_count) ctx.stepCount = ev.step_count;
@@ -15249,6 +15279,21 @@
     updateVisibleTask();
     // visibletask-coverage:end
   }
+
+  // tableak-coverage:start
+  /**
+   * Park a diagnostic (error, notice, warning) addressed to a tab other
+   * than the visible one in that tab's transcript.  Returns true when
+   * the event belongs to another tab — routed there, or dropped because
+   * the tab is gone — so the caller must not show it in the visible one.
+   */
+  function routedToBackgroundTab(ev) {
+    if (!isAddressed(ev) || isForActiveTab(ev)) return false;
+    const bgTab = findTabByEvt(ev);
+    if (bgTab) processOutputEventForBgTab(ev, bgTab);
+    return true;
+  }
+  // tableak-coverage:end
 
   function processOutputEventForBgTab(ev, tab) {
     normalizeEventTs(ev);
@@ -15840,11 +15885,14 @@
     });
   }
 
+  /** Fetch page one of the history list afresh. */
+  function requestHistoryFromStart() {
+    resetHistoryPagination();
+    requestHistory();
+  }
+
   function refreshHistory() {
-    if (sidebar.classList.contains('open')) {
-      resetHistoryPagination();
-      requestHistory();
-    }
+    if (sidebar.classList.contains('open')) requestHistoryFromStart();
     // Task news (a run started or finished, a commit landed) may have
     // changed the workspace: re-list the Explorer folders on screen /
     // re-read git for the Source Control view.  A hidden view — or one
@@ -16185,7 +16233,7 @@
     const id = chatTargetTabId();
     return {tabId: id, taskId: tabTaskId(getTab(id))};
   };
-  // Retained for callers that only need the visible tab id.
+  // The visible tab's id (the tests read it).
   window.kissActiveTabId = function () {
     return activeTabId;
   };
@@ -16286,6 +16334,11 @@
         if (!ev.connected) {
           forgetInFlightPathChecks();
           stopAppsRefreshSpin();
+          abandonExplorerListings();
+          setAutocommitInFlight(false);
+          tabs.forEach(t => {
+            failContentSave(t, 'Save failed: the server connection dropped');
+          });
           // An outage swallows in-flight replies. A getAdjacentTask reply
           // that never comes must not leave the loader row up and every
           // later scroll blocked behind adjacentLoading; sidebar
@@ -16877,15 +16930,9 @@
             : getTab(activeTabId);
           if (refusedTab) restoreRefusedPrompt(refusedTab);
         }
-        // tableak-coverage:start
         // Diagnostics are task output like any other: a message that names a
         // task or a tab belongs to that conversation and nowhere else.
-        if (isAddressed(ev) && !isForActiveTab(ev)) {
-          const bgErrTab = findTabByEvt(ev);
-          if (bgErrTab) processOutputEventForBgTab(ev, bgErrTab);
-          break;
-        }
-        // tableak-coverage:end
+        if (routedToBackgroundTab(ev)) break;
         addError(ev.text);
         // An unaddressed error answers a window-level request: an
         // update started from the settings sheet or a promptlet add
@@ -16897,13 +16944,7 @@
         }
         break;
       case 'notice':
-        // tableak-coverage:start
-        if (isAddressed(ev) && !isForActiveTab(ev)) {
-          const bgNoticeTab = findTabByEvt(ev);
-          if (bgNoticeTab) processOutputEventForBgTab(ev, bgNoticeTab);
-          break;
-        }
-        // tableak-coverage:end
+        if (routedToBackgroundTab(ev)) break;
         addNotice(ev.text);
         if (!isAddressed(ev)) relayUpdateStatus(ev.text, false);
         break;
@@ -16925,17 +16966,10 @@
         setLaunchPhase(phaseContainer, ev.text || '');
         break;
       }
-      case 'warning': {
-        // tableak-coverage:start
-        if (isAddressed(ev) && !isForActiveTab(ev)) {
-          const bgWarnTab = findTabByEvt(ev);
-          if (bgWarnTab) processOutputEventForBgTab(ev, bgWarnTab);
-          break;
-        }
-        // tableak-coverage:end
+      case 'warning':
+        if (routedToBackgroundTab(ev)) break;
         addWarning(ev.message || ev.text || '');
         break;
-      }
       case 'clear': {
         // report-coverage:start
         // A new task is starting in this tab: any report queued by a
@@ -18122,12 +18156,6 @@
     syncMetaInfoRunning(running);
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
-    // A tab that is not running has nothing left to stop, so the
-    // pending state never survives the task it belonged to.
-    if (!running) {
-      const activeTab = getTab(activeTabId);
-      if (activeTab) activeTab.isStopping = false;
-    }
     renderStopButton();
 
     updateInputDisabled();
@@ -19694,14 +19722,13 @@
   }
   // readychat-coverage:end
 
-  // The `ready` announcement: hands the daemon this client's legacy
-  // locally-persisted tabs exactly once (adopted only into an empty
-  // registry) — or, on a re-`ready` after a daemon restart, the tabs
-  // currently on screen, so a daemon whose registry file was wiped
-  // re-adopts them. The daemon answers with the canonical `tabs_state`
-  // snapshot and replays every chat-bound tab.
+  // The chat tabs the `ready` announcement carries: on a re-`ready`
+  // after a daemon restart, a daemon whose registry file was wiped
+  // re-adopts the tabs on screen (into an empty registry only). The
+  // daemon answers with the canonical `tabs_state` snapshot and replays
+  // every chat-bound tab.
   function collectRestoredTabs() {
-    const current = tabs
+    return tabs
       .filter(t => {
         return !t.isSubagentTab && !t.isContentTab && t.backendChatId;
       })
@@ -19720,7 +19747,6 @@
               : t.workDir || '',
         };
       });
-    return current.length > 0 ? current : legacyRestoredTabs;
   }
 
   function sendReady() {
@@ -19786,8 +19812,7 @@
     if (bootTab && bootTab.inputValue && !inp.value) {
       inp.value = bootTab.inputValue;
       syncClearBtn();
-      inp.style.height = 'auto';
-      inp.style.height = inp.scrollHeight + 'px';
+      autosizeComposer();
     }
     sendReady();
     if (EDITOR_TAB_MODE) {
@@ -19909,6 +19934,12 @@
     document.addEventListener('keyup', e => {
       if (e.key === 'Shift') _shiftHeld = false;
     });
+    // The keyup is lost when focus leaves the window with Shift down
+    // (Shift+Tab out, Alt+Shift, a system shortcut); Enter would then
+    // insert line breaks instead of sending until Shift is pressed again.
+    window.addEventListener('blur', () => {
+      _shiftHeld = false;
+    });
     inp.addEventListener('beforeinput', e => {
       if (e.inputType === 'insertLineBreak' && !_shiftHeld) {
         e.preventDefault();
@@ -19916,8 +19947,7 @@
       }
     });
     inp.addEventListener('input', () => {
-      inp.style.height = 'auto';
-      inp.style.height = inp.scrollHeight + 'px';
+      autosizeComposer();
       checkAutocomplete();
       requestGhost();
       histIdx = -1;
@@ -20196,8 +20226,7 @@
         if (!document.body.classList.contains('remote-desktop')) {
           sidebarOverlay.classList.add('open');
         }
-        resetHistoryPagination();
-        requestHistory();
+        requestHistoryFromStart();
         // The drawer may have missed task news while closed.
         refreshSidebarDataViews(false);
       }
@@ -20211,8 +20240,7 @@
       // sidebar fresh via refreshHistory, and a webview re-shown after
       // being hidden re-syncs whatever it missed.
       sidebar.classList.add('open');
-      resetHistoryPagination();
-      requestHistory();
+      requestHistoryFromStart();
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') refreshHistory();
       });
@@ -20372,8 +20400,7 @@
           setMetaDrawerOpen(false);
           if (!sidebar.classList.contains('open')) {
             sidebar.classList.add('open');
-            resetHistoryPagination();
-            requestHistory();
+            requestHistoryFromStart();
           }
           sidebarOverlay.classList.remove('open');
           // The docked panel's Explorer and Source Control load now.
@@ -22753,10 +22780,6 @@
     );
   }
 
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) relabelHistoryDaySeparators();
-  });
-
   // Mouse events cover pointing devices in every environment; pointer
   // events additionally cover touch, where the compatibility mouse
   // events only arrive AFTER the finger lifts, i.e. too late to guard
@@ -22787,13 +22810,16 @@
   });
   // A hidden page cannot hold a press, but hiding it mid-press can eat
   // the release event: drop the latches so the parked page can land.
+  // Coming back, the day separators may need relabelling.
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      historyMouseHeld = false;
-      historyHeldKeys.clear();
-      historyActivePointers.clear();
-      historyMaybeApplyPending();
+    if (!document.hidden) {
+      relabelHistoryDaySeparators();
+      return;
     }
+    historyMouseHeld = false;
+    historyHeldKeys.clear();
+    historyActivePointers.clear();
+    historyMaybeApplyPending();
   });
 
   function historyPressHeld() {
@@ -24398,8 +24424,7 @@
         inp.value = before + injected + after;
         const caret = start + injected.length;
         syncClearBtn();
-        inp.style.height = 'auto';
-        inp.style.height = inp.scrollHeight + 'px';
+        autosizeComposer();
         inp.focus();
         try {
           inp.setSelectionRange(caret, caret);
@@ -24481,8 +24506,7 @@
   function useFrequentTask(text) {
     inp.value = text;
     syncClearBtn();
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     closeFrequentPanel();
     inp.focus();
   }
@@ -25103,8 +25127,7 @@
     syncClearBtn();
     const np = inserted.length;
     inp.setSelectionRange(np, np);
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     hideAC();
     inp.focus();
   }
@@ -25297,8 +25320,7 @@
     if (/\S$/.test(inp.value)) inp.value += ' ';
     clearGhost();
     syncClearBtn();
-    inp.style.height = 'auto';
-    inp.style.height = inp.scrollHeight + 'px';
+    autosizeComposer();
     const np = inp.value.length;
     inp.setSelectionRange(np, np);
     hideAC();

@@ -181,7 +181,7 @@ function testHistoryClickSwitchesToExistingChatTab() {
   console.log('  ok - history click switches to existing tab with same chat id');
 }
 
-function testRestoreDropsDuplicatePersistedChatIds() {
+function testRestoreIgnoresStaleLocalTabs() {
   const {win, posted} = makeWebview({
     activeTabIndex: 0,
     chatId: 'frontend-a',
@@ -195,26 +195,23 @@ function testRestoreDropsDuplicatePersistedChatIds() {
   assert.strictEqual(
     chatTabs(win).length,
     1,
-    'legacy persisted tabs are not restored locally: the daemon adopts ' +
-      'them into the shared registry and answers with tabs_state',
+    'a stale local tab set is not restored: the daemon registry is the ' +
+      'only source of tabs and answers with tabs_state',
   );
   const ready = posted.find(msg => msg && msg.type === 'ready');
   assert.strictEqual(
     JSON.stringify(ready.restoredTabs),
-    JSON.stringify([
-      {tabId: 'frontend-a', chatId: 'chat-dup', title: 'A', workDir: ''},
-      {tabId: 'frontend-c', chatId: 'chat-other', title: 'C', workDir: ''},
-    ]),
-    'ready must announce each backend chat id at most once',
+    '[]',
+    'ready carries no tabs from local storage',
   );
 
   win.close();
-  console.log('  ok - startup restore drops duplicate persisted backend chat ids');
+  console.log('  ok - startup ignores a stale local tab set');
 }
 
 function main() {
   testHistoryClickSwitchesToExistingChatTab();
-  testRestoreDropsDuplicatePersistedChatIds();
+  testRestoreIgnoresStaleLocalTabs();
   console.log('historyClickSwitchExistingChat.test.js: all assertions passed.');
 }
 
