@@ -55,7 +55,6 @@ import html
 import ipaddress
 import json
 import logging
-import math
 import mimetypes
 import os
 import platform
@@ -99,7 +98,6 @@ from kiss.core.browser_handoff import set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive
-from kiss.core.models.model_info import get_default_model
 from kiss.core.processes import find_bash
 from kiss.core.processes import pid_alive as _is_pid_alive
 from kiss.core.processes import process_identity as _process_identity
@@ -108,7 +106,6 @@ from kiss.core.vscode_config import (
     apply_config_to_env,
     load_api_keys,
     load_config,
-    save_config,
 )
 from kiss.server import agent_state, tls_certs
 from kiss.server import sorcar as sorcar_api
@@ -130,7 +127,6 @@ from kiss.server.voice_wake import (
     default_models_dir,
     transcribe_pcm,
 )
-from kiss.server.voice_wake_control import VoiceWakeController
 from kiss.viz_trajectory.server import find_job_dir as find_job_dir
 from kiss.viz_trajectory.server import list_jobs as list_jobs
 from kiss.viz_trajectory.server import (
@@ -3350,10 +3346,7 @@ class WebPrinter(JsonPrinter):
             return lock
 
     async def _locked_send(
-        self,
-        endpoint: ServerConnection,
-        data: Payload,
-        admit: Callable[[], bool] | None = None,
+        self, endpoint: ServerConnection, data: Payload,
     ) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
 
@@ -3361,16 +3354,6 @@ class WebPrinter(JsonPrinter):
             endpoint: The client connection to write to.
             data: The JSON payload (already encoded with ``json.dumps``)
                 or a reserved replay slot that resolves to it.
-            admit: Optional last-moment admission check, evaluated
-                AFTER the send lock is acquired; a ``False`` result
-                drops the payload without touching the wire.  The
-                voice-wake delivery boundary re-validates its listener
-                generation here: a report validated before queueing
-                behind an in-flight send can be retired by a
-                concurrent ``stop()`` while it waits, and a check that
-                runs only before the lock would still write the stale
-                payload once the lock opens (gpt-5.6-sol round-4
-                review, finding 6).
         """
         async with self.send_lock(endpoint):
             if isinstance(data, ConcurrentFuture):
@@ -3382,8 +3365,6 @@ class WebPrinter(JsonPrinter):
                 text = await asyncio.shield(asyncio.wrap_future(data))
             else:
                 text = data
-            if admit is not None and not admit():
-                return
             await self._timed_send(endpoint, text)
 
     def _schedule_send(self, endpoint: ServerConnection, data: Payload) -> None:
@@ -5612,7 +5593,6 @@ class RemoteAccessServer:
         if self.work_dir:
             self._vscode_server.work_dir = self.work_dir
         self._server_api = sorcar_api.ServerApi(self)
-        self._voice_wake = VoiceWakeController()
 
         self._tunnel_proc: subprocess.Popen[str] | None = None
         self._tunnel_metrics_port: int | None = None
@@ -6007,9 +5987,9 @@ class RemoteAccessServer:
         token: the VS Code extension, ``daemon_client`` runs) joins the
         printer's local-client set — so talk arbitration can send it
         muted copies — and its commands run with ``is_local`` set,
-        which unlocks the local-only commands (``readKissConfig``,
-        voice wake, local-tab registration).  A remote browser joins
-        the plain client set.
+        which unlocks the local-only commands (file saves, directory
+        listings, terminals, local-tab registration).  A remote
+        browser joins the plain client set.
 
         Args:
             websocket: The WebSocket server connection.
@@ -6048,17 +6028,6 @@ class RemoteAccessServer:
             logger.debug("WS handler error", exc_info=True)
         finally:
             if is_local:
-                # A daemon-hosted wake-word listener is owned by
-                # exactly this connection: reap it here so a closed VS
-                # Code window can never leak a mic-holding child
-                # process.
-                try:
-                    await self._voice_wake.stop(conn_state["conn_id"])
-                except Exception:
-                    logger.debug(
-                        "voice-wake stop on disconnect failed",
-                        exc_info=True,
-                    )
                 self._printer.unregister_local_tabs(conn_state["conn_id"])
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
@@ -6834,173 +6803,6 @@ class RemoteAccessServer:
                 },
             ),
         )
-
-    async def _handle_get_default_model(
-        self, cmd: dict[str, Any], endpoint: Any,
-    ) -> None:
-        """Reply with the key-derived default model name.
-
-        Services the ``getDefaultModel`` command (routed by
-        :meth:`kiss.server.sorcar.ServerApi.get_default_model`): the
-        VS Code extension host historically shelled out to ``uv run
-        python -c ...`` for this value; over the socket the daemon
-        answers from its own environment instead.  The reply is a
-        single direct ``{"type": "defaultModel", "model": <name>}``
-        event to the requesting *endpoint* — never broadcast.
-
-        Args:
-            cmd: The parsed ``getDefaultModel`` command (unused).
-            endpoint: The client connection to reply to.
-        """
-        model = await asyncio.to_thread(get_default_model)
-        await self._endpoint_send(
-            endpoint,
-            json.dumps({"type": "defaultModel", "model": model}),
-        )
-
-    async def _handle_read_kiss_config(
-        self, cmd: dict[str, Any], endpoint: Any,
-    ) -> None:
-        """Reply with the raw merged ``~/.kiss/config.json`` contents.
-
-        Services the ``readKissConfig`` command (routed — and gated to
-        local clients — by
-        :meth:`kiss.server.sorcar.ServerApi.read_kiss_config`).  The
-        reply is a single direct ``{"type": "kissConfig", "config":
-        {...}}`` event to the requesting *endpoint* — never broadcast
-        — carrying :func:`kiss.core.vscode_config.load_config`'s
-        sanitized, defaults-merged view of the file, i.e. exactly
-        what the daemon itself acts on.
-
-        Args:
-            cmd: The parsed ``readKissConfig`` command (unused).
-            endpoint: The client connection to reply to.
-        """
-        cfg = await asyncio.to_thread(load_config)
-        await self._endpoint_send(
-            endpoint,
-            json.dumps({"type": "kissConfig", "config": cfg}),
-        )
-
-    async def _handle_write_kiss_config(
-        self, cmd: dict[str, Any], endpoint: Any,
-    ) -> None:
-        """Merge the command's ``config`` keys into ``config.json``.
-
-        Services the ``writeKissConfig`` command (routed — and gated
-        to local clients — by
-        :meth:`kiss.server.sorcar.ServerApi.write_kiss_config`).
-        Delegates to :func:`kiss.core.vscode_config.save_config`, so
-        the write shares the daemon's atomic, lock-guarded merge path
-        (existing keys are preserved, API keys are never written) and
-        the freshly saved state is re-applied to the daemon's
-        environment exactly like a settings-panel ``saveConfig``.
-        The reply is a single direct ``{"type": "kissConfigSaved",
-        "ok": <bool>[, "error": <msg>]}`` acknowledgement to the
-        requesting *endpoint* — never broadcast.
-
-        Args:
-            cmd: The parsed ``writeKissConfig`` command whose
-                ``config`` field must be a JSON object.
-            endpoint: The client connection to reply to.
-        """
-        data = cmd.get("config")
-        if not isinstance(data, dict):
-            await self._endpoint_send(endpoint, json.dumps({
-                "type": "kissConfigSaved",
-                "ok": False,
-                "error": "config must be a JSON object",
-            }))
-            return
-        try:
-            await asyncio.to_thread(save_config, data)
-            await asyncio.to_thread(
-                lambda: apply_config_to_env(load_config())
-            )
-        except OSError as err:
-            await self._endpoint_send(endpoint, json.dumps({
-                "type": "kissConfigSaved",
-                "ok": False,
-                "error": f"failed to save config: {err}",
-            }))
-            return
-        await self._endpoint_send(
-            endpoint, json.dumps({"type": "kissConfigSaved", "ok": True}),
-        )
-
-    async def _handle_voice_wake_start(
-        self, cmd: dict[str, Any], endpoint: Any, conn_id: str,
-    ) -> None:
-        """Start a daemon-hosted wake-word listener for one connection.
-
-        Services the ``voiceWakeStart`` command (routed — and gated to
-        local clients — by
-        :meth:`kiss.server.sorcar.ServerApi.voice_wake_start`).  The
-        listener child process is owned by *conn_id*: its protocol
-        lines stream back to the requesting *endpoint* as
-        ``voiceWakeEvent`` / ``voiceWakeState`` events (see
-        :mod:`kiss.server.voice_wake_control`), and the
-        :meth:`_ws_handler` disconnect cleanup stops it when the
-        connection goes away.
-
-        Args:
-            cmd: The parsed ``voiceWakeStart`` command; its optional
-                ``sensitivity`` field (0..100) tunes wake eagerness.
-            endpoint: The client connection to stream events to.
-            conn_id: The owning connection's id.
-        """
-        raw = cmd.get("sensitivity")
-        sensitivity = (
-            round(raw)
-            if isinstance(raw, (int, float))
-            and not isinstance(raw, bool)
-            and math.isfinite(raw)
-            else None
-        )
-
-        async def _send(event: dict[str, Any]) -> None:
-            # The delivery boundary of the controller's generation
-            # tag: drop a report whose listener generation was retired
-            # (a stop or a replacement spawn superseded it) so a
-            # wedged stale ``listening: false`` can never contradict a
-            # successor's ``listening: true``, and strip the tag so
-            # the wire protocol is unchanged.  Payloads that pass are
-            # written under the per-endpoint FIFO send lock
-            # (``_endpoint_send``), so accepted reports reach the wire
-            # in send-start order (gpt-5.6-sol round-3 review,
-            # findings 2-3).  The generation is RE-validated inside
-            # that lock (the ``admit`` callable): a report that passed
-            # the pre-check can queue behind an in-flight send and be
-            # retired by a concurrent stop before the lock opens —
-            # validation only before the wait would still write the
-            # stale payload (gpt-5.6-sol round-4 review, finding 6).
-            gen = event.pop("voiceGen", None)
-            if isinstance(gen, int):
-                if not self._voice_wake.accepts(conn_id, gen):
-                    return
-                await self._endpoint_send(
-                    endpoint,
-                    json.dumps(event),
-                    admit=partial(self._voice_wake.accepts, conn_id, gen),
-                )
-                return
-            await self._endpoint_send(endpoint, json.dumps(event))
-
-        await self._voice_wake.start(conn_id, sensitivity, _send)
-
-    async def _handle_voice_wake_stop(self, conn_id: str) -> None:
-        """Stop *conn_id*'s daemon-hosted wake-word listener, if any.
-
-        Services the ``voiceWakeStop`` command (routed — and gated to
-        local clients — by
-        :meth:`kiss.server.sorcar.ServerApi.voice_wake_stop`); also
-        called by the local-connection disconnect cleanup, so it is a no-op when
-        the connection owns no listener.
-
-        Args:
-            conn_id: The owning connection's id.
-        """
-        await self._voice_wake.stop(conn_id)
 
     @staticmethod
     def _cmd_str(cmd: dict[str, Any], key: str) -> str:
@@ -8564,10 +8366,7 @@ class RemoteAccessServer:
         await self._broadcast_update_available()
 
     async def _endpoint_send(
-        self,
-        endpoint: ServerConnection,
-        data: str,
-        admit: Callable[[], bool] | None = None,
+        self, endpoint: ServerConnection, data: str,
     ) -> None:
         """Send ``data`` to one client connection.
 
@@ -8584,11 +8383,8 @@ class RemoteAccessServer:
         Args:
             endpoint: The connection to send to.
             data: The JSON payload (already encoded with ``json.dumps``).
-            admit: Optional admission check evaluated under the
-                endpoint's send lock — see
-                :meth:`WebPrinter._locked_send`.
         """
-        await self._printer._locked_send(endpoint, data, admit)
+        await self._printer._locked_send(endpoint, data)
 
     @staticmethod
     def _sanitized_restored_tabs(cmd: dict[str, Any]) -> list[dict[str, str]]:
@@ -11024,10 +10820,6 @@ class RemoteAccessServer:
                 local_endpoint.remove_endpoint_if_owned,
                 self._local_endpoint_file, self._local_token,
             )
-            # Reap daemon-hosted wake-word listeners: their owning
-            # connections are gone (or going), and a leaked child
-            # would keep the microphone open past shutdown.
-            await self._voice_wake.stop_all()
             # The streamed browser (if one was opened) is a child of this
             # daemon: close it so no orphan browser survives shutdown.
             set_browser_tab_opener(None)
