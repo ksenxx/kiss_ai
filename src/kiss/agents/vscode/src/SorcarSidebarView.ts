@@ -2562,6 +2562,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._client.dispose();
       this._client = null;
     }
+    // A commit-message request still in flight gets no answer from a
+    // disposed client: settle its wait now (each `fire` resolves the
+    // waiter and clears its tab) instead of after its 30 s safety timer.
+    for (const tabId of [...this._commitPendingTabs]) {
+      this._onCommitMessage.fire({message: '', tabId});
+    }
     this._onCommitMessage.dispose();
     this._onRegistryTabsState.dispose();
     // Each panel's onDidDispose deletes its own map entry, so iterate a
