@@ -21,13 +21,15 @@ the tests verify the actual HTTP traffic the typing indicator produces:
 from __future__ import annotations
 
 import json
-import threading
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import urlsplit
 
+import pytest
+
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 
 class _TypingHandler(BaseHTTPRequestHandler):
@@ -58,53 +60,56 @@ class _TypingHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-class TestDiscordSendTyping:
-    """End-to-end tests against a local Discord-shaped HTTP server."""
+@pytest.fixture(scope="module")
+def server() -> Iterator[RecordingServer]:
+    """The Discord-shaped recording server, shared by the module."""
+    yield from serve_recording(_TypingHandler)
 
-    server: RecordingServer
-    api_base: str
 
-    @classmethod
-    def setup_class(cls) -> None:
-        cls.server = RecordingServer(("127.0.0.1", 0), _TypingHandler)
-        thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        thread.start()
-        cls.api_base = f"http://127.0.0.1:{cls.server.server_address[1]}"
+@pytest.fixture()
+def backend(server: RecordingServer) -> DiscordChannelBackend:
+    """A backend pointed at *server*; the request log starts empty."""
+    server.requests.clear()
+    backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{server.server_address[1]}")
+    backend._token = "test-token"
+    return backend
 
-    @classmethod
-    def teardown_class(cls) -> None:
-        cls.server.shutdown()
-        cls.server.server_close()
 
-    def setup_method(self) -> None:
-        self.server.requests.clear()
-        self.backend = DiscordChannelBackend(api_base=self.api_base)
-        self.backend._token = "test-token"
+def test_send_typing_posts_typing_endpoint_with_auth(
+    server: RecordingServer, backend: DiscordChannelBackend
+) -> None:
+    """send_typing must POST /channels/{id}/typing with the bot header."""
+    backend.send_typing("111")
+    assert len(server.requests) == 1
+    req = server.requests[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "/channels/111/typing"
+    assert req["authorization"] == "Bot test-token"
 
-    def test_send_typing_posts_typing_endpoint_with_auth(self) -> None:
-        """send_typing must POST /channels/{id}/typing with the bot header."""
-        self.backend.send_typing("111")
-        assert len(self.server.requests) == 1
-        req = self.server.requests[0]
-        assert req["method"] == "POST"
-        assert req["path"] == "/channels/111/typing"
-        assert req["authorization"] == "Bot test-token"
 
-    def test_send_typing_with_thread_ts_targets_channel(self) -> None:
-        """A reply-target message id must not change the typing channel."""
-        self.backend.send_typing("111", thread_ts="9999")
-        assert [r["path"] for r in self.server.requests] == ["/channels/111/typing"]
+def test_send_typing_with_thread_ts_targets_channel(
+    server: RecordingServer, backend: DiscordChannelBackend
+) -> None:
+    """A reply-target message id must not change the typing channel."""
+    backend.send_typing("111", thread_ts="9999")
+    assert [r["path"] for r in server.requests] == ["/channels/111/typing"]
 
-    def test_send_typing_swallows_http_500(self) -> None:
-        """A 500 API response must be swallowed, never raised."""
-        self.backend.send_typing("ERR")
-        req = self.server.requests[0]
-        assert req["method"] == "POST"
-        assert req["path"] == "/channels/ERR/typing"
 
-    def test_send_typing_swallows_unreachable_server(self, refusing_port: int) -> None:
-        """An unreachable server (connection refused) must never raise."""
-        backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{refusing_port}")
-        backend._token = "test-token"
-        backend.send_typing("111")
-        assert self.server.requests == []
+def test_send_typing_swallows_http_500(
+    server: RecordingServer, backend: DiscordChannelBackend
+) -> None:
+    """A 500 API response must be swallowed, never raised."""
+    backend.send_typing("ERR")
+    req = server.requests[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "/channels/ERR/typing"
+
+
+def test_send_typing_swallows_unreachable_server(
+    server: RecordingServer, backend: DiscordChannelBackend, refusing_port: int
+) -> None:
+    """An unreachable server (connection refused) must never raise."""
+    backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{refusing_port}")
+    backend._token = "test-token"
+    backend.send_typing("111")
+    assert server.requests == []

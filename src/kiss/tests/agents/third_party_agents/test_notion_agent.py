@@ -295,12 +295,7 @@ def backend(notion_server):
     return b, server
 
 
-@pytest.fixture(autouse=True)
-def _fresh_config():
-    """Start and end every test with no persisted Notion config."""
-    _config.clear()
-    yield
-    _config.clear()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 _ALL_TOOL_NAMES = {

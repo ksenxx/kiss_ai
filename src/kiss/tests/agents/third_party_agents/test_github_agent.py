@@ -299,12 +299,7 @@ def backend(gh_server):
     return b, server
 
 
-@pytest.fixture(autouse=True)
-def _fresh_config():
-    """Start and end every test with no persisted GitHub config."""
-    _config.clear()
-    yield
-    _config.clear()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 _READ_TOOLS = [

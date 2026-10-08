@@ -53,12 +53,7 @@ def _docker_available() -> bool:
 _DOCKER_OK = _docker_available()
 
 
-@pytest.fixture(autouse=True)
-def _fresh_config():
-    """Start and end every test with no persisted PostgreSQL config."""
-    _config.clear()
-    yield
-    _config.clear()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _backend(uri: str, read_only: bool) -> PostgresChannelBackend:

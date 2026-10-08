@@ -26,17 +26,12 @@ import socket
 import threading
 import time
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
 
 from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend, _config
 
-
-@pytest.fixture(autouse=True)
-def _isolated_kiss_home(isolated_kiss_home: Path) -> Path:
-    """Apply the shared per-test ``KISS_HOME`` isolation to every test here."""
-    return isolated_kiss_home
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _read_lines(conn: socket.socket, until: str, timeout: float = 5.0) -> list[str]:
@@ -147,9 +142,7 @@ class TestPingPong:
 class TestReconnect:
     """A reconnect retires the old reader instead of splitting the stream."""
 
-    def test_old_reader_exits_and_new_socket_is_not_adopted(
-        self, server: _IRCServer
-    ) -> None:
+    def test_old_reader_exits_and_new_socket_is_not_adopted(self, server: _IRCServer) -> None:
         """After connect() twice, only the new reader consumes the new socket."""
         backend = _connected_backend(server)
         try:
@@ -204,9 +197,7 @@ class TestDisconnectGuard:
         # next connect() to overwrite.
         assert backend._reader_thread is thread
 
-    def test_disconnect_from_other_thread_joins_reader(
-        self, server: _IRCServer
-    ) -> None:
+    def test_disconnect_from_other_thread_joins_reader(self, server: _IRCServer) -> None:
         """A normal disconnect still joins and clears the reader thread."""
         backend = _connected_backend(server)
         try:

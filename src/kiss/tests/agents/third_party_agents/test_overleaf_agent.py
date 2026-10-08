@@ -47,6 +47,7 @@ from kiss.agents.third_party_agents.overleaf.overleaf_sea import (
     _meta_content,
     _normalize_cookie,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 
 _COOKIE = "s%3Aabc123.sig"
 _GIT_TOKEN = "olp_gittoken"
@@ -460,16 +461,7 @@ def backend(overleaf_server):
     return b, server
 
 
-@pytest.fixture(autouse=True)
-def _fresh_config():
-    """Start and end every test with no persisted Overleaf config."""
-    _config.clear()
-    yield
-    _config.clear()
-
-
-def _auth_tools(agent: OverleafAgent) -> dict[str, Any]:
-    return {t.__name__: t for t in agent._get_auth_tools()}
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _requests_to(server: Any, method: str, path: str) -> list[dict[str, Any]]:
@@ -529,7 +521,7 @@ def test_unconfigured_agent_and_instructions() -> None:
         "authenticate_overleaf",
         "clear_overleaf_auth",
     ]
-    msg = _auth_tools(agent)["check_overleaf_auth"]()
+    msg = auth_tools(agent)["check_overleaf_auth"]()
     assert "DevTools" in msg and "overleaf_session2" in msg and "no OAuth" in msg
     assert "authenticate_overleaf" in msg
     backend = OverleafChannelBackend()
@@ -541,7 +533,7 @@ def test_authenticate_verifies_saves_and_clears(overleaf_server) -> None:
     """authenticate_overleaf verifies the cookie, saves 0600 config, unlocks tools."""
     base_url, server = overleaf_server
     agent = OverleafAgent()
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     result = json.loads(
         tools["authenticate_overleaf"](f' "overleaf_session2={_COOKIE}" ', " gt ", base_url + "/")
     )
@@ -580,7 +572,7 @@ def test_authenticate_and_use_localhost_host(overleaf_server) -> None:
     base_url, server = overleaf_server
     local_url = base_url.replace("127.0.0.1", "localhost")
     agent = OverleafAgent()
-    result = json.loads(_auth_tools(agent)["authenticate_overleaf"](_COOKIE, "", local_url))
+    result = json.loads(auth_tools(agent)["authenticate_overleaf"](_COOKIE, "", local_url))
     assert result == {"ok": True, "message": "Overleaf configured for ada@example.com."}
     assert json.loads(agent._backend.overleaf_read_file("p1", "main.tex"))["ok"] is True
     assert json.loads(agent._backend.overleaf_leave_project("p1"))["ok"] is True
@@ -590,7 +582,7 @@ def test_authenticate_and_use_localhost_host(overleaf_server) -> None:
 def test_authenticate_rejections(overleaf_server) -> None:
     """Bad cookies, hosts, and profiles are rejected and nothing is saved."""
     base_url, server = overleaf_server
-    tools = _auth_tools(OverleafAgent())
+    tools = auth_tools(OverleafAgent())
     auth = tools["authenticate_overleaf"]
     assert "cannot be empty" in auth("  ")
     assert "http://" in auth(_COOKIE, "", "ftp://example.com")
@@ -611,7 +603,7 @@ def test_authenticate_save_failure(overleaf_server) -> None:
     config_dir.parent.mkdir(parents=True, exist_ok=True)
     config_dir.write_text("blocks the directory")
     try:
-        result = json.loads(_auth_tools(agent)["authenticate_overleaf"](_COOKIE, "", base_url))
+        result = json.loads(auth_tools(agent)["authenticate_overleaf"](_COOKIE, "", base_url))
         assert result["ok"] is False and "could not save config" in result["error"]
         assert agent._is_authenticated() is False
     finally:
@@ -623,7 +615,7 @@ def test_check_auth_reports_expired_session(overleaf_server) -> None:
     base_url, _ = overleaf_server
     _config.save({"session_cookie": "stale", "git_token": "", "host": base_url})
     agent = OverleafAgent()
-    result = json.loads(_auth_tools(agent)["check_overleaf_auth"]())
+    result = json.loads(auth_tools(agent)["check_overleaf_auth"]())
     assert result["ok"] is False and "expired" in result["error"]
 
 
