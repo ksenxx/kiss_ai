@@ -24,7 +24,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from kiss.agents.third_party_agents.googlechat.googlechat_sea import (
-    _SERVICE,
     GoogleChatAgent,
     _load_service,
     _service_account_path,
@@ -32,7 +31,6 @@ from kiss.agents.third_party_agents.googlechat.googlechat_sea import (
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
     TOKEN,
     fake_composio,
-    reset_state,
 )
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 from kiss.tests.conftest import IS_WINDOWS
@@ -62,14 +60,7 @@ class _ChatHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-@pytest.fixture(autouse=True)
-def _fresh_state():
-    """Start and end every test without a connection or service account key."""
-    reset_state(_SERVICE)
-    _service_account_path().unlink(missing_ok=True)
-    yield
-    reset_state(_SERVICE)
-    _service_account_path().unlink(missing_ok=True)
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 @pytest.fixture()

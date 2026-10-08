@@ -364,7 +364,6 @@ class FakePanelManager {
   setActiveTaskSink(sink) {
     calls.manager.activeTaskSink = sink;
   }
-  markShutdown() {}
   dispose() {}
 }
 

@@ -9,8 +9,9 @@ on a real daemon; its scripted model dispatches three ``run_agent``
 sub-tasks.  Each sub-task's model request is a real chat-completions
 call, so its ``tools`` array is exactly the toolset the sub-agent got:
 
-* the plain sub-agent (``sorcar_sea.py``) has the parent's tool, and a
-  parent tool named like one of the sub-agent's built-ins is skipped;
+* the plain sub-agent (``sorcar_sea.py``) has the parent's tool, and
+  inherits the sequential parent's choice (no ``run_parallel``) but not
+  the text the parent SEA's ``system_prompt`` method added;
 * a sub-task whose own SEA also defines ``tools()`` has both
   sets, and a tool both scripts define by the same name once;
 * a sub-task whose SEA fixes the whole toolset (``tools()``
@@ -63,14 +64,10 @@ PARENT_SCRIPT = textwrap.dedent('''
 
     class Sea(BaseSea):
         def tools(self, tools):
+            # The parent runs sequentially (``is_parallel=False`` on the
+            # API call), so it has no built-in number_of_cores and its own
+            # tool of that name registers.
             return tools + [parent_ledger, number_of_cores]
-
-        def settings(self, settings):
-            # Without run_parallel the parent has no built-in
-            # number_of_cores, so its own tool of that name registers; a
-            # sub-task WITH run_parallel has the built-in and must skip the
-            # inherited one instead of failing on the duplicate name.
-            return settings | {"allow_fan_out": False}
 
         def system_prompt(self, system_prompt):
             protocol = "PARENT-PROTOCOL: record every decision with parent_ledger."
@@ -210,21 +207,20 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
                 child_prompts[marker] = request_text(request)
                 child_last_messages[marker] = last
                 return finish_response(f"done-{marker}")
-        # The sequential parent's children inherit ``allow_fan_out``;
-        # CHILD-A asks for fan-out explicitly.
-        return dispatch("", "CHILD-A", '{"allow_fan_out": true}')
+        return dispatch("", "CHILD-A")
 
     model = StandInModelServer(responder)
     try:
         result = sorcar.run(
             "PARENT-TASK dispatch the three children",
             work_dir=str(repo),
-            extension_agent_path=str(repo / "parent_sea.py"),
+            sea_path=str(repo / "parent_sea.py"),
             model=STANDIN_MODEL,
             model_config=model.model_config,
             use_worktree=False,
             auto_commit=False,
-            append_to_prompt=parent_suffix,
+            is_parallel=False,
+            add_to_prompt=parent_suffix,
             endpoint_file=daemon,
             timeout=300,
         )
@@ -240,14 +236,16 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
         )
 
     # The plain sub-agent (sorcar_sea.py) runs the basic toolset plus
-    # the parent's tool — and reads the parent's protocol it refers to.
+    # the parent's tool; what the parent SEA's ``system_prompt`` method
+    # returned is not forwarded (the sub-task's own SEA sees the
+    # assembled prompt).
     plain = child_tools["CHILD-A"]
     assert "parent_ledger" in plain
     assert "finish" in plain and "Bash" in plain
-    assert "PARENT-PROTOCOL" in child_prompts["CHILD-A"]
-    # The sub-agent asked for run_parallel, so it has the built-in
-    # ``number_of_cores``; the parent's same-named tool is skipped.
-    assert "run_parallel" in plain
+    assert "PARENT-PROTOCOL" not in child_prompts["CHILD-A"]
+    # The sequential parent's choice is inherited: no ``run_parallel``,
+    # and the parent's ``number_of_cores`` tool is the only one.
+    assert "run_parallel" not in plain
     assert plain.count("number_of_cores") == 1
 
     # A sub-task adding its own tools has both sets; the tool both
@@ -256,8 +254,6 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
     assert "child_probe" in adding
     assert adding.count("parent_ledger") == 1
     assert "Bash" in adding
-    # Nothing asked for fan-out: the sequential parent's choice is
-    # inherited, so the parent's ``number_of_cores`` tool is the only one.
     assert "run_parallel" not in adding
     assert adding.count("number_of_cores") == 1
 

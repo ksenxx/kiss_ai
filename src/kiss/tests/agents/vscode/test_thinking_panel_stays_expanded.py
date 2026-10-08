@@ -84,7 +84,7 @@ def test_main_js_does_not_contain_click_to_expand_label() -> None:
 
 
 def test_thinking_end_handler_does_not_hide_content() -> None:
-    """``thinking_end`` must keep the ``.cnt`` element visible.
+    """``thinking_end`` must keep the ``.think`` text visible.
 
     Concretely: it must not add the ``hidden`` class and must not set
     a ``(click to expand)`` label.  The panel stays expanded so the
@@ -106,14 +106,16 @@ def test_thinking_end_handler_does_not_hide_content() -> None:
 
 
 def test_thinking_start_handler_creates_expanded_panel() -> None:
-    """Sanity: ``thinking_start`` still creates the panel with a visible ``.cnt``.
+    """Sanity: ``thinking_start`` still creates the visible ``.think`` text block.
 
-    Confirms the streaming deltas have somewhere to append to.
+    Confirms the streaming deltas have somewhere to append to: the
+    plain text block inside the Thoughts panel (no header, no ``.cnt``
+    box of its own).
     """
     src = _read_main_js()
     m = re.search(r"case\s+'thinking_start':\s*(.*?)break;", src, re.DOTALL)
     assert m, "could not locate case 'thinking_start':"
     body = m.group(1)
     assert "thinkEl" in body
-    assert "cnt" in body, "thinking_start must create the .cnt element"
+    assert "mkEl('div', 'think')" in body, "thinking_start must create the .think block"
     assert "add('hidden')" not in body

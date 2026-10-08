@@ -145,10 +145,9 @@ async function webviewTests() {
     );
   });
 
-  await test('collapsing the panel keeps Stop and Copy visible', () => {
+  await test('the folded panel (its birth state) keeps Stop and Copy visible', () => {
     const tc = out.querySelector('.ev.tc');
-    click(tc.querySelector('.tc-h'));
-    assert.ok(tc.classList.contains('collapsed'));
+    assert.ok(tc.classList.contains('collapsed'), 'a tool panel starts folded');
     assert.strictEqual(
       display(win, tc.querySelector(':scope > .panel-stop-btn')),
       'flex',
@@ -157,7 +156,9 @@ async function webviewTests() {
       display(win, tc.querySelector(':scope > .tc-b')),
       'none',
     );
+    // Unfold it for the tests below: the Stop click must not refold it.
     click(tc.querySelector('.tc-h'));
+    assert.ok(!tc.classList.contains('collapsed'));
   });
 
   await test('clicking Stop posts interruptTool for the tab and tool', () => {

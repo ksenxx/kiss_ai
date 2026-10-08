@@ -20,9 +20,10 @@ Covers findings #2, #3, #7, #14, and #17 of ``tmp/findings-4.md``:
   timeouts are still reported.
 * #14 — ``Write`` writes content verbatim (``newline=""``), matching
   ``Edit``, so a Write-then-read round trip is byte-identical.
-* #17 — ``MCPServerConfig.source`` is bookkeeping only (excluded from
-  equality), so re-discovering the same server from a different config
-  file reuses the healthy connection instead of reconnecting.
+* #17 — ``MCPServerConfig`` carries no bookkeeping about which config
+  file it came from, so re-discovering the same server from a different
+  file yields an equal config and reuses the healthy connection instead
+  of reconnecting.
 
 No mocks, patches, or fakes: a real FastMCP stdio server subprocess and
 real shell subprocesses are used throughout.  (The #2 test drives the
@@ -137,10 +138,10 @@ def test_source_change_reuses_live_connection(
 ) -> None:
     """The same server re-discovered from another file is not reconnected.
 
-    Pre-fix ``MCPServerConfig.__eq__`` included the bookkeeping
-    ``source`` label, so an identical server whose config moved (e.g.
-    from ``.mcp.json`` to ``.kiss/mcp.json``) compared unequal and the
-    healthy connection was torn down and re-established.
+    Pre-fix ``MCPServerConfig`` carried a bookkeeping ``source`` label
+    that took part in equality, so an identical server whose config
+    moved (e.g. from ``.mcp.json`` to ``.kiss/mcp.json``) compared
+    unequal and the healthy connection was torn down and re-established.
     """
     manager = MCPManager()
     try:
@@ -149,8 +150,8 @@ def test_source_change_reuses_live_connection(
         assert conn1.error == ""
         assert conn1.session is not None
 
-        moved = dataclasses.replace(cfg, source="project")
-        assert moved == cfg, "source must not participate in equality"
+        moved = dataclasses.replace(cfg)
+        assert moved == cfg and moved is not cfg
         conn2 = manager.connect(moved)
         assert conn2 is conn1, "healthy connection was torn down on a source change"
         assert manager.call_tool("testsrv", "add", {"a": 2, "b": 3}) == "5"

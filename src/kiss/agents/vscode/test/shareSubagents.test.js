@@ -287,11 +287,11 @@ async function run() {
       "the sub-agent's transcript is rendered into its section",
     );
     assert.ok(
-      byId['sub-1'].querySelector('[id="task-panel"]'),
-      'each sub-agent section carries its static task panel',
+      byId['sub-1'].querySelector('.task-panel'),
+      'each sub-agent section carries its task panel',
     );
     assert.strictEqual(
-      byId['sub-1'].querySelector('[id^="task-panel-text"]').textContent,
+      byId['sub-1'].querySelector('.task-panel-text').textContent,
       'first sub task',
       "the panel shows the sub-agent's own task text",
     );

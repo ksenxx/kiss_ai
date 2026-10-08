@@ -10,8 +10,27 @@ import {execFileSync} from 'child_process';
 
 // Synchronous PATH probes run on the extension host's event loop, so
 // they must never wait on a hung child (e.g. a PATH entry on a stalled
-// network mount).  Twin of DependencyInstaller's SYNC_PROBE_TIMEOUT_MS.
+// network mount).
 const WHICH_TIMEOUT_MS = 5_000;
+
+/**
+ * Whether *cmd* resolves on PATH (`which` / `where`).  Synchronous, so
+ * bounded: execFileSync (no shell layer to orphan the probe) with a
+ * timeout and SIGKILL, since a probe stalled on a dead network mount
+ * can ignore the default SIGTERM and block past the timeout.
+ */
+export function commandExists(cmd: string): boolean {
+  try {
+    execFileSync(process.platform === 'win32' ? 'where' : 'which', [cmd], {
+      stdio: 'ignore',
+      timeout: WHICH_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function isValidKissProject(dir: string): boolean {
   try {
@@ -60,18 +79,5 @@ export function findUvPath(): string | null {
       continue;
     }
   }
-  try {
-    // execFileSync (no shell): execSync's shell layer meant a timeout
-    // killed only the shell and orphaned the underlying probe.
-    // killSignal SIGKILL: the default SIGTERM can be ignored by a probe
-    // stalled on a dead network mount, blocking past the timeout.
-    execFileSync(process.platform === 'win32' ? 'where' : 'which', ['uv'], {
-      stdio: 'ignore',
-      timeout: WHICH_TIMEOUT_MS,
-      killSignal: 'SIGKILL',
-    });
-    return 'uv';
-  } catch {
-    return null;
-  }
+  return commandExists('uv') ? 'uv' : null;
 }

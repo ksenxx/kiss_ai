@@ -232,27 +232,34 @@ class StreamAbortWatchdog:
         return False
 
 
-def _stop_requested(
+def _abort_error(
     watchdog: StreamAbortWatchdog,
     stop_event: threading.Event | None,
-) -> bool:
-    """Return whether this request must unwind as a user stop.
+    stall_timeout: float | None,
+) -> BaseException | None:
+    """Return the error a stopped or stalled stream must unwind with.
 
     The watchdog only reports a stop it acted on, and it acts no earlier
     than its first poll: a stream that reaches EOF (or fails) in that
     window would otherwise look like an ordinary result even though the
     user had already pressed Stop.  Reading the event too covers that.
+    A stop wins over a stall.  Call only after :meth:`StreamAbortWatchdog.stop`,
+    when the flags are final.
 
     Args:
-        watchdog: The watchdog attached to the stream.
+        watchdog: The disarmed watchdog attached to the stream.
         stop_event: The requesting thread's stop event, or ``None``.
+        stall_timeout: The tolerated silence, for the stall message.
 
     Returns:
-        ``True`` when a stop was requested for this request.
+        :func:`stop_error` for a user stop, :func:`stall_error` for a
+        stall, else ``None`` (the stream ended on its own).
     """
-    if watchdog.stopped:
-        return True
-    return stop_event is not None and stop_event.is_set()
+    if watchdog.stopped or (stop_event is not None and stop_event.is_set()):
+        return stop_error()
+    if watchdog.stalled:
+        return stall_error(stall_timeout)
+    return None
 
 
 def stop_error() -> KeyboardInterrupt:
@@ -389,27 +396,21 @@ def stop_aware_events(
         # stop) claimed between the transport failure and this point
         # would let the raw transport error escape unclassified.
         watchdog.stop()
-        if _stop_requested(watchdog, stop_event):
-            if on_abort is not None:
-                on_abort()
-            raise stop_error() from None
-        if watchdog.stalled:
-            if on_abort is not None:
-                on_abort()
-            raise stall_error(stall_timeout) from None
-        raise
+        error = _abort_error(watchdog, stop_event, stall_timeout)
+        if error is None:
+            raise
+        if on_abort is not None:
+            on_abort()
+        raise error from None
     finally:
         watchdog.stop()
         _close_stream(stream)
-    if _stop_requested(watchdog, stop_event):
-        # An aborted socket usually just ends the iterator, so a stop has
-        # to be reported after the loop as well.
+    # An aborted socket usually just ends the iterator, so a stop (or a
+    # stall) has to be reported after the loop as well; without this the
+    # caller would keep whatever partial text it accumulated and report
+    # it as a completion.
+    error = _abort_error(watchdog, stop_event, stall_timeout)
+    if error is not None:
         if on_abort is not None:
             on_abort()
-        raise stop_error()
-    if watchdog.stalled:
-        # Same for a stall: without this the caller would keep whatever
-        # partial text it accumulated and report it as a completion.
-        if on_abort is not None:
-            on_abort()
-        raise stall_error(stall_timeout)
+        raise error

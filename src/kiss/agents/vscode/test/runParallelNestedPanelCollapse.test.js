@@ -613,14 +613,10 @@ function testTranscriptWipeClosesSubagentTabs(mode) {
 function testReplayWhileViewingSubagentKeepsWholeTranscript(mode) {
   const st = bootParallelRun(mode, 2);
 
-  const subTabEl =
-    st.win.document.querySelector(
-      `#tab-list .chat-tab[data-tab-id="${st.subTabIds[0]}"]`,
-    ) ||
-    st.win.document.querySelector(
-      `#main-tab-list .chat-tab[data-tab-id="${st.subTabIds[0]}"]`,
-    );
-  assert.ok(subTabEl, 'the sub-agent tab must be in the tab bar');
+  const subTabEl = st.win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id="${st.subTabIds[0]}"]`,
+  );
+  assert.ok(subTabEl, 'the sub-agent tab must be on the group strip');
   subTabEl.dispatchEvent(new st.win.MouseEvent('click', {bubbles: true}));
   if (st.drain) st.drain();
   assert.strictEqual(
@@ -719,16 +715,16 @@ function testFailedReplayDoesNotStrandLaterCloses(mode) {
   }
   if (st.drain) st.drain();
 
-  const parentTabEl =
-    st.win.document.querySelector(
-      `#tab-list .chat-tab[data-tab-id="${st.parentId}"]`,
-    ) ||
-    st.win.document.querySelector(
-      `#main-tab-list .chat-tab[data-tab-id="${st.parentId}"]`,
-    );
-  assert.ok(parentTabEl, 'the parent chat must still be in the tab bar');
-  parentTabEl.dispatchEvent(new st.win.MouseEvent('click', {bubbles: true}));
+  // The parent chat is hidden behind the new one (its sub-agents are
+  // still running, so "+" did not retire it); the Chats panel's pick
+  // brings it back.
+  assert.ok(
+    st.win._testApi.openTabs().some(t => t.id === st.parentId),
+    'the parent chat must still be open',
+  );
+  st.win._testApi.switchToTab(st.parentId);
   if (st.drain) st.drain();
+  assert.strictEqual(st.win._testApi.getActiveTabId(), st.parentId);
   const out = st.win.document.getElementById('output');
   assert.ok(
     out.contains(st.panel),

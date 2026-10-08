@@ -114,22 +114,6 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def new_process_group_kwargs() -> dict[str, Any]:
-    """Return the :class:`subprocess.Popen` keyword arguments that put a child in its own group.
-
-    ``start_new_session=True`` on POSIX, ``CREATE_NEW_PROCESS_GROUP`` on
-    Windows.  Prefer :func:`popen_process_group`, which also enrols the
-    Windows child in a Job Object so :func:`kill_process_group` reaches
-    every descendant.
-
-    Returns:
-        A dict to splat into ``subprocess.Popen(...)``.
-    """
-    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
-    return {"start_new_session": True}
-
-
 # Windows: pid -> Job Object handle of a child started by
 # :func:`popen_process_group`.  Windows only tracks parent pids, so a
 # ``taskkill /T`` tree walk loses any descendant whose parent already
@@ -162,9 +146,11 @@ def _windows_enrol_in_job(proc: subprocess.Popen[Any]) -> None:  # pragma: no co
 def popen_process_group(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
     """Start a child that :func:`kill_process_group` can stop with all its descendants.
 
-    ``subprocess.Popen`` plus :func:`new_process_group_kwargs`; on Windows
-    the child is additionally placed in its own Job Object right after it
-    starts (descendants inherit the job automatically).
+    ``subprocess.Popen`` with the child in its own group
+    (``start_new_session=True`` on POSIX, ``CREATE_NEW_PROCESS_GROUP`` on
+    Windows); on Windows the child is additionally placed in its own Job
+    Object right after it starts (descendants inherit the job
+    automatically).
 
     Args:
         *args: Positional arguments for :class:`subprocess.Popen`.
@@ -173,7 +159,10 @@ def popen_process_group(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
     Returns:
         The started process.
     """
-    kwargs.update(new_process_group_kwargs())
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+    else:
+        kwargs["start_new_session"] = True
     proc: subprocess.Popen[Any] = subprocess.Popen(*args, **kwargs)
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
         _windows_enrol_in_job(proc)
@@ -190,7 +179,7 @@ def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
 
     Args:
         pid: The group leader (a child started with
-            :func:`new_process_group_kwargs`).
+            :func:`popen_process_group`).
         sig: The signal to send on POSIX; ignored on Windows.
 
     Raises:

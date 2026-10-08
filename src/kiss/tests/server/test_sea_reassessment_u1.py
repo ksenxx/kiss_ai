@@ -22,7 +22,7 @@ Against a real private daemon (``_Daemon``) with a stand-in model:
 3. A parent that calls ``finish`` with a live job gets the gate text
    once; its second ``finish`` passes, after which the job is dead and
    gone from the registry.
-4. A ``kind: "channel"`` sub-task detached at its bound keeps holding
+4. A ``ChannelSea`` sub-task detached at its bound keeps holding
    its workspace inside the daemon; a dispatch for another workspace
    waits and fails with the existing error until the first is killed.
 5. ``wait="false"`` keeps its notice; ``daemon_client.run`` is called
@@ -298,14 +298,11 @@ def test_detached_channel_sub_task_holds_its_workspace_until_killed(
     sea = home.repo / "chan_sea.py"
     sea.write_text(
         """
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 
-class Sea(BaseSea):
+class Sea(ChannelSea):
     def description(self):
         return 'a channel'
-
-    def settings(self, settings):
-        return settings | {'kind': 'channel'}
 """,
         encoding="utf-8",
     )
@@ -433,6 +430,24 @@ def test_timeout_bounds_the_whole_call_including_startup(
         daemon.close()
 
 
+def _interrupt_once_the_job_exists(
+    caller: int, seen: list[agent_dispatch.AgentJob], running: bool,
+) -> None:
+    """Record the standalone job the caller is waiting on, then Stop the caller's tool call.
+
+    With *running* the Stop waits for the sub-task's tab to be up, so
+    it lands in the result wait rather than the start wait.
+    """
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not seen:
+        seen.extend(
+            j for j in agent_dispatch.agent_jobs_of(None).values()
+            if j.running.is_set() or not running
+        )
+        time.sleep(0.02)
+    tool_interrupt.interrupt_tool_call(caller, "run_agent")
+
+
 def test_interrupting_wait_false_during_startup_cancels_the_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -449,19 +464,24 @@ def test_interrupting_wait_false_during_startup_cancels_the_job(
         "        return settings | {'model': 'm'}\n"
     )
     token = tool_interrupt.begin_tool_call("run_agent")
-    caller = threading.get_ident()
-    timer = threading.Timer(0.5, tool_interrupt.interrupt_tool_call, args=(caller, "run_agent"))
-    timer.start()
+    seen: list[agent_dispatch.AgentJob] = []
+    stopper = threading.Thread(
+        target=_interrupt_once_the_job_exists, args=(threading.get_ident(), seen, False),
+        daemon=True,
+    )
+    stopper.start()
     try:
         started = time.monotonic()
         with pytest.raises(tool_interrupt.ToolCallInterrupted):
             make_run_agent_tool(str(tmp_path))("never starts", str(script), wait="false")
         assert time.monotonic() - started < 5.0
-        (job,) = agent_dispatch.agent_jobs_of(None).values()
+        (job,) = seen
         assert job.cancel.is_set()
+        # No run end ever collects a standalone job: the interrupted call dropped it.
+        assert agent_dispatch.agent_jobs_of(None) == {}
         assert daemon.wait_for_command("stop"), "the interrupted call left its sub-task running"
     finally:
-        timer.cancel()
+        stopper.join(10)
         tool_interrupt.end_tool_call(token)
         daemon.close()
 
@@ -503,7 +523,7 @@ def test_a_stop_during_the_parent_end_join_still_ends_the_run_as_stopped(
     )
     agent = SorcarAgent("u1-parent")
     job = agent_dispatch.start_agent_job("helper", {
-        "name": "helper", "prompt": "never finishes", "agent_path": str(script),
+        "name": "helper", "prompt": "never finishes", "sea_path": str(script),
         "work_dir": str(tmp_path), "model_name": "", "budget": None, "timeout": 60.0,
         "parent_agent": agent,
     }, agent)
@@ -564,26 +584,28 @@ def test_interrupting_the_run_agent_call_kills_its_job(
         "        return settings | {'model': 'm'}\n"
     )
     token = tool_interrupt.begin_tool_call("run_agent")
-    caller = threading.get_ident()
-    timer = threading.Timer(0.5, tool_interrupt.interrupt_tool_call, args=(caller, "run_agent"))
-    timer.start()
+    seen: list[agent_dispatch.AgentJob] = []
+    stopper = threading.Thread(
+        target=_interrupt_once_the_job_exists, args=(threading.get_ident(), seen, True),
+        daemon=True,
+    )
+    stopper.start()
     try:
         started = time.monotonic()
         with pytest.raises(tool_interrupt.ToolCallInterrupted):
             make_run_agent_tool(str(tmp_path))("never finishes", str(script), timeout="30")
         # The call unwound at once; the job's thread sends the stop.
         assert time.monotonic() - started < 5.0
-        (job,) = agent_dispatch.agent_jobs_of(None).values()
+        (job,) = seen
         assert job.cancel.is_set()
+        # No run end ever collects a standalone job: the interrupted call dropped it.
+        assert agent_dispatch.agent_jobs_of(None) == {}
         assert daemon.wait_for_command("stop"), "the interrupted call left its sub-task running"
         assert daemon.wait_for_command("closeTab")
         job.thread.join(10)
         assert not job.thread.is_alive()
         assert "was stopped before it finished" in job.result, job.result
-        # The run's end drops what the interrupt left behind.
-        assert agent_dispatch.kill_jobs_of(None) == []
-        assert agent_dispatch.agent_jobs_of(None) == {}
     finally:
-        timer.cancel()
+        stopper.join(10)
         tool_interrupt.end_tool_call(token)
         daemon.close()

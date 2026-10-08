@@ -270,9 +270,10 @@ _PROBE_JS = """() => {
     preBg: cs('#probe-pre', 'backgroundColor'),
     codeBg: cs('#probe-code', 'backgroundColor'),
     keyword: cs('#probe-code .hljs-keyword', 'color'),
-    // The main tab row carries the editor-group header colour; the group
-    // strip under it (#tab-bar) sits on the editor background.
-    tabBar: cs('#main-tab-bar', 'backgroundColor'),
+    // The content pane's tab row (desktop split layout) carries the
+    // editor-group header colour; the group strip (#tab-bar) sits on the
+    // editor background.
+    tabBar: cs('#content-tab-bar', 'backgroundColor'),
     composer: cs('#input-container', 'backgroundColor'),
     send: cs('#send-btn', 'backgroundColor'),
     sendFg: cs('#send-btn', 'color'),

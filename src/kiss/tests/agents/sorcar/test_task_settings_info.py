@@ -465,6 +465,7 @@ class TestWithTaskSettingsSynthesis(_DBRedirect):
             prompt="crashed early",
             result_raw="",
             result_summary="Task failed",
+            usage=agent.usage_snapshot(),
         )
         session = _load_chat_events_by_task_id(task_id)
         assert session is not None
@@ -476,6 +477,7 @@ class TestWithTaskSettingsSynthesis(_DBRedirect):
             prompt="crashed early",
             result_raw="",
             result_summary="Task failed",
+            usage=agent.usage_snapshot(),
         )
         session = _load_chat_events_by_task_id(task_id)
         assert session is not None

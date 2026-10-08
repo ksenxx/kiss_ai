@@ -93,7 +93,10 @@ function testEarlyPromptPoisoning() {
   win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   fakeGeometry(O);
+  // The daemon's run path: the prompt echo, then the 'clear' that
+  // opens the new transcript, then the live stream.
   send(win, {type: 'setTaskText', text: 'My new task', tabId});
+  send(win, {type: 'clear', tabId});
   send(win, {type: 'status', running: true, tabId});
   send(win, {type: 'system_prompt', text: 'sys', tabId, taskId: '', early: true});
   send(win, {type: 'prompt', text: 'My new task', tabId, taskId: '', early: true});
@@ -127,7 +130,10 @@ function testNoEmptyTaskIdRequest() {
   win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   fakeGeometry(O);
+  // The daemon's run path: the prompt echo, then the 'clear' that
+  // opens the new transcript, then the live stream.
   send(win, {type: 'setTaskText', text: 'My new task', tabId});
+  send(win, {type: 'clear', tabId});
   send(win, {type: 'status', running: true, tabId});
   send(win, {type: 'system_prompt', text: 'sys', tabId, taskId: '', early: true});
   send(win, {type: 'prompt', text: 'My new task', tabId, taskId: '', early: true});

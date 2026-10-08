@@ -15,14 +15,11 @@ the task's event stream (``JsonPrinter._subscribers`` /
   ``SorcarAgent._show_model_in_picker`` via
   ``JsonPrinter.broadcast_agent_model_pick`` (which must fan out even
   when the calling thread has no thread-local ``task_id`` bound,
-  using the new explicit ``task_id`` fallback), and
-* the ``subagentDone`` broadcasts of the non-UI
-  ``run_tasks_parallel`` path.
+  using the new explicit ``task_id`` fallback).
 
 All tests drive the real code paths — real on-disk git worktrees for
-the auto-commit toasts, a real :class:`JsonPrinter` subscriber map,
-and the real ``run_tasks_parallel`` executor — with a capture
-printer that records ``broadcast`` payloads.
+the auto-commit toasts and a real :class:`JsonPrinter` subscriber map
+— with a capture printer that records ``broadcast`` payloads.
 
 Also covers the printer-side "transient, all-watching-tabs"
 primitive ``JsonPrinter.broadcast_transient`` (which the toast path

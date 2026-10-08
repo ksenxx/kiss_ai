@@ -59,10 +59,11 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// Every open tab's title, rendered or not: chat tabs have no row of
+// their own any more, so a background chat's title is only in the
+// tab records.
 function allTabTitles(win) {
-  return Array.from(win.document.querySelectorAll('[role="tab"]')).map(el =>
-    el.getAttribute('aria-label'),
-  );
+  return win._testApi.openTabs().map(t => t.title);
 }
 
 function key(win, el, k) {

@@ -216,13 +216,15 @@ function testSidebarCreateNewTabCopiesDraft() {
     'no editor tab is requested outside editor-tabs mode',
   );
 
-  // The originating tab kept its own copy.
+  // The originating tab kept its own copy (createNewTab alone retires
+  // nothing; going back to it is a Chats-panel pick).
   win._testApi.endLaunch();
-  const firstStrip = win.document.querySelector(
-    `#main-tab-list .chat-tab[data-tab-id="${firstTab}"]`,
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === firstTab),
+    'the first tab is still open',
   );
-  assert.ok(firstStrip, 'the first tab is still in the tab bar');
-  firstStrip.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  win._testApi.switchToTab(firstTab);
+  assert.strictEqual(win._testApi.getActiveTabId(), firstTab);
   assert.strictEqual(
     inp.value,
     'sidebar draft',

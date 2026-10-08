@@ -29,10 +29,10 @@ to ``kiss.tests.server.test_codex_mobile_layout``):
 * The Codex design tokens are actually in the stylesheet: page
   ``#0d0d0d``, composer surface ``#212121`` at 28px radius with
   circular 36px controls, white circular send button, pill tab chips.
-* The restyle stops at the chrome: the EVENT PANELS and the pinned
-  ``#task-panel`` are NOT touched, so they render exactly like the VS
-  Code extension webview (see
-  ``test_remote_panels_match_extension.py``).
+* The restyle stops at the chrome: the EVENT PANELS (including the
+  inline ``.task-panel`` that heads each task's thread) are NOT
+  touched, so they render exactly like the VS Code extension webview
+  (see ``test_remote_panels_match_extension.py``).
 * ``chat.html`` itself does not hardcode the new stylesheet (the VS
   Code webview must never load it) and ``buildChatHtml``'s HEAD_STYLE
   placeholder path is untouched.
@@ -68,9 +68,6 @@ CONTROL_IDS = [
     "status-tokens",
     "status-budget",
     "status-steps",
-    "task-panel",
-    "task-panel-text",
-    "task-panel-copy",
     "output",
     "welcome",
     "welcome-logo",
@@ -119,10 +116,6 @@ CONTROL_IDS = [
     "hf-tag",
     "history-list",
     "sidebar-overlay",
-    "frequent-panel",
-    "frequent-panel-close",
-    "frequent-list",
-    "frequent-overlay",
     "tricks-panel",
     "tricks-panel-close",
     "tricks-list",
@@ -339,12 +332,12 @@ def test_codex_pill_tabs_and_status() -> None:
 
 
 def test_task_panel_not_restyled_on_remote() -> None:
-    """The pinned task panel must render EXACTLY like the VS Code
-    extension webview (full-width thinking-panel-styled panel from
-    main.css), so
-    remote-codex.css must not target #task-panel at all."""
+    """The inline task panel (``.ev.task-panel``, the first event of
+    every task's thread) must render EXACTLY like the VS Code extension
+    webview (full-width accent-tinted panel from main.css), so
+    remote-codex.css must not target it at all."""
     css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
-    assert "#task-panel" not in css
+    assert "task-panel" not in css
 
 
 def test_codex_rounded_panels() -> None:
@@ -577,18 +570,18 @@ def test_sidebar_default_width_is_one_fifth_of_the_window() -> None:
 
 
 def test_chat_column_spans_full_width() -> None:
-    """Chat panels and the pinned task panel keep the extension's
-    full-width layout (remote-codex.css must not cap or realign
-    #output children or #task-panel), and the composer (input textbox
-    + buttons) spans the FULL chat webview width with no max-width cap
+    """Chat panels (the inline task panel among them) keep the
+    extension's full-width layout (remote-codex.css must not cap or
+    realign #output children), and the composer (input textbox +
+    buttons) spans the FULL chat webview width with no max-width cap
     at all."""
     css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
     assert "#output" not in css, (
         "remote-codex.css must not restyle #output or its children; "
         "the chat thread layout comes from main.css like the extension"
     )
-    assert "#task-panel" not in css, (
-        "remote-codex.css must not restyle the fixed task panel"
+    assert "task-panel" not in css, (
+        "remote-codex.css must not restyle the inline task panel"
     )
     composer = re.search(
         r"body\.remote-chat #input-container\s*\{([^}]*)\}", css

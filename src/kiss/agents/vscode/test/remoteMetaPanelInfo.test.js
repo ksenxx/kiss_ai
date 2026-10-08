@@ -879,13 +879,10 @@ async function main() {
       // Back to the first tab while BOTH tabs are running: the same
       // running state, yet the subpanel must not keep showing tab
       // two's report for even one poll interval.
+      // (The Chats-panel pick: chats have no tab row of their own.)
       const before = polls(wv).length;
-      click(
-        win,
-        win.document.querySelector(
-          `.chat-tab[data-tab-id=${JSON.stringify(TAB1)}]`,
-        ),
-      );
+      win._testApi.switchToTab(TAB1);
+      assert.strictEqual(win._testApi.getActiveTabId(), TAB1);
       assert.strictEqual(content.innerHTML, '', 'tab switch clears the panel');
       assert.ok(!infoVisible(win), 'tab switch hides the subpanel');
       assert.strictEqual(polls(wv).length, before + 1, 'immediate poll fired');
@@ -914,7 +911,9 @@ async function main() {
       reply(win, poll1, {sig: 'chat:1', content: '<p>chat tab notes</p>'});
       assert.ok(content.textContent.includes('chat tab notes'));
 
-      // Open a file view: it becomes the visible tab, but has no task.
+      // Open a file view: on the desktop remote's split layout it goes
+      // to the content pane (its own tab row), the chat stays on screen,
+      // and the file has no task.
       send(win, {
         type: 'fileContent',
         name: 'report.html',
@@ -922,10 +921,22 @@ async function main() {
         content: '<h1>report</h1>',
       });
       const contentTab = win.document.querySelector(
-        `#tab-list .chat-tab.active[data-tab-id]`,
+        `#content-tab-list .chat-tab.active[data-tab-id]`,
       );
-      assert.ok(contentTab, 'the content tab is the visible tab');
-      assert.notStrictEqual(contentTab.getAttribute('data-tab-id'), TAB1);
+      assert.ok(contentTab, 'the content tab is shown in the content pane');
+      const FILE = contentTab.getAttribute('data-tab-id');
+      assert.notStrictEqual(FILE, TAB1);
+      assert.ok(
+        win._testApi
+          .openTabs()
+          .some(t => t.id === FILE && t.isContentTab && t.rootId === TAB1),
+        'the file belongs to the chat that opened it',
+      );
+      assert.strictEqual(
+        win._testApi.getActiveTabId(),
+        TAB1,
+        'the chat pane keeps showing the chat',
+      );
       assert.ok(
         content.textContent.includes('chat tab notes'),
         'opening a file view keeps the report on screen',
@@ -940,14 +951,11 @@ async function main() {
       reply(win, poll, {sig: 'chat:2', content: '<p>chat tab, updated</p>'});
       assert.ok(content.textContent.includes('chat tab, updated'));
 
-      // Back to the chat tab (its group-strip entry): same target,
-      // nothing is cleared.
-      click(
-        win,
-        win.document.querySelector(
-          `#tab-list .chat-tab[data-tab-id=${JSON.stringify(TAB1)}]`,
-        ),
-      );
+      // Re-showing the file in the content pane and picking the chat
+      // again: same target, nothing is cleared.
+      click(win, contentTab);
+      win._testApi.switchToTab(TAB1);
+      assert.strictEqual(win._testApi.getActiveTabId(), TAB1);
       assert.ok(content.textContent.includes('chat tab, updated'));
       assert.strictEqual(lastPoll(wv).token, tok1);
     },

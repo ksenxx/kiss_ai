@@ -504,14 +504,16 @@ function submitPrompt(win, posted, text) {
   return sent[sent.length - 1];
 }
 
-/** The tab ids the tab bar currently shows. */
-function shownTabIds(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; count each tab once.
-  const ids = Array.from(win.document.querySelectorAll('.chat-tab')).map(
-    el => el.dataset.tabId,
-  );
-  return ids.filter((id, i) => ids.indexOf(id) === i);
+/** The ids of every open tab (a background chat has no strip entry, so
+ *  the registry, not the DOM, lists them). */
+function openTabIds(win) {
+  return Array.from(win._testApi.openTabs(), t => t.id);
+}
+
+/** Bring a background chat on screen the way the Chats panel's pick does. */
+function switchToChat(win, tabId) {
+  assert.ok(openTabIds(win).includes(tabId), 'tab ' + tabId + ' is open');
+  win._testApi.switchToTab(tabId);
 }
 
 /** Pick *dir* through the VS Code host round trip (panel -> host -> panel). */
@@ -563,7 +565,7 @@ function testVsCodePickIsGlobal() {
   win._testApi.createNewTab();
   const secondTab = win._testApi.getActiveTabId();
   assert.notStrictEqual(secondTab, firstTab);
-  assert.deepStrictEqual(shownTabIds(win).sort(), [firstTab, secondTab].sort());
+  assert.deepStrictEqual(openTabIds(win).sort(), [firstTab, secondTab].sort());
   openPanelViaMenu(win);
   assert.strictEqual(currentLine(win), 'Current: /elsewhere/repo');
   click(win, byId(win, 'workdir-panel-close'));
@@ -591,10 +593,7 @@ function testVsCodePickIsGlobal() {
   openPanelViaMenu(win);
   assert.strictEqual(currentLine(win), 'Current: /elsewhere/other');
   click(win, byId(win, 'workdir-panel-close'));
-  click(
-    win,
-    win.document.querySelector(`.chat-tab[data-tab-id="${firstTab}"]`),
-  );
+  switchToChat(win, firstTab);
   assert.strictEqual(win._testApi.getActiveTabId(), firstTab);
   openPanelViaMenu(win);
   assert.strictEqual(
@@ -634,7 +633,7 @@ function testVsCodeLateReplyRescopesEveryTab() {
   assert.strictEqual(sub.tabId, tabB);
   assert.strictEqual(sub.workDir, undefined);
 
-  click(win, win.document.querySelector(`.chat-tab[data-tab-id="${tabA}"]`));
+  switchToChat(win, tabA);
   assert.strictEqual(win._testApi.getActiveTabId(), tabA);
   openPanelViaMenu(win);
   assert.strictEqual(currentLine(win), 'Current: /picked/late');
@@ -779,7 +778,7 @@ function testOrphanedFileTabBrowsesTheGlobalDir() {
   // and Source Control views of the orphaned file tab browse THAT.
   const {win, posted} = makeWebview({remote: true, desktop: true});
   send(win, {type: 'configData', config: {work_dir: '/old'}});
-  const owner = win.document.querySelector('.chat-tab').dataset.tabId;
+  const owner = win._testApi.getActiveTabId();
   send(win, {
     type: 'fileContent',
     path: '/old/a.txt',
@@ -787,23 +786,25 @@ function testOrphanedFileTabBrowsesTheGlobalDir() {
     content: 'x',
     tabId: owner,
   });
-  const fileTab = Array.from(win.document.querySelectorAll('.chat-tab')).find(
-    el => el.dataset.tabId !== owner,
+  // The split layout lists content tabs on the content pane's own row.
+  const fileTab = win.document.querySelector(
+    '#content-tab-list .chat-tab.content-tab',
   );
   assert.ok(fileTab, 'the file opened as a content tab');
   click(win, fileTab);
   click(
     win,
     win.document.querySelector(
-      '.chat-tab[data-tab-id="' + owner + '"] .chat-tab-close',
+      '#tab-list .chat-tab[data-tab-id="' + owner + '"] .chat-tab-close',
     ),
   );
+  assert.ok(!openTabIds(win).includes(owner), 'the owning chat is closed');
+  // The Explorer and Source Control sections of the task-info panel
+  // follow the new workspace on their own.
   send(win, {type: 'workDirChanged', workDir: '/new'});
-  click(win, byId(win, 'activity-explorer'));
   const listing = msgs(posted, 'listDir').pop();
   assert.strictEqual(listing.path, '/new');
   assert.strictEqual(listing.workDir, '/new');
-  click(win, byId(win, 'activity-scm'));
   const status = msgs(posted, 'gitStatus').pop();
   assert.strictEqual(status.workDir, '/new');
   // The desktop layout polls the task info every 5 s for as long as the

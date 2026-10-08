@@ -19,9 +19,9 @@ concurrently running pytest processes.
 
 Branches not exercised:
 
-* ``_noninteractive_callback`` in ``mcp_servers``: the SDK calls the
-  redirect handler first, and ``_noninteractive_redirect`` always
-  raises, so the callback handler can never be reached.
+* ``_refuse_login`` as the callback handler in ``mcp_servers``: the SDK
+  calls the redirect handler first, and that always raises, so the
+  callback handler can never be reached.
 * ``MCPLoginSession._run``'s no-exception ``error = "sign-in cancelled"``
   branch: it needs a cancel to land after the redirect was consumed but
   before ``initialize`` returns, a window no real client/server exchange
@@ -540,8 +540,8 @@ def test_answer_waits_for_the_hand_off_outcome(server: _AuthMCPServer, home: Pat
 def test_flow_finishing_before_the_page_opened_never_publishes_a_url_hand_off(
     server: _AuthMCPServer, home: Path
 ) -> None:
-    """The opener follows the redirect (approving) but returns late: the flow ends first and
-    cancels the opening task; the answer must then be success, never an 'open this URL'."""
+    """The opener follows the redirect (approving) but returns late: the flow ends first,
+    while the opener still lingers; the answer must then be success, never an 'open this URL'."""
     from kiss.core.browser_handoff import set_browser_tab_opener
 
     release = threading.Event()
@@ -562,7 +562,7 @@ def test_flow_finishing_before_the_page_opened_never_publishes_a_url_hand_off(
         # lingers: nothing may be answered as consent_required now.
         for _ in range(20):
             answer = _session_answer(session)
-            assert answer["status"] != "consent_required", answer
+            assert answer.get("status") != "consent_required", answer
             if answer.get("ok"):
                 break
             time.sleep(0.1)
@@ -651,8 +651,8 @@ def _store_registration(name: str, client_id: str, redirect_uri: str) -> None:
             "redirect_uris": [redirect_uri],
         }
     )
-    storage._locked_update("client_info", info.model_dump(mode="json", exclude_none=True))
-    storage._locked_update("tokens", {"access_token": f"dead-{client_id}", "token_type": "Bearer"})
+    storage.put("client_info", info.model_dump(mode="json", exclude_none=True))
+    storage.put("tokens", {"access_token": f"dead-{client_id}", "token_type": "Bearer"})
 
 
 def test_drop_stale_registration_only_for_other_redirect_uris(home: Path) -> None:
@@ -668,7 +668,7 @@ def test_drop_stale_registration_only_for_other_redirect_uris(home: Path) -> Non
     assert drop_stale_registration(storage) is True
     assert _client_info("stale-check") is None
     assert _tokens("stale-check") is None
-    assert storage._read()["expires_at"] is None
+    assert not storage.path.exists()
     # Nothing left to drop.
     assert drop_stale_registration(storage) is False
 

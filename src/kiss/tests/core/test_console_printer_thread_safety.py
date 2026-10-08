@@ -4,11 +4,11 @@
 # add your name here
 """End-to-end thread-safety tests for :class:`ConsolePrinter` (audit F1).
 
-``SorcarAgent.run_tasks_parallel`` forwards the parent's printer object
-*verbatim* to every parallel sub-agent thread, and ``_LiveUsageMonitor``
-prints from a third daemon thread.  ``ConsolePrinter`` therefore has the
-same fan-out ``JsonPrinter`` does, and must protect its streaming state
-the same way.
+The daemon prints from several agent threads at once through one
+printer object (``JsonPrinter`` keys its state by thread for that
+reason), and a ``ConsolePrinter`` shared the same way must protect its
+streaming state too: one thread's block, style and usage offsets must
+never leak into another's.
 
 These tests use a real ``ConsolePrinter``, real ``threading.Thread``s and
 a real in-memory stream — no mocks, patches, fakes or test doubles.

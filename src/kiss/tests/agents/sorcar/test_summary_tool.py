@@ -21,7 +21,7 @@ every other tool call on steps divisible by 5 has been removed).
 
 This module verifies the Python side end-to-end:
 
-* the ``summary`` tool function is a no-op returning a confirmation;
+* the ``summary`` tool function is a no-op returning an empty string;
 * ``SorcarAgent`` (and therefore ``ChatSorcarAgent``) registers the tool;
 * ``ChatSorcarAgent`` leaves ``tool_call_guard`` / ``pre_step_hook``
   as the plain inherited attributes — no summary gate, no reminder
@@ -43,8 +43,8 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent, summary
 
 
 def test_summary_tool_is_noop() -> None:
-    """Calling the tool performs no action and confirms."""
-    assert summary("Did six things, then six more.") == "Summary recorded."
+    """Calling the tool performs no action and returns an empty result."""
+    assert summary("Did six things, then six more.") == ""
 
 
 def test_sorcar_agent_registers_summary_tool() -> None:
@@ -55,7 +55,7 @@ def test_sorcar_agent_registers_summary_tool() -> None:
     names = [getattr(t, "__name__", "") for t in tools]
     assert "summary" in names
     tool = tools[names.index("summary")]
-    assert tool("one. two. three. four. five.") == "Summary recorded."
+    assert tool("one. two. three. four. five.") == ""
 
 
 def test_chat_agent_registers_summary_tool() -> None:
@@ -66,7 +66,7 @@ def test_chat_agent_registers_summary_tool() -> None:
     names = [getattr(t, "__name__", "") for t in tools]
     assert "summary" in names
     tool = tools[names.index("summary")]
-    assert tool("one. two. three. four. five.") == "Summary recorded."
+    assert tool("one. two. three. four. five.") == ""
 
 
 def test_no_hardwired_summary_enforcement() -> None:

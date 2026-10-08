@@ -20,10 +20,7 @@ def find_id(tree: str, pattern: str) -> int:
 
 
 def main() -> None:
-    web = WebUseTool(
-        browser_type="chromium",
-        user_data_dir=KISS_PROFILE_DIR,
-    )
+    web = WebUseTool(user_data_dir=KISS_PROFILE_DIR)
 
     try:
         print("=" * 70)

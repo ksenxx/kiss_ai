@@ -8,8 +8,8 @@ Invariant: any agent or UI activity in the chat webview of one VS Code
 window must not affect the behavior or UI of the chat webview in
 another window.  Each window owns exactly one local connection to the
 shared daemon; historically the daemon *broadcast* every request/reply
-event (``files``, ``ghost``, ``models``, ``history``, ``frequentTasks``,
-``inputHistory``, ``configData``, unknown-command ``error``) to every
+event (``files``, ``ghost``, ``models``, ``history``, ``inputHistory``,
+``configData``, unknown-command ``error``) to every
 connected client, so e.g. typing ``@`` in window A popped the file
 picker dropdown in window B.
 
@@ -75,8 +75,7 @@ def _no_verify_ssl() -> ssl.SSLContext:
     return ctx
 
 _REPLY_TYPES = frozenset({
-    "files", "ghost", "models", "history", "frequentTasks",
-    "inputHistory", "configData",
+    "files", "ghost", "models", "history", "inputHistory", "configData",
 })
 
 
@@ -234,7 +233,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         await self._assert_no_reply_leak(reader_b, writer_b)
 
     async def test_data_replies_only_to_requesting_window(self) -> None:
-        """models/history/frequentTasks/inputHistory/configData replies
+        """models/history/inputHistory/configData replies
         from window A's requests must not repaint window B's UI."""
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
@@ -243,14 +242,10 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         await self._send(writer_a, {
             "type": "getHistory", "query": "", "offset": 0, "generation": 7,
         })
-        await self._send(writer_a, {"type": "getFrequentTasks"})
         await self._send(writer_a, {"type": "getInputHistory"})
         await self._send(writer_a, {"type": "getConfig"})
 
-        for reply_type in (
-            "models", "history", "frequentTasks", "inputHistory",
-            "configData",
-        ):
+        for reply_type in ("models", "history", "inputHistory", "configData"):
             msg = await self._drain_until(reader_a, _has_type(reply_type))
             self.assertNotIn("connId", msg)
 

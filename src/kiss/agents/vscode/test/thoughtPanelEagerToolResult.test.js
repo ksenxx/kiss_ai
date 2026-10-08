@@ -87,6 +87,17 @@ function stepsText(win) {
   return win.document.getElementById('status-steps').textContent;
 }
 
+// Bring a background chat back on screen the way the Chats panel's
+// pick does it (a background chat has no entry on the tab strip).
+function switchBack(win, tabId) {
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    'tab ' + tabId + ' must still be open',
+  );
+  win._testApi.switchToTab(tabId);
+  assert.strictEqual(win._testApi.getActiveTabId(), tabId);
+}
+
 async function testEagerPanelAfterToolResult() {
   const wv = makeWebview();
   const win = wv.win;
@@ -356,9 +367,7 @@ async function testEagerPanelBackgroundTab() {
     'background-tab events must not render in the active tab',
   );
 
-  const tabEl = win.document.querySelector('.chat-tab[data-tab-id="' + tab1 + '"]');
-  assert.ok(tabEl, 'tab1 element must exist in the tab bar');
-  tabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  switchBack(win, tab1);
   const output = win.document.getElementById('output');
   const panels = llmPanels(output);
   assert.strictEqual(
@@ -406,8 +415,7 @@ async function testEagerPanelSurvivesTabSwitch() {
   assert.strictEqual(llmPanels(output).length, 2);
 
   api.createNewTab();
-  const backEl = win.document.querySelector('.chat-tab[data-tab-id="' + tab1 + '"]');
-  backEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  switchBack(win, tab1);
   assert.strictEqual(
     llmPanels(win.document.getElementById('output')).length,
     2,
@@ -444,10 +452,7 @@ async function testEagerPanelFooterTicksAfterTabRestore() {
   api.createNewTab();
   await sleep(1150);
 
-  const backEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="' + tab1 + '"]',
-  );
-  backEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  switchBack(win, tab1);
   const output = win.document.getElementById('output');
   const eager = llmPanels(output)[1];
   assert.ok(eager, 'eager panel must survive the tab round-trip');
@@ -546,10 +551,7 @@ async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: tab1});
   send(win, {type: 'tool_result', content: 'r\n', tabId: tab1});
   send(win, {type: 'task_stopped', tabId: tab1});
-  const backEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="' + tab1 + '"]',
-  );
-  backEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  switchBack(win, tab1);
   const bgPanels = llmPanels(win.document.getElementById('output'));
   assert.strictEqual(
     bgPanels.length,

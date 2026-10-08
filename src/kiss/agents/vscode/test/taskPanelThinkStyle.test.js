@@ -3,11 +3,12 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The fixed task panel at the top of a chat webview is the one panel
-// the eye should find first: it paints the accent tint behind the
-// thinking panel's foreground colours and carries a 1px accent
-// hairline, on every surface (sidebar webview, editor-tab webview,
-// remote webapp and shared chat pages all inline media/main.css).
+// The task panel that opens every task of the chat thread is the one
+// panel the eye should find first: it paints the user bubble's accent
+// wash under a 1px accent hairline, on every surface (sidebar webview, editor-tab
+// webview, remote webapp and shared chat pages all inline
+// media/main.css).  The model's thinking tokens are a plain text block
+// inside the Thoughts panel, not a boxed panel of their own.
 // Fresh installs must default to editor-tabs mode
 // (kissSorcar.editorTabsMode default true in package.json).
 
@@ -45,96 +46,82 @@ function decl(body, prop) {
   return m ? m[1].trim() : null;
 }
 
-function testTaskPanelBackgroundIsTheAccentTint() {
-  const think = ruleBody('.think');
-  const panel = ruleBody('#task-panel');
-  assert.ok(think, 'main.css must style .think');
-  assert.ok(panel, 'main.css must style #task-panel');
+function testTaskPanelIsTheAccentTintedPanel() {
+  const tool = ruleBody('.tc');
+  const panel = ruleBody('.ev.task-panel');
+  assert.ok(tool, 'main.css must style .tc');
+  assert.ok(panel, 'main.css must style .ev.task-panel');
 
-  // The transcript panels share the neutral --panel-tint; the task
-  // panel alone paints the accent tint, through --panel-bg.
+  // The transcript panels share the neutral surface; the task panel
+  // alone paints the user bubble's accent wash (deeper than the
+  // --accent-tint of other accent-marked panels) under an accent
+  // hairline, with a tight top-right corner as the bubble's tail.
   assert.strictEqual(
-    decl(think, 'background'),
-    'var(--panel-tint)',
-    '.think must paint the neutral --panel-tint',
+    decl(tool, 'background'),
+    'var(--surface)',
+    '.tc must paint the neutral --surface',
   );
   assert.strictEqual(
     decl(panel, 'background'),
-    'var(--panel-bg)',
-    '#task-panel must paint its background from --panel-bg',
+    'var(--bubble-user-tint)',
+    'BUG: .ev.task-panel background must be the user bubble tint',
   );
   assert.strictEqual(
-    decl(panel, '--panel-bg'),
-    'var(--accent-tint)',
-    'BUG: #task-panel --panel-bg must be the accent tint (--accent-tint)',
-  );
-  console.log('  ok - #task-panel background is the accent tint');
-}
-
-function testTaskPanelForegroundMatchesThinkingPanel() {
-  const thinkCnt = ruleBody('.think .cnt');
-  const panel = ruleBody('#task-panel');
-  const thinkFg = decl(thinkCnt, 'color');
-  assert.strictEqual(
-    thinkFg,
-    'var(--dim)',
-    '.think .cnt (thinking panel text) must be colored var(--dim)',
-  );
-  assert.strictEqual(
-    decl(panel, 'color'),
-    thinkFg,
-    'BUG: #task-panel text color must equal the thinking panel text ' +
-      `color ("${thinkFg}")`,
-  );
-  // Secondary content (controls, info rows, scrollbar) must stay
-  // readable: the standard --dim, not a faded translucent variant.
-  assert.strictEqual(
-    decl(panel, '--panel-dim'),
-    'var(--dim)',
-    'BUG: --panel-dim must be the readable var(--dim), not a ' +
-      'translucent low-contrast mix',
-  );
-  console.log('  ok - #task-panel foreground equals .think text color');
-}
-
-function testTaskPanelHasAccentHairline() {
-  const panel = ruleBody('#task-panel');
-  const border = decl(panel, 'border');
-  assert.ok(border, '#task-panel must declare a border');
-  assert.strictEqual(
-    border,
+    decl(panel, 'border'),
     '1px solid var(--accent-line)',
-    'BUG: #task-panel border must be the 1px accent hairline ' +
-      `"1px solid var(--accent-line)", got "${border}"`,
-  );
-  console.log('  ok - #task-panel has a 1px accent hairline');
-}
-
-function testInvertedPaletteIsGone() {
-  const panel = ruleBody('#task-panel');
-  assert.notStrictEqual(
-    decl(panel, '--panel-bg'),
-    'var(--fg)',
-    'BUG: the old inverted palette (--panel-bg: var(--fg)) must be gone',
-  );
-  assert.ok(
-    !/rgb\(\s*255\s+200\s+0/.test(panel),
-    'BUG: the old yellow border color must be gone from #task-panel',
-  );
-  const tooltip = ruleBody('#custom-tooltip.task-panel-tooltip');
-  assert.notStrictEqual(
-    decl(tooltip, 'background'),
-    'var(--fg)',
-    'BUG: the task-panel tooltip must no longer use the inverted ' +
-      'palette (background: var(--fg))',
+    'BUG: .ev.task-panel border must be the accent hairline',
   );
   assert.strictEqual(
-    decl(tooltip, 'color'),
-    'var(--dim)',
-    'the task-panel tooltip text must match the thinking-panel ' +
-      'foreground (var(--dim))',
+    decl(panel, 'border-radius'),
+    decl(tool, 'border-radius'),
+    'the task panel is rounded like the other transcript panels',
   );
-  console.log('  ok - inverted task-panel palette fully removed');
+  assert.strictEqual(
+    decl(panel, 'border-top-right-radius'),
+    'var(--radius-sm)',
+    'the task panel has a tight top-right corner, the bubble tail',
+  );
+  assert.strictEqual(
+    decl(tool, 'border-top-right-radius'),
+    null,
+    'a tool panel has no bubble tail',
+  );
+  console.log('  ok - .ev.task-panel paints the user bubble tint and hairline');
+}
+
+function testThinkingTextIsNotABoxedPanel() {
+  const think = ruleBody('.think');
+  assert.ok(think, 'main.css must style .think');
+  assert.strictEqual(decl(think, 'background'), null, '.think paints no background');
+  assert.strictEqual(decl(think, 'border'), null, '.think draws no border');
+  assert.strictEqual(decl(think, 'max-height'), null, '.think is no scroller of its own');
+  assert.strictEqual(decl(think, 'font-style'), 'italic', '.think reads as thinking');
+  assert.strictEqual(ruleBody('.think .lbl'), '', 'no "Thinking" header rule');
+  assert.strictEqual(ruleBody('.think .cnt'), '', 'no thinking content box rule');
+  console.log('  ok - .think is plain text inside the Thoughts panel');
+}
+
+function testTaskPanelTextMatchesTheTranscript() {
+  const text = ruleBody('.task-panel-text');
+  assert.ok(text, 'main.css must style .task-panel-text');
+  assert.strictEqual(
+    decl(text, 'white-space'),
+    'pre-wrap',
+    'the task text keeps its line breaks',
+  );
+  assert.strictEqual(
+    decl(text, 'color'),
+    'var(--fg)',
+    'the task text is the transcript foreground',
+  );
+  // The old fixed panel's inverted palette and its tooltip are gone.
+  assert.strictEqual(ruleBody('#task-panel'), '', 'no fixed #task-panel');
+  assert.strictEqual(
+    ruleBody('#custom-tooltip.task-panel-tooltip'),
+    '',
+    'no task-panel tooltip variant',
+  );
+  console.log('  ok - .task-panel-text reads like the transcript');
 }
 
 function testEditorTabsModeDefaultsOn() {
@@ -155,10 +142,9 @@ function testEditorTabsModeDefaultsOn() {
 
 function main() {
   console.log('taskPanelThinkStyle.test.js');
-  testTaskPanelBackgroundIsTheAccentTint();
-  testTaskPanelForegroundMatchesThinkingPanel();
-  testTaskPanelHasAccentHairline();
-  testInvertedPaletteIsGone();
+  testTaskPanelIsTheAccentTintedPanel();
+  testThinkingTextIsNotABoxedPanel();
+  testTaskPanelTextMatchesTheTranscript();
   testEditorTabsModeDefaultsOn();
   console.log('all task-panel style tests passed');
 }

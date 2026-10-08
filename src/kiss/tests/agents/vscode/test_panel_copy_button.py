@@ -71,9 +71,9 @@ def test_explicit_copy_buttons_for_headerless_panels() -> None:
 
 
 def test_collect_text_skips_panel_chrome() -> None:
-    """``collectText`` must skip the copy button, the collapse chevron,
-    and the collapse preview so neither the clipboard payload nor the
-    collapsed-state preview repeats those UI-only fragments."""
+    """``collectText`` must skip the copy button and the collapse
+    preview so neither the clipboard payload nor the collapsed-state
+    preview repeats those UI-only fragments."""
     src = _read(MAIN_JS)
     m = re.search(
         r"function collectText\([^)]*\)\s*\{(.*?)^\s{2}\}",
@@ -82,10 +82,10 @@ def test_collect_text_skips_panel_chrome() -> None:
     )
     assert m, "could not locate function collectText"
     body = m.group(1)
-    for cls in ("panel-copy-btn", "collapse-chv", "collapse-preview"):
+    for cls in ("panel-copy-btn", "collapse-preview"):
         assert f"'{cls}'" in body, (
             f"collectText must skip nodes with class '{cls}' so the copy "
-            f"button / chevron / preview never leak into clipboard text"
+            f"button / preview never leak into clipboard text"
         )
 
 

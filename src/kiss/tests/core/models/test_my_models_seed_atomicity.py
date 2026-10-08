@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.models.model_info import _seed_file_atomically
+from kiss.core.utils import seed_file_atomically
 from kiss.tests.conftest import posix_only
 
 # chmod 0o500 on a directory denies nothing on Windows (only the
@@ -203,7 +203,7 @@ class TestAtomicSeedHelper:
         def seed(path: Path, start: threading.Barrier) -> None:
             start.wait(timeout=10)
             try:
-                _seed_file_atomically(path, self._PAYLOAD)
+                seed_file_atomically(path, self._PAYLOAD)
             except BaseException as exc:  # noqa: BLE001 — reported below
                 errors.append(exc)
 
@@ -240,7 +240,7 @@ class TestAtomicSeedHelper:
         path.symlink_to(target)
         assert path.exists() is False
 
-        _seed_file_atomically(path, self._PAYLOAD)
+        seed_file_atomically(path, self._PAYLOAD)
 
         assert path.is_symlink()
         assert not target.exists(), "the seed clobbered a name that was taken"
@@ -251,7 +251,7 @@ class TestAtomicSeedHelper:
         path = tmp_path / "asset.txt"
         path.write_text("mine", encoding="utf-8")
 
-        _seed_file_atomically(path, self._PAYLOAD)
+        seed_file_atomically(path, self._PAYLOAD)
 
         assert path.read_text(encoding="utf-8") == "mine"
 
@@ -263,7 +263,7 @@ class TestAtomicSeedHelper:
         parent.chmod(0o500)
         try:
             with pytest.raises(OSError):
-                _seed_file_atomically(parent / "asset.txt", self._PAYLOAD)
+                seed_file_atomically(parent / "asset.txt", self._PAYLOAD)
         finally:
             parent.chmod(0o700)
 

@@ -65,7 +65,6 @@ def claude_config_dir() -> Path:
 
     Honours the ``CLAUDE_CONFIG_DIR`` environment variable, the same
     override Claude Code itself uses for its ``~/.claude`` directory.
-    Shared by the skill and custom-command discovery paths.
 
     Returns:
         The resolved config directory path.
@@ -280,16 +279,6 @@ def load_permission_rules(key: str) -> dict[str, str]:
     return {str(k): str(v).strip().lower() for k, v in raw.items()}
 
 
-def load_skill_permissions() -> dict[str, str]:
-    """Load the ``skill_permissions`` rules from ``~/.kiss/config.json``.
-
-    Returns:
-        Mapping of wildcard pattern → ``"allow"``/``"deny"``, in file
-        order.  Empty when the config or key is missing/malformed.
-    """
-    return load_permission_rules("skill_permissions")
-
-
 def skill_permission(name: str, rules: dict[str, str]) -> str:
     """Resolve the permission for skill *name* against *rules*.
 
@@ -347,7 +336,7 @@ def discover_skills(work_dir: str) -> dict[str, Skill]:
         _load_skills_dir(wd / ".agents" / "skills", "agents-project")
     )
     skills.update(_load_skills_dir(wd / ".kiss" / "skills", "project"))
-    rules = load_skill_permissions()
+    rules = load_permission_rules("skill_permissions")
     if rules:
         skills = {
             name: skill
@@ -414,12 +403,10 @@ def load_skill_content(skill: Skill) -> str:
         The structured skill content string, or an error message when
         the file has become unreadable.
     """
-    try:
-        text = Path(skill.path).read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError):
+    parsed = parse_frontmatter(Path(skill.path))
+    if parsed is None:
         return f"Error: skill file is no longer readable: {skill.path}"
-    match = _FRONTMATTER_RE.match(text)
-    body = text[match.end():].strip() if match else text.strip()
+    body = parsed[1].strip()
     skill_dir = skill.directory
     escaped_name = xml_escape(skill.name, {'"': "&quot;"})
     parts = [f'<skill_content name="{escaped_name}">', body, ""]

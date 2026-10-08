@@ -4,7 +4,10 @@
 # add your name here
 """Regression tests for the 2026-09-11 sorcar concurrency review.
 
-Five findings from a read-only audit of ``src/kiss/agents/sorcar``:
+Five findings from a read-only audit of ``src/kiss/agents/sorcar``
+(finding 3 concerned the in-process fan-out engine, which no longer
+exists: ``run_parallel`` is N daemon sub-tasks, each with its own
+persisted usage, so there is no abandoned-child usage to reclaim):
 
 1. Normal worktree merges ran the multi-command stash → checkout →
    squash → commit → pop transaction on the shared main worktree under
@@ -17,11 +20,7 @@ Five findings from a read-only audit of ``src/kiss/agents/sorcar``:
    at arbitrary bytecode boundaries to stop a task) landed after the
    state was published but before the cleanup ``try/finally`` was
    entered, permanently wedging all persistence operations.
-3. ``_AbandonedSubagent.unbanked_usage()`` subtracted already-banked
-   spend from the parent when the child's live usage snapshot
-   momentarily regressed (RelentlessAgent detaches
-   ``_current_executor`` BEFORE folding it into the cumulative
-   counters at every session handoff).
+3. (removed with the fan-out engine)
 4. Journal replay was not exactly-once: a crash after the event batch
    committed but before the claimed snapshot file was unlinked made
    the next replayer insert the same events again under fresh seqs.
@@ -46,7 +45,6 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
-from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -54,8 +52,6 @@ import pytest
 
 import kiss.agents.sorcar.persistence as persistence
 from kiss.agents.sorcar.git_worktree import _git
-from kiss.agents.sorcar.relentless_agent import RelentlessAgent
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _AbandonedSubagent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 # ---------------------------------------------------------------------------
@@ -242,87 +238,6 @@ class TestRWLockAsyncInterrupt:
             assert twin() is token
             assert twin != first and not (twin == first)
             assert twin not in lock._reader_refs
-
-
-# ---------------------------------------------------------------------------
-# Finding 3: abandoned-child usage must never regress the parent's totals
-# ---------------------------------------------------------------------------
-
-
-def _child_mid_handoff(
-    budget: float, tokens: int, steps: int,
-) -> RelentlessAgent:
-    """Return a real RelentlessAgent in the mid-session-handoff state.
-
-    ``relentless_agent.py`` sets ``_current_executor = None`` BEFORE
-    ``_accumulate_usage()`` folds that executor's spend into the
-    cumulative counters, on the success path and on every exception
-    path.  A reader in that window sees the given cumulative counters
-    and no live executor — this constructs exactly that real state.
-    """
-    child = RelentlessAgent("review0911-child")
-    child.budget_used = budget
-    child.total_tokens_used = tokens
-    child.total_steps = steps
-    child._current_executor = None
-    return child
-
-
-class TestAbandonedUsageRegression:
-    """Finding 3: a torn (regressing) live snapshot must be clamped."""
-
-    def test_reclaim_never_subtracts_banked_spend(self) -> None:
-        """A mid-handoff snapshot below ``counted`` banks zero, not a
-        negative delta, and must not reset ``counted`` downward."""
-        parent = SorcarAgent("review0911-parent")
-        parent.budget_used = 1.0
-        parent.total_tokens_used = 100
-        parent.total_steps = 1
-        parent.printer = None
-
-        child = _child_mid_handoff(0.0, 0, 0)
-        item = _AbandonedSubagent(Future(), child, (1.0, 100, 1))
-        parent._abandoned_subagents.append(item)
-
-        assert not parent.reclaim_abandoned_subagents()
-
-        assert (
-            parent.budget_used,
-            parent.total_tokens_used,
-            parent.total_steps,
-        ) == (1.0, 100, 1), (
-            "reclaim subtracted already-banked spend from the parent "
-            "after reading a torn mid-handoff child snapshot"
-        )
-        assert item.counted == (1.0, 100, 1), (
-            "``counted`` regressed; the next reclaim would double-count"
-        )
-
-    def test_later_growth_banks_only_the_new_delta(self) -> None:
-        """Once the fold lands and spend grows, only the excess over the
-        already-counted figure is attributed — never twice."""
-        parent = SorcarAgent("review0911-parent2")
-        parent.budget_used = 1.0
-        parent.total_tokens_used = 100
-        parent.total_steps = 1
-        parent.printer = None
-
-        child = _child_mid_handoff(0.0, 0, 0)
-        item = _AbandonedSubagent(Future(), child, (1.0, 100, 1))
-        parent._abandoned_subagents.append(item)
-        parent.reclaim_abandoned_subagents()
-
-        # The handoff fold lands, plus fresh post-abandon spend.
-        child.budget_used = 1.5
-        child.total_tokens_used = 150
-        child.total_steps = 2
-        parent.reclaim_abandoned_subagents()
-
-        assert (
-            parent.budget_used,
-            parent.total_tokens_used,
-            parent.total_steps,
-        ) == (1.5, 150, 2), "delta after a torn read was double-counted"
 
 
 # ---------------------------------------------------------------------------

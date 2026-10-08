@@ -136,27 +136,8 @@ const {SorcarSidebarView} = require(path.join(outDir, 'SorcarSidebarView.js'));
 function makeView() {
   const view = new SorcarSidebarView({fsPath: path.join(tmp, 'ext')});
   const sent = [];
-  // Replace the daemon client with a recorder (no real daemon in tests).
-  view._api = {
-    _sent: sent,
-    forward: c => sent.push(c),
-    run: c => sent.push({type: 'run', ...c}),
-    stop: tabId => sent.push({type: 'stop', tabId}),
-    complete: c => sent.push({type: 'complete', ...c}),
-    closeTab: tabId => sent.push({type: 'closeTab', tabId}),
-    getModels: () => {},
-    getInputHistory: () => {},
-    getConfig: () => {},
-    setWorkDir: () => {},
-    recordFileUsage: () => {},
-    selectModel: () => {},
-    userAnswer: () => {},
-    resumeSession: () => {},
-    worktreeAction: () => {},
-    generateCommitMessage: () => {},
-    serverReset: () => {},
-    appendUserMessage: () => {},
-  };
+  // Replace the daemon send path with a recorder (no real daemon in tests).
+  view._send = c => sent.push(c);
   return {view, sent};
 }
 

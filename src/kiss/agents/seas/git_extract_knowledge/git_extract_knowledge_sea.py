@@ -50,7 +50,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.seas.git_extract_knowledge.git_knowledge_index import (
     IndexReport,
     KnowledgeError,
@@ -237,7 +237,7 @@ describe it as current.
 _resolved: dict[str, Path] = {}
 
 
-class GitExtractKnowledgeSea(BaseSea):
+class GitExtractKnowledgeSea(WorkerSea):
     """The ``/git_extract_knowledge`` SEA."""
 
     def description(self) -> str:
@@ -257,16 +257,15 @@ class GitExtractKnowledgeSea(BaseSea):
         ).replace("{module}", MODULE)
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """A worker with the full toolset that may fan out, on the real checkout.
+        """A worker with the full toolset, on the real checkout.
 
         No worktree or auto-commit (it indexes repositories, it does not
-        change them), no classifier, no browser, no memory; fan-out stays on
-        for the per-repository indexing sub-agents.
+        change them), no classifier, no browser, no memory; the full
+        toolset keeps ``run_parallel`` for the per-repository indexing
+        sub-agents.
         """
         return settings | {
-            "kind": "worker",
             "tool_profile": "full",
-            "allow_fan_out": True,
         }
 
     def tools(self, tools: list[Any]) -> list[Any]:

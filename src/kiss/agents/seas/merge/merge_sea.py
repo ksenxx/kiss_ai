@@ -31,7 +31,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.core.brand import PRODUCT_NAME
 
 MAX_BUDGET_USD = 5.0
@@ -83,7 +83,7 @@ Rules you MUST follow:
 """
 
 
-class MergeSea(BaseSea):
+class MergeSea(WorkerSea):
     """The ``/merge`` SEA."""
 
     def description(self) -> str:
@@ -106,7 +106,6 @@ class MergeSea(BaseSea):
         The budget is capped at :data:`MAX_BUDGET_USD`.
         """
         return settings | {
-            "kind": "worker",
             "max_budget": MAX_BUDGET_USD,
         }
 

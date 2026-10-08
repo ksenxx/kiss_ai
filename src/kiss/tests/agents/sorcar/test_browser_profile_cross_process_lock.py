@@ -4,9 +4,11 @@
 # add your name here
 """The browser profile guard must be machine-wide, not per-process.
 
-``_launch_browser`` protected the check-then-use sequence
-(``_cleanup_stale_escalation_dirs`` → ``_resolve_user_data_dir`` →
-``_clean_singleton_locks`` → launch) with a ``threading.RLock``.  The guarded
+``_launch_browser`` once protected the check-then-use sequence
+(``_resolve_user_data_dir`` → ``_clean_singleton_locks`` → launch) with a
+``threading.RLock`` only; today the ``<profile>.lock`` file lock
+(``_profile_lock``) is the sole guard, excluding threads and processes
+alike since every holder opens its own file description.  The guarded
 resource — the Chromium profile directory — is shared by *every* kiss process
 on the machine (the ``kiss-web`` daemon, a CLI run, channel agents), so a
 process-local lock gives no mutual exclusion at all: two processes both see a
@@ -28,7 +30,7 @@ from pathlib import Path
 #: Driver run in two concurrent processes.  Both wait on a barrier file so
 #: they enter the profile-resolution window together, then each reports the
 #: profile directory it actually opened.
-_BROWSER_DRIVER = '''
+_BROWSER_DRIVER = """
 import os, sys, time
 from pathlib import Path
 
@@ -47,26 +49,26 @@ try:
     time.sleep(3)
 finally:
     tool.close()
-'''
+"""
 
 #: Driver that takes the shared inter-process file lock and records the
 #: interval it held it, so overlapping intervals prove the lock is broken.
-_LOCK_DRIVER = '''
+_LOCK_DRIVER = """
 import sys, time
 from pathlib import Path
 
-from kiss.agents.sorcar.useful_tools import _file_lock
+from kiss.core.file_lock import exclusive_file_lock
 
 lock_path, out_path, barrier = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 Path(str(barrier) + "." + out_path.name).write_text("ready")
 while not barrier.exists():
     time.sleep(0.02)
 
-with _file_lock(lock_path):
+with exclusive_file_lock(lock_path):
     start = time.time()
     time.sleep(1.0)
     out_path.write_text(f"{start} {time.time()}")
-'''
+"""
 
 
 def _spawn(script: Path, *args: str, env_home: Path) -> subprocess.Popen:
@@ -104,8 +106,7 @@ def test_file_lock_excludes_other_processes(tmp_path):
     outs = [tmp_path / "a.txt", tmp_path / "b.txt"]
 
     procs = [
-        _spawn(script, str(lock_path), str(out), str(barrier), env_home=tmp_path)
-        for out in outs
+        _spawn(script, str(lock_path), str(out), str(barrier), env_home=tmp_path) for out in outs
     ]
     _release_barrier(barrier, [out.name for out in outs])
     for proc in procs:
@@ -128,8 +129,7 @@ def test_two_processes_never_share_one_browser_profile(tmp_path):
     barrier = tmp_path / "barrier"
 
     procs = [
-        _spawn(script, str(profile), str(barrier), tag, env_home=tmp_path)
-        for tag in ("one", "two")
+        _spawn(script, str(profile), str(barrier), tag, env_home=tmp_path) for tag in ("one", "two")
     ]
     _release_barrier(barrier, ["one", "two"])
 
@@ -141,7 +141,5 @@ def test_two_processes_never_share_one_browser_profile(tmp_path):
         line = next(li for li in stdout.splitlines() if li.startswith("PROFILE="))
         profiles.append(line.split("=", 1)[1])
 
-    assert len(set(profiles)) == 2, (
-        f"both processes opened the same Chromium profile: {profiles}"
-    )
+    assert len(set(profiles)) == 2, f"both processes opened the same Chromium profile: {profiles}"
     assert str(profile) in profiles, profiles

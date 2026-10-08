@@ -489,9 +489,10 @@ class TabRegistry:
         section as the removal it stamps.  The token orders the
         removal against every publication: any LATER ``update_tab`` /
         ``open_tab`` publication of the same tab id receives a larger
-        generation, so :meth:`republished_since` can tell the removal's
-        out-of-lock cleanup tail whether the tab has been legitimately
-        reopened since (gpt-5.6-sol review 3, missed wiring 1).
+        generation, so :meth:`reopened_since` and
+        :meth:`finalize_removal` can tell the removal's out-of-lock
+        cleanup tail whether the tab has been legitimately reopened
+        since.
 
         Returns:
             The removal's clock token (always positive).
@@ -596,8 +597,9 @@ class TabRegistry:
             The removal's clock token (positive, truthy) when the tab
             existed and was removed, ``0`` (falsy) otherwise.  The
             caller hands the token to its out-of-lock cleanup tail,
-            which uses :meth:`republished_since` to stand down when a
-            later publication has legitimately reopened the tab.
+            which uses :meth:`reopened_since` / :meth:`finalize_removal`
+            to stand down when a later publication has legitimately
+            reopened the tab.
         """
         with self._lock:
             entry = self._find_locked(_clean_str(tab_id))
@@ -616,14 +618,14 @@ class TabRegistry:
         duplicate close) has no removal token to order itself against
         later publications; it reads the clock instead — any
         publication of any tab after this call stamps a strictly
-        larger generation, so ``republished_since(tab_id, clock())``
-        is ``True`` exactly when someone republished *tab_id* after
-        the observation.  The reading is taken in its own locked
-        section, so a publication landing between the caller's
-        ``close_tab`` and this read can stamp a generation ``<=`` the
-        reading; the cleanup guards close that gap by also standing
-        down when the tab is PRESENT in the registry (presence after
-        an absent-close is always a later republication) — see
+        larger generation, so ``reopened_since(tab_id, clock())``
+        is ``True`` when someone republished *tab_id* after the
+        observation.  The reading is taken in its own locked section,
+        so a publication landing between the caller's ``close_tab``
+        and this read can stamp a generation ``<=`` the reading;
+        :meth:`reopened_since` closes that gap by also answering
+        ``True`` while the tab is PRESENT in the registry (presence
+        after an absent-close is always a later republication) — see
         ``VSCodeServer._tab_reopened_since``.
 
         Returns:

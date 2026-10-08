@@ -88,7 +88,7 @@ def test_timed_out_command_job_kills_descendants(tmp_path: Path) -> None:
     )
     job = {"id": "t1", "command": command}
     start = time.monotonic()
-    status, text = cron_agent._run_command_job(job, timeout_seconds=_JOB_TIMEOUT)
+    status, text = cron_agent._run_command_job(job, tmp_path, _JOB_TIMEOUT)
     elapsed = time.monotonic() - start
     assert status == "error"
     assert text is not None and "timed out" in text
@@ -125,17 +125,17 @@ def test_timed_out_command_job_kills_descendants(tmp_path: Path) -> None:
 def test_command_job_success_and_failure_paths(tmp_path: Path) -> None:
     """Normal command jobs behave exactly as before the fix."""
     ok_status, ok_text = cron_agent._run_command_job(
-        {"id": "t2", "command": "echo hello"},
+        {"id": "t2", "command": "echo hello"}, tmp_path, 5.0,
     )
     assert (ok_status, ok_text) == ("ok", "hello")
 
     silent_status, silent_text = cron_agent._run_command_job(
-        {"id": "t3", "command": "true"},
+        {"id": "t3", "command": "true"}, tmp_path, 5.0,
     )
     assert (silent_status, silent_text) == ("silent", None)
 
     err_status, err_text = cron_agent._run_command_job(
-        {"id": "t4", "command": "echo out; echo err >&2; exit 3"},
+        {"id": "t4", "command": "echo out; echo err >&2; exit 3"}, tmp_path, 5.0,
     )
     assert err_status == "error"
     assert err_text is not None
@@ -164,7 +164,7 @@ def test_setsid_descendant_is_killed_on_timeout(tmp_path: Path) -> None:
         "sleep 300"
     )
     status, text = cron_agent._run_command_job(
-        {"id": "t-setsid", "command": command}, timeout_seconds=0.5,
+        {"id": "t-setsid", "command": command}, tmp_path, 0.5,
     )
     assert status == "error"
     assert text is not None and "timed out" in text

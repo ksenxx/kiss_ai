@@ -44,6 +44,8 @@ def _make_repo(path: Path) -> Path:
     _git(path, "config", "user.name", "T")
     (path / "README.md").write_text("# repo\n")
     (path / ".gitignore").write_text("*.log\n")
+    (path / "src").mkdir()
+    (path / "src" / "module.py").write_text("x = 1\n")
     _git(path, "add", ".")
     _git(path, "commit", "-m", "initial")
     return path
@@ -105,6 +107,145 @@ class TestSpareHasContent:
         _git(self.wt_dir, "commit", "-m", "external commit")
         assert GitWorktreeOps.spare_has_content(self.repo, self.branch, self.wt_dir)
         self._all_consumers_preserve()
+
+    def _interrupt_checkout(self) -> None:
+        """Leave the spare as a killed ``reset --hard`` would: files partially
+        written, no index in the worktree's gitdir."""
+        index = Path(_git(self.wt_dir, "rev-parse", "--git-path", "index").strip())
+        assert index.is_file()
+        index.unlink()
+        (self.wt_dir / "README.md").unlink()
+        status = _git(self.wt_dir, "status", "--porcelain")
+        assert "D  README.md" in status and "?? .gitignore" in status
+
+    def test_interrupted_checkout_is_contentless_and_reclaimed(self) -> None:
+        """A spare whose populating checkout was killed mid-way has no
+        index: git reports every tracked file as a staged deletion and
+        the written files as untracked.  That is checkout debris, not
+        external content, so the orphan reclaim pass discards it
+        instead of preserving it forever."""
+        self._interrupt_checkout()
+        assert not GitWorktreeOps.spare_has_content(
+            self.repo, self.branch, self.wt_dir,
+        )
+        with worktree_pool._pool_lock:
+            worktree_pool._spares.clear()
+        head_before = _git(self.repo, "rev-parse", "HEAD")
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
+        assert not self.wt_dir.exists()
+        assert not GitWorktreeOps.branch_exists(self.repo, self.branch)
+        assert _git(self.repo, "rev-parse", "HEAD") == head_before
+        assert (self.repo / "README.md").read_text() == "# repo\n"
+        assert _git(self.repo, "status", "--porcelain") == ""
+
+    def test_interrupted_checkout_with_unique_commit_is_content(self) -> None:
+        """A missing index excuses the status output only; a commit that
+        exists on no other ref is still content and is preserved."""
+        (self.wt_dir / "work.txt").write_text("committed\n")
+        _git(self.wt_dir, "add", ".")
+        _git(self.wt_dir, "commit", "-m", "external commit")
+        self._interrupt_checkout()
+        assert GitWorktreeOps.spare_has_content(self.repo, self.branch, self.wt_dir)
+        self._all_consumers_preserve()
+
+    def test_interrupted_checkout_with_external_untracked_file_is_content(self) -> None:
+        """A file outside the HEAD tree in an index-less spare was written
+        externally, and the plain status walk cannot tell it from the
+        half-written checkout; the probe still preserves it."""
+        self._interrupt_checkout()
+        (self.wt_dir / "rescue.txt").write_text("external\n")
+        assert GitWorktreeOps.spare_has_content(self.repo, self.branch, self.wt_dir)
+        self._all_consumers_preserve()
+        assert (self.wt_dir / "rescue.txt").exists()
+
+    def test_interrupted_checkout_with_external_ignored_file_is_content(self) -> None:
+        self._interrupt_checkout()
+        (self.wt_dir / "build.log").write_text("external\n")
+        assert GitWorktreeOps.spare_has_content(self.repo, self.branch, self.wt_dir)
+        self._all_consumers_preserve()
+
+    def test_interrupted_checkout_external_file_inside_tracked_dir_is_content(self) -> None:
+        """With an empty index git's default status collapses ``src/``
+        (every file in it untracked) into one line, hiding an external
+        file next to the checked-out ``src/module.py``."""
+        self._interrupt_checkout()
+        assert "?? src/\n" in _git(self.wt_dir, "status", "--porcelain")
+        (self.wt_dir / "src" / "extra.py").write_text("external\n")
+        assert GitWorktreeOps.spare_has_content(self.repo, self.branch, self.wt_dir)
+        self._all_consumers_preserve()
+
+    def test_interrupted_checkout_with_edited_tracked_file_is_content(self) -> None:
+        """An externally edited tracked file in an index-less spare is
+        listed exactly like a checked-out one (``D `` plus ``??`` at the
+        same path); only a content comparison against HEAD tells them
+        apart, and it must preserve the edit."""
+        self._interrupt_checkout()
+        (self.wt_dir / "src" / "module.py").write_text("x = 2  # external edit\n")
+        assert GitWorktreeOps.spare_has_content(self.repo, self.branch, self.wt_dir)
+        self._all_consumers_preserve()
+        assert (self.wt_dir / "src" / "module.py").read_text() == "x = 2  # external edit\n"
+
+    def test_interrupted_checkout_dir_replacing_tracked_file_is_content(self) -> None:
+        """A directory written where HEAD has a file reads as ``" D"`` for
+        that file; the files inside it must still be enumerated."""
+        self._interrupt_checkout()
+        (self.wt_dir / "src" / "module.py").unlink()
+        (self.wt_dir / "src" / "module.py").mkdir()
+        (self.wt_dir / "src" / "module.py" / "extra.txt").write_text("external\n")
+        assert GitWorktreeOps.spare_has_content(self.repo, self.branch, self.wt_dir)
+        self._all_consumers_preserve()
+
+    def test_interrupted_checkout_probe_leaves_spare_gitdir_index_less(self) -> None:
+        """The scratch index must not be written into the spare's gitdir
+        (``core.splitIndex`` on would otherwise drop a ``sharedindex.*``
+        there) and the probe must leave no temporary directory behind."""
+        _git(self.repo, "config", "core.splitIndex", "true")
+        self._interrupt_checkout()
+        gitdir = Path(_git(self.wt_dir, "rev-parse", "--git-dir").strip())
+        before = sorted(p.name for p in gitdir.iterdir())
+        # The probe's scratch index goes to the process's temp dir, which
+        # concurrent test processes also litter with ``kiss-spare-index-*``
+        # of their own: give this probe a private one to inspect.
+        private_tmp = Path(self.tmp) / "scratch-tmp"
+        private_tmp.mkdir()
+        saved_tempdir = tempfile.tempdir
+        tempfile.tempdir = str(private_tmp)
+        try:
+            assert not GitWorktreeOps.spare_has_content(
+                self.repo, self.branch, self.wt_dir,
+            )
+        finally:
+            tempfile.tempdir = saved_tempdir
+        assert sorted(p.name for p in gitdir.iterdir()) == before
+        assert not (gitdir / "index").exists()
+        assert list(private_tmp.iterdir()) == []
+
+    @posix_only("NTFS rejects control characters such as \\r in file names")
+    def test_interrupted_checkout_with_newline_filename_is_content(self) -> None:
+        """A byte-distinct external filename (``\\n`` where HEAD has ``\\r``)
+        must not be folded onto the tracked name by text-mode decoding."""
+        cr_name = self.repo / "known\rname.txt"
+        cr_name.write_text("tracked\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-m", "cr filename")
+        _git(self.wt_dir, "reset", "--hard", "main")
+        self._interrupt_checkout()
+        (self.wt_dir / "known\nname.txt").write_text("external\n")
+        assert GitWorktreeOps.spare_has_content(self.repo, self.branch, self.wt_dir)
+        self._all_consumers_preserve()
+
+    def test_interrupted_checkout_with_unreadable_head_is_content(self) -> None:
+        """When git cannot even list the HEAD tree of an index-less spare
+        (corrupt gitdir), nothing can be classified as debris: preserve."""
+        self._interrupt_checkout()
+        head = Path(_git(self.wt_dir, "rev-parse", "--git-path", "HEAD").strip())
+        head.write_text("0" * 40 + "\n")
+        assert GitWorktreeOps.spare_has_content(self.repo, self.branch, self.wt_dir)
+        with worktree_pool._pool_lock:
+            worktree_pool._spares.clear()
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+        assert self.wt_dir.is_dir()
+        head.write_text(f"ref: refs/heads/{self.branch}\n")
 
     @posix_only("chmod 000 permission denial")
     def test_unenumerable_ignored_files_are_content(self) -> None:

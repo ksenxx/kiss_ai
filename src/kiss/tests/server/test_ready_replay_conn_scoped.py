@@ -295,6 +295,12 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         ])
         ws_a = await self._connect_ok()
         await self._ready(ws_a)
+        # A's ready must finish its registry sync before the panel
+        # seeds the registry: two concurrent readies legitimately
+        # replay the seeded tabs to A twice (A's own conn-scoped sync
+        # plus the panel's broadcast), which is not what this test
+        # measures.  The empty snapshot is the sync's last step.
+        self.assertIsNotNone(await self._wait_for_snapshot_with(ws_a))
 
         ws_panel = await self._connect_ok()
         await self._send(ws_panel, {

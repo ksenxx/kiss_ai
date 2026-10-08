@@ -41,8 +41,8 @@ export function mediaAssetVersion(
   return crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16);
 }
 
-/** Escape a string for interpolation into an HTML text position. */
-function escapeHtml(text: string): string {
+/** Escape a string for interpolation into an HTML text or attribute position. */
+export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -173,7 +173,7 @@ export function metaPanelBodyAttrs(): string {
  * a webview cannot reach the daemon's HTTPS port, and the browser's
  * HTTP cache keeps repeat downloads cheap.
  */
-export const VOICE_MODEL_URL =
+const VOICE_MODEL_URL =
   'https://ccoreilly.github.io/vosk-browser/models/' +
   'vosk-model-small-en-us-0.15.tar.gz';
 
@@ -323,10 +323,7 @@ const ATTR_STRING_KEYS: ReadonlySet<string> = new Set([
  * untouched. Mirrors `_build_html` in `kiss/server/web_server.py`, which
  * renders the same `media/chat.html` for the remote web app.
  */
-export function substituteTemplate(
-  tpl: string,
-  subs: Record<string, string>,
-): string {
+function substituteTemplate(tpl: string, subs: Record<string, string>): string {
   return tpl.replace(
     /( ?)\{\{([A-Z_]+)\}\}/g,
     (match, space: string, key: string) => {

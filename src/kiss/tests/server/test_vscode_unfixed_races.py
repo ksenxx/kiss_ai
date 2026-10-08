@@ -17,7 +17,6 @@ the point: they prove the race exists.
 from __future__ import annotations
 
 import threading
-import time
 import unittest
 
 from kiss.server.json_printer import JsonPrinter
@@ -28,49 +27,32 @@ class TestStaleBashBroadcastAfterReset(unittest.TestCase):
     """Timer-flushed bash output can arrive after reset()."""
 
     def test_stale_output_discarded_after_reset(self) -> None:
-        """Verify _flush_bash discards stale text when reset() intervenes.
+        """Verify _flush_bash sends nothing when reset() ran first.
 
-        The fix: _flush_bash captures the generation counter inside
-        _bash_lock along with the text.  After releasing the lock it
-        re-checks: if reset() ran in between (incrementing generation),
-        the text is stale and the broadcast is skipped.
+        The fix: _flush_bash captures the buffer and broadcasts it in
+        one critical section under the task's flush_lock, which
+        reset() takes while clearing the buffer.  A flush that reaches
+        the buffer after reset() finds it empty and skips the
+        broadcast.
         """
         printer = JsonPrinter()
 
         with printer._bash_lock:
             printer._bash_state.buffer.append("stale output")
 
-
-        reset_between = threading.Event()
-        flush_captured = threading.Event()
+        reset_done = threading.Event()
 
         def timer_thread_logic() -> None:
-            with printer._bash_lock:
-                bs = printer._bash_state
-                gen = bs.generation
-                if bs.timer is not None:
-                    bs.timer.cancel()
-                    bs.timer = None
-                text = "".join(bs.buffer) if bs.buffer else ""
-                bs.buffer.clear()
-                bs.last_flush = time.monotonic()
-            flush_captured.set()
-            reset_between.wait(timeout=5)
-            if text:
-                with printer._bash_lock:
-                    if printer._bash_state.generation != gen:
-                        return
-                printer.broadcast({"type": "system_output", "text": text})
+            reset_done.wait(timeout=5)
+            printer._flush_bash()
 
         timer_thread = threading.Thread(target=timer_thread_logic, daemon=True)
         timer_thread.start()
 
-        flush_captured.wait(timeout=5)
-
         printer.reset()
         printer.start_recording()
 
-        reset_between.set()
+        reset_done.set()
         timer_thread.join(timeout=5)
 
         recorded = printer.stop_recording()

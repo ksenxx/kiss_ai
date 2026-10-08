@@ -6,11 +6,10 @@
 // Standalone viewer script for shared chat pages
 // (reports/chat-<id>.html, written by the daemon's shareChat
 // handler).  The page body holds one section per task of the chat —
-// a clone of the webview's static task panel above the task's
-// transcript — so this script re-creates the interactions the webview
+// the task's panel above the task's transcript, as in the webview's
+// thread — so this script re-creates the interactions the webview
 // attaches through JavaScript: collapsing / expanding event panels
-// (media/main.js addCollapse), each section's task-panel drawer
-// button, and the "Thinking" section toggle.  The styling
+// (media/main.js addCollapse).  The styling
 // comes from the page's inlined main.css, driven purely by the same
 // classes this script toggles.
 (function () {
@@ -30,6 +29,8 @@
       if (
         node.classList.contains('panel-copy-btn') ||
         node.classList.contains('panel-stop-btn') ||
+        // Pages shared before the headers lost their chevron still
+        // carry one.
         node.classList.contains('collapse-chv') ||
         node.classList.contains('collapse-preview') ||
         node.classList.contains('panel-ts') ||
@@ -50,7 +51,10 @@
   /**
    * Fill or clear a panel's one-line collapsed preview, mirroring
    * collapsePreview in media/main.js: an expanded panel and a summary
-   * panel show no preview; a collapsed one previews its content text.
+   * panel show no preview; a collapsed Bash panel previews its
+   * description and a collapsed Read or Write panel its path (no
+   * "description:" / "path:" label); any other collapsed panel
+   * previews its content text.
    *
    * @param {Element} panelEl The collapsible panel.
    */
@@ -64,63 +68,38 @@
       prev.textContent = '';
       return;
     }
+    // A finished task's Trajectory panel (foldTrajectory in main.js)
+    // previews its event count, as in the live webview.
+    if (panelEl.classList.contains('trajectory')) {
+      const sub = panelEl.querySelector(':scope > .trajectory-sub');
+      const n = sub ? sub.children.length : 0;
+      prev.textContent = n + (n === 1 ? ' event' : ' events');
+      return;
+    }
+    let briefSel = null;
+    if (panelEl.classList.contains('tc-bash'))
+      briefSel = '.tc-arg-desc .tc-arg-val';
+    else if (panelEl.classList.contains('tc-path'))
+      briefSel = '.tc-arg-path .tp';
+    const brief = briefSel
+      ? panelEl.querySelector(':scope > .tc-b > ' + briefSel)
+      : null;
+    if (brief) {
+      prev.textContent = brief.textContent.trim();
+      return;
+    }
     let txt = '';
     for (let i = 0; i < panelEl.children.length; i++) {
       const ch = panelEl.children[i];
       if (
-        ch.classList.contains('collapse-chv') ||
-        ch === prev ||
-        ch.querySelector('.collapse-chv')
+        ch.classList.contains('collapse-header') ||
+        ch.querySelector('.collapse-header')
       )
         continue;
       txt += collectText(ch) + ' ';
     }
     prev.textContent = txt.replace(/\s+/g, ' ').trim();
   }
-
-  /**
-   * Toggle a "Thinking" section open or closed.  The transcript's
-   * think headers carry the webview's inline
-   * onclick="toggleThink(this)", so the shared page defines the same
-   * global (media/main.js exposes it as window.toggleThink too).
-   *
-   * @param {Element} el The clicked .lbl header of the think section.
-   */
-  window.toggleThink = function (el) {
-    const p = el.parentElement;
-    if (!p) return;
-    const cnt = p.querySelector('.cnt');
-    if (cnt) {
-      cnt.classList.toggle('hidden');
-      el.setAttribute(
-        'aria-expanded',
-        cnt.classList.contains('hidden') ? 'false' : 'true',
-      );
-    }
-    const arrow = el.querySelector('.arrow');
-    if (arrow) arrow.classList.toggle('collapsed');
-  };
-
-  /**
-   * Keyboard parity for the thinking header: the header is a focusable
-   * role="button", so Enter and Space toggle it like a click does.
-   *
-   * @param {KeyboardEvent} e The keydown event.
-   */
-  function onThinkHeaderKeydown(e) {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    const target = e.target;
-    if (
-      !target ||
-      typeof target.matches !== 'function' ||
-      !target.matches('.think > .lbl')
-    ) {
-      return;
-    }
-    e.preventDefault();
-    window.toggleThink(target);
-  }
-  document.addEventListener('keydown', onThinkHeaderKeydown);
 
   /**
    * Collapse every run_parallel panel inside *root*, mirroring
@@ -661,22 +640,6 @@
       return;
     }
     // resultimages-coverage:end
-
-    const drawerBtn = target.closest('#task-panel-drawer-btn');
-    if (drawerBtn) {
-      // The page holds one #task-panel per task of the chat, so the
-      // toggled panel must be the clicked button's own ancestor —
-      // getElementById would always fold the first task's panel.
-      const panel = drawerBtn.closest('#task-panel');
-      if (!panel) return;
-      const collapsed = panel.classList.toggle('drawer-collapsed');
-      drawerBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-      drawerBtn.setAttribute(
-        'aria-label',
-        collapsed ? 'Expand task panel' : 'Collapse task panel',
-      );
-      return;
-    }
 
     const header = target.closest('.collapse-header');
     if (!header) return;

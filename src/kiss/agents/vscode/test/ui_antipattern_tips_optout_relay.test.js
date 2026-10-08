@@ -127,11 +127,7 @@ function runTests() {
 
   const view = new SorcarSidebarView(makeUri(path.join(__dirname, '..')));
   const forwarded = [];
-  view._api = {
-    forward: cmd => forwarded.push(cmd),
-    getConfig: () => {},
-    setWorkDir: () => {},
-  };
+  view._send = cmd => forwarded.push(cmd);
   const wv = makeWebviewView();
   view.resolveWebviewView(wv.webviewView, {}, {});
 

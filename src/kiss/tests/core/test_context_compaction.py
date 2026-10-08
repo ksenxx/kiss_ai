@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for batched tool-output compaction (WP2c of the cost levers).
 
-The module-level tests exercise :func:`compact_tool_results` on the three
+The module-level tests exercise :func:`plan_compaction` + :func:`apply_compaction` on the three
 conversation shapes; the agent tests run a real :class:`KISSAgent` against
 the scripted local model server and check when compaction fires, what it
 leaves alone, and that the ``context_reset_hook`` is called.
@@ -22,7 +22,6 @@ from kiss.core.context_compaction import (
     COMPACTION_STEP_TOKENS,
     STUB_PREFIX,
     apply_compaction,
-    compact_tool_results,
     dropped_chars,
     make_stub,
     plan_compaction,
@@ -97,21 +96,21 @@ def test_compacts_only_old_large_results(build) -> None:
     before = len(conversation)
     # The 25th result follows the last assistant turn (unseen by the model):
     # 24 seen results minus the 20 newest leaves 4 candidates.
-    assert compact_tool_results(conversation, keep_recent=20) == 4
+    assert apply_compaction(plan_compaction(conversation, keep_recent=20)) == 4
     assert len(conversation) == before
     texts = _texts(conversation)
     assert all(t.startswith(STUB_PREFIX) for t in texts[:4])
     assert all(t == BIG for t in texts[4:])
     assert "3,000 chars" in texts[0] and texts[0].endswith("x" * 200)
     # Idempotent: stubs are never re-compacted.
-    assert compact_tool_results(conversation, keep_recent=20) == 0
+    assert apply_compaction(plan_compaction(conversation, keep_recent=20)) == 0
 
 
 def test_small_and_protected_results_are_kept() -> None:
     conversation = _generic(3, name="Bash") + _generic(3, name="Write", prefix="w")[1:]
     conversation[2]["content"] = SMALL
     conversation.append({"role": "assistant", "content": "seen everything"})
-    assert compact_tool_results(conversation, keep_recent=0) == 2
+    assert apply_compaction(plan_compaction(conversation, keep_recent=0)) == 2
     texts = _texts(conversation)
     assert texts[0] == SMALL
     assert texts[1].startswith(STUB_PREFIX) and texts[2].startswith(STUB_PREFIX)
@@ -119,9 +118,9 @@ def test_small_and_protected_results_are_kept() -> None:
 
 
 def test_nothing_to_do_and_unknown_messages() -> None:
-    assert compact_tool_results([], keep_recent=20) == 0
+    assert apply_compaction(plan_compaction([], keep_recent=20)) == 0
     conversation: list[Any] = ["junk", {"role": "system", "content": BIG}, {"type": "reasoning"}]
-    assert compact_tool_results(conversation, keep_recent=0) == 0
+    assert apply_compaction(plan_compaction(conversation, keep_recent=0)) == 0
     assert make_stub("abc", preview_chars=2).endswith("\nab")
 
 
@@ -276,7 +275,7 @@ def test_results_after_the_last_assistant_turn_are_never_compacted() -> None:
                                    "function": {"name": "Bash", "arguments": "{}"}})
         conversation.append({"role": "tool", "tool_call_id": f"n{i}", "content": BIG})
     # keep_recent=0 makes every SEEN result a candidate: only the 3 old ones go.
-    assert compact_tool_results(conversation, keep_recent=0) == 3
+    assert apply_compaction(plan_compaction(conversation, keep_recent=0)) == 3
     texts = _texts(conversation)
     assert all(t.startswith(STUB_PREFIX) for t in texts[:3])
     assert all(t == BIG for t in texts[3:])

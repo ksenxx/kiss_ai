@@ -102,8 +102,9 @@ class AgentTab:
         tab_id: The KISS tab id (``browser__N``) shown on every surface.
         target_id: Chromium's target id of the page, so a second CDP
             client can tell this page from the user's other tabs.
-        cdp_url: ``http://127.0.0.1:<port>`` of the browser's DevTools
-            endpoint (``connect_over_cdp`` accepts it).
+        cdp_url: ``ws://127.0.0.1:<port>/devtools/browser/<id>``, the
+            browser's DevTools endpoint (``connect_over_cdp`` accepts it);
+            the id is minted at launch, so it names this browser instance.
     """
 
     tab_id: str
@@ -165,7 +166,7 @@ class BrowserTabService:
         self._by_page: dict[int, _PageRecord] = {}
         self._next_id = 1
         self._closed = False
-        self._launch_lock: asyncio.Lock | None = None
+        self._launch_lock = asyncio.Lock()
         # Pages being created by _open (not popups) - see _on_page.
         self._creating = 0
 
@@ -202,9 +203,11 @@ class BrowserTabService:
                 be launched.
         """
         loop = self._ensure_loop()
-        future = asyncio.run_coroutine_threadsafe(self._open_for_agent(), loop)
+        future = asyncio.run_coroutine_threadsafe(
+            asyncio.wait_for(self._open_for_agent(), _OPEN_TIMEOUT), loop
+        )
         try:
-            return future.result(_OPEN_TIMEOUT)
+            return future.result(_OPEN_TIMEOUT + _CALL_TIMEOUT)
         except Exception as exc:
             raise RuntimeError(f"Cannot open a Browser tab: {exc}") from exc
 
@@ -228,8 +231,10 @@ class BrowserTabService:
         """
         try:
             loop = self._ensure_loop()
-            future = asyncio.run_coroutine_threadsafe(self._open_for_user(url), loop)
-            future.result(_OPEN_TIMEOUT)
+            future = asyncio.run_coroutine_threadsafe(
+                asyncio.wait_for(self._open_for_user(url), _OPEN_TIMEOUT), loop
+            )
+            future.result(_OPEN_TIMEOUT + _CALL_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — the caller falls back to another browser
             logger.warning("browser tab: cannot open %s for the user: %s", url, exc)
             return False
@@ -307,6 +312,11 @@ class BrowserTabService:
             logger.debug("browser tab: shutdown error: %s", exc)
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=10)
+        if thread.is_alive():
+            # A callback is wedged on the loop: closing a running loop
+            # raises, and the rest of the daemon's shutdown must go on.
+            logger.warning("browser tab: the loop thread did not stop; leaving it behind")
+            return
         loop.close()
 
     # ------------------------------------------------------------------
@@ -355,8 +365,6 @@ class BrowserTabService:
         Serialised: two opens racing (a double-click on "Browser") must
         not start two browsers on one profile.
         """
-        if self._launch_lock is None:
-            self._launch_lock = asyncio.Lock()
         async with self._launch_lock:
             if self._context is None:
                 self._context = await self._launch_new()
@@ -372,10 +380,11 @@ class BrowserTabService:
         self._playwright = playwright
         try:
             context = await self._launch_browser(playwright)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             # The driver (a node process) must not outlive the failed
-            # launch: the next open starts a fresh one.  A shutdown that
-            # ran meanwhile has already taken and stopped it.
+            # (or, past ``_OPEN_TIMEOUT``, abandoned) launch: the next
+            # open starts a fresh one.  A shutdown that ran meanwhile
+            # has already taken and stopped it.
             if self._playwright is playwright:
                 self._playwright = None
                 await playwright.stop()
@@ -457,9 +466,13 @@ class BrowserTabService:
             logger.debug("browser tab: could not mask the headless user agent", exc_info=True)
 
     def _cdp_url(self) -> str:
-        """The browser's DevTools HTTP endpoint, from the profile's ``DevToolsActivePort``."""
-        port = (self._profile_dir / "DevToolsActivePort").read_text().split()[0]
-        return f"http://127.0.0.1:{port}"
+        """The browser's DevTools websocket endpoint, from the profile's ``DevToolsActivePort``.
+
+        The path carries an id minted at launch, so the URL also tells
+        one browser instance from the next on the same port.
+        """
+        port, path = (self._profile_dir / "DevToolsActivePort").read_text().split()[:2]
+        return f"ws://127.0.0.1:{port}{path}"
 
     async def _open_reporting(self, url: str, conn_id: str) -> None:
         try:
@@ -528,12 +541,18 @@ class BrowserTabService:
             if page.is_closed():
                 raise RuntimeError("page closed while attaching")
             rec.target_id = (await cdp.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
-        except Exception as exc:  # noqa: BLE001 — a vanished popup is not an error
+        except BaseException as exc:  # noqa: BLE001 — a vanished popup is not an error
+            # ``BaseException``: the ``asyncio.wait_for`` around
+            # :meth:`_open` cancels this coroutine on timeout, and a
+            # cancelled attach must forget the page too, or a second
+            # ``_register`` for it would wait on ``attached`` forever.
             logger.debug("browser tab: %s not attached: %s", rec.tab_id, exc)
             with self._lock:
                 self._pages.pop(rec.tab_id, None)
                 self._by_page.pop(id(page), None)
             rec.attached.set()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return None
         rec.cdp = cdp
         rec.attached.set()
