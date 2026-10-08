@@ -14132,11 +14132,14 @@
               !sib.classList.contains('llm-panel')
             )
               break;
-            // Text-only Thoughts belong in the digest; media, questions
-            // and messages remain expanded siblings after it.
+            // A Thoughts panel always belongs in the digest, even when
+            // its Markdown shows a picture: the summary stands for the
+            // steps it recounts, their thoughts included.  Other media
+            // panels, questions and messages remain expanded siblings
+            // after the summary.
             if (
-              panelShowsMedia(sib) ||
-              (panelStaysOpen(sib) && !sib.classList.contains('llm-panel'))
+              !sib.classList.contains('llm-panel') &&
+              (panelShowsMedia(sib) || panelStaysOpen(sib))
             )
               preserve.push(sib);
             else adopt.push(sib);
