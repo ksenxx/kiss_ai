@@ -9535,10 +9535,12 @@
           request.action === 'rename' ? request.dest : request.path,
         );
         confirmAction({
-          // One toast per destination: a multi-entry paste or move asks
-          // once per clash, and a shared id would replace the earlier
-          // question (and lose its Replace) with the later one.
-          id: 'fs-overwrite:' + (request.dest || request.path),
+          // One toast per clashing entry: a multi-entry paste or move
+          // asks once per clash, and a shared id would replace the
+          // earlier question (and lose its Replace) with the later one.
+          // For copy/move `dest` is the destination folder, so the
+          // entry's own name is part of the key.
+          id: 'fs-overwrite:' + (request.dest || request.path) + '|' + target,
           message:
             "A file or folder named '" +
             target +
@@ -10278,6 +10280,7 @@
             : ''),
       text,
       'x.diff',
+      ev.tabId,
     );
   }
 

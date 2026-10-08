@@ -1981,7 +1981,11 @@ class _CommandsMixin:
         )
 
     def _start_tab_job(
-        self, in_flight: set[str], tab_id: str, job: Callable[[], None],
+        self,
+        in_flight: set[str],
+        tab_id: str,
+        job: Callable[[], None],
+        after: Callable[[], None] | None = None,
     ) -> None:
         """Run *job* on a daemon thread as *tab_id*'s in-flight entry of *in_flight*.
 
@@ -1997,11 +2001,14 @@ class _CommandsMixin:
                 ``_autocommit_tabs``).
             tab_id: Frontend tab that requested the job.
             job: The work to run on the thread.
+            after: Optional follow-up that runs on the same thread
+                once the entry is released, so it never touches an
+                entry a later request re-added.
         """
         try:
             threading.Thread(
                 target=self._finish_tab_job,
-                args=(in_flight, tab_id, job),
+                args=(in_flight, tab_id, job, after),
                 daemon=True,
             ).start()
         except BaseException:
@@ -2010,18 +2017,25 @@ class _CommandsMixin:
             raise
 
     def _finish_tab_job(
-        self, in_flight: set[str], tab_id: str, job: Callable[[], None],
+        self,
+        in_flight: set[str],
+        tab_id: str,
+        job: Callable[[], None],
+        after: Callable[[], None] | None,
     ) -> None:
-        """Run *job*, then release *tab_id*'s entry in *in_flight* under ``_state_lock``.
+        """Run *job*, release *tab_id*'s entry in *in_flight*, then run *after*.
 
         Body of the thread :meth:`_start_tab_job` spawns; the
-        ``finally`` makes a failed job re-arm the tab.
+        ``finally`` makes a failed job re-arm the tab.  *after* runs
+        only when *job* succeeded.
         """
         try:
             job()
         finally:
             with self._state_lock:
                 in_flight.discard(tab_id)
+        if after is not None:
+            after()
 
     def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
         """Stage-all + commit the tab's working tree in the background.
@@ -2116,6 +2130,12 @@ class _CommandsMixin:
                     self._run_autocommit_job,
                     tab_id, work_dir, repo, dispatch_claims,
                 ),
+                # The main tree is committed (and its claim released):
+                # merge the worktrees whose merge waited for exactly
+                # this commit.  Runs after the tab is re-armed, so a
+                # second click during those merges is a new request
+                # (refused by the busy guard), not a duplicate.
+                after=functools.partial(self._merge_deferred_worktrees, repo),
             )
         except BaseException:
             # The worker never ran, so its ``finally`` cannot release
@@ -2139,10 +2159,8 @@ class _CommandsMixin:
         The job :meth:`_cmd_autocommit_action` runs through
         :meth:`_start_tab_job`; the ``finally`` here releases the
         repository's main-tree claim so tasks can start again even
-        after a failed commit, and re-arms the tab's commit button
-        BEFORE the deferred-worktree merges below (a second click
-        during those is a new request, refused by the busy guard,
-        not a duplicate).
+        after a failed commit.  The tab's in-flight entry is released
+        by :meth:`_finish_tab_job` right after this returns.
 
         Args:
             tab_id: Frontend tab that requested the commit.
@@ -2160,12 +2178,8 @@ class _CommandsMixin:
             )
         finally:
             with self._state_lock:
-                self._autocommit_tabs.discard(tab_id)
                 for claim in dispatch_claims or []:
                     self._release_main_tree_claim(claim)
-        # The main tree is committed (and its claim released): merge
-        # the worktrees whose merge waited for exactly this commit.
-        self._merge_deferred_worktrees(repo)
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
