@@ -11,9 +11,8 @@ the exception killed the ENTIRE client connection (whole VS Code
 window).
 
 BUG-B: several handlers called ``int()`` on frontend-supplied fields
-without a guard — ``setFavorite``/``resumeSession`` (``taskId``) and
-``getFrequentTasks`` (``limit``) — so garbage like
-``"abc"`` raised ValueError and killed the connection.  Inconsistent
+without a guard — ``setFavorite``/``resumeSession`` (``taskId``) —
+so garbage like ``"abc"`` raised ValueError and killed the connection.  Inconsistent
 with ``_cmd_get_adjacent_task``, which guards its parse.
 """
 
@@ -68,13 +67,6 @@ class TestDispatchMalformed(unittest.TestCase):
         self.server._handle_command(
             {"type": "resumeSession", "taskId": "abc", "tabId": "t1"},
         )
-
-    def test_get_frequent_tasks_garbage_limit_does_not_raise(self) -> None:
-        self.server._handle_command(
-            {"type": "getFrequentTasks", "limit": "abc"},
-        )
-        freq = [e for e in self.events if e.get("type") == "frequentTasks"]
-        assert freq, "getFrequentTasks must still reply with default limit"
 
 
 if __name__ == "__main__":

@@ -117,7 +117,9 @@ class ConnPrinter:
             if predicate():
                 return
             time.sleep(0.02)
-        raise AssertionError("timed out waiting for terminal events")
+        with self.lock:
+            seen = [(e["type"], e.get("tab_id"), e.get("data", "")) for e in self.events]
+        raise AssertionError(f"timed out waiting for terminal events; got {seen!r}")
 
 
 def _wait_until(predicate: Any, timeout: float = 10.0) -> None:
@@ -268,8 +270,12 @@ def test_dropped_connection_keeps_the_shell_for_a_reattach(
     opened = printer.of_type("terminalOpened", "conn-2")
     assert opened and opened[-1]["attached"] is True
     svc.input("tab-g", "conn-2", "echo $MARK; stty size\n")
+    # The MARK wait above is met by the pty's echo of the typed line,
+    # which precedes the shell's own start: this wait also covers a
+    # login bash starting under a loaded machine.
     printer.wait_for(
         lambda: "kept-" in printer.output("tab-g") and "25 90" in printer.output("tab-g"),
+        timeout=20,
     )
     assert all(e["connId"] == "conn-2" for e in printer.events[-3:])
 
@@ -278,6 +284,24 @@ def test_dropped_connection_keeps_the_shell_for_a_reattach(
     svc.viewer_gone("conn-2")
     printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
     assert svc.session_count() == 0
+
+
+def test_resize_right_after_open_wins_over_the_opening_size(
+    service: Any, tmp_path: Path,
+) -> None:
+    """A re-attach (or resize) that follows ``open`` at once must leave the
+    pty at ITS size once the shell is up.  The opening size is applied on
+    the master by the parent, in program order with the later ioctls; a
+    forked child applying it before its exec could run after them on a
+    loaded machine and the shell would start at the opening size."""
+    svc, printer = service
+    svc.open("tab-i", "conn-1", str(tmp_path), 80, 24)
+    svc.viewer_gone("conn-1")
+    svc.open("tab-i", "conn-2", str(tmp_path), 90, 25)
+    svc.resize("tab-i", "conn-2", 100, 30)
+    svc.input("tab-i", "conn-2", "stty size\n")
+    printer.wait_for(lambda: "30 100" in printer.output("tab-i"), timeout=20)
+    assert "24 80" not in printer.output("tab-i")
 
 
 def test_reattach_before_grace_expiry_cancels_the_hangup(

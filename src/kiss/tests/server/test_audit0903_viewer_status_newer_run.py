@@ -20,7 +20,7 @@ in transport delivery therefore could:
 status events (review Finding 3).
 
 The scenario is real end to end: the old task is launched through the
-real ``_cmd_run`` (worker parked in a real agent-script getter), the
+real ``_cmd_run`` (worker parked in a real SEA getter), the
 viewer attaches through the real ``_replay_session``, the newer run is
 launched on the viewer tab through the real ``_cmd_run``, and the old
 task really ends.  The delayed replay's status helper is then invoked
@@ -119,11 +119,11 @@ class TestViewerStatusNewerRun(TestCase):
             "useWorktree": False,
             "isParallel": False,
             "autoCommit": False,
-            "agentPath": str(script),
+            "seaPath": str(script),
         })
         self.assertTrue(
             self._wait((self.tmp / f"entered-{marker}").exists, 30.0),
-            f"run {marker} never reached the agent-script getter",
+            f"run {marker} never reached the SEA getter",
         )
 
     def test_stale_replay_status_is_suppressed_for_newer_run(self) -> None:

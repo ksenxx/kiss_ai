@@ -243,7 +243,7 @@ class TestChatSorcarAgentRun:
     def test_custom_base_system_prompt_gets_no_directive(
         self, env: IsolatedKissHome,
     ) -> None:
-        """An agent script with its own system prompt owns the meaning of a bare path.
+        """A SEA with its own system prompt owns the meaning of a bare path.
 
         ``/git_extract_knowledge /path/to/repo`` dispatches the SEA with
         the repository path as its whole task; the open directive would

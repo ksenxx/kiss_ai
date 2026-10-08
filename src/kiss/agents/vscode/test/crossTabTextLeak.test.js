@@ -85,16 +85,27 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-function tabEl(win, tabId) {
-  return win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
-  );
+// The label a tab carries (what its Chats-panel row / strip entry shows).
+// Chat tabs have no row of their own any more, so the label is read from
+// the tab records rather than from a rendered element.
+function tabTitle(win, tabId) {
+  const rec = win._testApi.openTabs().find(t => t.id === tabId);
+  assert.ok(rec, `tab ${tabId} must be open`);
+  return rec.title;
 }
 
+// Bring a tab on screen the way the user does: a click on the group strip
+// when the tab is listed there, else the Chats-panel pick.
 function clickTab(win, tabId) {
-  const el = tabEl(win, tabId);
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
+  );
+  const el = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  );
+  if (el) el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  else win._testApi.switchToTab(tabId);
 }
 
 function visibleText(win) {
@@ -879,7 +890,7 @@ test('a taskId-only setTaskText never retitles an unowned visible tab', () => {
   });
 
   assert.ok(
-    !tabEl(win, second).textContent.includes('foreign header QK89'),
+    !tabTitle(win, second).includes('foreign header QK89'),
     "another task's header must not rename a tab that owns no task",
   );
 
@@ -1710,13 +1721,12 @@ test('a task header for a background tab never retitles the visible one', () => 
 
   send(win, {type: 'setTaskText', tabId: first, text: 'bg header QK82'});
 
-  const visibleTab = tabEl(win, second);
   assert.ok(
-    !visibleTab.textContent.includes('bg header QK82'),
+    !tabTitle(win, second).includes('bg header QK82'),
     "a background task's header must not rename the tab on screen",
   );
   assert.ok(
-    tabEl(win, first).textContent.includes('bg header QK82'),
+    tabTitle(win, first).includes('bg header QK82'),
     'it must rename its OWN tab instead',
   );
 
@@ -1730,7 +1740,7 @@ test('a task header for the visible tab still retitles it', () => {
   send(win, {type: 'setTaskText', tabId: second, text: 'own header QK83'});
 
   assert.ok(
-    tabEl(win, second).textContent.includes('own header QK83'),
+    tabTitle(win, second).includes('own header QK83'),
     'the visible tab must still be named after the task it is running',
   );
 

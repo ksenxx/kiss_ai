@@ -32,6 +32,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _save_task_result,
 )
+from kiss.core.tool_verdict import ALLOW, refuse
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 
 
@@ -48,19 +49,19 @@ def _returned_literal(source: str, function: str) -> Any:
 
 DEMO_SEA = '''"""Demo SEA: a worker with a tool."""
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 
 SYSTEM_PROMPT = "You run demo tasks. Report the exit code."
 
 
-class Sea(BaseSea):
+class Sea(WorkerSea):
     def description(self):
         """Help text."""
         return "Runs demo tasks."
 
     def settings(self, settings):
         """Run settings."""
-        return settings | {"kind": "worker", "tool_profile": "bash"}
+        return settings | {"tool_profile": "bash"}
 
     def system_prompt(self, system_prompt):
         """Replace the default prompt."""
@@ -201,7 +202,7 @@ X = 1
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {'kind': 'worker', 'timeout': 60,  # note
+        return settings | {'use_memory': False, 'timeout': 60,  # note
                 'tool_profile': 'bash'}
 
 
@@ -214,7 +215,7 @@ def other():
     out = sea_tuning.patch_settings_literal(out, "max_budget", 2.5)
     assert "'tool_profile': 'bash', 'max_budget': 2.5}" in out
     assert _returned_literal(out, "settings") == {
-        "kind": "worker",
+        "use_memory": False,
         "timeout": 1800,
         "tool_profile": "bash",
         "max_budget": 2.5,
@@ -240,7 +241,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 class Sea(BaseSea):
     def settings(self, settings):
         return settings | {
-            'kind': 'worker',
+            'use_memory': False,
         }
 """
     out = sea_tuning.patch_settings_literal(trailing, "timeout", 5)
@@ -251,7 +252,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 class Sea(BaseSea):
     def settings(self, settings):
         return settings | {
-            'kind': 'worker',
+            'use_memory': False,
             'timeout': 5,
         }
 """
@@ -264,7 +265,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 class Sea(BaseSea):
     def settings(self, settings):
         return settings | {
-            'kind': 'worker'  # worker defaults
+            'use_memory': False  # no memory
         }
 """
     )
@@ -276,12 +277,12 @@ from kiss.agents.seas.base.base_sea import BaseSea
 class Sea(BaseSea):
     def settings(self, settings):
         return settings | {
-            'kind': 'worker',  # worker defaults
+            'use_memory': False,  # no memory
             'timeout': 5,
         }
 """
     )
-    assert _returned_literal(out, "settings") == {"kind": "worker", "timeout": 5}
+    assert _returned_literal(out, "settings") == {"use_memory": False, "timeout": 5}
     only_comment = """
 from kiss.agents.seas.base.base_sea import BaseSea
 
@@ -360,7 +361,7 @@ def test_sea_source_and_patch_sea_code_through_the_gate(checkout: Path) -> None:
     listing = sea.sea_source("tunedemo", start=1, count=3)
     assert listing.startswith(f"# {path} (") and listing.endswith(
         '    1  """Demo SEA: a worker with a tool."""\n    2  \n'
-        "    3  from kiss.agents.seas.base.base_sea import BaseSea"
+        "    3  from kiss.agents.seas.base.base_sea import WorkerSea"
     )
     assert sea.sea_source("slack").startswith("Error: 'slack' is not an editable SEA")
 
@@ -375,9 +376,10 @@ def test_sea_source_and_patch_sea_code_through_the_gate(checkout: Path) -> None:
         '''
     def tool_call_hook(self, name, args):
         """Refuse rm -rf."""
+        from kiss.agents.seas.base.base_sea import ALLOW, refuse
         if name == 'Bash' and 'rm -rf' in str(args):
-            return 'refused'
-        return 'OK'
+            return refuse('refused')
+        return ALLOW
 
     def tools(self, tools):
         """Extra tools."""
@@ -389,12 +391,13 @@ def shout(text: str) -> str:
     return text.upper()
 ''',
     )
-    assert report.startswith(f"Patched {path}:") and "+11 lines" in report
-    seas, _cmd, _d = sea_commands.check_sea(path)
-    assert sorted(t.__name__ for t in sea_commands.base_tools(seas, [])) == ["count_words", "shout"]
+    assert report.startswith(f"Patched {path}:") and "+12 lines" in report
+    check = sea_commands.check_sea(path)
+    seas = check.seas
+    assert sorted(t.__name__ for t in check.tools) == ["count_words", "shout"]
     patched = seas[-1]
-    assert patched.tool_call_hook("Bash", {"command": "rm -rf /"}) == "refused"
-    assert patched.tool_call_hook("Bash", {"command": "ls"}) == "OK"
+    assert patched.tool_call_hook("Bash", {"command": "rm -rf /"}) == refuse("refused")
+    assert patched.tool_call_hook("Bash", {"command": "ls"}) == ALLOW
 
     # Appending with an empty ``old`` adds at the end of the file.
     assert sea.patch_sea_code("tunedemo", "", "\nEXTRA = 1\n").startswith("Patched")
@@ -412,8 +415,10 @@ def shout(text: str) -> str:
     assert sea.patch_sea_code("tunedemo", 'return "Runs demo tasks."', "return 123").startswith(
         "Error: the patched SEA no longer loads (",
     )
-    assert sea.patch_sea_code("tunedemo", '"kind": "worker"', '"preset": "worker"').startswith(
-        "Error: the patched SEA no longer loads (",  # the loader refuses the renamed key
+    assert sea.patch_sea_code(
+        "tunedemo", '"tool_profile": "bash"', '"kind": "worker", "tool_profile": "bash"',
+    ).startswith(
+        "Error: the patched SEA no longer loads (",  # the loader refuses the removed key
     )
     assert sea.patch_sea_code("tunedemo", "EXTRA = 1", 'EXTRA = "~/.kiss/x"').startswith(
         "Error: sea lint rejects the patched SEA; file restored:\n",
@@ -529,7 +534,7 @@ def test_tune_patch_settings_and_export_evals_use_the_persisted_runs(checkout: P
     assert sea.patch_sea_settings("tunedemo", "max_budget", '"lots"').startswith(
         "Error: the patched SEA no longer loads (",  # the contract's type check
     )
-    # A redundant value (the kind's default) fails lint and is rolled back.
+    # A redundant value (a ``WorkerSea`` default) fails lint and is rolled back.
     assert sea.patch_sea_settings("tunedemo", "use_memory", "false").startswith(
         "Error: sea lint rejects"
     )
@@ -669,7 +674,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 class Sea(BaseSea):
     def settings(self, settings):
         return settings | {
-            "kind": "worker",
+            "use_memory": False,
             "timeout": 7200,  # why
             "max_budget": 3.0,
         }
@@ -681,7 +686,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 class Sea(BaseSea):
     def settings(self, settings):
         return settings | {
-            "kind": "worker",
+            "use_memory": False,
             "max_budget": 3.0,
         }
 """
@@ -691,7 +696,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {"kind": "worker", "timeout": 7200, "max_budget": 3.0}
+        return settings | {"use_memory": False, "timeout": 7200, "max_budget": 3.0}
 """
     assert sea_tuning.patch_settings_literal(inline, "timeout", sea_tuning.REMOVE) == (
         """
@@ -699,7 +704,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {"kind": "worker", "max_budget": 3.0}
+        return settings | {"use_memory": False, "max_budget": 3.0}
 """
     )
     assert sea_tuning.patch_settings_literal(inline, "max_budget", sea_tuning.REMOVE) == (
@@ -708,7 +713,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {"kind": "worker", "timeout": 7200}
+        return settings | {"use_memory": False, "timeout": 7200}
 """
     )
     assert sea_tuning.patch_settings_literal(inline, "absent", sea_tuning.REMOVE) == inline
@@ -793,8 +798,8 @@ def test_improve_and_revert_sea_code_snapshot_and_gate(
         assert report["result"] == {"success": True, "summary": "reworked", "cost": 0.0, "steps": 0}
         (command,) = daemon.run_commands
         assert "add an extra() helper" in command["prompt"] and str(path) in command["prompt"]
-        # A plain Sorcar run (no agent script) in the SEA's git checkout.
-        assert command["agentPath"] == "" and command["workDir"] == str(root.resolve())
+        # A plain Sorcar run (no SEA) in the SEA's git checkout.
+        assert command["seaPath"] == "" and command["workDir"] == str(root.resolve())
         assert command["useWorktree"] is False and command["autoCommit"] is False
         assert "error" not in report and "def extra" in path.read_text()
         assert report["other_changes"] == []
@@ -845,10 +850,10 @@ def test_settle_accepts_only_a_later_successful_replay_of_the_same_sea(checkout:
     assert sea_commands.sea_settings(path)["timeout"] == 7200
 
 
-def test_revert_removes_a_key_that_was_absent_even_when_the_kind_gave_it_a_value(
+def test_revert_removes_a_key_that_was_absent_even_when_the_base_gave_it_a_value(
     checkout: Path,
 ) -> None:
-    """The record holds the literal's own value, not the kind default, so the revert of
+    """The record holds the literal's own value, not the ``WorkerSea`` default, so the revert of
     ``use_web_tools: true`` on a worker removes the key instead of writing the redundant
     ``False`` back (which ``sea lint`` would refuse, leaving the change pending for good)."""
     path = checkout / "tunedemo" / "tunedemo_sea.py"
@@ -903,7 +908,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {"kind": "worker", "timeout": ((7200)), "x": 1}
+        return settings | {"use_memory": False, "timeout": ((7200)), "x": 1}
 """,
         "timeout", sea_tuning.REMOVE,
     ) == """
@@ -911,7 +916,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {"kind": "worker", "x": 1}
+        return settings | {"use_memory": False, "x": 1}
 """
     assert sea_tuning.patch_settings_literal(
         """
@@ -919,7 +924,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {"kind": "worker", "timeout": 7200
+        return settings | {"use_memory": False, "timeout": 7200
     , "max_budget": 3}
 """,
         "timeout", sea_tuning.REMOVE,
@@ -928,7 +933,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {"kind": "worker", "max_budget": 3}
+        return settings | {"use_memory": False, "max_budget": 3}
 """
     assert sea_tuning.literal_value("""
 from kiss.agents.seas.base.base_sea import BaseSea

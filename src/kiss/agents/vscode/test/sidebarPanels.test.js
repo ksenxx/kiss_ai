@@ -802,7 +802,10 @@ async function main() {
       inp.dispatchEvent(new win.Event('input', {bubbles: true}));
       el(win, 'meta-panel').classList.add('open');
       send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
-      const tabsBefore = win.document.querySelectorAll('#main-tab-list .chat-tab').length;
+      const chatTabs = () =>
+        win._testApi.openTabs().filter(t => !t.isContentTab && !t.isSubagentTab);
+      const firstTab = win._testApi.getActiveTabId();
+      eq(chatTabs().map(t => t.id), [firstTab]);
       posted.length = 0;
       win.document.querySelector('.app-row[data-app="slack"] button').click();
       const submit = posted.find(m => m.type === 'submit');
@@ -817,11 +820,22 @@ async function main() {
       assert.match(submit.prompt, /Never ask for my password in chat/);
       assert.match(submit.prompt, /Never retry a failed sign-in in a loop/);
       assert.match(submit.prompt, /solve or bypass a CAPTCHA/);
-      assert.strictEqual(
-        win.document.querySelectorAll('#main-tab-list .chat-tab').length,
-        tabsBefore + 1,
+      // The task runs in a fresh chat.  The connect prompt replaces the
+      // composer text, so the draft stays with the chat left behind,
+      // which therefore stays open (an idle chat without a draft would
+      // be retired); switching back shows the draft again.
+      const connectTab = win._testApi.getActiveTabId();
+      assert.notStrictEqual(connectTab, firstTab, 'a new chat is on screen');
+      assert.strictEqual(submit.tabId, connectTab, 'the submit names the new chat');
+      eq(chatTabs().map(t => t.id), [firstTab, connectTab]);
+      assert.ok(
+        !posted.some(m => m.type === 'closeTab' && m.tabId === firstTab),
+        'the chat holding the draft is kept',
       );
       assert.ok(!el(win, 'meta-panel').classList.contains('open'), 'drawer closed');
+      win._testApi.switchToTab(firstTab);
+      assert.strictEqual(inp.value, 'my draft', 'the draft survives');
+      win._testApi.switchToTab(connectTab);
 
       // While Slack waits for its connect task, every poll re-probes;
       // once a reply shows it connected, polls use the cache again.

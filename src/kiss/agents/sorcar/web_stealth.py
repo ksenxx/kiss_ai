@@ -4,8 +4,9 @@
 # add your name here
 """Make the KISS browser look like a person's Chrome to bot-protection vendors.
 
-Analysis of ``~/.kiss/history.db`` (Sept 2026) found 95 hosts answering the
-browser tool with a bot-protection page: Cloudflare managed challenges
+Analysis of the task history (``history.db`` in the brand's home directory,
+Sept 2026) found 95 hosts answering the browser tool with a
+bot-protection page: Cloudflare managed challenges
 (stackoverflow, dl.acm.org, npmjs, readthedocs sites, congress.gov, ...),
 Cloudflare hard blocks (medium.com), Akamai "Access Denied" (carmax,
 costco), Anubis (dblp, archwiki), Imperva (cato.org), PerimeterX
@@ -288,9 +289,7 @@ atexit.register(stop_virtual_display)
 # ---------------------------------------------------------------------------
 
 
-def mouse_path(
-    start: tuple[float, float], end: tuple[float, float]
-) -> list[tuple[float, float]]:
+def mouse_path(start: tuple[float, float], end: tuple[float, float]) -> list[tuple[float, float]]:
     """Return waypoints of a curved, decelerating pointer move from *start* to *end*.
 
     Real pointer traces are arcs that start fast and settle onto the
@@ -391,28 +390,45 @@ _TITLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 # (vendor label, both patterns must match the body head)
 _BODY_PATTERNS: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
-    ("Google 'unusual traffic' page",
-     re.compile(r"unusual traffic from your computer network", re.I),
-     re.compile(r"IP address:", re.I)),
-    ("Cloudflare block",
-     re.compile(r"Sorry, you have been blocked", re.I),
-     re.compile(r"Ray ID|Cloudflare", re.I)),
-    ("Cloudflare challenge",
-     re.compile(r"Performing security verification|Verify(?:ing)? you are human|"
-                r"Enable JavaScript and cookies to continue", re.I),
-     re.compile(r"Ray ID|Cloudflare", re.I)),
-    ("Anubis proof-of-work check",
-     re.compile(r"Sad Anubis|Oh noes!", re.I),
-     re.compile(r"Anubis", re.I)),
-    ("Akamai block",
-     re.compile(r"You don't have permission to access", re.I),
-     re.compile(r"errors\.edgesuite\.net|Reference #", re.I)),
-    ("Imperva Incapsula block",
-     re.compile(r"Request unsuccessful", re.I),
-     re.compile(r"Incapsula incident ID", re.I)),
-    ("PerimeterX press-and-hold check",
-     re.compile(r"Press & Hold|press and hold", re.I),
-     re.compile(r"human", re.I)),
+    (
+        "Google 'unusual traffic' page",
+        re.compile(r"unusual traffic from your computer network", re.I),
+        re.compile(r"IP address:", re.I),
+    ),
+    (
+        "Cloudflare block",
+        re.compile(r"Sorry, you have been blocked", re.I),
+        re.compile(r"Ray ID|Cloudflare", re.I),
+    ),
+    (
+        "Cloudflare challenge",
+        re.compile(
+            r"Performing security verification|Verify(?:ing)? you are human|"
+            r"Enable JavaScript and cookies to continue",
+            re.I,
+        ),
+        re.compile(r"Ray ID|Cloudflare", re.I),
+    ),
+    (
+        "Anubis proof-of-work check",
+        re.compile(r"Sad Anubis|Oh noes!", re.I),
+        re.compile(r"Anubis", re.I),
+    ),
+    (
+        "Akamai block",
+        re.compile(r"You don't have permission to access", re.I),
+        re.compile(r"errors\.edgesuite\.net|Reference #", re.I),
+    ),
+    (
+        "Imperva Incapsula block",
+        re.compile(r"Request unsuccessful", re.I),
+        re.compile(r"Incapsula incident ID", re.I),
+    ),
+    (
+        "PerimeterX press-and-hold check",
+        re.compile(r"Press & Hold|press and hold", re.I),
+        re.compile(r"human", re.I),
+    ),
 )
 
 
@@ -464,8 +480,8 @@ def search_fallback_url(url: str) -> str | None:
     if parsed.path.startswith("/sorry/"):
         # /sorry/index?continue=<original search url>&q=<opaque token>:
         # the search terms live in the ``continue`` URL, not in ``q``.
-        cont = (query.get("continue") or [""])[0]
-        parsed, query = urlparse(cont), parse_qs(urlparse(cont).query)
+        parsed = urlparse((query.get("continue") or [""])[0])
+        query = parse_qs(parsed.query)
     if parsed.path != "/search":
         return None
     terms = query.get("q") or []

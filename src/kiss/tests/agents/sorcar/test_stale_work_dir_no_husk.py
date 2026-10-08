@@ -218,7 +218,7 @@ def test_run_agent_from_stale_worktree_creates_no_husk(
         out = make_run_agent_tool(str(wt / "sub"))("say hi", str(script))
         parsed = yaml.safe_load(out)
         assert parsed["success"] is True and parsed["summary"] == "done"
-        assert parsed["ran"].startswith("sub-agent (session) ")
+        assert parsed["ran"].startswith("sub-agent model=")
         assert daemon.run_cmd is not None, "the daemon stand-in saw no run command"
         assert daemon.run_cmd["workDir"] == str(repo / "sub")
     finally:

@@ -202,7 +202,8 @@ function testReplayedResultCodeBlockPathsClickable() {
 
 function testCollapsedPanelExpandKeepsLinks() {
   // Code blocks inside collapsed panels are highlighted lazily on
-  // expand (highlightPending); the links must survive that too.
+  // expand (highlightPending); the links must survive that too.  A
+  // replay folds the prompt panel (a Thoughts panel is never auto-folded).
   const {win} = makeWebview();
   send(win, {
     type: 'task_events',
@@ -210,10 +211,9 @@ function testCollapsedPanelExpandKeepsLinks() {
     extra: JSON.stringify({work_dir: tmpDir}),
     events: [
       {
-        type: 'text_delta',
+        type: 'prompt',
         text: 'listing:\n```\n-rw-r--r--  1 u  g  5  ' + realFile + '\n```\n',
       },
-      {type: 'text_end'},
       {
         type: 'result',
         summary: summaryHtml(),

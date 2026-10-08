@@ -46,6 +46,7 @@ from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import (
     _write_qr_html,
     main,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 from kiss.tests.agents.third_party_agents.whatsapp_bridge import BridgeServer, bridge_server
 
 # ----------------------------------------------------------------------
@@ -268,9 +269,7 @@ class TestDatabaseTools:
         everyone = json.loads(db_backend.search_whatsapp_contacts(""))
         assert {c["name"] for c in everyone["contacts"]} == {"Alice", "Bob"}
 
-    def test_list_chats_sorted_by_last_active(
-        self, db_backend: WhatsAppChannelBackend
-    ) -> None:
+    def test_list_chats_sorted_by_last_active(self, db_backend: WhatsAppChannelBackend) -> None:
         data = json.loads(db_backend.list_whatsapp_chats())
         assert data["ok"] is True
         assert [c["name"] for c in data["chats"]] == ["Family Group", "Alice", "Bob"]
@@ -322,9 +321,7 @@ class TestDatabaseTools:
         assert [m["id"] for m in by_chat["messages"]] == ["m3", "m2", "m1"]
         by_query = json.loads(db_backend.list_whatsapp_messages(query="LUNCH"))
         assert [m["id"] for m in by_query["messages"]] == ["m4"]
-        by_sender = json.loads(
-            db_backend.list_whatsapp_messages(sender_phone_number="14155550001")
-        )
+        by_sender = json.loads(db_backend.list_whatsapp_messages(sender_phone_number="14155550001"))
         assert {m["id"] for m in by_sender["messages"]} == {"m1", "m3", "m5"}
         windowed = json.loads(
             db_backend.list_whatsapp_messages(
@@ -334,9 +331,7 @@ class TestDatabaseTools:
         assert [m["id"] for m in windowed["messages"]] == ["m2"]
         paged = json.loads(db_backend.list_whatsapp_messages(chat_jid=_ALICE, limit=1, page=1))
         assert [m["id"] for m in paged["messages"]] == ["m2"]
-        t_form = json.loads(
-            db_backend.list_whatsapp_messages(after="2026-09-10T10:00:01+00:00")
-        )
+        t_form = json.loads(db_backend.list_whatsapp_messages(after="2026-09-10T10:00:01+00:00"))
         assert {m["id"] for m in t_form["messages"]} == {"m2", "m3", "m5"}
         bad = json.loads(db_backend.list_whatsapp_messages(after="not-a-date"))
         assert bad["ok"] is False and "Invalid date" in bad["error"]
@@ -493,9 +488,7 @@ class TestChannelProtocol:
             assert backend.connect() is True
             assert "connected" in backend.connection_info
 
-    def test_connect_ignores_invalid_port_config(
-        self, channel_state: Any, tmp_path: Path
-    ) -> None:
+    def test_connect_ignores_invalid_port_config(self, channel_state: Any, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path / "nowhere"), "bridge_port": "abc"})
         backend = WhatsAppChannelBackend()
         assert backend.connect() is False  # unpaired; invalid port only logs
@@ -613,11 +606,6 @@ _AUTH_TOOL_NAMES = [
 ]
 
 
-def _auth_tools(agent: WhatsAppAgent) -> dict[str, Any]:
-    """Return the agent's auth tools keyed by name."""
-    return {t.__name__: t for t in agent._get_auth_tools()}
-
-
 class TestAgentAndAuthTools:
     def setup_method(self) -> None:
         self._state = _ChannelState()
@@ -651,7 +639,7 @@ class TestAgentAndAuthTools:
 
     def test_check_auth_reports_setup_needed(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path / "nowhere"), "bridge_port": "1"})
-        status = json.loads(_auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
+        status = json.loads(auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
         assert status["repo_cloned"] is False
         assert status["paired"] is False
         assert "authenticate_whatsapp" in status["next_step"]
@@ -661,7 +649,7 @@ class TestAgentAndAuthTools:
         (tmp_path / "whatsapp-bridge" / "main.go").write_text("package main")
         (tmp_path / "whatsapp-bridge" / "kiss-whatsapp-bridge").write_text("bin")
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
-        status = json.loads(_auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
+        status = json.loads(auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
         assert status["repo_cloned"] is True and status["bridge_built"] is True
         assert status["next_step"] == "Call start_whatsapp_bridge()."
 
@@ -673,7 +661,7 @@ class TestAgentAndAuthTools:
         _make_paired_session(tmp_path)
         with bridge_server({"success": True, "message": ""}) as server:
             _config.save({"repo_dir": str(tmp_path), "bridge_port": str(server.server_address[1])})
-            status = json.loads(_auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
+            status = json.loads(auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
             assert status["bridge_running"] is True and status["paired"] is True
             assert status["next_step"].startswith("Ready")
 
@@ -684,13 +672,13 @@ class TestAgentAndAuthTools:
         (bridge / "kiss-whatsapp-bridge").write_text("bin")
         with bridge_server({"success": True, "message": ""}) as server:
             _config.save({"repo_dir": str(tmp_path), "bridge_port": str(server.server_address[1])})
-            status = json.loads(_auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
+            status = json.loads(auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
             assert status["bridge_running"] is True and status["paired"] is False
             assert "get_whatsapp_qr_code" in status["next_step"]
 
     def test_authenticate_rejects_bad_port(self, tmp_path: Path) -> None:
         result = json.loads(
-            _auth_tools(WhatsAppAgent())["authenticate_whatsapp"](
+            auth_tools(WhatsAppAgent())["authenticate_whatsapp"](
                 repo_dir=str(tmp_path), bridge_port="not-a-port"
             )
         )
@@ -706,7 +694,7 @@ class TestAgentAndAuthTools:
         (bridge / "main.go").write_text("package main")
         monkeypatch.setenv("PATH", str(tmp_path / "no-tools"))
         result = json.loads(
-            _auth_tools(WhatsAppAgent())["authenticate_whatsapp"](repo_dir=str(tmp_path))
+            auth_tools(WhatsAppAgent())["authenticate_whatsapp"](repo_dir=str(tmp_path))
         )
         assert result["ok"] is False
         assert "go.dev" in result["error"]
@@ -717,7 +705,7 @@ class TestAgentAndAuthTools:
         (bridge / "main.go").write_text("package main")
         (bridge / "kiss-whatsapp-bridge").write_text("bin")
         result = json.loads(
-            _auth_tools(WhatsAppAgent())["authenticate_whatsapp"](
+            auth_tools(WhatsAppAgent())["authenticate_whatsapp"](
                 repo_dir=str(tmp_path), bridge_port="18042"
             )
         )
@@ -734,34 +722,32 @@ class TestAgentAndAuthTools:
         parent = tmp_path / "blocker"
         parent.write_text("i am a file")
         result = json.loads(
-            _auth_tools(WhatsAppAgent())["authenticate_whatsapp"](
-                repo_dir=str(parent / "repo")
-            )
+            auth_tools(WhatsAppAgent())["authenticate_whatsapp"](repo_dir=str(parent / "repo"))
         )
         assert result["ok"] is False
         assert "Cannot create" in result["error"]
 
     def test_start_bridge_requires_build(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path / "nowhere"), "bridge_port": "1"})
-        result = json.loads(_auth_tools(WhatsAppAgent())["start_whatsapp_bridge"]())
+        result = json.loads(auth_tools(WhatsAppAgent())["start_whatsapp_bridge"]())
         assert result["ok"] is False and "authenticate_whatsapp" in result["error"]
 
     def test_start_bridge_short_circuits_when_running(self, tmp_path: Path) -> None:
         with bridge_server({"success": True, "message": ""}) as server:
             _config.save({"repo_dir": str(tmp_path), "bridge_port": str(server.server_address[1])})
-            result = json.loads(_auth_tools(WhatsAppAgent())["start_whatsapp_bridge"]())
+            result = json.loads(auth_tools(WhatsAppAgent())["start_whatsapp_bridge"]())
             assert result == {"ok": True, "message": "Bridge already running."}
 
     def test_qr_code_without_log(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
-        result = json.loads(_auth_tools(WhatsAppAgent())["get_whatsapp_qr_code"]())
+        result = json.loads(auth_tools(WhatsAppAgent())["get_whatsapp_qr_code"]())
         assert result["ok"] is False and "start_whatsapp_bridge" in result["error"]
 
     def test_qr_code_from_bridge_log(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
         _bridge_log_path().parent.mkdir(parents=True, exist_ok=True)
         _bridge_log_path().write_text(_BRIDGE_LOG_WITH_QR, encoding="utf-8")
-        result = json.loads(_auth_tools(WhatsAppAgent())["get_whatsapp_qr_code"]())
+        result = json.loads(auth_tools(WhatsAppAgent())["get_whatsapp_qr_code"]())
         assert result["ok"] is True
         page = Path(result["qr_page"])
         assert page.exists() and _QR_BLOCK in page.read_text(encoding="utf-8")
@@ -770,7 +756,7 @@ class TestAgentAndAuthTools:
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
         _bridge_log_path().parent.mkdir(parents=True, exist_ok=True)
         _bridge_log_path().write_text("starting up...", encoding="utf-8")
-        result = json.loads(_auth_tools(WhatsAppAgent())["get_whatsapp_qr_code"]())
+        result = json.loads(auth_tools(WhatsAppAgent())["get_whatsapp_qr_code"]())
         assert result["ok"] is False and "No QR code" in result["error"]
 
     def test_qr_code_when_already_paired(self, tmp_path: Path) -> None:
@@ -779,7 +765,7 @@ class TestAgentAndAuthTools:
         _bridge_log_path().write_text(
             "\u2713 Connected to WhatsApp! Type 'help' for commands.", encoding="utf-8"
         )
-        result = json.loads(_auth_tools(WhatsAppAgent())["get_whatsapp_qr_code"]())
+        result = json.loads(auth_tools(WhatsAppAgent())["get_whatsapp_qr_code"]())
         assert result["ok"] is True and "Already paired" in result["message"]
 
     def test_wait_for_pairing_success_rewrites_page(self, tmp_path: Path) -> None:
@@ -790,21 +776,15 @@ class TestAgentAndAuthTools:
             _BRIDGE_LOG_WITH_QR + "\nSuccessfully connected and authenticated!\n",
             encoding="utf-8",
         )
-        result = json.loads(
-            _auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=3)
-        )
+        result = json.loads(auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=3))
         assert result["ok"] is True and "paired" in result["message"]
         assert "linked successfully" in _qr_html_path().read_text(encoding="utf-8")
 
     def test_wait_for_pairing_bridge_timeout(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
         _bridge_log_path().parent.mkdir(parents=True, exist_ok=True)
-        _bridge_log_path().write_text(
-            "Timeout waiting for QR code scan", encoding="utf-8"
-        )
-        result = json.loads(
-            _auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=3)
-        )
+        _bridge_log_path().write_text("Timeout waiting for QR code scan", encoding="utf-8")
+        result = json.loads(auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=3))
         assert result["ok"] is False and "fresh QR" in result["error"]
 
     def test_wait_for_pairing_still_waiting_refreshes_qr(self, tmp_path: Path) -> None:
@@ -812,29 +792,25 @@ class TestAgentAndAuthTools:
         _bridge_log_path().parent.mkdir(parents=True, exist_ok=True)
         _bridge_log_path().write_text(_BRIDGE_LOG_WITH_QR, encoding="utf-8")
         _bridge_pid_path().write_text(str(os.getpid()), encoding="utf-8")
-        result = json.loads(
-            _auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=1)
-        )
+        result = json.loads(auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=1))
         assert result["ok"] is False and "Still waiting" in result["error"]
         assert _QR_BLOCK in _qr_html_path().read_text(encoding="utf-8")
 
     def test_wait_for_pairing_without_log(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
-        result = json.loads(
-            _auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=1)
-        )
+        result = json.loads(auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=1))
         assert result["ok"] is False and "start_whatsapp_bridge" in result["error"]
 
     def test_stop_bridge_without_pid(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
-        result = json.loads(_auth_tools(WhatsAppAgent())["stop_whatsapp_bridge"]())
+        result = json.loads(auth_tools(WhatsAppAgent())["stop_whatsapp_bridge"]())
         assert result["ok"] is False and "PID" in result["error"]
 
     def test_stop_bridge_with_stale_pid(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
         _bridge_pid_path().parent.mkdir(parents=True, exist_ok=True)
         _bridge_pid_path().write_text("999999999", encoding="utf-8")
-        result = json.loads(_auth_tools(WhatsAppAgent())["stop_whatsapp_bridge"]())
+        result = json.loads(auth_tools(WhatsAppAgent())["stop_whatsapp_bridge"]())
         assert result["ok"] is True and "not running" in result["message"]
 
     def test_clear_auth_removes_session(self, tmp_path: Path) -> None:
@@ -845,7 +821,7 @@ class TestAgentAndAuthTools:
         _write_qr_html(_QR_BLOCK)
         agent = WhatsAppAgent()
         assert agent._is_authenticated() is True
-        message = _auth_tools(agent)["clear_whatsapp_auth"]()
+        message = auth_tools(agent)["clear_whatsapp_auth"]()
         assert "Linked devices" in message
         assert not store.exists()
         assert not _qr_html_path().exists()
@@ -868,7 +844,7 @@ class TestAgentAndAuthTools:
         _make_paired_session(tmp_path)
         with bridge_server({"success": True, "message": ""}) as server:
             _config.save({"repo_dir": str(tmp_path), "bridge_port": str(server.server_address[1])})
-            message = _auth_tools(WhatsAppAgent())["clear_whatsapp_auth"]()
+            message = auth_tools(WhatsAppAgent())["clear_whatsapp_auth"]()
         assert "Refusing to clear" in message
         assert (tmp_path / "whatsapp-bridge" / "store" / "whatsapp.db").exists()
 
@@ -882,7 +858,7 @@ class TestAgentAndAuthTools:
         _config.save({"repo_dir": str(tmp_path), "bridge_port": "1"})
         _bridge_pid_path().parent.mkdir(parents=True, exist_ok=True)
         _bridge_pid_path().write_text(str(os.getpid()), encoding="utf-8")
-        result = json.loads(_auth_tools(WhatsAppAgent())["start_whatsapp_bridge"]())
+        result = json.loads(auth_tools(WhatsAppAgent())["start_whatsapp_bridge"]())
         assert result["ok"] is True
         assert "already starting or waiting" in result["message"]
 
@@ -891,9 +867,7 @@ class TestAgentAndAuthTools:
         _bridge_log_path().parent.mkdir(parents=True, exist_ok=True)
         _bridge_log_path().write_text(_BRIDGE_LOG_WITH_QR, encoding="utf-8")
         _bridge_pid_path().write_text("999999999", encoding="utf-8")
-        result = json.loads(
-            _auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=5)
-        )
+        result = json.loads(auth_tools(WhatsAppAgent())["wait_for_whatsapp_pairing"](timeout=5))
         assert result["ok"] is False and "no longer running" in result["error"]
 
     def test_main_without_args_exits(self) -> None:

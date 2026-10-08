@@ -35,11 +35,11 @@ def _subscribe_on_alloc(printer: JsonPrinter, tab_id: str) -> Any:
 
     Mirrors the server's ``task_runner._on_run_task_id_allocated``,
     which attaches the launching UI tab to the freshly persisted task
-    via ``printer.register_task_ui``.
+    via ``printer.subscribe_tab``.
     """
 
     def _cb(task_id: Any, chat_id: str) -> None:
-        printer.register_task_ui(task_id, tab_id)
+        printer.subscribe_tab(task_id, tab_id)
 
     return _cb
 

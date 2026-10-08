@@ -67,12 +67,13 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// The Chats-panel pick: chats have no row of tabs to click any more.
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
   );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  win._testApi.switchToTab(tabId);
 }
 
 // The commands are built inside the JSDOM realm, so their `paths` array

@@ -138,6 +138,7 @@ RELOCATE="$PROJECT_ROOT/src/kiss/scripts/relocate_work_dir.py"
 CARRY_OVER="$PROJECT_ROOT/src/kiss/scripts/carry_over_tables.py"
 RUNNING_TASKS="$PROJECT_ROOT/src/kiss/scripts/running_tasks.py"
 FINGERPRINT="$PROJECT_ROOT/src/kiss/scripts/db_fingerprint.py"
+LEGACY_TASK_DB="$PROJECT_ROOT/src/kiss/scripts/legacy_task_db.py"
 # How recent a task's newest event has to be for the task to count as running,
 # which is what stops the fallback from stopping the web app under one.
 LIVE_TASK_WINDOW="${SORCAR_LIVE_TASK_WINDOW:-300}"
@@ -149,14 +150,11 @@ DB="$KISS_DIR/history.db"
 # new version yet still holds it under the old name, here and on the remote.
 # The old name stays as a symlink to the new one, so a web app still running
 # the old version keeps writing to the same file (SQLite resolves the link).
-if [[ ! -e "$DB" && -e "$KISS_DIR/sorcar.db" ]]; then
-    for part in -wal -shm ""; do
-        if [[ -e "$KISS_DIR/sorcar.db$part" ]]; then
-            mv "$KISS_DIR/sorcar.db$part" "$DB$part" || die "Could not rename $KISS_DIR/sorcar.db$part."
-        fi
-    done
-    ln -s history.db "$KISS_DIR/sorcar.db"
-fi
+# A machine from the spring of 2026 also holds a history.db from before the
+# database was first renamed TO sorcar.db; the helper tells that leftover
+# apart by its schema and sets it aside (see src/kiss/scripts/legacy_task_db.py).
+RENAMED="$(python3 "$LEGACY_TASK_DB" "$KISS_DIR" adopt)" || die "Could not rename $KISS_DIR/sorcar.db."
+[[ -z "$RENAMED" ]] || info "$RENAMED"
 # Where the remote leaves the snapshot pass 1 reads.  Expanded by the remote
 # shell, so it is written with a literal $HOME everywhere below.
 REMOTE_SNAPSHOT='$HOME/.kiss/history.db.outgoing'
@@ -236,17 +234,16 @@ trap cleanup EXIT
 # must never be read as "there is nothing there to lose".
 # ---------------------------------------------------------------------------
 step "Looking at the task database on $TARGET ..."
-REMOTE_DB_STATE="$(ssh "$TARGET" 'python3 -' <<'PY' 2>/dev/null || echo unknown
+# A remote that has not started version 2026.10.2 yet still holds the
+# database as sorcar.db: it is renamed first (as this machine's was above), so
+# that the probe and both passes look at the file that holds the history.
+if REMOTE_RENAMED="$(ssh "$TARGET" 'python3 - "$HOME/.kiss" adopt' < "$LEGACY_TASK_DB" 2>/dev/null)"; then
+    [[ -z "$REMOTE_RENAMED" ]] || info "$TARGET: $REMOTE_RENAMED"
+    REMOTE_DB_STATE="$(ssh "$TARGET" 'python3 -' <<'PY' 2>/dev/null || echo unknown
 import os
 import sqlite3
 
 path = os.path.expanduser("~/.kiss/history.db")
-legacy = os.path.expanduser("~/.kiss/sorcar.db")
-if not os.path.exists(path) and os.path.exists(legacy):
-    for part in ("-wal", "-shm", ""):
-        if os.path.exists(legacy + part):
-            os.replace(legacy + part, path + part)
-    os.symlink("history.db", legacy)
 if not os.path.isfile(path):
     print("missing")
     raise SystemExit
@@ -261,6 +258,9 @@ except sqlite3.Error:
 print("ok" if {"task_history", "events"} <= tables else "incompatible")
 PY
 )"
+else
+    REMOTE_DB_STATE=unknown
+fi
 # A connection that dies mid-command can leave a line of output behind before
 # the "unknown" appended above, so only a whole, recognised answer counts as
 # one: anything else is an answer that never arrived.

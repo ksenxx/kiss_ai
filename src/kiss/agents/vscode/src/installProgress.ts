@@ -26,7 +26,7 @@ import {PRODUCT_NAME} from './brand';
 export const INSTALL_PROGRESS_FILE = '.install-progress';
 
 /** Poll interval of the progress file, in milliseconds. */
-export const INSTALL_PROGRESS_POLL_MS = 1000;
+const INSTALL_PROGRESS_POLL_MS = 1000;
 
 /** One published install step. */
 export interface InstallProgress {

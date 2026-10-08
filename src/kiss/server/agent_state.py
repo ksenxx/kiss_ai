@@ -197,6 +197,19 @@ class AgentState:
         thread = self.task_thread
         return thread is not None and (thread.ident is None or thread.is_alive())
 
+    def running(self) -> bool:
+        """True while this state's task is live.
+
+        The one liveness predicate for "is a task running here": the
+        worker has raised ``is_task_active``, or its thread is still
+        installed and not dead (:meth:`thread_alive`, which counts a
+        created-but-unstarted thread so a follow-up typed, a viewer
+        attached or a merge requested during ``_cmd_run``'s startup
+        window sees the task).  Callers act on the result under
+        :data:`STATE_LOCK`.
+        """
+        return self.is_task_active or self.thread_alive()
+
     def merge_in_progress(self) -> bool:
         """True while a merge, discard or tab-disposal claim is live.
 

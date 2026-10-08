@@ -50,7 +50,6 @@ from kiss.agents.sorcar.task_classifier import (
     CLASSIFIER_TASK_MAX_CHARS,
     ClassifierRun,
     TaskClassification,
-    _cached_decision,
     _decisions_model_config,
     cached_classification,
     classify_task,
@@ -70,6 +69,14 @@ SERVED_MODEL = "typesafe/jev-1.13-20260917"
 INPUT_TOKENS = 612
 OUTPUT_TOKENS = 5
 REPORTED_COST = 3.1e-05  # what the scripted endpoint says it charged (not the catalog rate)
+
+
+def _cached_decision(task: str) -> TaskClassification | None:
+    """The memoised decisions verdict for *task*, keyed like the classifier keys it."""
+    return cached_classification(
+        task, DEFAULT_DECISIONS_MODEL, _decisions_model_config(), _DECISIONS_CRITERIA
+    )
+
 
 
 def _choice_answer(kind: str) -> dict[str, Any]:

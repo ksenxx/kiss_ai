@@ -105,6 +105,16 @@ function submits(posted) {
   return posted.filter(m => m.type === 'submit');
 }
 
+// Chat tabs have no row of their own any more: the Chats panel's pick
+// (switchToTab) is how the user gets back to a chat.
+function clickTab(win, tabId) {
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} is still there`,
+  );
+  win._testApi.switchToTab(tabId);
+}
+
 function settle() {
   // Several macrotask turns: FileReader completion + the awaited chain.
   return new Promise(resolve => setTimeout(resolve, 50));
@@ -153,11 +163,7 @@ async function main() {
   assert.strictEqual(submits(posted).length, 1, 'no submit from A yet');
 
   // Back on A: the latch must be clear, so a plain Enter sends.
-  const tabEl = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabA)}]`,
-  );
-  assert.ok(tabEl, 'tab A is still there');
-  tabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, tabA);
   assert.strictEqual(win._testApi.getActiveTabId(), tabA);
   const chips = win.document.getElementById('file-chips');
   assert.match(
@@ -185,7 +191,7 @@ async function main() {
   });
   paste(win, png3);
   typeAndEnter(win, 'prompt for C');
-  tabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, tabA);
   assert.strictEqual(win._testApi.getActiveTabId(), tabA);
   await settle();
   assert.strictEqual(
@@ -193,9 +199,7 @@ async function main() {
     0,
     'a submit whose tab was switched away from must not be sent',
   );
-  win.document
-    .querySelector(`.chat-tab[data-tab-id=${JSON.stringify(tabC)}]`)
-    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, tabC);
   assert.strictEqual(win._testApi.getActiveTabId(), tabC);
   typeAndEnter(win, 'prompt for C again');
   await settle();
@@ -203,7 +207,7 @@ async function main() {
   assert.strictEqual(fromC.length, 1, 'C sends once its user is back');
   assert.strictEqual(fromC[0].attachments.length, 1, 'C kept its photo');
   assert.strictEqual(fromC[0].attachments[0].name, 'c.png');
-  tabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, tabA);
   assert.strictEqual(win._testApi.getActiveTabId(), tabA);
 
   // Same-tab deduplication still holds with a pending attachment: a burst

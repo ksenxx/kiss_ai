@@ -143,7 +143,7 @@ class TestDockerStreamCallback(unittest.TestCase):
             Returns:
                 The command output as a string.
             """
-            return agent._docker_bash(command, "docker cmd")
+            return str(agent.docker_manager.Bash(command, "docker cmd"))
 
         with tempfile.TemporaryDirectory() as td:
             result = agent.run(

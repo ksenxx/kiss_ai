@@ -138,6 +138,17 @@ function byId(win, id) {
   return win.document.getElementById(id);
 }
 
+/**
+ * Bring a workspace section of the task-info panel (meta-explorer /
+ * meta-scm) on screen: expand it if it is collapsed.  An expanded
+ * section is already live (the workspace pin loads it).
+ */
+function showSection(win, id) {
+  const section = byId(win, id);
+  if (section.classList.contains('collapsed'))
+    click(win, section.querySelector('.meta-section-toggle'));
+}
+
 function ofType(posted, type) {
   return posted.filter(m => m.type === type);
 }
@@ -155,7 +166,7 @@ function menuItem(win, label) {
 /** Open the Explorer on WD and answer its root listing with *entries*. */
 function openExplorer(win, posted, entries) {
   pinWorkspace(win);
-  click(win, byId(win, 'activity-explorer'));
+  showSection(win, 'meta-explorer');
   const list = ofType(posted, 'listDir');
   const req = list[list.length - 1];
   send(win, {
@@ -241,7 +252,7 @@ function commitRow(win, sha) {
 /** Open Source Control on *wd* showing history A -> B. */
 function openScm(win, posted, wd) {
   pinWorkspace(win, wd);
-  click(win, byId(win, 'activity-scm'));
+  showSection(win, 'meta-scm');
   answerScm(win, posted, wd || WD, [
     commit(SHA_A, [SHA_B], 'Title line'),
     commit(SHA_B, [], 'root'),
@@ -510,8 +521,8 @@ async function main() {
     );
     // The workspace changes to another repository.
     pinWorkspace(win, WD2);
-    click(win, byId(win, 'activity-explorer'));
-    click(win, byId(win, 'activity-scm'));
+    showSection(win, 'meta-explorer');
+    showSection(win, 'meta-scm');
     const st = ofType(posted, 'gitStatus');
     assert.strictEqual(
       st[st.length - 1].workDir,

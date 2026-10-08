@@ -260,7 +260,8 @@ function testReplayedLsListingPathsClickable() {
 
 function testCollapsedTextPanelExpandLinksWholePaths() {
   // Deferred highlighting (collapsed panel expanded later) goes through
-  // highlightPending -> highlightBlockPreservingLinks as well.
+  // highlightPending -> highlightBlockPreservingLinks as well.  A replay
+  // folds the prompt panel (a Thoughts panel is never auto-folded).
   const {win} = makeWebview();
   send(win, {
     type: 'task_events',
@@ -268,10 +269,9 @@ function testCollapsedTextPanelExpandLinksWholePaths() {
     extra: JSON.stringify({work_dir: VIRTUAL_ROOT}),
     events: [
       {
-        type: 'text_delta',
+        type: 'prompt',
         text: 'listing:\n```\n' + lsListing() + '```\n',
       },
-      {type: 'text_end'},
       {
         type: 'result',
         summary: '<p>done</p>',

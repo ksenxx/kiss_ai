@@ -15,10 +15,10 @@
 // original per-event tail.
 //
 // Unreachable-branch note (no mocks are used, per testing policy):
-// inside the deferTail condition, `thinkRaf && !thinkCnt` and
+// inside the deferTail condition, `thinkRaf && !thinkEl` and
 // `bashRaf && !bashPanel` cannot occur — thinking_end cancels thinkRaf
-// before clearing thinkCnt, and tool_call zeroes bashRaf when it
-// clears bashPanel — so the `!!tState.thinkCnt` / `!!tState.bashPanel`
+// before clearing thinkEl, and tool_call zeroes bashRaf when it
+// clears bashPanel — so the `!!tState.thinkEl` / `!!tState.bashPanel`
 // guards are pure defence and their false sides are untestable
 // end-to-end.
 
@@ -308,8 +308,8 @@ async function testThinkingDeltaStreamParity() {
   startRunningTask(win, posted);
 
   send(win, {type: 'thinking_start'});
-  const cnt = O.querySelector('.think .cnt');
-  assert.ok(cnt, 'thinking panel missing');
+  const cnt = O.querySelector('.llm-panel > .think');
+  assert.ok(cnt, 'thinking text block missing');
   geo.sh += 300;
   send(win, {type: 'thinking_delta', text: 'pondering '});
   send(win, {type: 'thinking_delta', text: 'deeply'});
@@ -478,12 +478,12 @@ async function testChunkAfterSwitchRetargetsSweep() {
   send(win, {type: 'text_delta', text: 'hi ', tabId: tab2});
 
   // Back on tab 1, leave a sweep pending WITH collapse debt...
-  win.document.querySelector('[data-tab-id="' + tab1 + '"]').click();
+  win._testApi.switchToTab(tab1);
   send(win, {type: 'system_output', text: 'one\n', tabId: tab1});
 
   // ...switch to tab 2 and make its FIRST event a buffered chunk: the
   // pending sweep is retargeted, dropping tab 1's debt.
-  win.document.querySelector('[data-tab-id="' + tab2 + '"]').click();
+  win._testApi.switchToTab(tab2);
   const t2panel = O.querySelector('.ev.tc');
   t2panel.classList.remove('collapsed');
   send(win, {type: 'text_delta', text: 'there', tabId: tab2});
@@ -523,7 +523,10 @@ async function testTaskEndFlushesPendingSweepWhileRunning() {
   send(win, {type: 'tool_call', name: 'Bash', command: 'make one'});
   send(win, {type: 'tool_call', name: 'Bash', command: 'make two'});
   const panels = O.querySelectorAll('.ev.tc');
-  panels[0].classList.remove('collapsed');
+  // Tool panels start folded: open all three by hand (not pinned), so
+  // the sweep's own rule — fold all but the newest two — is what is
+  // under test.
+  for (const p of panels) p.classList.remove('collapsed');
   send(win, {type: 'system_output', text: 'late output\n'});
   assert.ok(!panels[0].classList.contains('collapsed'), 'tail must defer');
 
@@ -560,8 +563,9 @@ async function testTaskEndFlushesPendingSweepWhileRunning() {
 // --------------------------------------------------------------------
 // Sweep autoscroll parity: the old per-event tail scrolled EVERY
 // scrollable subpanel of the latest event panel, not only the panels
-// enclosing the streamed text — a completed sibling .think subpanel
-// must still be pinned to its end by the per-frame sweep.
+// enclosing the streamed text — a Bash panel's argument body (.tc-b),
+// sibling of the output its system_output chunks stream into, must
+// still be pinned to its end by the per-frame sweep.
 // --------------------------------------------------------------------
 
 async function testSweepScrollsSiblingSubpanels() {
@@ -570,20 +574,18 @@ async function testSweepScrollsSiblingSubpanels() {
   fakeGeometry(O, {sh: 3000, ch: 500});
   startRunningTask(win, posted);
 
-  send(win, {type: 'thinking_start'});
-  send(win, {type: 'thinking_delta', text: 'mull'});
-  send(win, {type: 'thinking_end'});
-  send(win, {type: 'text_delta', text: 'answer '});
-  const think = O.querySelector('.think');
-  assert.ok(think, 'think subpanel missing');
-  win._geoByClass.think = {sh: 800, ch: 100};
-  think.scrollTop = 10; // reader left it mid-way; no user lock involved
-  send(win, {type: 'text_delta', text: 'text'});
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make', description: 'build'});
+  send(win, {type: 'system_output', text: 'line one\n'});
+  const body = O.querySelector('.ev.tc > .tc-b');
+  assert.ok(body, 'tool-call body subpanel missing');
+  win._geoByClass['tc-b'] = {sh: 800, ch: 100};
+  body.scrollTop = 10; // reader left it mid-way; no user lock involved
+  send(win, {type: 'system_output', text: 'line two\n'});
   await nextFrames(win);
   assert.strictEqual(
-    think.scrollTop,
+    body.scrollTop,
     700,
-    'BUG: the per-frame sweep did not scroll a sibling .think ' +
+    'BUG: the per-frame sweep did not scroll a sibling .tc-b ' +
       'subpanel of the latest event panel to its end',
   );
   win.close();

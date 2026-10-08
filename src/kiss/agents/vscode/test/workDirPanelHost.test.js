@@ -8,7 +8,7 @@
 // list) or `pickWorkDir` (the folder button) -- neither names a tab, the
 // working directory is ONE global value -- and the compiled
 // SorcarSidebarView makes the folder's real path the daemon's global
-// working directory (`SorcarApi.setWorkDir`, nothing is sent as
+// working directory (a `setWorkDir` command, nothing is sent as
 // `recordWorkDir`) and answers `workDirPicked {path}` without a tabId;
 // a path that is not a directory or is a file-system root (also one
 // reached through `..` or a symlink) gets `workDirError {text}` instead
@@ -138,15 +138,19 @@ const {SorcarSidebarView} = require(path.join(outDir, 'SorcarSidebarView.js'));
 
 function makeView() {
   const view = new SorcarSidebarView({fsPath: path.join(tmp, 'ext')});
+  // Commands sent to the daemon, split by kind: submits, completions,
+  // every directory sent as the global value, and everything else
+  // (getConfig refreshes aside) as raw forwards.
   const forwarded = [];
   const runs = [];
-  // Every directory the host sent to the daemon as the global value.
+  const completes = [];
   const sets = [];
-  view._api = {
-    forward: cmd => forwarded.push(cmd),
-    submit: fields => runs.push(fields),
-    getConfig: () => {},
-    setWorkDir: wd => sets.push(wd),
+  view._send = cmd => {
+    const {type, ...fields} = cmd;
+    if (type === 'submit') runs.push(fields);
+    else if (type === 'complete') completes.push(fields);
+    else if (type === 'setWorkDir') sets.push(cmd.workDir);
+    else if (type !== 'getConfig') forwarded.push(cmd);
   };
   const posted = [];
   view._view = {
@@ -155,7 +159,7 @@ function makeView() {
     show() {},
   };
   view._disposed = false;
-  return {view, posted, forwarded, runs, sets};
+  return {view, posted, forwarded, runs, completes, sets};
 }
 
 function opens() {
@@ -370,9 +374,7 @@ async function testWebviewEditorContextFallsBackToTheFileTab() {
   // Without a visible VS Code editor the webview's own file tab (the
   // Monaco buffer the remote webapp also has) is the editor context of
   // a run and of a completion; with one, the native editor wins.
-  const {view, runs} = makeView();
-  const completes = [];
-  view._api.complete = fields => completes.push(fields);
+  const {view, runs, completes} = makeView();
   await view._handleMessage({
     type: 'submit',
     prompt: 'explain',

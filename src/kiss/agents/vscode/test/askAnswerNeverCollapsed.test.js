@@ -177,7 +177,8 @@ function testBackgroundTabRestoreKeepsAnswerOpen() {
     send(win, {type: 'tool_call', name: 'Bash', command: 'ls ' + i, tabId: tab1});
     send(win, {type: 'tool_result', content: 'a', tool_name: 'Bash', tabId: tab1});
   }
-  win.document.querySelector('.chat-tab[data-tab-id="' + tab1 + '"]').click();
+  // The Chats-panel pick brings the chat back on screen.
+  api.switchToTab(tab1);
   assert.strictEqual(api.getActiveTabId(), tab1);
   const out = win.document.getElementById('output');
   const prompt = out.querySelector('.ev.prompt');
@@ -210,9 +211,9 @@ function testSummaryToolLeavesAnswerOnTranscript() {
   const panel = answerPanelIn(out);
   assertOpenAndOnScreen(panel, 'when a summary adopted its neighbours');
   assert.strictEqual(
-    panel.nextElementSibling,
+    panel.previousElementSibling,
     summary,
-    'the answer sits on the transcript right before the summary',
+    'the answer sits on the transcript right after the summary',
   );
   win.close();
   console.log('  ok - the summary tool leaves the answer on the transcript');

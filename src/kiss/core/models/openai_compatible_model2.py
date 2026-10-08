@@ -39,6 +39,7 @@ from kiss.core.models.model import (
     TokenCallback,
     _audio_mime_to_format,
     _build_text_based_tools_prompt,
+    _get_attr_or_key,
     _parse_text_based_tool_calls,
     accepted_request_params,
 )
@@ -49,11 +50,7 @@ from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
     _extract_deepseek_reasoning,
 )
-from kiss.core.models.stream_abort import (
-    CONNECT_TIMEOUT,
-    stop_aware_events,
-    stop_or_stall_error,
-)
+from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_or_stall_error
 
 logger = logging.getLogger(__name__)
 
@@ -199,28 +196,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._raise_for_failed_response(response)
         content, tool_calls = self._parse_non_streaming(response)
         return content, tool_calls, response
-
-    @staticmethod
-    def _get_attr_or_key(obj: Any, key: str, default: Any = None) -> Any:
-        """Return ``obj.key`` or ``obj[key]``, falling back to ``default``.
-
-        This helper supports both pydantic SDK model instances (which use
-        attribute access) and plain ``dict``-shaped responses returned by
-        some OpenAI-compatible gateways or recorded JSON payloads.
-
-        Args:
-            obj: Object or mapping to read from.
-            key: Attribute or mapping key to look up.
-            default: Value returned when ``key`` is absent.
-
-        Returns:
-            The looked-up value or ``default``.
-        """
-        if obj is None:
-            return default
-        if isinstance(obj, dict):
-            return obj.get(key, default)
-        return getattr(obj, key, default)
 
     @staticmethod
     def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
@@ -1242,27 +1217,14 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
     ) -> tuple[str, list[dict[str, str]], Any]:
         """Consume a Responses stream under an abort watchdog.
 
-        ``stop_aware_events`` aborts the request the moment the user
-        presses Stop or the provider goes silent for
-        ``stream_stall_timeout`` seconds; a bare ``for event in stream``
-        would hold the agent inside ``recv()`` until the client's own
-        30-minute timeout expires
-        (``reports/stop_button_delay_2026-08-05.html``).
-
-        Closing the generator explicitly is what makes that safe:
-        :meth:`_consume_stream_events` raises from *inside* the loop on
-        ``response.failed`` / ``response.incomplete``, and an abandoned
-        generator runs its cleanup only whenever the traceback holding
-        its frame is released — until then a daemon watchdog thread stays
-        alive and armed over a connection that never returns to the pool.
-
-        The thinking bracket is closed in the same ``finally``, as the
-        Chat Completions, Anthropic and Gemini transports do:
-        ``stop_aware_events`` closes it for a stop and a stall but
-        re-raises every other transport failure untouched, and
-        ``KISSAgent`` retries those in the SAME run without resetting the
-        printer — which would otherwise render the retry's answer as
-        reasoning.  A no-op when the turn ended outside a reasoning block.
+        :meth:`~kiss.core.models.model.Model._watched_events` aborts the
+        request the moment the user presses Stop or the provider goes
+        silent for ``stream_stall_timeout`` seconds; a bare ``for event
+        in stream`` would hold the agent inside ``recv()`` until the
+        client's own 30-minute timeout expires
+        (``reports/stop_button_delay_2026-08-05.html``).  It also releases
+        the watchdog when :meth:`_consume_stream_events` raises from
+        *inside* the loop on ``response.failed`` / ``response.incomplete``.
 
         Args:
             stream: The streaming iterator returned by the SDK.
@@ -1271,17 +1233,10 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             ``(content, tool_calls, response)`` — see
             :meth:`_consume_stream_events`.
         """
-        events = stop_aware_events(
-            stream,
-            stall_timeout=self._stream_stall_timeout,
-            on_abort=self._close_thinking_if_open,
-            name="openai-responses-stream-abort-watchdog",
-        )
-        try:
+        with self._watched_events(
+            stream, "openai-responses-stream-abort-watchdog"
+        ) as events:
             return self._consume_stream_events(events)
-        finally:
-            events.close()
-            self._close_thinking_if_open()
 
     def _consume_stream_events(
         self,
@@ -1782,7 +1737,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         Returns:
             The ``output`` list (or ``[]`` when absent).
         """
-        return cls._get_attr_or_key(response, "output", []) or []
+        return _get_attr_or_key(response, "output", []) or []
 
     def _raise_for_failed_response(self, response: Any) -> None:
         """Raise :class:`KISSError` for terminal ``failed`` / ``incomplete`` statuses.
@@ -1802,23 +1757,23 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 usage the response carries was billed, so it is kept for
                 :meth:`take_partial_usage_response`.
         """
-        status = self._get_attr_or_key(response, "status")
+        status = _get_attr_or_key(response, "status")
         if status in ("failed", "incomplete"):
             self._rejected_response = response
         if status == "failed":
-            err = self._get_attr_or_key(response, "error")
+            err = _get_attr_or_key(response, "error")
             message = ""
             if err is not None:
-                message = str(self._get_attr_or_key(err, "message", "") or "")
+                message = str(_get_attr_or_key(err, "message", "") or "")
             raise KISSError(
                 "Responses API returned failed response"
                 + (f": {message}" if message else "")
             )
         if status == "incomplete":
-            details = self._get_attr_or_key(response, "incomplete_details")
+            details = _get_attr_or_key(response, "incomplete_details")
             reason = ""
             if details is not None:
-                reason = str(self._get_attr_or_key(details, "reason", "") or "")
+                reason = str(_get_attr_or_key(details, "reason", "") or "")
             raise KISSError(
                 "Responses API returned incomplete response"
                 + (f": {reason}" if reason else "")
@@ -1844,10 +1799,10 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             otherwise.
         """
         for item in cls._response_output(response):
-            if cls._get_attr_or_key(item, "type", "") != "message":
+            if _get_attr_or_key(item, "type", "") != "message":
                 continue
-            for part in cls._get_attr_or_key(item, "content", []) or []:
-                if cls._get_attr_or_key(part, "type", "") in (
+            for part in _get_attr_or_key(item, "content", []) or []:
+                if _get_attr_or_key(part, "type", "") in (
                     "output_text",
                     "refusal",
                 ):
@@ -1873,32 +1828,32 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         text_chunks: list[str] = []
         tool_calls: list[dict[str, str]] = []
         for output_index, item in enumerate(cls._response_output(response)):
-            itype = cls._get_attr_or_key(item, "type", "")
+            itype = _get_attr_or_key(item, "type", "")
             if itype == "message":
-                for part in cls._get_attr_or_key(item, "content", []) or []:
-                    ptype = cls._get_attr_or_key(part, "type", "")
+                for part in _get_attr_or_key(item, "content", []) or []:
+                    ptype = _get_attr_or_key(part, "type", "")
                     if ptype == "output_text":
                         text_chunks.append(
-                            cls._get_attr_or_key(part, "text", "") or ""
+                            _get_attr_or_key(part, "text", "") or ""
                         )
                     elif ptype == "refusal":
                         text_chunks.append(
-                            cls._get_attr_or_key(part, "refusal", "") or ""
+                            _get_attr_or_key(part, "refusal", "") or ""
                         )
             elif itype == "function_call":
                 tool_calls.append(
                     {
                         "id": str(
-                            cls._get_attr_or_key(item, "call_id", "") or ""
+                            _get_attr_or_key(item, "call_id", "") or ""
                         ),
                         "name": str(
-                            cls._get_attr_or_key(item, "name", "") or ""
+                            _get_attr_or_key(item, "name", "") or ""
                         ),
                         "arguments": str(
-                            cls._get_attr_or_key(item, "arguments", "") or ""
+                            _get_attr_or_key(item, "arguments", "") or ""
                         ),
                         "item_id": str(
-                            cls._get_attr_or_key(item, "id", "") or ""
+                            _get_attr_or_key(item, "id", "") or ""
                         ),
                         "output_index": str(output_index),
                     }
@@ -2394,22 +2349,22 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             gateways (e.g. OpenRouter Anthropic passthrough) report it
             for their cache-write-billing upstreams.
         """
-        usage = self._get_attr_or_key(response, "usage")
+        usage = _get_attr_or_key(response, "usage")
         if usage is None:
             return 0, 0, 0, 0
-        input_tokens = int(self._get_attr_or_key(usage, "input_tokens", 0) or 0)
+        input_tokens = int(_get_attr_or_key(usage, "input_tokens", 0) or 0)
         output_tokens = int(
-            self._get_attr_or_key(usage, "output_tokens", 0) or 0
+            _get_attr_or_key(usage, "output_tokens", 0) or 0
         )
         cached_tokens = 0
         cache_write_tokens = 0
-        details = self._get_attr_or_key(usage, "input_tokens_details")
+        details = _get_attr_or_key(usage, "input_tokens_details")
         if details is not None:
             cached_tokens = int(
-                self._get_attr_or_key(details, "cached_tokens", 0) or 0
+                _get_attr_or_key(details, "cached_tokens", 0) or 0
             )
             cache_write_tokens = int(
-                self._get_attr_or_key(details, "cache_write_tokens", 0) or 0
+                _get_attr_or_key(details, "cache_write_tokens", 0) or 0
             )
         return (
             max(0, input_tokens - cached_tokens - cache_write_tokens),

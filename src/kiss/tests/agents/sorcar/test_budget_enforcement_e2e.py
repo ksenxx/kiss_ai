@@ -7,10 +7,11 @@
 Covers the production bug where parallel sub-agents spawned via
 ``run_parallel`` received NO budget cap (defaulting to the full configured
 budget), so a single sub-agent could spend the entire budget of the main
-task.  Sub-agents must now receive a meaningful share: the parent's
-remaining budget divided across the tasks.  Also verifies that spend
-attributed to the parent task by parallel sub-agents
-(``_attribute_sub_usage``) is enforced mid-session by ``RelentlessAgent``.
+task.  Sub-agents must receive a meaningful share: the parent's
+remaining budget divided across the tasks plus the parent
+(``SorcarAgent._subagent_budget_share``).  Also verifies that spend
+attributed to the parent task by sub-agents (``_attribute_sub_usage``)
+is enforced mid-session by ``RelentlessAgent``.
 
 The ``KISSAgent``-only half of the mid-step enforcement fix lives in
 ``kiss.tests.core.test_budget_enforcement_e2e``, whose fake
@@ -23,25 +24,17 @@ test doubles.
 
 from __future__ import annotations
 
-import json
 import tempfile
 from http.server import BaseHTTPRequestHandler
 
 import pytest
-import yaml
 
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
-from kiss.agents.sorcar.sorcar_agent import (
-    SorcarAgent,
-    _attribute_sub_usage,
-    run_tasks_parallel,
-)
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _attribute_sub_usage
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.tests.core.test_budget_enforcement_e2e import (
     _CHEAP,
-    _EXPENSIVE,
-    _ExpensiveNoopHandler,
     _read_body,
     _send_json,
     _start_server,
@@ -61,44 +54,6 @@ class _CheapSubSpendHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         pass
-
-
-class _ParallelParentHandler(BaseHTTPRequestHandler):
-    """Routes parent vs sub-agent requests for the distribution tests.
-
-    * Requests whose conversation already has a tool-role message (the
-      parent after ``run_parallel`` returned) -> cheap ``finish``.
-    * Requests mentioning BUDGETPROBE (the sub-agents' task prompts)
-      -> EXPENSIVE non-finish tool call, so each sub-agent immediately
-      blows through any small budget share it was given.
-    * Everything else (the parent's first call, or the summarizer)
-      -> cheap ``run_parallel`` call spawning two BUDGETPROBE tasks.
-    """
-
-    def do_POST(self) -> None:  # noqa: N802
-        body = _read_body(self)
-        try:
-            messages = json.loads(body).get("messages", [])
-        except Exception:
-            messages = []
-        has_tool_result = any(m.get("role") == "tool" for m in messages)
-        text = json.dumps(messages)
-        if has_tool_result:
-            resp = _tool_call_response(
-                "finish", '{"result": "parent-done"}', *_CHEAP
-            )
-        elif "BUDGETPROBE" in text:
-            resp = _tool_call_response("noop", "{}", *_EXPENSIVE)
-        else:
-            args = json.dumps(
-                {"tasks": '["BUDGETPROBE alpha", "BUDGETPROBE beta"]'}
-            )
-            resp = _tool_call_response("run_parallel", args, *_CHEAP)
-        _send_json(self, resp)
-
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        pass
-
 
 
 class TestParentAttributedSpendEnforcedMidSession:
@@ -238,159 +193,3 @@ class TestSubagentBudgetShareHasNoFloor:
         executor.budget_used = 1.5
         agent._current_executor = executor
         assert agent._subagent_budget_share(2) == pytest.approx(0.5 / 3)
-
-
-class TestRunTasksParallelBudgetCap:
-    """Each spawned sub-agent must run under the per-task ``max_budget``."""
-
-    def test_each_subagent_capped(self) -> None:
-        srv, url = _start_server(_ExpensiveNoopHandler)
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                totals: dict[str, float] = {}
-                results = run_tasks_parallel(
-                    ["BUDGETPROBE alpha", "BUDGETPROBE beta"],
-                    model_name="gpt-4o-mini",
-                    work_dir=td,
-                    max_budget=0.01,
-                    model_config={"base_url": url, "api_key": "test-key"},
-                    totals_out=totals,
-                )
-            assert len(results) == 2
-            for res in results:
-                payload = yaml.safe_load(res)
-                assert payload["success"] is False
-                assert "budget exceeded" in str(payload["summary"]).lower()
-            assert 0.7 < totals["budget_used"] < 1.0, (
-                f"Sub-agents spent ${totals['budget_used']:.4f} — the "
-                f"$0.01 per-task cap was not enforced."
-            )
-        finally:
-            srv.shutdown()
-
-
-
-def _assert_distributed(parent: SorcarAgent, url: str, td: str) -> None:
-    """Run *parent* with a $2.00 budget; its run_parallel spawns two
-    expensive sub-agents, each capped to ~a third of the remaining
-    budget (~$0.66).  Each sub-agent stops after ONE $0.375 call
-    (the fake 500k-token response also exhausts the model's context
-    window), and both subs' spend must be attributed back to the
-    parent (~$0.75 total)."""
-    try:
-        parent.run(
-            prompt_template="Run two probes in parallel.",
-            model_name="gpt-4o-mini",
-            model_config={"base_url": url, "api_key": "test-key"},
-            work_dir=td,
-            is_parallel=True,
-            max_steps=5,
-            max_sub_sessions=2,
-            max_budget=2.0,
-        )
-    except KISSError:
-        pass
-    assert parent.budget_used > 0.7, (
-        f"Parent budget_used ${parent.budget_used:.4f}: sub-agent spend was "
-        f"not attributed back to the parent task."
-    )
-    assert parent.budget_used < 1.6, (
-        f"Parent budget_used ${parent.budget_used:.4f}: sub-agents were not "
-        f"capped to a share of the parent's $2.00 budget — a sub-agent "
-        f"could spend the whole configured budget."
-    )
-
-
-class TestParallelBudgetDistributionE2E:
-    """Full agent -> run_parallel -> sub-agents budget distribution."""
-
-    def test_sorcar_agent_distributes_budget(self) -> None:
-        srv, url = _start_server(_ParallelParentHandler)
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                _assert_distributed(SorcarAgent("dist-parent"), url, td)
-        finally:
-            srv.shutdown()
-
-    def test_chat_sorcar_agent_distributes_budget(self) -> None:
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-        srv, url = _start_server(_ParallelParentHandler)
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                _assert_distributed(ChatSorcarAgent("dist-chat-parent"), url, td)
-        finally:
-            srv.shutdown()
-
-
-class _CountingParallelParentHandler(_ParallelParentHandler):
-    """``_ParallelParentHandler`` that counts served sub-agent requests."""
-
-    probe_requests = 0
-
-    def do_POST(self) -> None:  # noqa: N802
-        # Peek at the body via the parent's routing by re-implementing
-        # only the counter; the response logic stays in the parent.
-        # BaseHTTPRequestHandler bodies can only be read once, so count
-        # here and delegate the already-parsed decision to a copy of the
-        # parent's logic.
-        body = _read_body(self)
-        try:
-            messages = json.loads(body).get("messages", [])
-        except Exception:
-            messages = []
-        has_tool_result = any(m.get("role") == "tool" for m in messages)
-        text = json.dumps(messages)
-        if has_tool_result:
-            resp = _tool_call_response(
-                "finish", '{"result": "parent-done"}', *_CHEAP
-            )
-        elif "BUDGETPROBE" in text:
-            type(self).probe_requests += 1
-            resp = _tool_call_response("noop", "{}", *_EXPENSIVE)
-        else:
-            args = json.dumps(
-                {"tasks": '["BUDGETPROBE alpha", "BUDGETPROBE beta"]'}
-            )
-            resp = _tool_call_response("run_parallel", args, *_CHEAP)
-        _send_json(self, resp)
-
-
-class TestSmallShareFanOutSpawnsE2E:
-    """A parent whose remaining budget divides into shares below $0.50
-    still spawns its sub-agents: the fan-out is not refused, each child
-    runs under its small cap, and the children's spend is attributed
-    back to the parent (whose own budget check then stops it)."""
-
-    def test_run_parallel_spawns_children_on_a_small_share(self) -> None:
-        _CountingParallelParentHandler.probe_requests = 0
-        srv, url = _start_server(_CountingParallelParentHandler)
-        parent = SorcarAgent("small-share-parent")
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                try:
-                    parent.run(
-                        prompt_template="Run two probes in parallel.",
-                        model_name="gpt-4o-mini",
-                        model_config={"base_url": url, "api_key": "test-key"},
-                        work_dir=td,
-                        is_parallel=True,
-                        max_steps=5,
-                        max_sub_sessions=2,
-                        max_budget=0.30,
-                    )
-                except KISSError:
-                    pass
-            assert _CountingParallelParentHandler.probe_requests == 2, (
-                f"{_CountingParallelParentHandler.probe_requests} sub-agent "
-                f"model requests were served; both children should have "
-                f"been spawned on a ${0.30 / 3:.2f} share."
-            )
-            # Each child made one $0.375 call before its own cap stopped
-            # it, and that spend is attributed to the parent.
-            assert parent.budget_used > 0.7, (
-                f"Parent budget_used ${parent.budget_used:.4f}: the children's "
-                f"spend was not attributed back."
-            )
-        finally:
-            srv.shutdown()

@@ -7,8 +7,7 @@
 // user text is never thrown away silently.  The promptlet Add box keeps
 // its text until the daemon confirms and shows a rejection inside the
 // sheet; closing the settings sheet mid custom-model edit asks before
-// discarding typed changes; a frequent-task click asks before replacing
-// a non-empty composer draft.  Each test fails on the old code.
+// discarding typed changes.  Each test fails on the old code.
 'use strict';
 
 const assert = require('assert');
@@ -139,33 +138,6 @@ async function main() {
     h.click(win, h.byId(win, 'settings-panel-close'));
     assert.ok(!h.byId(win, 'settings-panel').classList.contains('open'));
     assert.ok(!h.toast(win, 'settings-discard-model-edit'));
-    win.close();
-  });
-
-  await test('a frequent task does not overwrite a composer draft silently', () => {
-    const {win} = h.makeWebview();
-    h.send(win, {type: 'frequentTasks', tasks: [{task: 'ship it', count: 3}]});
-    const item = win.document.querySelector('#frequent-list .sidebar-item');
-    assert.ok(item, 'precondition: the task is listed');
-    const inp = h.byId(win, 'task-input');
-    typeInto(win, inp, 'my half-written prompt');
-    h.click(win, item);
-    assert.strictEqual(
-      inp.value,
-      'my half-written prompt',
-      'the draft is kept',
-    );
-    const t = h.toast(win, 'frequent-replace-draft');
-    assert.ok(t, 'the question is asked');
-    assert.ok(h.toastButton(t, 'Keep draft'));
-    h.click(win, h.toastButton(t, 'Replace draft'));
-    assert.strictEqual(inp.value, 'ship it');
-
-    // An empty composer takes the task directly.
-    typeInto(win, inp, '');
-    h.click(win, item);
-    assert.strictEqual(inp.value, 'ship it');
-    assert.ok(!h.toast(win, 'frequent-replace-draft'));
     win.close();
   });
 

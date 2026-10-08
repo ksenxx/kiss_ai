@@ -71,11 +71,15 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+// The chat's entry on the group strip (#tab-list). Only the chat on
+// screen is rendered there: a background chat has no entry anywhere, so
+// a test reads its dot by bringing it on screen first (switchToTab is the
+// Chats-panel pick and retires nothing).
 function tabStrip(win, tabId) {
   const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
   );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
+  assert.ok(el, `tab ${tabId} must be the chat on screen`);
   return el;
 }
 
@@ -85,6 +89,18 @@ function dotOf(win, tabId) {
   if (strip.querySelector('.chat-tab-ok')) return 'ok';
   if (strip.querySelector('.chat-tab-spinner')) return 'running';
   return 'none';
+}
+
+// Whether *tabId* is running, on screen (spinner on the strip) or not
+// (the tab record, the only view of a background chat).
+function isRunning(win, tabId) {
+  const onStrip = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  );
+  if (onStrip) return dotOf(win, tabId) === 'running';
+  const rec = win._testApi.openTabs().find(t => t.id === tabId);
+  assert.ok(rec, `tab ${tabId} must be open`);
+  return rec.isRunning;
 }
 
 // The daemon's live sequence for one task in *tabId*, exactly as
@@ -99,7 +115,7 @@ function runTask(win, tabId, taskId, success, doneVerdict = false) {
     startTs: Date.now() - 1000,
     taskId,
   });
-  assert.strictEqual(dotOf(win, tabId), 'running');
+  assert.ok(isRunning(win, tabId), 'the tab is running');
   send(win, {type: 'text_delta', text: 'working', tabId, taskId});
   send(win, {type: 'text_end', tabId, taskId});
   send(win, {
@@ -183,15 +199,17 @@ function testBackgroundFailedTaskShowsRedDot() {
   const tabA = win._testApi.getActiveTabId();
   win._testApi.createNewTab();
   const tabB = win._testApi.getActiveTabId();
-  // Tab A runs and fails while the user reads tab B (its task_done then
-  // brings the user to it, as a finished task may).
+  // Tab A runs and fails while the user reads tab B. A background chat is
+  // rendered nowhere, so its dot is read once the user picks it again.
   assert.strictEqual(win._testApi.getActiveTabId(), tabB);
   runTask(win, tabA, 'task-5', false);
+  win._testApi.switchToTab(tabA);
   assert.strictEqual(
     dotOf(win, tabA),
     'fail',
     'a background tab keeps its failed verdict too',
   );
+  win._testApi.switchToTab(tabB);
   assert.strictEqual(dotOf(win, tabB), 'none', 'tab B never ran a task');
   win.close();
   console.log('  ok - background failed task shows the red dot');
@@ -271,6 +289,7 @@ function testReplayMirrorsTheReplayedTask() {
   });
   send(win, {type: 'status', running: false, tabId});
   assert.strictEqual(win._testApi.getActiveTabId(), tabB);
+  win._testApi.switchToTab(tabId);
   assert.strictEqual(
     dotOf(win, tabId),
     'ok',

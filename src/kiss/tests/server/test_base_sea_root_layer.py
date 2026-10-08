@@ -4,14 +4,15 @@
 # add your name here
 """``BaseSea`` (``base_sea.py``) is the root layer of every run.
 
-A plain chat run, a ``/xxx`` SEA run and a ``run_parallel`` child go
-through the methods of :class:`kiss.agents.seas.base.base_sea.BaseSea`
-first, so editing that one file customizes every run.  The tests
+A plain chat run, a ``/xxx`` SEA run and the daemon-launched side
+channels (task update, merge resolver) go through the methods of
+:class:`kiss.agents.seas.base.base_sea.BaseSea` first, so editing that
+one file customizes every run.  The tests
 stand in for such an edit by rebinding the methods on the class for
 their duration (what a daemon restart after editing the file does)
 and drive the real pipeline: the daemon's ``run`` command through
 :class:`DaemonRunApiHarness` (only the executor's LLM loop is swapped
-for a recorder), and the launcher's :func:`apply_agent_overrides` /
+for a recorder), and the launcher's :func:`apply_sea` /
 :func:`evaluate_sea` directly.
 """
 
@@ -25,21 +26,28 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import (
+    ALLOW,
+    SUMMARY_DUE_REFUSAL,
+    SUMMARY_EVERY_STEPS,
+    BaseSea,
+    Verdict,
+    refuse,
+)
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.agent_file import RUN_CONFIG_FIELD, apply_agent_overrides, load_layers
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT
+from kiss.agents.sorcar.sea_apply import RUN_CONFIG_FIELD, apply_sea, load_layers
 from kiss.agents.sorcar.sea_commands import (
-    SeaScriptError,
+    SeaError,
     base_prompt,
     base_system_prompt,
+    base_tool_call_hook,
     evaluate_sea,
     sea_layers,
     sea_name,
 )
-from kiss.agents.sorcar.sorcar_agent import _sea_run_kwargs
 from kiss.server import sorcar
 from kiss.server.merge_conflict_resolver import run_merge_sea
 from kiss.server.task_update import run_task_update_sea
@@ -73,10 +81,47 @@ def _custom_tools(self: BaseSea, tools: list[Any]) -> list[Any]:
     return tools + [house_tool]
 
 
-def _custom_tool_call_hook(self: BaseSea, name: str, args: dict[str, Any]) -> str:
+def _custom_tool_call_hook(self: BaseSea, name: str, args: dict[str, Any]) -> Verdict:
     if name == "task_context" or (name == "Bash" and "rm -rf" in str(args.get("command", ""))):
-        return "Blocked by base"
-    return "OK"
+        return refuse("Blocked by base")
+    return ALLOW
+
+
+def test_tool_call_hook_fold_stops_at_the_first_refusing_verdict() -> None:
+    """``base_tool_call_hook`` returns the first refusing ``Verdict`` of the chain, else ``ALLOW``.
+
+    Only a ``Verdict`` is accepted: the former ``None`` (allow) and
+    string (refuse) spellings, ``"OK"`` included, are script errors.
+    """
+
+    class Allows(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
+            return ALLOW
+
+    class FormerAllows(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Any:
+            return "OK"
+
+    class FormerAllowsNone(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Any:
+            return None
+
+    class Refuses(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
+            return refuse("ok") if name == "Bash" else ALLOW
+
+    class Broken(BaseSea):
+        def tool_call_hook(self, name: str, args: dict[str, Any]) -> Any:
+            return 1
+
+    assert base_tool_call_hook([Allows(), Refuses()], "Bash", {}) == refuse("ok")
+    assert base_tool_call_hook([Refuses(), Allows()], "Read", {}) == ALLOW
+    assert base_tool_call_hook([Refuses(), Allows()], "Read", {}).allowed
+    for broken in (FormerAllows(), FormerAllowsNone(), Broken()):
+        with pytest.raises(SeaError, match=r"tool_call_hook\(\) of SEA .* must return a Verdict"):
+            base_tool_call_hook([Allows(), broken], "Bash", {})
+    with pytest.raises(ValueError, match="non-blank"):
+        refuse("  ")
 
 
 def _custom_llm_call_hook(self: BaseSea, new_messages: list[Any]) -> list[Any]:
@@ -137,8 +182,10 @@ class BaseSeaRootLayerDaemonTest(DaemonRunApiHarness):
             assert "house_tool" in call["tool_names"]
             # The hooks look the base's methods up when called, so they
             # are exercised while the customization is still in place.
-            assert call["tool_call_hook"]("Bash", {"command": "rm -rf /"}) == "Blocked by base"
-            assert call["tool_call_hook"]("Bash", {"command": "ls"}) == "OK"
+            assert call["tool_call_hook"]("Bash", {"command": "rm -rf /"}) == refuse(
+                "Blocked by base"
+            )
+            assert call["tool_call_hook"]("Bash", {"command": "ls"}) == ALLOW
             assert call["llm_call_hook"]([1, 2, 3]) == [3, 2, 1]
         finally:
             for name, method in originals.items():
@@ -159,9 +206,57 @@ class BaseSeaRootLayerDaemonTest(DaemonRunApiHarness):
         assert len(executor_calls) == 1, calls
         call = executor_calls[0]
         assert call["llm_call_hook"]([1, 2]) == [1, 2]
-        assert call["tool_call_hook"]("Bash", {"command": "ls"}) == "OK"
+        assert call["tool_call_hook"]("Bash", {"command": "ls"}) == ALLOW
         assert "house_tool" not in call["tool_names"]
         assert HOUSE_RULE not in call["system_prompt"]
+        # The run's toolset holds ``summary``, so the stock base's
+        # cadence rule is armed; ``finish`` is never held up by it.
+        assert "summary" in call["tool_names"]
+        assert call["tool_call_hook"]("finish", {}) == ALLOW
+        assert call["tool_call_hook"]("finish", {"success": True}) == ALLOW
+        assert call["tool_call_hook"]("summary", {"description": "- did x"}) == ALLOW
+        assert call["tool_call_hook"]("finish", {"success": True}) == ALLOW
+
+
+def summary(description: str) -> str:
+    """Stand in for the run's ``summary`` tool (the root layer reads only its name)."""
+    return description
+
+
+def test_stock_base_requires_a_summary_at_every_tenth_step() -> None:
+    """At a 10th step every tool but ``summary`` and ``finish`` waits for a summary.
+
+    ``finish`` is exempt at every step: a one-step run (or the agent's
+    implicit-finish probe) must be able to end without a summary first.
+    """
+    sea = BaseSea()
+    sea.tools([summary, house_tool])
+    assert sea.has_summary_tool
+    due = SUMMARY_DUE_REFUSAL.format(step=10, every=SUMMARY_EVERY_STEPS, name="Bash")
+    # Nothing ran yet: both the probe and a real finish pass.
+    assert base_tool_call_hook([sea], "finish", {}) == ALLOW
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
+    for _ in range(9):
+        sea.llm_call_hook([])
+        assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
+    sea.llm_call_hook([])
+    assert sea.step == 10 and sea.summary_due
+    assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == refuse(due)
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
+    assert base_tool_call_hook([sea], "finish", {}) == ALLOW
+    assert base_tool_call_hook([sea], "summary", {"description": "- ran ls"}) == ALLOW
+    assert not sea.summary_due
+    assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
+    assert base_tool_call_hook([sea], "finish", {"success": True, "is_continue": True}) == ALLOW
+    # A toolset without ``summary`` (tool_profile "none", a SEA that
+    # drops it) is under no rule at all; ``tools`` restarts the count.
+    sea.tools([house_tool])
+    assert not sea.has_summary_tool and sea.step == 0
+    for _ in range(10):
+        sea.llm_call_hook([])
+    assert base_tool_call_hook([sea], "Bash", {"command": "ls"}) == ALLOW
+    assert base_tool_call_hook([sea], "finish", {"success": True}) == ALLOW
 
 
 def test_a_plain_command_runs_the_bare_base_and_names_no_sea() -> None:
@@ -170,31 +265,33 @@ def test_a_plain_command_runs_the_bare_base_and_names_no_sea() -> None:
     assert layers[0].path == Path(sea_commands.__file__).parents[1] / "seas/base/base_sea.py"
     assert sea_name(layers) == ""
     cmd: dict[str, Any] = {"prompt": "p", "useMemory": False}
-    assert apply_agent_overrides(cmd) == set()
-    assert cmd.pop(RUN_CONFIG_FIELD) == {"sea": "", "kind": "session", "pinned": {}}
+    assert apply_sea(cmd) == set()
+    assert cmd.pop(RUN_CONFIG_FIELD) == {"sea": "", "channel": False, "pinned": {}}
     assert cmd["prompt"] == "p" and cmd["useMemory"] is False
     assert cmd["systemPromptHook"]("X") == "X"
     assert cmd["toolsHook"]([house_tool]) == [house_tool]
     assert cmd["llmCallHook"]([1]) == [1]
-    assert cmd["toolCallHook"]("Bash", {}) == "OK"
+    assert cmd["toolCallHook"]("Bash", {}) == ALLOW
     # ``defines`` still asks what a SEA adds on top of the base.
     assert sea_commands.defines(layers, "system_prompt") is False
 
 
 def test_customized_base_applies_to_a_plain_command(customized_base: None) -> None:
     cmd: dict[str, Any] = {"prompt": "p"}
-    assert apply_agent_overrides(cmd) == set()
+    assert apply_sea(cmd) == set()
     assert cmd["systemPromptHook"]("X") == "X" + HOUSE_RULE
     assert cmd["toolsHook"]([]) == [house_tool]
     assert cmd["llmCallHook"]([1, 2]) == [2, 1]
-    assert cmd["toolCallHook"]("Bash", {"command": "rm -rf x"}) == "Blocked by base"
+    assert cmd["toolCallHook"]("Bash", {"command": "rm -rf x"}) == refuse(
+        "Blocked by base"
+    )
 
 
 def test_customized_base_runs_first_under_a_sea(customized_base: None, tmp_path: Path) -> None:
     sea = tmp_path / "rule_sea.py"
     sea.write_text(textwrap.dedent(SEA_WITH_RULE))
-    cmd: dict[str, Any] = {"agentPath": str(sea), "prompt": "do it"}
-    assert apply_agent_overrides(cmd) == {"prompt"}
+    cmd: dict[str, Any] = {"seaPath": str(sea), "prompt": "do it"}
+    assert apply_sea(cmd) == {"prompt"}
     assert cmd["prompt"] == "[sea] do it"
     assert cmd["systemPromptHook"]("X") == "X" + HOUSE_RULE + "\n\nSEA RULE"
     assert cmd["toolsHook"]([]) == [house_tool]
@@ -205,19 +302,15 @@ def test_customized_base_runs_first_under_a_sea(customized_base: None, tmp_path:
     assert sea_commands.defines(layers, "tools") is False
 
 
-def test_appended_text_is_stated_once_per_task_tree(customized_base: None, tmp_path: Path) -> None:
-    # A sub-agent inherits its parent's suffix, which already carries
-    # what the base appended: the base appends nothing more, while a
-    # layer the parent did not run still adds its own text.
-    inherited = "X" + HOUSE_RULE
-    assert base_system_prompt([BaseSea()], inherited) == inherited
+def test_system_prompt_is_folded_like_prompt(customized_base: None, tmp_path: Path) -> None:
+    # Each layer's return is the next layer's input and the last return
+    # is the run's prompt: no append/replace inference, no deduplication
+    # (a sub-agent re-runs its own layers instead of inheriting the text).
+    assert base_system_prompt([BaseSea()], "X") == "X" + HOUSE_RULE
+    assert base_system_prompt([BaseSea()], "X" + HOUSE_RULE) == "X" + HOUSE_RULE + HOUSE_RULE
     sea = tmp_path / "rule_sea.py"
     sea.write_text(textwrap.dedent(SEA_WITH_RULE))
-    assert base_system_prompt(sea_layers(sea), inherited) == inherited + "\n\nSEA RULE"
-    assert base_system_prompt(sea_layers(sea), inherited + "\n\nSEA RULE") == (
-        inherited + "\n\nSEA RULE"
-    )
-    # A replacement (not an append) is never deduplicated.
+    assert base_system_prompt(sea_layers(sea), "X") == "X" + HOUSE_RULE + "\n\nSEA RULE"
     replacing = tmp_path / "replace_sea.py"
     replacing.write_text(textwrap.dedent("""
 from kiss.agents.seas.base.base_sea import BaseSea
@@ -226,6 +319,7 @@ class Sea(BaseSea):
     def system_prompt(self, system_prompt):
         return "ONLY THIS"
 """))
+    assert base_system_prompt(sea_layers(replacing), "X") == "ONLY THIS"
     assert base_system_prompt(sea_layers(replacing), "ONLY THIS") == "ONLY THIS"
 
 
@@ -234,14 +328,14 @@ def test_base_settings_pin_a_plain_run_unless_the_caller_chose_explicitly() -> N
     BaseSea.settings = _custom_settings  # type: ignore[method-assign]
     try:
         persisted: dict[str, Any] = {"prompt": "p", "useMemory": False}
-        assert apply_agent_overrides(persisted) == {"useMemory"}
+        assert apply_sea(persisted) == {"useMemory"}
         assert persisted["useMemory"] is True
         assert persisted[RUN_CONFIG_FIELD]["pinned"] == {"use_memory": [False, True]}
         explicit: dict[str, Any] = {
             "prompt": "p", "useMemory": False,
             "provenance": {"use_memory": PROVENANCE_EXPLICIT},
         }
-        assert apply_agent_overrides(explicit) == set()
+        assert apply_sea(explicit) == set()
         assert explicit["useMemory"] is False
     finally:
         BaseSea.settings = original  # type: ignore[method-assign]
@@ -249,11 +343,15 @@ def test_base_settings_pin_a_plain_run_unless_the_caller_chose_explicitly() -> N
 
 def test_base_prompt_rewrites_every_task_and_an_identity_passes_an_empty_one() -> None:
     assert base_prompt([BaseSea()], "") == ""  # the stock base leaves an empty task alone
+    # ``{task_id}`` is filled in whether or not a method changed the text:
+    # the caller's own placeholder gets the id too (``""`` without one).
+    assert base_prompt([BaseSea()], "about {task_id}", "T-1") == "about T-1"
+    assert base_prompt([BaseSea()], "about {task_id}") == "about "
     original = vars(BaseSea)["prompt"]
     BaseSea.prompt = _custom_prompt  # type: ignore[method-assign]
     try:
         cmd: dict[str, Any] = {"prompt": "p"}
-        assert apply_agent_overrides(cmd) == {"prompt"}
+        assert apply_sea(cmd) == {"prompt"}
         assert cmd["prompt"] == "p (be brief)"
         run = evaluate_sea([BaseSea()], "t {task_id}", task_id="T-1")
         assert run.prompt == "t T-1 (be brief)"
@@ -261,7 +359,7 @@ def test_base_prompt_rewrites_every_task_and_an_identity_passes_an_empty_one() -
         BaseSea.prompt = original  # type: ignore[method-assign]
     BaseSea.prompt = lambda self, task: ""  # type: ignore[method-assign]
     try:
-        with pytest.raises(SeaScriptError, match="must return a non-empty string"):
+        with pytest.raises(SeaError, match="must return a non-empty string"):
             base_prompt([BaseSea()], "t")
     finally:
         BaseSea.prompt = original  # type: ignore[method-assign]
@@ -333,18 +431,3 @@ def test_merge_resolver_side_channel_goes_through_the_base(
     # base's appended rule is (correctly) gone from this child.
     system = next(m for m in requests[0]["messages"] if m["role"] == "system")
     assert HOUSE_RULE not in str(system["content"])
-
-
-def test_run_parallel_children_without_an_agent_go_through_the_base(
-    customized_base: None,
-) -> None:
-    overrides, run_config = _sea_run_kwargs(
-        [BaseSea()], "child task", {"prompt_suffix": " SUFFIX", "tool_profile": "full"}, None,
-    )
-    assert run_config == {"sea": "", "kind": "session", "pinned": {}}
-    assert overrides["prompt_template"] == "child task SUFFIX"
-    assert overrides["system_prompt_hook"]("X") == "X" + HOUSE_RULE
-    assert overrides["tools_hook"]([]) == [house_tool]
-    assert overrides["llm_call_hook"]([1, 2]) == [2, 1]
-    assert overrides["tool_call_hook"]("Bash", {"command": "rm -rf ."}) == "Blocked by base"
-    assert "tool_profile" not in overrides

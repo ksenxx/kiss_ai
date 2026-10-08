@@ -418,13 +418,21 @@ class TestClaudeOpus5ThinkingConfig:
             kwargs = m._build_create_kwargs()
             assert kwargs.get("max_tokens") == 64000, (name, kwargs.get("max_tokens"))
 
-    def test_opus_4_families_keep_65536_default(self) -> None:
-        """The old ``startswith("claude-opus-4")`` behaviour is preserved."""
-        for name in ("claude-opus-4-1", "claude-opus-4-8"):
+    def test_opus_4_6_and_later_keep_65536_default(self) -> None:
+        """Opus 4.6+ accepts 65536 output tokens (verified live 2026-10-07)."""
+        for name in ("claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"):
             m = AnthropicModel(name, api_key="test-key")
             m.conversation = [{"role": "user", "content": "ping"}]
             kwargs = m._build_create_kwargs()
             assert kwargs.get("max_tokens") == 65536, (name, kwargs.get("max_tokens"))
+
+    def test_opus_4_5_is_capped_at_64000(self) -> None:
+        """Opus 4.5 answers HTTP 400 ``max_tokens: 65536 > 64000`` otherwise."""
+        for name in ("claude-opus-4-5", "claude-opus-4-5-20251101"):
+            m = AnthropicModel(name, api_key="test-key")
+            m.conversation = [{"role": "user", "content": "ping"}]
+            kwargs = m._build_create_kwargs()
+            assert kwargs.get("max_tokens") == 64000, (name, kwargs.get("max_tokens"))
 
 
 class TestVersionAwareHeuristicBranches:

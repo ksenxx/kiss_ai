@@ -8,9 +8,9 @@ not persisted any events yet.
 
 The bug
 -------
-When ``ChatSorcarAgent._run_tasks_parallel`` spawns a sub-agent, the
-sub-agent's ``run`` broadcasts a ``new_tab`` event carrying its own
-``task_id``.  The frontend then:
+When ``run_parallel`` / ``run_agent`` dispatches a sub-agent through
+the daemon, the sub-agent's ``run`` broadcasts a ``new_tab`` event
+carrying its own ``task_id``.  The frontend then:
 
 1. Calls ``createNewTab`` to allocate a fresh frontend tab id.
 2. Posts ``resumeSession`` back to the backend with

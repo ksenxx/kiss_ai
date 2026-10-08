@@ -285,7 +285,26 @@ def _redirect_persistence(tmpdir: str) -> tuple:
     return saved
 
 
-def _restore_persistence(saved: tuple) -> None:
+def _restore_persistence(server: VSCodeServer, saved: tuple) -> None:
+    """Stop every live task of *server*, close the redirected DB, restore state.
+
+    A task a failed assertion left behind (one still waiting for an
+    ``ask_user_question`` answer, say) is stopped the way the UI's Stop
+    does, then its thread is joined, and only then is the DB closed
+    through :func:`ps._close_db` (which stops the ``kiss-event-writer``
+    thread before closing).  A raw ``ps._db_conn.close()`` closes whichever
+    connection was created last by ANY thread, so it segfaulted the
+    writer thread mid-batch when a task overran its join timeout.
+    """
+    for state in agent_state.snapshot():
+        thread = state.task_thread
+        if thread is None or thread is threading.current_thread():
+            continue
+        if thread.is_alive():
+            server._stop_task(state.tab_id)
+        thread.join(timeout=60)
+        assert not thread.is_alive(), f"task of tab {state.tab_id!r} did not stop"
+    ps._close_db()
     ps._DB_PATH, ps._db_conn, ps._KISS_DIR = saved
 
 
@@ -362,17 +381,9 @@ class _TwoTabFixture(unittest.TestCase):
         self.server = VSCodeServer(printer=self.printer)
 
     def tearDown(self) -> None:
-        try:
-            self.srv.shutdown()
-        except Exception:
-            pass
-        if ps._db_conn is not None:
-            try:
-                ps._db_conn.close()
-            except Exception:
-                pass
-            ps._db_conn = None
-        _restore_persistence(self.saved_persistence)
+        _restore_persistence(self.server, self.saved_persistence)
+        self.srv.shutdown()
+        self.srv.server_close()
         _restore_config(self.saved_config)
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
@@ -630,17 +641,9 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
         self.server = VSCodeServer(printer=self.printer)
 
     def tearDown(self) -> None:
-        try:
-            self.srv.shutdown()
-        except Exception:
-            pass
-        if ps._db_conn is not None:
-            try:
-                ps._db_conn.close()
-            except Exception:
-                pass
-            ps._db_conn = None
-        _restore_persistence(self.saved_persistence)
+        _restore_persistence(self.server, self.saved_persistence)
+        self.srv.shutdown()
+        self.srv.server_close()
         _restore_config(self.saved_config)
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()

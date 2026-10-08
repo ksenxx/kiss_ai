@@ -449,12 +449,14 @@ class TestM7CapsRestoredTabs(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({
                 "type": "ready", "tabId": "primary", "restoredTabs": tabs,
             }))
-            for _ in range(50):
-                try:
-                    await asyncio.wait_for(ws.recv(), timeout=0.5)
-                except TimeoutError:
-                    break
-        await asyncio.sleep(0.5)
+            # The ready handler runs its init commands and the tab
+            # sync on executor threads: wait for the capped replays
+            # to land (a fixed silence window flaked under load), then
+            # a grace period in which a 4th one would show up.
+            deadline = time.monotonic() + 20
+            while len(self._resumed) < 3 and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.5)
         self.assertEqual(
             len(self._resumed), 3,
             f"Expected exactly cap=3 resumeSession calls, got {self._resumed}",

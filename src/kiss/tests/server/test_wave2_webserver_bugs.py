@@ -99,11 +99,14 @@ class TestF4MachineTopicDeleteRace(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-w2f5-topic-")
-        self.saved_home = ws_mod._KISS_HOME
-        ws_mod._KISS_HOME = Path(self.tmpdir)
+        self.saved_home = os.environ.get("KISS_HOME")
+        os.environ["KISS_HOME"] = self.tmpdir
 
     def tearDown(self) -> None:
-        ws_mod._KISS_HOME = self.saved_home
+        if self.saved_home is None:
+            os.environ.pop("KISS_HOME", None)
+        else:
+            os.environ["KISS_HOME"] = self.saved_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_concurrent_delete_never_raises_and_topic_is_stable(self) -> None:

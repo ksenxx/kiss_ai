@@ -173,6 +173,17 @@ function byId(win, id) {
   return win.document.getElementById(id);
 }
 
+/**
+ * Bring a workspace section of the task-info panel (meta-explorer /
+ * meta-scm) on screen: expand it if it is collapsed.  An expanded
+ * section is already live (the workspace pin loads it).
+ */
+function showSection(win, id) {
+  const section = byId(win, id);
+  if (section.classList.contains('collapsed'))
+    click(win, section.querySelector('.meta-section-toggle'));
+}
+
 function ofType(posted, type) {
   return posted.filter(m => m.type === type);
 }
@@ -190,7 +201,7 @@ function menuItem(win, label) {
 /** Open the Explorer on WD and answer its root listing with *entries*. */
 function openExplorer(win, posted, entries) {
   pinWorkspace(win);
-  click(win, byId(win, 'activity-explorer'));
+  showSection(win, 'meta-explorer');
   const list = ofType(posted, 'listDir');
   const req = list[list.length - 1];
   send(win, {
@@ -229,7 +240,7 @@ function commit(sha, parents, subject, message) {
 /** Open Source Control on WD with a two-commit history. */
 function openScm(win, posted) {
   pinWorkspace(win);
-  click(win, byId(win, 'activity-scm'));
+  showSection(win, 'meta-scm');
   const st = ofType(posted, 'gitStatus');
   const lg = ofType(posted, 'gitLog');
   const token = st[st.length - 1].token;
@@ -470,7 +481,7 @@ async function main() {
       events: [],
       extra: JSON.stringify({work_dir: WD + '/sub'}),
     });
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     let list = ofType(posted, 'listDir');
     assert.strictEqual(
       list[list.length - 1].path,
@@ -514,7 +525,7 @@ async function main() {
     );
     assert.strictEqual(list[list.length - 1].workDir, WD + '/sub');
     // The Source Control view follows too.
-    click(win, byId(win, 'activity-scm'));
+    showSection(win, 'meta-scm');
     const st = ofType(posted, 'gitStatus');
     assert.strictEqual(st[st.length - 1].workDir, WD + '/sub');
     // Another surface's pick arrives as the daemon's broadcast: this
@@ -522,7 +533,7 @@ async function main() {
     send(win, {type: 'workDirChanged', workDir: '/elsewhere'});
     const st2 = ofType(posted, 'gitStatus');
     assert.strictEqual(st2[st2.length - 1].workDir, '/elsewhere');
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     list = ofType(posted, 'listDir').filter(
       m => !String(m.token).startsWith('picker:'),
     );
@@ -764,7 +775,7 @@ async function main() {
       path: WD + '/sub/a.txt',
       content: 'x',
     });
-    click(win, byId(win, 'activity-explorer'));
+    showSection(win, 'meta-explorer');
     let list = ofType(posted, 'listDir');
     // The global working directory is browsed past the content tab and
     // its owner chat alike (the owner's task folder is not a scope).

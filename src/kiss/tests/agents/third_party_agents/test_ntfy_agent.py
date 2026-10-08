@@ -120,12 +120,7 @@ def emulator() -> Any:
     server.stop()
 
 
-@pytest.fixture(autouse=True)
-def _clean_config() -> Any:
-    """Clear the (KISS_HOME-isolated) ntfy config before and after each test."""
-    _config.clear()
-    yield
-    _config.clear()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def _authenticated_agent(emulator: _NtfyEmulator, topic: str = "alerts", token: str = "") -> Any:
@@ -274,9 +269,7 @@ def test_poll_uses_channel_id_when_unconfigured(emulator: _NtfyEmulator) -> None
     assert [m["text"] for m in messages] == ["direct"]
 
 
-def test_poll_network_error_returns_empty(
-    emulator: _NtfyEmulator, refusing_port: int
-) -> None:
+def test_poll_network_error_returns_empty(emulator: _NtfyEmulator, refusing_port: int) -> None:
     """Poll failures are swallowed by poll_messages but reported by poll_topic."""
     agent = _authenticated_agent(emulator)
     # A port that is bound but never accepts: unlike stopping the emulator

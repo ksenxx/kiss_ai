@@ -117,7 +117,7 @@ class TestMcpIsolationAndNaming:
                 "required": [],
             },
         )
-        wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "srv", tool)
+        wrapper = make_mcp_tool_wrapper(MCPManager.instance(), "srv", tool, "srv")
         assert callable(wrapper)
         assert wrapper.__name__ == "srv_frac"
 

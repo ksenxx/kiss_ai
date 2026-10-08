@@ -184,12 +184,23 @@ const GROUPED = [
   'chat:C[task c1]',
 ];
 const FLAT = [
+  'sep:Today',
   'row:task a2',
   'row:task b2',
   'row:task a1',
+  'sep:Yesterday',
   'row:task c1',
   'row:task b1',
 ];
+
+function dateSeparator(daysAgo) {
+  const date = new Date((todayNoon - daysAgo * DAY) * 1000);
+  const opts = {weekday: 'short', month: 'short', day: 'numeric'};
+  if (date.getFullYear() !== new Date(todayNoon * 1000).getFullYear()) {
+    opts.year = 'numeric';
+  }
+  return 'sep:' + date.toLocaleDateString(undefined, opts);
+}
 
 test('chat headers carry no tooltip and show the first line of the chat summary or first task', () => {
   const {win, posted} = makeWebview();
@@ -268,7 +279,7 @@ test('the view toggle sits right of the search box and swaps grouped <-> flat wi
   );
   assert.deepStrictEqual(listShape(win), FLAT, 'flat, newest first');
   assert.strictEqual(all(win, '#history-list .history-chat-group').length, 0);
-  assert.strictEqual(all(win, '#history-list .history-day-sep').length, 0);
+  assert.strictEqual(all(win, '#history-list .history-day-sep').length, 2);
 
   // No per-chat colour: the flat rows carry no inline style at all.
   all(win, '#history-list > .sidebar-item').forEach(r => {
@@ -305,10 +316,12 @@ test('the flat list is remembered across loads and used for the first page', () 
   assert.deepStrictEqual(listShape(win), FLAT);
   // Later pages extend the flat list in order.
   sendHistory(win, posted, 5, [session('D', 'd1', todayNoon - 3 * DAY)]);
-  assert.deepStrictEqual(listShape(win), FLAT.concat(['row:task d1']));
+  assert.deepStrictEqual(listShape(win), FLAT.concat([dateSeparator(3), 'row:task d1']));
   // A row without a chat id is listed like any other.
   sendHistory(win, posted, 6, [session('', 'e1', todayNoon - 4 * DAY)]);
-  assert.deepStrictEqual(listShape(win), FLAT.concat(['row:task d1', 'row:task e1']));
+  assert.deepStrictEqual(listShape(win), FLAT.concat([
+    dateSeparator(3), 'row:task d1', dateSeparator(4), 'row:task e1',
+  ]));
   win.close();
 });
 
@@ -327,19 +340,17 @@ test('toggling with nothing loaded only flips the view; filters and focus work i
     Object.assign(session('A', 'a1', todayNoon - 1200), {is_running: true}),
   ]);
   assert.deepStrictEqual(listShape(win), [
-    'row:task a2',
-    'row:task b1',
-    'row:task a1',
+    'sep:Running', 'row:task a1', 'sep:Today', 'row:task a2', 'row:task b1',
   ]);
   // The "Errored" chip hides the failed row only.
   const hfErrors = byId(win, 'hf-errors');
   hfErrors.checked = false;
   hfErrors.dispatchEvent(new win.Event('change', {bubbles: true}));
-  assert.deepStrictEqual(listShape(win), ['row:task a2', 'row:task a1']);
+  assert.deepStrictEqual(listShape(win), ['sep:Running', 'row:task a1', 'sep:Today', 'row:task a2']);
   hfErrors.checked = true;
   hfErrors.dispatchEvent(new win.Event('change', {bubbles: true}));
   // Keyboard focus on a row survives a changed-data rebuild.
-  const rowB = all(win, '#history-list > .sidebar-item')[1];
+  const rowB = all(win, '#history-list > .sidebar-item')[2];
   rowB.focus();
   sendHistory(win, posted, 0, [
     session('A', 'a3', todayNoon + 60),
@@ -348,6 +359,7 @@ test('toggling with nothing loaded only flips the view; filters and focus work i
     session('A', 'a1', todayNoon - 1200),
   ]);
   assert.deepStrictEqual(listShape(win), [
+    'sep:Today',
     'row:task a3',
     'row:task a2',
     'row:task b1',

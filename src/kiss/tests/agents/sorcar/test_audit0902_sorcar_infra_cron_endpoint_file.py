@@ -42,7 +42,9 @@ def _job() -> dict[str, object]:
 def _run(tmp_path: Path) -> str:
     work_dir = tmp_path / "run"
     work_dir.mkdir(exist_ok=True)
-    status, text = cron_agent._run_prompt_job(_job(), work_dir)
+    status, text = cron_agent._run_prompt_job(
+        _job(), work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS,
+    )
     assert status == "error"
     assert text is not None
     return text

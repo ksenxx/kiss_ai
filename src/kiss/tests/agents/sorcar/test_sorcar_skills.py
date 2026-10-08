@@ -22,8 +22,8 @@ from kiss.agents.sorcar.skills import (
     Skill,
     bundled_skills_dir,
     discover_skills,
+    load_permission_rules,
     load_skill_content,
-    load_skill_permissions,
     make_skill_tool,
     skill_permission,
 )
@@ -239,7 +239,7 @@ def test_load_skill_permissions_from_config(isolated_homes: Path) -> None:
             json.dumps({"skill_permissions": {"internal-*": "DENY "}}),
             encoding="utf-8",
         )
-        assert load_skill_permissions() == {"internal-*": "deny"}
+        assert load_permission_rules("skill_permissions") == {"internal-*": "deny"}
     finally:
         if original is None:
             CONFIG_PATH.unlink()

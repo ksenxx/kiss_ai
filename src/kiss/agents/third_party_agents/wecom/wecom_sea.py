@@ -26,7 +26,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -41,7 +41,7 @@ _WECOM_DIR = kiss_home() / "third_party_agents" / "wecom"
 _config = ChannelConfig(_WECOM_DIR, ("webhook_url",))
 
 
-class WecomSea(BaseSea):
+class WecomSea(ChannelSea):
     """The ``/wecom`` SEA."""
 
     def description(self) -> str:
@@ -56,20 +56,11 @@ class WecomSea(BaseSea):
         """Return the WeCom channel tools (the SEA ``tools`` method).
 
         Called by the kiss-web daemon when this module's path is passed as
-        the API's ``extension_agent_path``: builds a fresh agent from the
+        the API's ``sea_path``: builds a fresh agent from the
         credentials persisted under ``$KISS_HOME`` and returns its
         authentication and backend tools.
         """
         return tools + WeComAgent()._get_tools()
-
-    def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
-
-        No git lifecycle, nothing inherited from the calling task, the
-        channel preamble in the system prompt (see
-        :mod:`kiss.agents.sorcar.sea_settings`).
-        """
-        return settings | {"kind": "channel"}
 
     def system_prompt(self, system_prompt: str) -> str:
         """Return the channel guidance appended to the run's system prompt."""

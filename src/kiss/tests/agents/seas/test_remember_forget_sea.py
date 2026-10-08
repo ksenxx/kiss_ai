@@ -28,7 +28,7 @@ import pytest
 import yaml
 
 from kiss.agents.seas import agents_md
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import BaseSea, WorkerSea
 from kiss.agents.seas.forget import forget_sea
 from kiss.agents.seas.forget.forget_sea import ForgetSea
 from kiss.agents.seas.remember import remember_sea
@@ -37,7 +37,7 @@ from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.utils import read_bytes_waiting_for_writer
-from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters, system_message
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -48,17 +48,15 @@ from kiss.tests.agents.sorcar.local_model_server import (
 _REMEMBER_PATH = Path(remember_sea.__file__).resolve()
 _FORGET_PATH = Path(forget_sea.__file__).resolve()
 _WORKER_SETTINGS: dict[str, Any] = {
-    "kind": "worker",
     "tool_profile": "bash",
     "max_budget": 1.0,
     "use_worktree": False,
     "auto_commit": False,
     "auto_classify": False,
-    "allow_fan_out": False,
     "use_web_tools": False,
     "use_memory": False,
 }
-"""Both SEAs' resolved settings: ``settings()`` plus the ``worker`` preset."""
+"""Both SEAs' resolved settings: ``settings()`` plus the ``WorkerSea`` defaults."""
 
 
 @pytest.fixture(autouse=True)
@@ -89,15 +87,9 @@ def _run(sea: BaseSea, prompt: str, script: list[bytes], work_dir: Path) -> tupl
             system_prompt_hook=run.system_prompt_hook,
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
-            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     return yaml.safe_load(result), [r for r in requests if r.get("tools")]
-
-
-def _system_message(request: dict[str, Any]) -> str:
-    """Return the system message text of one chat-completions request."""
-    return str(next(m for m in request["messages"] if m["role"] == "system")["content"])
 
 
 def test_sea_methods_follow_the_contract() -> None:
@@ -106,18 +98,23 @@ def test_sea_methods_follow_the_contract() -> None:
     assert RememberSea().system_prompt("ASSEMBLED") == remember_sea.SYSTEM_PROMPT
     assert "`remember_instruction`" in remember_sea.SYSTEM_PROMPT
     assert RememberSea().tools([print]) == [
-        print, remember_sea.remember_instruction, agents_md.list_instructions,
+        print,
+        remember_sea.remember_instruction,
+        agents_md.list_instructions,
     ]
     assert ForgetSea().system_prompt("ASSEMBLED") == forget_sea.SYSTEM_PROMPT
     assert "`forget_instruction`" in forget_sea.SYSTEM_PROMPT
     assert "`list_instructions`" in forget_sea.SYSTEM_PROMPT
     assert ForgetSea().tools([]) == [forget_sea.forget_instruction, agents_md.list_instructions]
     for module, sea in ((remember_sea, RememberSea()), (forget_sea, ForgetSea())):
-        assert sea.settings({}) == {"kind": "worker", "tool_profile": "bash", "max_budget": 1.0}
+        assert isinstance(sea, WorkerSea), module.__name__
+        assert sea.settings({}) == {"tool_profile": "bash", "max_budget": 1.0}
         assert sea.settings({"model": "m"})["model"] == "m"
-        # ``resolve_settings`` evaluates ``settings()`` plus the ``worker``
-        # preset only; ``system_prompt`` is a hook the daemon applies.
-        assert resolve_settings(sea.settings({})) == _WORKER_SETTINGS, module.__name__
+        # ``resolve_settings`` evaluates the declared settings (``settings()``
+        # over the ``WorkerSea`` defaults) only; ``system_prompt`` is a hook
+        # the daemon applies.
+        declared = sea_commands.declared_settings([sea])
+        assert resolve_settings(declared) == _WORKER_SETTINGS, module.__name__
         assert sea_commands.base_settings([sea]) == _WORKER_SETTINGS, module.__name__
         assert_no_removed_getters(module)
 
@@ -157,8 +154,7 @@ def test_remember_creates_the_file_and_appends_bullets(_fresh_agents_md: Path) -
     reply = remember_sea.remember_instruction("-   Run   tests\nbefore   finishing  ")
     assert reply == f"Remembered in {path}: Run tests before finishing"
     assert path.read_text() == (
-        "# User instructions\n\n- Always reply in British English\n"
-        "- Run tests before finishing\n"
+        "# User instructions\n\n- Always reply in British English\n- Run tests before finishing\n"
     )
     assert agents_md.list_instructions() == (
         "1. Always reply in British English\n2. Run tests before finishing"
@@ -196,12 +192,8 @@ def test_bullet_markers_never_become_instructions(_fresh_agents_md: Path) -> Non
     # A nested bullet the user wrote by hand is matched by its text alone.
     path.write_text(path.read_text() + "- - Hand written\n")
     assert agents_md.read_instructions() == ["Nested rule", "- Hand written"]
-    assert forget_sea.forget_instruction("- - Nested rule") == (
-        f"Forgot from {path}: Nested rule"
-    )
-    assert forget_sea.forget_instruction("hand written") == (
-        f"Forgot from {path}: - Hand written"
-    )
+    assert forget_sea.forget_instruction("- - Nested rule") == (f"Forgot from {path}: Nested rule")
+    assert forget_sea.forget_instruction("hand written") == (f"Forgot from {path}: - Hand written")
     assert path.read_text() == "# User instructions\n\n"
 
 
@@ -214,9 +206,7 @@ def test_edits_keep_foreign_bytes_and_crlf_endings(_fresh_agents_md: Path) -> No
     assert path.read_bytes() == original + b"- New rule\r\n"
     assert agents_md.read_instructions() == ["Old rule", "New rule"]
     assert forget_sea.forget_instruction("old rule") == f"Forgot from {path}: Old rule"
-    assert path.read_bytes() == (
-        b"# Mine\r\n\r\nProse with a cp1252 \x92 quote.\r\n- New rule\r\n"
-    )
+    assert path.read_bytes() == (b"# Mine\r\n\r\nProse with a cp1252 \x92 quote.\r\n- New rule\r\n")
 
 
 def test_edits_keep_every_other_line_byte_for_byte(_fresh_agents_md: Path) -> None:
@@ -349,8 +339,7 @@ def test_forget_reports_misses_with_the_stored_list(_fresh_agents_md: Path) -> N
     remember_sea.remember_instruction("Rule B")
     before = path.read_text()
     assert forget_sea.forget_instruction("Rule") == (
-        f"Error: no instruction in {path} matches: Rule\n"
-        "Stored instructions:\n1. Rule A\n2. Rule B"
+        f"Error: no instruction in {path} matches: Rule\nStored instructions:\n1. Rule A\n2. Rule B"
     )
     assert forget_sea.forget_instruction("   ") == (
         "Error: the instruction is empty; nothing was forgotten."
@@ -379,7 +368,7 @@ def test_remember_agent_stores_the_prompt_verbatim(tmp_path: Path, _fresh_agents
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"Bash", "finish", "remember_instruction", "list_instructions"}, names
-        assert _system_message(request).startswith(remember_sea.SYSTEM_PROMPT)
+        assert system_message(request).startswith(remember_sea.SYSTEM_PROMPT)
     user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
     assert instruction in str(user["content"])
     tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
@@ -391,7 +380,8 @@ def test_remember_agent_stores_the_prompt_verbatim(tmp_path: Path, _fresh_agents
 
 
 def test_forget_agent_removes_the_instruction_the_next_task_was_following(
-    tmp_path: Path, _fresh_agents_md: Path,
+    tmp_path: Path,
+    _fresh_agents_md: Path,
 ) -> None:
     """A stored instruction is in the run's system prompt until ``/forget`` removes it.
 
@@ -402,10 +392,13 @@ def test_forget_agent_removes_the_instruction_the_next_task_was_following(
     remember_sea.remember_instruction("Prefer uv over pip")
     script = [
         tool_call_body(
-            "forget_instruction", {"instruction": "the British English one"}, prompt_tokens=400,
+            "forget_instruction",
+            {"instruction": "the British English one"},
+            prompt_tokens=400,
         ),
         tool_call_body(
-            "forget_instruction", {"instruction": "Always reply in British English"},
+            "forget_instruction",
+            {"instruction": "Always reply in British English"},
             prompt_tokens=500,
         ),
         finish_body("<p>Forgot it.</p>", prompt_tokens=600),
@@ -419,7 +412,7 @@ def test_forget_agent_removes_the_instruction_the_next_task_was_following(
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
         assert names == {"Bash", "finish", "forget_instruction", "list_instructions"}, names
-        system = _system_message(request)
+        system = system_message(request)
         assert system.startswith(forget_sea.SYSTEM_PROMPT)
         # perform_task appended AGENTS.md: the run itself followed both rules.
         assert "- Always reply in British English\n- Prefer uv over pip" in system

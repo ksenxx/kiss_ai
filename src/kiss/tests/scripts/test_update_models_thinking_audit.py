@@ -149,7 +149,7 @@ class TestThinkingScaleDispatch:
             assert mod._thinking_scale_for(name) == MOONSHOT_LEVELS, name
 
     def test_ungated_families_fall_back_to_openai_ladder(self) -> None:
-        """Non-Moonshot / non-Grok-effort / non-GLM-5.2 keys use the OpenAI ladder.
+        """Non-Moonshot / non-Grok-effort / non-GLM-5.2 / non-Claude keys use the OpenAI ladder.
 
         The scale is only *consulted* when the probe gate admits the
         model.  For ungated families this scale is inert — but pinning
@@ -166,7 +166,6 @@ class TestThinkingScaleDispatch:
         import kiss.scripts.update_models as mod
 
         for name in (
-            "claude-opus-4-7",
             "gemini-3.6-flash",
             "glm-4.6",
             "glm-5.2",
@@ -234,9 +233,6 @@ class TestDetectThinkingLevelGateHolds:
     @pytest.mark.parametrize(
         "name",
         [
-            "claude-opus-4-7",
-            "claude-sonnet-4-7",
-            "claude-haiku-4-7",
             "openrouter/anthropic/claude-opus-4",
             "openrouter/~anthropic/claude-latest",
             "cc/opus",
@@ -244,10 +240,15 @@ class TestDetectThinkingLevelGateHolds:
             "cc/haiku",
         ],
     )
-    def test_anthropic_and_claude_code_are_gated_out(
+    def test_openrouter_anthropic_and_claude_code_are_gated_out(
         self, gate_probe: _RecordingModelStub, name: str
     ) -> None:
-        """Anthropic uses ``thinking.budget_tokens`` — never probe with effort."""
+        """OpenRouter-routed Claude and the Claude Code CLI are never probed.
+
+        Direct ``claude-*`` keys ARE probed (``AnthropicModel`` maps
+        ``reasoning_effort`` to ``output_config.effort``); see
+        :class:`TestAnthropicEffortLadder`.
+        """
         import kiss.scripts.update_models as mod
 
         assert mod.detect_thinking_level(name) is None

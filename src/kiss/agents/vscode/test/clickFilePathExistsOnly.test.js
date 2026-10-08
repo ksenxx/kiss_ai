@@ -576,21 +576,15 @@ function testBackgroundTabResolvesAgainstItsOwnWorkDir() {
   fs.mkdirSync(path.join(wd3, 'bgsub'), {recursive: true});
   fs.writeFileSync(path.join(wd3, 'bgsub', 'bg.txt'), 'x\n');
   const {win, posted} = makeWebview();
-  const doc = win.document;
-  const tabIdsBefore = Array.from(
-    doc.querySelectorAll('.chat-tab[data-tab-id]'),
-  ).map(el => el.dataset.tabId);
-  const addBtn = doc.querySelector('#new-chat-btn');
-  assert.ok(addBtn, 'tab add button must exist');
-  clickEl(win, addBtn);
-  const tabIdsAfter = Array.from(
-    doc.querySelectorAll('.chat-tab[data-tab-id]'),
-  ).map(el => el.dataset.tabId);
-  const tab2Id = tabIdsAfter.filter(id => tabIdsBefore.indexOf(id) < 0)[0];
-  assert.ok(tab2Id, 'a second tab must have been created');
-  const tab1Id = tabIdsBefore[0];
-  const tab1El = doc.querySelector('.chat-tab[data-tab-id="' + tab1Id + '"]');
-  clickEl(win, tab1El);
+  const api = win._testApi;
+  const tab1Id = api.getActiveTabId();
+  // A second chat opened without leaving the first for good: the "+"
+  // button would retire the idle first chat, and this test needs both.
+  api.createNewTab();
+  const tab2Id = api.getActiveTabId();
+  assert.ok(tab2Id && tab2Id !== tab1Id, 'a second tab must have been created');
+  api.switchToTab(tab1Id);
+  assert.strictEqual(api.getActiveTabId(), tab1Id);
   send(win, {
     type: 'task_events',
     tabId: tab2Id,
@@ -619,8 +613,8 @@ function testBackgroundTabResolvesAgainstItsOwnWorkDir() {
   }
   // Switch to the background tab: its replayed panel must show the
   // existing relative path as clickable and the missing one as text.
-  const tab2El = doc.querySelector('.chat-tab[data-tab-id="' + tab2Id + '"]');
-  clickEl(win, tab2El);
+  api.switchToTab(tab2Id);
+  assert.strictEqual(api.getActiveTabId(), tab2Id);
   assert.strictEqual(findLinks(win, 'bgsub/bg.txt').length, 1);
   assert.strictEqual(findLinks(win, 'bgsub/none.txt').length, 0);
   win.close();

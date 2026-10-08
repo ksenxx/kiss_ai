@@ -112,13 +112,10 @@ function entry(tabId, title) {
   return {tabId, title: title || tabId, chatId: '', workDir: ''};
 }
 
+// Every open tab, in tab order (copied into this realm's Array so
+// deepStrictEqual compares values, not realms' prototypes).
 function tabIds(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; count each tab once.
-  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
-    .map(el => el.dataset.tabId)
-    .filter(Boolean);
-  return ids.filter((id, i) => ids.indexOf(id) === i);
+  return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
 // --- F1 ---------------------------------------------------------------------
@@ -386,9 +383,12 @@ function testPollersPauseWhileDisconnected() {
 
 // --- F4 ---------------------------------------------------------------------
 
+// The user's close: only the chat on screen has an entry (with a close
+// button) on the group strip, so the chat is brought on screen first.
 function closeTabViaUi(win, tabId) {
+  win._testApi.switchToTab(tabId);
   const btn = win.document.querySelector(
-    '.chat-tab[data-tab-id="' + tabId + '"] .chat-tab-close',
+    '#tab-list .chat-tab[data-tab-id="' + tabId + '"] .chat-tab-close',
   );
   assert.ok(btn, 'tab ' + tabId + ' has a close button');
   btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));

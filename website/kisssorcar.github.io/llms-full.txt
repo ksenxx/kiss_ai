@@ -401,14 +401,14 @@ A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as
 - **Atomic, type-checked settings.** `settings()` and the other functions run in the daemon process and are re-imported from source on every run. Every value is type-checked against the key it fills; an unknown key or preset, a wrong type or a function that raises fails the task before it starts, with a diagnostic naming the source (`settings()['model'] must be str, got int`) in `TaskResult.text`.
 - **One precedence rule.** For every run setting, the SEA's `settings()` win, then what the caller passed (`run()` keywords, or `run_agent`'s arguments and options), then what a calling task inherits to its sub-task, then the user's persisted settings. The one exception is the dispatch `timeout`, where an explicit `run_agent` argument wins over the SEA's setting.
 - **Removed getters.** The earlier per-field getters (`use_worktree()`, `model()`, `max_budget()`, ..., `dispatch_timeout()`, `append_to_prompt()`, `append_to_system_prompt()`, `tools()`) are no longer read: a SEA that still defines them runs as if they were absent, so move each value into `settings()` (`tools()` becomes `add_to_tools()` plus `"tool_profile": "none"`; `append_to_system_prompt()` becomes `add_to_system_prompt()`). `prompt` and `system_prompt` are not `settings()` keys (they are the functions `prompt(task)` and `system_prompt()`), so a script naming them fails as an unknown key.
-- **Hooks.** `llm_call_hook()` and `tool_call_hook()` return functions with no `run()` equivalent. `llm_call_hook(new_messages)` runs before every LLM call and its return value replaces the outgoing messages; `tool_call_hook(name, args)` runs before every tool call — returning `"OK"` lets the tool execute, any other string suppresses the call and is given to the model as the tool's result.
+- **Hooks.** `llm_call_hook()` and `tool_call_hook()` return functions with no `run()` equivalent. `llm_call_hook(new_messages)` runs before every LLM call and its return value replaces the outgoing messages; `tool_call_hook(name, args)` runs before every tool call — returning `None` lets the tool execute, any string (`"OK"` included) suppresses the call and is given to the model as the tool's result.
 
 ```python
 # guarded_agent.py — veto dangerous shell commands
 def veto_destructive(name, args):
     if name == "Bash" and "rm -rf" in str(args.get("command", "")):
         return "Blocked: destructive command"
-    return "OK"
+    return None
 
 def tool_call_hook():
     return veto_destructive
@@ -461,7 +461,7 @@ A KISS agent using native function calling.
       tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None) -> str
   ```
 
-  Key parameters: `model_name` (LLM to use), `prompt_template` + `arguments` (task prompt with substitutions), `tools` (callables exposed to the model; a built-in `finish` tool is always added), `max_steps` (default 10000), `max_budget` (default $10), `attachments` (images/PDFs for the initial prompt), `llm_call_hook` (called before every LLM call with the new messages about to be sent; its return value replaces them), `tool_call_hook` (called before every tool call with the tool's name and arguments; returning `"OK"` lets the tool execute, any other string suppresses the call and is returned to the model as the tool's result). Returns the result string of the agent's task.
+  Key parameters: `model_name` (LLM to use), `prompt_template` + `arguments` (task prompt with substitutions), `tools` (callables exposed to the model; a built-in `finish` tool is always added), `max_steps` (default 10000), `max_budget` (default $10), `attachments` (images/PDFs for the initial prompt), `llm_call_hook` (called before every LLM call with the new messages about to be sent; its return value replaces them), `tool_call_hook` (called before every tool call with the tool's name and arguments; returning `None` lets the tool execute, any string suppresses the call and is returned to the model as the tool's result). Returns the result string of the agent's task.
 
 - **finish** — `finish(result: str) -> str`. The agent must call this with the final answer.
 

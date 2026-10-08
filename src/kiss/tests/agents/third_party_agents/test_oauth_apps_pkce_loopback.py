@@ -30,7 +30,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, parse_qsl, urlsplit
 
@@ -38,6 +38,7 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents import _oauth_apps
+from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents._device_auth import (
     ConsentSession,
     LoopbackPkceSession,
@@ -72,10 +73,8 @@ class _TokenHandler(BaseHTTPRequestHandler):
         """Silence per-request logging."""
 
 
-class _TokenServer(ThreadingHTTPServer):
+class _TokenServer(ThreadedHTTPServer):
     """Token endpoint whose reply a test can choose."""
-
-    daemon_threads = True
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _TokenHandler)
@@ -98,8 +97,7 @@ def token_server() -> Iterator[_TokenServer]:
     try:
         yield server
     finally:
-        server.shutdown()
-        server.server_close()
+        stop_http_server(server, thread)
 
 
 @pytest.fixture

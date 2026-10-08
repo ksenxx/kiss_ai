@@ -9,26 +9,25 @@ S1  one precedence sentence, ``sea_settings.PRECEDENCE_RULE``, quoted by
     ``stale-prose`` rule keeps the old sentences out.
 S2  the run-configuration key is ``pinned`` (an inherited or default
     value the SEA replaced), never an explicit argument.
-S3  a ``channel`` SEA locks every key its kind sets.
-S4  ``worker`` is a kind, not a generic agent label.
+S3  a ``ChannelSea`` locks every key its base classes lay.
+S4  ``worker`` is a base class, not a generic agent label.
 S5  ``dummy``, ``coding`` and ``oai`` are hidden; a channel is a
-    third-party SEA that declares ``"kind": "channel"``.
+    third-party SEA whose class derives from ``ChannelSea``.
 S6  one name, "SEA", and whole argument descriptions in the tool schema.
 S8  ``tool_profile`` is also an option; ``workspace`` is refused for a
-    non-channel; ``run_parallel`` honours ``inherit: false``.
+    non-channel.
 S9  is covered by ``tests/agents/seas/test_rsi7d_sea_tuning.py``.
 """
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar import agent_dispatch, sea_commands
 from kiss.agents.sorcar.agent_dispatch import (
     DEFAULT_AGENT_PATH,
@@ -40,14 +39,15 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.run_config import RUN_CONFIG_KEYS, run_config_line
-from kiss.agents.sorcar.sea_commands import declared_settings
+from kiss.agents.sorcar.sea_commands import base_settings
 from kiss.agents.sorcar.sea_docs import precedence_block, precedence_example, render
 from kiss.agents.sorcar.sea_lint import PROSE_FILES, lint_prose
 from kiss.agents.sorcar.sea_settings import (
     PRECEDENCE_RULE,
+    WORKER_DEFAULTS,
     declared_literal,
+    declares_channel,
     declares_hidden,
-    kind_defaults,
     resolve_settings,
 )
 from kiss.core.models.model_info import model
@@ -89,7 +89,7 @@ def test_precedence_rule_is_stated_once_and_quoted_everywhere(home: IsolatedKiss
     # bundled ``/sh`` (its literal settings and the exact refusal text).
     assert precedence_block() == f"> {PRECEDENCE_RULE}\n>\n> {precedence_example()}"
     assert precedence_example().startswith(
-        'For example, `/sh` declares `{"kind": "worker", "tool_profile": "bash", '
+        'For example, `/sh` declares `{"tool_profile": "bash", '
         '"locked": ["tool_profile"]}`, so `run_agent(agent="sh", task=..., '
         'tool_profile="review")` is refused with `Error: sh: the script locks '
         "tool_profile='bash' (asked for 'review')`"
@@ -134,12 +134,12 @@ def test_stale_prose_rule_reads_prose_outside_generated_blocks(tmp_path: Path) -
 def test_pinned_is_the_run_config_key_and_renders_a_reachable_example() -> None:
     assert "pinned" in RUN_CONFIG_KEYS and "overridden" not in RUN_CONFIG_KEYS
     line = run_config_line({
-        "sea": "sh", "kind": "worker", "model": "gpt-5", "tool_profile": "bash",
+        "sea": "sh", "channel": False, "model": "gpt-5", "tool_profile": "bash",
         "max_budget": 1.0, "timeout": 3600, "inherited": ["model", "chat_id", "max_budget"],
         "pinned": {"use_worktree": [True, False]},
     })
     assert line == (
-        "sh (worker) model=gpt-5 tools=bash budget=$1.00 timeout=3600s "
+        "sh model=gpt-5 tools=bash budget=$1.00 timeout=3600s "
         "inherited=model,chat_id,max_budget pinned=use_worktree(True->False)"
     )
     assert run_config_line({}).endswith("inherited=none pinned=none")
@@ -148,9 +148,9 @@ def test_pinned_is_the_run_config_key_and_renders_a_reachable_example() -> None:
 # --- S3: a channel is closed -------------------------------------------------------
 
 
-class _Channel(BaseSea):
+class _Channel(ChannelSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        return settings | {"kind": "channel", "work_dir": "/scratch"}
+        return settings | {"work_dir": "/scratch"}
 
 
 class _ChannelWithMemory(_Channel):
@@ -158,31 +158,32 @@ class _ChannelWithMemory(_Channel):
         return settings | {"use_memory": True}
 
 
-def test_channel_kind_locks_every_key_it_sets() -> None:
-    resolved = resolve_settings(declared_settings([_Channel()]))
-    assert resolved["locked"] == sorted(kind_defaults()["channel"])
+def test_channel_base_locks_the_worker_keys_and_work_dir() -> None:
+    resolved = base_settings([_Channel()])
+    assert "kind" not in resolved and "channel" not in resolved
+    assert resolved["work_dir"] == "/scratch"
+    assert all(resolved[key] is False for key in WORKER_DEFAULTS)
+    assert resolved["locked"] == sorted({"work_dir", *WORKER_DEFAULTS})
     assert set(resolved["locked"]) == {
-        "work_dir", "use_worktree", "auto_commit", "auto_classify", "allow_fan_out",
+        "work_dir", "use_worktree", "auto_commit", "auto_classify",
         "use_web_tools", "use_memory",
     }
     # The lock survives in a SEA that inherits from the channel (its own
-    # locks are added to the kind's); other kinds lock only what they declare.
-    derived = resolve_settings(declared_settings([_ChannelWithMemory()]))
+    # locks are added to the base's); other bases lock only what they declare.
+    derived = base_settings([_ChannelWithMemory()])
     assert derived["use_memory"] is True
-    assert derived["locked"] == sorted(kind_defaults()["channel"])
-    assert resolve_settings({"kind": "channel", "locked": ["model"]})["locked"] == sorted(
-        {"model", *kind_defaults()["channel"]}
+    assert derived["locked"] == sorted({"work_dir", *WORKER_DEFAULTS})
+    assert resolve_settings({"locked": ["model"]}, channel=True)["locked"] == sorted(
+        {"model", "work_dir", *WORKER_DEFAULTS}
     )
-    assert "locked" not in resolve_settings({"kind": "worker"})
-    assert resolve_settings({"kind": "worker", "locked": ["tool_profile"]})["locked"] == [
-        "tool_profile"
-    ]
+    assert "locked" not in resolve_settings({})
+    assert resolve_settings({"locked": ["tool_profile"]})["locked"] == ["tool_profile"]
 
 
 # --- S4 / S5: names and hidden SEAs ----------------------------------------------
 
 
-def test_worker_is_a_kind_not_an_alias_and_infrastructure_seas_are_hidden() -> None:
+def test_worker_is_a_base_not_an_alias_and_infrastructure_seas_are_hidden() -> None:
     assert resolve_agent("", "") == (DEFAULT_AGENT_PATH, "sorcar")
     assert resolve_agent("general", "") == (DEFAULT_AGENT_PATH, "sorcar")
     for name in ("worker", "subagent", "helper"):
@@ -192,14 +193,14 @@ def test_worker_is_a_kind_not_an_alias_and_infrastructure_seas_are_hidden() -> N
         assert hidden not in commands, hidden
     assert declares_hidden(Path(DEFAULT_AGENT_PATH))
     assert declared_literal(Path(DEFAULT_AGENT_PATH), "hidden") is True
-    assert declared_literal(Path(DEFAULT_AGENT_PATH), "kind") is None
-    assert declared_literal(Path("/no/such/file.py"), "kind") is None
-    # A channel declares its kind literally; ``a2a`` is a command but not a channel.
+    assert declared_literal(Path("/no/such/file.py"), "hidden") is None
+    assert not declares_channel(Path(DEFAULT_AGENT_PATH))
+    # A channel derives from ``ChannelSea`` by name; ``a2a`` is a command but not a channel.
     channels = available_channels()
     assert "a2a" in commands and "a2a" not in channels and "oai" not in channels
     for channel in channels:
         path = sea_commands.get_command(channel)
-        assert path is not None and declared_literal(path, "kind") == "channel", channel
+        assert path is not None and declares_channel(path), channel
 
 
 # --- S6: whole argument descriptions reach the model -----------------------------
@@ -234,57 +235,20 @@ def test_tool_schema_carries_whole_argument_descriptions() -> None:
     ]["properties"]
     assert props["agent"]["description"].startswith("Empty = a plain Sorcar sub-agent;")
     assert "that SEA file" in props["agent"]["description"]
-    assert "``allow_fan_out``" in props["options"]["description"]
+    assert "``use_memory``" in props["options"]["description"]
 
 
 # --- S8: options -------------------------------------------------------------------
 
 
-def test_tool_profile_is_an_argument_and_an_option_that_must_agree() -> None:
+def test_tool_profile_is_an_argument_only() -> None:
     assert parse_run_options("", "review").tool_profile == "review"
-    assert parse_run_options('{"tool_profile": "shell"}', "").tool_profile == "shell"
-    assert parse_run_options('{"tool_profile": " shell "}', "shell").tool_profile == "shell"
-    with pytest.raises(ValueError, match="contradicts the tool_profile argument 'review'"):
+    with pytest.raises(ValueError, match="options key 'tool_profile' is the tool_profile arg"):
         parse_run_options('{"tool_profile": "shell"}', "review")
     with pytest.raises(ValueError, match="tool_profile must be one of"):
-        parse_run_options('{"tool_profile": "bogus"}', "")
-    assert "tool_profile" in agent_dispatch.OPTION_TYPES
+        parse_run_options("", "bogus")
+    assert "tool_profile" not in agent_dispatch.OPTION_TYPES
     assert "run_agent` only" not in agent_dispatch.OPTION_DOCS["inherit"]
-
-
-def test_run_parallel_honours_inherit_false(
-    home: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    agent = _bare_agent(home.repo)
-    agent.model_name = "parent-model"
-    agent._base_system_prompt = "PARENT PROMPT"
-
-    def helper() -> str:
-        """A tool the parent carries."""
-        return "x"
-
-    agent._extra_tools = [helper]
-    fanned: list[dict[str, Any]] = []
-
-    def fake_fanout(tasks: list[str], **kwargs: Any) -> list[str]:
-        fanned.append(kwargs)
-        return ["- success: true\n  summary: ok"] * len(tasks)
-
-    monkeypatch.setattr("kiss.agents.sorcar.sorcar_agent.run_tasks_parallel", fake_fanout)
-    monkeypatch.setattr(agent, "reclaim_abandoned_subagents", lambda: None)
-    run_parallel = next(t for t in agent._get_tools() if t.__name__ == "run_parallel")
-    assert "success: true" in run_parallel('["a"]')
-    assert "success: true" in run_parallel('["a"]', options='{"inherit": false}')
-    inherited, bare = fanned
-    assert inherited["model_name"] == "parent-model"
-    assert inherited["base_system_prompt"] == "PARENT PROMPT"
-    assert inherited["inherited_tools"] == [helper]
-    assert bare["model_name"] is None
-    assert bare["base_system_prompt"] == ""
-    assert bare["inherited_tools"] == []
-    # Both are threads of this task: the budget share is never withheld.
-    assert "max_budget" in bare and bare["max_budget"] == inherited["max_budget"]
-    assert inspect.signature(run_parallel).parameters["options"].default == ""
 
 
 def test_workspace_is_refused_for_a_non_channel_sea(tmp_path: Path) -> None:
@@ -297,7 +261,7 @@ class Sea(BaseSea):
 """)
     run_agent = make_run_agent_tool(str(tmp_path))
     assert run_agent("hi", "helper.py", options='{"workspace": "acct"}') == (
-        "Error: helper: options['workspace'] applies to a channel agent only; helper is a "
-        "session SEA"
+        "Error: helper: options['workspace'] applies to a channel only; helper is not a "
+        "channel (its class does not derive from ChannelSea)"
     )
     assert RunOptions().workspace == ""

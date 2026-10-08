@@ -54,20 +54,16 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-// The chat tabs on the main row (the strip under it only lists the
-// group of the chat on screen).
+// The open chats (there is no row of chat tabs any more: the chat on
+// screen is the one picked in the Chats panel, the rest stay hidden).
 function chatTabs(win) {
-  return Array.from(win.document.querySelectorAll('#main-tab-list .chat-tab'));
-}
-
-function activeTab(win) {
-  return win.document.querySelector('#tab-list .chat-tab.active');
+  return win._testApi.openTabs().filter(t => !t.isContentTab);
 }
 
 function activeTabLabel(win) {
-  const tab = activeTab(win);
-  const label = tab && tab.querySelector('.chat-tab-label');
-  return label ? label.textContent : '';
+  const id = win._testApi.getActiveTabId();
+  const tab = chatTabs(win).find(t => t.id === id);
+  return tab ? tab.title : '';
 }
 
 function historyRows(win) {
@@ -102,8 +98,12 @@ function testHistoryClickSwitchesToExistingChatTab() {
     task_id: 101,
     task: 'Existing task opened already',
     events: [],
-    extra: JSON.stringify({startTs: 1_700_000_000_000, endTs: 1_700_000_001_000}),
+    extra: JSON.stringify({startTs: 1_700_000_000_000}),
   });
+  // The task is still running: leaving it for "+" must keep its tab
+  // open (an idle chat left behind would be retired instead).
+  send(win, {type: 'status', running: true, tabId: firstTabId});
+  assert.ok(chatTabs(win)[0].isRunning, 'sanity: the first chat is running');
 
   assert.strictEqual(chatTabs(win).length, 1, 'sanity: one chat tab initially');
   assert.strictEqual(
@@ -115,6 +115,7 @@ function testHistoryClickSwitchesToExistingChatTab() {
   win.document.querySelector('#new-chat-btn').click();
   assert.strictEqual(chatTabs(win).length, 2, 'sanity: plus opens one new tab');
   assert.strictEqual(activeTabLabel(win), 'new chat', 'sanity: new tab is active');
+  assert.notStrictEqual(win._testApi.getActiveTabId(), firstTabId);
 
   const resumeBefore = countMessages(posted, 'resumeSession');
 
@@ -130,7 +131,7 @@ function testHistoryClickSwitchesToExistingChatTab() {
         preview: 'Existing task opened already',
         has_events: true,
         failed: false,
-        is_running: false,
+        is_running: true,
         tokens: 0,
         cost: 0,
         steps: 0,
@@ -138,7 +139,7 @@ function testHistoryClickSwitchesToExistingChatTab() {
         timestamp: 1_700_000_000,
         work_dir: '',
         startTs: 1_700_000_000_000,
-        endTs: 1_700_000_001_000,
+        endTs: 0,
       },
     ],
   });
@@ -148,14 +149,27 @@ function testHistoryClickSwitchesToExistingChatTab() {
   rows[0].click();
 
   assert.strictEqual(
-    chatTabs(win).length,
-    2,
+    chatTabs(win).filter(t => t.title === 'Existing task opened already')
+      .length,
+    1,
     'clicking a history row for an already-open chat must not create a duplicate tab',
+  );
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    firstTabId,
+    'history click must switch focus back to the already-open chat tab',
   );
   assert.strictEqual(
     activeTabLabel(win),
     'Existing task opened already',
-    'history click must switch focus back to the already-open chat tab',
+    'the already-open chat is the one on screen',
+  );
+  // The empty "new chat" left behind is retired (retire-on-leave), so
+  // the running chat is the only one open.
+  assert.strictEqual(
+    chatTabs(win).length,
+    1,
+    'leaving the empty new chat for the running one retires it',
   );
   assert.strictEqual(
     countMessages(posted, 'resumeSession'),
@@ -167,7 +181,7 @@ function testHistoryClickSwitchesToExistingChatTab() {
   console.log('  ok - history click switches to existing tab with same chat id');
 }
 
-function testRestoreDropsDuplicatePersistedChatIds() {
+function testRestoreIgnoresStaleLocalTabs() {
   const {win, posted} = makeWebview({
     activeTabIndex: 0,
     chatId: 'frontend-a',
@@ -181,26 +195,23 @@ function testRestoreDropsDuplicatePersistedChatIds() {
   assert.strictEqual(
     chatTabs(win).length,
     1,
-    'legacy persisted tabs are not restored locally: the daemon adopts ' +
-      'them into the shared registry and answers with tabs_state',
+    'a stale local tab set is not restored: the daemon registry is the ' +
+      'only source of tabs and answers with tabs_state',
   );
   const ready = posted.find(msg => msg && msg.type === 'ready');
   assert.strictEqual(
     JSON.stringify(ready.restoredTabs),
-    JSON.stringify([
-      {tabId: 'frontend-a', chatId: 'chat-dup', title: 'A', workDir: ''},
-      {tabId: 'frontend-c', chatId: 'chat-other', title: 'C', workDir: ''},
-    ]),
-    'ready must announce each backend chat id at most once',
+    '[]',
+    'ready carries no tabs from local storage',
   );
 
   win.close();
-  console.log('  ok - startup restore drops duplicate persisted backend chat ids');
+  console.log('  ok - startup ignores a stale local tab set');
 }
 
 function main() {
   testHistoryClickSwitchesToExistingChatTab();
-  testRestoreDropsDuplicatePersistedChatIds();
+  testRestoreIgnoresStaleLocalTabs();
   console.log('historyClickSwitchExistingChat.test.js: all assertions passed.');
 }
 

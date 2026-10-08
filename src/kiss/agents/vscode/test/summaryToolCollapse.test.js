@@ -138,6 +138,11 @@ function testNestsAllPanelsBackToPromptInOrder() {
   send(win, {type: 'thinking_delta', text: 'pondering...'});
   send(win, {type: 'thinking_end'});
   const before = topLevel(win);
+  // The summary recounts these steps, so it adopts their Thoughts
+  // panel along with the tool panels (the one automatic fold a
+  // Thoughts panel takes part in).
+  const thoughts = before.filter(el => el.classList.contains('llm-panel'));
+  assert.strictEqual(thoughts.length, 1, 'the run rendered one Thoughts panel');
   const expectNested = before.slice(1);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
@@ -147,8 +152,8 @@ function testNestsAllPanelsBackToPromptInOrder() {
   assert.strictEqual(
     nested.length,
     8,
-    'ALL 8 event panels since the beginning must nest (not just the ' +
-      'last 6) — got ' +
+    'ALL 7 tool panels since the beginning plus the Thoughts panel ' +
+      'must nest (not just the last 6) — got ' +
       nested.length,
   );
   for (let i = 0; i < expectNested.length; i++) {
@@ -158,20 +163,17 @@ function testNestsAllPanelsBackToPromptInOrder() {
       'nested panel ' + i + ' must be the original panel, in order',
     );
   }
-  assert.ok(
-    nested.some(el => el.classList.contains('llm-panel')),
-    'Thoughts (llm-panel) panels count as event panels and must nest',
+  assert.strictEqual(
+    nested[nested.length - 1],
+    thoughts[0],
+    'the Thoughts panel is adopted by the summary, in its place',
   );
   const after = topLevel(win);
-  assert.strictEqual(
-    after.length,
-    2,
-    'top level must be: prompt + summary panel',
-  );
+  assert.strictEqual(after.length, 2, 'top level must be: prompt + summary panel');
   assert.ok(after[0].classList.contains('prompt'), 'prompt stays first');
   assert.strictEqual(after[1], p, 'summary panel is the last child');
   win.close();
-  console.log('  ok - ALL panels back to the prompt nest, order kept');
+  console.log('  ok - ALL panels back to the prompt nest, Thoughts included, order kept');
 }
 
 function testStopsAtPromptBoundary() {
@@ -469,9 +471,11 @@ function testNonSummaryToolCallUnaffected() {
     !last.querySelector('.summary-sub'),
     'non-summary tools must never adopt preceding panels',
   );
+  // Every tool call's panel starts folded (the header shows the call);
+  // what sets the summary apart is the adoption above, not the fold.
   assert.ok(
-    !last.classList.contains('collapsed'),
-    'non-summary tools are not auto-collapsed on render',
+    last.classList.contains('collapsed'),
+    'a tool-call panel starts folded',
   );
   assert.strictEqual(summaryPanels(win).length, 0);
   win.close();
@@ -556,7 +560,22 @@ function replayCompletedSummaryTask(win) {
   });
 }
 
-function testReplayedSummaryStaysVisibleDespiteChevronCollapse() {
+/**
+ * The replay of a finished task folds every panel into one collapsed
+ * Trajectory panel; open it, as the user would, and return it.
+ */
+function openTrajectory(win) {
+  const traj = output(win).querySelector(':scope > .trajectory');
+  assert.ok(traj, 'the finished task replays with a Trajectory panel');
+  assert.ok(traj.classList.contains('collapsed'), 'collapsed at first');
+  traj
+    .querySelector(':scope > .trajectory-h')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true, cancelable: true}));
+  assert.ok(!traj.classList.contains('collapsed'), 'the header click opens it');
+  return traj;
+}
+
+function testReplayedSummaryStaysVisibleInsideTrajectory() {
   const {win} = makeWebview();
   injectCss(win);
   replayCompletedSummaryTask(win);
@@ -566,43 +585,43 @@ function testReplayedSummaryStaysVisibleDespiteChevronCollapse() {
     p.classList.contains('collapsed'),
     'the replayed summary panel stays in its collapsed digest state',
   );
+  const traj = output(win).querySelector(':scope > .trajectory');
+  assert.ok(
+    traj && traj.contains(p) && isDisplayed(win, traj) && !isDisplayed(win, p),
+    'the summary panel sits behind the collapsed Trajectory of the ' +
+      'finished task',
+  );
+  openTrajectory(win);
   assert.ok(
     isDisplayed(win, p),
-    'the summary panel (and all its ancestors) must remain displayed ' +
-      'after a completed-task replay',
+    'the summary panel (and all its ancestors) is displayed once the ' +
+      'Trajectory is opened',
   );
   const desc = p.querySelector(':scope > .tc-summary-desc');
   assert.ok(
     isDisplayed(win, desc),
     'the description must be fully visible after replay',
   );
-  const plainTc = topLevel(win)
-    .flatMap(el =>
-      el.classList && el.classList.contains('adjacent-task')
-        ? Array.from(el.querySelectorAll(':scope > .tc'))
-        : [el],
-    )
-    .filter(
-      el =>
-        el.classList &&
-        el.classList.contains('tc') &&
-        !el.classList.contains('tc-summary'),
-    );
-  assert.ok(plainTc.length > 0, 'the replay leaves plain panels on screen');
+  const plainTc = Array.from(
+    traj.querySelectorAll(':scope > .trajectory-sub > .tc:not(.tc-summary)'),
+  );
+  assert.ok(plainTc.length > 0, 'the Trajectory holds the plain panels');
   assert.ok(
     plainTc.every(
       el => el.classList.contains('collapsed') && isDisplayed(win, el),
     ),
-    'non-summary panels of a replayed task are folded, never hidden',
+    'non-summary panels of a replayed task are folded inside the ' +
+      'Trajectory, shown when it is open',
   );
   win.close();
-  console.log('  ok - replayed summary and plain panels stay visible');
+  console.log('  ok - replayed summary and plain panels sit in the Trajectory');
 }
 
 function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
   const {win} = makeWebview();
   injectCss(win);
   replayCompletedSummaryTask(win);
+  openTrajectory(win);
   const p = summaryPanels(win)[0];
   const hdr = p.querySelector('.tc-h');
   hdr.dispatchEvent(
@@ -632,20 +651,16 @@ function testAdoptedPanelKeepsOwnCollapsePreview() {
   hdr.dispatchEvent(
     new win.MouseEvent('click', {bubbles: true, cancelable: true}),
   );
-  // The newest adopted tool panel: the streaming sweep folded the
-  // older ones, this one is still open when the user folds it below.
+  // The newest adopted tool panel: every tool panel starts folded,
+  // and this one keeps its own header preview inside the summary.
   const nestedPanel = p.querySelector(
     ':scope > .summary-sub > .tc:last-of-type',
   );
   assert.ok(
-    !nestedPanel.classList.contains('collapsed'),
-    'precondition: the adopted panel is open',
+    nestedPanel.classList.contains('collapsed'),
+    'precondition: the adopted panel starts folded',
   );
   const nestedHdr = nestedPanel.querySelector(':scope > .tc-h');
-  nestedHdr.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
-  assert.ok(nestedPanel.classList.contains('collapsed'));
   const nestedPrev = nestedHdr.querySelector('.collapse-preview');
   assert.ok(
     (nestedPrev.textContent || '').length > 0,
@@ -781,7 +796,7 @@ function runTests() {
   testToolResultLandsInsideCollapsedSummaryPanel();
   testNonSummaryToolCallUnaffected();
   testReplayPathNestsAndCollapses();
-  testReplayedSummaryStaysVisibleDespiteChevronCollapse();
+  testReplayedSummaryStaysVisibleInsideTrajectory();
   testAdoptedPanelsRevealAfterManualExpandPostReplay();
   testAdoptedPanelKeepsOwnCollapsePreview();
   testReplayWithTwoSummariesSegmentsCorrectly();

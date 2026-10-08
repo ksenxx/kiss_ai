@@ -15,7 +15,6 @@ argument parser must honor it when defaulting the task ``work_dir``.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -54,50 +53,28 @@ def _wire_work_dir(run_kwargs: dict[str, Any]) -> str:
         daemon.close()
 
 
-def _clear_kiss_workdir() -> str | None:
-    """Pop ``KISS_WORKDIR`` from the environment, returning its old value."""
-    return os.environ.pop("KISS_WORKDIR", None)
-
-
-def _restore_kiss_workdir(old: str | None) -> None:
-    """Restore ``KISS_WORKDIR`` to *old* (removing it when *old* is None)."""
-    if old is None:
-        os.environ.pop("KISS_WORKDIR", None)
-    else:
-        os.environ["KISS_WORKDIR"] = old
-
-
-def test_launch_work_dir_prefers_kiss_workdir(tmp_path: Path) -> None:
+def test_launch_work_dir_prefers_kiss_workdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``KISS_WORKDIR`` (set by the wrapper) overrides the process cwd."""
-    old = os.environ.get("KISS_WORKDIR")
     launch = tmp_path / "user_shell_dir"
     launch.mkdir()
-    os.environ["KISS_WORKDIR"] = str(launch)
-    try:
-        assert _launch_work_dir() == str(launch.resolve())
-    finally:
-        _restore_kiss_workdir(old)
+    monkeypatch.setenv("KISS_WORKDIR", str(launch))
+    assert _launch_work_dir() == str(launch.resolve())
 
 
-def test_launch_work_dir_falls_back_to_cwd_when_unset() -> None:
+def test_launch_work_dir_falls_back_to_cwd_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without ``KISS_WORKDIR`` the launch dir is the real process cwd."""
-    old = _clear_kiss_workdir()
-    try:
-        assert _launch_work_dir() == str(Path.cwd())
-    finally:
-        _restore_kiss_workdir(old)
+    monkeypatch.delenv("KISS_WORKDIR", raising=False)
+    assert _launch_work_dir() == str(Path.cwd())
 
 
 def test_launch_work_dir_ignores_nonexistent_kiss_workdir(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A stale ``KISS_WORKDIR`` pointing nowhere falls back to cwd."""
-    old = os.environ.get("KISS_WORKDIR")
-    os.environ["KISS_WORKDIR"] = str(tmp_path / "does_not_exist")
-    try:
-        assert _launch_work_dir() == str(Path.cwd())
-    finally:
-        _restore_kiss_workdir(old)
+    monkeypatch.setenv("KISS_WORKDIR", str(tmp_path / "does_not_exist"))
+    assert _launch_work_dir() == str(Path.cwd())
 
 
 @pytest.mark.parametrize("stale_kiss_workdir", [False, True], ids=["unset", "stale"])
@@ -126,47 +103,36 @@ def test_run_forwards_launch_cwd_to_daemon(
     assert _wire_work_dir(run_kwargs) == expected
 
 
-def test_arg_parser_default_work_dir_uses_kiss_workdir(tmp_path: Path) -> None:
+def test_arg_parser_default_work_dir_uses_kiss_workdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The ``--work_dir`` argparse default resolves to ``KISS_WORKDIR``."""
-    old = os.environ.get("KISS_WORKDIR")
     launch = tmp_path / "launch"
     launch.mkdir()
-    os.environ["KISS_WORKDIR"] = str(launch)
-    try:
-        parser = _build_arg_parser()
-        args = parser.parse_args([])
-        assert args.work_dir == str(launch.resolve())
-    finally:
-        _restore_kiss_workdir(old)
+    monkeypatch.setenv("KISS_WORKDIR", str(launch))
+    args = _build_arg_parser().parse_args([])
+    assert args.work_dir == str(launch.resolve())
 
 
-def test_build_run_kwargs_work_dir_uses_kiss_workdir(tmp_path: Path) -> None:
+def test_build_run_kwargs_work_dir_uses_kiss_workdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``_build_run_kwargs`` threads the launch dir into ``run`` kwargs."""
-    old = os.environ.get("KISS_WORKDIR")
     launch = tmp_path / "project"
     launch.mkdir()
-    os.environ["KISS_WORKDIR"] = str(launch)
-    try:
-        parser = _build_arg_parser()
-        args = parser.parse_args(["-t", "noop"])
-        run_kwargs = _build_run_kwargs(args)
-        assert run_kwargs["work_dir"] == str(launch.resolve())
-    finally:
-        _restore_kiss_workdir(old)
+    monkeypatch.setenv("KISS_WORKDIR", str(launch))
+    args = _build_arg_parser().parse_args(["-t", "noop"])
+    assert _build_run_kwargs(args)["work_dir"] == str(launch.resolve())
 
 
-def test_explicit_work_dir_flag_overrides_kiss_workdir(tmp_path: Path) -> None:
+def test_explicit_work_dir_flag_overrides_kiss_workdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An explicit ``-w`` flag still wins over ``KISS_WORKDIR``."""
-    old = os.environ.get("KISS_WORKDIR")
     launch = tmp_path / "launch"
     launch.mkdir()
     explicit = tmp_path / "explicit"
     explicit.mkdir()
-    os.environ["KISS_WORKDIR"] = str(launch)
-    try:
-        parser = _build_arg_parser()
-        args = parser.parse_args(["-w", str(explicit), "-t", "noop"])
-        run_kwargs = _build_run_kwargs(args)
-        assert run_kwargs["work_dir"] == str(explicit)
-    finally:
-        _restore_kiss_workdir(old)
+    monkeypatch.setenv("KISS_WORKDIR", str(launch))
+    args = _build_arg_parser().parse_args(["-w", str(explicit), "-t", "noop"])
+    assert _build_run_kwargs(args)["work_dir"] == str(explicit)

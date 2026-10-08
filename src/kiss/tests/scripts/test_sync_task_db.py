@@ -190,6 +190,41 @@ class SyncTaskDbPushTest(unittest.TestCase):
             self.assertEqual(os.readlink(home / "sorcar.db"), "history.db", home)
             self.assertFalse((home / "sorcar.db-wal").exists(), home)
 
+    def test_a_history_db_left_by_spring_2026_is_set_aside_for_sorcar_db(self) -> None:
+        """Both names present, history.db from before 2026-04-24: sorcar.db is the history.
+
+        The database was history.db until that day, sorcar.db until
+        2026.10.2, and history.db again since; the leftover under the
+        new name has the schema of its time and is set aside, kept.
+        """
+        for home in (self.local_home, self.remote_home / ".kiss"):
+            con = sqlite3.connect(home / "history.db")
+            con.executescript(
+                "CREATE TABLE task_history (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " timestamp REAL NOT NULL, task TEXT NOT NULL, has_events INTEGER DEFAULT 0,"
+                " result TEXT DEFAULT '', chat_id TEXT DEFAULT '');"
+                "INSERT INTO task_history (timestamp, task) VALUES (1.0, 'march 2026');"
+            )
+            con.commit()
+            con.close()
+        _make_db(self.remote_home / ".kiss" / "sorcar.db", 3)
+        _make_db(self.local_home / "sorcar.db", 10)
+
+        result = self._push()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("history.db is a leftover from before 2026-04-24", result.stdout)
+        for home in (self.local_home, self.remote_home / ".kiss"):
+            self.assertEqual(_count(home / "history.db"), 10, home)
+            self.assertEqual(os.readlink(home / "sorcar.db"), "history.db", home)
+            [stale] = [
+                p for p in home.iterdir()
+                if p.name.startswith("history.db.stale-") and not p.name.endswith(("-wal", "-shm"))
+            ]
+            con = sqlite3.connect(stale)
+            kept = con.execute("SELECT task FROM task_history").fetchall()
+            con.close()
+            self.assertEqual(kept, [("march 2026",)])
+
     def test_uncommitted_wal_pages_travel_too(self) -> None:
         """Tasks living only in the -wal must not be left behind."""
         local_db = self.local_home / "history.db"

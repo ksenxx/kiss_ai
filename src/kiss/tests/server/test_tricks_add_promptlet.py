@@ -213,6 +213,7 @@ class _FakeServer(_CommandsMixin):
         self.work_dir = "/tmp"
         self._state_lock = threading.RLock()
 
+
     def last(self, event_type: str) -> dict[str, Any] | None:
         for msg in reversed(self.printer.messages):
             if msg.get("type") == event_type:

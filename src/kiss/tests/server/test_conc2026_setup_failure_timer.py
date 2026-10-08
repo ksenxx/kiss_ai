@@ -18,7 +18,7 @@ never ran: the tab's spinner stopped (the ``finally`` still emitted
 and the recording leaked permanently (the timer was its only
 releaser).
 
-Reproduced for real: a run whose ``agentPath`` names a broken agent
+Reproduced for real: a run whose ``seaPath`` names a broken agent
 script (so the REAL ``_run_task`` takes the setup-failure path), with
 ``RLIMIT_NPROC`` lowered to 1 so ``Timer.start()`` genuinely fails.
 No mocks or patches.
@@ -71,7 +71,7 @@ class TestSetupFailureTimerSpawnFailure(unittest.TestCase):
             "tabId": tab_id,
             "prompt": "hello",
             "workDir": tmp.name,
-            "agentPath": str(broken_script),
+            "seaPath": str(broken_script),
             "_state_key": state.task_id,
         }
         # ``_run_task`` normally runs on a worker thread; calling it
@@ -120,7 +120,7 @@ class TestSetupFailureTimerSpawnFailure(unittest.TestCase):
             "tabId": tab_id,
             "prompt": "hello",
             "workDir": tmp.name,
-            "agentPath": str(broken_script),
+            "seaPath": str(broken_script),
             "_state_key": state.task_id,
         })
         results = [

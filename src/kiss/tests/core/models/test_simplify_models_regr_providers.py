@@ -33,7 +33,6 @@ from kiss.core.models.anthropic_model import (
 )
 from kiss.core.models.claude_code_model import (
     ClaudeCodeModel,
-    _dict_field,
     _find_consecutive_tool_calls_end,
 )
 from kiss.core.models.codex_model import (
@@ -816,10 +815,9 @@ class TestClaudeCodeModel:
                     "ephemeral_1h_input_tokens": 4,
                 }
             },
-            _dict_field,
         ) == (3, 4)
-        assert cache_creation_tokens({"cache_creation_input_tokens": 9}, _dict_field) == (0, 9)
-        assert cache_creation_tokens({}, _dict_field) == (0, 0)
+        assert cache_creation_tokens({"cache_creation_input_tokens": 9}) == (0, 9)
+        assert cache_creation_tokens({}) == (0, 0)
 
     def test_find_consecutive_tool_calls_end(self) -> None:
         one = '{"tool_calls": [{"name": "Bash", "arguments": {}}]}'

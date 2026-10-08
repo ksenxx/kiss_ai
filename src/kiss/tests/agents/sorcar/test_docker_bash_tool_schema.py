@@ -6,8 +6,8 @@
 
 :class:`~kiss.agents.sorcar.docker_manager.DockerManager`'s ``Bash``
 honours ``timeout_seconds`` and truncates at ``max_output_chars``, but
-:meth:`SorcarAgent._get_tools` handed the model a two-parameter shim in
-docker mode, and ``RelentlessAgent._docker_bash`` forwarded only those
+:meth:`SorcarAgent._get_tools` once handed the model a two-parameter
+shim in docker mode, and its ``_docker_bash`` forwarded only those
 two arguments.  Both limits were therefore pinned to the manager's
 defaults: the model could not raise the 30-second cap for a slow build
 nor widen the output slice, although the non-docker
@@ -122,7 +122,7 @@ class TestDockerBashToolExposesBothLimits(unittest.TestCase):
         self.assertIn("nohup", result)
 
     def test_docker_bash_without_a_manager_still_raises(self) -> None:
-        """The widened forwarder keeps the base class's guard."""
+        """The forwarder refuses to run without a container attached."""
         from kiss.core.kiss_error import KISSError
 
         agent = SorcarAgent("K2 docker shim, no manager")

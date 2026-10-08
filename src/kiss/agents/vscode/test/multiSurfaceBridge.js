@@ -330,17 +330,18 @@ function shownBrowserScreen(surface) {
   return shown ? shown.querySelector('.browser-screen') : null;
 }
 
-// The tab rows show the main row (#main-tab-list: the chats and
-// ownerless tabs) and the group strip (#tab-list: the chat on screen
-// with its sub-agents and files); in editor-tabs mode the strip is the
-// only row.  A background chat's sub-agents and files are open but not
-// rendered, so the webview's own tab records (_testApi.openTabs) are the
-// list of open tabs and the rows supply what the user sees of each.
+// There is no row of chat tabs: the group strip (#tab-list) renders
+// the chat on screen with its sub-agents (and, on a stacked surface,
+// every content tab), and the desktop remote's split layout lists the
+// content tabs on #content-tab-list instead.  A background chat and its
+// sub-agents are open but not rendered, so the webview's own tab records
+// (_testApi.openTabs) are the list of open tabs and the rows supply what
+// the user sees of each.
 function allTabEls(doc) {
   const seen = new Set();
   return Array.from(
     doc.querySelectorAll(
-      '#main-tab-list [data-tab-id], #tab-list [data-tab-id]',
+      '#tab-list [data-tab-id], #content-tab-list [data-tab-id]',
     ),
   ).filter(el => {
     if (seen.has(el.dataset.tabId)) return false;
@@ -352,14 +353,14 @@ function allTabEls(doc) {
 function renderedTabEl(doc, tabId) {
   return (
     doc.querySelector(`#tab-list [data-tab-id="${tabId}"]`) ||
-    doc.querySelector(`#main-tab-list [data-tab-id="${tabId}"]`)
+    doc.querySelector(`#content-tab-list [data-tab-id="${tabId}"]`)
   );
 }
 
-// The element of tab `tabId` on whichever row shows it (the strip's
-// when it is on both, so `.active` reads the real active tab).  A tab of
-// a background group is reached the way the user reaches it: its chat's
-// main-row entry brings the group on screen first.
+// The element of tab `tabId` on whichever row shows it.  A tab of a
+// background group is reached the way the user reaches it: its chat is
+// picked (the Chats panel's click, _testApi.switchToTab) so the group
+// comes on screen first and the strip renders the tab.
 function tabEl(doc, tabId) {
   const el = renderedTabEl(doc, tabId);
   if (el) return el;
@@ -367,12 +368,8 @@ function tabEl(doc, tabId) {
   const record = (win._testApi ? win._testApi.openTabs() : []).find(
     t => t.id === tabId,
   );
-  if (!record || record.rootId === tabId) return null;
-  const root = doc.querySelector(
-    `#main-tab-list [data-tab-id="${record.rootId}"]`,
-  );
-  if (!root) return null;
-  root.click();
+  if (!record) return null;
+  win._testApi.switchToTab(record.rootId);
   return renderedTabEl(doc, tabId);
 }
 

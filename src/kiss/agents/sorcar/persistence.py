@@ -34,12 +34,13 @@ import weakref
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import IO, Any
+from types import TracebackType
+from typing import IO, Any, Literal, cast
 
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.chat_summary import upsert_chat_summary
 from kiss.agents.sorcar.task_metadata import classify_task_tags
-from kiss.core.config import adopt_legacy_file, kiss_home
+from kiss.core.config import adopt_legacy_file, is_pre_2026_04_db, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
@@ -417,6 +418,18 @@ _rw_lock = _RWLock()
 
 _init_tables_lock = threading.Lock()
 
+# Serializes a task's usage finalization against spend charged to it
+# from another thread: a run's final "read the ledger, save the row with
+# its end stamp" and its last ``usage_info`` on one side, a late charge's
+# "is the row finished? then add to the row, else bank on the live
+# ledger and publish" on the other (``charge_side_channel_usage``).
+# Without it a charge could check the row (unfinished), lose the CPU to
+# the final save, then bank on a ledger nothing reads again — or publish
+# newer totals that the run's stale last event then overwrites.  Held
+# only around those short DB/ledger/printer sections, never across a
+# join or a model call.
+TASK_USAGE_LOCK = threading.Lock()
+
 
 _chat_context_text_cache: dict[str, str] = {}
 _chat_context_cache_lock = threading.Lock()
@@ -707,6 +720,124 @@ _db_conn: sqlite3.Connection | None = None
 _thread_local = threading.local()
 _db_generation: int = 0
 
+
+class _LockedCursor(sqlite3.Cursor):
+    """Cursor of a :class:`_LockedConnection`.
+
+    Every call that steps the statement (``execute``, the ``fetch*``
+    family, iteration) runs under the connection's lock, so the
+    connection is never closed from another thread while this cursor
+    is inside ``sqlite3_step``.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        super().__init__(connection)
+        self.lock = cast(_LockedConnection, connection).lock
+
+    def execute(self, sql: str, parameters: Any = (), /) -> _LockedCursor:
+        """Run *sql* with *parameters* under the connection's lock."""
+        with self.lock:
+            super().execute(sql, parameters)
+        return self
+
+    def executemany(self, sql: str, seq_of_parameters: Any, /) -> _LockedCursor:
+        """Run *sql* once per parameter set under the connection's lock."""
+        with self.lock:
+            super().executemany(sql, seq_of_parameters)
+        return self
+
+    def fetchone(self) -> Any:
+        """Return the next row, or ``None``, stepping under the lock."""
+        with self.lock:
+            return super().fetchone()
+
+    def fetchmany(self, size: int | None = None) -> list[Any]:
+        """Return up to *size* (default ``arraysize``) rows, stepping under the lock."""
+        with self.lock:
+            return super().fetchmany(self.arraysize if size is None else size)
+
+    def fetchall(self) -> list[Any]:
+        """Return every remaining row, stepping under the lock."""
+        with self.lock:
+            return super().fetchall()
+
+    def executescript(self, sql_script: str, /) -> _LockedCursor:
+        """Run *sql_script* under the connection's lock."""
+        with self.lock:
+            super().executescript(sql_script)
+        return self
+
+    def __next__(self) -> Any:
+        with self.lock:
+            return super().__next__()
+
+
+class _LockedConnection(sqlite3.Connection):
+    """``sqlite3.Connection`` whose statement steps run under ``self.lock``.
+
+    Connections are opened with ``check_same_thread=False`` and cached
+    per thread, and :func:`_recover_orphaned_sidecars` has to close
+    handles that belong to OTHER threads (SQLite drops a dead ``-shm``
+    mapping only when the last connection using it closes).  Closing a
+    ``sqlite3.Connection`` while its owner is inside ``sqlite3_step``
+    is a use-after-free in CPython, so every step on the connection —
+    and :meth:`close` — holds a reentrant lock: a handle whose lock can
+    be taken is idle and safe to close from any thread (its owner's
+    next statement raises ``ProgrammingError`` instead of crashing);
+    one whose lock is held is left to its owner.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.lock = threading.RLock()
+
+    def cursor(self, factory: Any = None) -> Any:
+        """Return a :class:`_LockedCursor` (or a *factory* cursor)."""
+        return super().cursor(_LockedCursor if factory is None else factory)
+
+    def execute(self, sql: str, parameters: Any = (), /) -> _LockedCursor:
+        """Run *sql* on a new locked cursor and return it."""
+        cursor: _LockedCursor = self.cursor()
+        return cursor.execute(sql, parameters)
+
+    def executemany(self, sql: str, seq_of_parameters: Any, /) -> _LockedCursor:
+        """Run *sql* once per parameter set on a new locked cursor."""
+        cursor: _LockedCursor = self.cursor()
+        return cursor.executemany(sql, seq_of_parameters)
+
+    def executescript(self, sql_script: str, /) -> _LockedCursor:
+        """Run *sql_script* on a new locked cursor."""
+        cursor: _LockedCursor = self.cursor()
+        return cursor.executescript(sql_script)
+
+    def commit(self) -> None:
+        """Commit the open transaction under the lock."""
+        with self.lock:
+            super().commit()
+
+    def rollback(self) -> None:
+        """Roll back the open transaction under the lock."""
+        with self.lock:
+            super().rollback()
+
+    def close(self) -> None:
+        """Close the connection; waits for a statement in flight on it."""
+        with self.lock:
+            super().close()
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+        /,
+    ) -> Literal[False]:
+        # ``with conn:`` commits or rolls back from C, bypassing the
+        # Python overrides above, so the lock is taken here.
+        with self.lock:
+            return super().__exit__(exc_type, exc, tb)
+
+
 #: Every connection :func:`_get_db` has opened in this process and not
 #: yet closed, keyed by ``id(conn)`` -> ``(conn, owning thread, db
 #: path)``.  ``sqlite3.Connection`` cannot be weakly referenced, so a
@@ -716,7 +847,15 @@ _db_generation: int = 0
 #: for one purpose: the orphaned-sidecar recovery in
 #: :func:`_recover_orphaned_sidecars` has to close ALL connections to a
 #: database — see :func:`_sidecars_orphaned`.
-_open_conns: dict[int, tuple[sqlite3.Connection, threading.Thread, str]] = {}
+_open_conns: dict[int, tuple[_LockedConnection, threading.Thread, str]] = {}
+
+#: How long :func:`_recover_orphaned_sidecars` waits, in total, for
+#: other threads' statements in flight to finish.  They are interrupted
+#: first, so this is normally instant; the bound only matters for a
+#: handle queued in SQLite's (uninterruptible) 30 s ``busy_timeout``
+#: wait, and it exceeds that wait so the recovery outlasts it rather
+#: than failing the task that ran into the deleted sidecars.
+_RECOVERY_IDLE_WAIT_S = 35.0
 
 #: Per database path: ``(db_file_id, shm_file_id)`` of the ``-shm``
 #: sidecar the connections in this process are mapped to.  An entry
@@ -811,15 +950,24 @@ def _recover_orphaned_sidecars(current_path: str) -> None:
     when a brand-new connection failed with ``SQLITE_IOERR``.  While the
     old mapping is still valid, the frames this process committed into
     the deleted ``-wal`` are folded into the main file with a passive
-    checkpoint (so they survive), then EVERY open connection to
+    checkpoint (so they survive), then every open connection to
     *current_path* in the process is interrupted and closed — SQLite
     releases the shared ``-shm`` mapping only when the last connection
     using it closes, so closing just the calling thread's connection
-    would leave every new connection failing.  The generation counter
-    is bumped so each other thread's next ``_get_db()`` reconnects (its
-    cached handle is already closed); a statement in flight on another
-    thread fails once with ``ProgrammingError`` instead of that thread
-    keeping the dead mapping alive for the life of the process.
+    would leave every new connection failing.  A handle is closed only
+    once its :class:`_LockedConnection` lock is held, i.e. while no
+    other thread is inside a statement on it (the interrupt makes a
+    statement in flight abort promptly): closing it under its owner's
+    feet would crash the process.  A handle whose owner keeps it busy
+    beyond :data:`_RECOVERY_IDLE_WAIT_S` stays open and the owner
+    retires it on its next ``_get_db()`` — the generation counter is
+    bumped so every thread's next ``_get_db()`` reconnects — and this
+    call raises ``OperationalError`` without reopening anything, since
+    a connection opened while an old handle lives joins the dead
+    mapping for good; the ``_attached_shm`` entry stays so every
+    ``_get_db()`` retries the recovery until the last old handle is
+    retired.  A thread whose idle handle was closed here fails once
+    with ``ProgrammingError`` on a statement it runs on the old handle.
 
     Idempotent under ``_init_tables_lock``: a racing thread that finds
     the mapping already dropped returns without doing anything.
@@ -841,25 +989,54 @@ def _recover_orphaned_sidecars(current_path: str) -> None:
             current_path,
             len(doomed),
         )
-        for _key, conn in doomed:
-            try:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                break
-            except sqlite3.Error:
-                continue
+        deadline = time.monotonic() + _RECOVERY_IDLE_WAIT_S
+        checkpointed = False
         for key, conn in doomed:
+            # Thread-safe by SQLite's contract; a statement another
+            # thread is stepping on this handle aborts with
+            # "interrupted", which releases the handle's lock.  (A
+            # busy-timeout wait is not interruptible, so a thread
+            # queued behind another process's write transaction can
+            # keep its lock past the deadline.)
             try:
                 conn.interrupt()
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error:  # already closed behind the registry's back
+                logger.debug("Exception caught", exc_info=True)
+            if not conn.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                continue  # busy: its owner closes it on its next _get_db()
             try:
-                conn.close()
-            except sqlite3.Error:
-                pass
+                if not checkpointed:
+                    # Fails with "interrupted" on a handle whose
+                    # paused statement the interrupt above hit; the
+                    # next idle handle checkpoints instead.
+                    try:
+                        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                        checkpointed = True
+                    except sqlite3.Error:
+                        logger.debug("Exception caught", exc_info=True)
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    logger.debug("Exception caught", exc_info=True)
+            finally:
+                conn.lock.release()
             _drop_open_conn_locked(key)
-        _attached_shm.pop(current_path, None)
         _db_conn = None
         _db_generation += 1
+        busy = sum(1 for _c, _o, path in _open_conns.values() if path == current_path)
+        if busy:
+            # A connection opened now would join the dead mapping for
+            # good (SQLite keeps one shared-memory node per database
+            # per process while any handle uses it), so nothing is
+            # reopened: the ``_attached_shm`` entry stays, every
+            # ``_get_db()`` re-runs this recovery until the owners
+            # retire their handles, and this call fails instead.
+            raise sqlite3.OperationalError(
+                f"disk I/O error: {current_path}-wal/-shm were deleted while "
+                f"{busy} connection(s) are still busy; retry once their "
+                "statements finish"
+            )
+        _attached_shm.pop(current_path, None)
     _invalidate_chat_context_cache("")
 
 
@@ -867,6 +1044,19 @@ def _forget_open_conn(conn: sqlite3.Connection) -> None:
     """Remove *conn* from :data:`_open_conns` (no-op if absent)."""
     with _init_tables_lock:
         _drop_open_conn_locked(id(conn))
+
+
+def _retire_conn(conn: sqlite3.Connection) -> None:
+    """Forget and close *conn*, the calling thread's own handle (best effort).
+
+    The registry entry goes BEFORE the close so a close that raises
+    cannot leave a dead handle registered.
+    """
+    _forget_open_conn(conn)
+    try:
+        conn.close()
+    except Exception:
+        logger.debug("Exception caught", exc_info=True)
 
 
 def _close_cached_thread_conn() -> sqlite3.Connection | None:
@@ -884,11 +1074,7 @@ def _close_cached_thread_conn() -> sqlite3.Connection | None:
     """
     tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
     if tl_conn is not None:
-        _forget_open_conn(tl_conn)
-        try:
-            tl_conn.close()
-        except Exception:
-            pass
+        _retire_conn(tl_conn)
     _thread_local.conn = None
     _thread_local.gen = -1
     _thread_local.path = None
@@ -1262,7 +1448,7 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             -- Comma-separated classification of the task ("work,coding");
             -- written when the task finishes (task_metadata.classify_task_tags).
             tags TEXT DEFAULT '',
-            -- File stem of the SEA (agent script) that ran the task
+            -- File stem of the SEA that ran the task
             -- ("write_paper_sea", "cron_agent"); '' for a plain run.
             sea TEXT DEFAULT ''
         );
@@ -1324,8 +1510,10 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             timestamp REAL NOT NULL DEFAULT 0
         );
     """)
-    _apply_index_ddl(conn)
+    # Columns first: an index over a column this version added to an
+    # existing table can only be created once the column is there.
     _add_missing_columns(conn)
+    _apply_index_ddl(conn)
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -1364,11 +1552,13 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
 def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
     """Port a pre-UUID task_history DB to the new schema in-place.
 
-    Detects the old schema (``task_history.id`` is ``INTEGER`` and the
-    ``extra`` column exists), creates new-shaped tables under temporary
-    names, assigns each row a fresh ``uuid.uuid4().hex``, copies row
-    data into the typed columns, remaps every ``events.task_id`` to the
-    new UUID, then atomically replaces the old tables.
+    Detects the old schema (``task_history.id`` is ``INTEGER``), creates
+    new-shaped tables under temporary names, assigns each row a fresh
+    ``uuid.uuid4().hex``, copies row data into the typed columns, remaps
+    every ``events.task_id`` to the new UUID, then atomically replaces
+    the old tables.  The JSON ``extra`` column holds the per-row
+    metadata; a database from before 2026-04-13 has no such column,
+    and its rows migrate with the metadata defaults.
 
     Returns ``True`` when migration was performed, ``False`` when the
     DB already has the new schema or no ``task_history`` table yet.
@@ -1380,8 +1570,6 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
     if not cols:
         return False
     if cols.get("id") == "TEXT":
-        return False
-    if "extra" not in cols:
         return False
 
     def _sx(v: object) -> str:
@@ -1413,14 +1601,11 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
                 "PRAGMA table_info(task_history)"
             ).fetchall()
         }
-        if (
-            not cols_locked
-            or cols_locked.get("id") == "TEXT"
-            or "extra" not in cols_locked
-        ):
+        if not cols_locked or cols_locked.get("id") == "TEXT":
             conn.execute("ROLLBACK")
             conn.execute("PRAGMA foreign_keys=ON")
             return False
+        extra_column = "extra" if "extra" in cols_locked else "''"
         conn.execute("DROP TABLE IF EXISTS task_history__new")
         conn.execute("DROP TABLE IF EXISTS events__new")
         conn.execute(
@@ -1458,7 +1643,7 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
         )
         rows = conn.execute(
             "SELECT id, timestamp, task, has_events, result, chat_id, "
-            "extra FROM task_history ORDER BY id ASC"
+            f"{extra_column} FROM task_history ORDER BY id ASC"
         ).fetchall()
         id_map: dict[int, str] = {int(r[0]): uuid.uuid4().hex for r in rows}
         dropped_unknown_keys = 0
@@ -1674,11 +1859,7 @@ def _get_db() -> sqlite3.Connection:
         # later call would hand out as valid.
         tl.conn = None
         tl.file_id = None
-        _forget_open_conn(tl_conn)
-        try:
-            tl_conn.close()
-        except Exception:
-            pass
+        _retire_conn(tl_conn)
 
     _ensure_kiss_dir()
     _adopt_legacy_db_name(current_path)
@@ -1714,6 +1895,16 @@ _LEGACY_DB_NAME = "sorcar.db"  # the database's name before version 2026.10.2
 def _adopt_legacy_db_name(current_path: str) -> None:
     """Rename a ``sorcar.db`` left by a pre-2026.10.2 install to *current_path*.
 
+    The database was ALSO called ``history.db`` from March 2026 until
+    2026-04-24, when it became ``sorcar.db`` and the old file was left
+    where it was.  An install from those weeks has both names when it
+    upgrades, and the leftover under the new name is not the database:
+    its schema cannot even be opened (``no such column:
+    parent_task_id``), while every task since lives in ``sorcar.db``.
+    :func:`kiss.core.config.is_pre_2026_04_db` recognises
+    the leftover by its schema and :func:`adopt_legacy_file` sets it
+    aside (as ``history.db.stale-<UTC time>``) before the rename.
+
     The journals named after the database (:func:`_failed_events_path`,
     :func:`_final_results_path`) are adopted on their own, so that they
     follow even when the database itself was renamed by the deploy
@@ -1721,7 +1912,7 @@ def _adopt_legacy_db_name(current_path: str) -> None:
     know about the database and its ``-wal``/``-shm`` sidecars.
     """
     db_file = Path(current_path)
-    adopt_legacy_file(db_file, _LEGACY_DB_NAME, ("-wal", "-shm", ""))
+    adopt_legacy_file(db_file, _LEGACY_DB_NAME, ("-wal", "-shm", ""), stale=is_pre_2026_04_db)
     for journal in (".failed_events.jsonl", ".final_results.jsonl"):
         adopt_legacy_file(db_file.with_name(db_file.name + journal), _LEGACY_DB_NAME + journal)
 
@@ -1766,7 +1957,7 @@ def _adopt_legacy_journal_snapshots(conn: sqlite3.Connection, current_path: str)
         conn.execute("DELETE FROM replayed_journals WHERE snapshot = ?", (name,))
 
 
-def _open_db_connection(current_path: str) -> sqlite3.Connection:
+def _open_db_connection(current_path: str) -> _LockedConnection:
     """Open, configure and register one new connection to *current_path*.
 
     Runs the WAL pragma (retried while another connection holds the
@@ -1794,7 +1985,7 @@ def _open_db_connection(current_path: str) -> sqlite3.Connection:
     # leftover sidecar of a deleted-and-recreated database safely: a
     # WAL whose salt/checksums do not match is ignored and reset on
     # the first write, so no cleanup is needed for correctness.
-    conn = sqlite3.connect(
+    conn = _LockedConnection(
         current_path,
         check_same_thread=False,
         timeout=10,
@@ -1888,13 +2079,14 @@ def _add_task(
     is generated as the chat session identifier.
     Otherwise the given *chat_id* is stored directly (continuation task).
 
-    When *extra* is provided, the JSON-encoded dict is written into the
-    ``extra`` column in the same INSERT so that values known at task
-    creation time (model, work_dir, version, toggles) are immediately
-    visible in the history sidebar — even before the task completes.
-    Callers that need to add post-completion values (tokens, cost) can
-    later call :func:`_save_task_extra` which rewrites the column
-    (preserving any ``is_favorite`` flag set in the meantime).
+    When *extra* is provided, its known keys (see ``_EXTRA_COL_MAP``)
+    are written into their typed columns in the same INSERT so that
+    values known at task creation time (model, work_dir, version,
+    toggles) are immediately visible in the history sidebar — even
+    before the task completes.  Callers that need to add
+    post-completion values (tokens, cost) later call
+    :func:`_save_task_extra`, which updates only the columns it is
+    given (so an ``is_favorite`` flag set in the meantime survives).
 
     Thread-safe: all writes are protected by ``_rw_lock.write_lock()``.
 
@@ -2017,7 +2209,17 @@ def _tag_filter_sql(tag: str) -> tuple[str, tuple[str, ...]]:
     return "AND (',' || COALESCE(tags, '') || ',') LIKE ? ", (f"%,{tag},%",)
 
 
-def _load_history(limit: int = 0, offset: int = 0, tag: str = "") -> list[_HistoryEntry]:
+def _history_order_sql(running_task_ids: set[str] | None) -> tuple[str, tuple[str, ...]]:
+    """Order running tasks first, then newest first within each section."""
+    ids = tuple(sorted(running_task_ids or ()))
+    priority = f"id IN ({','.join('?' for _ in ids)}) DESC, " if ids else ""
+    return priority + "timestamp DESC, rowid DESC", ids
+
+
+def _load_history(
+    limit: int = 0, offset: int = 0, tag: str = "", *,
+    query: str = "", running_task_ids: set[str] | None = None,
+) -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 
     Args:
@@ -2025,22 +2227,36 @@ def _load_history(limit: int = 0, offset: int = 0, tag: str = "") -> list[_Histo
             0 returns all entries (no cap).
         offset: Number of entries to skip before returning results.
         tag: When set, only entries carrying this tag are returned.
+        query: When set, a case-insensitive substring the task text
+            must contain.
+        running_task_ids: Tasks to put before completed history, including
+            tasks older than the first chronological page.
 
     Returns:
         List of history entry dicts with ``id``, ``timestamp``,
         ``task``, ``has_events``, ``result``, and ``chat_id`` keys.
     """
+    query_sql = ""
+    query_params: tuple[str, ...] = ()
+    if query:
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query_sql = "AND task LIKE ? ESCAPE '\\' "
+        query_params = (f"%{escaped}%",)
     with _rw_lock.read_lock():
         db = _get_db()
         effective_limit = limit if limit > 0 else -1
         tag_sql, tag_params = _tag_filter_sql(tag)
+        order_sql, order_params = _history_order_sql(running_task_ids)
         sql = (
             _HISTORY_SELECT
             + f"WHERE {_HISTORY_NOT_SUBAGENT} "
+            + query_sql
             + tag_sql
-            + "ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?"
+            + f"ORDER BY {order_sql} LIMIT ? OFFSET ?"
         )
-        rows = db.execute(sql, (*tag_params, effective_limit, offset)).fetchall()
+        rows = db.execute(
+            sql, (*query_params, *tag_params, *order_params, effective_limit, offset),
+        ).fetchall()
         return [_history_row_to_dict(r) for r in rows]
 
 
@@ -2316,17 +2532,9 @@ def _record_steer_input(text: str) -> None:
     db = _get_db()
     now = time.time()
     with _rw_lock.write_lock(), _immediate_txn(db):
-        existing = db.execute(
-            "SELECT 1 FROM steer_inputs WHERE text = ?", (text,),
-        ).fetchone()
-        if existing is None:
-            row = db.execute("SELECT COUNT(*) FROM steer_inputs").fetchone()
-            if row[0] >= _MAX_STEER_INPUTS:
-                db.execute(
-                    "DELETE FROM steer_inputs WHERE text = "
-                    "(SELECT text FROM steer_inputs "
-                    "ORDER BY timestamp ASC LIMIT 1)"
-                )
+        _evict_for_new_key(
+            db, "steer_inputs", "text", text, _MAX_STEER_INPUTS, "timestamp ASC",
+        )
         db.execute(
             "INSERT INTO steer_inputs (text, timestamp) VALUES (?, ?) "
             "ON CONFLICT(text) DO UPDATE SET timestamp = ?",
@@ -2334,8 +2542,43 @@ def _record_steer_input(text: str) -> None:
         )
 
 
+def _evict_for_new_key(
+    db: sqlite3.Connection, table: str, key_col: str, key: str, cap: int, evict_order: str,
+) -> None:
+    """Make room in a capped table for an upsert of *key*.
+
+    No-op when *key* already has a row (the upsert only refreshes it)
+    or the table is under *cap*; otherwise deletes the first row in
+    *evict_order*.  Runs inside the caller's ``BEGIN IMMEDIATE``
+    transaction: as separate autocommit statements, two PROCESSES
+    could both observe "cap not reached" and both insert, pushing the
+    table permanently over the cap.
+
+    Args:
+        db: The connection holding the write transaction.
+        table: Table name (a literal from this module).
+        key_col: The table's unique text column.
+        key: The value about to be upserted.
+        cap: Maximum number of rows the table may hold.
+        evict_order: ``ORDER BY`` clause selecting the row to evict first.
+    """
+    existing = db.execute(
+        f"SELECT 1 FROM {table} WHERE {key_col} = ?", (key,),
+    ).fetchone()
+    if existing is not None:
+        return
+    row = db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+    _race_delay()
+    if row[0] >= cap:
+        db.execute(
+            f"DELETE FROM {table} WHERE {key_col} = "
+            f"(SELECT {key_col} FROM {table} ORDER BY {evict_order} LIMIT 1)"
+        )
+
+
 def _search_history(
-    query: str, limit: int = 50, offset: int = 0, tag: str = ""
+    query: str, limit: int = 50, offset: int = 0, tag: str = "", *,
+    running_task_ids: set[str] | None = None,
 ) -> list[_HistoryEntry]:
     """Search history entries by substring match. Thread-safe.
 
@@ -2344,25 +2587,14 @@ def _search_history(
         limit: Maximum number of matching entries to return.
         offset: Number of entries to skip before returning results.
         tag: When set, only entries carrying this tag are returned.
+        running_task_ids: Matching tasks to put before completed history.
 
     Returns:
-        List of matching entries, most-recent-first.
+        List of matching entries, running first when requested, then newest first.
     """
-    if not query:
-        return _load_history(limit=limit, offset=offset, tag=tag)
-    with _rw_lock.read_lock():
-        db = _get_db()
-        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        tag_sql, tag_params = _tag_filter_sql(tag)
-        rows = db.execute(
-            _HISTORY_SELECT
-            + "WHERE task LIKE ? ESCAPE '\\' "
-            + f"AND {_HISTORY_NOT_SUBAGENT} "
-            + tag_sql
-            + "ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?",
-            (f"%{escaped}%", *tag_params, limit, offset),
-        ).fetchall()
-        return [_history_row_to_dict(r) for r in rows]
+    return _load_history(
+        limit=limit, offset=offset, tag=tag, query=query, running_task_ids=running_task_ids,
+    )
 
 
 def _resolve_task_id(
@@ -2970,18 +3202,37 @@ def _add_task_usage(
     _flush_chat_events(task_id)
     db = _get_db()
     with _rw_lock.write_lock(), _immediate_txn(db):
-        cursor = db.execute(
-            "UPDATE task_history SET tokens = COALESCE(tokens, 0) + ?, "
-            "cost = COALESCE(cost, 0.0) + ?, steps = COALESCE(steps, 0) + ? "
-            "WHERE id = ?",
-            (int(tokens), float(cost), int(steps), task_id),
-        )
-        if (cursor.rowcount or 0) == 0:
-            return None
-        row = db.execute(
-            "SELECT tokens, cost, steps FROM task_history WHERE id = ?",
-            (task_id,),
-        ).fetchone()
+        return _add_usage_locked(db, task_id, tokens, cost, steps)
+
+
+def _add_usage_locked(
+    db: sqlite3.Connection, task_id: str, tokens: int, cost: float, steps: int,
+) -> tuple[int, float, int] | None:
+    """Add spend to a row's ``tokens`` / ``cost`` / ``steps`` and return the new totals.
+
+    Args:
+        db: The connection holding the write transaction.
+        task_id: Primary key of the ``task_history`` row to update.
+        tokens: Tokens to add.
+        cost: USD to add.
+        steps: Steps to add.
+
+    Returns:
+        The row's new ``(tokens, cost, steps)``, or ``None`` when no
+        such row exists.
+    """
+    cursor = db.execute(
+        "UPDATE task_history SET tokens = COALESCE(tokens, 0) + ?, "
+        "cost = COALESCE(cost, 0.0) + ?, steps = COALESCE(steps, 0) + ? "
+        "WHERE id = ?",
+        (int(tokens), float(cost), int(steps), task_id),
+    )
+    if (cursor.rowcount or 0) == 0:
+        return None
+    row = db.execute(
+        "SELECT tokens, cost, steps FROM task_history WHERE id = ?",
+        (task_id,),
+    ).fetchone()
     return (_safe_int(row[0]), _safe_float(row[1]), _safe_int(row[2]))
 
 
@@ -3031,22 +3282,9 @@ def _add_late_task_usage(
                 return updated, ""
             if not _safe_int(row["end_ts"], 0):
                 return updated, current
-            db.execute(
-                "UPDATE task_history SET tokens = COALESCE(tokens, 0) + ?, "
-                "cost = COALESCE(cost, 0.0) + ?, steps = COALESCE(steps, 0) + ? "
-                "WHERE id = ?",
-                (int(tokens), float(cost), int(steps), current),
-            )
-            totals = db.execute(
-                "SELECT tokens, cost, steps FROM task_history WHERE id = ?",
-                (current,),
-            ).fetchone()
-            updated.append((
-                current,
-                _safe_int(totals[0]),
-                _safe_float(totals[1]),
-                _safe_int(totals[2]),
-            ))
+            totals = _add_usage_locked(db, current, tokens, cost, steps)
+            if totals is not None:  # pragma: no branch — row read just above
+                updated.append((current, *totals))
             current = _safe_str(row["parent_task_id"])
     return updated, ""
 
@@ -4050,6 +4288,15 @@ def _reserve_pending(task_id: str) -> None:
         _pending_by_task[task_id] = _pending_by_task.get(task_id, 0) + 1
 
 
+def _decrement_pending_locked(task_id: str) -> None:
+    """Drop one pending reservation of *task_id*; caller holds ``_pending_cond``."""
+    remaining = _pending_by_task.get(task_id, 0) - 1
+    if remaining > 0:
+        _pending_by_task[task_id] = remaining
+    else:
+        _pending_by_task.pop(task_id, None)
+
+
 def _unreserve_pending(task_id: str) -> None:
     """Roll back one :func:`_reserve_pending` whose item never reached the queue.
 
@@ -4057,11 +4304,7 @@ def _unreserve_pending(task_id: str) -> None:
     ``_event_queue.task_done()`` — nothing was enqueued.
     """
     with _pending_cond:
-        remaining = _pending_by_task.get(task_id, 0) - 1
-        if remaining > 0:
-            _pending_by_task[task_id] = remaining
-        else:
-            _pending_by_task.pop(task_id, None)
+        _decrement_pending_locked(task_id)
         _pending_cond.notify_all()
 
 
@@ -4069,11 +4312,7 @@ def _release_pending(batch: list[tuple[str, str, float, str]]) -> None:
     """Mark every event in *batch* as no longer pending and wake waiters."""
     with _pending_cond:
         for task_id, _ev, _ts, _origin in batch:
-            remaining = _pending_by_task.get(task_id, 0) - 1
-            if remaining > 0:
-                _pending_by_task[task_id] = remaining
-            else:
-                _pending_by_task.pop(task_id, None)
+            _decrement_pending_locked(task_id)
         _pending_cond.notify_all()
     for _ in batch:
         _event_queue.task_done()
@@ -4577,8 +4816,8 @@ def _load_subagent_rows_by_parent_task_id(
     layout.
 
     A sub-agent row is identified by its ``parent_task_id`` column
-    matching *parent_task_id* — the dedicated column written by
-    :meth:`ChatSorcarAgent._run_tasks_parallel`'s worker thread (the
+    matching *parent_task_id* — the dedicated column written for a
+    run submitted with ``parentTaskId`` (a ``run_agent`` sub-task; the
     ``extra`` payload's ``subagent`` object is synthesized back from
     this column by :func:`_row_to_extra_json`).
 
@@ -4644,26 +4883,15 @@ def _get_adjacent_task_by_chat_id(
             return None
         ts = row["timestamp"]
         cur_rowid = row["rowid"]
-
-        if direction == "prev":
-            adj = db.execute(
-                _HISTORY_SELECT
-                + "WHERE chat_id = ? "
-                "AND (timestamp < ? OR (timestamp = ? AND rowid < ?)) "
-                f"AND {_HISTORY_NOT_SUBAGENT} "
-                "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
-                (chat_id, ts, ts, cur_rowid),
-            ).fetchone()
-        else:
-            adj = db.execute(
-                _HISTORY_SELECT
-                + "WHERE chat_id = ? "
-                "AND (timestamp > ? OR (timestamp = ? AND rowid > ?)) "
-                f"AND {_HISTORY_NOT_SUBAGENT} "
-                "ORDER BY timestamp ASC, rowid ASC LIMIT 1",
-                (chat_id, ts, ts, cur_rowid),
-            ).fetchone()
-
+        cmp, order = ("<", "DESC") if direction == "prev" else (">", "ASC")
+        adj = db.execute(
+            _HISTORY_SELECT
+            + "WHERE chat_id = ? "
+            f"AND (timestamp {cmp} ? OR (timestamp = ? AND rowid {cmp} ?)) "
+            f"AND {_HISTORY_NOT_SUBAGENT} "
+            f"ORDER BY timestamp {order}, rowid {order} LIMIT 1",
+            (chat_id, ts, ts, cur_rowid),
+        ).fetchone()
         if not adj:
             return None
 
@@ -4679,8 +4907,8 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 
     Sub-agent rows (those with a non-empty ``parent_task_id`` column —
-    set by :class:`ChatSorcarAgent._run_tasks_parallel`
-    on every worker thread's task row) are filtered out via the shared
+    set on the task row of every run submitted with ``parentTaskId``,
+    a ``run_agent`` sub-task) are filtered out via the shared
     ``_HISTORY_NOT_SUBAGENT`` SQL predicate.  Sub-agent
     tasks/results are an internal implementation detail of the
     parent's ``run_parallel`` tool call; surfacing them in the chat
@@ -4901,11 +5129,7 @@ def _record_frequent_task(task: str) -> None:
     The table is capped at ``_MAX_FREQUENT_TASKS`` rows.  When inserting
     a brand-new task would exceed the cap, the row with the lowest
     ``count`` (and, on a count tie, the oldest ``timestamp``) is
-    evicted before the insert completes.  The whole probe → count →
-    evict → upsert sequence runs in one ``BEGIN IMMEDIATE``
-    transaction: as separate autocommit statements, two PROCESSES
-    could both observe "cap not reached" and both insert, pushing the
-    table permanently over the cap.
+    evicted before the insert completes (see :func:`_evict_for_new_key`).
 
     Args:
         task: The task description string.  Empty strings are ignored.
@@ -4915,18 +5139,10 @@ def _record_frequent_task(task: str) -> None:
     db = _get_db()
     now = time.time()
     with _rw_lock.write_lock(), _immediate_txn(db):
-        existing = db.execute(
-            "SELECT 1 FROM frequent_tasks WHERE task = ?", (task,),
-        ).fetchone()
-        if existing is None:
-            row = db.execute("SELECT COUNT(*) FROM frequent_tasks").fetchone()
-            _race_delay()
-            if row[0] >= _MAX_FREQUENT_TASKS:
-                db.execute(
-                    "DELETE FROM frequent_tasks WHERE task = "
-                    "(SELECT task FROM frequent_tasks "
-                    "ORDER BY count ASC, timestamp ASC LIMIT 1)"
-                )
+        _evict_for_new_key(
+            db, "frequent_tasks", "task", task, _MAX_FREQUENT_TASKS,
+            "count ASC, timestamp ASC",
+        )
         db.execute(
             "INSERT INTO frequent_tasks (task, count, timestamp) "
             "VALUES (?, 1, ?) "
@@ -4934,48 +5150,3 @@ def _record_frequent_task(task: str) -> None:
             "count = count + 1, timestamp = ?",
             (task, now, now),
         )
-
-
-def _delete_frequent_task(task: str) -> bool:
-    """Delete a row from the ``frequent_tasks`` table by task text.
-
-    Args:
-        task: The exact task description string identifying the row.
-
-    Returns:
-        True if a matching row existed and was deleted, False otherwise.
-    """
-    if not task:
-        return False
-    db = _get_db()
-    with _rw_lock.write_lock():
-        cursor = db.execute(
-            "DELETE FROM frequent_tasks WHERE task = ?", (task,)
-        )
-        return (cursor.rowcount or 0) > 0
-
-
-def _load_frequent_tasks(limit: int = 50) -> list[dict[str, object]]:
-    """Return the top *limit* most-frequent tasks (highest count first).
-
-    On a tie in ``count``, the more recently used task (larger
-    ``timestamp``) is returned first.
-
-    Args:
-        limit: Maximum number of rows to return.
-
-    Returns:
-        A list of dicts with keys ``task`` (str), ``count`` (int) and
-        ``timestamp`` (float), ordered by ``count`` descending.
-    """
-    with _rw_lock.read_lock():
-        db = _get_db()
-        rows = db.execute(
-            "SELECT task, count, timestamp FROM frequent_tasks "
-            "ORDER BY count DESC, timestamp DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [
-            {"task": r["task"], "count": r["count"], "timestamp": r["timestamp"]}
-            for r in rows
-        ]

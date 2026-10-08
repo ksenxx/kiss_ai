@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 import yaml
 
+from kiss.agents.seas.base.base_sea import ChannelSea
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.cron_agent import (
     SCHEDULE_TZ,
@@ -42,6 +43,7 @@ from kiss.agents.sorcar.cron_agent import (
     start_scheduler_thread,
     tick,
 )
+from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS
 from kiss.core.config import kiss_home
 
 
@@ -593,7 +595,7 @@ def test_prompt_job_runs_the_cron_prompt_sea(
     own loader to read the effective run settings.
     """
     from kiss.agents.sorcar import daemon_client
-    from kiss.agents.sorcar.agent_file import apply_agent_overrides
+    from kiss.agents.sorcar.sea_apply import apply_sea
 
     captured: list[dict[str, object]] = []
 
@@ -610,11 +612,13 @@ def test_prompt_job_runs_the_cron_prompt_sea(
         "id": "abcd1234", "name": "greeter", "prompt": "say 'hi'\n",
         "model_name": "some-model", "max_budget": 1.5,
     }
-    status, text = cron_agent._run_prompt_job(job, work_dir)
+    status, text = cron_agent._run_prompt_job(
+        job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS,
+    )
     assert (status, text) == ("ok", "hello")
     assert not list(work_dir.iterdir())
     sent = captured[0]
-    assert sent["extension_agent_path"] == str(cron_agent.PROMPT_SEA_PATH)
+    assert sent["sea_path"] == str(cron_agent.PROMPT_SEA_PATH)
     assert sent["prompt"] == cron_agent.PROMPT_PREAMBLE + "say 'hi'\n"
     assert sent["model"] == "some-model"
     assert sent["max_budget"] == 1.5
@@ -625,10 +629,10 @@ def test_prompt_job_runs_the_cron_prompt_sea(
     # Top-level task: no parent, so no reviewer sub-tree marking.
     assert sent["parent_task_id"] == ""
     cmd: dict[str, object] = {
-        "agentPath": str(cron_agent.PROMPT_SEA_PATH), "prompt": str(sent["prompt"]),
+        "seaPath": str(cron_agent.PROMPT_SEA_PATH), "prompt": str(sent["prompt"]),
         "classifyTasks": None,
     }
-    assert apply_agent_overrides(cmd) == {"classifyTasks"}
+    assert apply_sea(cmd) == {"classifyTasks"}
     assert cmd["prompt"] == cron_agent.PROMPT_PREAMBLE + "say 'hi'\n"
     assert cmd["classifyTasks"] is False
 
@@ -651,7 +655,9 @@ def test_prompt_job_defaults_and_silent_result(
     work_dir = tmp_path / "run"
     work_dir.mkdir()
     job = {"id": "abcd1234", "prompt": "say hi", "max_budget": 0}
-    assert cron_agent._run_prompt_job(job, work_dir) == ("silent", None)
+    assert cron_agent._run_prompt_job(
+        job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS,
+    ) == ("silent", None)
     assert captured[0]["max_budget"] is None
     assert captured[0]["model"] == ""
 
@@ -672,7 +678,7 @@ def test_prompt_job_text_survives_adversarial_text(
     name = 'bad """ name ' + "''' with \\ backslash"
     prompt = 'line1\n"""\n' + "'''\n\\n ünïcode \x00 {braces} #comment"
     job = {"id": "abcd1234", "name": name, "prompt": prompt, "model_name": name}
-    cron_agent._run_prompt_job(job, tmp_path)
+    cron_agent._run_prompt_job(job, tmp_path, tmp_path, cron_agent.PROMPT_TIMEOUT_SECONDS)
     assert captured[0]["prompt"] == cron_agent.PROMPT_PREAMBLE + prompt
     assert captured[0]["model"] == name
 
@@ -691,7 +697,9 @@ def test_prompt_job_marker_in_endpoint_path_is_not_a_timeout(
     work_dir = tmp_path / "run"
     work_dir.mkdir()
     job = {"id": "abcd1234", "name": "hi", "prompt": "say hi", "max_budget": 0}
-    status, text = cron_agent._run_prompt_job(job, work_dir)
+    status, text = cron_agent._run_prompt_job(
+        job, work_dir, work_dir, cron_agent.PROMPT_TIMEOUT_SECONDS,
+    )
     assert status == "error"
     assert text is not None and str(endpoint) in text
 
@@ -756,30 +764,29 @@ def test_cli_nothing_to_do(
 def test_agent_script_getters(tmp_path: Path) -> None:
     """The SEA contract used by ``run_agent(agent="cron", ...)``.
 
-    ``settings()`` picks the ``channel`` preset in ``~/.kiss/cron/work``,
+    The SEA is a ``ChannelSea`` in ``~/.kiss/cron/work``,
     so the resolved settings (what the dispatcher and the daemon read)
     turn the git lifecycle, classification and inheritance off; the
     cron guidance reaches the session through ``system_prompt()``
     (the daemon applies it as the run's system-prompt hook), not the task.
     """
-    from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
+    from kiss.agents.sorcar.sea_apply import CHANNEL_PREAMBLE, apply_sea
     from kiss.agents.sorcar.sea_commands import sea_settings
-    from kiss.agents.sorcar.sea_settings import kind_defaults
 
     work_dir = cron_agent.cron_work_dir()
     assert work_dir == str(tmp_path / "cron" / "work")
     assert Path(work_dir).is_dir()
     sea = cron_agent.CronAgentSea()
-    assert sea.settings({}) == {"kind": "channel", "work_dir": work_dir}
+    assert isinstance(sea, ChannelSea)
+    assert sea.settings({}) == {"work_dir": work_dir}
     resolved = sea_settings(Path(cron_agent.__file__))
-    # Every key the channel kind sets is implicitly locked
-    # (sea_settings.merge_settings): a call cannot give cron a worktree.
+    # A channel is a worker whose worker keys and work_dir are locked
+    # (CHANNEL_BEHAVIOURS "worker"): a call cannot give cron a worktree.
     assert resolved == {
-        "kind": "channel", **kind_defaults()["channel"],
-        "work_dir": work_dir, "locked": sorted(kind_defaults()["channel"]),
+        **WORKER_DEFAULTS,
+        "work_dir": work_dir, "locked": sorted({"work_dir", *WORKER_DEFAULTS}),
     }
-    assert resolved["kind"] == "channel"
-    assert resolved["kind"] == "channel"
+    assert "kind" not in resolved and "channel" not in resolved
     assert resolved["use_worktree"] is False
     assert resolved["auto_commit"] is False
     assert resolved["auto_classify"] is False
@@ -792,10 +799,10 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     # assembled prompt, the tools hook adds the cron tools to the run's
     # built-ins; the task prompt is untouched.
     cmd: dict[str, Any] = {
-        "agentPath": cron_agent.__file__, "prompt": "schedule it",
+        "seaPath": cron_agent.__file__, "prompt": "schedule it",
         "appendToSystemPrompt": "CALLER",
     }
-    overridden = apply_agent_overrides(cmd)
+    overridden = apply_sea(cmd)
     # The hooks are always staged, so only settings fields are reported.
     assert {"appendToSystemPrompt", "workDir", "useWorktree", "autoCommit"} <= overridden
     assert not {"systemPromptHook", "toolsHook", "prompt"} & overridden
@@ -938,8 +945,6 @@ def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
     monkeypatch.setattr(daemon_client, "run", capture_run)
     project = tmp_path / "project"
     project.mkdir()
-    scratch = tmp_path / "run"
-    scratch.mkdir()
     job = _create(cron_job(
         "create", name="nightly", prompt="run the tests", schedule="every 1d",
         model_name="some-model", work_dir=str(project), use_worktree=True,
@@ -949,15 +954,18 @@ def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
         str(project.resolve()), True, True,
     )
     assert job["timeout"] == 21600.0
-    stored = load_jobs()[0]
-    assert cron_agent._run_prompt_job(stored, scratch) == ("ok", "done")
+    # The full run path: _execute_job derives the run directory and
+    # timeout from the stored job and hands them to the dispatch.
+    cron_agent._execute_job(load_jobs()[0])
+    ran = load_jobs()[0]
+    assert (ran["last_status"], ran["last_summary"]) == ("ok", "done")
     sent = captured[0]
-    assert sent["extension_agent_path"] == str(cron_agent.PROMPT_SEA_PATH)
+    assert sent["sea_path"] == str(cron_agent.PROMPT_SEA_PATH)
     assert sent["record_timeout"] == 21600.0
     assert sent["work_dir"] == str(project.resolve())
     assert sent["use_worktree"] is True
     assert sent["auto_commit"] is True
-    assert sent["classify_tasks"] is None  # pinned off by the SEA on the daemon
+    assert sent["auto_classify"] is None  # pinned off by the SEA on the daemon
     assert sent["model"] == "some-model"
 
 

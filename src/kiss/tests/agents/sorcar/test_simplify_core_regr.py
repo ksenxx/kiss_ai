@@ -7,8 +7,8 @@
 
 Split out of ``tests/core/test_simplify_core_regr.py``: these methods
 exercise ``kiss.agents.sorcar.relentless_agent`` for real (its ``finish``
-output through the core ConsolePrinter's result panel, ``_str_to_bool``,
-and ``RelentlessAgent._docker_bash``), so they belong in
+output through the core ConsolePrinter's result panel, ``coerce_bool``,
+and ``SorcarAgent._docker_bash``), so they belong in
 ``tests/agents/sorcar`` per the placement invariants.  The shared
 ``_make_printer`` helper stays in the lower-layer core file and is
 imported from there.  Uses only real objects (no mocks/patches/fakes).
@@ -19,8 +19,9 @@ from typing import Any, cast
 
 import yaml
 
-from kiss.agents.sorcar.relentless_agent import RelentlessAgent, _str_to_bool
 from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.utils import coerce_bool
 from kiss.tests.core.test_simplify_core_regr import _make_printer
 
 
@@ -65,11 +66,11 @@ class ConsolePrinterRegression(unittest.TestCase):
 
 
 class RelentlessRegression(unittest.TestCase):
-    def test_str_to_bool(self) -> None:
+    def test_coerce_bool(self) -> None:
         for v in ("true", "TRUE", "1", "yes", True):
-            self.assertTrue(_str_to_bool(v))
+            self.assertTrue(coerce_bool(v))
         for v in ("false", "0", "no", "", False):
-            self.assertFalse(_str_to_bool(v))
+            self.assertFalse(coerce_bool(v))
 
     def test_finish_yaml_shape(self) -> None:
         data = yaml.safe_load(
@@ -82,7 +83,7 @@ class RelentlessRegression(unittest.TestCase):
     def test_docker_bash_without_manager_raises(self) -> None:
         from kiss.core.kiss_error import KISSError
 
-        agent = RelentlessAgent("regr docker")
+        agent = SorcarAgent("regr docker")
         agent.docker_manager = None
         with self.assertRaises(KISSError):
             agent._docker_bash("echo hi", "desc")

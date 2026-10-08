@@ -23,9 +23,13 @@
 // uses execFileSync (no shell): execSync's shell layer meant a timeout
 // killed only the shell and ORPHANED the underlying probe.
 //
+// Both probes now share kissPaths.commandExists (DependencyInstaller
+// uses it too), so one constant, WHICH_TIMEOUT_MS, bounds every
+// synchronous `which`.
+//
 // A real 5s wait per probe is not acceptable in the suite, so the
-// compiled modules are copied to a temp dir with the two constants
-// lowered (each copy asserts its substitution matched, so a rename
+// compiled modules are copied to a temp dir with that constant
+// lowered (the copy asserts its substitution matched, so a rename
 // fails loudly).  The probes then run in a CHILD process against a PATH
 // whose only `which` IGNORES SIGTERM, records its PID, and sleeps far
 // past the watchdog; the parent's watchdog is the proof: before the fix
@@ -72,15 +76,6 @@ for (const f of fs.readdirSync(OUT_DIR)) {
         'did the `which uv` probe lose its timeout?',
     );
     src = src.replace(needle, `const WHICH_TIMEOUT_MS = ${SHORT_TIMEOUT_MS};`);
-  }
-  if (f === 'voiceAckPlayer.js') {
-    const needle = 'const PROBE_TIMEOUT_MS = 5_000;';
-    assert.ok(
-      src.includes(needle),
-      'voiceAckPlayer.js no longer defines PROBE_TIMEOUT_MS as expected — ' +
-        'did the player probe lose its timeout?',
-    );
-    src = src.replace(needle, `const PROBE_TIMEOUT_MS = ${SHORT_TIMEOUT_MS};`);
   }
   fs.writeFileSync(path.join(outCopy, f), src);
 }

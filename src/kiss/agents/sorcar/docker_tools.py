@@ -56,7 +56,7 @@ class DockerTools:
     """File tools that execute inside a Docker container via bash.
 
     Each method generates a shell command and executes it via the provided
-    bash function (typically DockerManager.Bash or RelentlessAgent._docker_bash).
+    bash function (typically DockerManager.Bash or SorcarAgent._docker_bash).
     """
 
     def __init__(self, bash_fn: Callable[[str, str], str]) -> None:
@@ -102,7 +102,7 @@ class DockerTools:
             f'if [ "$TOTAL" -eq 0 ]; then echo "(file is empty)"; exit 0; fi\n'
             f'START={start_line}\n'
             f'MAX={max_lines}\n'
-            f'if [ "$START" -gt "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then\n'
+            f'if [ "$START" -gt "$TOTAL" ]; then\n'
             f'  echo "Error: start_line=$START is past EOF (file has $TOTAL lines)."\n'
             f'  exit 0\n'
             f'fi\n'
@@ -176,10 +176,14 @@ class DockerTools:
             f"new = base64.b64decode('{b64_new}').decode()\n"
             f"path = sys.argv[1]\n"
             f"try:\n"
-            f"    content = open(path, encoding='utf-8').read()\n"
+            f"    content = open(path, encoding='utf-8', newline='').read()\n"
             f"except FileNotFoundError:\n"
             f"    print(f'Error: File not found: {{path}}'); sys.exit(1)\n"
             f"count = content.count(old)\n"
+            f"if count == 0 and '\\r\\n' in content and '\\r\\n' not in old:\n"
+            f"    old = old.replace('\\n', '\\r\\n')\n"
+            f"    new = new.replace('\\r\\n', '\\n').replace('\\n', '\\r\\n')\n"
+            f"    count = content.count(old)\n"
             f"if count == 0:\n"
             f"    print('Error: String not found in file'); sys.exit(1)\n"
             f"ra = {ra}\n"
@@ -187,7 +191,7 @@ class DockerTools:
             f"    print(f'Error: String appears {{count}} times (not unique). "
             f"Use replace_all=True to replace all occurrences.'); sys.exit(1)\n"
             f"new_content = content.replace(old, new) if ra else content.replace(old, new, 1)\n"
-            f"open(path, 'w', encoding='utf-8').write(new_content)\n"
+            f"open(path, 'w', encoding='utf-8', newline='').write(new_content)\n"
             f"replaced = count if ra else 1\n"
             f"print(f'Successfully replaced {{replaced}} occurrence(s) in {{path}}')\n"
             f'" {path}'

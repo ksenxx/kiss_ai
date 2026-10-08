@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for what a path-mode ``run_agent`` sub-task inherits.
 
-A ``run_agent`` call that names an agent-script path works on the calling
+A ``run_agent`` call that names an SEA path works on the calling
 task's project, so the arguments the call leaves empty are filled from the
 calling agent the way a ``run_parallel`` child's are
 (:func:`kiss.agents.sorcar.agent_dispatch.inherit_from_parent`): model,
@@ -38,9 +38,9 @@ import yaml
 
 from kiss.agents.sorcar import agent_dispatch, cron_agent, daemon_client
 from kiss.agents.sorcar.agent_dispatch import RunOptions, dispatch_result, make_run_agent_tool
-from kiss.agents.sorcar.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cron_agent import UNATTENDED_CHILD_PREAMBLE, unattended_child_suffix
+from kiss.agents.sorcar.sea_apply import CHANNEL_PREAMBLE, apply_sea
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
@@ -205,7 +205,7 @@ class Sea(BaseSea):
         # The daemon applies the script to the command exactly as sent;
         # ``prompt()`` changed the task so ``prompt`` is reported, the
         # system-prompt hook is staged but never listed.
-        assert apply_agent_overrides(cmd) == {"prompt"}
+        assert apply_sea(cmd) == {"prompt"}
         assert cmd["systemPrompt"] == PARENT_BASE_PROMPT
         assert cmd["appendToSystemPrompt"] == PARENT_SUFFIX
         # The run assembles ``systemPrompt + appendToSystemPrompt`` and
@@ -290,11 +290,11 @@ class Sea(BaseSea):
 """,
             "worker": (
                 """
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 
-class Sea(BaseSea):
+class Sea(WorkerSea):
     def settings(self, settings):
-        return settings | {'kind': 'worker', 'model': 'claude-sonnet-4-5'}
+        return settings | {'model': 'claude-sonnet-4-5'}
 """
             ),
             # The SEA class defined under a condition the script evaluates
@@ -407,29 +407,29 @@ class Sea(BaseSea):
             # A file that does not even compile "failed to import";
             # one that runs but misdeclares its settings names the
             # settings() problem.  The diagnostic names the script by
-            # its canonical path (``resolve_agent_path``), which on
+            # its canonical path (``resolve_sea_path``), which on
             # macOS differs from the ``/var`` spelling of ``tmp_path``, and
             # quotes it with ``!r`` (doubled backslashes on Windows).
             canonical = str(script.resolve())
             if label == "unparsable":
-                expected = f"Error: agent script {canonical!r} failed to import"
+                expected = f"Error: SEA {canonical!r} failed to import"
             elif label == "no_class":
                 expected = (
-                    f"Error: agent script {canonical!r} must define exactly one subclass "
+                    f"Error: SEA {canonical!r} must define exactly one subclass "
                     "of BaseSea (kiss.agents.seas.base.base_sea); found none"
                 )
             elif label == "async":
                 expected = (
-                    f"Error: settings() of agent script {canonical!r} must return a dict, "
+                    f"Error: settings() of SEA {canonical!r} must return a dict, "
                     "got coroutine"
                 )
             elif label == "raising":
                 expected = (
-                    f"Error: settings() of agent script {canonical!r} raised: "
+                    f"Error: settings() of SEA {canonical!r} raised: "
                     "RuntimeError: boom"
                 )
             else:
-                expected = f"Error: agent script {canonical!r}: settings()"
+                expected = f"Error: SEA {canonical!r}: settings()"
             assert text.startswith(expected), (label, text)
             assert len(daemon.run_commands) == dispatched, label
         # ``dispatch_result`` itself: the ``settings`` argument decides.
@@ -437,7 +437,7 @@ class Sea(BaseSea):
         assert _sent(daemon)["modelConfig"] == PARENT_CONFIG
         result = dispatch_result(
             "sorcar_sea", "say hi", DUMMY_SEA, str(env.repo), "", None, 30.0,
-            parent_agent=parent, inherit=True, settings={"kind": "session", "model": "x"},
+            parent_agent=parent, inherit=True, settings={"model": "x"},
         )
         assert isinstance(result, daemon_client.TaskResult), result
         assert _sent(daemon)["modelConfig"] is None
@@ -554,7 +554,7 @@ class Sea(BaseSea):
         to the system prompt), in the shared ``channel_work`` scratch
         directory.  Worktree and auto-commit follow the persisted
         settings on the wire, not the parent's run, and the module's
-        ``channel`` preset pins both off on the daemon.
+        ``ChannelSea`` base pins both off on the daemon.
         """
         from kiss.agents.third_party_agents.slack import slack_sea
 
@@ -565,7 +565,7 @@ class Sea(BaseSea):
         assert yaml.safe_load(text)["success"] is True, text
         (call,) = daemon.run_commands
         assert call["prompt"] == "list channels"
-        assert call["agentPath"] == slack_sea.__file__
+        assert call["seaPath"] == slack_sea.__file__
         assert call["workDir"] == str(env.kiss_home / "channel_work")
         assert call["tabScopeWorkDir"] == str(env.repo)
         assert call["model"] == ""
@@ -584,7 +584,7 @@ class Sea(BaseSea):
         assert call["autoCommit"] is True
         # The daemon applies the channel script to the command as sent.
         cmd = dict(call)
-        apply_agent_overrides(cmd)
+        apply_sea(cmd)
         assert cmd["useWorktree"] is False
         assert cmd["autoCommit"] is False
         assert cmd["appendToSystemPrompt"] == CHANNEL_PREAMBLE.format(name="slack")

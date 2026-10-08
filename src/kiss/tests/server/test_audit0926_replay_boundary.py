@@ -327,7 +327,7 @@ class TestReplayBoundary(TabMirroringBase):
                 "useWorktree": False,
                 "isParallel": False,
                 "autoCommit": False,
-                "agentPath": str(script),
+                "seaPath": str(script),
             })
         finally:
             threading.settrace(None)  # type: ignore[arg-type]

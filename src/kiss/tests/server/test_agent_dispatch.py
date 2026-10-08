@@ -7,7 +7,7 @@
 
 Moved here because their full dependency closure touches only
 kiss.agents.sorcar (the cron agent module) and kiss.server (the
-daemon's ``apply_agent_overrides`` agent-file loader) — unlike the
+daemon's ``apply_sea`` agent-file loader) — unlike the
 rest of the dispatch suite, they never create a ``run_agent`` tool or
 resolve a channel, so the third-party package is not involved.
 """
@@ -21,22 +21,26 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import cron_agent
-from kiss.agents.sorcar.agent_file import (
+from kiss.agents.sorcar.sea_apply import (
     CHANNEL_PREAMBLE,
     NO_TOOLS_PROFILE,
-    AgentFileError,
-    apply_agent_overrides,
+    apply_sea,
     channel_workspace,
     load_layers,
 )
-from kiss.agents.sorcar.sea_commands import SeaScriptError
-from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, kind_defaults
+from kiss.agents.sorcar.sea_settings import (
+    WORKER_DEFAULTS,
+    SeaError,
+    base_class_defaults,
+    channel_work_dir,
+)
 from kiss.core.config import kiss_home
+from kiss.core.tool_verdict import ALLOW
 
 
 def test_cron_agent_module_is_a_valid_agent_script() -> None:
     # The contract the cron dispatch relies on: the cron module is a
-    # ``channel``-kind SEA whose ``settings()`` moves the session to
+    # ``ChannelSea`` whose ``settings()`` moves the session to
     # ~/.kiss/cron/work with no git lifecycle, whose ``tools()`` adds
     # the cron_job and gateway_command tools ON TOP of the tools the run
     # has (no tool profile is staged, so the daemon keeps the basics),
@@ -46,13 +50,13 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
     # on every run (``BaseSea`` roots the chain), so only the settings
     # wire fields are reported as overridden.
     sea = cron_agent.CronAgentSea()
-    assert sea.settings({}) == {"kind": "channel", "work_dir": cron_agent.cron_work_dir()}
+    assert sea.settings({}) == {"work_dir": cron_agent.cron_work_dir()}
     assert sea.system_prompt("BASE") == "BASE\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
-    cmd: dict[str, Any] = {"agentPath": cron_agent.__file__, "appendToSystemPrompt": "CALLER"}
-    overridden = apply_agent_overrides(cmd)
+    cmd: dict[str, Any] = {"seaPath": cron_agent.__file__, "appendToSystemPrompt": "CALLER"}
+    overridden = apply_sea(cmd)
     assert overridden == {
         "appendToSystemPrompt", "workDir",
-        "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
+        "useWorktree", "autoCommit", "classifyTasks", "useWebTools", "useMemory",
     }
     # The workspace a channel run holds is decided from the settings
     # alone (entered by the task runner before the tools are built).
@@ -70,13 +74,15 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
     assert cmd["workDir"] == cron_agent.cron_work_dir()
     for key, value in WORKER_DEFAULTS.items():
         assert value is False, key
-    assert kind_defaults()["channel"] == {
-        **WORKER_DEFAULTS, "work_dir": str(kiss_home() / "channel_work"),
+    assert base_class_defaults() == {
+        "BaseSea": {},
+        "WorkerSea": WORKER_DEFAULTS,
+        "ChannelSea": {**WORKER_DEFAULTS, "work_dir": channel_work_dir()},
     }
+    assert channel_work_dir() == str(kiss_home() / "channel_work")
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
     assert cmd["classifyTasks"] is False
-    assert cmd["isParallel"] is False
     assert cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
     assert cmd["appendToSystemPrompt"] == (
@@ -133,8 +139,8 @@ class Sea(BaseSea):
     def tools(self, tools):
         return tools + [_hello]
 """)
-    cmd: dict[str, Any] = {"agentPath": str(script), "toolProfile": "full"}
-    assert apply_agent_overrides(cmd) == {"toolProfile"}
+    cmd: dict[str, Any] = {"seaPath": str(script), "toolProfile": "full"}
+    assert apply_sea(cmd) == {"toolProfile"}
     staged = cmd["toolsHook"]([])
     assert [t.__name__ for t in staged] == ["_hello"]
     assert staged[0]() == "hello"
@@ -158,8 +164,8 @@ class Sea(BaseSea):
     def tools(self, tools):
         return tools + [_hello]
 """)
-    cmd: dict[str, Any] = {"agentPath": str(script), "toolProfile": "review"}
-    assert apply_agent_overrides(cmd) == set()
+    cmd: dict[str, Any] = {"seaPath": str(script), "toolProfile": "review"}
+    assert apply_sea(cmd) == set()
     assert [t.__name__ for t in cmd["toolsHook"]([print])] == ["print", "_hello"]
     assert cmd["toolProfile"] == "review"
     assert "tools" not in cmd
@@ -182,9 +188,9 @@ class Sea(BaseSea):
         return tools + [_hello]
 """)
     cmd: dict[str, Any] = {
-        "agentPath": str(script), "toolsHook": "/client/tools.py", "appendBasicTools": False,
+        "seaPath": str(script), "toolsHook": "/client/tools.py", "appendBasicTools": False,
     }
-    assert apply_agent_overrides(cmd) == set()
+    assert apply_sea(cmd) == set()
     assert [t.__name__ for t in cmd["toolsHook"]([])] == ["_hello"]
     assert cmd["appendBasicTools"] is False
     assert "toolProfile" not in cmd
@@ -204,12 +210,12 @@ class Sea(BaseSea):
     def tools(self, tools):
         return 42
 """)
-    cmd: dict[str, Any] = {"agentPath": str(script)}
-    assert apply_agent_overrides(cmd) == set()
+    cmd: dict[str, Any] = {"seaPath": str(script)}
+    assert apply_sea(cmd) == set()
     with pytest.raises(
-        SeaScriptError,
+        SeaError,
         match=(
-            r"tools\(\) of agent script '.*bad_tools_agent\.py' must return "
+            r"tools\(\) of SEA '.*bad_tools_agent\.py' must return "
             r"a list of tool callables \(not a file path\), got int"
         ),
     ):
@@ -231,16 +237,16 @@ def test_agent_script_tools_rejects_paths_tuples_and_non_callables(
         ),
         ("        return [1]\n", "list of tool callables.*got list"),
         ("        return tuple(tools)\n", "list of tool callables.*got tuple"),
-        ("        return tools + 42\n", r"tools\(\) of agent script .* raised: "),
+        ("        return tools + 42\n", r"tools\(\) of SEA .* raised: "),
     ):
         script = tmp_path / "bad_tools_agent.py"
         script.write_text(
             "from kiss.agents.seas.base.base_sea import BaseSea\n\n"
             f"class Sea(BaseSea):\n    def tools(self, tools):\n{body}"
         )
-        cmd: dict[str, Any] = {"agentPath": str(script), "appendBasicTools": True}
-        assert apply_agent_overrides(cmd) == set()
-        with pytest.raises(SeaScriptError, match=message):
+        cmd: dict[str, Any] = {"seaPath": str(script), "appendBasicTools": True}
+        assert apply_sea(cmd) == set()
+        with pytest.raises(SeaError, match=message):
             cmd["toolsHook"]([])
         assert "tools" not in cmd
         assert cmd["appendBasicTools"] is True
@@ -257,8 +263,8 @@ def test_module_level_functions_are_not_sea_methods(tmp_path: Path) -> None:
         "def scope_work_dir():\n    return 7\n\n"
         "def if_append_basic_tools():\n    return False\n"
     )
-    cmd = {"agentPath": str(script), "tabScopeWorkDir": "kept", "appendBasicTools": True}
-    assert apply_agent_overrides(cmd) == set()
+    cmd = {"seaPath": str(script), "tabScopeWorkDir": "kept", "appendBasicTools": True}
+    assert apply_sea(cmd) == set()
     assert cmd["tabScopeWorkDir"] == "kept"
     assert cmd["appendBasicTools"] is True
 
@@ -268,13 +274,13 @@ def test_file_without_a_sea_class_is_rejected(tmp_path: Path) -> None:
     # not a SEA: the loader wants exactly one BaseSea subclass.
     script = tmp_path / "getters_only_agent.py"
     script.write_text("def settings():\n    return {}\n\ndef add_to_tools():\n    return []\n")
-    cmd: dict[str, Any] = {"agentPath": str(script), "appendBasicTools": True}
+    cmd: dict[str, Any] = {"seaPath": str(script), "appendBasicTools": True}
     with pytest.raises(
-        AgentFileError,
+        SeaError,
         match=r"must define exactly one subclass of BaseSea .*; found none",
     ):
-        apply_agent_overrides(cmd)
-    assert cmd == {"agentPath": str(script), "appendBasicTools": True}
+        apply_sea(cmd)
+    assert cmd == {"seaPath": str(script), "appendBasicTools": True}
 
 
 def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) -> None:
@@ -323,30 +329,28 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
             return "soon"
     """))
     cmd: dict[str, Any] = {
-        "agentPath": str(script),
+        "seaPath": str(script),
         "model": "kept-model",
         "useMemory": True,
-        "isParallel": True,
         "useWebTools": None,
         "classifyTasks": False,
         "appendToSystemPrompt": "CALLER",
     }
-    assert apply_agent_overrides(cmd) == set()
+    assert apply_sea(cmd) == set()
     # The only writes are the provenance record of a script that
     # replaced nothing and the four hook callables every run gets,
     # all of them ``BaseSea``'s identities here.
     assert cmd.pop("_runConfig") == {
-        "sea": "old_contract_agent", "kind": "session", "pinned": {},
+        "sea": "old_contract_agent", "channel": False, "pinned": {},
     }
     assert cmd.pop("systemPromptHook")("BASE") == "BASE"
     assert cmd.pop("toolsHook")([_hello]) == [_hello]
     assert cmd.pop("llmCallHook")([1, 2]) == [1, 2]
-    assert cmd.pop("toolCallHook")("Bash", {"command": "ls"}) == "OK"
+    assert cmd.pop("toolCallHook")("Bash", {"command": "ls"}) == ALLOW
     assert cmd == {
-        "agentPath": str(script),
+        "seaPath": str(script),
         "model": "kept-model",
         "useMemory": True,
-        "isParallel": True,
         "useWebTools": None,
         "classifyTasks": False,
         "appendToSystemPrompt": "CALLER",
@@ -354,9 +358,9 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
 
 
 def test_settings_keys_override_their_wire_fields(tmp_path: Path) -> None:
-    # ``use_web_tools``, ``auto_classify`` and ``allow_fan_out`` are
-    # ``settings()`` keys: each is written over its wire field on the
-    # run command, whatever the caller sent there.
+    # ``use_web_tools`` and ``auto_classify`` are ``settings()`` keys:
+    # each is written over its wire field on the run command, whatever
+    # the caller sent there.
     script = tmp_path / "settings_agent.py"
     script.write_text(textwrap.dedent("""
         from kiss.agents.seas.base.base_sea import BaseSea
@@ -366,22 +370,19 @@ def test_settings_keys_override_their_wire_fields(tmp_path: Path) -> None:
                 return settings | {
                     "use_web_tools": False,
                     "auto_classify": True,
-                    "allow_fan_out": False,
                 }
 
 
     """))
     cmd = {
-        "agentPath": str(script),
+        "seaPath": str(script),
         "useWebTools": None,
         "classifyTasks": None,
-        "isParallel": True,
     }
-    overridden = apply_agent_overrides(cmd)
-    assert overridden == {"useWebTools", "classifyTasks", "isParallel"}
+    overridden = apply_sea(cmd)
+    assert overridden == {"useWebTools", "classifyTasks"}
     assert cmd["useWebTools"] is False
     assert cmd["classifyTasks"] is True
-    assert cmd["isParallel"] is False
 
 
 def test_web_and_classify_settings_accept_none(tmp_path: Path) -> None:
@@ -398,49 +399,34 @@ class Sea(BaseSea):
         return settings | {'use_web_tools': None, 'auto_classify': None}
 """
     )
-    cmd = {"agentPath": str(script), "useWebTools": True, "classifyTasks": False}
-    assert apply_agent_overrides(cmd) == set()
+    cmd = {"seaPath": str(script), "useWebTools": True, "classifyTasks": False}
+    assert apply_sea(cmd) == set()
     assert cmd["useWebTools"] is True
     assert cmd["classifyTasks"] is False
 
 
-def test_is_parallel_setting_accepts_none(tmp_path: Path) -> None:
-    # ``None`` is "no override" for EVERY settings key, ``is_parallel``
-    # included: the caller's ``isParallel`` stands and nothing is
-    # reported as overridden.  (A non-bool, non-None value is still
-    # rejected: see the type-check tests below.)
-    script = tmp_path / "none_parallel_agent.py"
+def test_allow_fan_out_setting_is_refused(tmp_path: Path) -> None:
+    # ``run_parallel`` is N ``run_agent`` calls, so ``allow_fan_out`` is
+    # a removed key: the script fails to load, whatever the value, and
+    # the caller's wire fields stand.
+    script = tmp_path / "fan_out_agent.py"
     script.write_text("""
 from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {'allow_fan_out': None}
+        return settings | {'allow_fan_out': False}
 """)
-    cmd = {"agentPath": str(script), "isParallel": True}
-    assert apply_agent_overrides(cmd) == set()
-    assert cmd["isParallel"] is True
-
-
-def test_is_parallel_setting_rejects_non_bool(tmp_path: Path) -> None:
-    script = tmp_path / "bad_parallel_agent.py"
-    script.write_text("""
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'allow_fan_out': 'no'}
-""")
-    cmd = {"agentPath": str(script), "isParallel": True}
+    cmd = {"seaPath": str(script), "useWebTools": True}
     with pytest.raises(
-        AgentFileError,
+        SeaError,
         match=(
-            r"agent script '.*bad_parallel_agent\.py': "
-            r"settings\(\)\['allow_fan_out'\] must be bool, got str"
+            r"SEA '.*fan_out_agent\.py': settings\(\) key 'allow_fan_out' was removed: "
+            r"`run_parallel` is N `run_agent` calls"
         ),
     ):
-        apply_agent_overrides(cmd)
-    assert cmd["isParallel"] is True, "a broken setting must not override"
+        apply_sea(cmd)
+    assert cmd["useWebTools"] is True, "a refused script must not override"
 
 
 def test_use_web_tools_setting_rejects_non_bool(tmp_path: Path) -> None:
@@ -452,11 +438,11 @@ class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'use_web_tools': 'yes'}
 """)
-    cmd = {"agentPath": str(script), "useWebTools": None}
+    cmd = {"seaPath": str(script), "useWebTools": None}
     with pytest.raises(
-        AgentFileError, match=r"settings\(\)\['use_web_tools'\] must be bool, got str",
+        SeaError, match=r"settings\(\)\['use_web_tools'\] must be bool, got str",
     ):
-        apply_agent_overrides(cmd)
+        apply_sea(cmd)
     assert cmd["useWebTools"] is None
 
 
@@ -469,11 +455,11 @@ class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'auto_classify': 1}
 """)
-    cmd = {"agentPath": str(script), "classifyTasks": None}
+    cmd = {"seaPath": str(script), "classifyTasks": None}
     with pytest.raises(
-        AgentFileError, match=r"settings\(\)\['auto_classify'\] must be bool, got int",
+        SeaError, match=r"settings\(\)\['auto_classify'\] must be bool, got int",
     ):
-        apply_agent_overrides(cmd)
+        apply_sea(cmd)
     assert cmd["classifyTasks"] is None
 
 
@@ -488,8 +474,8 @@ class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'use_memory': False}
 """)
-    cmd = {"agentPath": str(script), "useMemory": True}
-    assert apply_agent_overrides(cmd) == {"useMemory"}
+    cmd = {"seaPath": str(script), "useMemory": True}
+    assert apply_sea(cmd) == {"useMemory"}
     assert cmd["useMemory"] is False
 
 
@@ -504,8 +490,8 @@ class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'use_memory': None}
 """)
-    cmd = {"agentPath": str(script), "useMemory": True}
-    assert apply_agent_overrides(cmd) == set()
+    cmd = {"seaPath": str(script), "useMemory": True}
+    assert apply_sea(cmd) == set()
     assert cmd["useMemory"] is True
 
 
@@ -518,9 +504,9 @@ class Sea(BaseSea):
     def settings(self, settings):
         return settings | {'use_memory': 1}
 """)
-    cmd = {"agentPath": str(script), "useMemory": None}
+    cmd = {"seaPath": str(script), "useMemory": None}
     with pytest.raises(
-        AgentFileError, match=r"settings\(\)\['use_memory'\] must be bool, got int",
+        SeaError, match=r"settings\(\)\['use_memory'\] must be bool, got int",
     ):
-        apply_agent_overrides(cmd)
+        apply_sea(cmd)
     assert cmd["useMemory"] is None, "a broken setting must not override"

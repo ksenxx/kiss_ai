@@ -123,7 +123,15 @@ def _wait_until(predicate: Any, timeout: float = 10.0) -> None:
 
 
 class TestTaskUpdateRunner(unittest.TestCase):
-    """The lazy schedule behind the panel's poll."""
+    """The lazy schedule behind the panel's poll.
+
+    Not covered: ``poll`` marks an update ``running`` only after its
+    worker thread has started, so a ``Thread.start()`` that raises
+    (``RuntimeError: can't start new thread`` under thread exhaustion)
+    cannot pin the update on "running" for good.  That branch needs the
+    interpreter to fail creating a thread, which no end-to-end test can
+    provoke without a test double.
+    """
 
     def test_first_run_waits_a_minute_after_the_task_started(self) -> None:
         """A young task is not asked about yet; the panel learns when it will be."""

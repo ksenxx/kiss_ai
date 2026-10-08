@@ -94,12 +94,13 @@ function sendModels(win, selected) {
   send(win, {type: 'models', models: MODEL_LIST, selected: selected});
 }
 
+// The Chats-panel pick: chat tabs have no row of their own any more.
 function clickTab(win, tabId) {
-  const el = win.document.querySelector(
-    `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  assert.ok(
+    win._testApi.openTabs().some(t => t.id === tabId),
+    `tab ${tabId} must be open`,
   );
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  win._testApi.switchToTab(tabId);
 }
 
 /** Open a second chat tab; returns both ids with `second` on screen. */

@@ -19,6 +19,10 @@ from pathlib import Path
 import pytest
 
 import kiss.agents.third_party_agents.slack.slack_sea as slack_agent_mod
+from kiss.tests.agents.third_party_agents.composio_test_utils import (
+    FakeComposioServer,
+    start_fake_composio,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -44,6 +48,12 @@ def isolated_kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "kiss_home"
     monkeypatch.setenv("KISS_HOME", str(home))
     return home
+
+
+@pytest.fixture
+def composio(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeComposioServer]:
+    """Run the local Composio API emulator and point the Composio SDK at it."""
+    yield from start_fake_composio(monkeypatch)
 
 
 @pytest.fixture
@@ -75,9 +85,7 @@ def refusing_port() -> Iterator[int]:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_slack_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Path:
+def _isolated_slack_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect Slack token storage to a per-test temporary directory.
 
     ``slack_sea._slack_dir()`` resolves ``$KISS_HOME`` lazily, which already

@@ -19,10 +19,7 @@ BROWSER_PROFILE = str(Path.home() / ".kiss" / "browser_profile")
 
 
 def main() -> None:
-    web = WebUseTool(
-        browser_type="chromium",
-        user_data_dir=BROWSER_PROFILE,
-    )
+    web = WebUseTool(user_data_dir=BROWSER_PROFILE)
     query = "Python programming language"
 
     try:

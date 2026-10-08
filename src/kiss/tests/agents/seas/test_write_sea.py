@@ -26,8 +26,9 @@ from kiss.agents.seas.write import write_sea
 from kiss.agents.seas.write.write_sea import WriteSea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.agent_dispatch import resolve_timeout
-from kiss.agents.sorcar.agent_file import apply_agent_overrides
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sea_apply import apply_sea
+from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
 
@@ -82,7 +83,7 @@ def test_slash_write_resolves_to_the_bundled_sea() -> None:
     assert WriteSea().settings({}) == {"timeout": write_sea.DISPATCH_TIMEOUT_SECONDS}
     assert write_sea.DISPATCH_TIMEOUT_SECONDS == 3600
     settings = sea_commands.sea_settings(path)
-    assert settings == {"kind": "session", "timeout": 3600.0}
+    assert settings == {"timeout": 3600.0}
     assert resolve_timeout(None, settings) == 3600.0
     assert resolve_timeout(120.0, settings) == 120.0
     # The timeout lives in ``settings()`` alone: no removed getter
@@ -96,10 +97,10 @@ def test_loader_stages_the_protocol_as_a_system_prompt_hook() -> None:
     The caller's ``appendToSystemPrompt`` is not the SEA's business: the
     hook receives the assembled prompt (default + suffix) and appends.
     """
-    cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER"}
+    cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER"}
     # The SEA pins no setting and has no ``prompt``: nothing is reported as
     # overridden (the four hooks are written on every run, not listed).
-    assert apply_agent_overrides(cmd) == set()
+    assert apply_sea(cmd) == set()
     assert cmd["appendToSystemPrompt"] == "CALLER"
     hook = cmd["systemPromptHook"]
     assert hook("BASE\n\nCALLER") == "BASE\n\nCALLER\n\n" + write_sea.SYSTEM_PROMPT
@@ -109,9 +110,9 @@ def test_loader_stages_the_protocol_as_a_system_prompt_hook() -> None:
     assert cmd["llmCallHook"]([{"role": "user", "content": "x"}]) == [
         {"role": "user", "content": "x"}
     ]
-    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == "OK"
-    cmd = {"agentPath": str(_SEA_PATH)}
-    apply_agent_overrides(cmd)
+    assert cmd["toolCallHook"]("Bash", {"command": "ls"}) == ALLOW
+    cmd = {"seaPath": str(_SEA_PATH)}
+    apply_sea(cmd)
     assert cmd["systemPromptHook"]("BASE") == "BASE\n\n" + write_sea.SYSTEM_PROMPT
 
 
@@ -123,8 +124,8 @@ def test_agent_run_sends_the_default_prompt_with_the_protocol_added(tmp_path: Pa
     (``<identity>``) comes first, the writing protocol follows, and the
     prose reaches the summary untouched.
     """
-    cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH)}
-    apply_agent_overrides(cmd)
+    cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH)}
+    apply_sea(cmd)
     prose = "<p>The port was in use, so the test failed. Free it and rerun.</p>"
     with serve([finish_body(prose, prompt_tokens=500)]) as (url, requests):
         agent = ChatSorcarAgent("write-sea-test")

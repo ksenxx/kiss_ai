@@ -54,14 +54,13 @@ _API_JS = _MEDIA_DIR / "api.js"
 _JS = _MEDIA_DIR / "main.js"
 _HTML = _MEDIA_DIR / "chat.html"
 
-# The tab bar has two rows: ``#main-tab-list`` holds one entry per chat
-# and ``#tab-list`` (the group strip) holds the on-screen chat plus its
-# sub-agents / files.  The active chat is rendered on BOTH rows, so the
-# number of open tabs is the number of distinct ``data-tab-id`` values.
-_OPEN_TAB_COUNT_JS = (
-    "new Set(Array.from(document.querySelectorAll("
-    "'.chat-tab[data-tab-id]')).map(e => e.dataset.tabId)).size"
-)
+# There is no row of chat tabs: the group strip ``#tab-list`` renders
+# the on-screen chat plus its sub-agents / files only, and a background
+# chat is not drawn at all.  The number of open tabs is therefore the
+# size of the webview's tab list, as ``window._testApi.openTabs()``
+# reports it; chats are switched with ``window._testApi.switchToTab``
+# (the Chats panel's pick).
+_OPEN_TAB_COUNT_JS = "window._testApi.openTabs().length"
 
 
 def _build_test_page() -> str:
@@ -190,8 +189,8 @@ def _open_agent_tab(page) -> str:
     """
     before = _active_tab_id(page)
     page.evaluate("() => window._testApi.createNewTab()")
-    # A second chat is a new top-level tab: it is rendered on the main
-    # row, not in the group strip of the first chat.
+    # A second chat is a new top-level tab: it takes the screen (and the
+    # strip) over from the first chat.
     page.wait_for_function(f"{_OPEN_TAB_COUNT_JS} === 2", timeout=5000)
     after = _active_tab_id(page)
     assert after != before
@@ -200,29 +199,16 @@ def _open_agent_tab(page) -> str:
 
 
 def _click_tab(page, tab_id: str) -> None:
-    """Click the tab in the tab bar so it becomes the active tab.
+    """Pick the chat the way the user does, so it becomes the active tab.
 
-    A real click: main.js records it as the user's own interaction,
-    so a later task end must leave them where they are.
-
-    The tab is clicked on the row where it is rendered: a chat that is
-    not on screen exists only on the main row (``#main-tab-list``); a
-    member of the on-screen group is in the strip (``#tab-list``).
+    A background chat has no tab element to click: the user picks it in
+    the sidebar's Chats panel, which is a real click (main.js records
+    it as the user's own interaction, so a later task end must leave
+    them where they are) followed by the switch the panel performs
+    (``window._testApi.switchToTab``, which never retires a chat).
     """
-    page.evaluate(
-        """(id) => {
-            const el =
-                document.querySelector(
-                    `#tab-list .chat-tab[data-tab-id="${id}"]`
-                ) ||
-                document.querySelector(
-                    `#main-tab-list .chat-tab[data-tab-id="${id}"]`
-                );
-            if (!el) throw new Error('tab not rendered on either row: ' + id);
-            el.click();
-        }""",
-        tab_id,
-    )
+    page.mouse.click(400, 450)
+    page.evaluate("(id) => window._testApi.switchToTab(id)", tab_id)
     page.wait_for_function(
         "id => window._testApi.getActiveTabId() === id",
         arg=tab_id,
@@ -288,28 +274,17 @@ def _active_dom_tab_id(page) -> str | None:
     """Return the ``data-tab-id`` of the ``.chat-tab.active`` DOM node.
 
     The on-screen tab is the ``.active`` entry of the group strip
-    (``#tab-list``, rendered even while hidden for a lone chat); the
-    main row's ``.active`` entry marks that tab's group, so it must
-    name the same chat (the tabs here are all top-level chats).
+    (``#tab-list``, rendered even while hidden for a lone chat); no
+    other row draws chat tabs, so exactly one entry may be active.
     """
     result = page.evaluate(
-        "() => {"
-        " const strip = document.querySelector("
+        "() => Array.from(document.querySelectorAll("
         "'#tab-list .chat-tab.active[data-tab-id]'"
-        ");"
-        " const main = document.querySelector("
-        "'#main-tab-list .chat-tab.active[data-tab-id]'"
-        ");"
-        " return {strip: strip ? strip.dataset.tabId : null,"
-        "         main: main ? main.dataset.tabId : null};"
-        "}"
+        ")).map(el => el.dataset.tabId)"
     )
-    assert result["main"] == result["strip"], (
-        "main row highlights a different group than the strip's "
-        f"active tab: {result!r}"
-    )
-    assert result["strip"] is None or isinstance(result["strip"], str)
-    return result["strip"]
+    assert len(result) <= 1, f"more than one active strip entry: {result!r}"
+    assert not result or isinstance(result[0], str)
+    return result[0] if result else None
 
 
 def test_task_done_switches_to_target_tab(_browser) -> None:

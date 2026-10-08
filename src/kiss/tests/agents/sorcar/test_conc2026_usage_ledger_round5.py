@@ -5,25 +5,18 @@
 """E2E regressions for the round-5 usage-ledger hardening.
 
 The round-4 review (``tmp/review4-usage.md``) demonstrated five
-defects; each is regression-tested here (finding 1's KISSAgent source
-atomicity lives in
-``kiss/tests/core/test_conc2026_kiss_agent_usage_atomicity.py``):
+defects; the ones whose code survives are regression-tested here
+(finding 1's KISSAgent source atomicity lives in
+``kiss/tests/core/test_conc2026_kiss_agent_usage_atomicity.py``;
+findings 2a and 3 covered the in-process fan-out engine's abandoned-child
+reclaim, which is gone with the engine: ``run_parallel`` children are
+daemon sub-tasks now):
 
-* Finding 2a — the abandoned-child reclaim advanced its ``counted``
-  checkpoint BEFORE the ledger append, so a stop between the two
-  permanently dropped a finished child's spend (the retry saw a zero
-  delta).  The reclaim now runs an append-then-advance transaction
-  with a write-ahead intent and a retry-stable per-generation key.
 * Finding 2b — the mandatory classifier fold had one unkeyed append
   and no safe retry: a stop before it lost the spend, a blind retry
   after it would double-count.  The fold now appends under the
   classification's stable transaction key BEFORE clearing the consumed
   markers.
-* Finding 3 — ``_abandoned_subagents`` survived ``reset_usage()``, so
-  a prior run's abandoned child was reclaimed into the NEXT run's
-  ledger epoch.  Items are now epoch-tagged at registration and a
-  reclaim refuses to bank a stale epoch's spend (while still tracking
-  the thread for worktree-deletion safety).
 * Finding 4 — ledger reads were O(records ever appended) and repeated
   adjustments were quadratic (20,000 took 25s).  Bounded compaction
   folds the deduped prefix into a base record; reads stay
@@ -44,10 +37,8 @@ import threading
 import time
 import types
 from collections.abc import Callable
-from concurrent.futures import Future
 from typing import Any
 
-from kiss.agents.sorcar import sorcar_agent
 from kiss.agents.sorcar.relentless_agent import (
     _COMPACTION_THRESHOLD,
     RelentlessAgent,
@@ -55,10 +46,8 @@ from kiss.agents.sorcar.relentless_agent import (
 )
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
-    _AbandonedSubagent,
     _attribute_sub_usage,
     _ClassifierSpend,
-    _register_abandoned,
 )
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.printer import Printer
@@ -131,108 +120,6 @@ def _run_with_injection_at(
 
 
 # ---------------------------------------------------------------------------
-# Finding 2a — reclaim commit is append-then-advance with a stable key.
-# ---------------------------------------------------------------------------
-
-# The finding-2a transaction: everything ``reclaim_abandoned_subagents``
-# executes per item UNDER ``_abandoned_lock``.  The reclaim wrapper's own
-# opcodes are deliberately NOT swept: injecting at the exact boundary
-# between its ``with self._abandoned_lock:`` acquire and the activation
-# of the with-block's cleanup leaks the lock — the well-known CPython
-# async-exception window of every ``with lock:`` statement, unchanged
-# since the lock was introduced and reviewed in round 4, and orthogonal
-# to the append-before-advance ordering this test pins down.
-_RECLAIM_CODES = _codes_with_nested(
-    [
-        _AbandonedSubagent.bank_unbanked,
-        _attribute_sub_usage,
-        sorcar_agent._live_agent_usage,
-        sorcar_agent._agent_usage,
-        RelentlessAgent._attribute_usage,
-        RelentlessAgent._commit_usage_event,
-        _UsageEvent.__new__,
-    ]
-)
-
-
-def _parent_with_finished_abandoned_child(
-    spend: tuple[float, int, int],
-) -> tuple[SorcarAgent, _AbandonedSubagent]:
-    """Return a parent holding one FINISHED abandoned child with *spend*."""
-    child = RelentlessAgent("finished-child")
-    child._accumulate_usage(_executor_with_spend("child-session", *spend))
-    future: Future[str] = Future()
-    future.set_result("done")
-    parent = SorcarAgent("parent")
-    item = _AbandonedSubagent(
-        future, child, (0.0, 0, 0), epoch=parent._usage_epoch(),
-    )
-    parent._abandoned_subagents.append(item)
-    return parent, item
-
-
-def test_reclaim_interrupted_at_every_boundary_banks_exactly_once() -> None:
-    """One injected stop at ANY reclaim opcode: the retry recovers the spend.
-
-    Round-4 finding 2a, rewritten from
-    ``tmp/review-scratch4/repro_reclaim_interrupt_loses_usage.py`` to
-    assert FIXED behavior at every opcode boundary of the real banking
-    transaction (executed exactly as production does, under
-    ``_abandoned_lock``): after the interrupt, the ordinary production
-    retry (the next ``reclaim_abandoned_subagents`` — every fan-out
-    starts with one) must leave the parent with the child's spend
-    EXACTLY once and forget the finished child.  The write-ahead
-    intent plus the per-generation key make pre- and post-append
-    interrupts converge to one contribution.
-    """
-    spend = (1.0, 100, 3)
-    boundary = 0
-    while True:
-        parent, item = _parent_with_finished_abandoned_child(spend)
-
-        def bank_under_lock(
-            parent: SorcarAgent = parent, item: _AbandonedSubagent = item,
-        ) -> None:
-            with parent._abandoned_lock:
-                item.bank_unbanked(parent)
-
-        injected, interrupted = _run_with_injection_at(
-            bank_under_lock,
-            _RECLAIM_CODES,
-            boundary,
-        )
-        if not injected:
-            break
-        assert interrupted, f"boundary {boundary}: injection was swallowed"
-        # The ordinary retry: the next fan-out / worktree cleanup.
-        assert parent.reclaim_abandoned_subagents()
-        assert parent.usage_snapshot() == spend, (
-            f"boundary {boundary}: reclaim lost or double-counted the "
-            f"child's spend: {parent.usage_snapshot()}"
-        )
-        assert parent._abandoned_subagents == []
-        boundary += 1
-    assert boundary > 0
-
-
-def test_reclaim_banks_late_spend_of_same_epoch_child() -> None:
-    """A same-epoch child's post-abandon spend is banked incrementally."""
-    spend = (1.0, 100, 3)
-    parent, item = _parent_with_finished_abandoned_child(spend)
-    child = item.agent
-    # First reclaim banks the current spend but the child (future
-    # replaced to look unfinished) lives on and spends more.
-    item.future = Future()
-    assert not parent.reclaim_abandoned_subagents()
-    assert parent.usage_snapshot() == spend
-    child._accumulate_usage(_executor_with_spend("late-session", 2.0, 200, 2))
-    item.future.set_result("done")
-    assert parent.reclaim_abandoned_subagents()
-    assert parent.usage_snapshot() == (3.0, 300, 5)
-    assert parent._abandoned_subagents == []
-
-
-# ---------------------------------------------------------------------------
 # Finding 2b — the classifier fold is keyed and retry-safe.
 # ---------------------------------------------------------------------------
 
@@ -290,86 +177,6 @@ def test_classifier_fold_is_idempotent() -> None:
     agent._fold_classifier_usage()
     assert agent.usage_snapshot() == (0.25, 25, 2)
     assert agent._classifier_spend is None
-
-
-# ---------------------------------------------------------------------------
-# Finding 3 — abandoned children are owned by their registration epoch.
-# ---------------------------------------------------------------------------
-
-
-def _register_one_running_child(
-    parent: SorcarAgent, child: RelentlessAgent, counted: tuple[float, int, int],
-) -> Future[str]:
-    """Register *child* through the production abandon path; return its future."""
-    future: Future[str] = Future()
-    _register_abandoned(parent, [future], [child], [counted])
-    return future
-
-
-def test_prior_epoch_abandoned_child_never_banks_into_new_run() -> None:
-    """A reset (task boundary) makes an old child's late spend unbankable.
-
-    Round-4 finding 3, rewritten from
-    ``tmp/review-scratch4/repro_cross_run_abandoned_usage.py`` to
-    assert FIXED behavior with the PRODUCTION registration
-    (``_register_abandoned`` tags the item with the parent's current
-    epoch): after ``reset_usage()`` the old run's child spends more and
-    finishes, and the next run's opening reclaim must neither charge
-    the new epoch nor keep the finished child around.
-    """
-    parent = SorcarAgent("reused-parent")
-    child = RelentlessAgent("old-run-abandoned-child")
-    child._accumulate_usage(_executor_with_spend("old-first-part", 1.0, 100, 1))
-    # What the old run's fan-out finally already attributed.
-    parent._attribute_usage(1.0, 100, 1)
-    future = _register_one_running_child(parent, child, (1.0, 100, 1))
-
-    # The next run's task boundary.
-    parent.reset_usage()
-    assert parent.usage_snapshot() == (0.0, 0, 0)
-
-    # The old run's child spends more and then finishes after the new
-    # epoch started.
-    child._accumulate_usage(_executor_with_spend("old-late-part", 2.0, 200, 2))
-    future.set_result("old child done")
-
-    # Production entry points: the new run's first fan-out reclaim and
-    # worktree cleanup.
-    assert parent.reclaim_abandoned_subagents()
-    assert parent.usage_snapshot() == (0.0, 0, 0), (
-        "late spend from the prior run leaked into the new ledger epoch: "
-        f"{parent.usage_snapshot()}"
-    )
-    assert parent._abandoned_subagents == []
-
-
-def test_stale_epoch_live_child_still_blocks_worktree_deletion() -> None:
-    """A prior epoch's RUNNING child is tracked (unsafe to delete) but unbanked."""
-    parent = SorcarAgent("reused-parent-live-child")
-    child = RelentlessAgent("old-run-live-child")
-    future = _register_one_running_child(parent, child, (0.0, 0, 0))
-    parent.reset_usage()
-    child._accumulate_usage(_executor_with_spend("old-late-part", 2.0, 200, 2))
-    # Still running: callers must NOT delete the shared work dir.
-    assert not parent.reclaim_abandoned_subagents()
-    assert parent.usage_snapshot() == (0.0, 0, 0)
-    assert len(parent._abandoned_subagents) == 1
-    future.set_result("done")
-    assert parent.reclaim_abandoned_subagents()
-    assert parent.usage_snapshot() == (0.0, 0, 0)
-    assert parent._abandoned_subagents == []
-
-
-def test_same_epoch_registration_still_banks() -> None:
-    """Without a reset, the production registration banks normally."""
-    parent = SorcarAgent("same-epoch-parent")
-    child = RelentlessAgent("same-epoch-child")
-    future = _register_one_running_child(parent, child, (0.0, 0, 0))
-    child._accumulate_usage(_executor_with_spend("spend", 2.0, 200, 2))
-    future.set_result("done")
-    assert parent.reclaim_abandoned_subagents()
-    assert parent.usage_snapshot() == (2.0, 200, 2)
-    assert parent._abandoned_subagents == []
 
 
 # ---------------------------------------------------------------------------

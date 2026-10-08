@@ -234,6 +234,7 @@ for helper in scripts/install-ssh-identity.sh scripts/install-remote-prereqs.sh 
               src/kiss/scripts/carry_over_tables.py \
               src/kiss/scripts/db_fingerprint.py \
               src/kiss/scripts/running_tasks.py \
+              src/kiss/scripts/legacy_task_db.py \
               src/kiss/scripts/remote_config.py; do
     [[ -f "$SCRIPT_DIR/$helper" ]] || die "No $helper next to $0 — the deploy needs it."
 done
@@ -305,10 +306,15 @@ LIVE_TASK_WINDOW="${SORCAR_LIVE_TASK_WINDOW:-300}"
 # and the web app this deploy starts find the remote's history where they
 # look for it.  The old name stays as a symlink to the new one: the web app
 # still running the old version keeps writing to the same file until step 7c
-# restarts it, instead of recreating an empty sorcar.db.
-REMOTE_DB="$(ssh "$TARGET" '[ ! -e "$HOME/.kiss/history.db" ] && [ -e "$HOME/.kiss/sorcar.db" ] \
-    && echo sorcar.db || echo history.db')" \
+# restarts it, instead of recreating an empty sorcar.db.  A remote from the
+# spring of 2026 holds a history.db from before the database was first
+# renamed TO sorcar.db as well; the helper tells that leftover apart by its
+# schema and sets it aside (see src/kiss/scripts/legacy_task_db.py).
+LEGACY_TASK_DB="$SCRIPT_DIR/src/kiss/scripts/legacy_task_db.py"
+REMOTE_DB="$(ssh "$TARGET" 'python3 - "$HOME/.kiss"' < "$LEGACY_TASK_DB")" \
     || die "Could not look for the task database on $TARGET."
+[[ "$REMOTE_DB" == history.db || "$REMOTE_DB" == sorcar.db ]] \
+    || die "Could not look for the task database on $TARGET (answer: '$REMOTE_DB')."
 if [[ "${SORCAR_FORCE_RESTART:-}" != "1" && "$LIVE_TASK_WINDOW" != "0" ]]; then
     step "Checking whether a task is running on $TARGET ..."
     RUNNING="$(ssh "$TARGET" "python3 - \"\$HOME/.kiss/$REMOTE_DB\" \
@@ -334,11 +340,7 @@ if [[ "${SORCAR_FORCE_RESTART:-}" != "1" && "$LIVE_TASK_WINDOW" != "0" ]]; then
 fi
 if [[ "$REMOTE_DB" == sorcar.db ]]; then
     step "Renaming $TARGET's ~/.kiss/sorcar.db to history.db, its name since version 2026.10.2 ..."
-    ssh "$TARGET" 'cd "$HOME/.kiss" || exit 1
-        for part in -wal -shm ""; do
-            if [ -e "sorcar.db$part" ]; then mv "sorcar.db$part" "history.db$part" || exit 1; fi
-        done
-        ln -s history.db sorcar.db' \
+    ssh "$TARGET" 'python3 - "$HOME/.kiss" adopt' < "$LEGACY_TASK_DB" | sed 's/^/         /' \
         || die "Could not rename ~/.kiss/sorcar.db on $TARGET."
 fi
 

@@ -86,24 +86,34 @@ function activeTabId(win) {
 }
 
 function tabIds(win) {
-  // The chat whose group is on screen sits on the main row and on the
-  // group strip under it; count each tab once.
-  const ids = Array.from(win.document.querySelectorAll('.chat-tab'))
-    .map(el => el.getAttribute('data-tab-id'))
-    .filter(id => !!id);
-  return ids.filter((id, i) => ids.indexOf(id) === i);
+  // Every tab the window holds, in tab order.  Chat tabs have no row of
+  // their own any more (the Chats panel picks them), so the rendered
+  // strip alone would miss the chats that are not on screen.  Array.from
+  // re-creates the list in this realm: deepStrictEqual compares
+  // prototypes, and the window's Array is not ours.
+  return Array.from(win._testApi.openTabs(), t => t.id);
 }
 
-// A real click in the tab bar: it carries the pointerdown a user's finger
-// would, which is what ends a launch.
+// A real pick by the user: a tab on the group strip is clicked there; a
+// chat is picked in the Chats panel.  Either way the user's finger lands
+// first (pointerdown), which is what ends a launch.
 function clickTab(win, tabId) {
-  const sel = `.chat-tab[data-tab-id=${JSON.stringify(tabId)}]`;
-  const el =
-    win.document.querySelector('#tab-list ' + sel) ||
-    win.document.querySelector('#main-tab-list ' + sel);
-  assert.ok(el, `tab ${tabId} must exist in the tab bar`);
-  el.dispatchEvent(new win.MouseEvent('pointerdown', {bubbles: true}));
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  const el = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabId)}]`,
+  );
+  if (el) {
+    el.dispatchEvent(new win.MouseEvent('pointerdown', {bubbles: true}));
+    el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+    return;
+  }
+  assert.ok(
+    tabIds(win).includes(tabId),
+    `tab ${tabId} must exist in the tab bar`,
+  );
+  win.document.dispatchEvent(
+    new win.MouseEvent('pointerdown', {bubbles: true}),
+  );
+  win._testApi.switchToTab(tabId);
 }
 
 // The registry snapshot the daemon broadcasts after `ready` (and after every

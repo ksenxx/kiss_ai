@@ -27,8 +27,9 @@ import pytest
 
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS, resolve_settings
 from kiss.core.kiss_error import BudgetExceededError
+from kiss.core.tool_verdict import ALLOW, refuse
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 
 MODEL = "gpt-5.6-luna"
@@ -80,10 +81,10 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
         # the container is gone: the next model call ends the trial
         with pytest.raises(BudgetExceededError):
             harness.on_llm_call([])
-    assert harness.on_tool_call("Bash", {"command": "ls"}) == "OK"
-    assert harness.on_tool_call("ask_user_question", {"question": "?"}) != "OK"
-    assert harness.on_tool_call("talk", {"text": "hi", "language": "en"}) != "OK"
-    assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != "OK"
+    assert harness.on_tool_call("Bash", {"command": "ls"}) == ALLOW
+    assert harness.on_tool_call("ask_user_question", {"question": "?"}) != ALLOW
+    assert harness.on_tool_call("talk", {"text": "hi", "language": "en"}) != ALLOW
+    assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != ALLOW
     settings = resolve_settings(harness.settings())
     assert settings["docker_image"] == f"container:{container_name}"
     # The trial adds no tools of its own (the container's shell is the
@@ -92,13 +93,12 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     assert not hasattr(coding_sea, "add_to_tools")
     assert_no_removed_getters(coding_sea)
     assert not hasattr(harness, "if_append_basic_tools") and not hasattr(harness, "tools")
-    assert not settings["use_memory"] and not settings["use_web_tools"]
-    # The bundled ``coding`` SEA itself is hidden: it is a factory of trial
-    # SEAs, never a slash command of its own.
+    # The bundled ``coding`` SEA itself is a hidden worker: it is a factory
+    # of trial SEAs, never a slash command of its own.
     assert coding_sea.CodingSea().settings({"model": "m"}) == {"model": "m", "hidden": True}
     assert sea_commands.get_command("coding") is None
     assert sea_commands.sea_settings(Path(coding_sea.__file__).resolve()) == {
-        "kind": "session", "hidden": True,
+        **WORKER_DEFAULTS, "hidden": True,
     }
     assert "/app" in harness.system_prompt() and "wall-clock" not in harness.system_prompt()
     events = [
@@ -232,7 +232,7 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
         assert "tests that reference the changed definitions" in harness.system_prompt()
         # an Edit of a source file: snapshot, then the change lands in the container
         edit = {"file_path": "pkg/fields.py", "old_string": "1", "new_string": "2"}
-        assert harness.on_tool_call("Edit", edit) == "OK"
+        assert harness.on_tool_call("Edit", edit) == ALLOW
         live.exec_run(["sh", "-c", "sed -i 's/return 1/return 2/' /repo/pkg/fields.py"])
         # edits of test files, missing files and non-string paths are ignored
         harness.on_tool_call("Write", {"file_path": "/repo/tests/test_new.py", "content": "x"})
@@ -285,7 +285,7 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
         assert off.pending_edits == []
         # a path the shell cannot take, a huge file and a binary file never raise out of the hook
         nul = {"file_path": "pkg/\x00bad.py", "old_string": "x", "new_string": "y"}
-        assert harness.on_tool_call("Edit", nul) == "OK"
+        assert harness.on_tool_call("Edit", nul) == ALLOW
         assert harness.read_container_file("/repo/pkg/\x00bad.py") is None
         live.exec_run(["sh", "-c", "head -c 500000 /dev/zero | tr '\0' 'a' > /repo/pkg/big.py; "
                       "printf 'a\0b' > /repo/pkg/bin.py"])
@@ -318,63 +318,66 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
                     "pkill --full .", "pkill -f '.*'", "rm -rf '/app'", "/bin/rm -rf /app",
                     "rm -rf /app >/dev/null", "rm -rf /app /tmp/x", "sudo rm -rf /app/",
                     "FOO=1 kill -9 -1"):
-        assert plain.on_tool_call("Bash", {"command": command}) == blocked, command
+        assert plain.on_tool_call("Bash", {"command": command}) == refuse(blocked), command
     parallel = {"commands": '["ls", "kill -9 -1"]'}
-    assert plain.on_tool_call("run_commands_parallel", parallel) == blocked
-    assert plain.on_tool_call("run_commands_parallel", {"commands": "kill -9 -1"}) == blocked
+    assert plain.on_tool_call("run_commands_parallel", parallel) == refuse(blocked)
+    assert plain.on_tool_call("run_commands_parallel", {"commands": "kill -9 -1"}) == refuse(
+        blocked
+    )
     for command in ("kill -9 1234", "kill -1 1234", "kill -1 $(cat /tmp/pid)", "kill -1 %1",
                     "pkill -f myserver", "pkill -f python3", "rm -rf /app/build", "rm -rf /app/*.o",
                     "rm -rf /tmp/x", "rm -rf /apps", "ls /app", "printf '%s\\n' 'kill -9 -1'",
                     "echo \"pkill -f .\"", "grep -F 'rm -rf /app' README.md",
                     "echo ok # rm -rf /app"):
-        assert plain.on_tool_call("Bash", {"command": command}) == "OK", command
+        assert plain.on_tool_call("Bash", {"command": command}) == ALLOW, command
     # installs and builds get a long timeout in place; other commands keep theirs
     args: dict[str, object] = {"command": "apt-get install -y gcc"}
-    assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 900
+    assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 900
     args = {"command": "pip install numpy", "timeout_seconds": 1800}
-    assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 1800
+    assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 1800
     args = {"command": "make -j4", "timeout_seconds": "bad"}
-    assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 900
+    assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 900
     for command in ("cd /x && make", "sudo apt-get update", "python3 -m pip install x",
                     "DEBIAN_FRONTEND=noninteractive apt-get -y install x", "cmake .. && make"):
         args = {"command": command, "timeout_seconds": 60}
-        assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 900, command
+        assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 900, command
     for command in ("ls -la", "grep -R make .", "python3 -c \"print('cmake')\"", "npm get registry",
                     "echo make", "cat Makefile"):
         args = {"command": command, "timeout_seconds": 30}
-        assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 30, command
+        assert plain.on_tool_call("Bash", args) == ALLOW and args["timeout_seconds"] == 30, command
     args = {"commands": '["npm install", "cargo build"]', "timeout_seconds": 120}
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert plain.on_tool_call("run_commands_parallel", args) == ALLOW
     assert args["timeout_seconds"] == 900
     # The tool's own default (1800 s) is already long enough.
     args = {"commands": '["npm install"]'}
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert plain.on_tool_call("run_commands_parallel", args) == ALLOW
     assert "timeout_seconds" not in args
     # An unparsable list is treated as one command.
     args = {"commands": "not json; make", "timeout_seconds": 60}
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert plain.on_tool_call("run_commands_parallel", args) == ALLOW
     assert args["timeout_seconds"] == 900
     args = {"commands": '{"a": 1}'}
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert plain.on_tool_call("run_commands_parallel", args) == ALLOW
     assert "timeout_seconds" not in args
-    assert plain.on_tool_call("Bash", {"command": 42}) == "OK"
-    assert plain.on_tool_call("Bash", {}) == "OK"
+    assert plain.on_tool_call("Bash", {"command": 42}) == ALLOW
+    assert plain.on_tool_call("Bash", {}) == ALLOW
     # no gate by default: every finish passes
-    assert plain.on_tool_call("finish", {"success": True}) == "OK"
-    assert plain.on_tool_call("finish", {}) == "OK"
+    assert plain.on_tool_call("finish", {"success": True}) == ALLOW
+    assert plain.on_tool_call("finish", {}) == ALLOW
     gated = harness(finish_gate=True)
-    assert gated.on_tool_call("finish", {"success": False}) == "OK"
+    assert gated.on_tool_call("finish", {"success": False}) == ALLOW
     # an implicit (text-only) finish is vetoed once, without spending the gate
-    assert gated.on_tool_call("finish", {}) == coding_sea.FINISH_GATE_VERDICT
-    assert gated.on_tool_call("finish", {}) == "OK"
-    assert gated.on_tool_call("finish", {"success": "true"}) == coding_sea.FINISH_GATE_VERDICT
-    assert gated.on_tool_call("finish", {"success": True}) == "OK"
-    assert gated.on_tool_call("finish", {}) == "OK"
+    assert gated.on_tool_call("finish", {}) == refuse(coding_sea.FINISH_GATE_VERDICT)
+    assert gated.on_tool_call("finish", {}) == ALLOW
+    gate = refuse(coding_sea.FINISH_GATE_VERDICT)
+    assert gated.on_tool_call("finish", {"success": "true"}) == gate
+    assert gated.on_tool_call("finish", {"success": True}) == ALLOW
+    assert gated.on_tool_call("finish", {}) == ALLOW
     gated2 = harness(finish_gate=True, workdir="/testbed")
-    assert gated2.on_tool_call("finish", {"success": True}) == coding_sea.FINISH_GATE_VERDICT
-    assert gated2.on_tool_call("finish", {"success": True}) == "OK"
-    assert gated2.on_tool_call("Bash", {"command": "rm -rf /testbed"}) == blocked
-    assert gated2.on_tool_call("Bash", {"command": "rm -rf /app"}) == "OK"
+    assert gated2.on_tool_call("finish", {"success": True}) == gate
+    assert gated2.on_tool_call("finish", {"success": True}) == ALLOW
+    assert gated2.on_tool_call("Bash", {"command": "rm -rf /testbed"}) == refuse(blocked)
+    assert gated2.on_tool_call("Bash", {"command": "rm -rf /app"}) == ALLOW
     events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
     gate_events = [e for e in events
                    if e.get("tool") == "finish" and e["args"] == {"success": True}]
@@ -425,11 +428,12 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     assert settings["docker_image"] == "container:kiss-test-trial"
     assert settings["work_dir"] == str(tmp_path / "sea-trial")
     assert settings["model_config"] is None
-    resolved = resolve_settings(sea.settings({}))
+    # The trial's effective settings: a worker (no browser, no memory),
+    # see ``ContainerHarness.settings``.
+    resolved = sea_commands.sea_settings(sea_path)
     assert resolved["use_web_tools"] is False
     assert resolved["use_memory"] is False
-    assert resolved["allow_fan_out"] is True
-    assert sea.tool_call_hook("Bash", {"command": "ls"}) == "OK"
+    assert sea.tool_call_hook("Bash", {"command": "ls"}) == ALLOW
     # ``llm_call_hook`` delegates to the harness: the call is counted and
     # logged before the liveness check, which ends the trial when a Docker
     # daemon is running and "kiss-test-trial" (never started) is not found.
@@ -456,8 +460,8 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     # ``tools`` is not overridden: the staged tools hook is the identity.
     assert run.tools_hook([print]) == [print]
     assert run.system_prompt_hook("ASSEMBLED") == harness.system_prompt()
-    assert run.tool_call_hook("ask_user_question", {"question": "?"}) != "OK"
-    assert run.tool_call_hook("Bash", {"command": "ls"}) == "OK"
+    assert run.tool_call_hook("ask_user_question", {"question": "?"}) != ALLOW
+    assert run.tool_call_hook("Bash", {"command": "ls"}) == ALLOW
 
 
 def _live_container(image: str, setup: str) -> Any:
@@ -520,7 +524,7 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         prompt = harness.prompt()
         assert prompt.startswith("Do the task.") and "data.csv" in prompt
         assert "ls -la /app" in prompt
-        assert harness.on_tool_call("set_model", {"model_name": "x"}) != "OK"
+        assert harness.on_tool_call("set_model", {"model_name": "x"}) != ALLOW
         # First model call: baseline of the workdir; no shell ran, so no notes.
         user = {"role": "user", "content": "Do the task."}
         assert harness.on_llm_call([user]) == [user]
@@ -531,7 +535,7 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         def shell(command: str, exited: str | None = None) -> dict[str, Any]:
             """Run *command* as one tool call; *exited* names a process that must be gone
             from the container before the post-call snapshot is taken."""
-            assert harness.on_tool_call("Bash", {"command": command}) == "OK"
+            assert harness.on_tool_call("Bash", {"command": command}) == ALLOW
             live.exec_run(["sh", "-c", command])
             if exited is not None:
                 _wait_until(harness, exited, present=False)
@@ -606,18 +610,18 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         assert "changed pre-existing" not in shell("echo again >> /app/data.csv")["content"]
         # A file the agent edits itself is its own business.
         edit = {"file_path": "mine.py", "old_string": "z", "new_string": "w"}
-        assert harness.on_tool_call("Edit", edit) == "OK"
+        assert harness.on_tool_call("Edit", edit) == ALLOW
         assert "changed pre-existing" not in shell("echo w > /app/mine.py")["content"]
         # New files are not inputs; a same-content rewrite counts as modified (mtime moved).
         result = shell("echo new > /app/new.txt && touch /app/sub/keep.txt")
         assert "new.txt" not in result["content"]
         assert "/app/sub/keep.txt (modified)" in result["content"]
         # An edit through a symlink owns the target too.
-        assert harness.on_tool_call("Write", {"file_path": "link.txt", "content": "q"}) == "OK"
+        assert harness.on_tool_call("Write", {"file_path": "link.txt", "content": "q"}) == ALLOW
         assert {"/app/link.txt", "/app/real.txt"} <= harness.owned_files
         assert "changed pre-existing" not in shell("echo q > /app/link.txt")["content"]
         # A note that finds no tool result waits for the next one instead of vanishing.
-        assert harness.on_tool_call("Bash", {"command": "rm /app/extra.txt"}) == "OK"
+        assert harness.on_tool_call("Bash", {"command": "rm /app/extra.txt"}) == ALLOW
         live.exec_run(["sh", "-c", "rm /app/extra.txt"])
         text_only = {"role": "assistant", "content": "thinking"}
         harness.on_llm_call([text_only])
@@ -656,7 +660,7 @@ def test_shell_notes_off_without_container_or_workdir(tmp_path: Path) -> None:
         }))
         harness = coding_sea.ContainerHarness(str(config))
         assert harness.prompt() == "p"
-        assert harness.on_tool_call("Bash", {"command": "nohup sleep 5 &"}) == "OK"
+        assert harness.on_tool_call("Bash", {"command": "nohup sleep 5 &"}) == ALLOW
         result = {"role": "tool", "content": "ran"}
         # the liveness check is what ends the trial; the notes must not raise first
         if daemon_up:

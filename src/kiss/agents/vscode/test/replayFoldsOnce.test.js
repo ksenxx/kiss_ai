@@ -81,16 +81,32 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Top-level collapsible panels of the visible transcript, in order. */
+/**
+ * Top-level collapsible panels of the visible transcript, in order
+ * (the task panel that opens the transcript is not an event panel).
+ */
 function panels(win) {
   const out = win.document.getElementById('output');
   return Array.from(out.children).filter(
-    el => el.classList.contains('collapsible') && !el.classList.contains('rc'),
+    el =>
+      el.classList.contains('collapsible') &&
+      !el.classList.contains('rc') &&
+      !el.classList.contains('task-panel'),
   );
 }
 
 function isCollapsed(p) {
   return p.classList.contains('collapsed');
+}
+
+/** A Thoughts panel is never folded by any automatic pass. */
+function isThoughts(p) {
+  return p.classList.contains('llm-panel');
+}
+
+/** Folded, or a Thoughts panel (which no pass folds). */
+function isFoldedOrThoughts(p) {
+  return isThoughts(p) || isCollapsed(p);
 }
 
 /** One thinking + Read step of a run. */
@@ -141,8 +157,13 @@ function testLongReplayFoldsOnceAndFast() {
   // the work the per-event pass used to redo hundreds of times.
   const older = ps.slice(0, -2);
   assert.ok(
-    older.every(isCollapsed),
-    'every older panel of a replayed running task is folded',
+    older.every(isFoldedOrThoughts),
+    'every older tool panel of a replayed running task is folded',
+  );
+  assert.ok(
+    ps.filter(isThoughts).length >= STEPS &&
+      !ps.filter(isThoughts).some(isCollapsed),
+    'no Thoughts panel of the replay is folded',
   );
   assert.ok(
     elapsed < REPLAY_BUDGET_MS,
@@ -162,23 +183,24 @@ function testLiveStreamAfterReplayKeepsNewestTwoOpen() {
   const before = panels(win).length;
 
   // The task keeps streaming after the replay: the live collapse pass
-  // must run again (the replay flag is cleared) and keep the newest two
-  // panels open while folding the rest.
+  // must run again (the replay flag is cleared) and fold the rest.  The
+  // newest two are the last step's tool panel (a tool call starts
+  // folded) and the Thoughts panel its result armed (never folded).
   for (const ev of [...step(3), ...step(4)]) send(win, {...ev, tabId: tab});
   const ps = panels(win);
   assert.strictEqual(ps.length, before + 4, 'two more steps, four panels');
   const folded = ps.map(isCollapsed);
   assert.deepStrictEqual(
     folded.slice(-2),
-    [false, false],
-    'the newest two panels of the live stream are open',
+    [true, false],
+    'the newest tool panel starts folded, the armed Thoughts panel is open',
   );
   assert.ok(
-    folded.slice(0, -2).every(Boolean),
-    'every older panel is folded once the stream resumes',
+    ps.slice(0, -2).every(isFoldedOrThoughts),
+    'every older tool panel is folded once the stream resumes',
   );
   win.close();
-  console.log('  ok - live streaming after a replay keeps the newest two open');
+  console.log('  ok - live streaming after a replay keeps folding tool panels');
 }
 
 function testReadyNamesSingleTabOnlyInEditorMode() {

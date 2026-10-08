@@ -3,14 +3,15 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end tests for the two chat drawers, in the extension webview and in
-// the remote web app.
+// End-to-end tests for the composer drawer, in the extension webview and
+// in the remote web app.
 //
-// The static task panel is a header, not content: it opens collapsed
-// everywhere and only a click on its own chevron may expand it. The composer
-// is the opposite -- it opens reachable, and its textbox folds away only on
-// a phone while a task is running, where the transcript needs the room.
+// The composer opens reachable, and its textbox folds away only on a
+// phone while a task is running, where the transcript needs the room.
 // Collapsing never hides the button bar (#input-footer) below the textbox.
+// (The task's text is no longer a fixed drawer above the transcript: it
+// opens the transcript as a regular event panel, see
+// taskPanelExpandFullText.test.js.)
 
 'use strict';
 
@@ -38,10 +39,6 @@ function makeWebview(opts) {
   html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
   if (remote) html = html.replace('<body', '<body class="remote-chat"');
   if (stripDrawerButtons) {
-    html = html.replace(
-      /<button id="task-panel-drawer-btn"[\s\S]*?<\/button>/,
-      '',
-    );
     html = html.replace(/<button id="input-drawer-btn"[\s\S]*?<\/button>/, '');
   }
 
@@ -135,8 +132,8 @@ function showTaskPanel(win, posted) {
     chat_id: 'chat-drawer',
   });
   assert.ok(
-    win.document.getElementById('task-panel').classList.contains('visible'),
-    'task panel must be visible after a task replay',
+    win.document.querySelector('#output .task-panel'),
+    'the transcript must open with the task panel after a task replay',
   );
 }
 
@@ -162,17 +159,6 @@ function assertBtnState(win, id, expanded) {
     want.test(label),
     `#${id} aria-label must start with "${expanded ? 'Collapse' : 'Expand'}" (got "${label}")`,
   );
-}
-
-function assertTaskDrawer(win, collapsed, why) {
-  assert.strictEqual(
-    win.document
-      .getElementById('task-panel')
-      .classList.contains('drawer-collapsed'),
-    collapsed,
-    `task drawer must ${collapsed ? '' : 'NOT '}be collapsed: ${why}`,
-  );
-  assertBtnState(win, 'task-panel-drawer-btn', !collapsed);
 }
 
 function assertInputDrawer(win, collapsed, why) {
@@ -220,36 +206,24 @@ function testDefaults() {
   showTaskPanel(win, posted);
   const d = win.document;
 
-  const taskBtn = d.getElementById('task-panel-drawer-btn');
   const inputBtn = d.getElementById('input-drawer-btn');
-  assert.ok(taskBtn, '#task-panel-drawer-btn must exist');
   assert.ok(inputBtn, '#input-drawer-btn must exist');
-  assert.ok(
-    d.getElementById('task-panel').contains(taskBtn),
-    'task drawer toggle must live inside #task-panel',
-  );
   assert.ok(
     d.getElementById('input-area').contains(inputBtn),
     'input drawer toggle must live inside #input-area',
-  );
-  assert.strictEqual(
-    taskBtn.getAttribute('aria-controls'),
-    'task-panel-text',
-    'task drawer toggle must declare its controlled region',
   );
   assert.strictEqual(
     inputBtn.getAttribute('aria-controls'),
     'input-container',
     'input drawer toggle must declare its controlled region',
   );
-
-  assertTaskDrawer(win, true, 'the task panel opens collapsed');
-  assertInputDrawer(win, false, 'the composer opens reachable');
   assert.strictEqual(
-    cs(win, 'task-panel-text').whiteSpace,
-    'nowrap',
-    'the collapsed task drawer clamps the task text to one line',
+    d.getElementById('task-panel'),
+    null,
+    'no fixed task panel (and no task drawer) sits above the transcript',
   );
+
+  assertInputDrawer(win, false, 'the composer opens reachable');
   assert.strictEqual(
     cs(win, 'output').flexGrow,
     '1',
@@ -305,86 +279,26 @@ function testInputDrawerToggle() {
   win.close();
 }
 
-function testTaskDrawerToggle() {
-  persistedState = undefined;
-  const {win, posted} = makeWebview();
-  showTaskPanel(win, posted);
-  const d = win.document;
-  const task = 'refactor the parser and keep the CLI flags backward compatible';
-
-  assertTaskDrawer(win, true, 'the task panel opens collapsed');
-  const collapsedCs = cs(win, 'task-panel-text');
-  assert.strictEqual(
-    collapsedCs.overflow,
-    'hidden',
-    'collapsed task drawer must hide the clamped overflow',
-  );
-  assert.strictEqual(
-    collapsedCs.textOverflow,
-    'ellipsis',
-    'collapsed task drawer must ellipsize the clamped text',
-  );
-  assert.strictEqual(
-    cs(win, 'task-panel').display,
-    'block',
-    'the slim task drawer itself must stay visible',
-  );
-  assert.strictEqual(
-    d.getElementById('task-panel-text').textContent,
-    task,
-    'the task text must stay readable in the slim drawer',
-  );
-
-  click(win, 'task-panel-drawer-btn');
-  assertTaskDrawer(win, false, 'clicking the toggle expands the task drawer');
-  assert.strictEqual(
-    cs(win, 'task-panel-text').whiteSpace,
-    'pre-wrap',
-    'expanded task drawer must wrap the task text',
-  );
-
-  click(win, 'task-panel-drawer-btn');
-  assertTaskDrawer(win, true, 'clicking the toggle again collapses it');
-  assert.strictEqual(
-    cs(win, 'task-panel-text').whiteSpace,
-    'nowrap',
-    'the re-collapsed task drawer clamps the text again',
-  );
-  win.close();
-}
-
 function testPersistenceAcrossReopen() {
   persistedState = undefined;
   const wv1 = makeWebview();
   showTaskPanel(wv1.win, wv1.posted);
-  click(wv1.win, 'task-panel-drawer-btn');
   click(wv1.win, 'input-drawer-btn');
-  assert.ok(persistedState, 'toggling a drawer must persist state');
+  assert.ok(persistedState, 'toggling the drawer must persist state');
   wv1.win.close();
 
   const wv2 = makeWebview();
   showTaskPanel(wv2.win, wv2.posted);
-  assertTaskDrawer(
-    wv2.win,
-    false,
-    'a re-opened webview restores the task drawer the user expanded',
-  );
   assertInputDrawer(
     wv2.win,
     true,
     'a re-opened webview restores the composer the user collapsed',
   );
 
-  click(wv2.win, 'task-panel-drawer-btn');
   click(wv2.win, 'input-drawer-btn');
   wv2.win.close();
 
   const wv3 = makeWebview();
-  assertTaskDrawer(
-    wv3.win,
-    true,
-    'a re-opened webview restores the re-collapsed task drawer',
-  );
   assertInputDrawer(
     wv3.win,
     false,
@@ -393,93 +307,22 @@ function testPersistenceAcrossReopen() {
   wv3.win.close();
 }
 
-function testPersistenceSingleDrawer() {
-  persistedState = undefined;
-  const wv1 = makeWebview();
-  showTaskPanel(wv1.win, wv1.posted);
-  click(wv1.win, 'task-panel-drawer-btn');
-  wv1.win.close();
-
-  const wv2 = makeWebview();
-  showTaskPanel(wv2.win, wv2.posted);
-  assertTaskDrawer(wv2.win, false, 'the expanded task drawer is restored');
-  assertInputDrawer(wv2.win, false, 'the untouched composer stays reachable');
-  wv2.win.close();
-}
-
 function testRemoteWebApp() {
   persistedState = undefined;
   const {win, posted} = makeWebview({remote: true});
   showTaskPanel(win, posted);
 
-  assertTaskDrawer(win, true, 'remote: the task panel opens collapsed');
-  assert.strictEqual(
-    cs(win, 'task-panel-text').whiteSpace,
-    'nowrap',
-    'remote: the collapsed task drawer clamps the task text',
-  );
-
-  click(win, 'task-panel-drawer-btn');
   click(win, 'input-drawer-btn');
-  assertTaskDrawer(win, false, 'remote: the task drawer expands on click');
   assertInputDrawer(win, true, 'remote: the composer collapses on click');
-  assert.strictEqual(
-    cs(win, 'task-panel-text').whiteSpace,
-    'pre-wrap',
-    'remote: expanding must wrap the task text',
-  );
   assert.strictEqual(
     cs(win, 'output').flexGrow,
     '1',
     'remote: #output must keep flex:1 to absorb the freed space',
   );
 
-  click(win, 'task-panel-drawer-btn');
   click(win, 'input-drawer-btn');
-  assertTaskDrawer(win, true, 'remote: the task drawer collapses again');
   assertInputDrawer(win, false, 'remote: the composer comes back');
   win.close();
-}
-
-// Nothing the backend says may open the task panel: only the chevron can.
-function testTaskPanelNeverAutoExpands() {
-  for (const remote of [false, true]) {
-    persistedState = undefined;
-    const {win, posted} = makeWebview({remote});
-    const tabId = readyTabId(posted);
-    const why = remote ? 'remote' : 'extension';
-
-    showTaskPanel(win, posted);
-    assertTaskDrawer(win, true, `${why}: a task replay must not expand it`);
-
-    setRunning(win, posted, true);
-    assertTaskDrawer(win, true, `${why}: a task starting must not expand it`);
-
-    send(win, {
-      type: 'setTaskText',
-      text: 'a much longer task text that would love the extra room',
-      tabId: tabId,
-    });
-    assertTaskDrawer(win, true, `${why}: new task text must not expand it`);
-
-    send(win, {
-      type: 'task_events',
-      events: [],
-      task: 'a brand new task text arriving mid-flight',
-      tabId: tabId,
-      chat_id: 'chat-drawer',
-    });
-    assertTaskDrawer(win, true, `${why}: a fresh replay must not expand it`);
-
-    setRunning(win, posted, false);
-    assertTaskDrawer(win, true, `${why}: a task ending must not expand it`);
-    assert.strictEqual(
-      win.document.getElementById('task-panel-text').textContent,
-      'a brand new task text arriving mid-flight',
-      `${why}: the slim drawer still tracks the latest task text`,
-    );
-    win.close();
-  }
 }
 
 function testDrawerStateSurvivesTaskChurn() {
@@ -487,7 +330,6 @@ function testDrawerStateSurvivesTaskChurn() {
   const {win, posted} = makeWebview();
   showTaskPanel(win, posted);
 
-  click(win, 'task-panel-drawer-btn');
   click(win, 'input-drawer-btn');
   setRunning(win, posted, true);
   send(win, {
@@ -499,11 +341,6 @@ function testDrawerStateSurvivesTaskChurn() {
   });
   setRunning(win, posted, false);
 
-  assertTaskDrawer(
-    win,
-    false,
-    'status/task churn must not re-collapse the task drawer the user opened',
-  );
   assertInputDrawer(
     win,
     true,
@@ -512,34 +349,10 @@ function testDrawerStateSurvivesTaskChurn() {
   win.close();
 }
 
-function testChatsCollapseButtonRemoved() {
-  persistedState = undefined;
-  const {win, posted} = makeWebview();
-  showTaskPanel(win, posted);
-  const d = win.document;
-  assert.strictEqual(
-    d.getElementById('task-panel-collapse-btn'),
-    null,
-    'the Collapse/Uncollapse Chats button must not exist',
-  );
-  assert.strictEqual(
-    d.getElementById('task-panel-collapse-label'),
-    null,
-    'the Collapse/Uncollapse Chats label must not exist',
-  );
-  win.close();
-}
-
 function testDrawerButtonsBigEnough() {
   persistedState = undefined;
   for (const remote of [false, true]) {
     const {win} = makeWebview({remote});
-    const taskBtn = cs(win, 'task-panel-drawer-btn');
-    assert.ok(
-      parseFloat(taskBtn.width) >= 24 && parseFloat(taskBtn.height) >= 24,
-      `task drawer toggle must be at least 24x24px (remote=${remote}, ` +
-        `got ${taskBtn.width} x ${taskBtn.height})`,
-    );
     const inputBtn = cs(win, 'input-drawer-btn');
     assert.ok(
       parseFloat(inputBtn.width) >= 24 && parseFloat(inputBtn.height) >= 24,
@@ -553,7 +366,7 @@ function testDrawerButtonsBigEnough() {
 function testDrawerButtonsLoseFocusAfterClick() {
   persistedState = undefined;
   const {win} = makeWebview();
-  for (const id of ['task-panel-drawer-btn', 'input-drawer-btn']) {
+  for (const id of ['input-drawer-btn']) {
     const el = win.document.getElementById(id);
     el.focus();
     assert.strictEqual(
@@ -582,12 +395,6 @@ function testRemoteCollapsedPadding() {
   showTaskPanel(win, posted);
   click(win, 'input-drawer-btn');
   assert.strictEqual(
-    cs(win, 'task-panel').paddingTop,
-    '4px',
-    'remote: collapsed task drawer must keep the extension padding ' +
-      '(remote-codex.css no longer restyles #task-panel)',
-  );
-  assert.strictEqual(
     cs(win, 'input-area').paddingTop,
     '10px',
     'remote: collapsed input drawer must get the slim remote padding',
@@ -601,11 +408,11 @@ function testMissingDrawerButtonsGracefulBoot() {
   assert.strictEqual(
     win.document.getElementById('input-drawer-btn'),
     null,
-    'harness sanity: the drawer buttons were stripped',
+    'harness sanity: the drawer button was stripped',
   );
   assert.ok(
     posted.some(m => m.type === 'ready'),
-    'main.js must boot (post ready) even without the drawer buttons',
+    'main.js must boot (post ready) even without the drawer button',
   );
   win.close();
 }
@@ -635,7 +442,6 @@ function testMobileRemoteIdleShowsComposer() {
     const {win, posted} = makeWebview({remote: true, userAgent: ua});
     showTaskPanel(win, posted);
     const d = win.document;
-    assertTaskDrawer(win, true, `${name}: the task panel opens collapsed`);
     assertInputDrawer(win, false, `${name}: nothing is running, so type away`);
     const container = d.getElementById('input-container');
     assert.ok(
@@ -657,11 +463,6 @@ function testMobileRemoteIdleShowsComposer() {
       `${name}: the buttons must be visible`,
     );
     assert.strictEqual(
-      cs(win, 'task-panel-text').whiteSpace,
-      'nowrap',
-      `${name}: the task text must be clamped to the slim drawer`,
-    );
-    assert.strictEqual(
       cs(win, 'output').flexGrow,
       '1',
       `${name}: #output must absorb the freed space`,
@@ -680,7 +481,6 @@ function testMobileRemoteFollowsRunningState() {
 
   setRunning(win, posted, true);
   assertInputDrawer(win, true, 'a running task folds the phone composer');
-  assertTaskDrawer(win, true, 'the task panel stays collapsed throughout');
 
   setRunning(win, posted, false);
   assertInputDrawer(win, false, 'the finished task hands the composer back');
@@ -708,7 +508,6 @@ function testDesktopRemoteDefaults() {
   persistedState = undefined;
   const {win, posted} = makeWebview({remote: true, userAgent: UA_DESKTOP});
   showTaskPanel(win, posted);
-  assertTaskDrawer(win, true, 'desktop remote: the task panel opens collapsed');
   assertInputDrawer(win, false, 'desktop remote: the composer is reachable');
   setRunning(win, posted, true);
   assertInputDrawer(
@@ -783,7 +582,6 @@ function testMobileUaVscodeWebviewUnaffected() {
   persistedState = undefined;
   const {win, posted} = makeWebview({remote: false, userAgent: UA_IPHONE});
   showTaskPanel(win, posted);
-  assertTaskDrawer(win, true, 'the extension webview also opens collapsed');
   setRunning(win, posted, true);
   assertInputDrawer(
     win,
@@ -822,21 +620,15 @@ function testMobileUserChoicePersists() {
 
 // A blob from an older build has no `*UserSet` flags, so it cannot prove the
 // user ever clicked anything: the defaults win.
-function testLegacyStateDoesNotResurrectExpandedPanel() {
+function testLegacyStateDoesNotResurrectFoldedComposer() {
   for (const ua of [UA_IPHONE, UA_DESKTOP]) {
     persistedState = {
       tabs: [{title: 'old chat', chatId: 'tab-1'}],
       activeTabIndex: 0,
       chatId: 'tab-1',
-      taskDrawerCollapsed: false,
       inputDrawerCollapsed: true,
     };
     const wv = makeWebview({remote: true, userAgent: ua});
-    assertTaskDrawer(
-      wv.win,
-      true,
-      'a legacy blob must not resurrect an expanded task panel',
-    );
     assertInputDrawer(
       wv.win,
       false,
@@ -848,16 +640,10 @@ function testLegacyStateDoesNotResurrectExpandedPanel() {
       tabs: [{title: 'old chat', chatId: 'tab-1'}],
       activeTabIndex: 0,
       chatId: 'tab-1',
-      taskDrawerCollapsed: false,
       inputDrawerCollapsed: true,
       drawersVersion: 2,
     };
     const wvV2 = makeWebview({remote: true, userAgent: ua});
-    assertTaskDrawer(
-      wvV2.win,
-      true,
-      'a v2 blob predates the *UserSet flags, so it proves nothing',
-    );
     assertInputDrawer(wvV2.win, false, 'a v2 blob cannot fold the composer');
     wvV2.win.close();
   }
@@ -866,18 +652,11 @@ function testLegacyStateDoesNotResurrectExpandedPanel() {
     tabs: [{title: 'old chat', chatId: 'tab-1'}],
     activeTabIndex: 0,
     chatId: 'tab-1',
-    taskDrawerCollapsed: false,
-    taskDrawerUserSet: true,
     inputDrawerCollapsed: true,
     inputDrawerUserSet: true,
     drawersVersion: 3,
   };
   const wvNew = makeWebview({remote: true, userAgent: UA_IPHONE});
-  assertTaskDrawer(
-    wvNew.win,
-    false,
-    'a current blob that records the click restores the expanded panel',
-  );
   assertInputDrawer(
     wvNew.win,
     true,
@@ -893,11 +672,6 @@ function testMalformedStateGracefulBoot() {
     assert.ok(
       posted.some(m => m.type === 'ready'),
       `main.js must boot with a ${typeof bad} persisted state`,
-    );
-    assertTaskDrawer(
-      win,
-      true,
-      `a malformed (${typeof bad}) blob falls back to the collapsed default`,
     );
     assertInputDrawer(
       win,
@@ -942,13 +716,22 @@ async function testMobileRemoteNeverFocusesComposerByCode() {
         {tabId: 'tab-c', chatId: 'chat-c', title: 'c', workDir: ''},
       ],
     });
-    const tabEl = id => d.querySelector(`.chat-tab[data-tab-id="${id}"]`);
+    // Chats have no tab row of their own: a chat is shown through the
+    // Chats-panel pick (switchToTab) and a lone chat is closed from
+    // another surface, which the daemon mirrors as a snapshot without it.
+    const snapshot = ids =>
+      send(win, {
+        type: 'tabs_state',
+        tabs: ids.map(id => ({
+          tabId: id,
+          chatId: id === bootTab ? 'chat-a' : `chat-${id.slice(-1)}`,
+          title: id.slice(-1),
+          workDir: '',
+        })),
+      });
     const steps = [
-      ['touching a tab', () => click(win, null, tabEl('tab-b'))],
-      [
-        'closing the active tab',
-        () => click(win, null, tabEl('tab-b').querySelector('.chat-tab-close')),
-      ],
+      ['touching a tab', () => win._testApi.switchToTab('tab-b')],
+      ['closing the active tab', () => snapshot([bootTab, 'tab-c'])],
       // A background tab whose agent is asking a question: touching it
       // (and landing on it after closing its neighbour) puts the
       // composer in answer mode, which is another focus path.
@@ -956,14 +739,14 @@ async function testMobileRemoteNeverFocusesComposerByCode() {
         'touching a tab with a pending question',
         () => {
           send(win, {type: 'askUser', tabId: 'tab-c', question: 'Which one?'});
-          click(win, null, tabEl('tab-c'));
+          win._testApi.switchToTab('tab-c');
         },
       ],
       [
         'closing a tab next to an asking tab',
         () => {
-          click(win, null, tabEl(bootTab));
-          click(win, null, tabEl(bootTab).querySelector('.chat-tab-close'));
+          win._testApi.switchToTab(bootTab);
+          snapshot(['tab-c']);
           assert.strictEqual(
             win._testApi.getActiveTabId(),
             'tab-c',
@@ -1015,13 +798,9 @@ async function runTests() {
   const tests = [
     testDefaults,
     testInputDrawerToggle,
-    testTaskDrawerToggle,
     testPersistenceAcrossReopen,
-    testPersistenceSingleDrawer,
     testRemoteWebApp,
-    testTaskPanelNeverAutoExpands,
     testDrawerStateSurvivesTaskChurn,
-    testChatsCollapseButtonRemoved,
     testDrawerButtonsBigEnough,
     testDrawerButtonsLoseFocusAfterClick,
     testRemoteCollapsedPadding,
@@ -1034,7 +813,7 @@ async function runTests() {
     testIpadMasqueradeRemote,
     testMobileUaVscodeWebviewUnaffected,
     testMobileUserChoicePersists,
-    testLegacyStateDoesNotResurrectExpandedPanel,
+    testLegacyStateDoesNotResurrectFoldedComposer,
     testMalformedStateGracefulBoot,
     testMobileRemoteNeverFocusesComposerByCode,
   ];

@@ -126,10 +126,7 @@ def _handler(conn: ServerConnection) -> None:
         conn.send(json.dumps({"corrId": corr_id, "resp": resp}))
 
 
-@pytest.fixture(autouse=True)
-def _isolated_kiss_home(isolated_kiss_home: Path) -> Path:
-    """Apply the shared per-test ``KISS_HOME`` isolation to every test here."""
-    return isolated_kiss_home
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 @pytest.fixture
@@ -171,13 +168,13 @@ def test_agent_unauthenticated_state() -> None:
     assert "authenticate_simplex" in msg
 
 
-def test_auth_persistence_and_clear(_isolated_kiss_home: Path) -> None:
+def test_auth_persistence_and_clear(isolated_kiss_home: Path) -> None:
     """authenticate_simplex persists config (0600); check reports it; clear removes it."""
     agent = SimpleXAgent()
     tools = _authenticate(agent, "ws://127.0.0.1:5225")
 
     config_path = _config.path
-    assert config_path == (_isolated_kiss_home / "third_party_agents" / "simplex" / "config.json")
+    assert config_path == (isolated_kiss_home / "third_party_agents" / "simplex" / "config.json")
     assert config_path.exists()
     if sys.platform != "win32":
         assert stat.S_IMODE(config_path.stat().st_mode) == 0o600

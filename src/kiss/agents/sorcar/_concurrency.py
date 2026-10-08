@@ -4,13 +4,11 @@
 # add your name here
 """Shared concurrency primitives for the sorcar package.
 
-Holds the pieces that ``persistence.py``, ``git_worktree.py``,
-``web_use_tool.py`` and ``kiss.server.web_server`` (and any other
-module coordinating across threads or processes) previously duplicated
-with drifting semantics: the ``KISS_RACE_DELAY`` test hook that widens
-read-modify-write windows in concurrency tests.  The ``pid_alive``
-liveness probe lives in :mod:`kiss.core.processes` and cross-process
-file locks in :mod:`kiss.core.file_lock`.
+One copy of the ``KISS_RACE_DELAY`` test hook that widens
+read-modify-write windows in concurrency tests, for every module
+(sorcar and server) that coordinates across threads or processes.
+The ``pid_alive`` liveness probe lives in :mod:`kiss.core.processes`
+and cross-process file locks in :mod:`kiss.core.file_lock`.
 """
 
 from __future__ import annotations

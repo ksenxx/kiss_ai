@@ -312,6 +312,7 @@ class TestRegistryLiveMetrics(_DbTestBase):
             "is_worktree": True,
             "is_parallel": False,
             "auto_commit_mode": False,
+            "awaiting_answer": False,
         }
 
     def test_overlay_live_metrics_ignores_unregistered_task(self) -> None:

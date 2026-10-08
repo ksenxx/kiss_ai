@@ -6,7 +6,7 @@
 // End-to-end auto-scroll tests: the chat webview scrolls to the end of
 // the latest event panel, in both the extension webview and the remote
 // webapp (same main.js, remote-chat body class).  Every scrollable
-// subpanel of an event panel (thinking, bash output, thoughts/llm
+// subpanel of an event panel (bash output, thoughts/llm
 // panel, tool bodies) must also scroll to its own end as streamed text
 // appears inside it.  ANY user scroll away from the bottom of the chat
 // DISABLES the outer auto-scroll — the chat must never scroll to the
@@ -254,8 +254,9 @@ async function testOuterChatFollowsLocksAndResumes(remote) {
 }
 
 // --------------------------------------------------------------------
-// Think subpanel: streamed thinking must scroll the think panel AND
-// its enclosing thoughts (llm) panel AND the outer chat to their ends.
+// Thinking text: streamed thinking is plain text inside the thoughts
+// (llm) panel, so it must scroll that panel AND the outer chat to
+// their ends -- and respect the panel's own user scroll lock.
 // --------------------------------------------------------------------
 
 async function testThinkPanelAutoScrolls(remote) {
@@ -268,25 +269,21 @@ async function testThinkPanelAutoScrolls(remote) {
   send(win, {type: 'thinking_start'});
   const lp = O.querySelector('.llm-panel');
   assert.ok(lp, 'thinking_start must create a thoughts (llm) panel');
-  const think = lp.querySelector('.ev.think');
-  assert.ok(think, 'thinking_start must create a think panel');
-  const geoT = {sh: 1000, ch: 200};
+  const think = lp.querySelector(':scope > .think');
+  assert.ok(think, 'thinking_start must create a thinking text block in it');
+  assert.ok(!think.querySelector('.lbl'), 'the thinking text has no header');
   const geoL = {sh: 1400, ch: 350};
-  fakeGeometry(think, geoT);
   fakeGeometry(lp, geoL);
 
   send(win, {type: 'thinking_delta', text: 'a'.repeat(80)});
-  geoT.sh += 200;
   geoL.sh += 200;
   geoO.sh += 200;
   send(win, {type: 'thinking_delta', text: 'b'.repeat(80)});
   await nextFrames(win);
   assert.strictEqual(
-    think.scrollTop,
-    bottom(geoT),
-    'BUG (' +
-      label(remote) +
-      '): streamed thinking did not scroll the think panel to its end',
+    think.textContent,
+    'a'.repeat(80) + 'b'.repeat(80),
+    'the thinking text lands directly in the Thoughts panel',
   );
   assert.strictEqual(
     lp.scrollTop,
@@ -303,71 +300,14 @@ async function testThinkPanelAutoScrolls(remote) {
       '): streamed thinking did not scroll the chat to its end',
   );
 
-  // A user scroll away from the think panel's bottom engages the
-  // panel's OWN lock: more streamed thinking must leave the think
-  // panel where the user put it, while the unlocked thoughts panel
-  // and the chat keep following their ends.
-  userScroll(win, think, 50);
-  geoT.sh += 200;
+  // A user scroll away from the thoughts panel's bottom engages the
+  // panel's OWN lock: more streamed thinking must leave the panel
+  // where the user put it, while the chat keeps following its end.
+  userScroll(win, lp, 40);
   geoL.sh += 200;
   geoO.sh += 200;
   send(win, {type: 'thinking_delta', text: 'c'.repeat(80)});
   await nextFrames(win);
-  assert.strictEqual(
-    think.scrollTop,
-    50,
-    'BUG (' +
-      label(remote) +
-      '): streamed thinking auto-scrolled the think panel although ' +
-      'the user had scrolled it up',
-  );
-  assert.strictEqual(
-    lp.scrollTop,
-    bottom(geoL),
-    'BUG (' +
-      label(remote) +
-      "): the locked think panel disabled its parent thoughts panel's " +
-      'auto-scroll',
-  );
-  assert.strictEqual(
-    O.scrollTop,
-    bottom(geoO),
-    'BUG (' +
-      label(remote) +
-      "): the locked think panel disabled the chat's auto-scroll",
-  );
-
-  // Scrolling the think panel back to its bottom releases its lock:
-  // the panel follows its end again.
-  userScroll(win, think, bottom(geoT));
-  geoT.sh += 200;
-  send(win, {type: 'thinking_delta', text: 'd'.repeat(80)});
-  await nextFrames(win);
-  assert.strictEqual(
-    think.scrollTop,
-    bottom(geoT),
-    'BUG (' +
-      label(remote) +
-      '): the think panel did not resume following after the user ' +
-      'scrolled it back to its bottom',
-  );
-
-  // The REVERSE nesting: a locked thoughts (llm) panel must stay put
-  // while the unlocked think panel inside it keeps following its end.
-  userScroll(win, lp, 40);
-  geoT.sh += 200;
-  geoL.sh += 200;
-  geoO.sh += 200;
-  send(win, {type: 'thinking_delta', text: 'x'.repeat(80)});
-  await nextFrames(win);
-  assert.strictEqual(
-    think.scrollTop,
-    bottom(geoT),
-    'BUG (' +
-      label(remote) +
-      "): a locked thoughts panel disabled the inner think panel's " +
-      'auto-scroll',
-  );
   assert.strictEqual(
     lp.scrollTop,
     40,
@@ -383,41 +323,54 @@ async function testThinkPanelAutoScrolls(remote) {
       label(remote) +
       "): the locked thoughts panel disabled the chat's auto-scroll",
   );
+
+  // Scrolling the panel back to its bottom releases its lock: the
+  // panel follows its end again.
   userScroll(win, lp, bottom(geoL));
+  geoL.sh += 200;
+  send(win, {type: 'thinking_delta', text: 'd'.repeat(80)});
+  await nextFrames(win);
+  assert.strictEqual(
+    lp.scrollTop,
+    bottom(geoL),
+    'BUG (' +
+      label(remote) +
+      '): the thoughts panel did not resume following after the user ' +
+      'scrolled it back to its bottom',
+  );
 
   // A thinking_end arriving before the rAF flush must still flush the
   // pending text and scroll the (unlocked) panel to its end.
-  geoT.sh += 200;
+  geoL.sh += 200;
   send(win, {type: 'thinking_delta', text: 'e'.repeat(80)});
   send(win, {type: 'thinking_end'});
+  assert.ok(think.textContent.endsWith('e'.repeat(80)), 'thinking_end flushes the text');
   assert.strictEqual(
-    think.scrollTop,
-    bottom(geoT),
+    lp.scrollTop,
+    bottom(geoL),
     'BUG (' +
       label(remote) +
-      '): thinking_end did not scroll the flushed think panel to its end',
+      '): thinking_end did not scroll the flushed thoughts panel to its end',
   );
 
-  // A LOCKED think panel is left alone even by the thinking_end
+  // A LOCKED thoughts panel is left alone even by the thinking_end
   // flush; the pending text must still land in the panel.
   send(win, {type: 'thinking_start'});
-  const think2 = O.querySelectorAll('.ev.think')[1];
-  assert.ok(think2, 'a second thinking_start must create a think panel');
-  const geoT2 = {sh: 1000, ch: 200};
-  fakeGeometry(think2, geoT2);
+  const think2 = lp.querySelectorAll(':scope > .think')[1];
+  assert.ok(think2, 'a second thinking_start adds a second text block to the panel');
   send(win, {type: 'thinking_delta', text: 'f'.repeat(80)});
   await nextFrames(win);
-  userScroll(win, think2, 30);
-  geoT2.sh += 200;
+  userScroll(win, lp, 30);
+  geoL.sh += 200;
   send(win, {type: 'thinking_delta', text: 'g'.repeat(80)});
   send(win, {type: 'thinking_end'});
   await nextFrames(win);
   assert.strictEqual(
-    think2.scrollTop,
+    lp.scrollTop,
     30,
     'BUG (' +
       label(remote) +
-      '): the thinking_end flush auto-scrolled a think panel the user ' +
+      '): the thinking_end flush auto-scrolled a thoughts panel the user ' +
       'had scrolled up',
   );
   assert.ok(
@@ -426,7 +379,7 @@ async function testThinkPanelAutoScrolls(remote) {
   );
   win.close();
   console.log(
-    '  ok - think subpanel auto-scrolls to its end (' + label(remote) + ')',
+    '  ok - thinking text auto-scrolls its Thoughts panel (' + label(remote) + ')',
   );
 }
 

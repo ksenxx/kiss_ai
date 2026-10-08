@@ -63,16 +63,16 @@ class TestStaleFlushAfterCleanup(unittest.TestCase):
         p.print("late output", type="bash_stream")
         with p._bash_lock:
             bs = p._bash_states["task-55"]
-        # Park the timer between its copy step and its broadcast step:
-        # it copies the text under _bash_lock, then blocks acquiring
-        # flush_lock (held here) before the generation re-check.
+        # Park the timer before its copy step: the flush copies and
+        # broadcasts under flush_lock (held here), so the fired timer
+        # blocks with the text still in the buffer.
         bs.flush_lock.acquire()
         cleaner = threading.Thread(
             # cleanup_task itself waits on flush_lock (to let an
             # authorized in-flight broadcast finish), so it must run on
             # its own thread while this test thread holds the lock.  It
-            # bumps the generation BEFORE that wait, so the parked
-            # timer's re-check fails regardless of who gets the lock
+            # clears the buffer BEFORE that wait, so the parked timer
+            # finds nothing to send regardless of who gets the lock
             # first once it is released.
             target=p.cleanup_task,
             args=("task-55",),
@@ -82,11 +82,12 @@ class TestStaleFlushAfterCleanup(unittest.TestCase):
         try:
             time.sleep(0.35)
             self.assertEqual(
-                bs.buffer, [],
-                "timer should have copied and cleared the buffer by now",
+                bs.buffer, ["late output"],
+                "parked timer must not have touched the buffer",
             )
             cleaner.start()
             time.sleep(0.1)
+            self.assertEqual(bs.buffer, [], "cleanup_task must clear the buffer")
         finally:
             bs.flush_lock.release()
         cleaner.join(timeout=10)

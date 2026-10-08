@@ -4,8 +4,8 @@
 # add your name here
 """Tests for the frequent_tasks table in history.db.
 
-Verifies counter incrementing, timestamp updates, top-N retrieval and
-the 100-row eviction policy (lowest count, oldest timestamp first).
+Verifies counter incrementing, timestamp updates and the 100-row
+eviction policy (lowest count, oldest timestamp first).
 """
 
 from __future__ import annotations
@@ -32,8 +32,20 @@ def _restore(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
+def _rows() -> list[dict[str, object]]:
+    """Every ``frequent_tasks`` row, highest count then newest first."""
+    rows = th._get_db().execute(
+        "SELECT task, count, timestamp FROM frequent_tasks "
+        "ORDER BY count DESC, timestamp DESC"
+    ).fetchall()
+    return [
+        {"task": r["task"], "count": r["count"], "timestamp": r["timestamp"]}
+        for r in rows
+    ]
+
+
 class TestFrequentTasks:
-    """Behavioral tests for ``_record_frequent_task`` and ``_load_frequent_tasks``."""
+    """Behavioral tests for ``_record_frequent_task``."""
 
     def setup_method(self) -> None:
         self.tmp = tempfile.mkdtemp()
@@ -60,7 +72,7 @@ class TestFrequentTasks:
         th._record_frequent_task("task A")
         time.sleep(0.01)
         th._record_frequent_task("task A")
-        rows = th._load_frequent_tasks()
+        rows = _rows()
         assert len(rows) == 1
         assert rows[0]["task"] == "task A"
         assert rows[0]["count"] == 2
@@ -70,24 +82,18 @@ class TestFrequentTasks:
     def test_empty_string_ignored(self) -> None:
         """Empty task strings are ignored and produce no row."""
         th._record_frequent_task("")
-        assert th._load_frequent_tasks() == []
+        assert _rows() == []
 
-    def test_top_n_ordering(self) -> None:
-        """_load_frequent_tasks returns rows ordered by count desc."""
+    def test_counts_per_task(self) -> None:
+        """Each distinct task text keeps its own counter."""
         th._record_frequent_task("rare")
         for _ in range(3):
             th._record_frequent_task("common")
         for _ in range(2):
             th._record_frequent_task("medium")
-        rows = th._load_frequent_tasks(limit=20)
+        rows = _rows()
         assert [r["task"] for r in rows] == ["common", "medium", "rare"]
         assert [r["count"] for r in rows] == [3, 2, 1]
-
-    def test_limit_caps_results(self) -> None:
-        """The ``limit`` argument caps the result list length."""
-        for i in range(5):
-            th._record_frequent_task(f"t{i}")
-        assert len(th._load_frequent_tasks(limit=3)) == 3
 
     def test_eviction_when_at_max(self) -> None:
         """When the table is full, the lowest-count oldest row is evicted."""
@@ -105,7 +111,7 @@ class TestFrequentTasks:
             th._record_frequent_task("newest")
 
             th._record_frequent_task("inserted")
-            rows = th._load_frequent_tasks()
+            rows = _rows()
             tasks = {r["task"] for r in rows}
             assert "oldest" not in tasks
             assert "middle" in tasks
@@ -125,7 +131,7 @@ class TestFrequentTasks:
             th._record_frequent_task("second")
             time.sleep(0.01)
             th._record_frequent_task("third")
-            rows = th._load_frequent_tasks()
+            rows = _rows()
             tasks = {r["task"] for r in rows}
             assert tasks == {"second", "third"}
         finally:
@@ -139,28 +145,19 @@ class TestFrequentTasks:
             th._record_frequent_task("a")
             th._record_frequent_task("b")
             th._record_frequent_task("a")
-            tasks = {r["task"] for r in th._load_frequent_tasks()}
+            tasks = {r["task"] for r in _rows()}
             assert tasks == {"a", "b"}
         finally:
             th._MAX_FREQUENT_TASKS = original_max
 
-    def test_default_limit_is_50(self) -> None:
-        """_load_frequent_tasks default limit returns up to 50 rows."""
+    def test_below_cap_keeps_every_task(self) -> None:
+        """Below the cap, every distinct task is kept."""
         for i in range(60):
             th._record_frequent_task(f"task-{i:03d}")
-        rows = th._load_frequent_tasks()
-        assert len(rows) == 50
-
-    def test_returns_all_50_when_exactly_50_exist(self) -> None:
-        """When exactly 50 tasks are recorded, all 50 are returned."""
-        for i in range(50):
-            th._record_frequent_task(f"task-{i:03d}")
-        rows = th._load_frequent_tasks()
-        assert len(rows) == 50
+        assert len(_rows()) == 60
 
     def test_chat_run_records_frequent_task(self) -> None:
         """ChatSorcarAgent.run wires ``_record_frequent_task`` for each task."""
         th._add_task("integration task", chat_id="")
         th._record_frequent_task("integration task")
-        rows = th._load_frequent_tasks()
-        assert any(r["task"] == "integration task" for r in rows)
+        assert any(r["task"] == "integration task" for r in _rows())

@@ -24,7 +24,7 @@ could not see the viewer yet.  The attach now resolves the live task
 and subscribes the viewer in one ``_state_lock`` section, so the run's
 end is serialized after the subscription (audit 2026-09-26).  Everything else is real: a real
 ``VSCodeServer``, a run submitted through the real ``_cmd_run``, a
-real worker thread parked in a real agent-script getter, the real
+real worker thread parked in a real SEA getter, the real
 end-of-run broadcasts.  Releasing the getter makes it raise, so the
 task ends in setup and no LLM is ever invoked.
 """
@@ -186,11 +186,11 @@ class TestReattachStatusEndRace(TestCase):
             "useWorktree": False,
             "isParallel": False,
             "autoCommit": False,
-            "agentPath": str(self.script),
+            "seaPath": str(self.script),
         })
         self.assertTrue(
             self._wait((self.tmp / "entered").exists, 30.0),
-            "the run never reached the agent-script getter",
+            "the run never reached the SEA getter",
         )
 
     def test_viewer_attaching_as_task_ends_receives_running_false(self) -> None:
@@ -409,12 +409,14 @@ class TestReattachStatusEndRace(TestCase):
             f"through the end fan-out: {self._statuses(viewer)}",
         )
 
-    def test_replaying_unknown_idle_chat_emits_no_status(self) -> None:
-        """No history row and no live task: nothing to attach or flip."""
+    def test_replaying_unknown_idle_chat_reports_idle(self) -> None:
+        """No history row and no live task: nothing to attach, so the
+        tab is told once that it is idle (the webview holds a registry
+        chat open until its state is known) and never flipped again."""
         from uuid import uuid4
 
         self.server._replay_session(f"chat-none-{uuid4().hex}", "lonely-tab")
-        self.assertEqual(self._statuses("lonely-tab"), [])
+        self.assertEqual(self._statuses("lonely-tab"), [False])
 
     def test_viewer_attaching_to_live_task_is_not_flipped_back(self) -> None:
         """The still-running re-check must not undo a valid attach.

@@ -21,13 +21,11 @@ from typing import Any, cast
 
 import pytest
 
-from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _memory_root_for_run,
     _memory_settings,
     _repo_memory_domains,
-    run_tasks_parallel,
 )
 from kiss.core import config as config_module
 from kiss.core.memoryfield.index import hashed_embedding
@@ -270,87 +268,6 @@ class TestUseMemoryOverride:
             ),
         ]
         assert gated == [None, None, None, None]
-
-
-class TestFanOutForwardsUseMemory:
-    """``run_tasks_parallel`` forwards the parent's ``use_memory`` override
-    to every sub-agent, so one explicit override governs the whole task
-    tree while ``None`` lets each child fall back to the config default.
-
-    Like the daemon suites in ``tests/server``, the only replaced
-    boundary is the LLM itself: ``SorcarAgent``'s parent ``run`` is
-    swapped for a recorder while the real fan-out pipeline (chat
-    allocation, task persistence, the memory decision in
-    ``SorcarAgent.run``) executes against an isolated ``KISS_HOME``.
-    """
-
-    @pytest.fixture()
-    def recorded(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> list[dict[str, Any]]:
-        home = _home(monkeypatch, tmp_path)
-        _write_config(home, {"use_memory": True})
-        monkeypatch.setattr(_persistence, "_KISS_DIR", home)
-        monkeypatch.setattr(_persistence, "_DB_PATH", home / "history.db")
-        monkeypatch.setattr(_persistence, "_db_conn", None)
-        (tmp_path / "work").mkdir(exist_ok=True)
-        seen: list[dict[str, Any]] = []
-        parent_class = cast(Any, SorcarAgent.__mro__[1])
-
-        def stub_run(self_agent: Any, **kwargs: Any) -> str:
-            seen.append({
-                "override": self_agent._use_memory_override,
-                "memory_tools": self_agent._memory_tools,
-            })
-            return "success: true\nis_continue: false\nsummary: ok\n"
-
-        monkeypatch.setattr(parent_class, "run", stub_run)
-        return seen
-
-    def test_false_reaches_every_sub_agent(
-        self, recorded: list[dict[str, Any]], tmp_path: Path
-    ) -> None:
-        results = run_tasks_parallel(
-            ["record a", "record b"],
-            max_workers=2,
-            model_name="claude-haiku-4-5",
-            work_dir=str(tmp_path / "work"),
-            use_memory=False,
-        )
-        assert len(results) == 2
-        assert [entry["override"] for entry in recorded] == [False, False]
-        assert all(entry["memory_tools"] is None for entry in recorded)
-
-    def test_default_none_lets_children_use_config(
-        self, recorded: list[dict[str, Any]], tmp_path: Path
-    ) -> None:
-        results = run_tasks_parallel(
-            ["record"],
-            max_workers=1,
-            model_name="claude-haiku-4-5",
-            work_dir=str(tmp_path / "work"),
-        )
-        assert len(results) == 1
-        assert recorded[0]["override"] is None
-        assert recorded[0]["memory_tools"] is not None
-
-    def test_run_parallel_tool_forwards_parent_override(
-        self, recorded: list[dict[str, Any]], tmp_path: Path
-    ) -> None:
-        """The ``run_parallel`` tool closure passes the PARENT's stored
-        override on, so an LLM-triggered fan-out inherits it too."""
-        agent = SorcarAgent("memory-fanout-parent")
-        agent._use_web_tools = False
-        agent._use_memory_override = False
-        agent.work_dir = str(tmp_path / "work")
-        run_parallel = next(
-            t
-            for t in agent._get_tools()
-            if getattr(t, "__name__", "") == "run_parallel"
-        )
-        run_parallel('["record via tool"]', max_workers="1")
-        assert [entry["override"] for entry in recorded] == [False]
-        assert recorded[0]["memory_tools"] is None
 
 
 def _git_repo(path: Path) -> None:

@@ -20,9 +20,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import threading
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +28,6 @@ import pytest
 
 from kiss.agents.sorcar import worktree_sorcar_agent as wta_mod
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _AbandonedSubagent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.tests.server.parallel_agent_harness import CapturePrinter, IsolatedKissHome
 
@@ -174,39 +171,6 @@ class TestWorkDirUntouchedWhenWorktreeKept:
 
         assert wt_dir.exists()
         assert agent.work_dir == str(wt_dir / "pkg")
-
-    def test_deferred_discard_keeps_work_dir_until_subagent_stops(
-        self, tmp_path: Path,
-    ) -> None:
-        """A real abandoned sub-agent thread wedges the discard (5 s wait)."""
-        repo, wt_dir, branch = _make_repo_with_worktree(tmp_path)
-        agent = _agent_in_worktree(repo, wt_dir, branch)
-        release = threading.Event()
-
-        def wedged_child() -> str:
-            release.wait(120)
-            return "done"
-
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(wedged_child)
-            with agent._abandoned_lock:
-                agent._abandoned_subagents.append(
-                    _AbandonedSubagent(future, SorcarAgent("child"), (0.0, 0, 0)),
-                )
-            try:
-                message = agent.discard()
-                assert message.startswith("Discard deferred")
-                assert wt_dir.exists()
-                assert agent.work_dir == str(wt_dir / "pkg")
-            finally:
-                release.set()
-            assert agent.reclaim_abandoned_subagents(timeout=120)
-
-        message = agent.discard()
-
-        assert message.startswith("Discarded branch")
-        assert not wt_dir.exists()
-        assert agent.work_dir == str(repo / "pkg")
 
     def test_work_dir_outside_this_worktree_is_left_alone(
         self, tmp_path: Path, no_llm_commit_message: None,

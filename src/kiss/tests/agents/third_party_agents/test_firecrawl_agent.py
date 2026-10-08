@@ -10,9 +10,8 @@ The server asserts the ``Authorization: Bearer`` header on every call,
 returns canned JSON, and records requests (method, path, body) for
 verification.
 
-Config state is isolated per pytest process because the session
-conftest points ``KISS_HOME`` at a temporary directory and
-``ChannelConfig.path`` resolves ``$KISS_HOME`` lazily.
+State is isolated per test: ``isolated_kiss_home`` points ``KISS_HOME`` at a
+fresh temporary directory and the config paths resolve ``$KISS_HOME`` lazily.
 """
 
 from __future__ import annotations
@@ -212,12 +211,7 @@ def backend(fc_server):
     return b, server
 
 
-@pytest.fixture(autouse=True)
-def _fresh_config():
-    """Start and end every test with no persisted Firecrawl config."""
-    _config.clear()
-    yield
-    _config.clear()
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
 def test_agent_instantiation_unauthenticated() -> None:

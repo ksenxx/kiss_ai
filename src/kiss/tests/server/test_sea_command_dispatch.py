@@ -11,7 +11,7 @@ Two integration surfaces are pinned:
   other read command;
 * the slash-command run: ``/xxx text`` runs the SEA ``xxx`` DIRECTLY
   in the tab's own run (``slash_command_task`` splits the prompt, and
-  :meth:`TaskRunner._run_task` makes the SEA the run's ``agentPath``
+  :meth:`TaskRunner._run_task` makes the SEA the run's ``seaPath``
   and ``text`` its prompt), so the LLM sees ``text`` as its task while
   the tab, ``state.last_user_prompt`` and the history row keep the raw
   ``/xxx text``.  There is no ``run_agent`` relay turn and no nested
@@ -101,7 +101,7 @@ def test_get_sea_commands_conn_id_stamping() -> None:
     An empty ``connId`` broadcasts to all clients; a non-empty
     ``connId`` scopes the event to the requesting connection.  This
     mirrors the same contract every other read command follows
-    (``getFrequentTasks``, ``getInputHistory``, ``getModels``).
+    (``getInputHistory``, ``getModels``).
     """
     server, printer = _make_server()
     sea_commands.refresh_registry()
@@ -130,7 +130,7 @@ def test_slash_command_task_splits_a_registered_command(tmp_path: Path) -> None:
     """``slash_command_task`` yields the SEA to run and the trailing text as its task.
 
     This is the helper :meth:`TaskRunner._run_task` calls first: the
-    SEA becomes the run's ``agentPath`` and the text its ``prompt``.
+    SEA becomes the run's ``seaPath`` and the text its ``prompt``.
     No ``run_agent`` directive is built any more.
     """
     sea = _seed_seas_md(tmp_path / "user-seas", "notify")

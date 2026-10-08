@@ -16,8 +16,9 @@ copy the historical task text into the chat input textarea
 (``#task-input``).  That textarea holds the user's draft for the next
 prompt, so overwriting it both destroys typed text and invites the
 user to accidentally re-send an old task.  Echoing the task into the
-read-only task panel (``#task-panel-text``, via ``setTaskText``) is the
-correct behaviour and is asserted to keep working.
+read-only task panel heading the transcript (``.task-panel-text``,
+via ``setTaskText``) is the correct behaviour and is asserted to keep
+working.
 
 All three branches of the row click handler are covered — resume
 (``has_events``), plain new tab (no events) and switch-to-already-open

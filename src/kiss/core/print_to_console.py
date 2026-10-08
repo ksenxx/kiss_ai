@@ -56,11 +56,11 @@ class _PrinterThreadState(threading.local):
 class ConsolePrinter(Printer):
     """Rich-formatted console printer, safe to share across agent threads.
 
-    ``run_tasks_parallel`` forwards one printer object verbatim to every
-    parallel sub-agent, and the live usage monitor prints from a third
-    daemon thread, so this class faces the same fan-out ``JsonPrinter``
-    does.  It is protected the same way: state that belongs to the
-    printing agent is thread-local, the shared cursor position
+    One printer object may be shared by several agent threads (a
+    ``talk`` synthesis, a daemon-side fold of a sub-task's spend), so
+    this class faces the same fan-out ``JsonPrinter`` does.  It is
+    protected the same way: state that belongs to the printing agent
+    is thread-local, the shared cursor position
     (``_mid_line``, a property of the one output stream) stays shared,
     and every public entry point holds ``_lock`` for its whole body so a
     panel and its rules are emitted as one uninterrupted unit.

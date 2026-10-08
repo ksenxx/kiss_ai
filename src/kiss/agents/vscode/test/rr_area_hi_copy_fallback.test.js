@@ -5,8 +5,9 @@
 
 // I-R2: one hidden-textarea execCommand('copy') fallback, exported as
 // PanelCopy.fallbackCopyText, backs every same-page copy control. This
-// exercises the helper directly and through main.js's task-panel copy
-// button when the async clipboard API is unavailable.
+// exercises the helper directly and through the copy button of the
+// task panel that opens a transcript when the async clipboard API is
+// unavailable.
 
 /* global require, process, console, __dirname, global, setTimeout, clearTimeout */
 
@@ -100,11 +101,20 @@ async function testMainTaskPanelUsesSharedFallback() {
     return true;
   };
 
+  // A task starts: its transcript opens with the task panel, a regular
+  // event panel whose copy button copies the task text.
+  const send = data =>
+    win.dispatchEvent(new win.MessageEvent('message', {data}));
+  send({type: 'setTaskText', text: 'the task text'});
+  send({type: 'clear'});
   // No navigator.clipboard in this DOM: the button must fall back.
-  const text = win.document.getElementById('task-panel-text');
-  const btn = win.document.getElementById('task-panel-copy');
-  assert.ok(text && btn, 'task panel copy controls missing');
-  text.textContent = 'the task text';
+  const panel = win.document.querySelector('#output .task-panel');
+  const btn = panel && panel.querySelector(':scope > .panel-copy-btn');
+  assert.ok(panel && btn, 'task panel copy controls missing');
+  assert.strictEqual(
+    panel.querySelector('.task-panel-text').textContent,
+    'the task text',
+  );
   btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepStrictEqual(

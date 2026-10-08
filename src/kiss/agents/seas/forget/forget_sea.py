@@ -18,7 +18,7 @@ The file is edited through
 :func:`kiss.agents.seas.agents_md.remove_instruction` in the daemon
 process; the agent runs with the ``bash`` tool profile directly on the
 checkout (no worktree, no auto-commit, no classification, no browser,
-no memory, no fan-out).
+no memory).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from kiss.agents.seas.agents_md import list_instructions, remove_instruction
-from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.core.brand import HOME_DIR
 
 SYSTEM_PROMPT = (
@@ -47,7 +47,7 @@ SYSTEM_PROMPT = (
 """The whole base system prompt of the forget agent (replaces ``SYSTEM.md``)."""
 
 
-class ForgetSea(BaseSea):
+class ForgetSea(WorkerSea):
     """The ``/forget`` SEA."""
 
     def description(self) -> str:
@@ -65,7 +65,6 @@ class ForgetSea(BaseSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
         return settings | {
-            "kind": "worker",
             "tool_profile": "bash",
             "max_budget": 1.0,
         }

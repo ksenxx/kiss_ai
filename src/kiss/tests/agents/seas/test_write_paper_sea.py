@@ -150,17 +150,17 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "Em dashes: zero in prose" in prompt
     assert "Never add .aux" in prompt
     assert [t.__name__ for t in sea.tools([print])] == ["print", "check_paper", "build_paper"]
-    # Browse, fan out, skip the classifier; a ``run_agent`` dispatch waits six hours.
+    # Browse, skip the classifier; a ``run_agent`` dispatch waits six hours.
+    # ``run_parallel`` is always offered, so nothing turns fan-out on.
     assert sea.settings({}) == {
         "use_web_tools": True,
-        "allow_fan_out": True,
         "auto_classify": False,
         "timeout": 6 * 3600,
     }
     assert sea.settings({"model": "m"}) == {"model": "m", **sea.settings({})}
-    assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == {
-        "kind": "session", **sea.settings({})
-    }
+    assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == (
+        sea.settings({})
+    )
     # The default system prompt is kept: ``system_prompt`` only appends to
     # it, and the module defines none of the removed getters, which
     # nothing would read.
@@ -512,7 +512,6 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: P
             system_prompt_hook=run.system_prompt_hook,
             tools_hook=run.tools_hook,
             web_tools=settings["use_web_tools"],
-            is_parallel=settings["allow_fan_out"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

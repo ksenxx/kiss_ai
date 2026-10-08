@@ -17,10 +17,10 @@ local OpenAI-compatible HTTP server:
 * ``ask_user_question`` returns an error at once when the running task is
   unattended (its prompt carries ``UNATTENDED_MARKER``) instead of
   invoking the blocking callback.
-* ``run_parallel`` prepends ``UNATTENDED_CHILD_PREAMBLE`` to every child
-  task of an unattended run; ``run_agent`` (``_dispatch``) appends
-  it through ``append_to_prompt`` so that an agent script's ``prompt()``
-  override cannot drop it.  Either way the children inherit the rule.
+* every sub-task of an unattended run (``run_agent``, and ``run_parallel``
+  which is N ``run_agent`` calls) gets ``UNATTENDED_CHILD_PREAMBLE``
+  appended through ``append_to_prompt`` so that a SEA's ``prompt()``
+  override cannot drop it; the children inherit the rule.
 
 Detection looks at the current task only (after the chat history's
 ``# Task`` heading) and at the preamble's position, so an earlier result
@@ -32,17 +32,24 @@ from __future__ import annotations
 
 import json
 import tempfile
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+from typing import Any
 
+import pytest
+
+from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar.agent_dispatch import make_run_parallel_tool
 from kiss.agents.sorcar.cron_agent import (
     PROMPT_PREAMBLE,
     UNATTENDED_CHILD_PREAMBLE,
     UNATTENDED_MARKER,
     is_unattended,
-    unattended_child_prompt,
     unattended_child_suffix,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 from kiss.tests.core.test_budget_enforcement_e2e import (
     _CHEAP,
     _read_body,
@@ -120,71 +127,53 @@ def test_ask_user_question_still_reaches_the_user_when_attended() -> None:
     assert "summary_in_html: yes" in result or "yes" in result
 
 
-class _ParallelThenFinishHandler(BaseHTTPRequestHandler):
-    """Parent: ``run_parallel`` of two children, then ``finish`` with the YAML
-    result.  Children (prompt contains CHILDPROBE): ``finish`` echoing their
-    own task text, taken from the first user message, which is also recorded
-    in ``child_prompts`` for the assertions."""
-
-    child_prompts: list[str] = []
-
-    def do_POST(self) -> None:  # noqa: N802
-        messages = json.loads(_read_body(self)).get("messages", [])
-        text = json.dumps(messages)
-        has_tool_result = any(m.get("role") == "tool" for m in messages)
-        if has_tool_result:
-            last = [m for m in messages if m.get("role") == "tool"][-1]
-            resp = _tool_call_response("finish", _finish_args(last), *_CHEAP)
-        elif "CHILDPROBE" in text:
-            first_user = next(m for m in messages if m.get("role") == "user")
-            type(self).child_prompts.append(str(first_user.get("content")))
-            resp = _tool_call_response("finish", _finish_args(first_user), *_CHEAP)
-        else:
-            args = json.dumps({"tasks": '["CHILDPROBE one", "CHILDPROBE two"]'})
-            resp = _tool_call_response("run_parallel", args, *_CHEAP)
-        _send_json(self, resp)
-
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        pass
-
-
-def _run_parallel_parent(prompt: str) -> list[str]:
-    """Run the fan-out parent; return the task text each child was given."""
-    _ParallelThenFinishHandler.child_prompts = []
-    srv, url = _start_server(_ParallelThenFinishHandler)
+@pytest.fixture()
+def daemon(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingDaemon]:
+    """A daemon stand-in that records the ``run`` command of every child."""
+    stand_in = RecordingDaemon(cost=0.25, tokens=10, steps=1, chat_id="chat-child")
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", str(stand_in.endpoint_file))
     try:
-        with tempfile.TemporaryDirectory() as td:
-            agent = SorcarAgent("unattended-parent")
-            result = agent.run(
-                model_name="gpt-4o-mini",
-                prompt_template=prompt,
-                max_steps=4,
-                max_budget=2.0,
-                work_dir=td,
-                verbose=False,
-                model_config={"base_url": url, "api_key": "test-key"},
-            )
+        yield stand_in
     finally:
-        srv.shutdown()
-    assert "success: true" in result
-    return sorted(_ParallelThenFinishHandler.child_prompts)
+        stand_in.close()
 
 
-def test_run_parallel_children_inherit_the_unattended_rule() -> None:
-    """Both children's prompts carry the child preamble exactly once."""
-    prompts = _run_parallel_parent(PROMPT_PREAMBLE + "Fan out.")
-    assert len(prompts) == 2
-    for prompt, probe in zip(prompts, ["CHILDPROBE one", "CHILDPROBE two"], strict=True):
-        assert prompt.count(UNATTENDED_CHILD_PREAMBLE) == 1
-        assert prompt.index(UNATTENDED_CHILD_PREAMBLE) < prompt.index(probe)
+def _fan_out(prompt: str, work_dir: str, daemon: RecordingDaemon) -> list[dict[str, Any]]:
+    """``run_parallel`` two children from a parent whose task is *prompt*.
+
+    Returns the ``run`` command each child reached the daemon with, in
+    task order.
+    """
+    parent = SorcarAgent("unattended-parent")
+    parent.task_description = prompt
+    parent.max_budget = 2.0
+    parent.budget_used = 0.0
+    parent.work_dir = work_dir
+    out = make_run_parallel_tool(work_dir, parent)(
+        tasks=json.dumps(["CHILDPROBE one", "CHILDPROBE two"]), timeout="30",
+    )
+    assert "agent_job" not in out, out
+    commands = sorted(daemon.run_commands, key=lambda call: str(call["prompt"]))
+    assert [call["prompt"] for call in commands] == ["CHILDPROBE one", "CHILDPROBE two"]
+    return commands
 
 
-def test_run_parallel_children_of_attended_run_are_untouched() -> None:
-    prompts = _run_parallel_parent("Fan out.")
-    assert len(prompts) == 2
-    for prompt, probe in zip(prompts, ["CHILDPROBE one", "CHILDPROBE two"], strict=True):
-        assert UNATTENDED_MARKER not in prompt
-        assert probe in prompt
+def test_run_parallel_children_inherit_the_unattended_rule(
+    tmp_path: Path, daemon: RecordingDaemon,
+) -> None:
+    """Each child's prompt suffix ends with the child preamble, once."""
+    for call in _fan_out(PROMPT_PREAMBLE + "Fan out.", str(tmp_path), daemon):
+        suffix = str(call["appendToPrompt"])
+        assert suffix.count(UNATTENDED_CHILD_PREAMBLE) == 1
+        assert suffix.endswith(UNATTENDED_CHILD_PREAMBLE)
+
+
+def test_run_parallel_children_of_attended_run_are_untouched(
+    tmp_path: Path, daemon: RecordingDaemon,
+) -> None:
+    for call in _fan_out("Fan out.", str(tmp_path), daemon):
+        assert UNATTENDED_MARKER not in str(call["appendToPrompt"])
+        assert UNATTENDED_MARKER not in str(call["prompt"])
 
 
 class _Agent:
@@ -193,13 +182,9 @@ class _Agent:
 
 
 def test_unattended_helpers() -> None:
-    """The preamble is added only once, in front for run_parallel and at the
-    end of the run_agent suffix."""
+    """The preamble is added only once, at the end of the child's suffix."""
     assert UNATTENDED_MARKER in PROMPT_PREAMBLE
     assert UNATTENDED_MARKER in UNATTENDED_CHILD_PREAMBLE
-    child = unattended_child_prompt("do x")
-    assert child == UNATTENDED_CHILD_PREAMBLE + "\n\ndo x"
-    assert unattended_child_prompt(child) == child
     suffix = unattended_child_suffix("")
     assert suffix.endswith(UNATTENDED_CHILD_PREAMBLE)
     assert unattended_child_suffix(suffix) == suffix
@@ -207,11 +192,11 @@ def test_unattended_helpers() -> None:
 
 
 def test_is_unattended_positions() -> None:
-    """Cron job prompt, prepended child preamble, appended child suffix, and the
-    chat wrapper around each are all recognised."""
+    """Cron job prompt, appended child suffix, and the chat wrapper around
+    each are all recognised; a preamble that only leads the text is not."""
     assert is_unattended(_Agent(PROMPT_PREAMBLE + "job"))
     assert is_unattended(_Agent("# Task\n" + PROMPT_PREAMBLE + "job"))
-    assert is_unattended(_Agent(unattended_child_prompt("child")))
+    assert not is_unattended(_Agent(UNATTENDED_CHILD_PREAMBLE + "\n\nchild"))
     assert is_unattended(_Agent("child" + unattended_child_suffix("")))
     assert is_unattended(
         _Agent("## Previous tasks\n\nold\n\n---\n\n# Task (work on it now)\n\n"

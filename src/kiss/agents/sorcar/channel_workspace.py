@@ -49,7 +49,7 @@ WORKSPACE_ENV_VAR = "KISS_CHANNEL_WORKSPACE"
 WORKSPACE_WAIT_TIMEOUT_SECONDS = 900.0
 """Bound on a run's wait for a conflicting channel workspace to free up.
 
-A ``channel``-kind run whose workspace differs from a running channel
+A channel run (``channel: True``) whose workspace differs from a running channel
 task's waits at most this long in :func:`enter_workspace` before it
 fails with a diagnostic, so a conflicting task cannot hang it forever.
 """

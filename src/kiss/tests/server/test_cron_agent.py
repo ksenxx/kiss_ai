@@ -6,8 +6,8 @@
 
 Extracted from
 ``kiss.tests.agents.third_party_agents.test_cron_agent``: these two
-scenarios exercise the kiss-web daemon plumbing (the agent-script
-loader in ``kiss.agents.sorcar.agent_file`` and the scheduler thread started by
+scenarios exercise the kiss-web daemon plumbing (the SEA
+loader in ``kiss.agents.sorcar.sea_apply`` and the scheduler thread started by
 ``kiss.server.web_server.RemoteAccessServer``), so their dependency
 closure is kiss.agents.sorcar + kiss.server only — no third-party
 channel module is imported.
@@ -40,7 +40,7 @@ def test_agent_script_loaded_run_now_uses_daemon_endpoint_file(
     tmp_path: Path,
 ) -> None:
     # A run_agent(agent="cron", ...) session gets its cron_job tool from a
-    # FRESH synthetic module (the daemon's agent-script loader re-executes
+    # FRESH synthetic module (the daemon's SEA loader re-executes
     # this file), whose own _daemon_endpoint_file global is never set:
     # run_now must still target the endpoint file recorded in the canonical
     # module by the daemon's scheduler thread.

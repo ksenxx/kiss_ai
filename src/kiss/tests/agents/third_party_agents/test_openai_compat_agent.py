@@ -15,12 +15,11 @@ deterministically fails fast (no daemon endpoint file under the fresh
 from __future__ import annotations
 
 import json
-import os
 import socket
 import stat
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -37,50 +36,23 @@ from kiss.agents.third_party_agents.oai.oai_sea import (
     _store_chat_id,
     _system_prompt_text,
 )
+from kiss.tests.agents.third_party_agents.muse_test_utils import auth_tools
 
 _API_KEY = "test-secret-key"
 
 
-class _EnvSwap:
-    """Point ``KISS_HOME`` at a temp dir and clear ``KISS_SORCAR_LOCAL``."""
-
-    def __init__(self, target: Path) -> None:
-        self._saved_home = os.environ.get("KISS_HOME")
-        self._saved_endpoint = os.environ.get("KISS_SORCAR_LOCAL")
-        os.environ["KISS_HOME"] = str(target)
-        os.environ.pop("KISS_SORCAR_LOCAL", None)
-
-    def restore(self) -> None:
-        """Restore the original environment values."""
-        if self._saved_home is None:
-            os.environ.pop("KISS_HOME", None)
-        else:
-            os.environ["KISS_HOME"] = self._saved_home
-        if self._saved_endpoint is not None:
-            os.environ["KISS_SORCAR_LOCAL"] = self._saved_endpoint
-
-
 @pytest.fixture()
-def isolated_home(tmp_path: Path) -> Iterator[Path]:
-    """Per-test KISS_HOME isolation."""
-    home = tmp_path / "kiss_home"
-    swap = _EnvSwap(home)
-    try:
-        yield home
-    finally:
-        swap.restore()
-
-
-def _auth_tools(agent: OpenAICompatAgent) -> dict[str, Callable[..., str]]:
-    """Return the agent's auth trio keyed by function name."""
-    return {fn.__name__: fn for fn in agent._get_auth_tools()}
+def isolated_home(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Per-test ``KISS_HOME`` isolation with no daemon endpoint configured."""
+    monkeypatch.delenv("KISS_SORCAR_LOCAL", raising=False)
+    return isolated_kiss_home
 
 
 @pytest.fixture()
 def api_server(isolated_home: Path) -> Iterator[tuple[str, OpenAICompatChannelBackend]]:
     """Authenticate on an ephemeral port and start the real API server."""
     agent = OpenAICompatAgent()
-    result = _auth_tools(agent)["authenticate_openai_compat"](_API_KEY, port="0")
+    result = auth_tools(agent)["authenticate_openai_compat"](_API_KEY, port="0")
     assert json.loads(result)["ok"] is True
     backend = OpenAICompatChannelBackend()
     assert backend.connect() is True
@@ -103,13 +75,13 @@ def test_agent_instantiation_and_unauthenticated_tools(isolated_home: Path) -> N
         "check_openai_compat_auth",
         "clear_openai_compat_auth",
     ]
-    assert "Not configured" in _auth_tools(agent)["check_openai_compat_auth"]()
+    assert "Not configured" in auth_tools(agent)["check_openai_compat_auth"]()
 
 
 def test_authenticate_persists_config_and_clear(isolated_home: Path) -> None:
     """authenticate persists config with 0600 mode; clear removes it."""
     agent = OpenAICompatAgent()
-    tools = _auth_tools(agent)
+    tools = auth_tools(agent)
     result = tools["authenticate_openai_compat"](
         _API_KEY, port="18099", bind_host="127.0.0.1", model_name="some-model"
     )
@@ -143,7 +115,7 @@ def test_authenticate_persists_config_and_clear(isolated_home: Path) -> None:
 
 def test_authenticate_rejects_bad_input(isolated_home: Path) -> None:
     """Empty api_key and invalid ports are rejected without persisting."""
-    tools = _auth_tools(OpenAICompatAgent())
+    tools = auth_tools(OpenAICompatAgent())
     assert tools["authenticate_openai_compat"]("") == "api_key cannot be empty."
     assert "Invalid port" in tools["authenticate_openai_compat"](_API_KEY, port="abc")
     assert "Invalid port" in tools["authenticate_openai_compat"](_API_KEY, port="70000")
