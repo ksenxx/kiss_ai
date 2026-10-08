@@ -805,10 +805,10 @@ class _LockedConnection(sqlite3.Connection):
         cursor: _LockedCursor = self.cursor()
         return cursor.executemany(sql, seq_of_parameters)
 
-    def executescript(self, sql_script: str, /) -> Any:
-        """Run *sql_script* under the lock."""
-        with self.lock:
-            return super().executescript(sql_script)
+    def executescript(self, sql_script: str, /) -> _LockedCursor:
+        """Run *sql_script* on a new locked cursor."""
+        cursor: _LockedCursor = self.cursor()
+        return cursor.executescript(sql_script)
 
     def commit(self) -> None:
         """Commit the open transaction under the lock."""
@@ -850,9 +850,12 @@ class _LockedConnection(sqlite3.Connection):
 _open_conns: dict[int, tuple[_LockedConnection, threading.Thread, str]] = {}
 
 #: How long :func:`_recover_orphaned_sidecars` waits, in total, for
-#: other threads' statements in flight to finish (they are interrupted
-#: first, so this is normally instant).
-_RECOVERY_IDLE_WAIT_S = 5.0
+#: other threads' statements in flight to finish.  They are interrupted
+#: first, so this is normally instant; the bound only matters for a
+#: handle queued in SQLite's (uninterruptible) 30 s ``busy_timeout``
+#: wait, and it exceeds that wait so the recovery outlasts it rather
+#: than failing the task that ran into the deleted sidecars.
+_RECOVERY_IDLE_WAIT_S = 35.0
 
 #: Per database path: ``(db_file_id, shm_file_id)`` of the ``-shm``
 #: sidecar the connections in this process are mapped to.  An entry
