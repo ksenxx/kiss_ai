@@ -73,8 +73,14 @@ test('SorcarSidebarView turns webview messages into wire commands', async () => 
   global.__kissVscodeStub = {
     Uri: {file: p => ({fsPath: p, scheme: 'file'})},
     EventEmitter: class {
-      event = () => ({dispose() {}});
-      fire() {}
+      _subs = [];
+      event = cb => {
+        this._subs.push(cb);
+        return {dispose() {}};
+      };
+      fire(v) {
+        for (const cb of this._subs) cb(v);
+      }
       dispose() {}
     },
     TabInputText: class {},
