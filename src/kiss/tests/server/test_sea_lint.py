@@ -663,12 +663,28 @@ def test_cli_folder_paths_fix_and_exit_codes(
         main([])
 
 
-def test_bundled_tree_is_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("api_key", ["", "test-key"])
+def test_bundled_tree_is_clean(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, api_key: str
+) -> None:
     """The gate ``uv run check`` runs: every bundled script honours the contract."""
     from kiss.core import config
+    from kiss.core.models import cli_connections, model_info
+    from kiss.core.vscode_config import API_KEY_ENV_VARS
 
-    # Autorouter settings select from configured providers; lint never generates.
-    monkeypatch.setattr(config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "test-key")
+    # Match a fresh CI runner as well as a configured install, regardless
+    # of the developer's API credentials and authenticated CLI sessions.
+    for key in API_KEY_ENV_VARS:
+        monkeypatch.setattr(config.DEFAULT_CONFIG, key, "")
+    monkeypatch.setattr(config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", api_key)
+    monkeypatch.setattr(
+        cli_connections,
+        "get_cli_connection",
+        lambda provider: cli_connections.CLIConnection(provider, "missing"),
+    )
+    if not api_key:
+        assert model_info.get_available_models() == []
+        assert model_info.get_default_model() == "No model"
     scripts = bundled_seas()
     assert len(scripts) > 60
     assert all(
