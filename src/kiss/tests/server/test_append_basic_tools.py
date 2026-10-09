@@ -233,7 +233,7 @@ class DaemonRunApiHarness(unittest.TestCase):
             if "task_description" not in arguments:
                 # The failed-session trajectory summarizer.
                 self_agent.step_count = 1
-                return "result: prior progress\n"
+                return "success: false\nis_continue: true\nsummary: prior progress\n"
             executor_index = sum(
                 1 for c in calls if "task_description" in c["arguments"]
             )
@@ -609,8 +609,9 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
 
         Counterpart of the restricted test above: with no SEA
         restricting the toolset, the failed first sub-session is
-        followed by the Read/Bash-equipped trajectory summarizer before
-        the second sub-session continues.
+        followed by the Read/Bash-equipped trajectory summarizer (whose
+        ``finish`` is ``SummarizerFinish.finish``, the structured
+        continuation result) before the second sub-session continues.
         """
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls, fail_first_executor=True)
@@ -627,7 +628,12 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             c for c in calls if "trajectory_path" in c["arguments"]
         ]
         assert len(summarizer_calls) == 1, calls
-        assert summarizer_calls[0]["tool_names"] == ["Read", "Bash", "bash_job"]
+        assert summarizer_calls[0]["tool_names"] == [
+            "Read",
+            "Bash",
+            "bash_job",
+            "finish",
+        ]
 
     def test_absent_wire_field_defaults_true(self) -> None:
         """A raw command without ``appendBasicTools`` keeps the basics.

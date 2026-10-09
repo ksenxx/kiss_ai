@@ -2026,6 +2026,7 @@ class _MergeFlowMixin:
             "text": "",
             "total_tokens": new_tokens,
             "cost": f"${new_cost:.4f}",
+            "cost_usd": new_cost,
             "total_steps": new_steps,
         }
         stamp_event_ts(event)

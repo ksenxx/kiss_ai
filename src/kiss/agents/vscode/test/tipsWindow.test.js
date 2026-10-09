@@ -222,7 +222,7 @@ test('tips panel is styled from the shared design tokens, never a fixed palette'
     '--vscode-button-secondaryBackground',
     '--vscode-textCodeBlock-background',
     '--vscode-focusBorder',
-    '--vscode-editor-font-family',
+    '--font-mono',
   ]) {
     assert.ok(css.includes('var(' + token), `token ${token} must be read`);
   }

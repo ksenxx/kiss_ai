@@ -175,6 +175,7 @@ def test_wedged_page_bounds_the_switch_of_browser(
 ) -> None:
     """W4: the localStorage restore of the switch is bounded like any page
     read; a page that wedges its renderer at commit does not hang it."""
+    assert live_tool.show_browser(visible=False) == "Browser is now headless."
     assert live_tool.go_to_url(f"{server}/sticky").startswith("Page: Sticky")
     assert live_tool._page.evaluate("localStorage.getItem('tok')") == "1"
 

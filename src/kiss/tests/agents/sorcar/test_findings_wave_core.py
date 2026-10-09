@@ -7,8 +7,8 @@
 Covers:
 - The summarizer prompt in relentless_agent instructs a ``finish(...)``
   call that the summarizer's actually-registered finish tool accepts
-  (the summarizer registers ``KISSAgent.finish(result: str)`` because
-  its tool list has no tool named "finish").
+  (the summarizer registers ``SummarizerFinish.finish(result: str)``,
+  which returns the structured continuation result).
 - ``relentless_agent`` reuses the canonical ``kiss.core.utils.finish``
   (whose ``parse_result_yaml`` contract is pinned in
   ``kiss.tests.core.test_findings_wave_core``).
@@ -24,7 +24,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.relentless_agent import SUMMARIZER_PROMPT
+from kiss.agents.sorcar.relentless_agent import SUMMARIZER_PROMPT, SummarizerFinish
 from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.kiss_agent import KISSAgent
@@ -34,10 +34,9 @@ from kiss.core.utils import finish as utils_finish
 def _build_summarizer_registry() -> KISSAgent:
     """Build a KISSAgent tool registry exactly as the summarizer session does.
 
-    Mirrors ``RelentlessAgent.perform_task``'s summarizer wiring
-    (``tools=[shell_tools.Read, shell_tools.Bash]``) followed by
-    ``KISSAgent._setup_tools``'s fallback: when no supplied tool is named
-    "finish", the agent's own ``finish`` method is appended.
+    Mirrors ``RelentlessAgent._summarize_failed_session``'s summarizer
+    wiring: ``SummarizerFinish.finish`` is named "finish", so
+    ``KISSAgent._setup_tools`` registers it instead of the built-in.
 
     Returns:
         The KISSAgent with its ``function_map`` populated.
@@ -45,10 +44,11 @@ def _build_summarizer_registry() -> KISSAgent:
     agent = KISSAgent("summarizer registry test")
     agent.function_map = {}
     shell_tools = UsefulTools()
-    tools: list[Callable[..., Any]] = [shell_tools.Read, shell_tools.Bash]
-    tool_names = {getattr(tool, "__name__", None) for tool in tools}
-    if "finish" not in tool_names:
-        tools.append(agent.finish)
+    tools: list[Callable[..., Any]] = [
+        shell_tools.Read,
+        shell_tools.Bash,
+        SummarizerFinish.finish,
+    ]
     agent._add_functions(tools)
     return agent
 
@@ -68,18 +68,24 @@ class SummarizerFinishContract(unittest.TestCase):
             sig.bind(**{kwarg: "detailed summary of work done so far"})
 
     def test_execute_tool_with_prompt_instructed_call_succeeds(self) -> None:
-        """Executing finish exactly as the prompt instructs returns the summary."""
+        """Executing finish as the prompt instructs yields the continuation result."""
         agent = _build_summarizer_registry()
         name, response = agent._execute_tool(
             {
                 "name": "finish",
-                "arguments": {"result": "detailed summary of work done so far"},
+                "arguments": {"result": "<p>detailed summary of work done so far</p>"},
             }
         )
         self.assertEqual(name, "finish")
-        self.assertEqual(response, "detailed summary of work done so far")
         parsed = yaml.safe_load(response)
-        self.assertNotIsInstance(parsed, dict)
+        self.assertEqual(
+            parsed,
+            {
+                "success": False,
+                "is_continue": True,
+                "summary": "<p>detailed summary of work done so far</p>",
+            },
+        )
 
     def test_old_success_summary_call_does_not_bind(self) -> None:
         """The pre-fix prompt call finish(success=..., summary=...) is invalid."""

@@ -95,6 +95,14 @@ def _money(text: Any) -> float:
         return 0.0
 
 
+def _event_cost(event: dict[str, Any]) -> float:
+    """The USD cost of a ``usage_info`` event: exact ``cost_usd``, else the string."""
+    exact = event.get("cost_usd")
+    if isinstance(exact, (int, float)) and not isinstance(exact, bool):
+        return float(exact)
+    return _money(event.get("cost"))
+
+
 def _bucket(context_tokens: int) -> str:
     for name, upper in CONTEXT_BUCKETS:
         if context_tokens < upper:
@@ -168,7 +176,7 @@ def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
                 peak_context[task_id] = (context, window)
             if row.first_context is None:
                 row.first_context = context
-            cost = _money(event.get("cost"))
+            cost = _event_cost(event)
             steps = int(event.get("total_steps") or 0)
             delta = max(0.0, cost - last_cost.get(task_id, 0.0))
             last_cost[task_id] = cost

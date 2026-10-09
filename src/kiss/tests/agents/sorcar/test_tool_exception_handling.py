@@ -42,11 +42,11 @@ def test_keyboard_interrupt_propagates() -> None:
 
 
 def _parse_summarizer_result(summarizer_result: str) -> str:
-    """Replicate the summarizer YAML parsing logic from relentless_agent.perform_task."""
+    """Replicate the YAML parsing of relentless_agent._summarize_failed_session."""
     try:
         parsed = yaml.safe_load(summarizer_result)
         return (
-            parsed.get("result", summarizer_result)
+            parsed.get("summary", summarizer_result)
             if isinstance(parsed, dict)
             else summarizer_result
         )

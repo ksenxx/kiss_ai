@@ -762,6 +762,7 @@ def _result_event(text: str, *, success: bool, agent: object = None) -> dict[str
         "success": success,
         "total_tokens": tokens,
         "cost": f"${cost:.4f}",
+        "cost_usd": cost,
         "step_count": steps,
     }
 

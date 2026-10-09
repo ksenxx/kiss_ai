@@ -258,7 +258,7 @@ def _post_history(
     # chat across the later re-renders.
     page.evaluate(
         "() => document.querySelectorAll('#history-list "
-        ".history-chat-group.collapsed > .history-chat-header')"
+        ".history-chat-group.collapsed .history-chat-collapse')"
         ".forEach(h => h.click())"
     )
 
@@ -397,7 +397,9 @@ def test_running_session_renders_spinner(_browser) -> None:
 
 def test_running_filter_is_checked_by_default(_browser) -> None:
     """The History sidebar's #hf-running checkbox must default to
-    checked so running rows are visible on first open.
+    checked so running rows show as soon as the user unfolds their
+    chat's panel (``_post_history`` opens the panels through their
+    chevrons; a running task does not unfold its panel on its own).
 
     A default-unchecked running filter would make the feature appear
     broken even though the dot DOM exists.
@@ -727,6 +729,13 @@ def test_backend_history_event_renders_spinner_end_to_end(
             "'#history-list .sidebar-item'"
             ").length >= 1",
             timeout=5000,
+        )
+        # A running task does not unfold its chat's panel: the user
+        # opens it through the "Show details" chevron.
+        page.evaluate(
+            "() => document.querySelectorAll("
+            "'.history-chat-group.collapsed .history-chat-collapse')"
+            ".forEach(btn => btn.click())"
         )
         dot_visible = page.evaluate(
             """

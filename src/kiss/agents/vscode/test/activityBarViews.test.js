@@ -432,6 +432,12 @@ async function main() {
         ),
     );
     assert.ok(diffTab, 'a diff tab titled like VS Code');
+    // The diff opening in the content pane slid the task-info panel off;
+    // the drawer brings it back without re-reading an unchanged workspace.
+    assert.ok(win.document.body.classList.contains('meta-hidden'));
+    click(win, byId(win, 'meta-drawer'));
+    assert.ok(!win.document.body.classList.contains('meta-hidden'));
+    assert.strictEqual(ofType(posted, 'gitStatus').length, 1);
     // Section headers collapse their lists.
     click(win, byId(win, 'scm-graph-toggle'));
     assert.ok(byId(win, 'scm-graph').hidden);
