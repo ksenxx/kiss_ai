@@ -38,12 +38,16 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 import kiss.agents.sorcar.persistence as _persistence
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 from kiss.tests.conftest import posix_only
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 _COMMIT_MSG = "test: deterministic cross-repo commit message"
 

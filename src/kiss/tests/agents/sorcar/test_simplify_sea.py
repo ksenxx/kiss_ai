@@ -414,10 +414,14 @@ def test_apply_sea_evaluates_then_applies_the_run(tmp_path: Path) -> None:
     assert direct["useWorktree"] is False and via_apply["useWorktree"] is False
 
 
-def test_sea_lint_fix_without_paths_rewrites_nothing_in_a_clean_checkout() -> None:
+def test_sea_lint_fix_without_paths_rewrites_nothing_in_a_clean_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """``sea lint --fix`` with no path targets the bundled scripts (and finds nothing to fix)."""
     from kiss.agents.sorcar.sea_cli import main
+    from kiss.core import config
 
+    monkeypatch.setattr(config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "test-key")
     assert main(["lint", "--fix"]) == 0
 
 

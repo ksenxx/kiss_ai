@@ -1921,6 +1921,7 @@ def channel_main(
         sys.exit(1)
 
     parser = _build_arg_parser()
+    parser.prog = cli_name
     parser.add_argument(
         "--workspace",
         default="default",

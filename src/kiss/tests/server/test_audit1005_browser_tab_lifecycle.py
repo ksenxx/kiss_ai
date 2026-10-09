@@ -34,8 +34,8 @@ from typing import Any
 
 import pytest
 
+from kiss.tests.conftest import PLAYWRIGHT_CHROMIUM_INSTALLED
 from kiss.tests.server.test_browser_tab_service import (
-    _PLAYWRIGHT_CACHE,
     _events,
     _wait,
     daemon,  # noqa: F401 - pytest fixture
@@ -56,7 +56,7 @@ def _driver_processes() -> int | None:
     )
 
 
-@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(not PLAYWRIGHT_CHROMIUM_INSTALLED, reason="Playwright browsers not installed")
 def test_a_failed_launch_stops_the_playwright_driver(
     daemon: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -79,7 +79,7 @@ def test_a_failed_launch_stops_the_playwright_driver(
     assert not _events(printer, "openBrowserTab")
 
 
-@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(not PLAYWRIGHT_CHROMIUM_INSTALLED, reason="Playwright browsers not installed")
 def test_a_shutdown_during_the_launch_keeps_the_launch_error(
     daemon: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -101,7 +101,7 @@ def test_a_shutdown_during_the_launch_keeps_the_launch_error(
     _wait(lambda: _driver_processes() in (None, 0), "driver exit")
 
 
-@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(not PLAYWRIGHT_CHROMIUM_INSTALLED, reason="Playwright browsers not installed")
 def test_closing_the_last_tab_while_another_opens_keeps_the_new_tab(
     daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

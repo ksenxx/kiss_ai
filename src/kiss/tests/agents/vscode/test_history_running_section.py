@@ -31,6 +31,7 @@ from playwright.sync_api import expect, sync_playwright
 from kiss.agents.sorcar import persistence
 from kiss.agents.sorcar.daemon_client import run
 from kiss.tests.agents.vscode.test_content_tab_file_links import _open_page
+from kiss.tests.conftest import requires_openai_api_key
 from kiss.tests.server.test_content_tab_file_links import _ServerHarness
 
 
@@ -89,6 +90,8 @@ def _load_more(page, count: int) -> None:
     )
 
 
+@pytest.mark.live_api
+@requires_openai_api_key
 @pytest.mark.parametrize("flat", [False, True], ids=["grouped", "flat"])
 def test_running_history_section_lifecycle(flat: bool) -> None:
     """An old live task is pinned, survives paging, and returns on completion."""

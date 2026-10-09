@@ -46,6 +46,8 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import pytest
+
 import kiss.agents.sorcar.commit_message as _commit_message_module
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
@@ -58,6 +60,8 @@ from kiss.tests.server.test_worktree_no_autocommit_branch import (
     _run_git,
     _WorktreeNoAutocommitBase,
 )
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 #: Tab that runs the worktree task under test.
 _WT_TAB = "wt-tab"

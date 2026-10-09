@@ -16,12 +16,16 @@ import uuid
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import _git
 from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _attach_worktree_state(

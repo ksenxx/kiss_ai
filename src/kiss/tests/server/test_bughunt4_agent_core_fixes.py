@@ -345,10 +345,9 @@ class TestF07GeminiThoughtSignatures(_SetModelHarness):
     def test_signatures_survive_gemini_switch(self) -> None:
         pytest.importorskip("google.genai")
         agent: Any = SorcarAgent("f07")
-        try:
-            old_model: Any = _model_factory("gemini-2.5-flash")
-        except Exception as exc:  # no key configured in this environment
-            pytest.skip(f"gemini model unavailable: {exc}")
+        # Construct real adapters with a placeholder; no inference is performed.
+        old_model: Any = _model_factory("gemini-2.5-flash")
+        old_model.api_key = "test-key"
         old_model.initialize("task")
         old_model._thought_signatures["call-1"] = b"sig-bytes"
         agent.model = old_model

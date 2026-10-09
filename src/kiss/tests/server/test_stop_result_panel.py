@@ -24,8 +24,12 @@ import uuid
 from typing import Any
 from unittest import TestCase
 
+import pytest
+
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _make_server() -> Any:

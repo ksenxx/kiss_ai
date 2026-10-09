@@ -36,10 +36,14 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 _END_EVENT_TYPES = ("result", "task_done", "task_error", "task_stopped")
 

@@ -46,6 +46,8 @@ from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 
 def _run_git(repo: Path, *args: str) -> None:
     subprocess.run(

@@ -39,6 +39,8 @@ from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 _USAGE: dict[str, tuple[int, float, int]] = {
     "a0902 first": (300, 0.30, 6),
     "a0902 second": (100, 0.10, 2),

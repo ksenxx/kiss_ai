@@ -120,9 +120,13 @@ def _screen(page) -> str:
     return str(page.evaluate(_SCREEN_TEXT))
 
 
-def _wait_for_output(page, needle: str, timeout: int = 20000) -> str:
+def _wait_for_output(page, needle: str, timeout: int = 20000, *, unwrap: bool = False) -> str:
+    text_expr = "(" + _SCREEN_TEXT + ")"
+    if unwrap:
+        text_expr += ".replaceAll('\\n', '')"
+        needle = needle.replace("\n", "")
     page.wait_for_function(
-        "needle => (" + _SCREEN_TEXT + ").includes(needle)",
+        "needle => " + text_expr + ".includes(needle)",
         arg=needle, timeout=timeout,
     )
     return _screen(page)
@@ -171,7 +175,8 @@ def test_menu_item_opens_a_shell_in_the_work_dir(browser, harness):
         # ``rows cols`` line too before reading the screen.
         _wait_for_sizes(page, 1)
         text = _screen(page)
-        assert str(harness.work_dir) in text
+        # macOS temporary paths can wrap across several xterm screen rows.
+        assert str(harness.work_dir) in text.replace("\n", "")
         size = re.search(r"(?m)^(\d+) (\d+)$", text)
         assert size is not None
         rows, cols = (int(x) for x in size.groups())
@@ -203,8 +208,8 @@ def test_shell_starts_in_the_workspace_the_page_browses(browser, harness):
         _set_work_dir(page, harness, str(harness.plain_dir))
         _open_terminal(page)
         page.keyboard.type("pwd\n")
-        text = _wait_for_output(page, str(harness.plain_dir) + "\n")
-        assert str(harness.work_dir) + "\n" not in text
+        text = _wait_for_output(page, str(harness.plain_dir) + "\n", unwrap=True)
+        assert str(harness.work_dir) not in text.replace("\n", "")
         _close_active_tab(page)
         _wait_sessions(harness, 0)
         _set_work_dir(page, harness, str(harness.work_dir))

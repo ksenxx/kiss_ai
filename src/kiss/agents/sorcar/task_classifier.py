@@ -956,6 +956,14 @@ def classify_task(
         usage and zero steps; a decisions verdict reports its cost and
         tokens and zero steps (it is not an LLM step).
     """
+    from kiss.core.models.cli_connections import billing_mode, cli_provider, subscription_only
+
+    if (
+        subscription_only()
+        or (model_config or {}).get("subscription_only") is True
+        or (cli_provider(model_name) and billing_mode(model_name, model_config) == "subscription")
+    ):
+        return ClassifierRun(None, 0.0, 0, 0)
     task = _truncate_task(task)
     if not decisions_tool_available():
         return _classify_with_llm(task, model_name, model_config)

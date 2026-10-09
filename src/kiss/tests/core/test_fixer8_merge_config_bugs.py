@@ -28,7 +28,12 @@ class TestSanitizeConfigBooleanBudget:
         assert sanitize_config({"max_budget": "42"})["max_budget"] == 42.0
 
     def test_bool_defaults_still_coerce_truthy(self) -> None:
-        bool_keys = [k for k, v in DEFAULTS.items() if isinstance(v, bool)]
+        # Usage-credit consent is the one deliberate exception: only a
+        # literal ``true`` counts, so a junk truthy value never opts in.
+        consent = "allow_fable_usage_credits"
+        bool_keys = [k for k, v in DEFAULTS.items() if isinstance(v, bool) and k != consent]
         for key in bool_keys:
             assert sanitize_config({key: 1})[key] is True
             assert sanitize_config({key: 0})[key] is False
+        assert sanitize_config({consent: 1})[consent] is False
+        assert sanitize_config({consent: True})[consent] is True

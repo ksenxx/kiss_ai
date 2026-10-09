@@ -47,10 +47,12 @@ import time
 from pathlib import Path
 from typing import Any
 from unittest import TestCase
+from unittest.mock import patch
 
 from websockets.exceptions import ConnectionClosed
 
 from kiss.agents.sorcar import local_endpoint
+from kiss.core import config
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.task_runner import _state_owns_thread
@@ -192,6 +194,10 @@ class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
         asyncio.run_coroutine_threadsafe(
             self.remote.start_private_async(), self.loop,
         ).result(timeout=30)
+        credential = patch.object(config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "test-key")
+        credential.start()
+        self.addCleanup(credential.stop)
+        self.remote._vscode_server._default_model = "claude-opus-5-5"
         self.client = _LocalClient(self.endpoint_file)
         self.logger = logging.getLogger("kiss.server.task_runner")
         self._saved_level = self.logger.level

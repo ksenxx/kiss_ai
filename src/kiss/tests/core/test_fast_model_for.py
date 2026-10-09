@@ -65,17 +65,8 @@ class TestFastModelFor:
     def test_no_keys_returns_cli_or_no_model_fallback(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When no API keys are set, falls back to cc/haiku, codex/default, or 'No model'."""
-        import shutil
-
-        from kiss.core.models.codex_model import find_codex_executable
-
-        if shutil.which("claude") is not None:
-            assert get_fast_model() == "cc/haiku"
-        elif find_codex_executable() is not None:
-            assert get_fast_model() == "codex/default"
-        else:
-            assert get_fast_model() == "No model"
+        """No keys and no authenticated CLI result in No model."""
+        assert get_fast_model() == "No model"
 
     def test_priority_openai_over_gemini(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """OpenAI key takes priority over Gemini key."""

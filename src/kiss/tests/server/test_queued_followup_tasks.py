@@ -50,6 +50,8 @@ from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 from kiss.server.task_runner import contains_task_tags
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 
 def _clear_states(prefix: str) -> None:
     """Remove every agent state whose tab id starts with *prefix*."""

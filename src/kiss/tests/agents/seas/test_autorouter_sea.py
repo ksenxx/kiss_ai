@@ -457,6 +457,10 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
     """
     from kiss.agents.seas.rsi7d.rsi7d_sea import parse_scope
     from kiss.agents.sorcar.cron_agent import cron_job, load_jobs
+    from kiss.core import config
+
+    # Scheduling is offline and must not depend on the developer's CLI login.
+    monkeypatch.setattr(config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "test-key")
 
     home = tmp_path / "home"
     monkeypatch.setenv("KISS_HOME", str(home))

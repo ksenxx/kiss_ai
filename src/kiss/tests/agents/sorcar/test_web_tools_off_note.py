@@ -15,12 +15,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
+from kiss.agents.sorcar import skills
 from kiss.agents.sorcar.sorcar_agent import WEB_TOOLS_OFF_NOTE, SorcarAgent
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
 
 _BROWSER_TOOLS = {"go_to_url", "click", "type_text", "screenshot", "get_page_content"}
+
+
+@pytest.fixture(autouse=True)
+def isolated_user_skills(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep a developer's installed skills out of the tool-profile assertions."""
+    for name in ("claude_user_skills_dir", "agents_user_skills_dir", "user_skills_dir"):
+        monkeypatch.setattr(skills, name, lambda: tmp_path / "empty-user-skills")
 
 
 def _run(tmp_path: Path, web_tools: bool, tool_profile: str = "") -> dict:

@@ -60,6 +60,8 @@ from kiss.server.file_index import FileIndexRegistry
 from kiss.server.json_printer import JsonPrinter, _BashState
 from kiss.server.server import VSCodeServer
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 
 class _CapturePrinter(JsonPrinter):
     """Real printer subclass that records every broadcast event."""

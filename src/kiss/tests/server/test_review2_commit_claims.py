@@ -48,6 +48,7 @@ reachable in a real end-to-end setup.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -57,12 +58,18 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
+
+import pytest
 
 import kiss.agents.sorcar.persistence as _persistence
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core import config as config_module
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -97,6 +104,18 @@ class _Base(unittest.TestCase):
     """Real server, real repo, gated composer, prompt-keyed stub agent."""
 
     def setUp(self) -> None:
+        # The LLM loop is mocked. Admission still needs a configured provider;
+        # do not rely on real machine credentials or an authenticated local CLI.
+        configured = patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "offline-test-key", "ANTHROPIC_API_KEY": "offline-test-key"},
+        )
+        configured.start()
+        self.addCleanup(configured.stop)
+        for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            keyed = patch.object(config_module.DEFAULT_CONFIG, name, "offline-test-key")
+            keyed.start()
+            self.addCleanup(keyed.stop)
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-review2-claims-")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)

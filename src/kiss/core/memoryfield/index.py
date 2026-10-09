@@ -231,7 +231,9 @@ def default_embedder() -> Embedder:
     Returns:
         An :data:`Embedder` callable safe to invoke in this process.
     """
-    if os.environ.get("OPENAI_API_KEY", "").strip():
+    from kiss.core.models.cli_connections import subscription_only
+
+    if not subscription_only() and os.environ.get("OPENAI_API_KEY", "").strip():
         return ModelEmbedder()
     return hashed_embedding
 

@@ -5,8 +5,8 @@
 
 """Codex model implementation — uses the ``codex`` CLI as an LLM backend.
 
-This lets you use OpenAI Codex models through a ChatGPT subscription at
-subsidized per-token pricing.  The model invokes
+This lets you use OpenAI Codex models through a ChatGPT subscription or the CLI's
+explicit existing billing configuration.  The model invokes
 ``codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox``
 in single-shot mode and consumes the JSONL event stream emitted on stdout.
 Sandbox/approvals are bypassed because KISS is the outer agent and the user
@@ -41,6 +41,7 @@ from kiss.core.models.model import (
     TokenCallback,
     _iter_jsonl,
     _parse_text_based_tool_calls,
+    billing_checked,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,8 +176,17 @@ class CodexModel(CLITextModel):
         ]
         if self._cli_model and self._cli_model != "default":
             args.extend(["-m", self._cli_model])
+        effort = self.model_config.get("reasoning_effort")
+        if effort is not None:
+            supported = {"none", "low", "medium", "high", "xhigh", "max"}
+            if self.model_name == "codex/gpt-6.1-sol":
+                supported.discard("none")
+            if not isinstance(effort, str) or effort not in supported:
+                raise KISSError("Unsupported Codex reasoning effort.")
+            args.extend(["-c", f'model_reasoning_effort="{effort}"'])
         return args
 
+    @billing_checked
     def generate(self) -> tuple[str, Any]:
         """Generate a response using the Codex CLI.
 

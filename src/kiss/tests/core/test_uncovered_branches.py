@@ -30,16 +30,9 @@ class TestGetAvailableModels:
             for k in env_keys:
                 os.environ.pop(k, None)
             config_module.DEFAULT_CONFIG = config_module.Config()
-            import shutil
-
-            from kiss.core.models.codex_model import find_codex_executable
-
-            if shutil.which("claude") is not None:
-                assert get_default_model() == "cc/opus"
-            elif find_codex_executable() is not None:
-                assert get_default_model() == "codex/default"
-            else:
-                assert get_default_model() == "No model"
+            # The offline fixture reports no authenticated CLI, even if the
+            # developer happens to have a binary on PATH.
+            assert get_default_model() == "No model"
 
             os.environ["TOGETHER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()

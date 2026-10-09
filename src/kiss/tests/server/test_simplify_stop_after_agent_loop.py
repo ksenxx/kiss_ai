@@ -46,6 +46,8 @@ from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 _RESULT_TEXT = "stop-after-loop finished"
 
 

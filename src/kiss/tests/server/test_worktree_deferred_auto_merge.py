@@ -39,6 +39,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.server import agent_state
 from kiss.tests.server.test_worktree_no_autocommit_branch import (
@@ -51,6 +53,8 @@ from kiss.tests.server.test_worktree_repo_aware_busy_guard import (
     _WT_TAB,
     _RepoAwareGuardBase,
 )
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 #: Tab that runs the real non-worktree task whose commit frees the tree.
 _DIRECT_TAB = "direct-task-tab"

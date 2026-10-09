@@ -36,6 +36,7 @@ from playwright.sync_api import Browser, BrowserContext, sync_playwright
 from websockets.asyncio.client import connect
 
 from kiss.agents.sorcar import local_endpoint
+from kiss.core import config
 from kiss.core.kiss_agent import KISSAgent
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
@@ -111,7 +112,7 @@ class VsCodeClient:
             "tabId": self.tab_id,
             "taskId": uuid.uuid4().hex,
             "workDir": self.work_dir,
-            "model": "",
+            "model": "claude-opus-5-5",
             "useWorktree": False,
             "useWebTools": False,
             "autoCommit": False,
@@ -202,9 +203,11 @@ def _assert_ready_replay(
 
 
 def test_remote_client_opened_mid_run_gets_status_replay_and_spinner(
-    browser: Browser, harness: ExplorerHarness,
+    browser: Browser, harness: ExplorerHarness, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Wire replay and rendered spinner for a client that connects mid-task."""
+    # The executor is mocked, but admission still needs a configured backend.
+    monkeypatch.setattr(config.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "test-key")
     executor = BlockingExecutor()
     vscode: VsCodeClient | None = None
     context: BrowserContext | None = None

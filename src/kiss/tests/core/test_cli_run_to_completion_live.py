@@ -104,7 +104,7 @@ def _run_live_task_once(model_name: str, work_dir: Path) -> tuple[dict, Path]:
 
 
 @requires_claude
-@pytest.mark.live_cli
+@pytest.mark.live_cli("claude")
 @pytest.mark.slow
 def test_claude_code_runs_task_to_completion_live(tmp_path: Path) -> None:
     """The real claude CLI completes the whole task in one invocation."""
@@ -119,7 +119,7 @@ def test_claude_code_runs_task_to_completion_live(tmp_path: Path) -> None:
 
 
 @requires_codex
-@pytest.mark.live_cli
+@pytest.mark.live_cli("codex")
 @pytest.mark.slow
 def test_codex_runs_task_to_completion_live(tmp_path: Path) -> None:
     """The real codex CLI completes the whole task in one invocation."""

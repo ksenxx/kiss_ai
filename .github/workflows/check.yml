@@ -20,4 +20,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - run: uv run check --clean
+      - run: uv run python -m kiss.scripts.update_models --check-docs
+
+      - run: uv run check

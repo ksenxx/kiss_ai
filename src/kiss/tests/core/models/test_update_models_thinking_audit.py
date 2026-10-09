@@ -99,15 +99,19 @@ class TestCatalogAliasesFrozen:
                 assert data[alias].get("alias_of") == base
 
     def test_no_stray_max_aliases_on_openai_models(self) -> None:
-        """The Moonshot-only ``-max`` suffix must never appear on OpenAI keys."""
+        """Only GPT-6.1 Sol supports max in the current OpenAI catalog."""
         data = _catalog()
         for name in data:
             if not name.endswith("-max"):
                 continue
             base = name.removesuffix("-max")
-            # An OpenAI base would never carry a -max alias because the
-            # OpenAI ladder tops out at xhigh.
-            if base in data and base.startswith(("gpt-", "o1", "o3", "o4")):
+            if base in ("gpt-6.1-sol", "openrouter/openai/gpt-6.1-sol"):
+                assert data[name]["thinking"] == "max"
+                _assert_alias_field_parity(data, base, name)
+                continue
+            if base in data and base.startswith(
+                ("gpt-", "o1", "o3", "o4", "openrouter/openai/")
+            ):
                 pytest.fail(
                     f"OpenAI-family base {base!r} has a -max alias; "
                     "Moonshot scale mistakenly applied?"

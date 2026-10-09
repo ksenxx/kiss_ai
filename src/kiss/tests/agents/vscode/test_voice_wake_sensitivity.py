@@ -44,8 +44,10 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
         from kiss.server.web_server import RemoteAccessServer
 
         self.tmpdir = Path(tempfile.mkdtemp())
+        # A full spoken prefix exceeds the listener's short leading-noise
+        # allowance, so only high sensitivity accepts the trailing wake alias.
         self.wav = _say_wav(
-            self.tmpdir, "hey", "hey there [[slnc 300]] Hey Sorcar [[slnc 1500]]"
+            self.tmpdir, "hey", "this is the wake phrase Hey Sorcar [[slnc 1500]]"
         )
         self.port = _free_port()
 

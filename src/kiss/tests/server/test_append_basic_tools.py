@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import tempfile
 import textwrap
@@ -37,6 +38,7 @@ import unittest
 import uuid
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
@@ -59,6 +61,14 @@ class DaemonRunApiHarness(unittest.TestCase):
     """
 
     def setUp(self) -> None:
+        # The LLM loop is mocked. Admission still needs a configured provider;
+        # do not rely on real machine credentials or an authenticated local CLI.
+        configured = patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "offline-test-key", "ANTHROPIC_API_KEY": "offline-test-key"},
+        )
+        configured.start()
+        self.addCleanup(configured.stop)
         # Resolved: macOS mkdtemp returns a symlinked /var/... path while
         # the worktree machinery canonicalizes the repo, so un-resolved
         # paths break startswith checks.

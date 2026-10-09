@@ -60,6 +60,7 @@ from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.memoryfield.tools import MemoryTools
+from kiss.core.models.cli_connections import subscription_run
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -169,7 +170,6 @@ A profile name is either one key or several keys joined with ``+``
 
 PROFILE_SEPARATOR = "+"
 """Joins the parts of a composite tool profile name."""
-
 
 
 def canonical_tool_profile(name: str) -> str:
@@ -1433,9 +1433,12 @@ class SorcarAgent(RelentlessAgent):
                 change (or a "no change" message when the requested
                 model is already active).
             """
+            from kiss.core.models.cli_connections import enforce_model_policy
             from kiss.core.models.model_info import (
                 model_runs_task_to_completion,
             )
+
+            enforce_model_policy(model_name, getattr(self, "model_config", None))
 
             if self.docker_image and model_runs_task_to_completion(model_name):
                 return (
@@ -1946,6 +1949,7 @@ class SorcarAgent(RelentlessAgent):
             self._classifier_spend = None
         self._reset_task_classification()
 
+    @subscription_run
     def run(  # type: ignore[override]
         self,
         model_name: str | None = None,

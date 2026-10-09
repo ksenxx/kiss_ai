@@ -77,7 +77,6 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         self._saved_budget = config_module.DEFAULT_CONFIG.max_budget
         # The decisions route also needs a key; a placeholder is enough
         # because nothing here makes a request.
-        config_module.DEFAULT_CONFIG.OPENROUTER_API_KEY = "test-key"
         clear_classification_cache()
 
         certfile = self.isolated.tmpdir / "cert.pem"
@@ -93,6 +92,7 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
             local_endpoint_file=self.endpoint_file,
         )
         await self.server.start_async()
+        config_module.DEFAULT_CONFIG.OPENROUTER_API_KEY = "test-key"
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()

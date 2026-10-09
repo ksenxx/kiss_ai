@@ -44,11 +44,11 @@ git commit -q -m "initial"
 # Source release.sh functions without running main (BASH_SOURCE guard).
 source "$RELEASE_SH"
 
-# The real repo must ignore the vsix too, or "git add -A" in the release would
-# commit it to origin.
-git -C "$REPO_ROOT" check-ignore -q "$VSIX_FILE" ||
-    fail "$VSIX_FILE is not gitignored in the real repo (would be committed to origin)"
-pass "real repo gitignores $VSIX_FILE"
+# The development checkout must ignore the vsix. Verify that in the scratch
+# development repo: the public release checkout intentionally tracks its vsix.
+git -C "$WORK/repo" check-ignore -q "$VSIX_FILE" ||
+    fail "$VSIX_FILE is not gitignored in the development repo (would be committed to origin)"
+pass "development repo gitignores $VSIX_FILE"
 
 # A stand-in for the packaged extension that build_vscode_extension produces.
 mkdir -p "$(dirname "$VSIX_FILE")"

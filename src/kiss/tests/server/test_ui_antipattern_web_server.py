@@ -72,6 +72,8 @@ from kiss.server.web_server import (
 )
 from kiss.tests.conftest import goto_retrying_network_change
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 PAGE_URL = "https://shim-ui.test/"
 _PASSWORD = "correct-horse-battery-staple"
 

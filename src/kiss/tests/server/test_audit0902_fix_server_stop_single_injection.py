@@ -40,11 +40,15 @@ import time
 from typing import Any, cast
 from unittest import TestCase
 
+import pytest
+
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.task_runner import _state_owns_thread
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 # Watchdog schedule: first injection after 1 s, retry after 5 more.
 _SECOND_INJECTION_AT = 6.0

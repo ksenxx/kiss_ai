@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 
 from kiss.core.kiss_agent import KISSAgent
+from kiss.core.models import cli_connections
+from kiss.core.vscode_config import save_config
 from kiss.tests.conftest import install_cli_script
 
 _EVENTS = [
@@ -42,6 +44,12 @@ _EVENTS = [
 
 _FAKE_CLAUDE = f"""#!{sys.executable}
 import json, sys
+if "--version" in sys.argv:
+    print("2.1.300")
+    sys.exit(0)
+if "status" in sys.argv:
+    print('{{"authMethod": "api_key"}}')
+    sys.exit(0)
 sys.stdin.read()
 for event in {_EVENTS!r}:
     print(json.dumps(event), flush=True)
@@ -63,6 +71,8 @@ def test_run_does_not_mutate_caller_tools_list(
     """After run(), the caller's tools list must be exactly as passed in."""
     install_cli_script(tmp_path / "claude", _FAKE_CLAUDE)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(cli_connections, "_executable", lambda provider: str(tmp_path / "claude"))
+    save_config({"claude_cli_billing_mode": "existing"})
 
     shared_tools = [echo_tool]
     agent = KISSAgent("bughunt-tools-mutation")

@@ -381,6 +381,7 @@ class TestMergeGuard(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @pytest.mark.usefixtures("stubbed_agent_model")
     def test_merging_blocks_same_tab(self) -> None:
         """Cannot start a task on the same tab that has a merge in progress."""
         _register_wt_state("5", use_worktree=False, is_merging=True)
@@ -389,10 +390,11 @@ class TestMergeGuard(unittest.TestCase):
         assert any("merge is in progress" in e["text"] for e in errors)
 
     @pytest.mark.slow
+    @pytest.mark.live_cli("codex")
     def test_merging_does_not_block_other_tabs(self) -> None:
         """A merge on one tab does not block tasks on other tabs.
 
-        The admitted task runs against the live default model, so the
+        The admitted task runs against the live Codex subscription, so the
         prompt must leave it nothing to clarify: on 2026-09-23 the prompt
         ``"test"`` made the model call ``ask_user_question``, and with no
         user on the tab ``_await_user_response`` blocked the test until
@@ -405,7 +407,9 @@ class TestMergeGuard(unittest.TestCase):
             "'<p>OK</p>'. Do not ask the user anything and do not call any "
             "other tool."
         )
-        self.server._run_task_inner({"prompt": prompt, "model": "", "tabId": "99"})
+        self.server._run_task_inner({
+            "prompt": prompt, "model": "codex/default", "tabId": "99",
+        })
         errors = [e for e in self.events if e["type"] == "error"]
         assert not any(
             "merge is in progress" in e.get("text", "") for e in errors

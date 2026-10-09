@@ -42,6 +42,8 @@ from kiss.agents.sorcar.sea_settings import anchored_work_dir
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.config import kiss_home
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 PICKER_SEA = """
 from kiss.agents.seas.base.base_sea import BaseSea
 

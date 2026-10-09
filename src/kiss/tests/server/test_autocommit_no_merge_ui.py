@@ -42,11 +42,15 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.task_runner import _release_worktree_without_merging
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 #: Events that make the hunk-by-hunk diff/merge UI appear.
 MERGE_UI_EVENTS = ("merge_data", "merge_started")

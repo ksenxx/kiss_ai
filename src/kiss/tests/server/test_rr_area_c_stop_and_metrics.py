@@ -31,6 +31,8 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.kiss_error import KISSError
 from kiss.server import agent_state
@@ -38,6 +40,8 @@ from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 from kiss.server.task_runner import inject_keyboard_interrupt
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 class _ExplodingRecordingPrinter(JsonPrinter):

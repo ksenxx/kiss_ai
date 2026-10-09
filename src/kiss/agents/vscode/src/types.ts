@@ -337,6 +337,8 @@ export type FromWebviewMessage =
       taskId: string | number | null;
       direction: 'prev' | 'next';
     }
+  | {type: 'getCLIConnections'; refresh?: boolean}
+  | {type: 'openCLITerminal'; provider: 'claude' | 'codex'; machine: string}
   | {type: 'getConfig'}
   | {
       type: 'saveConfig';
@@ -880,6 +882,11 @@ type ToWebviewMessageBody =
         out: number;
         uses: number;
         vendor: string;
+        provider?: string;
+        access_type?: string;
+        available?: boolean;
+        cost_label?: string;
+        unavailable_reason?: string;
       }>;
       selected: string;
     }
@@ -1189,6 +1196,19 @@ type ToWebviewMessageBody =
   // agent's authentication state and the epoch ms it was probed (0
   // before the first successful probe).
   | {type: 'appsStatus'; apps: AppStatusRow[]; checkedAt: number}
+  | {
+      type: 'cliConnections';
+      connections: Array<{
+        provider: string;
+        status: string;
+        version: string;
+        auth_method: string;
+        billing_mode: string;
+        message: string;
+      }>;
+      machine: string;
+      platform: string;
+    }
   // The daemon's direct reply to `getSpendReport`: the task history's
   // spend all time, per local day (ascending), per model (dearest
   // first) and per model within each day (dearest first).
@@ -1236,6 +1256,7 @@ export interface AgentCommand {
     | 'mainTreeAction'
     | 'getAdjacentTask'
     | 'setWorkDir'
+    | 'getCLIConnections'
     | 'getConfig'
     | 'saveConfig'
     | 'getMyModels'

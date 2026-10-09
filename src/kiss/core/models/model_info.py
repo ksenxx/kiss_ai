@@ -166,6 +166,7 @@ def _select_catalog_path(
         return user_path
     return package_path
 
+
 MY_MODELS_DEFAULT_CONTENT = json.dumps(
     {
         "_documentation": [
@@ -280,6 +281,7 @@ def _my_models_flock() -> Iterator[None]:
     path = USER_MY_MODELS_PATH
     with exclusive_file_lock(path.with_name("." + path.name + ".kiss.lock")):
         yield
+
 
 _CUSTOM_MODEL_DEFAULTS: dict[str, Any] = {
     "context_length": 128000,
@@ -1093,7 +1095,7 @@ def _strip_thinking_alias(bare: str) -> str:
     ``-xhigh`` / ``-max`` / ``-high`` / ``-medium`` / ``-low`` are
     KISS-internal alias suffixes (see ``update_models.py``) that map onto
     the same provider model id as their base entry (``-max`` is the top of
-    the Moonshot/Kimi scale, ``-xhigh`` the top of the OpenAI scale).
+    the Moonshot/Kimi and GPT-6.1 Sol scales; ``-xhigh`` remains supported for OpenAI).
     Provider pricing tables and endpoints only know the base names, so
     every pricing lookup and outbound request must consult the base name.
 
@@ -1336,6 +1338,7 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
 for _name, _info in MODEL_INFO.items():
     _apply_cache_pricing(_name, _info)
 
+
 def _strip_provider_prefix(model_name: str) -> str:
     """Strip harbor-style provider prefixes that duplicate KISS's own routing.
 
@@ -1564,6 +1567,11 @@ def model(
         KISSError: If the model name is not recognized.
     """
     model_name = _strip_provider_prefix(model_name)
+    from kiss.core.models.cli_connections import enforce_model_policy, subscription_only
+
+    enforce_model_policy(model_name, model_config)
+    if subscription_only():
+        model_config = dict(model_config or {}) | {"subscription_only": True}
     info = _lookup_model_info(model_name)
     if info is not None and info.is_decisions_supported:
         # Typed-decision models (``"dec": true``) speak a different
@@ -1672,17 +1680,14 @@ def _configured_providers() -> dict[str, bool]:
 
     Returns:
         Mapping of provider label to whether it is usable right now — an
-        API key for HTTP providers, the executable on ``PATH`` for the
-        subscription CLIs.
+        API key for HTTP providers, a verified authentication status for the CLIs.
     """
-    import shutil
-
-    from kiss.core.models.codex_model import find_codex_executable
+    from kiss.core.models.cli_connections import get_cli_connection
 
     keys = config_module.DEFAULT_CONFIG
     configured = {
-        "Claude Code CLI": shutil.which("claude") is not None,
-        "Codex CLI": find_codex_executable() is not None,
+        "Claude Code CLI": get_cli_connection("claude").status == "connected",
+        "Codex CLI": get_cli_connection("codex").status == "connected",
         "Unknown": False,
     }
     for provider in OPENAI_COMPATIBLE_PROVIDERS:
@@ -1721,24 +1726,35 @@ def get_model_provider(model_name: str) -> str:
     return "Unknown"
 
 
-def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
+def _model_for_first_configured_provider(
+    choices: dict[str, str], *, subscription_first: bool = True
+) -> str:
     """Return the choice for the first provider with a configured credential.
 
-    Providers are checked in priority order: Anthropic → OpenAI → Gemini →
-    OpenRouter → Together → Claude Code CLI → Codex CLI.
+    With *subscription_first*, verified Claude subscriptions precede Codex
+    subscriptions. API providers follow, then connected CLIs using their
+    existing billing configuration. A subscription task never falls back
+    to an API provider.
 
     Args:
         choices: Mapping from ``config.DEFAULT_CONFIG`` API-key attribute
             names (plus ``"cc"`` / ``"codex"`` for the subscription CLIs) to
             the model name to return for that provider.
+        subscription_first: Whether verified subscriptions precede API keys.
+            Always true inside a subscription task.
 
     Returns:
         The chosen model name, or ``"No model"`` when nothing is configured.
     """
-    import shutil
+    from kiss.core.models.cli_connections import get_cli_connection, subscription_only
 
-    from kiss.core.models.codex_model import find_codex_executable
-
+    if subscription_first or subscription_only():
+        for provider, choice in (("claude", "cc"), ("codex", "codex")):
+            status = get_cli_connection(provider)
+            if status.status == "connected" and status.billing_mode == "subscription":
+                return choices[choice]
+    if subscription_only():
+        return "No model"
     keys = config_module.DEFAULT_CONFIG
     for key_name in (
         "ANTHROPIC_API_KEY",
@@ -1749,17 +1765,20 @@ def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
     ):
         if getattr(keys, key_name):
             return choices[key_name]
-    if shutil.which("claude") is not None:
-        return choices["cc"]
-    if find_codex_executable() is not None:
-        return choices["codex"]
+    for provider, choice in (("claude", "cc"), ("codex", "codex")):
+        if get_cli_connection(provider).status == "connected":
+            return choices[choice]
     return "No model"
 
 
 def get_fast_model() -> str:
-    """Return a cheap/fast model based on which API keys are available.
+    """Return a cheap/fast model for short helper calls.
 
-    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together → Claude Code CLI.
+    Outside a subscription task the priority is unchanged: Anthropic →
+    OpenAI → Gemini → OpenRouter → Together → connected CLIs, so a helper
+    such as the commit-message button stays a plain API call rather than
+    an agentic CLI session. Inside a subscription task only a verified
+    subscription CLI is eligible.
 
     Returns:
         A fast model name for the first available provider.
@@ -1772,16 +1791,19 @@ def get_fast_model() -> str:
             "OPENROUTER_API_KEY": "openrouter/anthropic/claude-sonnet-5.5",
             "TOGETHER_API_KEY": "deepseek-ai/DeepSeek-V4.1-Flash",
             "cc": "cc/haiku",
-            "codex": "codex/default",
-        }
+            "codex": "codex/gpt-6-luna",
+        },
+        subscription_first=False,
     )
 
 
 def get_default_model() -> str:
-    """Return the best default model based on which API keys are configured.
+    """Return the best default model for a task with no explicit or saved choice.
 
-    Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI > Claude Code CLI.
-    Falls back to ``"No model"`` if no keys are set.
+    Priority order: verified Claude subscription > verified Codex subscription >
+    Anthropic > OpenAI > Gemini > OpenRouter > Together AI > connected CLIs
+    using their existing billing. Falls back to ``"No model"`` if nothing is
+    configured.
     """
     return _model_for_first_configured_provider(
         {
@@ -1791,7 +1813,7 @@ def get_default_model() -> str:
             "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-5.5",
             "TOGETHER_API_KEY": "moonshotai/Kimi-K3",
             "cc": "cc/opus",
-            "codex": "codex/default",
+            "codex": "codex/gpt-6.1-sol",
         }
     )
 

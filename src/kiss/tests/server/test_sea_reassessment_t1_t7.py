@@ -54,6 +54,8 @@ from kiss.core.models.model_info import get_available_models
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 from kiss.tests.server.test_run_config_echo import _parent
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 # --- T1: options = settings vocabulary ---------------------------------------------
 
 

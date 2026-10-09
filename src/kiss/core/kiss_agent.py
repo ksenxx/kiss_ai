@@ -30,6 +30,7 @@ from kiss.core.kiss_error import (
     KISSError,
     ModelRefusalError,
 )
+from kiss.core.models.cli_connections import subscription_run
 from kiss.core.models.model import Attachment, strip_system_cache_break
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 from kiss.core.prompt_cache_keepalive import PromptCacheKeepAlive, is_long_running_call
@@ -394,6 +395,7 @@ class KISSAgent(Base):
         if self.printer and self.print_prompts:
             self.printer.print(full_prompt, type="prompt")
 
+    @subscription_run
     def run(
         self,
         model_name: str,
@@ -671,9 +673,7 @@ class KISSAgent(Base):
                 params = set()
         return finish_fn, params
 
-    def _try_switch_to_fallback(
-        self, reason: str = "a non-retryable error"
-    ) -> str | None:
+    def _try_switch_to_fallback(self, reason: str = "a non-retryable error") -> str | None:
         """Swap ``self.model`` to the registered fallback model, if any.
 
         Consulted by :meth:`_run_agentic_loop` after a recoverable
@@ -708,7 +708,11 @@ class KISSAgent(Base):
             fallback is available, the fallback equals the current
             model, or the one-shot guard has already been consumed.
         """
+        from kiss.core.models.cli_connections import subscription_only
         from kiss.core.models.model_info import declared_fallback, get_fallback_model
+
+        if subscription_only() or (self._model_config or {}).get("subscription_only") is True:
+            return None
         if self._fallback_used:
             return None
         new_name = get_fallback_model(self.model_name)

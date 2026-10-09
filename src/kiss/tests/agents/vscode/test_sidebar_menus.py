@@ -31,6 +31,7 @@ import re
 from collections import Counter
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from kiss.tests.agents.vscode.test_workspace_sections import (
@@ -79,12 +80,16 @@ def _click_root_button(page, root: str, action: str) -> None:
     """
     row = page.locator(_row_at(root, ".is-root"))
     button = page.locator(f"{_row_at(root, '.is-root')} .explorer-root-{action}")
-    for _ in range(50):
+    for attempt in range(50):
         row.hover()
-        if button.is_visible():
-            break
-        page.wait_for_timeout(100)
-    button.click()
+        try:
+            button.click(timeout=500)
+            return
+        except PlaywrightTimeoutError:
+            if attempt == 49:
+                raise
+            page.wait_for_timeout(100)
+
 
 
 def _open_page(browser, harness, width: int = 1400):

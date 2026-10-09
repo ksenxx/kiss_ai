@@ -37,6 +37,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from kiss.agents.sorcar import worktree_pool
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -47,6 +49,8 @@ from kiss.tests.server.test_worktree_ignored_file_rescue import (
     _restore_db,
     _stub_parent_run,
 )
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 class TestRescueHardening:

@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 import threading
@@ -51,7 +50,7 @@ from kiss.server.web_server import (
     _probe_tunnel_ready,
     _try_adopt_existing_cloudflared,
 )
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import install_named_interpreter, posix_only
 
 
 class _FakeCloudflaredMetrics:
@@ -336,11 +335,10 @@ class TestAdoptionWithRealCloudflaredWireFormat(unittest.TestCase):
         )
         # The decline path verifies the process is really named
         # "cloudflared" before signalling it (stale-pidfile / recycled
-        # PID protection), so exec a real subprocess through a symlink
-        # named ``cloudflared`` (copying a system binary breaks its
-        # code signature on macOS and the kernel SIGKILLs it at exec).
+        # PID protection), so install the host's named Python runtime
+        # rather than a launcher that execs a differently named process.
         fake_bin = Path(self._tmp.name) / "cloudflared"
-        os.symlink(sys.executable, fake_bin)
+        install_named_interpreter(fake_bin)
         self._proc = subprocess.Popen(
             [str(fake_bin), "-c", "import time; time.sleep(60)"],
             stdout=subprocess.DEVNULL,

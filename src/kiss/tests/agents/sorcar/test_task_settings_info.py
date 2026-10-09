@@ -217,7 +217,7 @@ class TestSystemPromptTaskSettings(_DBRedirect):
     def test_base_agents_report_model_budget_and_time(self) -> None:
         """RelentlessAgent / SorcarAgent report their own settings."""
         base = RelentlessAgent("base")
-        base._reset(None, None, None, 7.25, self.tmpdir, None)
+        base._reset("claude-opus-4-6", None, None, 7.25, self.tmpdir, None)
         section = base._task_settings_section()
         assert "# Task Settings" in section
         assert "- Model name: claude-opus-4-6" in section

@@ -36,10 +36,14 @@ import threading
 import time
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _clear_registry() -> None:

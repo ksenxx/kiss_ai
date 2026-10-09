@@ -32,6 +32,7 @@ from kiss.core.models.model import (
     _get_attr_or_key,
     _parse_text_based_tool_calls,
     accepted_request_params,
+    billing_checked,
     responses_items_to_chat_messages,
 )
 from kiss.core.models.stream_abort import CONNECT_TIMEOUT, stop_or_stall_error
@@ -543,6 +544,7 @@ class OpenAICompatibleBase(Model):
         )
         self._client_inputs = inputs
 
+    @billing_checked
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generate an embedding vector for the given text.
 
@@ -567,6 +569,7 @@ class OpenAICompatibleBase(Model):
                 f"Embedding generation failed for model {model_to_use}: {e}"
             ) from e
 
+    @billing_checked
     def get_embeddings(
         self, texts: list[str], embedding_model: str | None = None
     ) -> list[list[float]]:
@@ -1428,6 +1431,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             )
         return normalized
 
+    @billing_checked
     def generate(self) -> tuple[str, Any]:
         """Generate content from prompt without tools.
 
@@ -1451,6 +1455,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         self.conversation.append({"role": "assistant", "content": content})
         return content, response
 
+    @billing_checked
     def generate_and_process_with_tools(
         self,
         function_map: dict[str, Callable[..., Any]],

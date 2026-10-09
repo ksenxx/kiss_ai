@@ -31,6 +31,7 @@ from kiss.core.models.model import (
     TokenCallback,
     _get_attr_or_key,
     accepted_request_params,
+    billing_checked,
     merge_system_texts,
     responses_items_to_chat_messages,
     split_system_cache_break,
@@ -1089,6 +1090,7 @@ class AnthropicModel(Model):
                 f"prompt or use a different model."
             )
 
+    @billing_checked
     def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
         """Generates content from the current conversation.
 
@@ -1104,6 +1106,7 @@ class AnthropicModel(Model):
         self._append_assistant_message(blocks, content)
         return content, response
 
+    @billing_checked
     def generate_and_process_with_tools(  # pragma: no cover – API call
         self,
         function_map: dict[str, Callable[..., Any]],
@@ -1264,6 +1267,7 @@ class AnthropicModel(Model):
             )
         return 0, 0, 0, 0, 0
 
+    @billing_checked
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generates an embedding vector for the given text.
 

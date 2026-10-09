@@ -26,6 +26,8 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -33,6 +35,8 @@ from kiss.core import vscode_config
 from kiss.core.models.model_info import get_available_models
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _task_chat_id(task_id: str) -> str:

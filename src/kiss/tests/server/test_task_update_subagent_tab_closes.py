@@ -24,10 +24,14 @@ import threading
 import time
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.server import task_update
 from kiss.server.server import _is_side_channel_row
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 PARENT_TAB_ID = "webtab-updated-1"
 PARENT_MARKER = "long running parent task tu7"

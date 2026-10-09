@@ -104,7 +104,7 @@ class TestModelPickerLastModelPersistence:
             model_events = [event for event in events if event.get("type") == "models"]
         assert model_events, "Expected a models broadcast"
         event = model_events[-1]
-        available = {model["name"] for model in event["models"]}
+        available = {model["name"] for model in event["models"] if model.get("available", True)}
         assert "claude-opus-4-8" in available
         assert event["selected"] == "claude-opus-4-8", (
             "getModels should re-read config.json last_model on each refresh; "
@@ -150,7 +150,7 @@ class TestModelPickerLastModelPersistence:
                 model_events = [e for e in events if e.get("type") == "models"]
             assert model_events, "Expected a models broadcast"
             event = model_events[-1]
-            available = {model["name"] for model in event["models"]}
+            available = {model["name"] for model in event["models"] if model.get("available", True)}
             assert available == {"custom/v1"}
             assert event["selected"] == "custom/v1", (
                 "custom-only model picker should select the custom model; "

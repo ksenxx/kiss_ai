@@ -26,7 +26,20 @@ KISS Sorcar requires **Python 3.13+**. The PyPI package name is `kiss-agent-fram
 
 ## Configure Model Access
 
-Provide at least one model backend. You can use environment variables such as:
+You can connect a Claude Code or Codex subscription, configure API keys, or register a custom endpoint.
+
+**Subscription connection.** Use Claude Code 2.1.280+ or Codex 0.162.0+ for subscription isolation. Install the official CLI on the machine running the Sorcar daemon, then use **Settings → CLI Connections → Sign in** and **Refresh status**. Existing logins are reused. The fixed terminal commands are:
+
+```bash
+claude auth login
+codex login --device-auth
+```
+
+Choose **Subscription** and select `cc/opus` or `codex/gpt-6.1-sol`. Sorcar verifies the login before execution and isolates the child process from API credentials and alternate-provider overrides. Codex subscription runs refuse a configured `openai_base_url` or `openai` provider override. New connections use Subscription mode; detected API or enterprise configurations remain available under **Existing CLI configuration**, with their billing shown in Settings. Remote users sign in on the daemon machine; Windows web users can copy the command into a terminal there.
+
+Subscription tasks keep this billing constraint through retries, children, model switches, task updates, and commit helpers. Optional API classification is skipped. A task that requests an API model under that constraint fails with guidance; start a separate API task to use API credits. Fable is optional and requires the saved **Allow Fable usage credits** setting for any Claude subscription login, including one kept as the existing CLI configuration: noninteractive Claude requests can bill usage credits without prompting. Without that opt-in, native Claude child agents use the selected model, and Claude settings files cannot remap model aliases, add a fallback model, or call an advisor model for that run. Provider plan limits and extra-usage settings still apply.
+
+**API connection.** Configure keys in Settings or export them before starting the daemon:
 
 ```bash
 export ANTHROPIC_API_KEY=...
@@ -44,7 +57,7 @@ You can register your own models (e.g. a local vLLM/Ollama endpoint or a provide
 
 ## VS Code Extension
 
-To install only the KISS Sorcar extension, open Visual Studio Code, search for **KISS Sorcar** in the extension marketplace, install it, and relaunch VS Code. Press ESC if you do not have a specific API key ready, but configure at least one model backend before running tasks.
+To install only the KISS Sorcar extension, open Visual Studio Code, search for **KISS Sorcar** in the extension marketplace, install it, and relaunch VS Code. You can dismiss the API-key prompt and connect a subscription in CLI Connections, or configure an API backend before running tasks.
 
 ## Docker
 

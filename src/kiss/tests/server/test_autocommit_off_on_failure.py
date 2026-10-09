@@ -42,10 +42,14 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 import kiss.agents.sorcar.persistence as _persistence
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:

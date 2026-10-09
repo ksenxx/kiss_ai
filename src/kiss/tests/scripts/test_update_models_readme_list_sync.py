@@ -190,10 +190,28 @@ def test_backslash_in_model_name_is_written_literally(tmp_path: Path) -> None:
     model_info = tmp_path / "MODEL_INFO.json"
     model_info.write_text(json.dumps({"glm-4\\5": {"gen": True}}), encoding="utf-8")
     readme.write_text(
-        "<details>\n<summary><strong>Z.AI (1)</strong></summary>\n\n"
-        "- `glm-old`\n\n</details>\n",
+        "<details>\n<summary><strong>Z.AI (1)</strong></summary>\n\n- `glm-old`\n\n</details>\n",
         encoding="utf-8",
     )
 
     assert sync_readme_catalog(readme, model_info) is True
     assert "- `glm-4\\5`\n" in readme.read_text(encoding="utf-8")
+
+
+def test_website_and_features_offline_drift_check(tmp_path, monkeypatch):
+    """The offline checker reports drift without rewriting either document."""
+    monkeypatch.setattr(update_models, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(update_models, "README_PATH", tmp_path / "README.md")
+    monkeypatch.setattr(update_models, "MODELS_PATH", tmp_path / "MODELS.md")
+    website = tmp_path / "website/kisssorcar.github.io/docs/models.md"
+    website.parent.mkdir(parents=True)
+    website.write_text("ships a catalog of **1 models** across **1 provider categories**")
+    features = tmp_path / "FEATURES.md"
+    features.write_text(
+        "- **1 model entries** stale\n │ Models (1 entries) │\n- **Catalogue**: stale\n"
+    )
+    before = (website.read_bytes(), features.read_bytes())
+    assert sync_catalog_docs(check_only=True)
+    assert (website.read_bytes(), features.read_bytes()) == before
+    assert sync_catalog_docs()
+    assert not sync_catalog_docs(check_only=True)

@@ -24,6 +24,7 @@ from kiss.core.models.model import (
     Model,
     ThinkingCallback,
     TokenCallback,
+    billing_checked,
     merge_system_texts,
     responses_items_to_chat_messages,
 )
@@ -803,6 +804,7 @@ class GeminiModel(Model):
                 self._close_thinking_if_open()
         return parts, response
 
+    @billing_checked
     def generate(self) -> tuple[str, Any]:
         """Generates content from prompt without tools.
 
@@ -818,6 +820,7 @@ class GeminiModel(Model):
         self.conversation.append({"role": "assistant", "content": content})
         return content, response
 
+    @billing_checked
     def generate_and_process_with_tools(
         self,
         function_map: dict[str, Callable[..., Any]],
@@ -931,6 +934,7 @@ class GeminiModel(Model):
             return input_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 
+    @billing_checked
     def get_embedding(  # pragma: no cover – API call
         self, text: str, embedding_model: str | None = None,
     ) -> list[float]:

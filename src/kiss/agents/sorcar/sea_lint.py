@@ -49,7 +49,8 @@ Rules, each a :class:`Finding` code:
     A registered ``/command`` whose script defines no ``description()``.
 ``unknown-model``
     ``settings()["model"]`` names neither a catalogued model nor a
-    model-picker SEA.
+    model-picker SEA. The ``"No model"`` state returned by dynamic
+    defaults on an unconfigured installation is allowed.
 ``lock-without-value``
     A ``locked`` key the merged settings give no value, so the lock
     protects nothing.
@@ -370,7 +371,9 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
             )
         )
     model = merged.get("model")
-    if isinstance(model, str) and model and not _known_model(model):
+    # Dynamic settings may use get_default_model() on a keyless install.
+    # Its "No model" state is not a misspelled model identifier.
+    if isinstance(model, str) and model not in ("", "No model") and not _known_model(model):
         findings.append(
             Finding(
                 path,

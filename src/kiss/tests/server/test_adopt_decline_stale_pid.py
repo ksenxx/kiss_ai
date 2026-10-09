@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import http.server
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -44,7 +43,7 @@ import unittest
 from pathlib import Path
 
 from kiss.server import web_server as ws
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import install_named_interpreter, posix_only
 
 
 class _MetricsHandler(http.server.BaseHTTPRequestHandler):
@@ -131,7 +130,7 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
         """An exact-name check: ``cloudflared-helper`` must NOT be killed."""
         port = self._start_unhealthy_metrics_server()
         link = Path(self._tmp.name) / "cloudflared-helper"
-        os.symlink(sys.executable, link)
+        install_named_interpreter(link)
         proc = subprocess.Popen(
             [str(link), "-c", "import time; time.sleep(60)"],
             stdout=subprocess.DEVNULL,
@@ -152,7 +151,7 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
             )
             time.sleep(0.05)
 
-    @posix_only("a symlink named cloudflared cannot rename a Windows process image")
+    @posix_only("a copied interpreter reproduces cloudflared process names on POSIX")
     def test_real_cloudflared_mid_reconnect_is_adopted_tentatively(
         self,
     ) -> None:
@@ -169,7 +168,7 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
         """
         port = self._start_unhealthy_metrics_server()
         link = Path(self._tmp.name) / "cloudflared"
-        os.symlink(sys.executable, link)
+        install_named_interpreter(link)
         proc = subprocess.Popen(
             [str(link), "-c", "import time; time.sleep(60)"],
             stdout=subprocess.DEVNULL,
@@ -195,7 +194,7 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
             "pidfile of a tentatively adopted cloudflared must remain",
         )
 
-    @posix_only("a symlink named cloudflared cannot rename a Windows process image")
+    @posix_only("a copied interpreter reproduces cloudflared process names on POSIX")
     def test_real_cloudflared_without_known_url_is_terminated(self) -> None:
         """A 0-ready cloudflared whose URL is unknown IS terminated.
 
@@ -205,7 +204,7 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
         """
         port = self._start_unhealthy_metrics_server()
         link = Path(self._tmp.name) / "cloudflared"
-        os.symlink(sys.executable, link)
+        install_named_interpreter(link)
         proc = subprocess.Popen(
             [str(link), "-c", "import time; time.sleep(60)"],
             stdout=subprocess.DEVNULL,

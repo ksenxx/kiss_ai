@@ -1782,6 +1782,16 @@ body.remote-chat #terminal-btn { display: flex; }
   direction: rtl; text-align: left;
 }
 .model-item.active { color: var(--accent); font-weight: 500; }
+.model-item[aria-disabled="true"] { cursor: not-allowed; align-items: start; }
+.model-picker-empty { padding: var(--space-3); color: var(--fg); }
+.cli-connection { margin-bottom: var(--space-4); }
+.cli-connection code { overflow-wrap: anywhere; }
+
+.cli-connection select {
+  width: 100%; box-sizing: border-box; padding: var(--space-2);
+  background: var(--bg2); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
 .model-cost { font-size: var(--fs-sm); color: color-mix(in srgb, var(--fg) 50%, transparent); flex-shrink: 0; margin-left: var(--space-3); }
 
 .model-group-hdr {
@@ -3135,7 +3145,7 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
 .scm-status-R, .scm-status-C { color: var(--cyan); }
 .scm-status-conflict { color: var(--red); }
 
-.scm-row.is-deleted .scm-path { text-decoration: line-through; opacity: 0.7; }
+.scm-row.is-deleted .scm-path {  opacity: 0.7; }
 
 /* Commit graph rows: a lane-graph SVG cell on the left (one lane =
    14px), then the subject, refs and metadata.  Clicking a commit
@@ -5238,4 +5248,11 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   font-size: var(--fs-sm);
   line-height: 1;
   color: var(--fg);
+}
+
+.model-unavailable { display: block; direction: ltr; unicode-bidi: normal; font-size: var(--fs-sm); white-space: normal; overflow-wrap: anywhere; color: var(--dim); }
+
+@media (width <= 320px) {
+  .model-item { flex-wrap: wrap; }
+  .model-cost { flex-basis: 100%; margin-left: 0; }
 }

@@ -33,7 +33,7 @@ Every count and feature in this document was checked against the source tree at 
 ## 1. At a glance
 
 - **One agent, many surfaces**: the same `SorcarAgent` runs in the VS Code extension, the remote web app served by the `kiss-web` daemon, the `sorcar` CLI, the Python client API, 44 messaging and service channels, and cron jobs. Clients connected to the daemon share its tab registry (`~/.kiss/tabs.json`) for chat tabs, and sub-agent and browser tabs are synchronised by events, so an open task, sub-agent or browser tab appears in every client; only the standalone `sorcar` CLI runs its agent in the terminal instead. **NEW**
-- **706 model entries** in `src/kiss/core/models/MODEL_INFO.json` (687 generation, 525 with function calling, 7 embedding): 165 direct API models, 412 through OpenRouter, 16 `cc/` (Claude Code) and 10 `codex/` run-to-completion adapters, the rest through Together and other hosts. Two router entries, `autorouter` and `bestrouter`, appear in the model picker and are implemented as SEAs. **NEW**
+- **778 model entries** in `src/kiss/core/models/MODEL_INFO.json` (752 generation, 590 with function calling, 7 embedding, 11 typed decisions), across 9 routing providers. Claude Code CLI: 17; Codex CLI: 10. API and CLI entries are separated in the picker; `autorouter` and `bestrouter` are SEAs.
 - **17 bundled Sorcar Extension Agents** (slash commands) in `src/kiss/agents/seas/`, 13 of them new since 2026-09-22, plus 44 channel SEAs in `src/kiss/agents/third_party_agents/`; both packages use a folder-per-SEA layout with a mandatory `description()`.
 - **33 built-in tool functions** in a full-profile run (shell/file 6, browser 9, memory 7, MCP sign-in 2, dispatch 3, interaction 6 including `finish` and, when Jev is enabled, `decide`), before skill, MCP-server and caller-supplied tools; fifteen composable tool profiles (`full`, `review`, `assistant`, `bash`, `none` and the ten tool groups `shell`, `edit`, `browser`, `memory`, `agents`, `mcp`, `skills`, `user`, `decide`, `control`, joinable with `+`). **NEW**
 - **50 console scripts** in `pyproject.toml` (`sorcar`, `kiss-web`, `kiss-cron`, `check`, `generate-api-docs`, `swedefend-eval` and 44 `kiss-<channel>` CLIs, including the new `kiss-overleaf`).
@@ -123,7 +123,7 @@ On the TPC-H engine the human supplied a researched plan (5,979 characters: remo
  └────────┬───────────────────────────────────────────────────────────────────────────┘
           │
  ┌────────▼───────────────┐ ┌──────────────────────┐ ┌───────────────────────────────┐
- │ Models (706 entries)   │ │ State in ~/.kiss     │ │ Extension points              │
+ │ Models (778 entries)   │ │ State in ~/.kiss     │ │ Extension points              │
  │ Anthropic/OpenAI/Gemini│ │ history.db · memories/│ │ SEAs (seas/, SEAS.md folders) │
  │ OpenRouter/Together/   │ │ cron/jobs.json ·     │ │ skills (SKILL.md) · MCP       │
  │ Z.ai/Moonshot · cc/    │ │ tabs.json · AGENTS.md│ │ servers · SEA tools() method ·│
@@ -222,7 +222,7 @@ Profiles compose **NEW**: a profile name may join any number of keys with `+` (`
 
 ## 8. Models, routing and cost accounting
 
-- **Catalogue**: 706 entries; direct families are `gpt-*` (100 entries with `-low`/`-high`/`-xhigh` effort aliases), `gemini-*` (20), `claude-*` (16), `glm-*` (8), `kimi-*` (7), `o1`/`o3`/`o4` (8); OpenRouter (412), Together-hosted open weights (Qwen 24, Meta Llama 16, DeepSeek 13, Moonshot 10, Z.ai 10, DeepCogito 6, Mistral 6), `cc/*` (16) and `codex/*` (10) drive the Claude Code and Codex CLIs to completion. Price fields include cache read/write, long-context tiers and audio input. Custom OpenAI-compatible endpoints can be added from Settings with name, endpoint, key and headers.
+- **Catalogue**: 778 entries across 9 routing providers. See [MODELS.md](MODELS.md) for generated per-provider counts and model lists. Custom OpenAI-compatible endpoints can be added in Settings.
 - **Picker routers** **NEW**: `autorouter` splits a task into units and runs each on the cheapest tier (small, medium, frontier) that passes its acceptance check, escalating on failure and logging every decision to `~/.kiss/MODEL_DECISIONS.md`; its per-model evidence lives in `~/.kiss/AUTOROUTER.md` (capped at 2,500 characters, refreshed weekly by `/rsi7d`). `bestrouter` runs everything on `claude-fable-5-1` and has `gpt-6-astra` review read-only through `run_parallel` with at most 75% of the budget. Picking a router SEA fires its `on_picked_as_model` hook (15 s cap); autorouter's hook ensures the weekly cron job.
 - **Cost pipeline** **NEW**: OpenRouter is billed from the provider-reported `usage.cost` (BYOK upstream cost added only when `is_byok`); classifier, merge-agent, TTS, side-channel and late-arriving sub-agent spend fold into the owning task via `_net_totals` and `_add_late_task_usage`; a sub-task stopped on timeout still charges its caller (`StoppedOnTimeoutError`); the Spend subpanel splits each task's cost across the models its sub-agent tree used.
 - **Live accounting**: cost, tokens, steps and remaining budget are printed in every tool result and shown in the status bar and Task Info; the daily cost-calculation audit is a cron job on the development machine.

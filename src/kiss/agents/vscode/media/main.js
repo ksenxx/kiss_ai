@@ -998,6 +998,7 @@
   // `agentModel` and is dropped the moment the task ends, so the user's
   // own choice is never silently replaced by the agent's.
   let selectedModel = '';
+  let modelChoicePinned = false;
   let agentModel = '';
   let allModels = [];
   let modelDDIdx = -1;
@@ -1449,6 +1450,7 @@
         : '';
     // visibletask-coverage:end
     tab.selectedModel = selectedModel;
+    tab.modelChoicePinned = modelChoicePinned;
     tab.agentModel = agentModel;
     tab.attachments = attachments;
     tab.attachErrors = attachErrors;
@@ -1619,6 +1621,7 @@
       }
     }
     selectedModel = tab.selectedModel || '';
+    modelChoicePinned = tab.modelChoicePinned === true;
     agentModel = tab.agentModel || '';
     refreshModelLabel();
     attachments = tab.attachments || [];
@@ -2835,6 +2838,7 @@
     holder.appendChild(tab.terminalView.el);
     switchToTab(tab.id);
     renderTabBar();
+    return tab;
   }
 
   function syncTerminalTabVisibility(shownTab) {
@@ -2861,6 +2865,10 @@
         break;
       case 'terminalOpened':
         tab.terminalView.opened(ev);
+        if (tab.cliLoginCommand) {
+          api.terminalInput({tab_id: tab.id, data: tab.cliLoginCommand + '\n'});
+          delete tab.cliLoginCommand;
+        }
         break;
       case 'terminalExit':
         tab.terminalView.exit(ev.code);
@@ -16677,11 +16685,26 @@
           const _prevSelected = selectedModel;
           tabs.forEach(t => {
             const cur = t.selectedModel || '';
-            if (cur === '' || cur === 'No model' || cur === _prevSelected) {
+            if (t.modelChoicePinned && !allModels.some(m => m.name === cur)) {
+              t.modelChoicePinned = false;
+              t.selectedModel = ev.selected;
+            }
+            if (
+              !t.modelChoicePinned &&
+              (cur === '' || cur === 'No model' || cur === _prevSelected)
+            ) {
               t.selectedModel = ev.selected;
             }
           });
-          selectedModel = ev.selected;
+          const active = getTab(activeTabId);
+          if (active) modelChoicePinned = active.modelChoicePinned === true;
+          selectedModel =
+            active && active.modelChoicePinned
+              ? active.selectedModel
+              : modelChoicePinned &&
+                  allModels.some(m => m.name === selectedModel)
+                ? selectedModel
+                : ev.selected;
           refreshModelLabel();
         }
         renderModelList('');
@@ -16719,6 +16742,9 @@
         applyModelPick(ev.tabId || '', ev.model, ev.source);
         break;
       // modelpick-coverage:end
+      case 'cliConnections':
+        renderCLIConnections(ev);
+        break;
       case 'configData':
         // The daemon stamps the server's machine name into every
         // configData reply; it names the machine the agent runs ON
@@ -20168,6 +20194,8 @@
       // Only one composer popup at a time (see the #more-btn handler).
       closeMoreMenu();
       modelDropdown.classList.add('open');
+      modelBtn.setAttribute('aria-expanded', 'true');
+      modelSearch.setAttribute('aria-expanded', 'true');
       modelSearch.value = '';
       if (modelSearchClear) modelSearchClear.style.display = 'none';
       renderModelList('');
@@ -20188,7 +20216,9 @@
       });
     }
     modelSearch.addEventListener('keydown', e => {
-      const items = modelList.querySelectorAll('.model-item');
+      const items = modelList.querySelectorAll(
+        '.model-item:not([aria-disabled="true"])',
+      );
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         modelDDIdx = Math.min(modelDDIdx + 1, items.length - 1);
@@ -20707,6 +20737,40 @@
       settingsPanel.addEventListener('input', noteSettingsEdit);
       settingsPanel.addEventListener('change', noteSettingsEdit);
     }
+    ['claude', 'codex'].forEach(provider => {
+      const signin = document.getElementById('cli-' + provider + '-signin');
+      const refresh = document.getElementById('cli-' + provider + '-refresh');
+      const copy = document.getElementById('cli-' + provider + '-copy');
+      const mode = document.getElementById(
+        'cfg-' + provider + '-cli-billing-mode',
+      );
+      if (signin) signin.addEventListener('click', () => signInCLI(provider));
+      if (refresh)
+        refresh.addEventListener('click', () => {
+          refresh.disabled = true;
+          api.getCLIConnections({refresh: true});
+        });
+      if (mode)
+        mode.addEventListener('change', () => {
+          api.saveConfig({
+            config: {[provider + '_cli_billing_mode']: mode.value},
+          });
+          api.getCLIConnections({refresh: true});
+        });
+      if (copy)
+        copy.addEventListener('click', () => {
+          Promise.resolve()
+            .then(() =>
+              navigator.clipboard.writeText(CLI_LOGIN_COMMANDS[provider]),
+            )
+            .catch(() => {
+              document.getElementById(
+                'cli-' + provider + '-status',
+              ).textContent =
+                'Copy the sign-in command shown below and run it on the Sorcar server machine.';
+            });
+        });
+    });
     CONFIG_SUBPANELS.forEach(pair => {
       const toggle = document.getElementById(pair[0]);
       const body = document.getElementById(pair[1]);
@@ -21730,7 +21794,7 @@
     const price =
       typeof m.cost_label === 'string'
         ? esc(m.cost_label)
-        : '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2);
+        : '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2) + ' / 1M tokens';
     // The name span ellipsizes from the START (RTL line, like the
     // pill label) so the distinctive end of a long name stays visible
     // and the list never scrolls horizontally on narrow screens; the
@@ -21739,50 +21803,141 @@
     d.innerHTML =
       '<span class="model-item-name">&lrm;' +
       esc(m.name) +
-      '&lrm;</span><span class="model-cost">' +
+      '&lrm;' +
+      (m.available === false
+        ? '<small class="model-unavailable">' +
+          esc(m.unavailable_reason || 'Connect in Settings.') +
+          '</small>'
+        : '') +
+      '</span><span class="model-cost">' +
       price +
       '</span>';
+    d.id = 'model-choice-' + encodeURIComponent(m.name);
+    d.setAttribute('role', 'option');
+    d.setAttribute('aria-selected', String(m.name === selectedModel));
+    d.setAttribute('aria-disabled', String(m.available === false));
+    d.title =
+      m.available === false
+        ? m.unavailable_reason || 'Connect this CLI in Settings.'
+        : m.cost_label || 'USD per 1M input / output tokens';
     d.addEventListener('click', () => {
+      if (m.available === false) return;
       selectModel(m.name);
     });
     return d;
   }
 
+  function modelGroup(m) {
+    const access =
+      m.access_type ||
+      (m.name.startsWith('cc/') || m.name.startsWith('codex/')
+        ? 'cli'
+        : m.vendor === 'Custom' || m.endpoint
+          ? 'custom'
+          : m.vendor === 'Router'
+            ? 'router'
+            : 'api');
+    const provider = m.provider || m.vendor || 'Other';
+    const familyMatch = m.name
+      .toLowerCase()
+      .match(
+        /(?:^|[/-])(opus|sonnet|haiku|fable|mythos|sol|terra|luna|astra)(?:[/-]|$)/,
+      );
+    const family = familyMatch
+      ? familyMatch[1] === 'mythos'
+        ? 'fable'
+        : familyMatch[1]
+      : 'Other';
+    return {access: access, provider: provider, family: family};
+  }
+
   function renderModelList(q) {
     modelList.innerHTML = '';
     modelDDIdx = -1;
-    const ql = q.toLowerCase();
-    const used = [],
-      rest = [];
-    allModels.forEach(m => {
-      if (ql && m.name.toLowerCase().indexOf(ql) < 0) return;
-      if (m.uses > 0) used.push(m);
-      else rest.push(m);
+    modelSearch.removeAttribute('aria-activedescendant');
+    const ql = q.toLowerCase().trim();
+    const matching = allModels.filter(m => {
+      const g = modelGroup(m);
+      return (
+        !ql ||
+        [m.name, g.provider, g.family, g.access, m.cost_label || '']
+          .join(' ')
+          .toLowerCase()
+          .includes(ql)
+      );
     });
-    used.sort((a, b) => {
-      return b.uses - a.uses;
-    });
-    if (used.length) {
+    const used = matching.filter(m => m.uses > 0);
+    const rest = matching.filter(m => !(m.uses > 0));
+    const header = text => {
       const hdr = mkEl('div', 'model-group-hdr');
-      hdr.textContent = 'Recently Used';
+      hdr.textContent = text;
       modelList.appendChild(hdr);
-      used.forEach(m => {
+    };
+    used.sort(
+      (a, b) =>
+        b.uses - a.uses ||
+        a.name.localeCompare(b.name, undefined, {numeric: true}),
+    );
+    if (used.length) {
+      header('Frequently Used');
+      used.forEach(m => modelList.appendChild(renderModelItem(m)));
+    }
+    const accesses = {
+      cli: 'CLI Models',
+      api: 'API Models',
+      custom: 'Custom Models',
+      router: 'Routers',
+    };
+    const families = [
+      'opus',
+      'sonnet',
+      'haiku',
+      'fable',
+      'mythos',
+      'sol',
+      'terra',
+      'luna',
+      'astra',
+      'Other',
+    ];
+    Object.keys(accesses).forEach(access => {
+      const entries = rest.filter(m => modelGroup(m).access === access);
+      if (!entries.length) return;
+      header(accesses[access]);
+      entries.sort((a, b) => {
+        const ga = modelGroup(a),
+          gb = modelGroup(b);
+        return (
+          ga.provider.localeCompare(gb.provider) ||
+          families.indexOf(ga.family) - families.indexOf(gb.family) ||
+          b.name.localeCompare(a.name, undefined, {numeric: true})
+        );
+      });
+      let lastGroup = '';
+      entries.forEach(m => {
+        const g = modelGroup(m);
+        const label =
+          g.provider +
+          (g.family === 'Other' &&
+          !['OpenAI', 'Anthropic', 'Codex CLI', 'Claude Code CLI'].includes(
+            g.provider,
+          )
+            ? ''
+            : ' · ' + g.family.charAt(0).toUpperCase() + g.family.slice(1));
+        if (label !== lastGroup) {
+          header(label);
+          lastGroup = label;
+        }
         modelList.appendChild(renderModelItem(m));
       });
-    }
-    let lastVendor = '';
-    rest.forEach(m => {
-      const v = m.vendor;
-      if (v !== lastVendor) {
-        const hdr = mkEl('div', 'model-group-hdr');
-        hdr.textContent = v;
-        modelList.appendChild(hdr);
-        lastVendor = v;
-      }
-      modelList.appendChild(renderModelItem(m));
     });
-    // Content changes only ever happen through this render, so this is
-    // the one spot that must re-fit the open dropdown to the viewport.
+    if (!matching.length) {
+      const empty = mkEl('div', 'model-picker-empty');
+      empty.textContent = ql
+        ? 'No models match your search.'
+        : 'Connect a CLI subscription or configure an API key in Settings.';
+      modelList.appendChild(empty);
+    }
     if (modelDropdown.classList.contains('open')) positionModelDD();
   }
 
@@ -21808,6 +21963,7 @@
 
   function selectModel(name) {
     selectedModel = name;
+    modelChoicePinned = true;
     agentModel = '';
     // Record it on the tab straight away rather than waiting for the
     // next saveCurrentTab: a `models` refresh arriving in between reads
@@ -21815,6 +21971,7 @@
     const picked = getTab(activeTabId);
     if (picked) {
       picked.selectedModel = name;
+      picked.modelChoicePinned = true;
       picked.agentModel = '';
     }
     refreshModelLabel();
@@ -21824,18 +21981,26 @@
   }
 
   function closeModelDD() {
+    const hadFocus = modelDropdown.contains(document.activeElement);
     modelDropdown.classList.remove('open');
+    modelBtn.setAttribute('aria-expanded', 'false');
+    modelSearch.setAttribute('aria-expanded', 'false');
+    modelSearch.removeAttribute('aria-activedescendant');
     modelDropdown.style.right = '';
     modelSearch.value = '';
     if (modelSearchClear) modelSearchClear.style.display = 'none';
     modelDDIdx = -1;
+    if (hadFocus) modelBtn.focus();
   }
 
   function updateSel(items, idx) {
     items.forEach((it, i) => {
       it.classList.toggle('sel', i === idx);
     });
-    if (idx >= 0) items[idx].scrollIntoView({block: 'nearest'});
+    if (idx >= 0) {
+      items[idx].scrollIntoView({block: 'nearest'});
+      modelSearch.setAttribute('aria-activedescendant', items[idx].id);
+    } else modelSearch.removeAttribute('aria-activedescendant');
   }
 
   const SIDEBAR_DELETE_SVG =
@@ -24033,6 +24198,7 @@
     collapseConfigSubpanels();
     api.getConfig();
     api.getMyModels();
+    api.getCLIConnections();
   }
 
   function closeSettingsPanel() {
@@ -24459,6 +24625,7 @@
 
   // toggle-button id / body id of every collapsible settings subpanel.
   const CONFIG_SUBPANELS = [
+    ['cli-connections-toggle', 'cli-connections-body'],
     ['api-keys-toggle', 'api-keys-body'],
     ['custom-models-toggle', 'custom-models-body'],
   ];
@@ -24484,6 +24651,89 @@
     CONFIG_SUBPANELS.forEach(pair => {
       setConfigSubpanelExpanded(pair[0], pair[1], false);
     });
+  }
+
+  let cliServerMachine = '';
+  let cliServerPlatform = '';
+  const CLI_LOGIN_COMMANDS = {
+    claude: 'claude auth login',
+    codex: 'codex login --device-auth',
+  };
+
+  function renderCLIConnections(ev) {
+    cliServerMachine = ev.machine || '';
+    cliServerPlatform = ev.platform || '';
+    const labels = {
+      missing: 'Not installed',
+      signed_out: 'Signed out',
+      connected: 'Connected',
+      unsupported_version: 'Update required',
+      conflict: 'Billing conflict',
+      unknown: 'Status unavailable',
+    };
+    (ev.connections || []).forEach(row => {
+      if (
+        !Object.prototype.hasOwnProperty.call(CLI_LOGIN_COMMANDS, row.provider)
+      )
+        return;
+      const el = document.getElementById('cli-' + row.provider + '-status');
+      if (el)
+        el.textContent =
+          (labels[row.status] || labels.unknown) +
+          (row.version ? ' · ' + row.version : '') +
+          ' · ' +
+          row.message;
+      const billing = {
+        api_key: 'API key billing',
+        api_key_helper: 'API helper billing',
+        third_party: 'Enterprise/provider billing',
+        oauth_token: 'Existing token billing',
+        'claude.ai': 'Claude subscription',
+        chatgpt: 'ChatGPT subscription',
+      };
+      if (el && billing[row.auth_method])
+        el.textContent += ' · ' + billing[row.auth_method];
+      const id = 'cfg-' + row.provider + '-cli-billing-mode';
+      const select = document.getElementById(id);
+      if (select && !settingsEditedFields.has(id))
+        select.value = row.billing_mode;
+      const refresh = document.getElementById(
+        'cli-' + row.provider + '-refresh',
+      );
+      if (refresh) refresh.disabled = false;
+      const signin = document.getElementById('cli-' + row.provider + '-signin');
+      if (signin) signin.disabled = row.status === 'missing';
+    });
+  }
+
+  function signInCLI(provider) {
+    const command = CLI_LOGIN_COMMANDS[provider];
+    if (!command || !cliServerMachine) return;
+    const id = 'cfg-' + provider + '-cli-billing-mode';
+    document.getElementById(id).value = 'subscription';
+    markSettingsFieldEdited(id);
+    api.saveConfig({
+      config: {[provider + '_cli_billing_mode']: 'subscription'},
+    });
+    if (VSCODE_CHAT_HOST) {
+      postToHost({
+        type: 'openCLITerminal',
+        provider: provider,
+        machine: cliServerMachine,
+      });
+    } else if (cliServerPlatform !== 'win32') {
+      closeSettingsPanel();
+      const tab = openTerminalTab();
+      if (tab) tab.cliLoginCommand = command;
+    } else {
+      const status = document.getElementById('cli-' + provider + '-status');
+      status.textContent =
+        'Run ' +
+        command +
+        ' in a terminal on ' +
+        cliServerMachine +
+        ', then refresh status. The web terminal is unavailable on Windows.';
+    }
   }
 
   // ---- Custom Models subpanel (~/.kiss/MY_MODELS.json) ----
@@ -24879,6 +25129,14 @@
       setValue('cfg-custom-api-key', cfg.custom_api_key || '');
       setValue('cfg-custom-headers', cfg.custom_headers || '');
     }
+    ['claude', 'codex'].forEach(provider => {
+      const mode = cfg[provider + '_cli_billing_mode'];
+      if (mode) setValue('cfg-' + provider + '-cli-billing-mode', mode);
+    });
+    setChecked(
+      el('cfg-allow-fable-usage-credits'),
+      cfg.allow_fable_usage_credits === true,
+    );
     setValue('cfg-remote-password', cfg.remote_password || '');
     configFormPopulated = true;
     FIRST_PARTY_KEY_IDS.forEach(k => {
@@ -24978,6 +25236,16 @@
     }
     if (want('cfg-remote-password')) {
       cfg.remote_password = el('cfg-remote-password').value.trim();
+    }
+    ['claude', 'codex'].forEach(provider => {
+      const id = 'cfg-' + provider + '-cli-billing-mode';
+      if (want(id) && settingsEditedFields.has(id))
+        cfg[provider + '_cli_billing_mode'] = el(id).value;
+    });
+    if (want('cfg-allow-fable-usage-credits')) {
+      cfg.allow_fable_usage_credits = el(
+        'cfg-allow-fable-usage-credits',
+      ).checked;
     }
     const apiKeys = {};
     FIRST_PARTY_KEY_IDS.forEach(k => {

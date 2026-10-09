@@ -956,6 +956,35 @@ class _CommandsMixin:
         """Send available models list to the requesting connection only."""
         self._get_models(cmd.get("connId", ""))
 
+    def _cmd_get_cli_connections(self, cmd: dict[str, Any]) -> None:
+        """Probe official CLIs off the command loop; return sanitized status."""
+        from kiss.core.models.cli_connections import get_cli_connection
+
+        conn_id = cmd.get("connId", "")
+        work_dir = self.work_dir or None
+
+        def probe() -> None:
+            rows = [
+                get_cli_connection(
+                    provider,
+                    refresh=cmd.get("refresh") is True,
+                    cwd=work_dir,
+                ).wire()
+                for provider in ("claude", "codex")
+            ]
+            self.printer.broadcast(
+                {
+                    "type": "cliConnections",
+                    "connections": rows,
+                    "machine": platform.node(),
+                    "platform": sys.platform,
+                    **({"connId": conn_id} if conn_id else {}),
+                }
+            )
+            self._get_models(conn_id)
+
+        threading.Thread(target=probe, name="cli-connection-status", daemon=True).start()
+
     def _cmd_select_model(self, cmd: dict[str, Any]) -> None:
         """Update the selected model for a tab.
 
@@ -2573,6 +2602,7 @@ class _CommandsMixin:
         "stop": _cmd_stop,
         "interruptTool": _cmd_interrupt_tool,
         "getModels": _cmd_get_models,
+        "getCLIConnections": _cmd_get_cli_connections,
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,
         "setFavorite": _cmd_set_favorite,

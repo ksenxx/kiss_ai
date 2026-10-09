@@ -48,10 +48,14 @@ import time
 from typing import Any
 from unittest import TestCase
 
+import pytest
+
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 def _make_remote_server() -> Any:

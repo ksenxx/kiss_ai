@@ -72,10 +72,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.agent_dispatch import run_agents_parallel
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 _VSCODE_DIR = Path(__file__).resolve().parents[2] / "agents" / "vscode"
 _BRIDGE = _VSCODE_DIR / "test" / "multiSurfaceBridge.js"

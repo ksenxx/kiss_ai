@@ -331,7 +331,13 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     sub_tab_id = f"task-{task_id}__update-{int(time.time() * 1000)}"
     ask = evaluate_sea([AskSea()], UPDATE_QUESTION, task_id)
     ask_settings = ask.settings
-    model_name = str(ask_settings.get("model") or parent_agent.model_name)
+    parent_config = getattr(parent_agent, "model_config", None) or {}
+    restricted = parent_config.get("subscription_only") is True
+    model_name = str(
+        parent_agent.model_name
+        if restricted
+        else ask_settings.get("model") or parent_agent.model_name
+    )
     agent = ChatSorcarAgent("Task update")
     agent._tab_id = sub_tab_id
     # A side channel like the ``/ask`` answerer: its answer lands in the

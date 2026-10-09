@@ -1,30 +1,32 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **776 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **778 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 111 |
+| OpenAI | 112 |
 | Anthropic | 76 |
 | Gemini | 20 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 421 |
+| OpenRouter | 422 |
 | Claude Code CLI (`cc/*`) | 17 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **750** generation-capable models
-- **588** function-calling-capable models
+- **752** generation-capable models
+- **590** function-calling-capable models
 - **7** embedding models
 - **11** decision models
+
+CLI entries have no API per-token price in the catalog. This does not mean unlimited or free usage: the picker shows Subscription, possible usage credits, or existing CLI billing instead. See [model setup](README.md#configure-model-access) for login and billing controls. To check documentation offline, run `uv run python -m kiss.scripts.update_models --check-docs`; use `--sync-docs` to regenerate totals and lists without contacting providers.
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (111)</strong></summary>
+<summary><strong>OpenAI (112)</strong></summary>
 
 - `gpt-3.5-turbo`
 - `gpt-3.5-turbo-0125`
@@ -113,6 +115,7 @@ Full model list:
 - `gpt-6.1-sol`
 - `gpt-6.1-sol-high`
 - `gpt-6.1-sol-low`
+- `gpt-6.1-sol-max`
 - `gpt-6.1-sol-medium`
 - `gpt-6.1-sol-xhigh`
 - `gpt-audio`
@@ -388,7 +391,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (421)</strong></summary>
+<summary><strong>OpenRouter (422)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -615,6 +618,7 @@ Full model list:
 - `openrouter/openai/gpt-6.1-sol`
 - `openrouter/openai/gpt-6.1-sol-high`
 - `openrouter/openai/gpt-6.1-sol-low`
+- `openrouter/openai/gpt-6.1-sol-max`
 - `openrouter/openai/gpt-6.1-sol-medium`
 - `openrouter/openai/gpt-6.1-sol-xhigh`
 - `openrouter/openai/gpt-audio`

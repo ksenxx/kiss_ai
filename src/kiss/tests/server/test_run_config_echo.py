@@ -36,6 +36,8 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
+
 MODELS = get_available_models() or ["parent-model-x", "other-model"]
 PARENT_MODEL = MODELS[0]
 OTHER_MODEL = MODELS[-1]

@@ -4197,7 +4197,7 @@ def _read_version() -> str:
     version caused the sticky "update available" toast to re-appear
     with the same NEW-version text the user just clicked.
 
-    Fix: pick the newest ``__version__`` found under
+    Fix: pick the newest version of the running daemon and each ``__version__`` found under
     ``<extensions_root>/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/core/
     _version.py`` so a freshly-installed extension dominates the answer even when
     the running daemon is still the stale one.  Falls back to the
@@ -4207,9 +4207,12 @@ def _read_version() -> str:
     root = _INSTALLED_EXTENSIONS_ROOT
     if root is None:
         root = Path.home() / ".vscode" / "extensions"
+    bundled = _parse_version_py(
+        Path(__file__).parent.parent / "core" / "_version.py",
+    )
     best: tuple[int, ...] | None = None
     best_str = ""
-    for v in _scan_installed_extension_versions(root):
+    for v in [bundled, *_scan_installed_extension_versions(root)]:
         t = _version_tuple(v)
         if t is None:
             continue
@@ -4218,9 +4221,7 @@ def _read_version() -> str:
             best_str = v
     if best_str:
         return best_str
-    return _parse_version_py(
-        Path(__file__).parent.parent / "core" / "_version.py",
-    )
+    return bundled
 
 
 def _version_tuple(v: str) -> tuple[int, ...] | None:

@@ -22,9 +22,13 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+
+pytestmark = pytest.mark.usefixtures("stubbed_agent_model")
 
 
 class TestRunEmptyTabId(unittest.TestCase):

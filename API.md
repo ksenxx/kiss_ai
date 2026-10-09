@@ -83,7 +83,7 @@
   - **Returns:** YAML string with 'success' and 'summary' keys on successful completion.
 
 - **run** — Run the agent with the provided tools.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str = '', max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools: list[Callable[..., Any]] | None = None, attachments: list[Attachment] | None = None, llm_call_hook: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None, tool_call_hook: Callable[[str, dict[str, Any]], Verdict] | None = None) -> str`
-  - `model_name`: LLM model to use. Defaults to "claude-opus-4-6".
+  - `model_name`: LLM model to use. Defaults to the first usable configured model.
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `system_prompt`: System-level instructions passed to the underlying LLM via model_config. Defaults to empty string (no system instructions).

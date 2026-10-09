@@ -86,6 +86,7 @@ from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 
 logger = logging.getLogger(__name__)
 
+
 def inject_keyboard_interrupt(tid: int) -> int:
     """Raise ``KeyboardInterrupt`` asynchronously in thread *tid*.
 
@@ -905,6 +906,19 @@ class _TaskRunnerMixin:
             SeaError: When a script is broken.
         """
         overridden: set[str] = set()
+        from kiss.core.models.cli_connections import (
+            billing_mode,
+            cli_provider,
+            enforce_model_policy,
+        )
+
+        initial_model = cmd.get("model") or self._tab_model(cmd.get("tabId", ""))
+        raw_initial_config = cmd.get("modelConfig")
+        initial_config = raw_initial_config if isinstance(raw_initial_config, dict) else {}
+        restricted = initial_config.get("subscription_only") is True or bool(
+            cli_provider(initial_model)
+            and billing_mode(initial_model, initial_config) == "subscription"
+        )
         _slash = slash_command_task(cmd.get("prompt", ""))
         if _slash is not None:
             cmd["displayPrompt"] = cmd["prompt"]
@@ -937,6 +951,11 @@ class _TaskRunnerMixin:
         # whatever a client sent in them is overwritten rather than read
         # as input.
         overridden |= apply_sea(cmd, layers)
+        if restricted:
+            cmd["modelConfig"] = dict(cmd.get("modelConfig") or {}) | {
+                "subscription_only": True,
+                "cli_billing_mode": "subscription",
+            }
         # A layer's ``model`` setting may name a picker entry — the
         # tab's own ("" or its name: keep the picker's model) or another
         # one, which is executed once here and resolved the same way.
@@ -948,6 +967,8 @@ class _TaskRunnerMixin:
             picked = (str(model), chosen)
             layers = sea_layers(chosen)
             cmd["model"] = _picker_model(layers, chosen)
+        if restricted:
+            enforce_model_policy(cmd.get("model") or initial_model, cmd["modelConfig"])
         if picked is not None:
             # Once per run whose model is a picker SEA, with the
             # effective work dir (a ``work_dir`` setting included): the
@@ -1781,7 +1802,10 @@ class _TaskRunnerMixin:
         _agent_model_config = (
             _raw_model_config if isinstance(_raw_model_config, dict) else None
         )
-        _model_config = custom_model_config(model) or build_model_config(_vcfg)
+        # Global custom endpoints must not reroute a selected CLI into API billing.
+        _model_config = custom_model_config(model) or (
+            None if model.startswith(("cc/", "codex/")) else build_model_config(_vcfg)
+        )
         # A run whose effective configuration names an endpoint never
         # needs a vendor key: ``model_info.model`` builds the
         # OpenAI-compatible adapter for that ``base_url`` whatever the
@@ -1795,12 +1819,29 @@ class _TaskRunnerMixin:
             _effective_config and _effective_config.get("base_url") and is_known_model(model)
         )
         available = get_available_models()
-        if not _endpoint_run and (not available or (model and model not in available)):
+        from kiss.core.models.cli_connections import billing_mode, cli_provider, get_cli_connection
+
+        provider = cli_provider(model)
+        cli_connected = bool(
+            provider
+            and get_cli_connection(
+                provider,
+                mode=billing_mode(model, _effective_config),
+                cwd=work_dir,
+            ).status
+            == "connected"
+        )
+        if (
+            not _endpoint_run
+            and not cli_connected
+            and (not available or (model and model not in available))
+        ):
+            no_model_msg = (
+                "No model available. Sign in to a CLI subscription "
+                "or configure an API key in Settings."
+            )
             self.printer.broadcast({
-                **_result_event(
-                    "No model available.  Set at least one API key in the environment.",
-                    success=False,
-                ),
+                **_result_event(no_model_msg, success=False),
                 "tabId": tab_id,
             })
             return
@@ -3402,7 +3443,6 @@ class _TaskRunnerMixin:
                 if state is not None:
                     states.append(state)
         return states
-
 
     @staticmethod
     def _force_stop_thread(

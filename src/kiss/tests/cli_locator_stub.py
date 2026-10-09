@@ -22,6 +22,7 @@ which registers the autouse fixture for that module only.  Tests marked
 
 from __future__ import annotations
 
+import os
 from types import ModuleType
 
 import pytest
@@ -29,7 +30,8 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def stub_cli_locators(
-    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Stub Claude Code / Codex binary lookups for offline test runs.
 
@@ -62,3 +64,14 @@ def stub_cli_locators(
             cx_mod, "_find_codex_cli", lambda: "/usr/bin/codex",
             raising=False,
         )
+
+    from kiss.core.models import cli_connections
+
+    monkeypatch.setattr(cli_connections, "prepare_cli", lambda name, config: (dict(os.environ), []))
+    monkeypatch.setattr(
+        cli_connections,
+        "get_cli_connection",
+        lambda provider, **kwargs: cli_connections.CLIConnection(
+            provider, "connected", "2.1.300", "api_key", "existing"
+        ),
+    )

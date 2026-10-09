@@ -46,11 +46,11 @@ import pytest
 
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.server.browser_tab import BrowserTabService
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import PLAYWRIGHT_CHROMIUM_INSTALLED, posix_only
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 pytestmark = pytest.mark.skipif(
-    not (Path.home() / ".cache" / "ms-playwright").is_dir(),
+    not PLAYWRIGHT_CHROMIUM_INSTALLED,
     reason="Playwright browsers not installed",
 )
 
