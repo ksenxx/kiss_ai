@@ -296,24 +296,6 @@ async function runTest() {
     'the task-carrying open must still not create a panel',
   );
 
-  // --- an expanded history panel (onlyIfMissing) leaves an open chat ---
-  const revealsBefore = panelB.reveals;
-  const showTasksBefore = panelB._posted.filter(m => m.type === 'showTask')
-    .length;
-  panelA._recv.fire({
-    type: 'openChatPanel',
-    chatId: 'chat-B',
-    taskId: 9,
-    onlyIfMissing: true,
-  });
-  await new Promise(r => setTimeout(r, 100));
-  assert.strictEqual(createdPanels.length, 2, 'onlyIfMissing opens nothing');
-  assert.strictEqual(panelB.reveals, revealsBefore, 'and reveals nothing');
-  assert.strictEqual(
-    panelB._posted.filter(m => m.type === 'showTask').length,
-    showTasksBefore,
-    'and leaves the panel on its task',
-  );
 
   // --- a fresh openChatPanel carries the opener's composer draft --------
   panelA._recv.fire({

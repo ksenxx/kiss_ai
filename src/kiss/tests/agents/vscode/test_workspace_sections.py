@@ -488,6 +488,16 @@ def test_commit_click_lists_modified_files_and_opens_them(browser, harness):
             "  p => p.textContent.includes('nested-sentinel-4f2a'))",
             timeout=30000,
         )
+        # The diff tab slid the panel off the content pane; the drawer
+        # brings it back.
+        page.wait_for_selector("body.meta-hidden", state="attached", timeout=5000)
+        page.click("#meta-drawer")
+        page.wait_for_function(
+            "() => !document.body.classList.contains('meta-hidden')"
+            " && document.getElementById('meta-panel').getBoundingClientRect().right"
+            "    <= window.innerWidth + 1",
+            timeout=5000,
+        )
         # A deleted file in the Changes list is not openable.
         n_open = len(opened)
         page.locator("#scm-changes .scm-row.is-deleted").click()

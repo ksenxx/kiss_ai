@@ -143,7 +143,8 @@ function testNestsAllPanelsBackToPromptInOrder() {
   // Thoughts panel takes part in).
   const thoughts = before.filter(el => el.classList.contains('llm-panel'));
   assert.strictEqual(thoughts.length, 1, 'the run rendered one Thoughts panel');
-  const expectNested = before.slice(1);
+  // The run's first summary folds the Prompt panel too.
+  const expectNested = before;
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
   const sub = p.querySelector(':scope > .summary-sub');
@@ -151,9 +152,9 @@ function testNestsAllPanelsBackToPromptInOrder() {
   const nested = Array.from(sub.children);
   assert.strictEqual(
     nested.length,
-    8,
-    'ALL 7 tool panels since the beginning plus the Thoughts panel ' +
-      'must nest (not just the last 6) — got ' +
+    9,
+    'the Prompt, ALL 7 tool panels since the beginning and the Thoughts ' +
+      'panel must nest (not just the last 6) — got ' +
       nested.length,
   );
   for (let i = 0; i < expectNested.length; i++) {
@@ -169,52 +170,50 @@ function testNestsAllPanelsBackToPromptInOrder() {
     'the Thoughts panel is adopted by the summary, in its place',
   );
   const after = topLevel(win);
-  assert.strictEqual(after.length, 2, 'top level must be: prompt + summary panel');
-  assert.ok(after[0].classList.contains('prompt'), 'prompt stays first');
-  assert.strictEqual(after[1], p, 'summary panel is the last child');
+  assert.strictEqual(after.length, 1, 'top level must be: the summary panel');
+  assert.strictEqual(after[0], p, 'summary panel is the only child');
   win.close();
-  console.log('  ok - ALL panels back to the prompt nest, Thoughts included, order kept');
+  console.log('  ok - ALL panels, the prompt included, nest; Thoughts included, order kept');
 }
 
-function testStopsAtPromptBoundary() {
+function testPromptFoldsUnderFirstSummary() {
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'go'});
+  const prompt = output(win).querySelector('.ev.prompt');
   sendToolPanels(win, 3);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
   const nested = Array.from(p.querySelector(':scope > .summary-sub').children);
-  assert.strictEqual(nested.length, 3, 'only the 3 available panels nest');
+  assert.strictEqual(nested.length, 4, 'the prompt and the 3 tool panels nest');
+  assert.strictEqual(nested[0], prompt, 'the Prompt panel heads the digest');
   const after = topLevel(win);
-  assert.strictEqual(after.length, 2, 'prompt + summary panel remain');
-  assert.ok(
-    after[0].classList.contains('prompt'),
-    'the user prompt panel must NEVER be swallowed by a summary',
-  );
+  assert.strictEqual(after.length, 1, 'only the summary panel remains');
   win.close();
-  console.log('  ok - nesting stops at the .prompt boundary');
+  console.log('  ok - the first summary folds the .prompt panel under itself');
 }
 
-function testAdjacentTaskAndSystemPromptAreBoundaries() {
+function testAdjacentTaskIsBoundarySystemPromptIsNot() {
   const {win} = makeWebview();
   const O = output(win);
   const adj = win.document.createElement('div');
   adj.className = 'adjacent-task';
   O.appendChild(adj);
-  const sys = win.document.createElement('div');
-  sys.className = 'ev system-prompt';
-  O.appendChild(sys);
+  send(win, {type: 'system_prompt', text: 'be careful'});
+  const sys = O.querySelector('.ev.system-prompt');
   sendToolPanels(win, 2);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
   const nested = Array.from(p.querySelector(':scope > .summary-sub').children);
   assert.strictEqual(
     nested.length,
-    2,
-    'nesting must stop before .system-prompt / .adjacent-task blocks',
+    3,
+    'the System Prompt nests; nesting stops before the .adjacent-task block',
   );
-  assert.ok(sys.parentElement === O && adj.parentElement === O);
+  assert.strictEqual(nested[0], sys, 'the System Prompt heads the digest');
+  assert.strictEqual(adj.parentElement, O, 'the adjacent task stays put');
+  assert.strictEqual(adj.nextElementSibling, p, 'right before the summary');
   win.close();
-  console.log('  ok - .adjacent-task and .system-prompt are boundaries');
+  console.log('  ok - .adjacent-task is a boundary; .system-prompt folds under the summary');
 }
 
 function testWelcomeBlockNeverAdopted() {
@@ -240,11 +239,12 @@ function testNoPrecedingPanels() {
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
   const sub = p.querySelector(':scope > .summary-sub');
-  const count = sub ? sub.children.length : 0;
-  assert.strictEqual(count, 0, 'nothing to nest right after the prompt');
+  const nested = sub ? Array.from(sub.children) : [];
+  assert.strictEqual(nested.length, 1, 'only the prompt nests right after it');
+  assert.ok(nested[0].classList.contains('prompt'));
   assert.ok(p.classList.contains('collapsed'), 'still collapses');
   win.close();
-  console.log('  ok - summary right after prompt nests nothing');
+  console.log('  ok - summary right after prompt nests just the prompt');
 }
 
 function testEmptyDescription() {
@@ -380,11 +380,11 @@ function testSecondSummaryStopsAtEarlierSummaryBoundary() {
   );
   assert.strictEqual(
     first.querySelector(':scope > .summary-sub').children.length,
-    8,
-    'the earlier summary keeps its own 8 nested panels',
+    9,
+    'the earlier summary keeps its own 9 nested panels (prompt + 8 tools)',
   );
   const after = topLevel(win);
-  assert.strictEqual(after.length, 3, 'prompt + two summary digests');
+  assert.strictEqual(after.length, 2, 'two summary digests');
   win.close();
   console.log('  ok - a later summary stops at the earlier summary');
 }
@@ -427,8 +427,8 @@ function testManyPanelsBetweenSummariesAllNest() {
   const after = topLevel(win);
   assert.strictEqual(
     after.length,
-    3,
-    'no stranded panels: prompt + first summary + second summary',
+    2,
+    'no stranded panels: first summary (with the prompt) + second summary',
   );
   win.close();
   console.log('  ok - all 9 panels between summaries nest (no 6 cap)');
@@ -514,8 +514,9 @@ function testReplayPathNestsAndCollapses() {
   const nested = p.querySelector(':scope > .summary-sub').children;
   assert.strictEqual(
     nested.length,
-    7,
-    'replay nests ALL panels since the beginning, like the live stream',
+    8,
+    'replay nests the prompt and ALL panels since the beginning, like ' +
+      'the live stream',
   );
   assert.strictEqual(
     p.querySelector(':scope > .tc-summary-desc').textContent,
@@ -629,7 +630,7 @@ function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
   );
   assert.ok(!p.classList.contains('collapsed'), 'header click expands');
   const nested = Array.from(p.querySelector(':scope > .summary-sub').children);
-  assert.strictEqual(nested.length, 7);
+  assert.strictEqual(nested.length, 8, 'the prompt and 7 tool panels');
   for (const el of nested) {
     assert.ok(
       isDisplayed(win, el),
@@ -718,8 +719,8 @@ function testReplayWithTwoSummariesSegmentsCorrectly() {
   const second = panels[1];
   assert.strictEqual(
     first.querySelector(':scope > .summary-sub').children.length,
-    8,
-    'first replayed summary adopts its full 8-panel segment',
+    9,
+    'first replayed summary adopts the prompt and its full 8-panel segment',
   );
   assert.strictEqual(
     second.querySelector(':scope > .summary-sub').children.length,
@@ -782,8 +783,8 @@ function runTests() {
   testSummaryPanelCreatedAndCollapsed();
   testDescriptionIsDirectChildWithFullText();
   testNestsAllPanelsBackToPromptInOrder();
-  testStopsAtPromptBoundary();
-  testAdjacentTaskAndSystemPromptAreBoundaries();
+  testPromptFoldsUnderFirstSummary();
+  testAdjacentTaskIsBoundarySystemPromptIsNot();
   testWelcomeBlockNeverAdopted();
   testNoPrecedingPanels();
   testEmptyDescription();

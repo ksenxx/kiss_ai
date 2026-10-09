@@ -1003,8 +1003,8 @@ class SorcarAgent(RelentlessAgent):
         self._use_memory_override: bool | None = None
         self._use_web_tools: bool = True
         # The daemon's BrowserTabService (kiss.server.browser_tab) when
-        # running under kiss-web: show_browser() then puts the page in
-        # the Browser tab on every surface instead of a local window.
+        # running under kiss-web: the web tools then browse in the
+        # Browser tab on every surface, where the user watches.
         self._live_browser: Any = None
         self._is_parallel: bool = True
         # The caller's extra tools of the current run (``run(tools=...)``:
@@ -1319,7 +1319,11 @@ class SorcarAgent(RelentlessAgent):
                 )
             except Exception:
                 synthesized = None
-            _attribute_tts_usage(self, tts_usage)
+            finally:
+                # Also on a Stop (KeyboardInterrupt) that unwinds through
+                # here: the synthesis already banked its spend in
+                # ``tts_usage`` and the task must still pay for it.
+                _attribute_tts_usage(self, tts_usage)
             if synthesized:
                 payload["audioB64"], payload["audioMime"] = synthesized
             broadcast(payload)
@@ -2000,10 +2004,10 @@ class SorcarAgent(RelentlessAgent):
             docker_image: Docker image name to run tools inside a container.
             web_tools: Whether to include browser/web tools. Defaults to True.
             live_browser: The daemon's ``BrowserTabService``; when given,
-                ``show_browser()`` opens the page in the Browser tab on
-                every surface (forwarded to every sub-agent).  None (no
-                daemon) shows a local window instead.
-                Set to False for terminal-only environments.
+                the web tools browse in the Browser tab on every surface
+                (forwarded to every sub-agent).  None (no daemon)
+                browses headless until ``show_browser()`` opens a local
+                window.  Set to False for terminal-only environments.
             prompt_suffix: The caller-supplied text (the daemon's
                 ``appendToPrompt`` wire field, e.g. a ``run_agent``
                 call's ``add_to_prompt`` option) that the caller has

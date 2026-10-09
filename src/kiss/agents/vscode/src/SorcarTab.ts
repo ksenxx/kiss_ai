@@ -268,6 +268,7 @@ export function buildChatHtml(
     BROWSER_TAB_SRC: u('browserTab.js'),
     TERMINAL_TAB_SRC: u('terminalTab.js'),
     PDF_VIEW_SRC: u('pdfView.js'),
+    MOBILE_SWIPE_SRC: u('mobileSwipe.js'),
     MAIN_SRC: u('main.js'),
     SHIM_SCRIPT:
       `<script nonce="${nonce}">window.__HLJS_THEME_CSS__ = ` +

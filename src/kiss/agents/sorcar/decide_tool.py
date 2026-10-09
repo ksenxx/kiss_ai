@@ -170,18 +170,17 @@ def _is_choice_criteria(criteria: Any) -> TypeGuard[dict[str, str] | list[str]]:
     return isinstance(criteria, list) and bool(criteria) and all(_is_text(c) for c in criteria)
 
 
-def format_decision(model_name: str, response: dict[str, Any]) -> tuple[str, float, int]:
-    """Render a decisions response for the agent and price it.
+def decision_usage(model_name: str, response: dict[str, Any]) -> tuple[float, int, int]:
+    """Price a decisions response.
 
     Args:
         model_name: The catalog name the request was made with (its catalog
             prices are used only when the response carries no ``usage.cost``).
-        response: The dict returned by :meth:`DecisionsModel.decide`.
+        response: The dict returned by :meth:`DecisionsModel.decide`, or a
+            charged reply it rejected (see ``take_partial_usage_response``).
 
     Returns:
-        ``(text, cost_usd, total_tokens)`` where *text* is the JSON the tool
-        returns: ``{"answers": ..., "model": <served id>, "usage":
-        {"input_tokens", "output_tokens", "cost_usd"}}``.  *cost_usd* is
+        ``(cost_usd, input_tokens, output_tokens)``.  *cost_usd* is
         OpenRouter's reported ``usage.cost`` when present (the served
         model's actual bill), else the catalog estimate.
     """
@@ -193,6 +192,23 @@ def format_decision(model_name: str, response: dict[str, Any]) -> tuple[str, flo
     cost = reported_cost(response)
     if cost is None:
         cost = calculate_cost(model_name, input_tokens, output_tokens)
+    return cost, input_tokens, output_tokens
+
+
+def format_decision(model_name: str, response: dict[str, Any]) -> tuple[str, float, int]:
+    """Render a decisions response for the agent and price it.
+
+    Args:
+        model_name: The catalog name the request was made with (see
+            :func:`decision_usage`).
+        response: The dict returned by :meth:`DecisionsModel.decide`.
+
+    Returns:
+        ``(text, cost_usd, total_tokens)`` where *text* is the JSON the tool
+        returns: ``{"answers": ..., "model": <served id>, "usage":
+        {"input_tokens", "output_tokens", "cost_usd"}}``.
+    """
+    cost, input_tokens, output_tokens = decision_usage(model_name, response)
     text = json.dumps(
         {
             "answers": response["answers"],
@@ -230,17 +246,26 @@ def make_decide_tool(
     if not isinstance(decisions_model, DecisionsModel):
         raise KISSError(f"{model_name} is not a decisions model (catalog flag 'dec' is not set)")
 
+    def attribute(cost: float, tokens: int) -> None:
+        """Fold one call's spend into *agent*'s task accounting (no step)."""
+        if agent is not None and (cost > 0 or tokens > 0):
+            from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
+
+            _attribute_sub_usage(agent, cost, tokens, 0)
+
     def decide(state: str, questions: str) -> str:
         try:
             parsed = parse_questions(questions)
             response = decisions_model.decide(state, parsed)
         except KISSError as e:
+            # A 2xx reply without ``answers`` was still charged for.
+            charged = decisions_model.take_partial_usage_response()
+            if isinstance(charged, dict):
+                cost, input_tokens, output_tokens = decision_usage(model_name, charged)
+                attribute(cost, input_tokens + output_tokens)
             return f"Error: {e.args[0]}"
         text, cost, tokens = format_decision(model_name, response)
-        if agent is not None and (cost > 0 or tokens > 0):
-            from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
-
-            _attribute_sub_usage(agent, cost, tokens, 0)
+        attribute(cost, tokens)
         return text
 
     decide.__name__ = "decide"

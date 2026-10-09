@@ -150,7 +150,7 @@ def _visible_titles(browser, work_dir: str, sessions: list) -> list[str]:
         # them all so the rows lay out for the offsetParent probe.
         page.evaluate(
             "() => document.querySelectorAll('#history-list "
-            ".history-chat-group.collapsed > .history-chat-header')"
+            ".history-chat-group.collapsed .history-chat-collapse')"
             ".forEach(h => h.click())"
         )
         assert page.is_checked("#hf-workspace"), \

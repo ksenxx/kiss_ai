@@ -2796,7 +2796,9 @@ def _structured_usage_totals(event: dict[str, Any]) -> dict[str, int | float]:
     Returns:
         The subset of ``steps``/``tokens``/``cost`` present as valid
         ``total_steps``/``total_tokens``/``cost`` fields (events written
-        by versions that predate these fields contribute nothing).
+        by versions that predate these fields contribute nothing).  The
+        cost is the exact ``cost_usd`` when the event carries it, else
+        the four-decimal ``cost`` string.
     """
     totals: dict[str, int | float] = {}
     steps = event.get("total_steps")
@@ -2805,6 +2807,10 @@ def _structured_usage_totals(event: dict[str, Any]) -> dict[str, int | float]:
         totals["steps"] = steps
     if isinstance(tokens, int) and not isinstance(tokens, bool):
         totals["tokens"] = tokens
+    exact = event.get("cost_usd")
+    if isinstance(exact, (int, float)) and not isinstance(exact, bool):
+        totals["cost"] = float(exact)
+        return totals
     cost_m = _COST_FIELD_RE.fullmatch(str(event.get("cost", "")))
     if cost_m:
         totals["cost"] = float(cost_m.group(1))

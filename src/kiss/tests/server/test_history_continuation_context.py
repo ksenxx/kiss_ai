@@ -150,7 +150,9 @@ def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
     assert state is not None
     t = state.task_thread
     assert t is not None
-    t.join(timeout=10)
+    # The run is faked, but the thread still sets a git worktree up,
+    # which takes a while on a loaded Windows box.
+    t.join(timeout=60)
     assert not t.is_alive()
 
 

@@ -981,11 +981,11 @@ The `run()` parameters without a `settings()` key (the allowlist is
 - **`use_web_tools`** — per-run browser-tool enablement.  `None`
   falls back to the daemon's configured default (the settings panel's
   "Use web tools" checkbox, persisted as `use_web_browser`).  Under
-  the daemon the browser tools include `show_browser()`, which moves
-  the page the agent is browsing into the Browser tab on every surface
-  (the daemon's `BrowserTabService`, passed to the run as
+  the daemon the browser tools browse in the Browser tab on every
+  surface (the daemon's `BrowserTabService`, passed to the run as
   `live_browser` and forwarded to its sub-agents) so the user can
-  watch and act on it; there is no setting for it.
+  watch and act on the page; `show_browser(visible=False)` hides it
+  and `show_browser()` brings it back; there is no setting for it.
 - **`auto_classify`** — per-run pre-run task classification.
   `None` falls back to the daemon's configured default (the settings
   panel's "Classify tasks before running" checkbox, persisted as

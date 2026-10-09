@@ -818,6 +818,17 @@ class TestClaudeCodeModel:
         ) == (3, 4)
         assert cache_creation_tokens({"cache_creation_input_tokens": 9}) == (0, 9)
         assert cache_creation_tokens({}) == (0, 0)
+        # A streamed aggregate that outgrew the message_start split (the
+        # SDK updates only the aggregate from message_delta): the excess
+        # is billed, at the 1h rate, instead of vanishing.
+        stale_split = {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}
+        assert cache_creation_tokens(
+            {"cache_creation": stale_split, "cache_creation_input_tokens": 200},
+        ) == (0, 200)
+        assert cache_creation_tokens(
+            {"cache_creation": {"ephemeral_5m_input_tokens": 5, "ephemeral_1h_input_tokens": 9},
+             "cache_creation_input_tokens": 14},
+        ) == (5, 9)
 
     def test_find_consecutive_tool_calls_end(self) -> None:
         one = '{"tool_calls": [{"name": "Bash", "arguments": {}}]}'

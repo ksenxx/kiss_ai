@@ -224,8 +224,8 @@ def test_remote_client_opened_mid_run_gets_status_replay_and_spinner(
         #    interaction, and its timer counts from the task's real
         #    start.  There is no row of chat tabs: the chat is the one
         #    on screen (``_testApi``: running, titled by the prompt) and
-        #    its spinner is the one on its row in the Chats panel, open
-        #    by default on the desktop remote page.
+        #    its spinner is the one on its chat's header in the Chats
+        #    panel, open by default on the desktop remote page.
         context = browser.new_context(
             ignore_https_errors=True, viewport={"width": 1280, "height": 900},
             service_workers="block",
@@ -247,6 +247,14 @@ def test_remote_client_opened_mid_run_gets_status_replay_and_spinner(
         label = records[0]["title"]
         assert PROMPT.startswith(label.rstrip("\u2026")), label
         row = page.locator("#history-list .sidebar-item.running-item", has_text=PROMPT)
+        group = row.locator("xpath=ancestor::*[contains(@class, 'history-chat-group')]")
+        # The chat's panel starts folded (only the user unfolds it): its
+        # header carries the running spinner; the chevron reveals the
+        # task row with its own.
+        group.locator(".history-chat-header .history-chat-status.status-spinner").wait_for(
+            timeout=15000,
+        )
+        group.locator(".history-chat-header .history-chat-collapse").click()
         row.locator("> .sidebar-item-running.status-spinner").wait_for(timeout=15000)
         assert row.count() == 1
         assert row.get_attribute("data-category") == "running"

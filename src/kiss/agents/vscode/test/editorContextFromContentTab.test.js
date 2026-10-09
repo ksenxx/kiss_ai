@@ -143,13 +143,15 @@ async function testViewedFileTabIsTheEditorContext() {
     'completion sees the tab buffer, like the unsaved VS Code document',
   );
 
-  // Closing the file tab ends the context.
+  // Closing the file tab ends the context.  The mobile chat screen lists
+  // no content tabs, so the user goes to the file first and closes it
+  // from its own strip entry; the chat is back on screen afterwards.
   send(win, {type: 'tabs_state', tabs: [{tabId: 'a1', chatId: 'chat-1', title: 'a1', workDir: '/ws/a'}]});
-  win._testApi.closeTab
-    ? win._testApi.closeTab(fileTab)
-    : win.document
-        .querySelector(`.chat-tab[data-tab-id="${fileTab}"] .chat-tab-close`)
-        .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  clickTab(win, fileTab);
+  win.document
+    .querySelector(`.chat-tab[data-tab-id="${fileTab}"] .chat-tab-close`)
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.strictEqual(win._testApi.getActiveTabId(), 'a1', 'the chat is on screen again');
   send(win, {type: 'status', running: false, tabId: 'a1'});
   assert.strictEqual(
     submitPrompt(win, posted, 'and now?').activeFile,

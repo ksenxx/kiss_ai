@@ -149,7 +149,7 @@
     '  background: var(--vscode-textCodeBlock-background, #2b2b2b);' +
     '  overflow-x: auto;' +
     '  white-space: pre-wrap;' +
-    '  font-family: var(--vscode-editor-font-family, monospace);' +
+    '  font-family: var(--font-mono, monospace);' +
     '  font-size: var(--fs-sm, 0.85em);' +
     '  line-height: 1.45;' +
     '}' +
@@ -158,7 +158,7 @@
     '  border-radius: var(--radius-sm, 4px);' +
     '  background: var(--vscode-textCodeBlock-background, #2b2b2b);' +
     '  color: var(--vscode-textPreformat-foreground, var(--fg, #ccc));' +
-    '  font-family: var(--vscode-editor-font-family, monospace);' +
+    '  font-family: var(--font-mono, monospace);' +
     '  font-size: 0.92em;' +
     '}' +
     '.tips-body pre code {' +

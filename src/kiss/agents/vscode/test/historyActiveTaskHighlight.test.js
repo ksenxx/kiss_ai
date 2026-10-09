@@ -6,27 +6,29 @@
 // End-to-end (JSDOM) tests for the history list's ACTIVE-TASK
 // highlight in media/main.js: the row of the task shown by the chat
 // webview the user is looking at carries `.history-active-task`, its
-// chat panel stays open by default, and the row is scrolled into view.
+// chat panel carries `.history-active-chat`, and the row (or, while
+// the panel is folded, the chat's header) is scrolled into view.  No
+// panel ever unfolds on its own: folding is the user's alone.
 //
 // Covered behavior:
 //  - history-panel mode: the host's `activeTask` relay highlights the
-//    row of that very task, opens its chat panel (the other panels
-//    stay collapsed), and scrolls the row into view once;
+//    row of that very task and its chat panel, leaves every panel
+//    folded, and scrolls the chat's header into view once;
 //  - a task without a loaded row falls back to its chat's newest row;
 //  - a relay that lands BEFORE the history does is applied (and
 //    scrolled to) when the rows arrive;
 //  - the identical-refresh fast path and a changed-data rebuild both
 //    keep the highlight; the rebuild scrolls again (the emptied list
 //    lands at the top);
-//  - a named task without a loaded row highlights nothing (another
-//    task must not pass for it);
-//  - a chat panel the user folded while looking at it stays folded
-//    (the header stands in as scroll target); moving away and back
-//    unfolds it so the row shows;
+//  - a named task without a loaded row highlights no row (another
+//    task must not pass for it) but still highlights its chat;
+//  - a panel the user unfolded stays unfolded across moves away and
+//    back and across rebuilds (the row is the scroll target); a panel
+//    the user folded stays folded (the header stands in);
+//  - a running task does not unfold its chat's panel;
 //  - a row the filters hide is marked but its scroll waits for the
 //    filter change that shows it;
-//  - a relay with empty ids clears the highlight and the panel falls
-//    back to collapsed;
+//  - a relay with empty ids clears both highlights;
 //  - the remote webapp paints its in-page list from its own visible
 //    tab (task_settings, tab switches) and never posts `activeTask`;
 //  - a VS Code chat surface posts `activeTask` to the host once per
@@ -229,11 +231,33 @@ function collapsed(win, chatId) {
   return group(win, chatId).classList.contains('collapsed');
 }
 
-function testRelayHighlightsOpensAndScrolls() {
+function activeChat(win, chatId) {
+  return group(win, chatId).classList.contains('history-active-chat');
+}
+
+function header(win, chatId) {
+  return group(win, chatId).querySelector(':scope > .history-chat-header');
+}
+
+function chevron(win, chatId) {
+  return header(win, chatId).querySelector('.history-chat-collapse');
+}
+
+function clickChevron(win, chatId) {
+  chevron(win, chatId).dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+}
+
+function testRelayHighlightsAndScrolls() {
   const {win, posted, scrolled} = makeWebview(HISTORY_ATTRS);
   disableWorkspaceFilter(win);
   sendHistory(win, posted, threeSessions());
   assert.strictEqual(highlighted(win).length, 0, 'nothing highlighted yet');
+  assert.ok(
+    !activeChat(win, 'chat-1') && !activeChat(win, 'chat-2'),
+    'no chat highlighted yet',
+  );
   assert.ok(
     collapsed(win, 'chat-1') && collapsed(win, 'chat-2'),
     'idle chats start collapsed',
@@ -247,9 +271,17 @@ function testRelayHighlightsOpensAndScrolls() {
     [row],
     'only the shown task is highlighted',
   );
-  assert.ok(!collapsed(win, 'chat-1'), 'the shown chat opens');
-  assert.ok(collapsed(win, 'chat-2'), 'other chats stay collapsed');
-  assert.deepStrictEqual(scrolled, [row], 'the row is scrolled into view once');
+  assert.ok(activeChat(win, 'chat-1'), 'the shown chat is highlighted');
+  assert.ok(!activeChat(win, 'chat-2'), 'the other chat is not');
+  assert.ok(
+    collapsed(win, 'chat-1') && collapsed(win, 'chat-2'),
+    'the shown chat does not unfold on its own',
+  );
+  assert.deepStrictEqual(
+    scrolled,
+    [header(win, 'chat-1')],
+    'the folded chat\u2019s header is scrolled into view once',
+  );
 
   // The same relay again changes nothing and scrolls nothing.
   send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '2'});
@@ -260,30 +292,35 @@ function testRelayHighlightsOpensAndScrolls() {
   );
 
   // A named task without a loaded row: no other row passes for it,
-  // but its chat opens and the previous chat falls back to collapsed.
+  // but its chat is highlighted and the previous chat is not.
   send(win, {type: 'activeTask', chatId: 'chat-2', taskId: '999'});
   assert.strictEqual(
     highlighted(win).length,
     0,
     'no stand-in for a named task',
   );
-  assert.ok(!collapsed(win, 'chat-2'), 'the shown chat still opens');
-  assert.ok(collapsed(win, 'chat-1'), 'the previous chat collapses again');
+  assert.ok(activeChat(win, 'chat-2'), 'the shown chat is highlighted');
+  assert.ok(!activeChat(win, 'chat-1'), 'the previous chat no longer');
+  assert.ok(
+    collapsed(win, 'chat-1') && collapsed(win, 'chat-2'),
+    'both chats stay collapsed',
+  );
   assert.strictEqual(scrolled.length, 1, 'nothing to scroll to');
 
   // A chat that names no task yet: its newest row stands in.
   send(win, {type: 'activeTask', chatId: 'chat-2', taskId: ''});
   const newest = rowFor(win, 'chat-2', 3);
   assert.deepStrictEqual(highlighted(win), [newest]);
-  assert.deepStrictEqual(scrolled.slice(1), [newest]);
+  assert.deepStrictEqual(scrolled.slice(1), [header(win, 'chat-2')]);
 
-  // Empty ids clear the highlight.
+  // Empty ids clear both highlights.
   send(win, {type: 'activeTask', chatId: '', taskId: ''});
   assert.strictEqual(highlighted(win).length, 0);
-  assert.ok(collapsed(win, 'chat-2'), 'no shown chat: default collapsed');
+  assert.ok(!activeChat(win, 'chat-1') && !activeChat(win, 'chat-2'));
+  assert.ok(collapsed(win, 'chat-2'), 'still collapsed');
   assert.strictEqual(scrolled.length, 2, 'nothing to scroll to');
   win.close();
-  console.log('PASS relay highlights the row, opens its chat and scrolls once');
+  console.log('PASS relay highlights the row and its chat and scrolls once');
 }
 
 function testRelayBeforeHistoryAppliesOnRender() {
@@ -295,11 +332,12 @@ function testRelayBeforeHistoryAppliesOnRender() {
   sendHistory(win, posted, threeSessions());
   const row = rowFor(win, 'chat-1', 1);
   assert.deepStrictEqual(highlighted(win), [row]);
-  assert.ok(!collapsed(win, 'chat-1'));
+  assert.ok(activeChat(win, 'chat-1') && !activeChat(win, 'chat-2'));
+  assert.ok(collapsed(win, 'chat-1'), 'the panel is still folded');
   assert.deepStrictEqual(
     scrolled,
-    [row],
-    'the pending scroll lands with the rows',
+    [header(win, 'chat-1')],
+    'the pending scroll lands with the rows, on the folded chat\u2019s header',
   );
   win.close();
   console.log('PASS a relay ahead of the history is applied on render');
@@ -310,6 +348,10 @@ function testRefreshAndRebuildKeepHighlight() {
   disableWorkspaceFilter(win);
   sendHistory(win, posted, threeSessions());
   send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '1'});
+  // The user unfolds the chat: the row itself becomes the scroll
+  // target from here on.
+  clickChevron(win, 'chat-1');
+  assert.ok(!collapsed(win, 'chat-1'));
   const before = rowFor(win, 'chat-1', 1);
   scrolled.length = 0;
 
@@ -322,6 +364,7 @@ function testRefreshAndRebuildKeepHighlight() {
     'fast path kept the row',
   );
   assert.deepStrictEqual(highlighted(win), [before]);
+  assert.ok(activeChat(win, 'chat-1'), 'the chat highlight is kept');
   assert.strictEqual(
     scrolled.length,
     0,
@@ -337,6 +380,8 @@ function testRefreshAndRebuildKeepHighlight() {
   const after = rowFor(win, 'chat-1', 1);
   assert.notStrictEqual(after, before, 'the row was rebuilt');
   assert.deepStrictEqual(highlighted(win), [after]);
+  assert.ok(activeChat(win, 'chat-1') && !activeChat(win, 'chat-2'));
+  assert.ok(!collapsed(win, 'chat-1'), 'the user\u2019s unfold survives');
   assert.deepStrictEqual(
     scrolled,
     [after],
@@ -346,61 +391,93 @@ function testRefreshAndRebuildKeepHighlight() {
   console.log('PASS refreshes and rebuilds keep the highlight');
 }
 
-function testFoldedChat() {
+function testFoldIsTheUsersAlone() {
   const {win, posted, scrolled} = makeWebview(HISTORY_ATTRS);
   disableWorkspaceFilter(win);
   sendHistory(win, posted, threeSessions());
   send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '2'});
-  assert.ok(!collapsed(win, 'chat-1'));
-  const header = () =>
-    group(win, 'chat-1').querySelector(':scope > .history-chat-header');
-  header().dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
-  assert.ok(collapsed(win, 'chat-1'), 'the user folded the chat they look at');
+  assert.ok(collapsed(win, 'chat-1'), 'folded while on screen');
 
-  // A rebuild keeps that fold; the rebuild's scroll lands on the
-  // header, the highlighted row being hidden inside.
+  // The user unfolds the chat they look at.
+  clickChevron(win, 'chat-1');
+  assert.ok(!collapsed(win, 'chat-1'), 'the user unfolded the chat');
+
+  // Moving to another chat and back leaves the unfold alone; the
+  // row itself is the scroll target.
+  send(win, {type: 'activeTask', chatId: 'chat-2', taskId: '3'});
+  assert.ok(!collapsed(win, 'chat-1'), 'moving away keeps the unfold');
+  assert.ok(collapsed(win, 'chat-2'), 'the chat moved to stays folded');
+  assert.ok(activeChat(win, 'chat-2') && !activeChat(win, 'chat-1'));
+  scrolled.length = 0;
+  send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '1'});
+  assert.ok(!collapsed(win, 'chat-1'), 'moving back keeps the unfold');
+  const row = rowFor(win, 'chat-1', 1);
+  assert.deepStrictEqual(highlighted(win), [row]);
+  assert.ok(activeChat(win, 'chat-1') && !activeChat(win, 'chat-2'));
+  assert.deepStrictEqual(scrolled, [row], 'the row itself is scrolled to');
+
+  // The user folds it again while looking at it: a rebuild keeps the
+  // fold, and the rebuild's scroll lands on the header, the
+  // highlighted row being hidden inside.
+  clickChevron(win, 'chat-1');
+  assert.ok(collapsed(win, 'chat-1'), 'the user folded the chat');
   scrolled.length = 0;
   const changed = threeSessions();
   changed[2].cost = 1.5;
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, changed);
   assert.ok(collapsed(win, 'chat-1'), 'the fold survives a rebuild');
-  assert.deepStrictEqual(highlighted(win), [rowFor(win, 'chat-1', 2)]);
+  assert.deepStrictEqual(highlighted(win), [rowFor(win, 'chat-1', 1)]);
+  assert.ok(activeChat(win, 'chat-1'));
   assert.deepStrictEqual(
     scrolled,
-    [header()],
+    [header(win, 'chat-1')],
     'the header stands in for the hidden row',
   );
 
-  // Moving to another chat and back unfolds it: the row must show.
+  // Moving away and back no longer unfolds it either.
   send(win, {type: 'activeTask', chatId: 'chat-2', taskId: '3'});
-  assert.ok(collapsed(win, 'chat-1'));
-  scrolled.length = 0;
-  send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '1'});
-  assert.ok(!collapsed(win, 'chat-1'), 'moving to the folded chat unfolds it');
-  const row = rowFor(win, 'chat-1', 1);
-  assert.deepStrictEqual(highlighted(win), [row]);
-  assert.deepStrictEqual(
-    scrolled,
-    [row],
-    'the row itself is scrolled into view',
-  );
-
-  // The dropped fold stays dropped across a rebuild.
-  changed[2].cost = 2.5;
-  send(win, {type: 'tasks_updated'});
-  sendHistory(win, posted, changed);
-  assert.ok(!collapsed(win, 'chat-1'), 'the unfold survives a rebuild');
+  send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '2'});
+  assert.ok(collapsed(win, 'chat-1'), 'moving back keeps the fold');
+  assert.deepStrictEqual(highlighted(win), [rowFor(win, 'chat-1', 2)]);
   win.close();
-  console.log('PASS a folded chat unfolds when moved to, else keeps the fold');
+  console.log('PASS folding and unfolding a chat is the user\u2019s alone');
+}
+
+function testRunningTaskDoesNotUnfold() {
+  const {win, posted} = makeWebview(HISTORY_ATTRS);
+  disableWorkspaceFilter(win);
+  send(win, {type: 'activeTask', chatId: 'chat-1', taskId: '2'});
+  const running = threeSessions();
+  running[1].is_running = true;
+  sendHistory(win, posted, running);
+  assert.strictEqual(
+    group(win, 'chat-1').dataset.hasRunning,
+    '1',
+    'the chat is marked running for the Running section',
+  );
+  assert.ok(collapsed(win, 'chat-1'), 'a task starting does not unfold');
+  assert.ok(activeChat(win, 'chat-1'), 'the chat is highlighted');
+  assert.deepStrictEqual(highlighted(win), [rowFor(win, 'chat-1', 2)]);
+
+  // The user unfolds it; the task finishing (a rebuild) keeps that.
+  clickChevron(win, 'chat-1');
+  assert.ok(!collapsed(win, 'chat-1'));
+  send(win, {type: 'tasks_updated'});
+  sendHistory(win, posted, threeSessions());
+  assert.ok(!collapsed(win, 'chat-1'), 'the user\u2019s unfold stands');
+  assert.ok(collapsed(win, 'chat-2'), 'the other chat is folded');
+  win.close();
+  console.log('PASS a running task leaves the fold to the user');
 }
 
 function testFilteredRowWaitsForTheFilter() {
   const {win, posted, scrolled} = makeWebview(HISTORY_ATTRS);
   disableWorkspaceFilter(win);
   sendHistory(win, posted, threeSessions());
+  // The user unfolds the chat so the row (not the header) is the
+  // scroll target.
+  clickChevron(win, 'chat-1');
   const completedBox = win.document.getElementById('hf-completed');
   completedBox.checked = false;
   completedBox.dispatchEvent(new win.Event('change', {bubbles: true}));
@@ -456,13 +533,18 @@ function testRemoteWebappPaintsFromOwnTabs() {
     [own],
     'the tab\u2019s own task takes over',
   );
-  assert.ok(scrolled.includes(own), 'the row is scrolled into view');
-  assert.ok(!collapsed(win, 'chat-1') && collapsed(win, 'chat-2'));
+  assert.ok(
+    scrolled.includes(header(win, 'chat-1')),
+    'the folded chat\u2019s header is scrolled into view',
+  );
+  assert.ok(activeChat(win, 'chat-1') && !activeChat(win, 'chat-2'));
+  assert.ok(collapsed(win, 'chat-1') && collapsed(win, 'chat-2'));
 
   // Switching to the other chat (the Chats panel's pick) follows it.
   win._testApi.switchToTab('other-1');
   assert.deepStrictEqual(highlighted(win), [rowFor(win, 'chat-2', 3)]);
-  assert.ok(!collapsed(win, 'chat-2') && collapsed(win, 'chat-1'));
+  assert.ok(activeChat(win, 'chat-2') && !activeChat(win, 'chat-1'));
+  assert.ok(collapsed(win, 'chat-1') && collapsed(win, 'chat-2'));
 
   assert.strictEqual(
     byType(posted, 'activeTask').length,
@@ -540,10 +622,11 @@ function testHistoryPanelIgnoresOwnPlaceholderTab() {
 }
 
 async function main() {
-  testRelayHighlightsOpensAndScrolls();
+  testRelayHighlightsAndScrolls();
   testRelayBeforeHistoryAppliesOnRender();
   testRefreshAndRebuildKeepHighlight();
-  testFoldedChat();
+  testFoldIsTheUsersAlone();
+  testRunningTaskDoesNotUnfold();
   testFilteredRowWaitsForTheFilter();
   testRemoteWebappPaintsFromOwnTabs();
   await testChatPanelPostsActiveTask();

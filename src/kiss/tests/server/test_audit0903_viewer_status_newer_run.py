@@ -224,6 +224,9 @@ class TestViewerStatusNewerRun(TestCase):
         running = [e for e in self._statuses(viewer) if e.get("running")]
         self.assertEqual(len(running), 1)
         self.assertEqual(running[0].get("startTs"), 7)
+        # A viewer catching up on a run already going is marked so the
+        # webview does not take it for a run starting (showChatForRun).
+        self.assertIs(running[0].get("attached"), True)
         self.assertFalse(
             any(e.get("running") is False for e in self._statuses(viewer)),
             "a live attach must not be corrected back to running=false",

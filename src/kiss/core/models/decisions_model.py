@@ -233,6 +233,11 @@ class DecisionsModel(Model):
                 f"Decisions endpoint returned non-JSON body: {response.text[:200]!r}"
             ) from e
         if not isinstance(parsed, dict) or not isinstance(parsed.get("answers"), dict):
+            # The provider charged for this 2xx reply; keep its usage for
+            # the caller's partial-usage drain so a retry is not billed as
+            # if the first call never happened.
+            if isinstance(parsed, dict) and parsed.get("usage"):
+                self._rejected_response = parsed
             raise KISSError(f"Decisions response has no 'answers' object: {parsed!r}"[:500])
         return parsed
 
@@ -280,7 +285,11 @@ class DecisionsModel(Model):
         response = self.decide(state, questions)
         text = json.dumps(response["answers"])
         self.conversation.append({"role": "assistant", "content": text})
+        # The call is already paid for: a callback that raises (a Stop)
+        # must leave its usage for the partial-usage drain.
+        self._rejected_response = response
         self._invoke_token_callback(text)
+        self._rejected_response = None
         return text, response
 
     def generate_and_process_with_tools(

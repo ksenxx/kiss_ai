@@ -233,9 +233,13 @@
           term = new global.Terminal({
             cursorBlink: true,
             fontSize: 13,
+            // main.css's --font-mono: the editor font with Cursor's
+            // monospace fallback chain (a custom property's computed
+            // value has its var() references substituted).
             fontFamily: cssVar(
-              '--vscode-editor-font-family',
-              "'Fira Code', Menlo, Consolas, monospace",
+              '--font-mono',
+              'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, ' +
+                '"Liberation Mono", "Courier New", monospace',
             ),
             scrollback: 5000,
             theme: themeFromPage(),

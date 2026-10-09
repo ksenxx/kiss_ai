@@ -142,7 +142,8 @@ def test_fetch_compute_apply_writes_cache_prices(
     by_name = {u["name"]: u["changes"] for u in updates}
     assert set(by_name) == {"openrouter/deepseek/deepseek-v4-flash"}
     assert by_name["openrouter/deepseek/deepseek-v4-flash"] == {
-        "input_price_per_1M": 0.041,
+        "input_price_per_1M": 0.04144,
+        "output_price_per_1M": 0.08288,
         "cache_read_price_per_1M": 0.008288,
         "cache_write_price_per_1M": None,
     }
@@ -156,7 +157,8 @@ def test_fetch_compute_apply_writes_cache_prices(
     mod.apply_updates_to_file(updates, new_models, [], current, dry_run=False)
     written = json.loads(catalog.read_text())
     ds = written["openrouter/deepseek/deepseek-v4-flash"]
-    assert ds["input_price_per_1M"] == 0.041
+    assert ds["input_price_per_1M"] == 0.04144
+    assert ds["output_price_per_1M"] == 0.08288
     assert ds["cache_read_price_per_1M"] == 0.008288
     assert "cache_write_price_per_1M" not in ds
     fb = written["openrouter/anthropic/claude-fable-5.1"]

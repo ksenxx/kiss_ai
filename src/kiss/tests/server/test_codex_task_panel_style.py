@@ -26,8 +26,8 @@ def test_remote_page_font_size_vars_match_task_panel() -> None:
     """The task panel sizes itself with --vscode-editor-font-size and
     the chat panels with rem units derived from --vscode-font-size;
     the remote page must inject the SAME size for both so panel
-    contents and the task panel share one size (14px, VS Code's default
-    editor font size)."""
+    contents and the task panel share one size (13px, the webview
+    workbench size and the base of Cursor's UI type scale)."""
     src = WEB_SERVER_PY.read_text(encoding="utf-8")
-    assert "--vscode-font-size: 14px" in src
-    assert "--vscode-editor-font-size: 14px" in src
+    assert "--vscode-font-size: 13px" in src
+    assert "--vscode-editor-font-size: 13px" in src

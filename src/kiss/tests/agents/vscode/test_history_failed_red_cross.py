@@ -298,12 +298,13 @@ def _post_history_event(
         timeout=5000,
     )
     # Chat panels are collapsed by default (no chat here is running):
-    # open them all, as a user inspecting the rows would, so the rows
-    # and their status icons lay out. The explicit expands are
-    # remembered per chat across the later re-renders.
+    # open them all through their "Show details" chevrons, as a user
+    # inspecting the rows would, so the rows and their status icons lay
+    # out. The explicit expands are remembered per chat across the
+    # later re-renders.
     page.evaluate(
         "() => document.querySelectorAll('#history-list "
-        ".history-chat-group.collapsed > .history-chat-header')"
+        ".history-chat-group.collapsed .history-chat-collapse')"
         ".forEach(h => h.click())"
     )
 

@@ -335,6 +335,19 @@ def _no_verify_ssl() -> ssl.SSLContext:
     return ctx
 
 
+async def _recv_reply(ws: Any, timeout: float = 5) -> dict[str, Any]:
+    """Return the next frame that is a reply to the client's own command.
+
+    The server's startup PyPI check broadcasts ``update_available`` to
+    every client whenever it completes, so it can land between a command
+    and its reply on a fast host; such unsolicited broadcasts are skipped.
+    """
+    while True:
+        msg: dict[str, Any] = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+        if msg.get("type") != "update_available":
+            return msg
+
+
 class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
     """Test HTTPS serving of HTML and static assets."""
 
@@ -493,7 +506,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertEqual(resp["type"], "auth_ok")
 
             await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "models")
             self.assertIn("models", resp)
             self.assertIsInstance(resp["models"], list)
@@ -528,7 +541,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
             await ws.send(json.dumps({"type": "focusEditor"}))
             await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "models")
 
     async def test_ws_unknown_command_returns_error(self) -> None:
@@ -550,13 +563,13 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
             tab_id = "test-tab-1"
             await ws.send(json.dumps({"type": "newChat", "tabId": tab_id}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "showWelcome")
             self.assertEqual(resp["tabId"], tab_id)
 
             await ws.send(json.dumps({"type": "closeTab", "tabId": tab_id}))
             await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "models")
 
     async def test_ws_select_model(self) -> None:
@@ -575,12 +588,8 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 )
             )
             await ws.send(json.dumps({"type": "getModels"}))
-            # The server may interleave unsolicited broadcasts (e.g.
-            # ``update_available`` once the PyPI check finishes) before
-            # the ``models`` reply; skip them.
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            while resp["type"] != "models":
-                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
+            self.assertEqual(resp["type"], "models")
             self.assertEqual(resp["selected"], "gemini-2.5-pro")
 
     async def test_ws_ready_command(self) -> None:
@@ -890,7 +899,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 )
             )
             await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "models")
 
     async def test_ws_check_paths_reports_existing_files_only(self) -> None:
@@ -1405,7 +1414,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 )
             )
             await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "models")
 
     async def test_ws_complete(self) -> None:
@@ -3205,7 +3214,7 @@ class TestWSHandlerInvalidJson(IsolatedAsyncioTestCase):
 
             await ws.send("not valid json{{{")
             await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            resp = await _recv_reply(ws)
             self.assertEqual(resp["type"], "models")
 
 
@@ -4516,7 +4525,7 @@ class TestWatchdogWSPingWithConnections(IsolatedAsyncioTestCase):
         self.assertEqual(beat, {"type": "heartbeat"})
 
         await ws.send(json.dumps({"type": "getModels"}))
-        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        resp = await _recv_reply(ws)
         self.assertEqual(resp["type"], "models")
 
         await ws.close()

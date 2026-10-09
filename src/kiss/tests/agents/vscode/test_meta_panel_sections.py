@@ -1088,7 +1088,9 @@ def test_a_long_task_update_leaves_the_apps_list_a_usable_share(
                       updateScrolls: c.scrollHeight > c.clientHeight + 1};
             }"""
         )
-        assert geo["apps"] >= 80, geo
+        # Five equal shares of a 700px panel after the headers, status
+        # lines and separators: about 79px at the 13px Cursor scale.
+        assert geo["apps"] >= 70, geo
         assert geo["update"] == pytest.approx(geo["apps"], abs=1), geo
         assert geo["updateScrolls"], geo
     finally:
@@ -1188,7 +1190,7 @@ _MINIMUM_GEOMETRY_JS = """
   const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
   return {
     share,
-    minimum: Math.min(4 * rem, share / 2),
+    minimum: Math.min(4.5 * rem, share / 2),
     listHeight: rect('meta-list').height,
     scheduleHeight: rect('meta-schedule-list').height,
     appsHeight: rect('meta-apps-list').height,
@@ -1231,7 +1233,7 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
     Task Info separator had once been dragged far down; that height
     persists, and a middle body used to have no minimum, so the dragged
     body took its whole share.  Every expanded body now keeps half of an
-    equal share (at most 4rem): the jobs stay on screen and scroll, the
+    equal share (at most 4.5rem): the jobs stay on screen and scroll, the
     dragged body yields instead, and because the minimum follows the
     panel's height a short window never makes the panel itself
     overflow.  A double-click on the separator still restores the equal
@@ -1318,11 +1320,13 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
         assert all(bottom <= 300 for bottom in crowded["headerBottoms"]), crowded
 
         # Double-clicking the separator forgets the dragged height:
-        # the four bodies share the panel equally again.
+        # the four bodies share the panel equally again.  (The share
+        # with five sections in 800px is about 99px: the tall window
+        # is back once it is well above the short window's 60px.)
         page.set_viewport_size({"width": 1200, "height": 800})
         page.wait_for_function(
             "() => parseFloat(getComputedStyle(document.getElementById('meta-panel'))"
-            ".getPropertyValue('--meta-body-share')) > 100"
+            ".getPropertyValue('--meta-body-share')) > 80"
         )
         _section_resizer(page).dblclick()
         reset = page.evaluate(_MINIMUM_GEOMETRY_JS)
