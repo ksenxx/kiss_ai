@@ -16,9 +16,14 @@ Two races in :class:`kiss.server.browser_tab.BrowserTabService`:
 * Closing the last tab while another tab is being created tore the
   browser down under the ``new_page()`` call, which then failed and
   the user saw a ``browserError`` instead of the tab.  The teardown
-  must wait while a page is being created.
+  must wait while a page is being created.  Headed Chromium also
+  drops the close of a window's only tab sent while another tab is
+  being created (``page.close()`` never returned, the old tab stayed):
+  the service sends the close only once the creation settled.
+* A tab closed while its page was still loading reported the aborted
+  navigation as a ``browserError``; a close is no error.
 
-Both run a real browser (or a real "browser" that exits at once)
+All run a real browser (or a real "browser" that exits at once)
 through the daemon's command catalog, as ``test_browser_tab_service``
 does.
 """
@@ -26,9 +31,12 @@ does.
 from __future__ import annotations
 
 import asyncio
+import http.server
 import os
 import stat
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -128,3 +136,75 @@ def test_closing_the_last_tab_while_another_opens_keeps_the_new_tab(
         _wait(lambda: _events(printer, "browserState", tab_id=current, title="Tall"), "state")
         assert not _events(printer, "browserError")
         assert set(service._pages) == {current}
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+def test_closing_the_last_tab_right_before_opening_another_keeps_the_new_tab(
+    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other order: the close is sent first, the open right behind it."""
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    server._handle_command({"type": "browserOpen", "url": page_server, "connId": "c1"})
+    current = _wait(lambda: _events(printer, "openBrowserTab"), "first tab", 90)[0]["tab_id"]
+    _wait(lambda: _events(printer, "browserState", tab_id=current, title="Tall"), "loaded")
+    seen = {current}
+    for _ in range(6):
+        server._handle_command({"type": "browserClose", "tab_id": current, "connId": "c1"})
+        server._handle_command({"type": "browserOpen", "url": page_server, "connId": "c1"})
+        _wait(lambda: _events(printer, "closeBrowserTab", tab_id=current), "old tab closed")
+        opened = _wait(
+            lambda: [e for e in _events(printer, "openBrowserTab") if e["tab_id"] not in seen],
+            "new tab",
+        )
+        current = opened[-1]["tab_id"]
+        seen.add(current)
+        _wait(lambda: _events(printer, "browserState", tab_id=current, title="Tall"), "state")
+        assert not _events(printer, "browserError")
+        assert set(service._pages) == {current}
+
+
+class _StallingPage(http.server.BaseHTTPRequestHandler):
+    """A page whose response never comes: its navigation only ends by a close."""
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server API
+        time.sleep(20)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
+        return
+
+
+@pytest.fixture
+def stalling_server() -> Any:
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StallingPage)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/"
+    httpd.shutdown()
+    httpd.server_close()
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+def test_closing_a_tab_still_loading_is_no_error(
+    daemon: Any, page_server: str, stalling_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The aborted navigation of a tab closed mid-load is not reported."""
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    server._handle_command({"type": "browserOpen", "url": page_server, "connId": "c1"})
+    first = _wait(lambda: _events(printer, "openBrowserTab"), "first tab", 90)[0]["tab_id"]
+    _wait(lambda: _events(printer, "browserState", tab_id=first, title="Tall"), "loaded")
+    # The second tab's navigation stalls in the server; closing the tab
+    # aborts it (Playwright: "frame was detached").
+    server._handle_command({"type": "browserOpen", "url": stalling_server, "connId": "c1"})
+    stalled = _wait(
+        lambda: [e for e in _events(printer, "openBrowserTab") if e["tab_id"] != first],
+        "stalled tab",
+    )[0]["tab_id"]
+    server._handle_command({"type": "browserClose", "tab_id": stalled, "connId": "c1"})
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=stalled), "closed")
+    # Give the aborted goto time to surface before checking it stayed quiet.
+    time.sleep(1)
+    assert not _events(printer, "browserError")
+    assert set(service._pages) == {first}

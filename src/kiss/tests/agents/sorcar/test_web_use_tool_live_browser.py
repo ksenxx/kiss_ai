@@ -2,16 +2,19 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end: ``show_browser`` moves the session into the streamed Browser tab.
+"""End-to-end: under the daemon the web tools browse in the streamed Browser tab.
 
 Under the ``kiss-web`` daemon the agent's ``WebUseTool`` is handed the
-daemon's :class:`BrowserTabService`.  ``show_browser()`` must then open
-the page in a tab that every surface streams (instead of a window on the
-daemon machine), keep driving that very page through the other web tools
-while the user watches, and carry cookies between the headless browser
-and the tab's persistent profile.  These tests run a REAL service (its
-own Chromium and event loop) and a REAL ``WebUseTool`` (a second CDP
-client on that Chromium); no mocks.
+daemon's :class:`BrowserTabService`.  Its first web tool call must then
+open the page in a tab that every surface streams and switches to (the
+user watches what the agent does), every other web tool must keep
+driving that very page, ``show_browser(visible=False)`` must take the
+session headless and ``show_browser()`` bring it back, carrying cookies
+between the headless browser and the tab's persistent profile; a
+Browser tab that cannot be opened must leave the agent browsing
+headless rather than failing.  These tests run a REAL service (its own
+Chromium and event loop) and a REAL ``WebUseTool`` (a second CDP client
+on that Chromium); no mocks.
 
 Branches that cannot be reached without doubles: the headed
 ``_mask_headless_user_agent`` no-op needs a display; the "page closed
@@ -85,6 +88,11 @@ class _Handler(BaseHTTPRequestHandler):
                 "<title>Form</title><input aria-label='Name' id='name'>"
                 "<a href='/inert' target='_blank'>open</a>"
             )
+        elif self.path == "/go-slow":
+            body = "<title>Go</title><button onclick=\"location='/slow'\">go</button>"
+        elif self.path == "/slow":
+            time.sleep(2)
+            body = "<title>Slow</title>slow"
         elif self.path == "/persist-login":
             body, cookie = "kept", f"{PERSISTENT_COOKIE}; Path=/; Max-Age=3600"
         elif self.path == "/logout":
@@ -141,6 +149,14 @@ def tool(tmp_path: Path, service: Any) -> Any:
     web.close()
 
 
+@pytest.fixture
+def headless_tool(tool: WebUseTool) -> WebUseTool:
+    """The same tool after the agent took it headless (``show_browser(False)``)."""
+    assert tool.show_browser(visible=False) == "Browser is now headless."
+    assert tool._browser_pid is not None and not tool._live
+    return tool
+
+
 def _wait(pred: Callable[[], Any], what: str, timeout: float = 30) -> Any:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -166,42 +182,200 @@ def _in_service(svc: BrowserTabService, tab_id: str, expression: str) -> Any:
     return asyncio.run_coroutine_threadsafe(rec.page.evaluate(expression), svc._loop).result(10)
 
 
-def test_show_browser_opens_the_page_in_a_focused_tab_on_every_surface(tool, service, server):
-    """The headless page reopens as a Browser tab that every surface switches to,
-    with its session cookie, and the tool keeps driving that same page."""
+def test_first_web_tool_call_opens_the_page_in_a_focused_tab_on_every_surface(
+    tool, service, server
+):
+    """No ``show_browser`` needed: the first ``go_to_url`` opens a Browser tab
+    that every surface switches to, and every web tool drives that page."""
     svc, printer = service
-    tool.go_to_url(f"{server}/login")
-    tool.go_to_url(f"{server}/form")
-    own_pid = tool._browser_pid
-    assert own_pid is not None
+    assert tool._live and tool._headless and not _events(printer, "openBrowserTab")
 
-    tree = tool.show_browser()
+    tree = tool.go_to_url(f"{server}/form")
 
-    # Announced to everyone, then focused on every surface (the agent wants
-    # the user's attention): a broadcast focused event, no connId.
+    # Announced to everyone, then focused on every surface (the user is
+    # meant to watch): a broadcast focused event, no connId.
     focused = _events(printer, "openBrowserTab", focus=True)
     assert len(focused) == 1 and focused[0]["tabId"] == "" and "connId" not in focused[0]
     assert focused[0]["popup"] is False
+    tab_id = focused[0]["tab_id"]
+    assert tool._live and tool._live_tab == tab_id
+    # No Chromium of the tool's own: the daemon's browser is what it drives.
+    assert tool._browser_pid is None
+    assert tree.startswith("Page: Form") and f"{server}/form" in tree
+    assert svc._pages[tab_id].page.url == f"{server}/form"
+
+    # Every web tool acts on the page the user sees.
+    tool.type_text(1, "Ada")
+    assert _in_service(svc, tab_id, "document.getElementById('name').value") == "Ada"
+    shot_path = Path(svc._profile_dir).parent / "live.png"
+    assert tool.screenshot(file_path=str(shot_path)).startswith("Screenshot saved")
+    assert shot_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    tool.go_to_url(f"{server}/cookies")
+    assert svc._pages[tab_id].page.url == f"{server}/cookies"
+    _wait(lambda: _events(printer, "browserState", tab_id=tab_id, url=f"{server}/cookies"), "state")
+    # Later calls stay in that one tab: no second tab is opened.
+    assert len(_events(printer, "openBrowserTab", focus=True)) == 1 and len(svc._pages) == 1
+
+    assert tool.show_browser() == "Browser is already visible."
+
+
+def test_show_browser_carries_the_headless_session_into_the_tab(headless_tool, service, server):
+    """After ``show_browser(False)`` the page reopens in a Browser tab with its
+    session cookie when the agent calls ``show_browser()`` again."""
+    svc, printer = service
+    tool = headless_tool
+    tool.go_to_url(f"{server}/login")
+    tool.go_to_url(f"{server}/form")
+    assert tool._browser_pid is not None and not _events(printer, "openBrowserTab")
+
+    tree = tool.show_browser()
+
+    focused = _events(printer, "openBrowserTab", focus=True)
+    assert len(focused) == 1 and focused[0]["tabId"] == ""
     tab_id = focused[0]["tab_id"]
     assert tool._live and tool._live_tab == tab_id and tool._headless
     # The tool's own Chromium is gone; the daemon's browser is what it drives.
     assert tool._browser_pid is None
     assert tree.startswith("Page: Form") and f"{server}/form" in tree
     assert svc._pages[tab_id].page.url == f"{server}/form"
-
-    # Every web tool now acts on the page the user sees.
-    tool.type_text(1, "Ada")
-    assert _in_service(svc, tab_id, "document.getElementById('name').value") == "Ada"
-    shot_path = Path(svc._profile_dir).parent / "live.png"
-    assert tool.screenshot(file_path=str(shot_path)).startswith("Screenshot saved")
-    assert shot_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
     # The headless session's cookie travelled into the tab's profile.
     tool.go_to_url(f"{server}/cookies")
     assert SESSION_COOKIE in tool.get_page_content(text_only=True)
-    assert svc._pages[tab_id].page.url == f"{server}/cookies"
-    _wait(lambda: _events(printer, "browserState", tab_id=tab_id, url=f"{server}/cookies"), "state")
 
-    assert tool.show_browser() == "Browser is already visible."
+
+def test_sub_agent_tab_closes_with_the_sub_agent(tmp_path, service, server):
+    """A sub-agent (ephemeral profile) browses in a tab of its own, which closes
+    everywhere when the sub-agent finishes, like its chat tab."""
+    svc, printer = service
+    web = WebUseTool(user_data_dir=str(tmp_path / "sub"), ephemeral=True, live_browser=svc)
+    try:
+        assert web.go_to_url(f"{server}/inert").startswith("Page:")
+        tab_id = web._live_tab
+        assert tab_id in svc._pages and _events(printer, "openBrowserTab", tab_id=tab_id)
+    finally:
+        assert web.close() == "Browser closed."
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=tab_id), "closeBrowserTab")
+    assert tab_id not in svc._pages and web._live_tab is None
+
+
+def test_sub_agent_close_closes_the_tab_it_left_for_a_popup(tmp_path, service, server):
+    """After following a ``target=_blank`` link the sub-agent drives the popup;
+    its close() closes the tab it came from as well."""
+    svc, printer = service
+    web = WebUseTool(user_data_dir=str(tmp_path / "sub"), ephemeral=True, live_browser=svc)
+    web.go_to_url(f"{server}/form")
+    first = web._live_tab
+    web.click(2)
+    _wait(lambda: web._page.url == f"{server}/inert", "popup adopted")
+    _wait(lambda: len(svc._pages) == 2, "popup registered")
+    popup = next(t for t in svc._pages if t != first)
+
+    web.close()
+
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=first), "first tab closed")
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=popup), "popup closed")
+    assert not svc._pages
+
+
+def test_sub_agent_close_closes_a_tab_whose_renderer_crashed(tmp_path, service, server):
+    """A crashed page has no ``_page`` to close; the tab is closed through the
+    service all the same."""
+    svc, printer = service
+    web = WebUseTool(user_data_dir=str(tmp_path / "sub"), ephemeral=True, live_browser=svc)
+    web.go_to_url(f"{server}/inert")
+    tab_id = web._live_tab
+    web.go_to_url("chrome://crash")
+    _wait(lambda: not web._is_alive(), "crash noticed")  # the probe pumps the crash event
+    assert web._page is None and tab_id in svc._pages
+
+    web.close()
+
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=tab_id), "crashed tab closed")
+    assert tab_id not in svc._pages
+
+
+def _tab_index(web: WebUseTool, url: str) -> int:
+    """The ``tab:N`` index of the page at *url* in the shared context."""
+    return next(i for i, page in enumerate(web._context.pages) if page.url == url)
+
+
+def test_sub_agent_close_spares_the_users_tab_it_drove(tmp_path, service, server):
+    """Driving the user's own tab for a while (``tab:N``, with the watchdog
+    resolving its id) does not make it the sub-agent's: close() closes the
+    tab the sub-agent opened, never the user's."""
+    svc, printer = service
+    svc.open(f"{server}/inert", "user")
+    _wait(lambda: _events(printer, "openBrowserTab"), "user tab")
+    user_tab = _events(printer, "openBrowserTab")[0]["tab_id"]
+    web = WebUseTool(user_data_dir=str(tmp_path / "sub"), ephemeral=True, live_browser=svc)
+    web.go_to_url(f"{server}/form")
+    own = web._live_tab
+    assert f"URL: {server}/inert" in web.go_to_url(f"tab:{_tab_index(web, f'{server}/inert')}")
+    web.press_key("Tab")
+    assert web._live_tab_id() == user_tab
+    assert web.go_to_url(f"tab:{_tab_index(web, f'{server}/form')}").startswith("Page: Form")
+
+    web.close()
+
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=own), "own tab closed")
+    assert user_tab in svc._pages and not svc._pages[user_tab].page.is_closed()
+    assert not _events(printer, "closeBrowserTab", tab_id=user_tab)
+
+
+def test_sub_agent_close_closes_a_popup_it_left_again(tmp_path, service, server):
+    """A popup followed and then left for its opener (``tab:N``) is still the
+    sub-agent's: close() closes both, even though the popup's tab id was
+    never resolved; the listeners of the re-adopted opener fire once."""
+    svc, printer = service
+    web = WebUseTool(user_data_dir=str(tmp_path / "sub"), ephemeral=True, live_browser=svc)
+    web.go_to_url(f"{server}/form")
+    first = web._live_tab
+    opener = web._page
+    web.click(2)
+    _wait(lambda: web._page.url == f"{server}/inert", "popup adopted")
+    _wait(lambda: len(svc._pages) == 2, "popup registered")
+    popup = next(t for t in svc._pages if t != first)
+    armed = len(opener._impl_obj.listeners("popup"))
+    for _ in range(3):
+        assert web.go_to_url(f"tab:{_tab_index(web, f'{server}/inert')}").startswith("Page:")
+        assert web.go_to_url(f"tab:{_tab_index(web, f'{server}/form')}").startswith("Page: Form")
+    assert web._page is opener and len(opener._impl_obj.listeners("popup")) == armed
+    assert web._live_tab is None  # the popup's id was never needed
+
+    web.close()
+
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=first), "opener closed")
+    _wait(lambda: _events(printer, "closeBrowserTab", tab_id=popup), "popup closed")
+
+
+def _browse_then_close(web: WebUseTool, url: str, done: threading.Event) -> None:
+    """Another agent's whole browsing, on its own thread (its Playwright driver is thread-bound)."""
+    web.go_to_url(url)
+    done.wait(30)
+    web.close()
+
+
+def test_another_agents_new_tab_is_not_mistaken_for_a_popup(tmp_path, tool, service, server):
+    """The Browser tab's context is shared with other agents: a tab another
+    agent opens while this one clicks is not the popup of that click."""
+    svc, _printer = service
+    other = WebUseTool(user_data_dir=str(tmp_path / "other"), ephemeral=True, live_browser=svc)
+    done = threading.Event()
+    tool.go_to_url(f"{server}/go-slow")
+    mine = tool._live_tab
+    # The click navigates to a page that takes 2 s to arrive; the other
+    # agent's tab shows up in the shared context meanwhile.
+    opener = threading.Thread(target=_browse_then_close, args=(other, f"{server}/inert", done))
+    opener.start()
+    try:
+        tree = tool.click(1)
+        _wait(lambda: other._live_tab is not None, "the other agent's tab")
+        assert tree.startswith("Page: Slow"), tree
+        assert tool._live_tab_id() == mine and other._live_tab != mine
+        assert tool._page.url == f"{server}/slow"
+    finally:
+        done.set()
+        opener.join(60)
 
 
 def test_user_closing_the_tab_gets_a_fresh_tab_on_the_next_call(tool, service, server):
@@ -253,7 +427,6 @@ def test_back_to_headless_closes_the_tab_and_carries_cookies_back(tool, service,
     headless on the same page, with the cookies set while in the tab."""
     svc, printer = service
     tool.go_to_url(f"{server}/inert")
-    tool.show_browser()
     tab_id = tool._live_tab
     tool.go_to_url(f"{server}/tab-login")  # "the user logged in" while watching
 
@@ -273,7 +446,6 @@ def test_task_end_leaves_the_tab_open_for_the_user(tool, service, server):
     """``close()`` (end of a task) only disconnects: the page stays on every surface."""
     svc, printer = service
     tool.go_to_url(f"{server}/inert")
-    tool.show_browser()
     tab_id = tool._live_tab
 
     assert tool.close() == "Browser closed."
@@ -301,27 +473,35 @@ def test_close_browser_closes_the_tab_and_the_next_call_reopens_one(tool, servic
     assert tool._live_tab in svc._pages
 
 
-def test_service_shutdown_while_attached_is_reported_and_recoverable(tool, service, server):
+def test_service_shutdown_while_attached_falls_back_to_headless(tool, service, server):
     """The daemon browser exiting (the service shut down) drops the connection;
-    the tool reports the error and ``show_browser(False)`` goes back to headless."""
+    the next call carries on headless instead of failing, and ``show_browser()``
+    reports why the tab cannot come back."""
     svc, _printer = service
-    tool.show_browser()
+    tool.go_to_url(f"{server}/inert")
     svc.shutdown()
     assert not tool._is_alive()
 
-    err = tool.go_to_url(f"{server}/inert")
-    assert err.startswith("Error") and "shut down" in err
-    tree = tool.show_browser(visible=False)
-    assert tree == "Browser is now headless." and tool._is_alive() and not tool._live
+    assert tool.go_to_url(f"{server}/inert").startswith("Page:")
+    assert not tool._live and tool._headless and tool._browser_pid is not None
+    err = tool.show_browser()
+    assert err.startswith("Error making the browser visible:") and "shut down" in err
+    assert not tool._live and tool._headless
+    assert tool.go_to_url(f"{server}/inert").startswith("Page:")
+    assert tool.show_browser(visible=False) == "Browser is already headless."
 
 
-def test_show_browser_reports_an_unavailable_service_and_stays_usable(tmp_path, service, server):
-    """When the Browser tab cannot be opened the tool says so and keeps browsing headless."""
-    svc, _printer = service
+def test_unavailable_service_from_the_start_means_headless_browsing(tmp_path, service, server):
+    """When no Browser tab can be opened the first call browses headless; an
+    explicit ``show_browser()`` says why and the tool stays usable."""
+    svc, printer = service
     svc.shutdown()
     web = WebUseTool(user_data_dir=str(tmp_path / "p"), live_browser=svc)
     try:
-        web.go_to_url(f"{server}/inert")
+        assert web._live
+        assert web.go_to_url(f"{server}/inert").startswith("Page:")
+        assert not web._live and web._headless and web._browser_pid is not None
+        assert not _events(printer, "openBrowserTab")
         err = web.show_browser()
         assert err.startswith("Error making the browser visible:") and "shut down" in err
         assert not web._live and web._headless
@@ -404,7 +584,8 @@ def test_browser_that_cannot_launch_is_reported_by_show_browser(
     monkeypatch.setenv("KISS_HEADLESS", "1")
     web = WebUseTool(user_data_dir=str(tmp_path / "p"), live_browser=svc)
     try:
-        web.go_to_url(f"{server}/inert")
+        assert web.go_to_url(f"{server}/inert").startswith("Page:")  # headless fallback
+        assert not web._live and not _events(printer, "openBrowserTab")
         err = web.show_browser()
         assert err.startswith("Error making the browser visible: Cannot open a Browser tab:")
         assert not web._live and not _events(printer, "openBrowserTab")
@@ -447,10 +628,11 @@ def test_user_navigation_in_the_tab_is_what_comes_back_headless(tool, service, s
     assert tree.startswith("Page: Form") and tool._page.url == f"{server}/form"
 
 
-def test_local_storage_of_the_page_travels_both_ways(tool, service, server):
+def test_local_storage_of_the_page_travels_both_ways(headless_tool, service, server):
     """Token-based logins live in localStorage; the page origin's entries move
     into the tab and back, following the latest state each way."""
     svc, _printer = service
+    tool = headless_tool
     tool.go_to_url(f"{server}/inert")
     tool._page.evaluate("localStorage.setItem('token', 'agent-login')")
 
@@ -462,11 +644,12 @@ def test_local_storage_of_the_page_travels_both_ways(tool, service, server):
     assert tool._page.evaluate("localStorage.getItem('token')") == "user-login"
 
 
-def test_a_cookie_deleted_while_live_does_not_come_back_headless(tool, service, server):
+def test_a_cookie_deleted_while_live_does_not_come_back_headless(headless_tool, service, server):
     """A persistent cookie carried into the tab and deleted there (logout) must
     not be resurrected from the headless profile's disk copy; the tab's other
     cookies are untouched."""
     svc, _printer = service
+    tool = headless_tool
     tool.go_to_url(f"{server}/persist-login")
     tool.show_browser()
     tool.go_to_url(f"{server}/tab-login")  # a cookie of the tab's own
@@ -522,9 +705,10 @@ def test_page_that_stays_wedged_after_interrupt_is_closed_alone(tool, service, s
     assert tool.go_to_url(f"{server}/inert").startswith("Page:")
 
 
-def test_local_storage_is_not_written_to_a_redirect_destination(tool, service, server):
+def test_local_storage_is_not_written_to_a_redirect_destination(headless_tool, service, server):
     """A token set on one origin must not be handed to the origin a redirect lands on."""
     svc, _printer = service
+    tool = headless_tool
     tool.go_to_url(f"{server}/flip")  # served once; reopening it redirects to localhost
     tool._page.evaluate("localStorage.setItem('token', 'SECRET')")
 
@@ -541,9 +725,10 @@ def test_local_storage_is_not_written_to_a_redirect_destination(tool, service, s
     assert tool._page.evaluate("localStorage.getItem('token')") == "SECRET"
 
 
-def test_local_storage_removed_while_live_stays_removed(tool, service, server):
+def test_local_storage_removed_while_live_stays_removed(headless_tool, service, server):
     """A logout that deletes a localStorage key in the tab survives the switch back."""
     svc, _printer = service
+    tool = headless_tool
     tool.go_to_url(f"{server}/inert")
     tool._page.evaluate("localStorage.setItem('token', 'original-login')")
     tool.show_browser()
@@ -555,9 +740,10 @@ def test_local_storage_removed_while_live_stays_removed(tool, service, server):
     assert tool._page.evaluate("localStorage.getItem('token')") is None
 
 
-def test_switching_after_the_page_was_closed_deletes_nothing(tool, service, server):
+def test_switching_after_the_page_was_closed_deletes_nothing(headless_tool, service, server):
     """``close_browser`` then ``show_browser(False)`` has no session to capture;
     that must not be mistaken for "every carried cookie was deleted"."""
+    tool = headless_tool
     tool.go_to_url(f"{server}/persist-login")
     tool.show_browser()
     tool.close_browser()

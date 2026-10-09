@@ -47,13 +47,13 @@ class TestInstallUrl(unittest.TestCase):
                 "curl",
                 "-fsSL",
                 "--max-time",
-                "10",
+                "30",
                 "https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh",
             ],
             capture_output=True,
             encoding="utf-8",  # web pages are UTF-8, not the Windows code page
             errors="replace",
-            timeout=15,
+            timeout=40,
         )
         self.assertEqual(result.returncode, 0, f"curl failed: {result.stderr}")
         self.assertNotIn("<!DOCTYPE html>", result.stdout)
@@ -66,13 +66,13 @@ class TestInstallUrl(unittest.TestCase):
                 "curl",
                 "-fsSL",
                 "--max-time",
-                "10",
+                "30",
                 "https://kisssorcar.github.io/",
             ],
             capture_output=True,
             encoding="utf-8",  # web pages are UTF-8, not the Windows code page
             errors="replace",
-            timeout=15,
+            timeout=40,
         )
         self.assertEqual(result.returncode, 0, f"curl failed: {result.stderr}")
         self.assertTrue(
@@ -91,14 +91,15 @@ class TestInstallUrl(unittest.TestCase):
                 "curl",
                 "-sSL",
                 "--max-time",
-                "10",
+                "30",
                 "https://github.com/ksenxx/kiss_ai/blob/main/scripts/install.sh",
             ],
             capture_output=True,
             encoding="utf-8",  # web pages are UTF-8, not the Windows code page
             errors="replace",
-            timeout=15,
+            timeout=40,
         )
+        self.assertEqual(result.returncode, 0, f"curl failed: {result.stderr}")
         self.assertIn("<!DOCTYPE html>", result.stdout)
 
 

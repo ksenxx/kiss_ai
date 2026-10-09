@@ -97,6 +97,11 @@ class _DecisionsHandler(BaseHTTPRequestHandler):
             self._send(400, payload)
         elif body.get("state") == "no-usage":
             self._send(200, {"model": "typesafe/jev-1.13-20260917", "answers": LIVE_ANSWERS})
+        elif body.get("state") == "no-answers-charged":
+            self._send(200, {
+                "model": "typesafe/jev-1.13-20260917",
+                "usage": {"input_tokens": 123, "output_tokens": 0, "cost": 0.0123},
+            })
         else:
             self._send(
                 200,
@@ -344,6 +349,24 @@ def test_decide_tool_reports_http_errors_as_text() -> None:
         result = decide("bad-request", QUESTIONS_JSON)
     assert result.startswith("Error: Decisions request failed (HTTP 400 Bad Request)")
     assert "Model x does not exist" in result
+
+
+def test_decide_tool_bills_a_charged_reply_without_answers() -> None:
+    """October 2026 audit: the error path dropped the usage of a charged 2xx reply."""
+    agent = _make_agent()
+    budget_before, tokens_before = agent.budget_used, agent.total_tokens_used
+    with _decisions_server() as base_url:
+        decide = make_decide_tool(
+            agent, model_config={"base_url": base_url, "api_key": "test-key"}
+        )
+        result = decide("no-answers-charged", QUESTIONS_JSON)
+        assert result.startswith("Error: Decisions response has no 'answers' object")
+        assert agent.budget_used == pytest.approx(budget_before + 0.0123)
+        assert agent.total_tokens_used == tokens_before + 123
+        # The slot was consumed: a later successful call bills only itself.
+        decide(STATE, QUESTIONS_JSON)
+    assert agent.budget_used == pytest.approx(budget_before + 0.0123 + 1.722e-05)
+    assert agent.total_tokens_used == tokens_before + 123 + 481
 
 
 def test_decide_tool_rejects_malformed_questions_before_any_request() -> None:

@@ -2746,6 +2746,12 @@ class VSCodeServer(
         calls AFTER delivering the transcript, so an attached viewer
         never ends on a bare status boolean (audit0903 F4).
 
+        ``attached: true`` marks the broadcast as a viewer catching up
+        on a run already going (a reload's replay, a history open) as
+        opposed to a run starting: the webview gives a STARTING run
+        the window (``main.js`` ``showChatForRun``) and must not do so
+        for a replay.
+
         Args:
             tab_id: The viewer tab that just attached.
             source: The live state returned by
@@ -2762,6 +2768,7 @@ class VSCodeServer(
                     "running": True,
                     "tabId": tab_id,
                     "startTs": start_ts,
+                    "attached": True,
                 }
             )
 

@@ -42,6 +42,7 @@ from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import posix_only
 from kiss.tests.server._memory_printer import MemoryPrinter
 
 _BLOCKING_SCRIPT = textwrap.dedent(
@@ -197,6 +198,7 @@ def _no_verify_ssl() -> ssl.SSLContext:
     return ctx
 
 
+@posix_only("terminal tabs need a pty")
 class TestTerminalOpenOverWss(IsolatedAsyncioTestCase):
     """``terminalOpen`` from a remote connection opens a real shell."""
 

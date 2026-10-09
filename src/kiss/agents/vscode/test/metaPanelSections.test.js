@@ -244,6 +244,20 @@ function showTaskUpdate(wv, html) {
 }
 
 /**
+ * Register chat tab *tabId* (its status known, so the next running
+ * status counts as a start) and start a task in it, the way the daemon
+ * does for a prompt the user submits.
+ */
+function startOnChat(win, tabId) {
+  send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId, chatId: 'chat-' + tabId, title: tabId, workDir: '/ws'}],
+  });
+  send(win, {type: 'task_events', tabId, task: 'the task', events: []});
+  send(win, {type: 'status', running: true, tabId, startTs: 1});
+}
+
+/**
  * Take the workspace (Explorer, Source Control) and global (Schedule,
  * Apps, Spend) sections out of the stack (the `hidden` attribute, then
  * a Task Info toggle round trip re-applies the layout), leaving only
@@ -392,6 +406,58 @@ async function main() {
       assert.strictEqual(bodyLayout(el(win, 'meta-list')), '123px');
       assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
       assertResizer(resizerAfter(info), 'handle');
+    });
+
+    await test(`${label}: a task start expands Task Info and Task update and collapses the rest`, () => {
+      // The user's arrangement before the start: the two per-task
+      // sections folded, every other one open.
+      const {win} = makeWebview(attrs, {
+        storage: {
+          'kiss-meta-section-collapsed:meta-section-info': '1',
+          'kiss-meta-section-collapsed:meta-info': '1',
+        },
+      });
+      const [info, update, ...others] = sections(win);
+      assertExpanded(info, false);
+      assertExpanded(update, false);
+      for (const section of others) assertExpanded(section, true);
+      const metaView = attrs === META_VIEW;
+      // A chat surface arranges the panel itself when the daemon's
+      // running status starts a task in the chat tab on screen; the
+      // Task Info view (no chat of its own) is told by the host, which
+      // relays the active chat editor panel's start as `showForRun`.
+      // The wrong trigger for a surface changes nothing.
+      if (metaView) startOnChat(win, 'a1');
+      else send(win, {type: 'showForRun'});
+      assertExpanded(info, false);
+      assertExpanded(update, false);
+      if (metaView) send(win, {type: 'showForRun'});
+      else startOnChat(win, 'a1');
+      assertExpanded(info, true);
+      assertExpanded(update, true);
+      for (const section of others) {
+        assertExpanded(section, false);
+        assert.strictEqual(
+          win.localStorage.getItem('kiss-meta-section-collapsed:' + section.id),
+          '1',
+          section.id + ' collapse stored',
+        );
+      }
+      for (const section of [info, update])
+        assert.strictEqual(
+          win.localStorage.getItem('kiss-meta-section-collapsed:' + section.id),
+          null,
+          section.id + ' expansion stored',
+        );
+      // The arrangement is a starting point: the user unfolds Apps
+      // again, and a repeated running status (not a start) keeps it.
+      const apps = el(win, 'meta-apps');
+      click(win, toggleOf(apps));
+      assertExpanded(apps, true);
+      if (!metaView) {
+        send(win, {type: 'status', running: true, tabId: 'a1', startTs: 1});
+        assertExpanded(apps, true);
+      }
     });
   }
 

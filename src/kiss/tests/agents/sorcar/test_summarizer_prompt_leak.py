@@ -2,19 +2,27 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E test: the internal Summarizer prompt must not leak into user events.
+"""E2E tests: the failed-session summarizer's events as the user sees them.
 
 When an executor sub-session crashes (e.g. the model returns consecutive
 empty responses, or the step limit is exceeded), ``RelentlessAgent``
 runs an internal :class:`KISSAgent` summarizer that inherits the
-parent's printer. Before the fix, ``KISSAgent._set_prompt``
-unconditionally printed the summarizer's internal ``SUMMARIZER_PROMPT``
-with ``type="prompt"``, so the front-end displayed an unexpected
-"# Summarizer\\n\\nThe executor's trajectory is saved at: ..." prompt
-message in the task's event stream (observed in production task
-``1ae49939d2a34039b72e8234eed52b02`` in ``~/.kiss/history.db``).
+parent's printer. Two things went wrong with its events:
 
-This test drives a real ``RelentlessAgent`` against a real
+* ``KISSAgent._set_prompt`` unconditionally printed the summarizer's
+  internal ``SUMMARIZER_PROMPT`` with ``type="prompt"``, so the
+  front-end displayed an unexpected "# Summarizer\\n\\nThe executor's
+  trajectory is saved at: ..." prompt message in the task's event
+  stream (observed in production task
+  ``1ae49939d2a34039b72e8234eed52b02`` in ``~/.kiss/history.db``).
+* The summarizer used the built-in plain-text ``finish(result)``, so
+  its terminal ``result`` event carried the HTML summary as bare
+  ``text`` with no ``summary`` / ``is_continue`` keys; the chat webview
+  escaped it, showing ``<h3>``/``<ol>`` literally (observed in task
+  ``ab25a870`` in ``~/.s10s/history.db``), unlike the end-of-task
+  result panel which comes from the structured ``finish``.
+
+These tests drive a real ``RelentlessAgent`` against a real
 ``ThreadingHTTPServer`` speaking the OpenAI chat-completions protocol
 and records every printer event with a real ``Printer`` subclass.
 Nothing in the system under test (agents, model adapters, printers) is
@@ -105,13 +113,16 @@ def _executor_response() -> dict:
     }
 
 
-def _summarizer_finish_response() -> dict:
-    """``finish(result=...)`` so the summarizer returns at once.
+_SUMMARY_HTML = "<h3>summary-from-test</h3>\n<ol>\n<li>Read <code>a.py</code></li>\n</ol>"
 
-    The summarizer's ``KISSAgent`` registers the built-in
-    ``finish(result)`` tool (its tools list is only Read/Bash).
+
+def _summarizer_finish_response() -> dict:
+    """``finish(result=<HTML>)`` so the summarizer returns at once.
+
+    The summarizer's ``KISSAgent`` registers ``SummarizerFinish.finish``,
+    which keeps the one-argument ``finish(result)`` signature.
     """
-    args = json.dumps({"result": "summary-from-test"})
+    args = json.dumps({"result": _SUMMARY_HTML})
     return {
         "id": "chatcmpl-sum",
         "object": "chat.completion",
@@ -141,7 +152,34 @@ def _summarizer_finish_response() -> dict:
     }
 
 
+def _summarizer_text_response() -> dict:
+    """A text-only summarizer turn: the HTML summary as content, no tool call.
+
+    Two of these in a row trip ``KISSAgent``'s text-only net, which
+    finishes the summarizer implicitly through its registered ``finish``.
+    """
+    return {
+        "id": "chatcmpl-sum-text",
+        "object": "chat.completion",
+        "model": _MODEL,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": _SUMMARY_HTML},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+        },
+    }
+
+
 _summarizer_called = threading.Event()
+#: Set by a test to make the summarizer answer with text only (no finish call).
+_summarizer_text_only = threading.Event()
 
 
 def _sse_chunks(payload: dict) -> list[dict]:
@@ -191,9 +229,12 @@ class _PromptLeakHandler(BaseHTTPRequestHandler):
         is_summarizer = "Summarizer" in body
         if is_summarizer:
             _summarizer_called.set()
-        payload = (
-            _summarizer_finish_response() if is_summarizer else _executor_response()
-        )
+        if not is_summarizer:
+            payload = _executor_response()
+        elif _summarizer_text_only.is_set():
+            payload = _summarizer_text_response()
+        else:
+            payload = _summarizer_finish_response()
         try:
             wants_stream = bool(json.loads(body).get("stream"))
         except Exception:
@@ -221,6 +262,7 @@ class _PromptLeakHandler(BaseHTTPRequestHandler):
 def prompt_leak_server() -> Generator[str]:
     """Start a real OpenAI-protocol HTTP server for the agent to call."""
     _summarizer_called.clear()
+    _summarizer_text_only.clear()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _PromptLeakHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -286,3 +328,87 @@ class TestSummarizerPromptDoesNotLeakIntoEvents:
             "unexpected non-task prompt event(s) leaked into the "
             f"user-visible event stream: {non_task[0][:200]!r}"
         )
+
+
+def _summarizer_result_events(base_url: str) -> list[dict[str, Any]]:
+    """Run a crash → summarizer cycle through a real recording ``JsonPrinter``.
+
+    Args:
+        base_url: The local OpenAI-protocol server's base URL.
+
+    Returns:
+        list[dict]: The ``result`` events the webview would receive, in
+        order (the summarizer's, then the merged end-of-task failure).
+    """
+    from kiss.server.json_printer import JsonPrinter
+
+    printer = JsonPrinter()
+    printer._thread_local.task_id = "summarizer-result-event-html"
+    printer.start_recording()
+    agent = RelentlessAgent("summarizer-result-event-html")
+    with tempfile.TemporaryDirectory() as td:
+        with pytest.raises(KISSError):
+            agent.run(
+                model_name=_MODEL,
+                prompt_template=_TASK,
+                max_steps=3,
+                max_budget=1.00,
+                max_sub_sessions=1,
+                work_dir=td,
+                printer=printer,
+                model_config={"base_url": base_url, "api_key": "test-key"},
+            )
+    events = printer.stop_recording()
+    assert _summarizer_called.is_set(), "summarizer branch was not exercised"
+    return [e for e in events if e["type"] == "result"]
+
+
+def _assert_structured_continuation(results: list[dict[str, Any]]) -> None:
+    """Check the summarizer's result event is a renderable continuation.
+
+    Args:
+        results: The ``result`` events of one crash → summarizer cycle.
+    """
+    continuations = [e for e in results if e.get("is_continue")]
+    assert len(continuations) == 1, (
+        f"expected exactly one continuation result event, got {results!r}"
+    )
+    cont = continuations[0]
+    assert cont["success"] is False
+    assert cont["summary"] == _SUMMARY_HTML, cont
+    assert "<h3>summary-from-test</h3>" in cont["text"]
+    # Every result event the webview gets must be parseable: a
+    # bare-text result (the old summarizer finish) is rendered escaped.
+    assert all("summary" in e for e in results), results
+    # The merged end-of-task result repeats the session summary as
+    # HTML too (its "Previous Session" section), unescaped.
+    final = results[-1]
+    assert final is not cont
+    assert "<h3>summary-from-test</h3>" in final["summary"]
+    assert "&lt;h3&gt;" not in final["summary"]
+
+
+class TestSummarizerResultEventIsStructured:
+    """The summarizer's ``result`` event renders as a continuation panel.
+
+    ``createResultPanel`` in the chat webview renders ``summary`` as
+    markup and prepends "Status: Continue" for ``is_continue``; an
+    event with only ``text`` is escaped into a ``<pre>`` block, which
+    is how the summarizer's HTML used to show its tags literally.
+    """
+
+    def test_explicit_finish_call(self, prompt_leak_server: str) -> None:
+        """The summarizer calls ``finish(result=<HTML>)``: its result
+        event is ``success: false, is_continue: true`` with the HTML in
+        ``summary``.
+        """
+        _assert_structured_continuation(_summarizer_result_events(prompt_leak_server))
+
+    def test_text_only_implicit_finish(self, prompt_leak_server: str) -> None:
+        """The summarizer only talks (two text-only turns, no ``finish``
+        call): ``KISSAgent``'s text-only net finishes it implicitly, and
+        that result must go through the registered ``finish`` too rather
+        than surface as bare text.
+        """
+        _summarizer_text_only.set()
+        _assert_structured_continuation(_summarizer_result_events(prompt_leak_server))

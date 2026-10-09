@@ -230,19 +230,21 @@ function testChatLastLaunchedLine() {
   gs.forEach(g => {
     byChat[g.dataset.chatId] = g;
   });
+  // The label sits in the header's action strip right after the
+  // "Show details" chevron, where a task panel shows its age label.
   const lineA = byChat['chat-a'].querySelector(
-    ':scope > .history-chat-launched',
+    ':scope > .history-chat-header > .history-chat-actions > .history-chat-launched',
   );
-  assert.ok(lineA, 'the chat panel has a launched line');
-  assert.strictEqual(
-    lineA.previousElementSibling,
-    byChat['chat-a'].querySelector(':scope > .history-chat-header'),
-    'the line sits directly under the collapsible header',
+  assert.ok(lineA, 'the chat panel has a launched label in its action strip');
+  assert.ok(
+    lineA.previousElementSibling.classList.contains('history-chat-collapse'),
+    'the label follows the Show details chevron',
   );
   assert.strictEqual(
-    lineA.nextElementSibling,
+    byChat['chat-a'].querySelector(':scope > .history-chat-header')
+      .nextElementSibling,
     byChat['chat-a'].querySelector(':scope > .history-chat-body'),
-    'the line sits above the task rows',
+    'the header sits directly above the task rows',
   );
   const labelA = lineA.querySelector('.sidebar-item-launched');
   assert.strictEqual(labelA.textContent, 'last launched 3 hours ago');
@@ -273,9 +275,9 @@ function testChatLastLaunchedLine() {
   );
 
   // The chat panel is folded: the line stays visible (it is not part
-  // of the body the header folds).
-  const header = byChat['chat-a'].querySelector('.history-chat-header');
-  if (!byChat['chat-a'].classList.contains('collapsed')) header.click();
+  // of the body the chevron folds).
+  const chevron = byChat['chat-a'].querySelector('.history-chat-collapse');
+  if (!byChat['chat-a'].classList.contains('collapsed')) chevron.click();
   assert.ok(byChat['chat-a'].classList.contains('collapsed'), 'chat folded');
   assert.strictEqual(
     win.getComputedStyle(byChat['chat-a'].querySelector('.history-chat-body'))

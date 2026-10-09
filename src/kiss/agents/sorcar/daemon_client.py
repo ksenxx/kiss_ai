@@ -227,6 +227,27 @@ def _parse_cost(value: Any) -> float:
     return 0.0
 
 
+def _event_cost(event: dict[str, Any]) -> float:
+    """Return the USD cost carried by a ``result`` / ``usage_info`` event.
+
+    The daemon sends the exact figure as ``cost_usd`` next to the
+    four-decimal ``"$x.xxxx"`` display string in ``cost``; the string is
+    the fallback for events (older daemons, late-charge deltas) without
+    it, so the spend a parent charges to its ledger is never truncated
+    to the display precision.
+
+    Args:
+        event: A daemon event carrying ``cost`` and possibly ``cost_usd``.
+
+    Returns:
+        The cost in USD; ``0.0`` when neither field yields a number.
+    """
+    exact = event.get("cost_usd")
+    if isinstance(exact, (int, float)):
+        return float(exact)
+    return _parse_cost(event.get("cost"))
+
+
 def _net_totals(event: dict[str, Any], charged: dict[str, Any]) -> dict[str, Any]:
     """Return *event*'s task totals minus spend already charged elsewhere.
 
@@ -250,12 +271,12 @@ def _net_totals(event: dict[str, Any], charged: dict[str, Any]) -> dict[str, Any
     """
     delta = event.get("ancestor_charged")
     if isinstance(delta, dict):
-        charged["cost"] += _parse_cost(delta.get("cost"))
+        charged["cost"] += _event_cost(delta)
         charged["tokens"] += int(delta.get("tokens", 0) or 0)
         charged["steps"] += int(delta.get("steps", 0) or 0)
     steps = event.get("step_count", event.get("total_steps", 0))
     return {
-        "cost": _parse_cost(event.get("cost")) - charged["cost"],
+        "cost": _event_cost(event) - charged["cost"],
         "total_tokens": int(event.get("total_tokens", 0) or 0) - charged["tokens"],
         "step_count": int(steps or 0) - charged["steps"],
     }
@@ -298,7 +319,7 @@ def _to_task_result(
     return TaskResult(
         text=str((event or {}).get("summary") or (event or {}).get("text") or ""),
         success=bool((event or {}).get("success", False)),
-        cost=_parse_cost(spend.get("cost")),
+        cost=_event_cost(spend),
         tokens=int(spend.get("total_tokens", 0) or 0),
         steps=int(steps or 0),
         chat_id=chat_id,

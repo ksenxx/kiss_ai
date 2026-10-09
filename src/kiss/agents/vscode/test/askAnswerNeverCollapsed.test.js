@@ -233,12 +233,18 @@ function testReplayedSummaryLeavesAnswerVisible() {
   const out = win.document.getElementById('output');
   const summary = out.querySelector('.tc-summary');
   assert.ok(summary.classList.contains('collapsed'), 'the summary folds');
-  // The adoption walks back over the answer to the `/ask` prompt echo,
-  // which (like any prompt) bounds it: one tool panel is adopted.
+  // The run's first summary walks back over the answer, the `/ask`
+  // prompt echo and the task prompt: every tool panel and both prompt
+  // panels are adopted, the answer is not.
   assert.strictEqual(
     summary.querySelectorAll('.summary-sub > .tc').length,
-    1,
-    'the summary adopts the tool panel after the answer, not the answer',
+    4,
+    'the summary adopts the tool panels on both sides of the answer',
+  );
+  assert.strictEqual(
+    summary.querySelectorAll('.summary-sub > .ev.prompt').length,
+    2,
+    'the task prompt and the /ask echo fold under the summary',
   );
   assertOpenAndOnScreen(answerPanelIn(out), 'on a replay with a summary');
   win.close();

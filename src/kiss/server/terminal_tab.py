@@ -29,6 +29,12 @@ connection drops, the shell keeps running for ``GRACE_SECONDS`` so a
 page that reconnects (a phone waking up, a network blip) gets its
 shell back by sending ``terminalOpen`` with the same ``tab_id``.
 Windows has no pty: there ``terminalOpen`` answers with an error.
+
+The shell starts with the start-up files of :mod:`kiss.server.terminal_rc`
+(bash: ``--rcfile``; zsh: ``ZDOTDIR``), which run the user's own
+dotfiles and then write every command to the history file as it is
+entered, so Up/Down in a new tab recall the commands of every earlier
+one.
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ if sys.platform != "win32":
     import termios
 
 from kiss.core.processes import find_bash
+from kiss.server.terminal_rc import with_persistent_history
 
 logger = logging.getLogger(__name__)
 
@@ -301,9 +308,13 @@ class TerminalService:
         self, tab_id: str, conn_id: str, work_dir: str, cols: int, rows: int,
     ) -> _Session:
         """Fork the shell on a new pty; return its session (caller holds the lock)."""
-        argv = default_shell()
+        shell = default_shell()
+        # The shell's command history outlives the tab (and reaches
+        # the other tabs) through start-up files of our own.
+        argv, extra_env = with_persistent_history(shell)
         cwd = work_dir if work_dir and os.path.isdir(work_dir) else os.path.expanduser("~")
         env = dict(os.environ)
+        env.update(extra_env)
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         pid, fd = pty.fork()

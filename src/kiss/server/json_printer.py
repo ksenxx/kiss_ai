@@ -1871,25 +1871,39 @@ class JsonPrinter(Printer):
         self._record_task_event(event)
         self._persist_event(event)
 
-    def _cost_with_offset(self, cost: Any) -> Any:
-        """Add the per-task budget offset to a ``"$…"`` cost string.
+    def _cost_fields(self, cost: Any, cost_usd: float | None = None) -> tuple[Any, float | None]:
+        """Add the per-task budget offset to a cost; return both renderings.
 
-        Non-dollar or malformed costs (e.g. ``"N/A"``, ``"$abc"``) are
-        returned verbatim so a junk value never raises out of the
-        emitting agent thread.
+        The ``"$x.xxxx"`` string is what the UI shows; the float is what a
+        ``run_agent`` / ``run_parallel`` parent charges to its ledger
+        (``daemon_client._net_totals``), so it must not go through the
+        four-decimal rounding of the string.  Non-dollar or malformed
+        costs (``"N/A"``, ``"$abc"``) without *cost_usd* pass through
+        verbatim so a junk value never raises out of the emitting agent
+        thread.
 
         Args:
-            cost: The raw cost value (usually a ``"$1.2345"`` string).
+            cost: The raw display cost (usually a ``"$1.2345"`` string).
+            cost_usd: The unrounded USD figure when the emitter knows it;
+                parsed from *cost* otherwise.
 
         Returns:
-            The offset-adjusted cost string, or *cost* unchanged.
+            ``(display, exact)``: the offset-adjusted cost string (or
+            *cost* unchanged) and the offset-adjusted USD float, ``None``
+            when neither input yields a number.
         """
-        if isinstance(cost, str) and cost.startswith("$"):
+        exact: float | None = None
+        if cost_usd is not None:
+            exact = float(cost_usd)
+        elif isinstance(cost, str) and cost.startswith("$"):
             try:
-                return f"${float(cost[1:]) + self.budget_offset:.4f}"
+                exact = float(cost[1:])
             except ValueError:
-                pass
-        return cost
+                exact = None
+        if exact is None:
+            return cost, None
+        exact += self.budget_offset
+        return f"${exact:.4f}", exact
 
     def _broadcast_result(
         self,
@@ -1897,8 +1911,9 @@ class JsonPrinter(Printer):
         total_tokens: int = 0,
         cost: str = "N/A",
         step_count: int = 0,
+        cost_usd: float | None = None,
     ) -> None:
-        cost = self._cost_with_offset(cost)
+        cost, exact = self._cost_fields(cost, cost_usd)
         total_tokens = total_tokens + self.tokens_offset
         step_count = step_count + self.steps_offset
         event: dict[str, Any] = {
@@ -1908,6 +1923,8 @@ class JsonPrinter(Printer):
             "cost": cost,
             "step_count": step_count,
         }
+        if exact is not None:
+            event["cost_usd"] = exact
         parsed = parse_result_yaml(text) if text else None
         if parsed:
             event["success"] = parsed.get("success")
@@ -2041,7 +2058,7 @@ class JsonPrinter(Printer):
             raw_steps = kwargs.get("total_steps", 0)
             total_tokens = raw_tokens + self.tokens_offset
             total_steps = raw_steps + self.steps_offset
-            total_cost = self._cost_with_offset(raw_cost)
+            total_cost, exact_cost = self._cost_fields(raw_cost, kwargs.get("cost_usd"))
             event: dict[str, Any] = {
                 "type": "usage_info",
                 "text": str(content),
@@ -2049,6 +2066,8 @@ class JsonPrinter(Printer):
                 "cost": total_cost,
                 "total_steps": total_steps,
             }
+            if exact_cost is not None:
+                event["cost_usd"] = exact_cost
             # Per-step provenance for the cost report: the model that
             # served the step (a ``set_model`` switch is otherwise
             # invisible in task_history) and its prompt-cache read
@@ -2080,6 +2099,7 @@ class JsonPrinter(Printer):
                 kwargs.get("total_tokens", 0),
                 kwargs.get("cost", "N/A"),
                 kwargs.get("step_count", 0),
+                kwargs.get("cost_usd"),
             )
             return ""
         return ""
@@ -2361,6 +2381,7 @@ class JsonPrinter(Printer):
                 message.result,
                 kwargs.get("total_tokens_used", 0),
                 f"${budget_used:.4f}" if budget_used else "N/A",
+                cost_usd=float(budget_used) if budget_used else None,
             )
         elif hasattr(message, "content"):
             blocks = [

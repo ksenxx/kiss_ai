@@ -40,13 +40,25 @@
   --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
   --error: var(--vscode-errorForeground, #f85149);
   --warning: var(--vscode-editorWarning-foreground, #cca700);
-  --fs-xs:  0.636rem;
-  --fs-sm:  0.818rem;
-  --fs-md:  0.909rem;
-  --fs-base: 1rem;
-  --fs-lg:  1.091rem;
-  --fs-xl:  1.273rem;
-  --fs-2xl: 1.545rem;
+
+  /* ---- Type ---------------------------------------------------------
+     Cursor's typography (Cursor 3.23, workbench.glass.main.css): the
+     platform system font that VS Code itself uses, a 13px base with an
+     integer scale (11 / 12 / 13 / 14px, extended one step down and two
+     up), 18px line height, -0.08px tracking and greyscale smoothing;
+     code in the editor font with Cursor's monospace fallback chain.
+     Sizes are rem of the 13px root (--vscode-font-size) so VS Code's
+     zoom still scales everything.  Cursor ships no typeface of its own:
+     its brand face, Cursor Gothic, is website-only. */
+  --font-ui: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif);
+  --font-mono: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  --fs-xs:  0.769rem;  /* 10px */
+  --fs-sm:  0.846rem;  /* 11px */
+  --fs-md:  0.923rem;  /* 12px */
+  --fs-base: 1rem;     /* 13px */
+  --fs-lg:  1.077rem;  /* 14px */
+  --fs-xl:  1.231rem;  /* 16px */
+  --fs-2xl: 1.538rem;  /* 20px */
 
   /* ---- Design tokens ------------------------------------------------
      Components use these names instead of raw values, so spacing,
@@ -182,8 +194,12 @@ input { accent-color: var(--accent); }
 html.light-theme, body.light-theme, body.vscode-light, body.vscode-high-contrast-light { color-scheme: light; }
 
 body {
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+  font-family: var(--font-ui);
   font-size: var(--fs-base);
+  line-height: 1.385; /* Cursor: 18px on 13px */
+  letter-spacing: -0.08px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   background: var(--bg);
   color: var(--fg);
   height: 100vh;
@@ -390,10 +406,12 @@ body {
 
 /* The server's machine name, centred at the top of the chat pane in
    bold green on every chat surface (main.js fills it from
-   configData.machine); the strip takes no room until it has a name. */
+   configData.machine); the strip takes no room until it has a name.
+   The same hairline as the tab rows parts it from the transcript. */
 #chat-machine {
   flex-shrink: 0;
   padding: var(--space-0-5) var(--space-3);
+  border-bottom: 1px solid var(--border);
   text-align: center;
   font-size: var(--fs-base);
   font-weight: 700;
@@ -972,7 +990,7 @@ body.vscode-dark .welcome-logo-dark,
 body.vscode-high-contrast:not(.vscode-high-contrast-light) .welcome-logo-dark,
 body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 
-#welcome h2 { font-size: var(--fs-2xl); font-weight: 600; color: var(--fg); margin-bottom: var(--space-1); letter-spacing: -0.3px; }
+#welcome h2 { font-size: var(--fs-2xl); font-weight: 600; color: var(--fg); margin-bottom: var(--space-1); letter-spacing: -0.46px; }
 #welcome p { font-size: var(--fs-base); color: var(--dim); margin-bottom: var(--space-3); }
 
 #remote-url { width: 100%; margin-bottom: var(--space-2-5); }
@@ -1017,7 +1035,7 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 .remote-url-tls-hint a { color: var(--accent); text-decoration: none; }
 .remote-url-tls-hint a:hover { text-decoration: underline; }
 
-/* Every transcript panel (tool calls, results, Thoughts, prompts, status
+/* Every transcript panel (tool calls, results, Thinking, prompts, status
    lines) is left-justified, a twentieth of the chat's width clear on
    its right; the user's own panels (.task-panel, .user-msg above) are
    the exception, right-justified with a tenth clear on their left.  A
@@ -1030,7 +1048,7 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 
-/* The model's thinking tokens, streamed as plain text into the Thoughts
+/* The model's thinking tokens, streamed as plain text into the Thinking
    panel ahead of its words (.txt): dimmer and italic, no box of its own. */
 .think {
   font-size: var(--fs-md); line-height: 1.5; color: var(--dim); font-style: italic;
@@ -1051,7 +1069,7 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 
 .txt code {
   background: color-mix(in srgb, var(--fg) 8%, transparent); padding: var(--space-0-5) var(--space-1-5); border-radius: var(--radius-sm);
-  font-family: var(--vscode-editor-font-family, 'Fira Code', monospace); font-size: var(--fs-md);
+  font-family: var(--font-mono); font-size: var(--fs-md);
 }
 
 .txt pre {
@@ -1080,7 +1098,7 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 .tc-h:hover, .task-panel-h:hover, .trajectory-h:hover { color: var(--fg); }
 
 /* While a panel is active (panel.panel-active: a tool call from its
-   tool_call to its tool_result, the Thoughts panel while the model
+   tool_call to its tool_result, the Thinking panel while the model
    thinks and writes; stampPanelStart / finalizePanelTime in main.js),
    its header text breathes: a mild, slow opacity pulse. */
 .panel-active > .tc-h,
@@ -1169,7 +1187,7 @@ body.ask-answering #input-container {
 
 .tp {
   font-size: var(--fs-md); color: var(--accent);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
   word-break: break-all;
 }
 .tp[data-path] { cursor: pointer; text-decoration: underline dotted; }
@@ -1189,7 +1207,7 @@ body.ask-answering #input-container {
 
 .tc-b {
   padding: var(--space-2) var(--space-3); max-height: 200px; overflow-y: auto;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-md); line-height: 1.5; word-break: break-word;
 }
 .tc-b pre { margin: var(--space-1) 0; white-space: pre-wrap; word-break: break-word; }
@@ -1217,7 +1235,7 @@ body.ask-answering #input-container {
 .tr {
   padding: var(--space-1) var(--space-2-5); margin: var(--space-1-5) 0;
   border: 1px solid var(--border); border-radius: var(--radius-lg);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-md); max-height: 150px; overflow-y: auto;
   white-space: pre-wrap; word-break: break-word; background: var(--panel-tint);
 }
@@ -1314,7 +1332,7 @@ body.ask-answering #input-container {
 
 .sys {
   font-size: var(--fs-base); color: var(--dim);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
   white-space: pre-wrap; word-break: break-word; padding: var(--space-0-5) 0;
 }
 
@@ -1340,7 +1358,7 @@ body.ask-answering #input-container {
 
 .bash-panel-content {
   max-height: 200px; overflow-y: auto;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-md); line-height: 1.5; color: color-mix(in srgb, var(--fg) 70%, transparent);
   white-space: pre-wrap; word-break: break-word;
 }
@@ -1850,7 +1868,7 @@ body.remote-chat #terminal-btn { display: flex; }
 
 .ac-text {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-sm); color: color-mix(in srgb, var(--fg) 62%, transparent); min-width: 0;
   letter-spacing: -0.01em;
 }
@@ -1867,7 +1885,7 @@ body.remote-chat #terminal-btn { display: flex; }
   border: 1px solid color-mix(in srgb, var(--fg) 5%, transparent);
   padding: 1px var(--space-1); border-radius: var(--radius-sm); margin-left: auto;
   flex-shrink: 0;
-  font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
+  font-family: var(--font-mono);
 }
 
 .ac-item.sel .ac-hint {
@@ -1887,7 +1905,7 @@ body.remote-chat #terminal-btn { display: flex; }
 .ac-footer kbd {
   background: color-mix(in srgb, var(--fg) 5%, transparent); color: color-mix(in srgb, var(--fg) 50%, transparent);
   padding: 1px var(--space-1); border-radius: var(--radius-sm); font-size: var(--fs-xs);
-  font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
+  font-family: var(--font-mono);
   border: 1px solid color-mix(in srgb, var(--fg) 4%, transparent);
 }
 
@@ -1932,6 +1950,11 @@ body.remote-chat #terminal-btn { display: flex; }
    only on the desktop remote page with a content tab open
    (remote-codex.css shows it). */
 #meta-drawer { display: none; }
+
+/* The tab that unfolds the content pane its hide button folded away
+   exists only on the desktop remote page with the pane folded
+   (remote-codex.css shows it). */
+#content-pane-show { display: none; }
 
 /* Task-info panel sections (every surface).  #meta-panel is a flex
    column; each <section class="meta-section"> is `display: contents`,
@@ -2005,13 +2028,15 @@ body.remote-chat #terminal-btn { display: flex; }
    the user chose until nothing else can shrink.  The minimum height
    is what every expanded body keeps against dragged bodies above it:
    half of an equal share (--meta-body-share, measured by main.js's
-   applyMetaSectionLayout), at most 4rem (about a row or two).  Without
+   applyMetaSectionLayout), at most 4.5rem (about a row or two: a
+   schedule row whose detail line wraps once is 53px at the 13px
+   Cursor scale).  Without
    it a persisted drag left a section's header over an empty 0px body,
    which read as "the Schedule shows no jobs".  Tied to the share, the
    minimums never add up to more than the panel has. */
 .meta-section-body {
   flex: 1 1 0px;
-  min-height: min(4rem, calc(var(--meta-body-share, 0px) / 2));
+  min-height: min(4.5rem, calc(var(--meta-body-share, 0px) / 2));
   overflow-y: auto;
 }
 
@@ -2694,7 +2719,7 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
 .workdir-item-path {
   flex: 1;
   min-width: 0;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-sm);
   overflow-wrap: anywhere;
 }
@@ -2871,7 +2896,7 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 50%;
-  font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
+  font-family: var(--font-mono);
 }
 
 /* Explorer tree: one .explorer-row per entry, indented by depth via
@@ -3125,7 +3150,7 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
   font-size: var(--fs-sm);
   min-width: 12px;
   text-align: center;
-  font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
+  font-family: var(--font-mono);
 }
 
 /* Built as 'scm-status-' + git's one-letter status in main.js. */
@@ -4019,15 +4044,23 @@ body.pdf-preview-body {
   border-top: 1px solid color-mix(in srgb, var(--fg) 6%, transparent);
 }
 
-/* The chat panel's clickable header: a chevron and the chat's first
-   task on ONE line (ellipsized), as a plain row on the list's own
-   background (a list of many chats must not become a stack of bands;
-   the accent is reserved for the active row).  No tooltip: the line is
-   all there is. */
+/* The chat panel's header, laid out like a task panel: the chat's
+   title on ONE line (ellipsized), then the action strip ("Show
+   details" chevron, "last launched ... ago") on the next.  A plain row
+   on the list's own background (a list of many chats must not become
+   a stack of bands; the accent is reserved for the chat on screen and
+   its active task row).  No
+   tooltip: the line is all there is.  Clicking the row opens the chat;
+   only the chevron folds the task panels under it.
+   A two-column grid: the last task's status icon (when there is one)
+   in the first column, the title and the action strip stacked in the
+   second, so the strip starts under the title's first letter whether
+   or not an icon precedes it. */
 .history-chat-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: var(--space-1-5);
+  row-gap: var(--space-1);
   width: 100%;
   background: transparent;
   border: none;
@@ -4047,45 +4080,54 @@ body.pdf-preview-body {
   background: color-mix(in srgb, var(--fg) 5%, transparent);
 }
 
-.history-chat-chevron {
-  flex-shrink: 0;
-  color: var(--dim);
-  transition: transform var(--dur-base) var(--ease);
-}
-
-.history-chat-group:not(.collapsed) > .history-chat-header .history-chat-chevron {
-  transform: rotate(90deg);
+/* The header of the chat on screen (the chat whose task the visible
+   chat webview shows): a lighter accent wash than the active task row
+   below it, with an accent bar down its left edge, so the chat is
+   found even while its panel is folded and the row is hidden.  The
+   :hover form outranks the neutral hover above. */
+.history-chat-group.history-active-chat > .history-chat-header,
+.history-chat-group.history-active-chat > .history-chat-header:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 /* The status icon of the chat's last task (the same "?", spinner,
-   cross or tick its row shows), between the chevron and the title; the
-   header's gap spaces it, not the row icons' margin. */
+   cross or tick its row shows), in the first column before the title.
+   Its own margin spaces it (a grid column-gap would also open up the
+   empty column of an icon-less header). */
 .history-chat-header > .history-chat-status {
-  flex-shrink: 0;
-  margin-right: 0;
+  grid-column: 1;
+  margin-right: var(--space-1-5);
 }
 
 .history-chat-title {
-  flex: 1;
+  grid-column: 2;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* The line under the chat header: when the chat's latest task was
-   launched, in the task panels' "... ago" age-label style. Indented to
-   the header's title column; empty until the daemon's stamp arrives. */
+/* The action strip under the title, a line of its own like a task
+   panel's (.running-item > .sidebar-item-actions): the "Show details"
+   chevron (turned over while the task panels show) and the "last
+   launched ... ago" age label. */
+.history-chat-header > .history-chat-actions {
+  grid-column: 2;
+  margin-left: 0;
+}
+
+.history-chat-group:not(.collapsed) > .history-chat-header .history-chat-collapse svg {
+  transform: rotate(180deg);
+}
+
 .history-chat-launched {
   display: flex;
   min-width: 0;
-  padding: 0 var(--space-2-5) var(--space-1) calc(var(--space-2) + 12px + var(--space-1-5));
   line-height: 1.35;
 }
 
 .history-chat-launched:empty { display: none; }
-
-.history-chat-launched > .sidebar-item-launched { margin-left: 0; }
 
 /* The chat's task rows, indented under the header behind a hairline
    guide so the nesting reads without a tinted band. */
@@ -4453,7 +4495,7 @@ body.remote-chat .running-item.history-active-task:hover {
 
 .md-body code {
   background: color-mix(in srgb, var(--fg) 8%, transparent); padding: 1px var(--space-1); border-radius: var(--radius-sm);
-  font-family: var(--vscode-editor-font-family, 'Fira Code', monospace); font-size: var(--fs-md);
+  font-family: var(--font-mono); font-size: var(--fs-md);
 }
 
 .md-body pre {
@@ -4479,7 +4521,7 @@ body.remote-chat .running-item.history-active-task:hover {
   background: color-mix(in srgb, var(--fg) 4%, transparent); font-weight: 600;
 }
 
-code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace); }
+code { font-family: var(--font-mono); }
 
 /* The block takes the theme's code-block colour whatever highlight.js
    sheet is loaded (the sheets paint their own .hljs background). */
@@ -4664,7 +4706,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   color: var(--dim);
   margin-top: var(--space-1-5);
   padding: var(--space-0-5) var(--space-1) 0;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
   opacity: 0.75;
 }
 
@@ -4903,7 +4945,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 .content-tab-icon.terminal-tab-icon {
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
   font-weight: 700;
   font-size: var(--fs-xs);
 }
@@ -5055,7 +5097,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   overflow: auto;
   margin: 0;
   padding: var(--space-2) var(--space-3);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-md);
   white-space: pre;
 }
@@ -5080,7 +5122,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   direction: rtl; /* keep the file name visible when the path is cut */
   text-align: left;
   color: var(--dim);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
 }
 
 #content-tab-area .content-save-status {

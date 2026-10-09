@@ -580,6 +580,7 @@ class KISSAgent(Base):
                 step_count=self.step_count,
                 total_tokens=self.total_tokens_used,
                 cost=f"${self.budget_used:.4f}",
+                cost_usd=self.budget_used,
             )
 
     def _run_non_agentic(self) -> str:
@@ -635,9 +636,11 @@ class KISSAgent(Base):
         When the registered ``finish`` follows the structured
         :func:`kiss.core.utils.finish` signature (has a ``summary_in_html``
         parameter), *text* is wrapped as a successful, non-continuing
-        result so YAML-parsing callers keep working; otherwise *text* is
-        returned unchanged (the built-in ``finish(result)`` contract is
-        plain text).
+        result so YAML-parsing callers keep working.  A ``finish(result)``
+        contract gets *text* as its ``result`` (the built-in returns it
+        unchanged; a wrapper like ``SummarizerFinish.finish`` applies its
+        own structure).  With no inspectable ``finish``, *text* is
+        returned unchanged.
 
         Args:
             text: The model's final output for the task.
@@ -649,6 +652,9 @@ class KISSAgent(Base):
         if "summary_in_html" in params:
             assert finish_fn is not None
             return str(finish_fn(success=True, is_continue=False, summary_in_html=text))
+        if "result" in params:
+            assert finish_fn is not None
+            return str(finish_fn(result=text))
         return text
 
     def _registered_finish_and_params(
@@ -869,6 +875,7 @@ class KISSAgent(Base):
                 type="usage_info",
                 total_tokens=self.total_tokens_used,
                 cost=f"${self.budget_used:.4f}",
+                cost_usd=self.budget_used,
                 total_steps=self.step_count,
                 cache_read=self.last_cache_read_tokens,
                 model=self.model.model_name,
@@ -1109,8 +1116,10 @@ class KISSAgent(Base):
         (``success=True, is_continue=False`` — the text IS the answer, so
         RelentlessAgent must not resume a model that only ever talks).
         *explanation* and the model's last status text form the summary.
-        The built-in ``finish(result)`` contract (plain text) gets the
-        model's last status text.
+        A ``finish(result)`` contract gets the model's last status text
+        (or *explanation*) as its ``result``, through the registered
+        callable so a wrapper like ``SummarizerFinish.finish`` still
+        applies its structure.
 
         Args:
             explanation: Why the run is being finished implicitly (which
@@ -1129,7 +1138,7 @@ class KISSAgent(Base):
             return str(
                 finish_fn(success=success, is_continue=is_continue, summary_in_html=summary)
             )
-        return text or explanation
+        return self._wrap_in_finish_contract(text or explanation)
 
     def _execute_tool(
         self,

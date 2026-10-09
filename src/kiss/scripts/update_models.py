@@ -191,6 +191,24 @@ _OPENROUTER_CACHE_PRICE_FIELDS = (
 _CACHE_PRICE_CATALOG_FIELDS = tuple(field for _api, field in _OPENROUTER_CACHE_PRICE_FIELDS)
 
 
+def _price_changed(current: float, fetched: float) -> bool:
+    """Whether a fetched per-1M price differs materially from the stored one.
+
+    The comparison is relative (a tenth of a percent) rather than an
+    absolute $0.005/M: that floor hid a 14% change on a $0.035/M model
+    while still letting float noise through on expensive ones.  The
+    1e-9 floor keeps a stored zero stable against a fetched zero.
+
+    Args:
+        current: The catalog's price per 1M tokens.
+        fetched: The provider listing's price per 1M tokens.
+
+    Returns:
+        ``True`` when the catalog should take the fetched price.
+    """
+    return abs(fetched - current) > max(1e-9, 0.001 * abs(current))
+
+
 def openrouter_cache_prices(pricing: dict[str, Any]) -> dict[str, float]:
     """Convert OpenRouter per-token cache prices to catalog per-1M fields.
 
@@ -265,8 +283,8 @@ def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
                 continue
             models[name] = {
                 "context_length": ctx,
-                "input_price_per_1M": round(prompt_per_tok * 1_000_000, 3),
-                "output_price_per_1M": round(completion_per_tok * 1_000_000, 3),
+                "input_price_per_1M": round(prompt_per_tok * 1_000_000, 6),
+                "output_price_per_1M": round(completion_per_tok * 1_000_000, 6),
                 "source": "openrouter",
                 "decisions": decisions,
                 **openrouter_cache_prices(pricing),
@@ -314,8 +332,8 @@ def fetch_together(verbose: bool = False) -> dict[str, dict]:
         cached = float(pricing.get("cached_input", 0) or 0)
         models[model_id] = {
             "context_length": ctx,
-            "input_price_per_1M": round(inp, 3),
-            "output_price_per_1M": round(out, 3),
+            "input_price_per_1M": round(inp, 6),
+            "output_price_per_1M": round(out, 6),
             "cache_read_price_per_1M": round(cached, 6) if cached > 0 else None,
             "source": "together",
             "is_embedding": is_emb,
@@ -1559,11 +1577,9 @@ def compute_changes(
                 ctx and ctx != cur["context_length"]
             ):
                 changed["context_length"] = ctx
-            inp_delta = abs(fetched["input_price_per_1M"] - cur["input_price_per_1M"])
-            if inp_delta > 0.005:  # pragma: no branch
+            if _price_changed(cur["input_price_per_1M"], fetched["input_price_per_1M"]):
                 changed["input_price_per_1M"] = fetched["input_price_per_1M"]
-            out_delta = abs(fetched["output_price_per_1M"] - cur["output_price_per_1M"])
-            if out_delta > 0.005:  # pragma: no branch
+            if _price_changed(cur["output_price_per_1M"], fetched["output_price_per_1M"]):
                 changed["output_price_per_1M"] = fetched["output_price_per_1M"]
             changed.update(_cache_price_changes(cur, fetched))
             if changed:  # pragma: no branch
@@ -1597,11 +1613,11 @@ def compute_changes(
                 fetched["context_length"] and fetched["context_length"] != cur["context_length"]
             ):
                 changed["context_length"] = fetched["context_length"]
-            inp_diff = abs(fetched["input_price_per_1M"] - cur["input_price_per_1M"])
-            out_diff = abs(fetched["output_price_per_1M"] - cur["output_price_per_1M"])
-            if inp_diff > 0.005 and not cur["emb"]:  # pragma: no branch
+            inp_changed = _price_changed(cur["input_price_per_1M"], fetched["input_price_per_1M"])
+            out_changed = _price_changed(cur["output_price_per_1M"], fetched["output_price_per_1M"])
+            if inp_changed and not cur["emb"]:  # pragma: no branch
                 changed["input_price_per_1M"] = fetched["input_price_per_1M"]
-            if out_diff > 0.005 and not cur["emb"]:  # pragma: no branch
+            if out_changed and not cur["emb"]:  # pragma: no branch
                 changed["output_price_per_1M"] = fetched["output_price_per_1M"]
             changed.update(_cache_price_changes(cur, fetched))
             if changed:  # pragma: no branch

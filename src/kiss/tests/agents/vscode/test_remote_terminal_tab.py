@@ -128,6 +128,13 @@ def _wait_for_output(page, needle: str, timeout: int = 20000) -> str:
     return _screen(page)
 
 
+def _unwrapped(text: str) -> str:
+    """*text* without line breaks: a path longer than the pane's columns
+    (a macOS ``/private/var/folders/...`` temp dir in a 60-column pane)
+    shows as two xterm rows."""
+    return text.replace("\n", "")
+
+
 def _wait_for_sizes(page, count: int) -> None:
     """Wait until the screen shows *count* ``rows cols`` lines (``stty size`` answers)."""
     page.wait_for_function(
@@ -171,7 +178,7 @@ def test_menu_item_opens_a_shell_in_the_work_dir(browser, harness):
         # ``rows cols`` line too before reading the screen.
         _wait_for_sizes(page, 1)
         text = _screen(page)
-        assert str(harness.work_dir) in text
+        assert str(harness.work_dir) in _unwrapped(text)
         size = re.search(r"(?m)^(\d+) (\d+)$", text)
         assert size is not None
         rows, cols = (int(x) for x in size.groups())
@@ -202,9 +209,10 @@ def test_shell_starts_in_the_workspace_the_page_browses(browser, harness):
     try:
         _set_work_dir(page, harness, str(harness.plain_dir))
         _open_terminal(page)
-        page.keyboard.type("pwd\n")
-        text = _wait_for_output(page, str(harness.plain_dir) + "\n")
-        assert str(harness.work_dir) + "\n" not in text
+        page.keyboard.type("pwd; echo marker-$((40+2))\n")
+        text = _unwrapped(_wait_for_output(page, "marker-42"))
+        assert str(harness.plain_dir) in text
+        assert str(harness.work_dir) not in text
         _close_active_tab(page)
         _wait_sessions(harness, 0)
         _set_work_dir(page, harness, str(harness.work_dir))

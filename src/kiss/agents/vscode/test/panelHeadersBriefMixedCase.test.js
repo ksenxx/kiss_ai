@@ -385,7 +385,7 @@ function testHeadersAreMixedCase() {
     h.firstChild.textContent.trim(),
   );
   assert.deepStrictEqual(names, ['Bash', 'Bash', 'Question'], 'tool names keep their own case');
-  assert.strictEqual(output(win).querySelector('.llm-panel-hdr').firstChild.textContent, 'Thoughts');
+  assert.strictEqual(output(win).querySelector('.llm-panel-hdr').firstChild.textContent, 'Thinking');
   win.close();
   console.log('  ok - collapsible panel headers are mixed case');
 }

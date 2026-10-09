@@ -239,13 +239,15 @@ test('chat headers carry no tooltip and show the first line of the chat summary 
     'task c1',
     'Refactor billing module',
   ]);
-  // Toggling the panel repaints the ARIA state only — still no tooltip.
-  headers[0].click();
-  assert.strictEqual(headers[0].getAttribute('aria-expanded'), 'true');
+  // Toggling the panel (its Show details chevron) repaints the
+  // chevron's state only — still no tooltip on the header.
+  const chevron = headers[0].querySelector('.history-chat-collapse');
+  chevron.click();
+  assert.strictEqual(chevron.getAttribute('aria-expanded'), 'true');
   assert.ok(!headers[0].hasAttribute('data-tooltip'));
   assert.ok(!headers[0].hasAttribute('title'));
-  headers[0].click();
-  assert.strictEqual(headers[0].getAttribute('aria-expanded'), 'false');
+  chevron.click();
+  assert.strictEqual(chevron.getAttribute('aria-expanded'), 'false');
   assert.ok(!headers[0].hasAttribute('data-tooltip'));
   win.close();
 });

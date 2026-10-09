@@ -245,6 +245,7 @@ def charge_side_channel_usage(
                         "taskId": running,
                         "total_tokens": live_tokens,
                         "cost": f"${live_budget:.4f}",
+                        "cost_usd": live_budget,
                         "total_steps": live_steps,
                     })
         for row_id, row_tokens, row_cost, row_steps in updated:
@@ -253,6 +254,7 @@ def charge_side_channel_usage(
                 "text": "",
                 "total_tokens": row_tokens,
                 "cost": f"${row_cost:.4f}",
+                "cost_usd": row_cost,
                 "total_steps": row_steps,
             }
             if banked:

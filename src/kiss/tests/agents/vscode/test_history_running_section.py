@@ -183,7 +183,9 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                 # Expand the completed chat so grouped mode has enough visible
                 # rows to scroll and request its next real page.
                 if not flat:
-                    page.locator('[data-chat-id="other-chat"] .history-chat-header').click()
+                    page.locator(
+                        '[data-chat-id="other-chat"] .history-chat-collapse'
+                    ).click()
                 _load_more(page, 56)
                 ids = page.locator("#history-list .ids-copy-task").evaluate_all(
                     "els => els.map(el => el.parentElement.textContent)",

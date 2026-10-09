@@ -799,9 +799,22 @@ function testOrphanedFileTabBrowsesTheGlobalDir() {
     ),
   );
   assert.ok(!openTabIds(win).includes(owner), 'the owning chat is closed');
+  // Opening the file slid the task-info panel off the desktop layout;
+  // its views reload the moment the drawer brings the panel back.
+  assert.ok(
+    win.document.body.classList.contains('meta-hidden'),
+    'the file open hid the panel',
+  );
+  const before = msgs(posted, 'listDir').length;
+  send(win, {type: 'workDirChanged', workDir: '/new'});
+  assert.strictEqual(
+    msgs(posted, 'listDir').length,
+    before,
+    'a hidden Explorer is only marked stale',
+  );
   // The Explorer and Source Control sections of the task-info panel
   // follow the new workspace on their own.
-  send(win, {type: 'workDirChanged', workDir: '/new'});
+  click(win, byId(win, 'meta-drawer'));
   const listing = msgs(posted, 'listDir').pop();
   assert.strictEqual(listing.path, '/new');
   assert.strictEqual(listing.workDir, '/new');

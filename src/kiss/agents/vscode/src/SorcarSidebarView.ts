@@ -208,6 +208,9 @@ export type PanelEvent =
   // `force`: a question is waiting, so reveal even while the user is
   // in a text editor.
   | {kind: 'reveal'; force?: boolean}
+  // A task just started in the panel's chat tab: bring the Task Info
+  // view up in the secondary side bar, keyboard focus kept in the chat.
+  | {kind: 'taskStarted'}
   // Open another chat as a new editor tab (fresh when chatId is '').
   | {
       kind: 'openChat';
@@ -218,10 +221,6 @@ export type PanelEvent =
       pendingText?: string;
       // Fresh chats: submit pendingText as the first task once ready.
       autoSubmit?: boolean;
-      // Leave a panel already bound to chatId untouched (no reveal, no
-      // task change): the chat's history panel was expanded, which
-      // only brings a chat on screen that is not there yet.
-      onlyIfMissing?: boolean;
     }
   // Close this panel. retire=true means the USER closed the root chat
   // inside the panel, so the host must also retire the tab from the
@@ -458,6 +457,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // kept so a webview that resolves (or reloads) after the relay can
   // be brought up to date on its `ready`.
   private _lastMetaState?: Extract<ToWebviewMessage, {type: 'metaState'}>;
+  // Task Info view only (meta-panel-mode): a run start (showForRun)
+  // relayed before the webview loaded — the view is revealed for the
+  // start and resolves after the relay — waits for its `ready`.
+  private _showForRunPending = false;
   // History panel only (history-panel-mode): the last relayed
   // activeTask, replayed on `ready` for the same reason.
   private _lastActiveTask?: Extract<ToWebviewMessage, {type: 'activeTask'}>;
@@ -1372,6 +1375,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // before the webview loaded — or lost to a webview reload —
         // must not leave the panel on its placeholder dashes.
         if (this._lastMetaState) this._sendToWebview(this._lastMetaState);
+        if (this._showForRunPending) {
+          this._showForRunPending = false;
+          this._sendToWebview({type: 'showForRun'});
+        }
         if (this._lastActiveTask) this._sendToWebview(this._lastActiveTask);
         // The daemon owns the canonical tab registry, so `ready` is
         // forwarded whole: the daemon fans out the connId-scoped init
@@ -1733,6 +1740,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._revealForQuestion();
         break;
 
+      case 'taskStarted':
+        this._showChatForRun();
+        break;
+
       case 'openChatPanel':
         this._panelHooks?.onEvent({
           kind: 'openChat',
@@ -1741,7 +1752,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           title: message.title,
           pendingText: message.pendingText,
           autoSubmit: message.autoSubmit,
-          onlyIfMissing: message.onlyIfMissing,
         });
         break;
 
@@ -2115,16 +2125,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * or show the task text read-only when there is nothing to resume).
    *
    * @param event The clicked chat/task: backend chat id ('' or absent
-   *     when the task has nothing to resume), the task's id, the
-   *     task text for the read-only fallback, and onlyIfMissing when
-   *     a tab already showing the chat must be left alone (a chat
-   *     panel expanded in the history list).
+   *     when the task has nothing to resume), the task's id and the
+   *     task text for the read-only fallback.
    */
   public async openChatFromHistory(event: {
     chatId?: string;
     taskId?: string | number | null;
     title?: string;
-    onlyIfMissing?: boolean;
   }): Promise<void> {
     await this.focusChatInput();
     await this._waitForWebviewReady();
@@ -2141,7 +2148,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       chatId: event.chatId ? String(event.chatId) : '',
       taskId: event.taskId === undefined ? null : event.taskId,
       title: event.title || '',
-      onlyIfMissing: !!event.onlyIfMissing,
     });
   }
 
@@ -2166,6 +2172,26 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     if (this._panelHooks)
       this._panelHooks.onEvent({kind: 'reveal', force: true});
     else this._view?.show();
+  }
+
+  /**
+   * A task just started in the chat tab this webview shows: give the
+   * run the window. The sidebar chat view, when it is on screen (a
+   * task launched from another surface while the bar is closed must
+   * not cover what the user is working on), maximizes the secondary
+   * side bar: VS Code hides the editor area, the primary side bar and
+   * the panel, and restores them when the user opens an editor or
+   * presses the bar's restore button; a bar already maximized is left
+   * alone. An editor-tab chat cannot lose the editor area it lives
+   * in, so it brings the Task Info view up beside itself instead (the
+   * panel manager, keyboard focus kept in the chat).
+   */
+  private _showChatForRun(): void {
+    if (this._panelHooks) this._panelHooks.onEvent({kind: 'taskStarted'});
+    else if (this._view?.visible)
+      void vscode.commands
+        .executeCommand('workbench.action.maximizeAuxiliaryBar')
+        .then(undefined, () => undefined); // VS Code < 1.102: no such command
   }
 
   public async focusChatInput(): Promise<void> {
@@ -2213,6 +2239,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   ): void {
     this._lastMetaState = {type: 'metaState', values, taskUpdate};
     this._sendToWebview(this._lastMetaState);
+  }
+
+  /**
+   * Task Info view only (meta-panel-mode): a task just started in the
+   * ACTIVE chat editor panel, and the view is being brought up for it
+   * (SorcarPanelManager `taskStarted`): expand its Task Info and Task
+   * update sections and collapse the rest. A webview still loading
+   * (the view resolves after the reveal) gets the message on `ready`.
+   */
+  public postShowForRun(): void {
+    if (this._webviewReady) this._sendToWebview({type: 'showForRun'});
+    else this._showForRunPending = true;
   }
 
   /**

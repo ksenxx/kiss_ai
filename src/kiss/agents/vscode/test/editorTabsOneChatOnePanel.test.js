@@ -271,12 +271,11 @@ async function runTest() {
     'a history open of an adopted chat must not open a second panel',
   );
   assert.strictEqual(panel1.reveals, 1, 'the adopted panel is revealed');
-  // An expanded history panel (onlyIfMissing) wants the chat on screen
-  // somewhere: a panel already bound to it is neither revealed nor
-  // moved to the task.
-  manager.openChat({chatId: 'chat-1', taskId: 7, onlyIfMissing: true});
-  assert.strictEqual(createdPanels.length, 1, 'onlyIfMissing opens nothing');
-  assert.strictEqual(panel1.reveals, 1, 'onlyIfMissing reveals nothing');
+  // A chat panel click in the history list (the chat's last task):
+  // the same reveal, never a second panel.
+  manager.openChat({chatId: 'chat-1', taskId: 7});
+  assert.strictEqual(createdPanels.length, 1, 'a repeat open opens nothing');
+  assert.strictEqual(panel1.reveals, 2, 'and reveals the bound panel again');
 
   // --- 2. enterMode panels are bound too -------------------------------
   const managerB = new SorcarPanelManager(vscodeStub.Uri.file(EXT_ROOT));

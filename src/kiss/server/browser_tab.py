@@ -92,6 +92,9 @@ class _PageRecord:
     title: str = ""
     can_go_back: bool = False
     can_go_forward: bool = False
+    # Set when the service closes the page itself: a navigation this
+    # aborts is no error to report.
+    closing: bool = False
 
 
 @dataclass(frozen=True)
@@ -167,8 +170,11 @@ class BrowserTabService:
         self._next_id = 1
         self._closed = False
         self._launch_lock = asyncio.Lock()
-        # Pages being created by _open (not popups) - see _on_page.
+        # Pages being created by _open (not popups) - see _on_page.  The
+        # event is set while none is: a close waits for it (_close_page).
         self._creating = 0
+        self._not_creating = asyncio.Event()
+        self._not_creating.set()
 
     # ------------------------------------------------------------------
     # Thread-safe public API
@@ -489,7 +495,9 @@ class BrowserTabService:
         try:
             await rec.page.goto(url, wait_until="commit")
         except Exception as exc:  # noqa: BLE001 — a bad URL must not kill the tab
-            self._emit({"type": "browserError", "tab_id": rec.tab_id, "text": str(exc)})
+            # A tab closed while still loading is no error.
+            if not (rec.closing or rec.page.is_closed()):
+                self._emit({"type": "browserError", "tab_id": rec.tab_id, "text": str(exc)})
         return rec.tab_id
 
     async def _open_for_agent(self) -> AgentTab:
@@ -507,17 +515,20 @@ class BrowserTabService:
         except Exception:
             # A page that cannot load is no hand-off: drop the blank tab
             # so the caller can fall back to another browser.
-            await rec.page.close()
+            await self._close_page(rec)
             raise
 
     async def _new_tab(self) -> _PageRecord:
         """Launch the browser if needed, create a page and announce it unfocused."""
         context = await self._launch()
         self._creating += 1
+        self._not_creating.clear()
         try:
             page = await context.new_page()
         finally:
             self._creating -= 1
+            if self._creating == 0:
+                self._not_creating.set()
         rec = await self._register(page, popup=False)
         if rec is None:
             raise RuntimeError("The browser closed the new page before it could be attached.")
@@ -661,7 +672,20 @@ class BrowserTabService:
     async def _close(self, tab_id: str) -> None:
         rec = self._record(tab_id)
         if rec is not None:
-            await rec.page.close()
+            await self._close_page(rec)
+
+    async def _close_page(self, rec: _PageRecord) -> None:
+        """Close *rec*'s page once no other tab is being created.
+
+        Headed Chromium drops the close of a window's only tab sent
+        while another tab is being created, and ``page.close()`` never
+        returns.  The wait is re-checked because a new creation may
+        start between the event firing and this coroutine resuming.
+        """
+        rec.closing = True
+        while self._creating:
+            await self._not_creating.wait()
+        await rec.page.close()
 
     async def _interrupt(self, tab_id: str) -> None:
         rec = self._record(tab_id)

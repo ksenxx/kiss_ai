@@ -10,7 +10,7 @@ Features on the remote webapp (served by ``RemoteAccessServer``):
    task's thread) inherits main.css's look verbatim (the page
    foreground over the user bubble's accent wash, plus a 1px accent hairline; the
    remote page merely swaps the palette variables), its text sized by
-   the page's injected 14px ``--vscode-editor-font-size``.  The event
+   the page's injected 13px ``--vscode-editor-font-size``.  The event
    panels likewise inherit
    the extension's main.css typography — that extension-parity
    contract is pinned end to end by
@@ -479,16 +479,9 @@ _EXPAND_GROUP_JS = r"""
   // running): open the injected chat's panel so its row lays out.
   const g = document.querySelector('#history-list .history-chat-group');
   if (g && g.classList.contains('collapsed')) {
-    // Expanding a panel also opens the chat's last task in a tab when
-    // no tab shows the chat yet; the injected transcript lives in the
-    // original (running, so not retired) tab, so come back to it
-    // (its output is saved and restored across the switch).  Chats
-    // have no tab row: the switch is the Chats-panel pick itself.
-    const before = window.kissActiveTabId();
-    g.querySelector('.history-chat-header').click();
-    if (window.kissActiveTabId() !== before) {
-      window._testApi.switchToTab(before);
-    }
+    // The "Show details" chevron only unfolds the task rows; it opens
+    // no tab (the header itself would).
+    g.querySelector('.history-chat-collapse').click();
   }
   return g ? !g.classList.contains('collapsed') : false;
 })()
@@ -1012,8 +1005,8 @@ def test_live_task_panel_typography_and_history_rows(
     if isinstance(thread_error, BaseException):
         raise AssertionError("RemoteAccessServer thread failed") from thread_error
 
-    assert probes["taskPanelFontSize"] == "14px", (
-        "the task panel must size itself from the injected 14px "
+    assert probes["taskPanelFontSize"] == "13px", (
+        "the task panel must size itself from the injected 13px "
         "--vscode-editor-font-size: " + repr(probes)
     )
     assert probes["thinkColor"] != "MISSING", (

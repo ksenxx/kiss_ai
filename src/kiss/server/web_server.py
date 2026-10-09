@@ -3535,15 +3535,18 @@ _VSCODE_FONT_VARS_CSS = (
     # know which VS Code build the user runs, so the stack lists the
     # macOS, Windows and Linux choices in turn.  Same for the editor
     # font (src/vs/editor/common/config/fontInfo.ts
-    # EDITOR_FONT_DEFAULTS).  Both sizes are VS Code's default editor
-    # font size: an earlier request made the chat text match the task
-    # panel, which sizes itself with --vscode-editor-font-size.
-    "      --vscode-font-size: 14px;\n"
+    # EDITOR_FONT_DEFAULTS).  Both sizes are 13px: the workbench size
+    # VS Code gives its webviews and the base of Cursor's UI type scale
+    # (Cursor 3.23 workbench.glass.main.css: 13px / 18px line height),
+    # which main.css builds on; the editor size matches it because an
+    # earlier request made the chat text match the task panel, which
+    # sizes itself with --vscode-editor-font-size.
+    "      --vscode-font-size: 13px;\n"
     "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
     '"Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", '
     "sans-serif;\n"
     "      --vscode-font-weight: normal;\n"
-    "      --vscode-editor-font-size: 14px;\n"
+    "      --vscode-editor-font-size: 13px;\n"
     '      --vscode-editor-font-family: Menlo, Monaco, Consolas, '
     '"Droid Sans Mono", "Courier New", monospace;\n'
     "      --vscode-editor-font-weight: normal;\n"
@@ -4015,6 +4018,7 @@ def _build_html() -> str:
         "BROWSER_TAB_SRC": _media_url("browserTab.js"),
         "TERMINAL_TAB_SRC": _media_url("terminalTab.js"),
         "PDF_VIEW_SRC": _media_url("pdfView.js"),
+        "MOBILE_SWIPE_SRC": _media_url("mobileSwipe.js"),
         "MAIN_SRC": _media_url("main.js"),
         "SHIM_SCRIPT": (
             "<script>window.__HLJS_THEME_CSS__ = "

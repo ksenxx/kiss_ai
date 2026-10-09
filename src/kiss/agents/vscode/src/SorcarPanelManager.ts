@@ -135,6 +135,12 @@ export class SorcarPanelManager {
   // Where the ACTIVE panel's chat / task ids go: the primary sidebar's
   // history panel (see extension.ts setActiveTaskSink wiring).
   private _activeTaskSink?: (chatId: string, taskId: string) => void;
+  /**
+   * Called when a task starts in the ACTIVE chat editor panel on
+   * screen, as the Task Info view is revealed for it. extension.ts
+   * has the view arrange its sections for the run (postShowForRun).
+   */
+  public onTaskStarted?: () => void;
   // The two editor-tab icons: the KISS logo, and the green ring spinner
   // shown while the panel's task runs.  Built once so a repaint that
   // keeps the icon does not push a fresh Uri to the workbench.
@@ -852,6 +858,25 @@ export class SorcarPanelManager {
         if (vscode.window.activeTextEditor && !event.force) break;
         cp.panel.reveal(undefined, true);
         break;
+      case 'taskStarted':
+        // The run gets the window: the Task Info view comes up in the
+        // secondary side bar beside the chat, the keyboard focus stays
+        // in the chat the user just submitted from. Only for a chat on
+        // screen that the view describes (the active panel): a start
+        // in a background panel or behind a text editor (a task
+        // launched from another surface) brings nothing up over what
+        // the user is looking at. The view arranges its sections for
+        // the run (onTaskStarted) whether or not the reveal succeeds.
+        if (this._activePanel() !== cp || !cp.panel.visible) break;
+        this.onTaskStarted?.();
+        void vscode.commands
+          .executeCommand('kissSorcar.metaViewSecondary.focus', {
+            preserveFocus: true,
+          })
+          .then(undefined, err =>
+            console.error('[KISS Sorcar] Task Info reveal failed:', err),
+          );
+        break;
       case 'metaUpdate':
         cp.metaValues = event.values;
         cp.metaTaskUpdate = event.taskUpdate;
@@ -905,8 +930,7 @@ export class SorcarPanelManager {
    * @param event The chat to open — backend chat id ('' or absent for
    *     a fresh one), the task to scroll to, the panel title, (for
    *     fresh chats) the opener's composer draft to seed the new
-   *     panel's textarea with, and onlyIfMissing to leave a panel
-   *     already bound to the chat untouched.
+   *     panel's textarea with.
    */
   public openChat(event: {
     chatId?: string;
@@ -914,7 +938,6 @@ export class SorcarPanelManager {
     title?: string;
     pendingText?: string;
     autoSubmit?: boolean;
-    onlyIfMissing?: boolean;
   }): void {
     const chatId = event.chatId ? String(event.chatId) : '';
     if (chatId) {
@@ -922,11 +945,9 @@ export class SorcarPanelManager {
       // has an editor tab reveals that tab (the daemon registry
       // enforces the same one-tab-per-chat invariant) and brings the
       // clicked task on screen instead of leaving the panel parked on
-      // whatever task it was showing. An expanded history panel only
-      // wants the chat on screen somewhere: it leaves the tab alone.
+      // whatever task it was showing.
       const other = this._panelForChat(chatId);
       if (other) {
-        if (event.onlyIfMissing) return;
         other.panel.reveal();
         if (
           event.taskId !== undefined &&

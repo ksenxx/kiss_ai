@@ -22,12 +22,12 @@ import pytest
 # (extensions/theme-defaults/themes/dark_modern.json plus the colour
 # registry defaults it inherits, e.g. terminal.ansi*).
 VSCODE_VARS = {
-    "--vscode-font-size": "14px",
+    "--vscode-font-size": "13px",
     "--vscode-font-family": (
         '-apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", '
         'system-ui, "Ubuntu", "Droid Sans", sans-serif'
     ),
-    "--vscode-editor-font-size": "14px",
+    "--vscode-editor-font-size": "13px",
     "--vscode-editor-font-family": (
         'Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace'
     ),

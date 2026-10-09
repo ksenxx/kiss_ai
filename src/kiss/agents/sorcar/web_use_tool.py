@@ -4,8 +4,10 @@
 # add your name here
 """Browser automation tool for LLM agents using Playwright.
 
-Drives a Chromium that no window shows by default (page analysis via the
-accessibility tree, clicking, typing, screenshots).  ``show_browser()``
+Drives a Chromium (page analysis via the accessibility tree, clicking,
+typing, screenshots).  Under the KISS daemon the session lives in the
+Browser tab that every surface streams, so the user watches the agent
+browse; without a daemon no window is shown, and ``show_browser()``
 switches the session to a visible window when a page needs a human
 (interactive login, CAPTCHA, bot check).
 
@@ -21,6 +23,7 @@ cadence, and challenge pages that are waited out and reported plainly.
 from __future__ import annotations
 
 import atexit
+import functools
 import json
 import logging
 import os
@@ -472,16 +475,19 @@ class WebUseTool:
     profile, so logins — and the clearance cookies challenge pages hand
     out — survive across sessions.
 
-    When a page needs a human — an interactive login, a CAPTCHA, a bot
-    check, a live demo — :meth:`show_browser` moves the session to the
-    user's Browser tab: the daemon's browser (``live_browser``, a
-    :class:`kiss.server.browser_tab.BrowserTabService`) opens a tab that
-    every KISS surface streams, and this tool drives that page through a
-    second CDP client while the user watches and interacts.  That browser
-    keeps its own persistent profile across tasks and daemon restarts;
-    the cookies of the headless session are carried into it (and back).
-    Without a daemon, :meth:`show_browser` reopens the profile in a
-    visible window instead.
+    Under the KISS daemon (``live_browser``, a
+    :class:`kiss.server.browser_tab.BrowserTabService`) the session lives
+    in the user's Browser tab from the first web tool call: the daemon's
+    browser opens a tab that every KISS surface streams and switches to,
+    and this tool drives that page through a second CDP client while the
+    user watches what the agent does and can click and type too (a
+    login, a CAPTCHA, a bot check).  That browser keeps its own
+    persistent profile across tasks and daemon restarts.  A Browser tab
+    that cannot be opened (the daemon's browser fails to launch) falls
+    back to headless browsing.  :meth:`show_browser(visible=False)
+    <show_browser>` returns to headless browsing with the tab's cookies
+    carried along, and :meth:`show_browser` brings the session back
+    into the tab (or, without a daemon, into a visible window).
     """
 
     _DEFAULT_USER_DATA_DIR = "__kiss_default_browser_profile__"
@@ -498,10 +504,20 @@ class WebUseTool:
         live_browser: Any = None,
     ) -> None:
         self._live_browser = live_browser
-        # True while the session lives in the Browser tab (show_browser);
-        # _live_tab is the id of the tab this tool opened there.
-        self._live = False
+        # True while the session lives in the Browser tab: from the start
+        # under a daemon, toggled by show_browser; _live_tab is the id of
+        # the tab this tool opened there.
+        self._live = live_browser is not None
         self._live_tab: str | None = None
+        # Chromium target ids of the pages this tool opened in the Browser
+        # tab's browser or followed a popup into (never a tab of the
+        # user's it switched to): a sub-agent's close() closes them all.
+        self._own_targets: set[str] = set()
+        # Pages whose crash/popup listeners are armed (see _adopt_page).
+        self._watched_pages: set[Any] = set()
+        # A page the current page opened (a target=_blank link) since the
+        # last click, which click() follows (see _on_popup).
+        self._popup: Any = None
         # The DevTools endpoint _browser is connected to in the Browser
         # tab; a relaunched browser listens on a new one (see _attach_live).
         self._live_cdp_url: str | None = None
@@ -523,7 +539,9 @@ class WebUseTool:
         elif user_data_dir == self._DEFAULT_USER_DATA_DIR:
             user_data_dir = str(_default_kiss_dir() / "browser_profile")
         self.user_data_dir = user_data_dir
-        self._headless = headless
+        # The Browser tab is the daemon's browser, never a window of this
+        # tool's own, so a live session counts as headless here.
+        self._headless = headless or self._live
         self.work_dir = work_dir
         self._playwright: Any = None
         self._browser: Any = None
@@ -614,7 +632,9 @@ class WebUseTool:
         pointer position, and the Browser-tab id (resolved again from
         the new page when needed, see :meth:`_live_tab_id`), so the
         hang watchdog interrupts the page it is driving, not the one
-        it left.  Adopting the current page again changes nothing.
+        it left.  Adopting the current page again changes nothing, and
+        a page adopted before (the user's tab, switched to and back)
+        gets no second set of listeners.
         """
         if page is self._page:
             return
@@ -622,7 +642,23 @@ class WebUseTool:
         self._elements = []
         self._mouse_xy = None
         self._live_tab = None
-        page.on("crash", self._on_page_crash)
+        if page not in self._watched_pages:
+            self._watched_pages = {p for p in self._watched_pages if not p.is_closed()}
+            self._watched_pages.add(page)
+            page.on("crash", self._on_page_crash)
+            page.on("popup", functools.partial(self._on_popup, page))
+
+    def _on_popup(self, opener: Any, popup: Any) -> None:
+        """Remember *popup*, a page *opener* opened (a ``target=_blank`` link).
+
+        :meth:`click` follows it.  Only the CURRENT page's popups count:
+        the Browser tab's browser context is shared with the user and
+        with other agents, whose new pages are no business of this
+        tool, which is why pages are never found by counting the
+        context's pages.
+        """
+        if opener is self._page:
+            self._popup = popup
 
     def _on_page_crash(self, _page: Any = None) -> None:
         """Handle a renderer (page) crash without dropping the browser reference.
@@ -683,6 +719,7 @@ class WebUseTool:
             raise
         self._adopt_page(page)
         self._live_tab = tab.tab_id
+        self._own_targets.add(tab.target_id)
 
     def _live_connected(self, cdp_url: str) -> bool:
         """Whether the CDP connection to the Browser tab's browser is still usable.
@@ -740,10 +777,10 @@ class WebUseTool:
     def _live_tab_id(self) -> str | None:
         """The Browser-tab id of the current page, resolved lazily.
 
-        Following a popup (:meth:`_check_for_new_tab`) moves ``_page`` to
-        a page the daemon announced on its own; its tab id is looked up
-        from the page's target id when first needed (closing it, or
-        interrupting a hung script).
+        Following a popup (:meth:`click`) moves ``_page`` to a page the
+        daemon announced on its own; its tab id is looked up from the
+        page's target id when first needed (closing it, or interrupting
+        a hung script).
         """
         if self._live_tab is None and self._page is not None:
             try:
@@ -879,7 +916,8 @@ class WebUseTool:
         if self._is_alive():
             return
         if self._live:
-            # The user closed the tab (or the browser exited): open a new one.
+            # First call, or the user closed the tab (or the browser
+            # exited): open a tab in the Browser tab's browser.
             self._attach_live()
             return
         if self._page is not None and self._context is not None:
@@ -1536,13 +1574,27 @@ class WebUseTool:
         Public tools document string error returns, so browser
         startup/install failures must surface as ``Error <context>: ...``
         instead of escaping the method (S2-27).
+
+        A Browser tab that cannot be opened (the daemon's browser fails
+        to launch, or its service shut down) must not fail every web
+        tool call: the session falls back to headless browsing, which
+        :meth:`show_browser` can report and retry.
         """
         try:
             self._ensure_browser()
             return None
         except Exception as exc:
+            if self._live:
+                logger.warning("Browser tab unavailable, browsing headless instead", exc_info=True)
+                self._leave_live()
+                return self._try_ensure_browser(context)
             logger.warning("browser startup failed", exc_info=True)
             return f"Error {context}: {exc}"
+
+    def _leave_live(self) -> None:
+        """Drop the Browser tab session (its tab too) and continue headless."""
+        self._detach_live(close_tab=True)
+        self._live, self._headless = False, True
 
     def go_to_url(self, url: str) -> str:
         """Navigate the browser to a URL and return the page accessibility tree.
@@ -1634,12 +1686,14 @@ class WebUseTool:
                 self._page.wait_for_timeout(300)
                 return self._get_ax_tree()
 
-            pages_before = len(self._context.pages)
+            self._popup = None
             self._human_click(locator)
             self._page.wait_for_timeout(500)
             self._wait_for_stable()
-            if len(self._context.pages) > pages_before:
-                self._check_for_new_tab()
+            if self._popup is not None:
+                self._adopt_page(self._popup)
+                if self._live:
+                    self._own_targets.add(self._target_id(self._page))
                 self._wait_for_stable()
             return self._get_ax_tree()
         except Exception as e:
@@ -1811,11 +1865,20 @@ class WebUseTool:
         """Close the browser and release resources. Call when done with the session or before exit.
 
         A page shown in the Browser tab stays open there for the user;
-        only this tool's connection to it is dropped.
+        only this tool's connection to it is dropped.  A sub-agent's
+        tabs (``ephemeral``) close with the sub-agent, like its chat
+        tab: every tab it opened or followed a popup into, through the
+        daemon's service so a crashed or abandoned page goes too.
 
         Returns:
             "Browser closed." (always, even if nothing was open)."""
         self._close_browser_only(keep_live_tab=True)
+        if self._ephemeral:
+            for target_id in self._own_targets:
+                tab_id = self._live_browser.tab_for_target(target_id)  # None once closed
+                if tab_id is not None:
+                    self._live_browser.close(tab_id)  # a no-op on a shut-down service
+            self._own_targets = set()
         if self._playwright:
             try:
                 self._playwright.stop()
@@ -1843,25 +1906,23 @@ class WebUseTool:
         return "Browser closed. It will relaunch automatically on the next web tool call."
 
     def show_browser(self, visible: bool = True) -> str:
-        """Show the page to the user, live, in a Browser tab on every KISS surface.
+        """Show the page to the user, live, in a Browser tab on every KISS surface, or hide it.
 
-        Call this whenever the user should see or interact with a page:
-        an interactive login or OAuth consent, a CAPTCHA or "unusual
-        traffic" bot check, a demo or test of a web app the user wants to
-        watch, or any browsing the user asked to follow live. The page you
-        are on reopens as a Browser tab that every surface switches to;
-        the user can click and type in it while you keep driving the same
-        page with the other web tools (screenshot, click, type_text,
-        get_page_content, ...). That browser keeps its cookies and logins
-        across tasks and daemon restarts, and the cookies of the current
-        headless session are carried into it. Without a KISS daemon the
-        browser is shown as a window on the machine instead. Pass
-        visible=False when the human part is done: the tab closes and
-        browsing continues headless with the cookies carried back.
+        Under a KISS daemon the browser is already in the Browser tab:
+        every web tool call shows there, every surface switches to the
+        tab, and the user can click and type in it while you keep driving
+        the same page with the other web tools (screenshot, click,
+        type_text, get_page_content, ...). Call show_browser() to bring
+        the page back into that tab after show_browser(visible=False).
+        Without a KISS daemon the browser is shown as a window on the
+        machine instead. Pass visible=False only when the user asks not
+        to watch: the tab closes and browsing continues headless on the
+        same page with its cookies carried along; the next
+        show_browser() carries them back.
 
         Args:
-            visible: True to show the page to the user, False to return to
-                headless browsing.
+            visible: True to show the page to the user, False to browse
+                headless.
 
         Returns:
             The accessibility tree of the reopened page, or
@@ -1876,12 +1937,13 @@ class WebUseTool:
         self._close_browser_only()
         self._live = visible and self._live_browser is not None
         self._headless = not visible or self._live
-        err = self._try_ensure_browser(f"making the browser {state}")
-        if err is not None:
+        try:
+            self._ensure_browser()
+        except Exception as exc:
+            logger.warning("browser startup failed", exc_info=True)
             if self._live:
-                self._detach_live(close_tab=True)
-                self._live, self._headless = False, True
-            return err
+                self._leave_live()
+            return f"Error making the browser {state}: {exc}"
         self._restore_session(session)
         if session is not None and session.url:
             return self.go_to_url(session.url)

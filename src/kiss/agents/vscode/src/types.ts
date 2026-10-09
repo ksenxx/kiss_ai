@@ -419,6 +419,11 @@ export type FromWebviewMessage =
   // of this webview. The host brings the surface forward (sidebar view
   // or editor panel) without taking focus; nothing else is shown.
   | {type: 'revealForQuestion'}
+  // Both VS Code chat surfaces: a task just started in the chat tab
+  // this webview shows. The host gives the run the window: sidebar
+  // mode maximizes the secondary side bar over the editor area,
+  // editor-tabs mode brings the Task Info view up beside the chat.
+  | {type: 'taskStarted'}
   // Editor-tabs mode: open another chat as a new editor tab — a fresh
   // conversation when chatId is absent, a history resume otherwise.
   | {
@@ -434,11 +439,6 @@ export type FromWebviewMessage =
       // first task as soon as the panel is ready (the Apps subpanel's
       // "connect this app" launch).
       autoSubmit?: boolean;
-      // Only bring the chat on screen when no tab shows it yet: a tab
-      // already bound to chatId is left as it is (no reveal, no task
-      // change). Posted when a chat's panel in the history list is
-      // expanded, as opposed to a click on one of its task rows.
-      onlyIfMissing?: boolean;
     }
   // Editor-tabs mode: close this panel — because the daemon's registry
   // no longer lists its chat tab (another client closed it; retire
@@ -780,7 +780,10 @@ type ToWebviewMessageBody =
       success?: boolean;
       is_continue?: boolean;
       total_tokens?: number;
+      // ``cost`` is the four-decimal display string; ``cost_usd`` the
+      // unrounded USD figure a dispatching parent charges to its ledger.
       cost?: string;
+      cost_usd?: number;
       step_count?: number;
     }
   | {
@@ -788,6 +791,7 @@ type ToWebviewMessageBody =
       text?: string;
       total_tokens?: number;
       cost?: string;
+      cost_usd?: number;
       total_steps?: number;
       cache_read?: number;
       model?: string;
@@ -1056,8 +1060,6 @@ type ToWebviewMessageBody =
       chatId: string;
       taskId: string | number | null;
       title: string;
-      // A tab already bound to chatId is left alone (see openChatPanel).
-      onlyIfMissing: boolean;
     }
   // Daemon: answer to a `complete` command (the input-box ghost /
   // autocomplete list), scoped to the requesting connection and tab.
@@ -1182,6 +1184,10 @@ type ToWebviewMessageBody =
       values: MetaPanelValues | null;
       taskUpdate: TaskUpdateState | null;
     }
+  // Editor-tabs mode (host relay): a task just started in the ACTIVE
+  // chat panel (its `taskStarted`); the Task Info view expands its
+  // Task Info and Task update sections and collapses the rest.
+  | {type: 'showForRun'}
   // The daemon's direct reply to `getCronJobs`: the scheduled cron jobs
   // (kiss/server/sidebar_panels.py cron_jobs_report).
   | {type: 'cronJobs'; jobs: CronJobRow[]}
