@@ -102,6 +102,11 @@ class _DecisionsHandler(BaseHTTPRequestHandler):
             self._send_raw(200, b"this is not json")
         elif state == "no-answers":
             self._send(200, {"model": "typesafe/jev-1.13-20260917", "usage": {}})
+        elif state == "no-answers-charged":
+            self._send(200, {
+                "model": "typesafe/jev-1.13-20260917",
+                "usage": {"input_tokens": 123, "output_tokens": 0, "cost": 0.0123},
+            })
         else:
             self._send(
                 200,
@@ -403,3 +408,61 @@ def test_live_jev_answers_all_three_question_types() -> None:
     assert 0.0 <= answers["severity"]["score"] <= 2.0
     in_tokens, out_tokens, _cr, _cw = m.extract_input_output_token_counts_from_response(response)
     assert in_tokens > 0 and out_tokens >= 0
+
+
+def test_charged_response_without_answers_is_still_billable() -> None:
+    """A 2xx body the provider charged for but that lacks ``answers`` keeps its usage.
+
+    October 2026 audit: ``decide`` raised and dropped the dict, so a retry
+    paid for the first call twice without ever accounting for it.
+    """
+    with _decisions_server() as root:
+        m = DecisionsModel(JEV, base_url=root, api_key="k")
+        with pytest.raises(KISSError, match="no 'answers' object"):
+            m.decide("no-answers-charged", QUESTIONS)
+        partial = m.take_partial_usage_response()
+        assert m.extract_cost_from_response(partial) == pytest.approx(0.0123)
+        assert m.extract_input_output_token_counts_from_response(partial) == (123, 0, 0, 0)
+        assert m.take_partial_usage_response() is None
+        # An uncharged malformed body leaves nothing to bill.
+        with pytest.raises(KISSError, match="no 'answers' object"):
+            m.decide("no-answers", QUESTIONS)
+        assert m.take_partial_usage_response() is None
+
+
+def test_generate_keeps_usage_when_the_token_callback_stops_the_run() -> None:
+    """A Stop raised by the token callback after the answer arrived keeps the spend."""
+
+    def _stop(_token: str) -> None:
+        raise KeyboardInterrupt
+
+    with _decisions_server() as root:
+        m = DecisionsModel(
+            JEV, base_url=root, api_key="k", model_config={"questions": QUESTIONS},
+            token_callback=_stop,
+        )
+        m.initialize("The package arrived crushed.")
+        with pytest.raises(KeyboardInterrupt):
+            m.generate()
+        partial = m.take_partial_usage_response()
+        assert m.extract_cost_from_response(partial) == pytest.approx(1.6044e-05)
+        # A completed generation leaves nothing behind to double count.
+        m.token_callback = None
+        m.generate()
+        assert m.take_partial_usage_response() is None
+
+
+def test_kiss_agent_bills_a_charged_decisions_failure() -> None:
+    """End to end: the agent's budget includes the charged call that raised."""
+    from kiss.core.kiss_agent import KISSAgent
+
+    with _decisions_server() as root:
+        agent = KISSAgent("decisions-charged-failure")
+        with pytest.raises(KISSError, match="no 'answers' object"):
+            agent.run(
+                model_name=JEV, prompt_template="no-answers-charged", is_agentic=False,
+                model_config={"base_url": root, "api_key": "k", "questions": QUESTIONS},
+                print_prompts=False, verbose=False,
+            )
+    assert agent.budget_used == pytest.approx(0.0123)
+    assert agent.total_tokens_used == 123

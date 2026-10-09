@@ -190,6 +190,34 @@ body.remote-chat #tab-bar .chat-tab.active { background: var(--bg2); }
 body.remote-chat #content-tab-bar .chat-tab-close,
 body.remote-chat #tab-bar .chat-tab-close { border-radius: var(--radius-pill); }
 
+/* The hide button at the right end of the content pane's row: a
+   chevron pointing at the edge the pane folds into.  The row's tab
+   list scrolls (main.css), so the button keeps its place however many
+   tabs are open. */
+body.remote-chat #content-pane-hide {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  margin: 0 0 0 var(--space-2);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--dim);
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+
+body.remote-chat #content-pane-hide:hover,
+body.remote-chat #content-pane-hide:focus-visible {
+  background: var(--hover);
+  color: var(--fg);
+  outline: none;
+}
+
 /* The content pane with nothing open (split layout). */
 body.remote-chat #content-pane-empty {
   height: 100%;
@@ -876,6 +904,41 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
     outline: none;
   }
 
+  /* The pane folded away by its hide button (body.content-pane-folded,
+     main.js): the chat alone fills #app with the task-info panel docked
+     beside it (the rules above, no body.content-pane-open), and this
+     tab sits on the chat's right edge, against the docked panel, to
+     unfold the pane.  The same handle as #meta-drawer, moved in by the
+     panel's width. */
+  body.remote-chat.remote-desktop.content-pane-folded #content-pane-show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 50%;
+    right: var(--meta-w, var(--meta-panel-w));
+    width: 18px;
+    height: 56px;
+    margin: 0;
+    padding: 0;
+    transform: translateY(-50%);
+    border: 1px solid var(--border-soft);
+    border-right: none;
+    border-radius: var(--radius-md) 0 0 var(--radius-md);
+    background: var(--surface);
+    color: var(--dim);
+    font-size: var(--fs-md);
+    cursor: pointer;
+    z-index: var(--z-docked);
+  }
+
+  body.remote-chat.remote-desktop #content-pane-show:hover,
+  body.remote-chat.remote-desktop #content-pane-show:focus-visible {
+    color: var(--fg);
+    background: var(--hover);
+    outline: none;
+  }
+
   body.remote-chat.remote-desktop #settings-panel {
     width: min(90vw, var(--settings-panel-w));
   }
@@ -954,11 +1017,15 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
 @media (width >= 900px) {
   body.remote-chat.remote-desktop #tab-bar { grid-area: strip; }
 
-  /* The machine name shares its row with the content pane's tab row
-     and sits at that row's vertical centre. */
+  /* The machine name shares its row with the content pane's tab row:
+     the strip fills the row's height, so its bottom hairline runs on
+     from the tab row's across the handle, and the name sits at the
+     row's vertical centre (align-content on a block keeps the
+     ellipsis a flex or grid container would drop). */
   body.remote-chat.remote-desktop #chat-machine {
     grid-area: machine;
-    align-self: center;
+    align-self: stretch;
+    align-content: center;
   }
 
   body.remote-chat.remote-desktop #tab-status-bar { grid-area: status; }

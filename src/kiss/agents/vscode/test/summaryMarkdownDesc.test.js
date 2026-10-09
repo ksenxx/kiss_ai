@@ -181,7 +181,11 @@ function testPanelStillCollapsesWithMarkdown() {
   );
   const sub = p.querySelector(':scope > .summary-sub');
   assert.ok(sub, 'summary-sub nesting must still work');
-  assert.strictEqual(sub.children.length, 1, 'the Read panel must nest');
+  assert.strictEqual(
+    sub.children.length,
+    2,
+    'the prompt and the Read panel must nest',
+  );
   win.close();
   console.log('  ok - collapse + nesting behavior unchanged with markdown');
 }

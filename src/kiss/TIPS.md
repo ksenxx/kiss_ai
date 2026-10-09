@@ -111,6 +111,8 @@ Go to the Settings panel and copy the URL at the top. This URL contains a messag
 
 Open the URL in a browser on the mobile device and enter your remote password. You will see your familiar Codex-like chat interface.
 
+On a phone the four desktop panes are four screens: swipe left or right to move between your chats, the chat, the open file, and the Task Info panel. The file screen is skipped while no file is open.
+
 # Tip
 
 ## To Run Tasks from Python Scripts

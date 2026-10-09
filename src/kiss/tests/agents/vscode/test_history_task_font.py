@@ -32,7 +32,7 @@ def test_history_task_text_matches_chat_header(
     """
     harness = _ServerHarness()
     try:
-        title = "History task typography matches its collapsible chat header"
+        title = "History task typography matches its chat header"
         task_id, _ = persistence._add_task(
             title, "history-font-chat", {"work_dir": str(harness.work_dir)},
         )
@@ -64,14 +64,16 @@ def test_history_task_text_matches_chat_header(
                 expect(header).to_be_visible()
                 header_font = header.evaluate(_FONT)
                 assert header_font[2] == "400"
-                header.click()
+                # The chat's "Show details" chevron unfolds its task rows
+                # (a click on the header itself opens the chat).
+                page.locator(".history-chat-header .history-chat-collapse").click()
                 text = page.locator("#history-list .running-item > .sidebar-item-text")
                 expect(text).to_be_visible()
                 expect(text).to_have_text(title)
                 assert text.evaluate(_FONT) == header_font
 
                 # Expanding task metadata and hovering must not change its font.
-                page.locator("#history-list .sidebar-item-collapse").click()
+                page.locator("#history-list .running-item .sidebar-item-collapse").click()
                 text.hover()
                 assert text.evaluate(_FONT) == header_font
                 page.screenshot(path=str(tmp_path / f"history-font-{surface}-{theme}.png"))

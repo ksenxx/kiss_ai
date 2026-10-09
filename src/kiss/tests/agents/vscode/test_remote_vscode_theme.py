@@ -148,10 +148,14 @@ def test_theme_dependent_root_tokens_are_rederived_on_the_remote_body() -> None:
     body_block = re.search(r"body\.remote-chat\s*\{(.*?)\n\}", _stripped_codex_css(), re.S)
     assert root_block and body_block, "token blocks not found"
     root, body = root_block.group(1), body_block.group(1)
+    # Only variables the light theme redefines matter: the font
+    # variables (_VSCODE_FONT_VARS_CSS) are injected once for both
+    # themes, so --font-ui / --font-mono resolve the same either way.
+    themed = set(_palette(_VSCODE_LIGHT_MODERN_CSS))
     theme_dependent = [
         name
         for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", root)
-        if "--vscode-" in value
+        if themed & set(re.findall(r"--vscode-[\w-]+", value))
     ]
     assert theme_dependent, "main.css :root must derive tokens from --vscode-* variables"
     rederived = set(re.findall(r"(--[\w-]+)\s*:", body))
@@ -191,8 +195,8 @@ def test_remote_page_inlines_vscode_fonts_and_both_palettes() -> None:
         '--vscode-editor-font-family: Menlo, Monaco, Consolas, '
         '"Droid Sans Mono", "Courier New", monospace;'
     ) in page
-    assert "--vscode-font-size: 14px;" in page
-    assert "--vscode-editor-font-size: 14px;" in page
+    assert "--vscode-font-size: 13px;" in page
+    assert "--vscode-editor-font-size: 13px;" in page
     assert "html.light-theme,\n    body.remote-chat.light-theme {" in page
     root_pos = page.index(":root {")
     light_pos = page.index("body.remote-chat.light-theme {")
@@ -410,11 +414,12 @@ def test_live_remote_page_uses_vscode_theme_colours_and_fonts(tmp_path: Path) ->
     assert "highlight-vscode-light.css?v=" in light["hljsHref"], light
 
     # Fonts do not depend on the theme: VS Code's workbench stack at
-    # 14px for the UI and the composer, the editor stack for code.
+    # 13px (Cursor's UI base) for the UI and the composer, the editor
+    # stack for code.
     for probe in (dark, light):
         assert _font_families(probe["fontFamily"]) == _font_families(VSCODE_UI_FONT), probe
         assert _font_families(probe["inputFont"]) == _font_families(VSCODE_UI_FONT), probe
-        assert probe["fontSize"] == "14px", probe
+        assert probe["fontSize"] == "13px", probe
         assert _font_families(probe["codeFont"]) == _font_families(VSCODE_EDITOR_FONT), probe
 
     # Toggling back restores Light Modern exactly.

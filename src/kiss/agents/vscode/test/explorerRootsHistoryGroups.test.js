@@ -905,7 +905,7 @@ async function main() {
     win.close();
   });
 
-  await test('History: chat panels collapse by default, stay open while running, remember the user toggle', async () => {
+  await test('History: chat panels collapse by default, even while running, and remember the user toggle', async () => {
     const {win, posted} = makeWebview();
     const collapsed = g => g.classList.contains('collapsed');
     sendHistory(win, posted, 0, [
@@ -925,14 +925,33 @@ async function main() {
       'first task of A',
     );
     assert.ok(collapsed(gA), 'an idle chat starts collapsed');
-    assert.ok(!collapsed(gB), 'a chat with a running task starts open');
+    assert.ok(
+      collapsed(gB),
+      'a running task does not unfold its chat: only the user does',
+    );
+    assert.strictEqual(
+      gB.dataset.hasRunning,
+      '1',
+      'the running chat is still marked for the Running section',
+    );
+    // The header is no toggle: the "Show details" chevron in its
+    // action strip (as on a task panel) folds and unfolds the tasks.
+    const chevronA = gA.querySelector(
+      '.history-chat-header > .history-chat-actions > .history-chat-collapse',
+    );
+    assert.ok(chevronA, 'the chat panel carries a Show details chevron');
+    assert.strictEqual(chevronA.getAttribute('aria-expanded'), 'false');
+    assert.strictEqual(chevronA.dataset.tooltip, 'Show details');
     assert.strictEqual(
       gA.querySelector('.history-chat-header').getAttribute('aria-expanded'),
-      'false',
+      null,
+      'the header itself carries no expanded state',
     );
     // The user opens A: the choice survives a re-render.
-    gA.querySelector('.history-chat-header').click();
-    assert.ok(!collapsed(gA), 'header click expands the panel');
+    chevronA.click();
+    assert.ok(!collapsed(gA), 'the chevron expands the panel');
+    assert.strictEqual(chevronA.getAttribute('aria-expanded'), 'true');
+    assert.strictEqual(chevronA.dataset.tooltip, 'Hide details');
     sendHistory(win, posted, 0, [
       Object.assign(session('A', 'a2', todayNoon), {
         chat_first_task: 'first task of A',
@@ -946,8 +965,8 @@ async function main() {
       "B's task finished and the user never toggled it: collapsed again",
     );
     // Collapsing hides the body, not the block.
-    gA.querySelector('.history-chat-header').click();
-    assert.ok(collapsed(gA), 'header click collapses the panel again');
+    gA.querySelector('.history-chat-collapse').click();
+    assert.ok(collapsed(gA), 'the chevron collapses the panel again');
     assert.ok(
       gA.querySelector(':scope > .history-chat-body .sidebar-item'),
       'the rows stay in the DOM under the collapsed header',
@@ -981,9 +1000,9 @@ async function main() {
     assert.strictEqual(title(gB), 'first task of B');
     assert.strictEqual(title(gC), 'task c1');
     assert.strictEqual(
-      gA.querySelector('.history-chat-header').textContent.trim(),
+      gA.querySelector('.history-chat-header').getAttribute('aria-label'),
       'Fix login and add tests',
-      "the summary is the header button's accessible name",
+      "the summary is the header's accessible name (not the action strip)",
     );
     // B's task finishes and the daemon summarises the chat: the next
     // refresh renames the panel. A summary of only whitespace does not
@@ -1037,8 +1056,8 @@ async function main() {
     let [gA, gB] = groups(win);
     // The user explicitly collapses A (expand + collapse stores the
     // choice), which must NOT hide A's matches inside a later search.
-    gA.querySelector('.history-chat-header').click();
-    gA.querySelector('.history-chat-header').click();
+    gA.querySelector('.history-chat-collapse').click();
+    gA.querySelector('.history-chat-collapse').click();
     assert.ok(collapsed(gA));
     setSearch('task');
     // The search's results equal the loaded page, so the reply lands
@@ -1051,7 +1070,7 @@ async function main() {
     );
     assert.ok(!collapsed(gB), 'B expands for the search too');
     // A collapse DURING the search applies to the search view only.
-    gA.querySelector('.history-chat-header').click();
+    gA.querySelector('.history-chat-collapse').click();
     assert.ok(collapsed(gA), 'the panel can still be folded mid-search');
     // A changed-data rebuild while the SAME query stands (any task on
     // the daemon persisted a result) keeps the in-search fold.
@@ -2725,6 +2744,44 @@ async function main() {
       String(m.token).startsWith('picker:'),
     );
     assert.strictEqual(pick[pick.length - 1].path, '/tmp');
+    key(win, win.document, 'Escape');
+    win.close();
+  });
+
+  await test('a folder clicked in the picker is highlighted or entered, never opened as a file', async () => {
+    // The picker's rows carry their folder in data-path, like the
+    // chat's file links do; the file-link click handler must leave
+    // them alone (a directory "opened" as a file would land a listing
+    // tab in the content pane and slide the task-info panel off).
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    click(win, byId(win, 'explorer-pick-folder'));
+    const picker = byId(win, 'folder-picker');
+    let pick = ofType(posted, 'listDir').filter(m =>
+      String(m.token).startsWith('picker:'),
+    );
+    send(win, {
+      type: 'dirListing',
+      token: pick[pick.length - 1].token,
+      path: WD,
+      root: WD,
+      entries: [{name: 'dir', path: WD + '/dir', isDir: true}],
+    });
+    const item = picker.querySelector('.folder-picker-item');
+    const opens = ofType(posted, 'openFile').length;
+    click(win, item);
+    assert.strictEqual(item.getAttribute('aria-selected'), 'true');
+    click(win, item);
+    item.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
+    pick = ofType(posted, 'listDir').filter(m =>
+      String(m.token).startsWith('picker:'),
+    );
+    assert.strictEqual(pick[pick.length - 1].path, WD + '/dir', 'entered');
+    assert.strictEqual(
+      ofType(posted, 'openFile').length,
+      opens,
+      'no folder was opened as a file',
+    );
     key(win, win.document, 'Escape');
     win.close();
   });

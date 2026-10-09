@@ -156,23 +156,24 @@ function assertMirrors(win, chatId, taskId, where) {
     r.getAttribute('aria-label'),
     'same label ' + where,
   );
-  // Between the chevron and the title.
+  // Before the title; the action strip (Show details, last launched)
+  // comes last.
   const btn = header(win, chatId);
+  assert.strictEqual(btn.children[0], h, 'icon first ' + where);
   assert.strictEqual(
-    btn.children[0].classList.contains('history-chat-chevron'),
+    btn.children[1].classList.contains('history-chat-title'),
     true,
-    'chevron first ' + where,
+    'title second ' + where,
   );
-  assert.strictEqual(btn.children[1], h, 'icon second ' + where);
   assert.strictEqual(
-    btn.children[2].classList.contains('history-chat-title'),
+    btn.children[2].classList.contains('history-chat-actions'),
     true,
-    'title third ' + where,
+    'action strip third ' + where,
   );
   assert.strictEqual(
     win.getComputedStyle(h).marginRight,
-    '0px',
-    'the header gap spaces the icon, not the row margin ' + where,
+    '6px',
+    'the icon is spaced by its own header margin, not the row margin ' + where,
   );
 }
 
@@ -210,13 +211,18 @@ function testHeaderShowsLastTaskIcon() {
   assert.strictEqual(
     header(win, 'D').children.length,
     2,
-    'chevron and title only when there is no icon',
+    'title and action strip only when there is no icon',
   );
-  // Clicking the icon toggles the panel like the rest of the header.
+  // Clicking the icon (part of the header) opens the chat, as the rest
+  // of the header does; only the Show details chevron folds the panel.
   const a = group(win, 'A');
   const before = a.classList.contains('collapsed');
+  posted.length = 0;
   headerMark(win, 'A').click();
-  assert.strictEqual(a.classList.contains('collapsed'), !before, 'the icon toggles the panel');
+  assert.strictEqual(a.classList.contains('collapsed'), before, 'the icon never folds the panel');
+  const resumes = byType(posted, 'resumeSession');
+  assert.strictEqual(resumes.length, 1, 'the icon opens the chat');
+  assert.strictEqual(resumes[0].id, 'A');
   win.close();
   console.log('  ok - the chat header shows its last task\'s icon');
 }
@@ -360,7 +366,16 @@ function byType(posted, type) {
   return posted.filter(m => m && m.type === type);
 }
 
-function testExpandingPanelOpensLastTask() {
+/** The chat panel's "Show details" chevron. */
+function chevron(win, chatId) {
+  const btn = header(win, chatId).querySelector(
+    '.history-chat-actions > .history-chat-collapse',
+  );
+  assert.ok(btn, 'Show details chevron for ' + chatId);
+  return btn;
+}
+
+function testChevronFoldsAndHeaderOpensLastTask() {
   const {win, posted} = makeWebview();
   openSidebar(win);
   uncheckWorkspaceFilter(win);
@@ -379,11 +394,29 @@ function testExpandingPanelOpensLastTask() {
   const idleTab = win.kissActiveTabId();
   posted.length = 0;
 
-  header(win, 'A').click();
-  assert.ok(!a.classList.contains('collapsed'), 'the click expands the panel');
+  // The chevron only shows / hides the chat's task panels; it reads
+  // like a task panel's and opens nothing.
+  const chev = chevron(win, 'A');
+  assert.strictEqual(chev.dataset.tooltip, 'Show details', 'folded: Show details');
+  assert.strictEqual(chev.getAttribute('aria-expanded'), 'false');
+  chev.click();
+  assert.ok(!a.classList.contains('collapsed'), 'the chevron unfolds the panel');
+  assert.strictEqual(chev.dataset.tooltip, 'Hide details', 'unfolded: Hide details');
+  assert.strictEqual(chev.getAttribute('aria-expanded'), 'true');
   assert.ok(sidebar.classList.contains('open'), 'the tasks stay in view');
-  // A fresh tab shows the chat; the idle chat left behind is retired,
-  // so the count does not grow.
+  assert.strictEqual(win.kissActiveTabId(), idleTab, 'the chevron opens no tab');
+  assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'and resumes nothing');
+  chev.click();
+  assert.ok(a.classList.contains('collapsed'), 'folded again');
+  assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'no resume on fold');
+
+  // The header itself never folds the panel: it brings the chat on
+  // screen, as a task row click does.  A fresh tab shows the chat;
+  // the idle chat left behind is retired, so the count does not grow.
+  posted.length = 0;
+  header(win, 'A').click();
+  assert.ok(a.classList.contains('collapsed'), 'the header click leaves the panel folded');
+  assert.ok(!sidebar.classList.contains('open'), 'the sidebar closes as for a row click');
   assert.notStrictEqual(win.kissActiveTabId(), idleTab, 'a new tab is active');
   assert.ok(!hasTab(win, idleTab), 'the idle chat left behind is retired');
   assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab for the chat');
@@ -397,60 +430,59 @@ function testExpandingPanelOpensLastTask() {
     'in the fresh, now active, tab',
   );
 
-  // Collapsing opens nothing.
-  posted.length = 0;
-  header(win, 'A').click();
-  assert.ok(a.classList.contains('collapsed'), 'collapsed again');
-  assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'no resume on collapse');
-  assert.strictEqual(chatTabs(win).length, tabsBefore, 'no new tab on collapse');
-
-  // The daemon binds the new tab to chat A; expanding again finds that
-  // tab showing the chat and opens nothing more.
+  // The daemon binds the new tab to chat A; a second header click
+  // finds that tab showing the chat and switches to it.
+  const chatATab = win.kissActiveTabId();
   send(win, {
     type: 'task_events',
-    tabId: win.kissActiveTabId(),
+    tabId: chatATab,
     chat_id: 'A',
     task_id: 2,
     task: 'task 2',
     events: [],
     extra: JSON.stringify({startTs: 1_700_000_900_000, endTs: 1_700_000_900_001}),
   });
-  // Moving to the chat unfolds its panel (setHistoryActiveTask); fold
-  // it by hand, then expand it once more.
-  assert.ok(!a.classList.contains('collapsed'), 'the chat on screen unfolds its panel');
-  header(win, 'A').click();
-  assert.ok(a.classList.contains('collapsed'), 'folded by hand');
+  // Moving to the chat highlights its panel (setHistoryActiveTask)
+  // but does not unfold it: only the user folds or unfolds.
+  assert.ok(a.classList.contains('history-active-chat'), 'the chat on screen is highlighted');
+  assert.ok(a.classList.contains('collapsed'), 'the chat on screen stays folded');
+  // Chat A starts a new task so "+" keeps its tab open while moving
+  // to a fresh chat.
+  send(win, {type: 'status', running: true, tabId: chatATab, startTs: 1_700_000_950_000});
+  win.document.getElementById('new-chat-btn').click();
+  const freshTab = win.kissActiveTabId();
+  assert.notStrictEqual(freshTab, chatATab, 'a fresh chat is active');
+  assert.ok(hasTab(win, chatATab), 'the running chat A stays open');
+  openSidebar(win);
   posted.length = 0;
   header(win, 'A').click();
-  assert.ok(!a.classList.contains('collapsed'), 'expanded again');
+  assert.strictEqual(win.kissActiveTabId(), chatATab, 'the header switches to chat A');
+  assert.ok(!hasTab(win, freshTab), 'the idle fresh chat left behind is retired');
   assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'chat A is already on screen');
-  assert.strictEqual(chatTabs(win).length, tabsBefore, 'no duplicate tab for chat A');
+  assert.ok(a.classList.contains('collapsed'), 'and leaves the panel as it was');
 
   // Clicking the icon in the header behaves like the header.
-  const chatATab = win.kissActiveTabId();
+  openSidebar(win);
   posted.length = 0;
   sendHistory(win, posted, [
     makeRow({id: 'C', task_id: 9, is_running: true, has_events: true, startTs: 1_700_000_950_000}),
   ]);
   const c = group(win, 'C');
-  assert.ok(!c.classList.contains('collapsed'), 'a running chat starts open');
-  header(win, 'C').click();
-  assert.ok(c.classList.contains('collapsed'), 'folded by the click');
+  assert.ok(c.classList.contains('collapsed'), 'a running chat starts folded too');
   posted.length = 0;
   headerMark(win, 'C').click();
-  assert.ok(!c.classList.contains('collapsed'), 'the icon expands the panel');
+  assert.ok(c.classList.contains('collapsed'), 'the icon leaves the panel folded');
   resumes = byType(posted, 'resumeSession');
   assert.strictEqual(resumes.length, 1, 'and opens the running chat');
   assert.strictEqual(resumes[0].id, 'C');
   assert.strictEqual(resumes[0].taskId, 9);
   assert.notStrictEqual(win.kissActiveTabId(), chatATab, 'in a fresh tab');
-  assert.ok(!hasTab(win, chatATab), 'the settled chat A left behind is retired');
-  assert.strictEqual(chatTabs(win).length, tabsBefore, 'one tab: chat C');
+  assert.ok(hasTab(win, chatATab), 'the running chat A stays open');
   win.close();
-  console.log('  ok - expanding a chat panel loads its last task unless a tab shows the chat');
+  console.log('  ok - the chevron folds the chat panel; the header opens its last task');
 }
 
-function testExpandingPanelInEditorTabsModeAsksHost() {
+function testHeaderClickInEditorTabsModeAsksHost() {
   const {win, posted} = makeWebview(' class="editor-tab-mode history-panel-mode"');
   openSidebar(win);
   uncheckWorkspaceFilter(win);
@@ -461,34 +493,35 @@ function testExpandingPanelInEditorTabsModeAsksHost() {
   const a = group(win, 'A');
   assert.ok(a.classList.contains('collapsed'), 'starts collapsed');
   posted.length = 0;
+  chevron(win, 'A').click();
+  assert.ok(!a.classList.contains('collapsed'), 'the chevron unfolds the panel');
+  assert.strictEqual(byType(posted, 'openChatPanel').length, 0, 'and asks the host nothing');
   header(win, 'A').click();
-  assert.ok(!a.classList.contains('collapsed'), 'expanded');
+  assert.ok(!a.classList.contains('collapsed'), 'the header leaves the panel unfolded');
   let opens = byType(posted, 'openChatPanel');
   assert.strictEqual(opens.length, 1, 'the host is asked to open the chat');
   assert.strictEqual(opens[0].chatId, 'A');
   assert.strictEqual(opens[0].taskId, 1, 'at the last task');
   assert.strictEqual(
-    opens[0].onlyIfMissing,
-    true,
-    'only when no editor panel shows the chat yet',
+    'onlyIfMissing' in opens[0],
+    false,
+    'an ordinary open: the host reveals a panel already showing the chat',
   );
   assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'no in-panel resume');
   assert.ok(
     win.document.getElementById('sidebar').classList.contains('open'),
     'the history panel stays',
   );
-  // A task row's click is an ordinary open: the host reveals the
-  // chat's panel and moves it to the clicked task.
+  // A task row's click is the same open at the clicked task.
   posted.length = 0;
   rowByTask(win, 2).click();
   opens = byType(posted, 'openChatPanel');
   assert.strictEqual(opens.length, 1, 'a row click asks the host too');
   assert.strictEqual(opens[0].taskId, 2);
-  assert.strictEqual(opens[0].onlyIfMissing, false, 'and always lands on the task');
 
   // A chat whose last task has no persisted events: a row click opens
-  // it read-only (no chat id), but an expand keeps the chat id so the
-  // host can see the chat's panel is already open.
+  // it read-only (no chat id), but the chat's header keeps the chat
+  // id so the host resumes the chat (and finds its panel if open).
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, [
@@ -497,17 +530,16 @@ function testExpandingPanelInEditorTabsModeAsksHost() {
   posted.length = 0;
   header(win, 'E').click();
   opens = byType(posted, 'openChatPanel');
-  assert.strictEqual(opens.length, 1, 'the expand asks the host');
+  assert.strictEqual(opens.length, 1, 'the header asks the host');
   assert.strictEqual(opens[0].chatId, 'E', 'with the chat id even without events');
   assert.strictEqual(opens[0].taskId, 5);
-  assert.strictEqual(opens[0].onlyIfMissing, true);
   posted.length = 0;
   rowByTask(win, 5).click();
   opens = byType(posted, 'openChatPanel');
   assert.strictEqual(opens.length, 1, 'the row click asks the host');
   assert.strictEqual(opens[0].chatId, undefined, 'read-only: no chat to resume');
   win.close();
-  console.log('  ok - in editor-tabs mode expanding a panel asks the host for the chat');
+  console.log('  ok - in editor-tabs mode a chat header click asks the host for the chat');
 }
 
 function testEventlessLastTaskResumesByChatId() {
@@ -529,8 +561,8 @@ function testEventlessLastTaskResumesByChatId() {
   assert.strictEqual(resumes.length, 1, 'resumed by chat id, not shown read-only');
   assert.strictEqual(resumes[0].id, 'E');
   assert.strictEqual(resumes[0].taskId, 5);
-  // The daemon binds the tab to the chat on replay: a second expand
-  // finds it and opens nothing more.
+  // The daemon binds the tab to the chat on replay: a second header
+  // click finds it and opens nothing more.
   send(win, {
     type: 'task_events',
     tabId: resumes[0].tabId,
@@ -540,8 +572,7 @@ function testEventlessLastTaskResumesByChatId() {
     events: [],
     extra: JSON.stringify({startTs: 1_700_000_900_000, endTs: 1_700_000_900_001}),
   });
-  header(win, 'E').click();
-  assert.ok(group(win, 'E').classList.contains('collapsed'), 'folded');
+  openSidebar(win);
   posted.length = 0;
   header(win, 'E').click();
   assert.strictEqual(chatTabs(win).length, tabsBefore, 'no second tab for chat E');
@@ -561,10 +592,10 @@ function testEventlessLastTaskResumesByChatId() {
   assert.strictEqual(chatTabs(win).length, tabsBefore, 'only the read-only tab');
   assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'nothing to resume');
   win.close();
-  console.log('  ok - an eventless last task is resumed by chat id on expand');
+  console.log('  ok - an eventless last task is resumed by chat id from the chat header');
 }
 
-function testSidebarOpenFromHistoryHonoursOnlyIfMissing() {
+function testSidebarOpenFromHistoryRelay() {
   const {win, posted} = makeWebview();
   // Bind the first tab to chat A, then move to a fresh second tab.
   send(win, {
@@ -592,29 +623,17 @@ function testSidebarOpenFromHistoryHonoursOnlyIfMissing() {
   assert.ok(hasTab(win, chatATab), 'the running chat A stays open');
   assert.strictEqual(chatTabs(win).length, 2, 'two chat tabs');
 
-  // The host relays an expanded history panel: chat A has a tab, so
-  // nothing moves.
+  // The host relays a Chats-panel click on chat A (its header or one
+  // of its rows): chat A has a tab, so the view switches to it.
   posted.length = 0;
   send(win, {
     type: 'openChatFromHistory',
     chatId: 'A',
     taskId: 2,
     title: 'task 2',
-    onlyIfMissing: true,
   });
-  assert.strictEqual(win.kissActiveTabId(), freshTab, 'the active tab is kept');
+  assert.strictEqual(win.kissActiveTabId(), chatATab, 'the click switches to the chat');
   assert.strictEqual(byType(posted, 'resumeSession').length, 0, 'nothing resumed');
-  assert.strictEqual(chatTabs(win).length, 2, 'no tab opened');
-
-  // A row click relayed the same way switches to chat A's tab.
-  send(win, {
-    type: 'openChatFromHistory',
-    chatId: 'A',
-    taskId: 2,
-    title: 'task 2',
-    onlyIfMissing: false,
-  });
-  assert.strictEqual(win.kissActiveTabId(), chatATab, 'a row click switches to the chat');
   // The empty fresh chat left behind is retired, as it is when the
   // same row is clicked in the in-webview Chats panel (openHistoryTask).
   assert.ok(
@@ -625,15 +644,14 @@ function testSidebarOpenFromHistoryHonoursOnlyIfMissing() {
   );
   assert.strictEqual(chatTabs(win).length, 1, 'no new tab');
 
-  // Expanding a chat with no tab resumes it in a fresh tab; the
-  // running chat A stays open.
+  // A chat with no tab is resumed in a fresh tab; the running chat A
+  // stays open.
   posted.length = 0;
   send(win, {
     type: 'openChatFromHistory',
     chatId: 'B',
     taskId: 5,
     title: 'task 5',
-    onlyIfMissing: true,
   });
   assert.ok(hasTab(win, chatATab), 'the running chat A stays open');
   assert.strictEqual(chatTabs(win).length, 2, 'a tab for chat B');
@@ -642,7 +660,7 @@ function testSidebarOpenFromHistoryHonoursOnlyIfMissing() {
   assert.strictEqual(resumes[0].id, 'B');
   assert.strictEqual(resumes[0].taskId, 5);
   win.close();
-  console.log('  ok - the sidebar chat view leaves an open chat alone on a panel expand');
+  console.log('  ok - the sidebar chat view switches to or resumes a relayed chat');
 }
 
 try {
@@ -650,9 +668,9 @@ try {
   testHeaderFollowsTaskStatus();
   testNewestLaunchWinsAcrossPagesAndOrder();
   testLegacyFlatViewHasNoHeaders();
-  testExpandingPanelOpensLastTask();
-  testExpandingPanelInEditorTabsModeAsksHost();
-  testSidebarOpenFromHistoryHonoursOnlyIfMissing();
+  testChevronFoldsAndHeaderOpensLastTask();
+  testHeaderClickInEditorTabsModeAsksHost();
+  testSidebarOpenFromHistoryRelay();
   testEventlessLastTaskResumesByChatId();
   console.log('\n8 passed, 0 failed');
 } catch (e) {

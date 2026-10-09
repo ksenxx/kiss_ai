@@ -1021,10 +1021,12 @@ class TestPerTabT0(unittest.TestCase):
         # side-effect) is stubbed out.
         set_tab_running_src = _extract_function(self.js, "setTabRunning")
         # Completing the ACTIVE tab refocuses the composer unless the
-        # real composerFocusWouldSteal (and its isTextEntry helper) says
-        # another field or an open sheet owns the keyboard.
+        # real composerFocusWouldSteal (and its isTextEntry and
+        # sheetOrModalOpen helpers) says another field or an open sheet
+        # owns the keyboard.
         focus_steal_src = _extract_function(self.js, "composerFocusWouldSteal")
         is_text_entry_src = _extract_function(self.js, "isTextEntry")
+        sheet_open_src = _extract_function(self.js, "sheetOrModalOpen")
         result = _run_node(_make_test_script(
             r"""
             var tabs = [{ id: 1, isRunning: true, t0: 111, endTs: 0 }];
@@ -1055,6 +1057,7 @@ class TestPerTabT0(unittest.TestCase):
             """
             + set_tab_running_src
             + is_text_entry_src
+            + sheet_open_src
             + focus_steal_src
             + set_ready_src
             + r"""

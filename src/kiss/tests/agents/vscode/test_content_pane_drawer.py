@@ -12,11 +12,11 @@ and task-info panel.
   task-info panel, and never runs under the panel.
 * The machine name sits in bold green at the top centre of the chat.
 * A file opened from the Explorer opens the content pane, which runs
-  under the task-info panel: the panel lies ON TOP of it.
-* A click in the content pane slides the panel off the right edge
-  (animated) and leaves a drawer tab there; the tab brings the panel
-  back.  Closing the last content tab docks the panel beside the chat
-  again.
+  under the task-info panel, and slides the panel off the right edge
+  (animated), leaving a drawer tab there; the tab brings the panel back
+  ON TOP of the pane.
+* A click in the content pane slides the panel off again.  Closing the
+  last content tab docks the panel beside the chat again.
 
 Every test drives a REAL headless Chromium (Playwright) against a REAL
 :class:`RemoteAccessServer` over ``wss://`` whose work dir is a REAL
@@ -65,6 +65,24 @@ def _open_file(page, name: str = "feature.txt") -> None:
     )
 
 
+def _bring_panel_back(page) -> None:
+    """The file open slid the task-info panel off the right edge; the
+    drawer tab brings it back on top of the content pane."""
+    page.wait_for_selector("body.meta-hidden", state="attached", timeout=5000)
+    page.locator("#meta-drawer").click()
+    page.wait_for_selector("body:not(.meta-hidden)", state="attached", timeout=5000)
+    page.wait_for_function(
+        "w => document.getElementById('meta-panel').getBoundingClientRect().right <= w + 1"
+        " && document.getElementById('meta-panel').getBoundingClientRect().left < w - 100",
+        arg=page.evaluate("innerWidth"),
+        timeout=5000,
+    )
+    page.wait_for_function(
+        "getComputedStyle(document.getElementById('meta-drawer')).visibility === 'hidden'",
+        timeout=5000,
+    )
+
+
 def test_no_content_pane_until_a_file_opens_and_the_panel_overlays_it(browser, harness):
     context, page, _ = _open_page(browser, harness)
     try:
@@ -83,6 +101,9 @@ def test_no_content_pane_until_a_file_opens_and_the_panel_overlays_it(browser, h
         assert output["width"] > 300
 
         _open_file(page)
+        # The open slides the panel off the pane; the drawer brings it
+        # back over it.
+        _bring_panel_back(page)
         content = _rect(page, "#content-tab-area")
         panel = _rect(page, "#meta-panel")
         width = page.evaluate("innerWidth")
@@ -148,12 +169,75 @@ def test_machine_name_sits_in_bold_green_at_the_top_centre_of_the_chat(browser, 
         context.close()
 
 
+_BORDER_JS = """sel => {
+  const cs = getComputedStyle(document.querySelector(sel));
+  return [cs.borderBottomWidth, cs.borderBottomStyle, cs.borderBottomColor];
+}"""
+
+
+def test_machine_name_is_parted_from_the_chat_by_the_same_hairline_as_the_tab_rows(
+    browser, harness
+):
+    """The strip ends in the 1px border every other boundary of the page
+    uses, and with a file open that hairline runs on from the content
+    tab row's: both rows end at the same height."""
+    context, page, _ = _open_page(browser, harness)
+    try:
+        page.wait_for_function(
+            "document.getElementById('chat-machine').textContent.length > 0",
+            timeout=15000,
+        )
+        border = page.evaluate(_BORDER_JS, "#chat-machine")
+        assert border[0] == "1px" and border[1] == "solid"
+        # The chat alone: the hairline is the only thing between the
+        # name and the transcript.
+        machine = _rect(page, "#chat-machine")
+        output = _rect(page, "#output")
+        assert machine["bottom"] == pytest.approx(output["top"], abs=1)
+
+        _open_file(page)
+        assert page.evaluate(_BORDER_JS, "#content-tab-bar") == border
+        machine = _rect(page, "#chat-machine")
+        tabs = _rect(page, "#content-tab-bar")
+        assert machine["top"] == pytest.approx(tabs["top"], abs=1)
+        assert machine["bottom"] == pytest.approx(tabs["bottom"], abs=1)
+        # The name sits at the shared row's vertical centre, in one
+        # line that still ellipsizes (a flex or grid strip would not).
+        text = page.evaluate(
+            """() => {
+              const el = document.getElementById('chat-machine');
+              const r = document.createRange();
+              r.selectNodeContents(el);
+              const t = r.getBoundingClientRect();
+              const b = el.getBoundingClientRect();
+              return {mid: (t.top + t.bottom) / 2 - (b.top + b.bottom) / 2,
+                      display: getComputedStyle(el).display,
+                      overflow: getComputedStyle(el).textOverflow};
+            }"""
+        )
+        assert abs(text["mid"]) <= 2
+        assert text["display"] == "block"
+        assert text["overflow"] == "ellipsis"
+    finally:
+        context.close()
+
+
 def test_click_in_the_pane_hides_the_panel_and_the_drawer_brings_it_back(browser, harness):
     context, page, _ = _open_page(browser, harness)
     try:
         _open_file(page)
         width = page.evaluate("innerWidth")
         height = page.evaluate("innerHeight")
+        # The open itself hid the panel: the drawer shows and brings it
+        # back.
+        page.wait_for_selector("body.meta-hidden", state="attached", timeout=5000)
+        assert page.locator("#meta-panel").get_attribute("inert") is not None
+        page.wait_for_function(
+            "getComputedStyle(document.getElementById('meta-drawer')).opacity === '1'",
+            timeout=5000,
+        )
+        _bring_panel_back(page)
+        assert page.locator("#meta-panel").get_attribute("inert") is None
         panel = _rect(page, "#meta-panel")
         content = _rect(page, "#content-tab-area")
         # The panel slides, it does not jump: a transform transition.
@@ -265,6 +349,7 @@ def test_a_click_inside_the_preview_frame_hides_the_panel_too(browser, harness):
     context, page, _ = _open_page(browser, harness)
     try:
         _open_file(page, "README.md")
+        _bring_panel_back(page)
         frame = _rect(page, _VIEW + ".content-html-frame")
         assert frame["width"] > 100 and frame["height"] > 100
         panel = _rect(page, "#meta-panel")

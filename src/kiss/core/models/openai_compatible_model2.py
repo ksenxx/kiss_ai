@@ -193,6 +193,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             except (httpx.TimeoutException, APITimeoutError) as err:
                 raise stop_or_stall_error(self._stream_stall_timeout) from err
         response = self.client.responses.create(**kwargs)
+        self._rejected_response = response  # billed; see _consume_stream
         self._raise_for_failed_response(response)
         content, tool_calls = self._parse_non_streaming(response)
         return content, tool_calls, response
@@ -1634,6 +1635,13 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 # user sees with flaky provider connections.
                 break
 
+        # The completed response is already billed: anything that raises
+        # from here on (the closing thinking callback, a failed status, a
+        # parse error, a token callback interrupted by a Stop, the
+        # caller's tool-call validation) must leave its usage for the
+        # agent's partial-usage drain.  The public generation methods
+        # clear the slot when they hand the response to their caller.
+        self._rejected_response = response
         self._close_thinking_if_open()
         if not saw_completed:
             raise KISSError(
@@ -1946,6 +1954,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 self.conversation.append(
                     {"role": "assistant", "content": content}
                 )
+            self._rejected_response = None
             return content, response
 
         raw_items = self._response_output_items_to_input_items(response)
@@ -1959,6 +1968,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 )
         else:
             self.conversation.append({"role": "assistant", "content": content})
+        self._rejected_response = None
         return content, response
 
     def generate_and_process_with_tools(
@@ -2149,6 +2159,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             {"name": tc.get("name", ""), "call_id": tc.get("id", "")}
             for tc in raw_tool_calls
         ]
+        self._rejected_response = None
         return function_calls, content, response
 
     def _generate_with_text_based_tools(
@@ -2226,6 +2237,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._pending_function_calls = [
             {"name": fc["name"], "call_id": fc["id"]} for fc in function_calls
         ]
+        self._rejected_response = None
         return function_calls, content, response
 
     def add_function_results_to_conversation_and_return(

@@ -145,13 +145,16 @@ def _last_assistant_blocks(messages: list[Any]) -> list[dict[str, Any]]:
 def cache_creation_tokens(usage: Any) -> tuple[int, int]:
     """Return the 5-minute and 1-hour cache-creation token counts.
 
-    Anthropic reports cache writes either split by TTL under
-    ``cache_creation`` or as a single aggregate.  An aggregate is
-    attributed to the one-hour bucket, the more expensive of the two, so
-    an unknown TTL is never under-billed.  The Claude Code CLI re-emits
-    exactly this shape as JSON, so :mod:`kiss.core.models.claude_code_model`
-    shares this parser — otherwise a change to Anthropic's cache tiers
-    would have to be made twice.
+    Anthropic reports cache writes split by TTL under ``cache_creation``
+    and as the aggregate ``cache_creation_input_tokens``.  Writes the
+    split does not cover — no split at all, or an aggregate the SDK
+    updated from a streamed ``message_delta`` while the ``message_start``
+    split stayed behind — are attributed to the one-hour bucket, the
+    more expensive of the two, so an unknown TTL is never under-billed.
+    The Claude Code CLI re-emits exactly this shape as JSON, so
+    :mod:`kiss.core.models.claude_code_model` shares this parser —
+    otherwise a change to Anthropic's cache tiers would have to be made
+    twice.
 
     Args:
         usage: The provider's usage record — an SDK object for the API
@@ -160,13 +163,14 @@ def cache_creation_tokens(usage: Any) -> tuple[int, int]:
     Returns:
         ``(cache_write_5m_tokens, cache_write_1h_tokens)``.
     """
+    five_m = one_h = 0
     cache_creation = _get_attr_or_key(usage, "cache_creation")
     if cache_creation is not None:
-        return (
-            _get_attr_or_key(cache_creation, "ephemeral_5m_input_tokens") or 0,
-            _get_attr_or_key(cache_creation, "ephemeral_1h_input_tokens") or 0,
-        )
-    return 0, _get_attr_or_key(usage, "cache_creation_input_tokens") or 0
+        five_m = _get_attr_or_key(cache_creation, "ephemeral_5m_input_tokens") or 0
+        one_h = _get_attr_or_key(cache_creation, "ephemeral_1h_input_tokens") or 0
+    total = _get_attr_or_key(usage, "cache_creation_input_tokens") or 0
+    one_h += max(0, total - five_m - one_h)
+    return five_m, one_h
 
 
 _THINKING_FAMILIES = ("opus", "sonnet", "haiku", "fable")

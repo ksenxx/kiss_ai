@@ -100,13 +100,30 @@
     return x.toPrecision(3) + units[ui];
   }
 
-  // Dollar cost with exactly two digits after the decimal point.
+  // Dollar cost with two digits after the decimal point, or four when
+  // the amount is positive but would round to $0.00: a cheap task's
+  // spend must not read as free (below $0.00005 it reads "<$0.0001").
   // Accepts numbers or server strings like "$0.4123"; non-numeric
   // values (e.g. "N/A") pass through untouched.
   function fmtCost(c) {
     const n = Number(String(c).replace(/[$,\s]/g, ''));
     if (!Number.isFinite(n)) return String(c);
+    if (n > 0 && n < 0.005)
+      return n < 0.00005 ? '<$0.0001' : '$' + n.toFixed(4);
     return '$' + n.toFixed(2);
+  }
+
+  // The cost a usage_info / result event carries, as a number: the exact
+  // `cost_usd` when the daemon sends it, else the parsed four-decimal
+  // `cost` string (older daemons), so a $0.000049 task is not shown as
+  // free.  null when the event carries no cost (missing, '' or 'N/A');
+  // an exact zero is a cost and is returned as 0.
+  function eventCost(ev) {
+    if (typeof ev.cost_usd === 'number' && Number.isFinite(ev.cost_usd))
+      return ev.cost_usd;
+    if (ev.cost == null || ev.cost === '') return null;
+    const n = Number(String(ev.cost).replace(/[$,\s]/g, ''));
+    return Number.isFinite(n) ? n : null;
   }
 
   function fmtElapsedMs(ms) {
@@ -328,7 +345,7 @@
    * Called when a task ends (task_done / task_error / task_stopped /
    * task_interrupted) and after the replay of a task that has ended:
    * every `.ev` / `.llm-panel` child of *root* -- tool calls and
-   * results, Thoughts, prompts, summaries, status lines -- moves, in
+   * results, Thinking, prompts, summaries, status lines -- moves, in
    * order, into the `.trajectory-sub` of one `.ev.trajectory`
    * panel standing where the first of them stood, so the transcript
    * reads as the task's text, its trajectory and its result.  Left
@@ -1362,7 +1379,7 @@
   function mkThoughtsPanel(ts) {
     const panel = mkEl('div', 'llm-panel');
     const hdr = mkEl('div', 'llm-panel-hdr');
-    hdr.textContent = 'Thoughts';
+    hdr.textContent = 'Thinking';
     addCollapse(panel, hdr, ts);
     panel.appendChild(hdr);
     stampPanelStart(panel, ts);
@@ -1900,9 +1917,10 @@
   // (#tab-list) holds the chat on screen with the sub-agents it
   // spawned, in tab order, and appears only when it has more than one
   // tab.  Where the chat and the files it opens share one surface (the
-  // mobile remote webapp, the VS Code sidebar chat), the strip also
-  // lists every open file, browser and terminal tab, and showing one
-  // of them replaces the chat (body.content-tab-open).  The desktop
+  // mobile remote webapp, the VS Code sidebar chat), showing a file,
+  // browser or terminal tab replaces the chat (body.content-tab-open).
+  // The strip lists these tabs on the mobile file screen or throughout
+  // the VS Code sidebar chat, but not on the mobile chat screen. The desktop
   // remote webapp SPLITS the window instead (splitLayout): the chat
   // pane on the left keeps the strip, and the content pane on the
   // right has its own tab row (#content-tab-list) with every content
@@ -1920,6 +1938,32 @@
   // pane is empty).  Stacked surfaces show a content tab as the active
   // tab instead; shownContentTabId() reads the one on screen either way.
   let activeContentTabId = null;
+
+  // The user folded the content pane away (#content-pane-hide, the
+  // button at the right end of its tab row): the chat alone fills #app
+  // while the content tabs stay open.  #content-pane-show on the
+  // chat's right edge unfolds it, as does the next content tab shown
+  // (showInContentPane).  Dropped when the last content tab closes.
+  // Remembered in localStorage across reloads, like the chat pane's
+  // share of the split (PANE_PCT_KEY): the browser tabs the daemon
+  // announces again after a reload (`browserTabs`, unfocused) come
+  // back behind the fold.
+  const CONTENT_PANE_FOLDED_KEY = 'kiss-content-pane-folded';
+  let contentPaneHidden = false;
+  try {
+    contentPaneHidden =
+      window.localStorage.getItem(CONTENT_PANE_FOLDED_KEY) === '1';
+  } catch {}
+
+  /** Record the fold, in memory and in localStorage. */
+  function storeContentPaneFold(hidden) {
+    if (contentPaneHidden === hidden) return;
+    contentPaneHidden = hidden;
+    try {
+      if (hidden) window.localStorage.setItem(CONTENT_PANE_FOLDED_KEY, '1');
+      else window.localStorage.removeItem(CONTENT_PANE_FOLDED_KEY);
+    } catch {}
+  }
 
   function shownContentTabId() {
     if (splitLayout()) return activeContentTabId;
@@ -1978,9 +2022,16 @@
       null;
     const group = new Set(shownRoot ? groupMembers(shownRoot) : []);
     const split = splitLayout();
-    // Content tabs have their own row in the split layout; a stacked
-    // surface lists every one of them on the strip, whoever opened it.
-    const members = tabs.filter(t => (t.isContentTab ? !split : group.has(t)));
+    // Desktop content tabs have their own row. On mobile they appear
+    // on the file screen, never in the chat header. VS Code's stacked
+    // surface keeps its combined strip.
+    const showContentTabs =
+      !split &&
+      (!document.body.classList.contains('remote-chat') ||
+        active?.isContentTab);
+    const members = tabs.filter(t =>
+      t.isContentTab ? showContentTabs : group.has(t),
+    );
 
     // Checked on <body> inline — not via EDITOR_TAB_MODE — so the
     // function stays self-contained.
@@ -2075,7 +2126,9 @@
     list.setAttribute('aria-label', 'Open files');
     list.innerHTML = '';
     const contentTabs = tabs.filter(t => t.isContentTab);
-    syncContentPaneOpen(split && contentTabs.length > 0);
+    const folded = split && contentTabs.length > 0 && contentPaneHidden;
+    document.body.classList.toggle('content-pane-folded', folded);
+    syncContentPaneOpen(split && contentTabs.length > 0 && !folded);
     if (!split) return;
     const rovingStopId = contentTabs.some(t => t.id === activeContentTabId)
       ? activeContentTabId
@@ -2471,6 +2524,67 @@
     else setMetaDrawerOpen(false);
   }
 
+  /**
+   * Split layout: fold the content pane away (the hide button at the
+   * right end of its tab row) or unfold it (the show tab on the chat's
+   * right edge).  Folded, the chat alone fills #app and the task-info
+   * panel docks beside it again; unfolded, the panel slides off the
+   * pane.  The content tabs stay open either way, and the next one
+   * shown unfolds the pane too (showInContentPane).
+   *
+   * @param {boolean} hidden True to fold the pane away.
+   */
+  function setContentPaneHidden(hidden) {
+    hidden = !!hidden;
+    if (contentPaneHidden === hidden) return;
+    // Nothing to fold without a content tab.
+    if (hidden && !tabs.some(t => t.isContentTab)) return;
+    storeContentPaneFold(hidden);
+    const hideBtn = document.getElementById('content-pane-hide');
+    const showBtn = document.getElementById('content-pane-show');
+    // Whether focus sat in the pane, read before the render hides it.
+    const ae = document.activeElement;
+    const inPane =
+      ae === hideBtn || !!(contentArea && ae && contentArea.contains(ae));
+    renderTabBar();
+    // Unfolded to be looked at: the task-info panel slides off the
+    // pane as it does for a tab opened into it (switchToTab).
+    if (!hidden) setMetaPanelHidden(true);
+    // Keyboard focus follows the control that is left: the show tab
+    // once the pane (and its hide button) is gone, the hide button
+    // once the show tab is.
+    if (hidden && inPane && showBtn) showBtn.focus();
+    else if (!hidden && ae === showBtn && hideBtn) hideBtn.focus();
+  }
+
+  // runstart-coverage:start
+  /**
+   * A task just started in the chat on screen: give the run the
+   * window.  Split layout: fold the content pane away, so the chat
+   * alone fills #app with the task-info panel docked beside it (the
+   * next content tab shown unfolds it).  The panel's sections are
+   * arranged for the run: Task Info and Task update expanded, the
+   * rest collapsed (showMetaSectionsForRun).  A VS Code chat surface
+   * tells the host (`taskStarted`): the secondary-sidebar chat view is
+   * maximized over the editor area, an editor-tab chat gets the Task
+   * Info view beside it, its sections arranged the same way through
+   * the host's `showForRun` (SorcarSidebarView._showChatForRun).
+   */
+  function showChatForRun() {
+    if (splitLayout()) setContentPaneHidden(true);
+    showMetaSectionsForRun();
+    if (POST_ACTIVE_TASK) postToHost({type: 'taskStarted'});
+  }
+  // runstart-coverage:end
+
+  function onContentPaneHideClick() {
+    setContentPaneHidden(true);
+  }
+
+  function onContentPaneShowClick() {
+    setContentPaneHidden(false);
+  }
+
   /** The window lost focus to a frame of the content pane: a press there. */
   function onWindowBlurIntoContentFrame() {
     const ae = document.activeElement;
@@ -2486,10 +2600,17 @@
   /**
    * Split layout: show *tab* in the content pane, or empty the pane
    * when *tab* is null.  The chat on screen is not touched.
+   *
+   * A tab put in the pane is there to be looked at, whoever put it
+   * (the user from the Explorer or a link, the agent, the successor of
+   * a closed tab, the restore on a return to the desktop layout): a
+   * folded pane unfolds and the docked task-info panel slides off it;
+   * the drawer tab brings the panel back (setMetaPanelHidden).
    */
   function showInContentPane(tab) {
     activeContentTabId = tab ? tab.id : null;
     if (tab) {
+      storeContentPaneFold(false);
       showContentTab(tab);
     } else {
       closeContentMenu();
@@ -2501,6 +2622,8 @@
       syncTerminalTabVisibility(null);
     }
     renderTabBar();
+    // After the render: the slide only takes with the pane open.
+    if (tab) setMetaPanelHidden(true);
   }
 
   // The chat pane's share of the split (percent of the chat + content
@@ -3051,6 +3174,9 @@
     }
     tabs.splice(idx, 1);
     disposeTabContentView(tab);
+    // The fold does not outlive the content tabs: the next tab opened,
+    // even in the background, shows the pane.
+    if (!tabs.some(t => t.isContentTab)) storeContentPaneFold(false);
     if (splitLayout() && activeContentTabId === tabId) {
       // Split layout: the content pane moves on to the nearest content
       // tab, or empties.
@@ -4171,7 +4297,12 @@
   function withContentContextMenu(html) {
     const api = window.ContentContextMenu;
     if (!api) return html;
-    const boot = api.contentContextMenuBootstrapHtml();
+    return withBodyEndScript(html, api.contentContextMenuBootstrapHtml());
+  }
+
+  // Insert *boot* (a <script>) before the last </body> of *html*, or
+  // at its end when there is none.
+  function withBodyEndScript(html, boot) {
     // The ORIGINAL string is searched case-insensitively: lower-casing is
     // not length preserving in Unicode (U+0130 becomes two UTF-16 units),
     // so an index taken from a lower-cased copy can land mid-tag.
@@ -4184,6 +4315,16 @@
     }
     if (at < 0) return html + boot;
     return html.slice(0, at) + boot + html.slice(at);
+  }
+
+  // The remote page's phone layout steps between its screens by
+  // swiping (see the mobilescreens block), and a preview iframe fills
+  // the file screen: the detector is shipped into it the same way as
+  // the menu, and reports its swipes to the parent by message.
+  function withMobileSwipe(html) {
+    const api = window.MobileSwipe;
+    if (!api || !document.body.classList.contains('remote-chat')) return html;
+    return withBodyEndScript(html, api.bootstrapHtml());
   }
 
   // The menu belongs to read-only content surfaces only — the tab that
@@ -4298,7 +4439,7 @@
     iframe.setAttribute('sandbox', 'allow-scripts');
     if (saveKeyBridge) html = withContentSaveKeyBridge(html || '');
     // ctxmenu-coverage:start
-    iframe.srcdoc = withContentContextMenu(html);
+    iframe.srcdoc = withMobileSwipe(withContentContextMenu(html));
     // ctxmenu-coverage:end
     view.appendChild(iframe);
     return iframe;
@@ -4611,7 +4752,11 @@
         renderContentView(existing, ev);
       }
       if (reloading) existing.contentReloadRequested = false;
-      if (shownContentTabId() === existing.id) showContentTab(existing);
+      // In the split layout a file opened to be seen goes through the
+      // pane even when it is the one shown there: the pane may be
+      // folded away or under the task-info panel (showInContentPane).
+      if (mayFocus && splitLayout()) switchToTab(existing.id);
+      else if (shownContentTabId() === existing.id) showContentTab(existing);
       else if (mayFocus) switchToTab(existing.id);
       return;
     }
@@ -5778,7 +5923,7 @@
   // started, and the bodies below share the rest.  The LAST expanded
   // section's body always fills the leftover height.  Every expanded
   // body keeps a minimum height (main.css: half an equal share, at
-  // most 4rem) so a dragged body never leaves the sections below it
+  // most 4.5rem) so a dragged body never leaves the sections below it
   // as headers over 0px bodies; applyMetaSectionLayout publishes the
   // equal share as --meta-body-share on the panel.  Collapse state
   // and dragged heights persist in localStorage; every section starts
@@ -5899,6 +6044,23 @@
       /* storage unavailable: the choice lasts for this page only */
     }
     applyMetaSectionLayout();
+  }
+
+  /** The sections a task start expands (ids); every other one folds. */
+  const RUN_START_SECTIONS = ['meta-section-info', 'meta-info'];
+
+  /**
+   * A task just started: expand Task Info and Task update and collapse
+   * every other section, so the panel shows the run's figures and its
+   * report.  The choice persists like a click on the chevrons; the
+   * user folds or unfolds sections again as they like.
+   */
+  function showMetaSectionsForRun() {
+    for (const section of metaSections())
+      setMetaSectionCollapsed(
+        section,
+        !RUN_START_SECTIONS.includes(section.id),
+      );
   }
 
   /**
@@ -6184,7 +6346,7 @@
       } else if (state.updatedAt) {
         status = 'Updated ' + shortClockTime(state.updatedAt);
         const cost = Number(state.cost);
-        if (cost > 0) status += ' \u00b7 $' + cost.toFixed(2);
+        if (cost > 0) status += ' \u00b7 ' + fmtCost(cost);
       } else if (firstDueAt) {
         status = 'First update at ' + shortClockTime(firstDueAt);
       }
@@ -7585,6 +7747,13 @@
       workDir: workDir || sidebarWorkDir(),
       tabId: activeTabId,
     });
+    closeMetaDrawerForContent();
+  }
+
+  /** The phone layout's task-info drawer closes so a content tab
+   *  opened from it (Explorer, Source Control) is visible; the docked
+   *  desktop panel stays. */
+  function closeMetaDrawerForContent() {
     if (!document.body.classList.contains('remote-desktop'))
       setMetaDrawerOpen(false);
   }
@@ -10175,6 +10344,9 @@
     );
   }
 
+  /** Ask the daemon for a commit's patch, a file at a commit or a diff
+   *  (gitShow); the reply opens as a content tab (handleGitShow), so
+   *  the phone drawer closes as it does for a file. */
   function sendGitShow(request, target) {
     const at = target || gitTarget();
     const token = nextSidebarToken('show');
@@ -10189,6 +10361,7 @@
       tabId: at.tabId,
       token: token,
     });
+    closeMetaDrawerForContent();
   }
 
   function handleGitActionResult(ev) {
@@ -13580,7 +13753,7 @@
 
   /**
    * True for a panel that no automatic pass ever folds or hides: a
-   * Thoughts panel (`llm-panel`, the agent's words), a message the
+   * Thinking panel (`llm-panel`, the agent's words), a message the
    * user typed into the running task (`user-msg`), a `/ask` answer
    * (an `ask_answer` event) or an ask_user_question "Question" panel.
    * The user's response is a separate `user-msg` panel.
@@ -13590,7 +13763,7 @@
    * is loaded on: not the streaming sweep (collapseOlderPanels), not a
    * replay or share export (collapseAllExceptResult), not the
    * finished-task digest (applyChevronState), and a `summary` tool call
-   * leaves them out of the panels it adopts -- except the Thoughts
+   * leaves them out of the panels it adopts -- except the Thinking
    * panels, which the summary does fold (it recounts those very
    * steps). Otherwise only the user folds them, by their header.
    *
@@ -13785,7 +13958,7 @@
       fmtTokens(ev.total_tokens || 0) +
       '</b></span>' +
       '<span>Cost <b class="rs-cost">' +
-      esc(fmtCost(ev.cost || 'N/A')) +
+      esc(eventCost(ev) == null ? 'N/A' : fmtCost(eventCost(ev))) +
       '</b></span>' +
       '</div></div><div class="rc-body md-body' +
       (usePre ? ' pre' : '') +
@@ -14224,7 +14397,7 @@
     if (t !== 'usage_info' && t !== 'result') tState.resultPanelEl = null;
     switch (t) {
       // The model's thinking tokens stream as plain text straight into
-      // the Thoughts panel (a dim `.think` block, no header or box of
+      // the Thinking panel (a dim `.think` block, no header or box of
       // its own), followed by its words (`.txt`).
       case 'thinking_start':
         tState.thinkEl = mkEl('div', 'think');
@@ -14514,14 +14687,18 @@
           const sub = mkEl('div', 'summary-sub');
           const adopt = [];
           const preserve = [];
+          // The digest reaches back to the previous summary, or failing
+          // that to the task panel heading the run (or a result card /
+          // Trajectory panel of an earlier task): the run's first
+          // summary therefore folds its System Prompt and Prompt panels
+          // too, and the transcript above the digest holds only the
+          // task's own text.
           let sib = c.previousElementSibling;
           while (sib) {
             if (
               sib.dataset.summaryPreserved ||
               sib.classList.contains('tc-summary') ||
               sib.classList.contains('trajectory') ||
-              sib.classList.contains('prompt') ||
-              sib.classList.contains('system-prompt') ||
               sib.classList.contains('task-panel') ||
               sib.classList.contains('adjacent-task') ||
               sib.classList.contains('rc')
@@ -14532,13 +14709,16 @@
               !sib.classList.contains('llm-panel')
             )
               break;
-            // A Thoughts panel always belongs in the digest, even when
+            // A Thinking panel always belongs in the digest, even when
             // its Markdown shows a picture: the summary stands for the
-            // steps it recounts, their thoughts included.  Other media
-            // panels, questions and messages remain expanded siblings
-            // after the summary.
+            // steps it recounts, their thoughts included.  So do the
+            // System Prompt and Prompt panels, pictures or not.  Other
+            // media panels, questions and messages remain expanded
+            // siblings after the summary.
             if (
               !sib.classList.contains('llm-panel') &&
+              !sib.classList.contains('prompt') &&
+              !sib.classList.contains('system-prompt') &&
               (panelShowsMedia(sib) || panelStaysOpen(sib))
             )
               preserve.push(sib);
@@ -14740,8 +14920,8 @@
         tState.resultPanelEl = target.lastElementChild;
         if (statusTokens && ev.total_tokens)
           statusTokens.textContent = 'Tokens: ' + fmtTokens(ev.total_tokens);
-        if (statusBudget && ev.cost && ev.cost !== 'N/A')
-          statusBudget.textContent = 'Cost: ' + fmtCost(ev.cost);
+        if (statusBudget && eventCost(ev) != null)
+          statusBudget.textContent = 'Cost: ' + fmtCost(eventCost(ev));
         if (ev.step_count) updateStepCount(ev.step_count);
         break;
       }
@@ -14761,7 +14941,11 @@
           if (pending.length) el = pending[pending.length - 1];
         }
         const fresh = !el;
-        if (fresh) el = mkEl('div', 'ev ' + cls);
+        // The panel starts folded: while the task runs the transcript
+        // shows its header and a one-line preview, and a click unfolds
+        // it.  A pending early panel the user unfolded keeps its state
+        // when the authoritative text replaces its body.
+        if (fresh) el = mkEl('div', 'ev ' + cls + ' collapsed');
         const body =
           typeof marked !== 'undefined'
             ? kissSanitize(marked.parse(ev.text || ''))
@@ -14784,6 +14968,7 @@
         }
         el.dataset.rawText = ev.text || '';
         addCollapse(el, el.querySelector('.' + cls + '-h'), ev.ts);
+        collapsePreview(el);
         hlBlock(el);
         if (fresh) target.appendChild(el);
         const bodyEl = el.querySelector('.' + cls + '-body');
@@ -14803,11 +14988,14 @@
         break;
       }
       case 'usage_info': {
-        if (ev.total_tokens != null && ev.cost != null) {
+        if (
+          ev.total_tokens != null &&
+          (ev.cost != null || ev.cost_usd != null)
+        ) {
           if (statusTokens)
             statusTokens.textContent = 'Tokens: ' + fmtTokens(ev.total_tokens);
-          if (statusBudget && ev.cost !== 'N/A')
-            statusBudget.textContent = 'Cost: ' + fmtCost(ev.cost);
+          if (statusBudget && eventCost(ev) != null)
+            statusBudget.textContent = 'Cost: ' + fmtCost(eventCost(ev));
           if (statusSteps && ev.total_steps != null)
             statusSteps.textContent = 'Steps: ' + ev.total_steps;
           // Spend folded after the run's terminal result (the pre-run
@@ -14822,8 +15010,8 @@
             const tokensEl = panel.querySelector('.rs-tokens');
             if (tokensEl) tokensEl.textContent = fmtTokens(ev.total_tokens);
             const costEl = panel.querySelector('.rs-cost');
-            if (costEl && ev.cost !== 'N/A')
-              costEl.textContent = fmtCost(ev.cost);
+            if (costEl && eventCost(ev) != null)
+              costEl.textContent = fmtCost(eventCost(ev));
           }
         } else {
           updateUsageMetrics(ev.text || '');
@@ -15078,7 +15266,7 @@
     }
     if (t === 'result') {
       // A failure's result follows the last tool_result directly, so the
-      // Thoughts panel opened on spec above is still empty: withdraw it
+      // Thinking panel opened on spec above is still empty: withdraw it
       // rather than seal it into the transcript.
       if (ctx.llmPanel && ctx.llmPanel._provisional)
         discardProvisionalPanel(ctx.llmPanel);
@@ -15827,16 +16015,21 @@
   function composerFocusWouldSteal() {
     const active = document.activeElement;
     if (active && active !== inp && isTextEntry(active)) return true;
+    if (sheetOrModalOpen()) return true;
+    if (document.querySelector('.kiss-notification-input')) return true;
+    return false;
+  }
+
+  /** Whether a sheet (settings / promptlets), the work-dir panel or
+   *  the server-reset confirm is open over the page. */
+  function sheetOrModalOpen() {
     if (openSheets.length) return true;
     const workdirPanel = document.getElementById('workdir-panel');
     if (workdirPanel && workdirPanel.classList.contains('open')) return true;
-    if (
+    return Boolean(
       serverResetConfirmModal &&
-      serverResetConfirmModal.classList.contains('open')
-    )
-      return true;
-    if (document.querySelector('.kiss-notification-input')) return true;
-    return false;
+      serverResetConfirmModal.classList.contains('open'),
+    );
   }
 
   /**
@@ -16592,6 +16785,21 @@
             pauseActivePanels(phaseHome);
           }
         }
+        // runstart-coverage:start
+        // A task that just STARTED in a chat tab gives the run the
+        // window (showChatForRun). Not a tab catching up on a run
+        // already going — the daemon marks those `attached` (a
+        // reload's replay, a history open: server.py
+        // _broadcast_viewer_running) — not a repeated running status,
+        // and not a sub-agent's start.
+        const justStarted =
+          !!evTab &&
+          !!ev.running &&
+          !ev.attached &&
+          !evTab.isRunning &&
+          !evTab.isContentTab &&
+          !evTab.isSubagentTab;
+        // runstart-coverage:end
         if (evTab) {
           evTab.statusKnown = true;
           setTabRunning(evTab, !!ev.running);
@@ -16664,6 +16872,9 @@
         // finishing must not: the launch already brought them to it, and the
         // result they were brought to see is the last thing to pull them off.
         if (ev.running) switchToLatestRunningTab();
+        // runstart-coverage:start
+        if (justStarted && evTab.id === activeTabId) showChatForRun();
+        // runstart-coverage:end
         break;
       }
       case 'models':
@@ -16817,6 +17028,12 @@
         // The host relays the ACTIVE chat editor panel's task-info
         // values; only the Task Info view renders them.
         if (META_PANEL_MODE) renderMetaState(ev);
+        break;
+      case 'showForRun':
+        // The host relays a task start in the ACTIVE chat editor panel
+        // (its `taskStarted`); only the Task Info view arranges its
+        // sections for the run, like an in-page panel does itself.
+        if (META_PANEL_MODE) showMetaSectionsForRun();
         break;
       case 'refreshTaskUpdate':
         // The host relays the Task Info view's refresh button to the
@@ -17097,7 +17314,6 @@
         const hasTaskId =
           ev.taskId !== undefined && ev.taskId !== null && ev.taskId !== '';
         const ocTab = chatId ? getTabByBackendChatId(chatId) : null;
-        if (ocTab && ev.onlyIfMissing) break;
         const ocLeft = getTab(activeTabId);
         if (ocTab) {
           switchToTab(ocTab.id);
@@ -20220,18 +20436,18 @@
         hideAC();
       }
     });
-    function toggleHistorySidebar() {
-      if (sidebar.classList.contains('open')) {
-        closeSidebar(true);
-      } else {
-        sidebar.classList.add('open');
-        if (!document.body.classList.contains('remote-desktop')) {
-          sidebarOverlay.classList.add('open');
-        }
-        requestHistoryFromStart();
-        // The drawer may have missed task news while closed.
-        refreshSidebarDataViews(false);
+    function openHistorySidebar() {
+      sidebar.classList.add('open');
+      if (!document.body.classList.contains('remote-desktop')) {
+        sidebarOverlay.classList.add('open');
       }
+      requestHistoryFromStart();
+      // The drawer may have missed task news while closed.
+      refreshSidebarDataViews(false);
+    }
+    function toggleHistorySidebar() {
+      if (sidebar.classList.contains('open')) closeSidebar(true);
+      else openHistorySidebar();
     }
     if (menuBtn) {
       menuBtn.addEventListener('click', toggleHistorySidebar);
@@ -20365,6 +20581,16 @@
     if (metaDrawer) {
       metaDrawer.addEventListener('click', () => setMetaPanelHidden(false));
     }
+    // The hide button at the right end of the pane's tab row folds the
+    // pane away; the show tab on the chat's right edge unfolds it.
+    const contentPaneHide = document.getElementById('content-pane-hide');
+    if (contentPaneHide) {
+      contentPaneHide.addEventListener('click', onContentPaneHideClick);
+    }
+    const contentPaneShow = document.getElementById('content-pane-show');
+    if (contentPaneShow) {
+      contentPaneShow.addEventListener('click', onContentPaneShowClick);
+    }
     if (metaPanel && metaDrawerBtn) {
       // Escape dismisses the open mobile drawer like any dialog; the
       // docked desktop panel never carries `open`, so this never fires
@@ -20377,6 +20603,127 @@
         setMetaDrawerOpen(false);
       });
     }
+    // mobilescreens-coverage:start
+    // ---- The phone layout's four screens, swiped left and right ------
+    //
+    // Below the desktop breakpoint the remote page's four side-by-side
+    // panes become four screens in the same left-to-right order: the
+    // chats (the history drawer), the chat, the open file (a content
+    // tab shown in place of the chat) and the task info (the right
+    // drawer).  A swipe moves one screen in the finger's direction; the
+    // file screen is skipped while no content tab is open.  The screen
+    // on view is read from the drawers and the active tab, so the
+    // buttons that open the drawers and the tab strip stay in step
+    // with the gesture.
+    const SCREEN_CHATS = 0;
+    const SCREEN_CHAT = 1;
+    const SCREEN_FILE = 2;
+    const SCREEN_INFO = 3;
+
+    /** The mobile screen on view now. */
+    function mobileScreen() {
+      if (sidebar.classList.contains('open')) return SCREEN_CHATS;
+      if (metaPanel && metaPanel.classList.contains('open')) {
+        return SCREEN_INFO;
+      }
+      const active = getTab(activeTabId);
+      return active && active.isContentTab ? SCREEN_FILE : SCREEN_CHAT;
+    }
+
+    /** The content tab the file screen shows: the active one, else the
+     *  file viewed last, else the first open one; null when none. */
+    function mobileFileTab() {
+      const active = getTab(activeTabId);
+      if (active && active.isContentTab) return active;
+      const last = getTab(lastViewedContentTabId);
+      if (last && last.isContentTab) return last;
+      return tabs.find(t => t.isContentTab) || null;
+    }
+
+    /** Put *screen* (a SCREEN_* constant) on view. */
+    function showMobileScreen(screen) {
+      if (screen === SCREEN_CHATS) {
+        setMetaDrawerOpen(false);
+        openHistorySidebar();
+        return;
+      }
+      closeSidebar(true);
+      if (screen === SCREEN_INFO) {
+        setMetaDrawerOpen(true);
+        return;
+      }
+      setMetaDrawerOpen(false);
+      const active = getTab(activeTabId);
+      if (screen === SCREEN_FILE) {
+        const file = mobileFileTab();
+        if (file && file !== active) switchToTab(file.id);
+        return;
+      }
+      if (!active || !active.isContentTab) return;
+      const chat = rootChatTab(active) || tabs.find(t => !t.isContentTab);
+      if (chat) switchToTab(chat.id);
+    }
+
+    /** A swipe in *direction* ('left' / 'right') on the phone layout:
+     *  one screen along, skipping the file screen when no content tab
+     *  is open.  A sheet or modal over the page keeps the gesture. */
+    function onMobileSwipe(direction) {
+      if (splitLayout() || sheetOrModalOpen()) return;
+      const step = direction === 'left' ? 1 : -1;
+      let next = mobileScreen() + step;
+      if (next === SCREEN_FILE && !mobileFileTab()) next += step;
+      if (next < SCREEN_CHATS || next > SCREEN_INFO) return;
+      showMobileScreen(next);
+    }
+
+    /** The sideways scroll offsets of the open Monaco editors: an
+     *  editor scrolls through transforms, so mobileSwipe.js cannot tell
+     *  from the DOM that a drag scrolled it. */
+    function editorScrollLefts() {
+      const lefts = [];
+      tabs.forEach(t => {
+        const editor = t.contentEditor;
+        if (!editor) return;
+        // A diff tab (renderDiffContent) holds a diff editor: two code
+        // editors, each scrolling on its own.
+        const sides = editor.getModifiedEditor
+          ? [editor.getOriginalEditor(), editor.getModifiedEditor()]
+          : [editor];
+        sides.forEach(side => lefts.push(side.getScrollLeft()));
+      });
+      return lefts;
+    }
+
+    /** Whether *win* is the preview iframe of the content tab on
+     *  screen: the only iframe whose swipe messages count (a page
+     *  rendered in a hidden tab, or anything else, cannot turn the
+     *  screens). */
+    function isShownPreviewWindow(win) {
+      const tab = getTab(shownContentTabId());
+      const view = tab && tab.contentViewEl;
+      const frame = view && view.querySelector('iframe.content-html-frame');
+      return Boolean(frame && win && frame.contentWindow === win);
+    }
+
+    /** A swipe reported by the preview iframe (withMobileSwipe). */
+    function onPreviewSwipeMessage(e) {
+      const direction = e.data && e.data.kissMobileSwipe;
+      if (direction !== 'left' && direction !== 'right') return;
+      if (!isShownPreviewWindow(e.source)) return;
+      onMobileSwipe(direction);
+    }
+
+    if (document.body.classList.contains('remote-chat') && window.MobileSwipe) {
+      window.MobileSwipe.install(document, onMobileSwipe, {
+        // The composer has its own swipes (accept the ghost suggestion,
+        // cycle the prompt history); the streamed browser screen
+        // forwards drags to the remote page.
+        ignore: '#task-input, .browser-view',
+        scrollPositions: editorScrollLefts,
+      });
+      window.addEventListener('message', onPreviewSwipeMessage);
+    }
+    // mobilescreens-coverage:end
     setupWorkspaceViews();
     setupWorkDirPanel();
     applyRemoteTheme(getSavedRemoteTheme());
@@ -20883,8 +21230,12 @@
         requestHistory(historyOffset);
       }
     });
+    // A click on a file link of a transcript (a span promoteFileLink
+    // stamped) opens the file.  Only those: the folder picker's rows
+    // and the "Working directory" panel's recent list carry their
+    // folder in data-path too, and have click handlers of their own.
     document.addEventListener('click', e => {
-      const el = e.target.closest('[data-path]');
+      const el = e.target.closest('.kiss-filelink[data-path]');
       if (el && el.dataset.path) {
         const raw = el.dataset.path;
         const msg = {
@@ -21895,13 +22246,16 @@
     );
   }
 
+  // The "Show details" chevron of a task panel and of a chat panel.
+  const SIDEBAR_COLLAPSE_SVG =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+
   function makeSidebarCollapseToggle(itemDiv, session) {
     const key = historyCollapseKey(session);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'sidebar-item-collapse';
-    btn.innerHTML =
-      '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+    btn.innerHTML = SIDEBAR_COLLAPSE_SVG;
     const applyCollapseState = () => {
       const collapsed = !historyExpandedTaskKeys.has(key);
       itemDiv.classList.toggle('collapsed', collapsed);
@@ -22216,9 +22570,10 @@
 
   /**
    * Whether *group* renders collapsed: the user's explicit choice when
-   * there is one, otherwise collapsed unless a task of the chat is
-   * running — or a history search is active, whose matches must not
-   * hide behind closed headers.
+   * there is one, otherwise collapsed — a task starting in the chat,
+   * or the chat coming on screen, never unfolds a panel on its own.
+   * A history search is the exception: its matches must not hide
+   * behind closed headers.
    */
   function historyGroupCollapsed(group) {
     // An active search overrides even the user's saved choice: its
@@ -22226,13 +22581,7 @@
     // search. A collapse made DURING the search is honoured (kept on
     // the element only, dropped when the search text changes).
     if (historySearchActive()) return group._kissSearchCollapsed === true;
-    if (group._kissCollapsed !== undefined) return group._kissCollapsed;
-    if (group.dataset.hasRunning === '1') return false;
-    // The chat the user is looking at stays open like a running one:
-    // its highlighted task row must be in view, not behind a header.
-    return !(
-      historyActiveChatId && group.dataset.chatId === historyActiveChatId
-    );
+    return group._kissCollapsed !== false;
   }
 
   /**
@@ -22261,9 +22610,10 @@
 
   /**
    * Adopt *chatId* / *taskId* as the task the user is looking at and
-   * repaint the history list: the chat's panel opens (unless the user
-   * folded it), the task's row takes the highlight and scrolls into
-   * view.  Returns false when nothing changed.
+   * repaint the history list: the chat's panel and the task's row take
+   * the highlight, and the row (or, in a folded panel, the chat's
+   * header) scrolls into view.  The fold state is untouched: only the
+   * user folds or unfolds a panel.  Returns false when nothing changed.
    */
   function setHistoryActiveTask(chatId, taskId) {
     if (chatId === historyActiveChatId && taskId === historyActiveTaskId) {
@@ -22272,19 +22622,6 @@
     historyActiveChatId = chatId;
     historyActiveTaskId = taskId;
     historyActiveScrollPending = true;
-    // Moving to a chat the user once folded unfolds it: the fold
-    // predates the move, and the row to show sits inside.  A fold
-    // made WHILE looking at the chat stands until the next move.
-    if (chatId) {
-      historyChatCollapseOverrides.delete(chatId);
-      historySearchCollapseOverrides.delete(chatId);
-      const group = historyChatGroups.get(chatId);
-      if (group) {
-        delete group._kissCollapsed;
-        delete group._kissSearchCollapsed;
-      }
-    }
-    reapplyAllHistoryGroupCollapse(false);
     applyHistoryActiveTask();
     return true;
   }
@@ -22323,12 +22660,19 @@
 
   /**
    * Paint the highlight on the row of the task the user is looking at
-   * and, when a scroll is pending (the task changed, or the list was
-   * rebuilt — a rebuild lands at the top), bring the row into view: the
-   * row itself, or its chat's header when the user folded that panel.
-   * Called after every history render and on every change of the task.
+   * and on its chat's panel, and, when a scroll is pending (the task
+   * changed, or the list was rebuilt — a rebuild lands at the top),
+   * bring the row into view: the row itself, or its chat's header
+   * while that panel is folded.  Called after every history render
+   * and on every change of the task.
    */
   function applyHistoryActiveTask() {
+    historyChatGroups.forEach((group, chatId) => {
+      group.classList.toggle(
+        'history-active-chat',
+        !!historyActiveChatId && chatId === historyActiveChatId,
+      );
+    });
     const target = historyActiveRow();
     historyRenderedRows.forEach(row => {
       row.classList.toggle('history-active-task', row === target);
@@ -22378,14 +22722,25 @@
       });
   }
 
-  /** Repaint *group*'s collapsed class and its header's ARIA state. */
+  /**
+   * Repaint *group*'s collapsed class and its "Show details" chevron
+   * (tooltip, label and ARIA state), as a task panel's chevron reads.
+   * The header carries no tooltip (neither data-tooltip nor title):
+   * its one line of text is the whole of what it shows.
+   */
   function applyHistoryGroupCollapsed(group) {
     const collapsed = historyGroupCollapsed(group);
     group.classList.toggle('collapsed', collapsed);
-    // The header carries no tooltip (neither data-tooltip nor title):
-    // its one line of text is the whole of what it shows.
-    const btn = group.querySelector(':scope > .history-chat-header');
-    if (btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    const btn = group.querySelector(
+      ':scope > .history-chat-header .history-chat-collapse',
+    );
+    if (!btn) return;
+    btn.dataset.tooltip = collapsed ? 'Show details' : 'Hide details';
+    btn.setAttribute(
+      'aria-label',
+      collapsed ? "Show the chat's tasks" : "Hide the chat's tasks",
+    );
+    btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
   }
 
   /**
@@ -22423,7 +22778,12 @@
         .split('\n')
         .map(l => l.trim())
         .filter(Boolean)[0] || 'Untitled';
-    if (titleEl.textContent !== text) titleEl.textContent = text;
+    if (titleEl.textContent === text) return;
+    titleEl.textContent = text;
+    // The title alone names the header for screen readers: without the
+    // label the name would run on into the chevron's and the "last
+    // launched" line's text.
+    titleEl.parentElement.setAttribute('aria-label', text);
   }
 
   /**
@@ -22433,7 +22793,9 @@
    * yet summarised) the line follows the newest row loaded so far.
    */
   function updateHistoryGroupLaunched(group, session) {
-    const line = group.querySelector(':scope > .history-chat-launched');
+    const line = group.querySelector(
+      ':scope > .history-chat-header .history-chat-launched',
+    );
     if (!line) return;
     const stamped = Number(session.chat_last_launched || 0);
     const rowMs = taskLaunchMs(session);
@@ -22521,21 +22883,18 @@
    * A task with nothing to resume is shown read-only in a fresh tab.
    *
    * @param {Object} s The history row from the daemon.
-   * @param {boolean} onlyIfMissing Leave a tab already bound to the
-   *   chat as it is (the host does the same for its editor panels):
-   *   an expanded history panel only wants the chat on screen. The
-   *   chat is then always resumed by id, even for a task without
-   *   persisted events: a read-only tab would bind to no chat, so the
-   *   next expand could not tell the chat is on screen already.
+   * @param {boolean} wholeChat The click was on the CHAT's panel (its
+   *   row *s* is the chat's last task): the chat is always resumed by
+   *   id, even when that task has no persisted events — a read-only
+   *   tab would bind to no chat, so a second click could not find the
+   *   chat on screen.
    */
-  function openHistoryTask(s, onlyIfMissing) {
+  function openHistoryTask(s, wholeChat) {
     // The task text goes to the read-only task panel only.  #task-input
     // holds the user's own draft for the NEXT prompt and is never written.
     const taskText = s.preview || s.title || '';
     const existingChatTab = getTabByBackendChatId(s.id);
-    if (onlyIfMissing && existingChatTab) return;
-    const resumable =
-      !!s.id && (s.has_events || s.is_running || !!onlyIfMissing);
+    const resumable = !!s.id && (s.has_events || s.is_running || !!wholeChat);
     // Editor-tabs mode: a chat that is not THIS panel's belongs in
     // its own editor tab. The host either reveals the panel already
     // bound to the chat or opens a new one that resumes it.
@@ -22546,7 +22905,6 @@
         taskId:
           s.task_id === undefined || s.task_id === null ? null : s.task_id,
         title: taskText,
-        onlyIfMissing: !!onlyIfMissing,
       });
       return;
     }
@@ -22586,19 +22944,16 @@
     }
   }
 
-  /** Build the collapsible chat panel's clickable header. */
-  function historyGroupHeader(group, chatId) {
+  /**
+   * The chat panel's "Show details" chevron: the same control a task
+   * panel carries, here unfolding the chat's task panels underneath.
+   * It is the only thing that folds or unfolds the panel.
+   */
+  function historyGroupDetailsToggle(group, chatId) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'history-chat-header';
-    // No fixed aria-label: the title span (chat summary or first task)
-    // IS the button's accessible name, so screen readers can tell the
-    // chats apart (aria-expanded carries the toggle state).
-    btn.innerHTML =
-      '<svg class="history-chat-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
-    const titleEl = document.createElement('span');
-    titleEl.className = 'history-chat-title';
-    btn.appendChild(titleEl);
+    btn.className = 'sidebar-item-collapse history-chat-collapse';
+    btn.innerHTML = SIDEBAR_COLLAPSE_SVG;
     btn.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
@@ -22613,14 +22968,53 @@
         if (chatId) historyChatCollapseOverrides.set(chatId, collapsed);
       }
       applyHistoryGroupCollapsed(group);
-      // Expanding a chat's panel also brings the chat on screen: its
-      // last task is loaded in a tab unless a tab already shows the
-      // chat (the panel stays open so the tasks remain in view).
-      if (!collapsed && group._kissLastSession) {
-        openHistoryTask(group._kissLastSession, true);
-      }
     });
     return btn;
+  }
+
+  /**
+   * Build the chat panel's header, laid out like a task panel: the
+   * chat's title (behind its last task's status icon) on the first
+   * line, then the action strip with the "Show details" chevron and
+   * the "last launched ... ago" label.  Clicking the header brings
+   * the chat on screen (its last task, as a task row click does);
+   * it never folds the panel.
+   */
+  function historyGroupHeader(group, chatId) {
+    const header = document.createElement('div');
+    header.className = 'history-chat-header';
+    header.tabIndex = 0;
+    header.setAttribute('role', 'button');
+    // The title (chat summary or first task) becomes the header's
+    // aria-label as it is painted (updateHistoryGroupHeader), so screen
+    // readers can tell the chats apart.
+    const titleEl = document.createElement('span');
+    titleEl.className = 'history-chat-title';
+    header.appendChild(titleEl);
+    const actions = document.createElement('div');
+    actions.className = 'sidebar-item-actions history-chat-actions';
+    actions.appendChild(historyGroupDetailsToggle(group, chatId));
+    // After the chevron: when the chat's latest task was launched
+    // (filled by updateHistoryGroupLaunched).
+    const launched = document.createElement('span');
+    launched.className = 'history-chat-launched';
+    actions.appendChild(launched);
+    header.appendChild(actions);
+    header.addEventListener('keydown', e => {
+      if (e.target !== header) return;
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        header.click();
+      }
+    });
+    header.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (!group._kissLastSession) return;
+      openHistoryTask(group._kissLastSession, true);
+      closeSidebar();
+    });
+    return header;
   }
 
   function historyGroupFor(session) {
@@ -22645,11 +23039,6 @@
     // The chat's latest task time decides its day bucket.
     group.dataset.ts = String(ts);
     group.appendChild(historyGroupHeader(group, chatId));
-    // The line under the header: when the chat's latest task was
-    // launched (filled by updateHistoryGroupLaunched).
-    const launched = document.createElement('div');
-    launched.className = 'history-chat-launched';
-    group.appendChild(launched);
     const body = document.createElement('div');
     body.className = 'history-chat-body';
     group.appendChild(body);
@@ -23103,6 +23492,7 @@
     let focusCtrlClass = '';
     let focusCtrlNth = -1;
     let focusHeaderChatId = '';
+    let focusHeaderChevron = false;
     if (offset === 0) {
       // A refresh that returns exactly what is already on screen keeps
       // the existing DOM.  `tasks_updated` broadcasts arrive whenever
@@ -23170,8 +23560,9 @@
       // action stays under Space/Enter after the rebuild (the control
       // is identified by its first class among same-class siblings).
       const active = document.activeElement;
-      // A focused chat-panel header survives the rebuild too: its
-      // group is found again by chat id after the fresh render.
+      // A focused chat-panel header (or its Show details chevron)
+      // survives the rebuild too: its group is found again by chat id
+      // after the fresh render.
       const activeHeader =
         active && active.closest
           ? active.closest('#history-list .history-chat-header')
@@ -23179,6 +23570,7 @@
       if (activeHeader) {
         const headerGroup = activeHeader.closest('.history-chat-group');
         focusHeaderChatId = (headerGroup && headerGroup.dataset.chatId) || '';
+        focusHeaderChevron = active.classList.contains('history-chat-collapse');
       }
       const activeRow =
         active && active.closest
@@ -23418,11 +23810,9 @@
         );
         body.insertBefore(div, before || null);
         updateHistoryGroupLastTask(group, s);
-        if (s.is_running && group.dataset.hasRunning !== '1') {
-          // A running task keeps its chat's panel open by default.
-          group.dataset.hasRunning = '1';
-          applyHistoryGroupCollapsed(group);
-        }
+        // A running task puts its chat in the Running section
+        // (historyItemRunning); it does not unfold the chat's panel.
+        if (s.is_running) group.dataset.hasRunning = '1';
       }
       historyRenderedRows.push(div);
     });
@@ -23448,12 +23838,17 @@
         target.focus({preventScroll: true});
       }
     } else if (focusHeaderChatId) {
-      // Likewise for a focused chat-panel header: focus the fresh
-      // header of the same chat so Space/Enter keeps toggling it.
+      // Likewise for a focused chat-panel header or its chevron: focus
+      // the same control of the same chat's fresh header so Space/Enter
+      // keeps doing what it did.
       const headerGroup = historyChatGroups.get(focusHeaderChatId);
       const headerBtn =
         headerGroup &&
-        headerGroup.querySelector(':scope > .history-chat-header');
+        headerGroup.querySelector(
+          focusHeaderChevron
+            ? ':scope > .history-chat-header .history-chat-collapse'
+            : ':scope > .history-chat-header',
+        );
       if (headerBtn) headerBtn.focus({preventScroll: true});
     }
   }

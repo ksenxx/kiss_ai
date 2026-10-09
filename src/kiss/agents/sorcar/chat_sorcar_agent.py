@@ -524,6 +524,7 @@ class ChatSorcarAgent(SorcarAgent):
             "text": result_summary or "(no result)",
             "total_tokens": tokens,
             "cost": f"${cost:.4f}",
+            "cost_usd": cost,
             "step_count": steps,
         }
         parsed = parse_result_yaml(result_raw) if result_raw else None
