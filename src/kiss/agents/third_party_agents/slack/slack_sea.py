@@ -499,11 +499,39 @@ class SlackChannelBackend(ToolMethodBackend):
     """
 
     def __init__(self, workspace: str = "default") -> None:
-        self._client: WebClient | None = None
+        self._client_obj: WebClient | None = None
+        self._lazy_muse: bool = False
+        self._wire_lock = threading.Lock()
         self._bot_user_id: str = ""
         self._connection_info: str = ""
         self._workspace = workspace
         self._api_base_url: str = _api_base()
+
+    def _wire_deferred(self) -> None:
+        """Build the client :class:`SlackAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of building the client at
+        construction, so building it for its tool list (``sea lint``,
+        ``sea docs``, run start) touches no daemon.  Concurrent first
+        requests wait on the lock and share the one client (and its
+        vault surrogate); with no credential the client stays None and
+        no request leaves.
+        """
+        if self._client_obj is not None or not self._lazy_muse:
+            return
+        with self._wire_lock:
+            if self._client_obj is None:
+                self._client_obj = _make_client(self._workspace, self._api_base_url)
+
+    @property
+    def _client(self) -> WebClient | None:
+        """The Slack Web API client, built on first use when deferred; None without a credential."""
+        self._wire_deferred()
+        return self._client_obj
+
+    @_client.setter
+    def _client(self, client: WebClient | None) -> None:
+        self._client_obj = client
 
     def connect(self) -> bool:
         """Authenticate with Slack using the stored user token.
@@ -1201,13 +1229,29 @@ class SlackAgent(BaseChannelAgent):
     def __init__(self, workspace: str = "default") -> None:
         super().__init__("Slack Agent", workspace=workspace)
         self._backend = SlackChannelBackend(workspace=workspace)
-        # Muse-auth mode: the client holds only a vault surrogate; the
-        # real token never enters this process once migrated.
-        self._backend._client = _make_client(workspace, self._backend._api_base_url)
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        if muse_auth_enabled():
+            # Muse-auth mode: the client holds only a vault surrogate,
+            # minted on first use (see SlackChannelBackend._client); the
+            # real token never enters this process once migrated.
+            self._backend._lazy_muse = True
+            return
+        self._backend._client = _legacy_client(workspace, self._backend._api_base_url)
 
     def _is_authenticated(self) -> bool:
-        """Return True if a Slack client is configured."""
-        return self._backend._client is not None
+        """Return True if a Slack client is built, or a credential is in the vault or token file."""
+        backend = self._backend
+        if backend._client_obj is not None:
+            return True
+        if not backend._lazy_muse:
+            return False
+        from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
+
+        return (
+            vault_has_credentials(_muse_service(self.workspace))
+            or _load_config(self.workspace) is not None
+        )
 
     def _get_auth_tools(self) -> list:
         """Return Slack authentication tool functions."""

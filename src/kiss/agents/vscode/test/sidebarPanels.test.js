@@ -3,14 +3,15 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// End-to-end tests for the right sidebar's Schedule, Apps and Spend
+// End-to-end tests for the right sidebar's Schedule, Apps, Spend and Recommendations
 // subpanels (the sidebarpanels block of media/main.js), on every
 // surface that shows the panel (remote webapp, sidebar-chat drawer,
 // editor-tabs Task Info view) and the ones that must stay quiet (chat
 // editor panels, the history panel):
 //
-// * boot and a daemon (re)connect request getCronJobs + getAppsStatus
-//   + getSpendReport; the poll timer starts on the first reply, once,
+// * boot and a daemon (re)connect request getCronJobs + getMachines +
+//   getAppsStatus + getSpendReport + getRecommendations; the poll
+//   timer starts on the first reply, once,
 //   and skips hidden pages;
 // * spendReport replies render the all-time line, the daily heatmap
 //   (Monday-first week columns back to the oldest day, at least 98
@@ -193,11 +194,61 @@ const APPS = [
   {name: 'brave', label: 'Brave Search', authenticated: true, error: ''},
 ];
 
+const MACHINES = [
+  {
+    name: 'laptop',
+    address: 'https://10.0.0.5:8787',
+    ip: '10.0.0.5',
+    port: 8787,
+    local: true,
+    status: 'reachable',
+    error: '',
+  },
+  {
+    name: 'gpu-box',
+    address: 'ssh me@gpu',
+    ip: '10.0.0.9',
+    port: 41234,
+    local: false,
+    status: 'reachable',
+    error: '',
+  },
+  {
+    name: 'office',
+    address: 'ssh me@office',
+    ip: 'office',
+    port: 0,
+    local: false,
+    status: 'unreachable',
+    error: 'office: ssh exited',
+  },
+];
+
 function appRows(win) {
   return Array.from(win.document.querySelectorAll('#meta-apps-list .app-row'));
 }
 
-const PANEL_COMMANDS = ['getCronJobs', 'getAppsStatus', 'getSpendReport'];
+const PANEL_COMMANDS = [
+  'getCronJobs',
+  'getMachines',
+  'getAppsStatus',
+  'getSpendReport',
+  'getRecommendations',
+];
+
+function recommendationRows(win) {
+  return Array.from(
+    win.document.querySelectorAll('#meta-recommendations-list .recommendation-row'),
+  );
+}
+
+const FIVE_TASKS = [
+  'Fix the failing parser test in parser.py',
+  'Add a changelog entry for /recommendations',
+  'Run the full test suite in /home/me/proj',
+  'Review the open pull request on the cron scheduler',
+  'Document the sidebar panels in README.md',
+];
 
 /** "YYYY-MM-DD" of the local day *daysAgo* days before today. */
 function dayKey(daysAgo) {
@@ -274,16 +325,23 @@ async function main() {
     ['sidebar-chat drawer', SIDEBAR],
     ['Task Info view', META_VIEW],
   ]) {
-    await test(`${label}: boot requests the three subpanels; the poll starts on the first reply`, () => {
+    await test(`${label}: boot requests the five subpanels; the poll starts on the first reply`, () => {
       const {win, posted, intervals} = makeWebview(attrs);
       const boot = posted.filter(m => PANEL_COMMANDS.includes(m.type));
       eq(boot, [
         {type: 'getCronJobs'},
+        {type: 'getMachines'},
         {type: 'getAppsStatus'},
         {type: 'getSpendReport'},
+        {type: 'getRecommendations'},
       ]);
       assert.strictEqual(el(win, 'meta-apps-status').textContent, 'Checking\u2026');
+      assert.strictEqual(el(win, 'meta-machines-status').textContent, 'Checking\u2026');
       assert.strictEqual(el(win, 'meta-spend-status').textContent, 'Loading\u2026');
+      assert.strictEqual(
+        el(win, 'meta-recommendations-status').textContent,
+        'Loading\u2026',
+      );
       const polls = () => intervals.filter(i => i.ms === 30000);
       assert.strictEqual(polls().length, 0, 'no poll before the daemon answers');
       send(win, {type: 'cronJobs', jobs: []});
@@ -376,6 +434,315 @@ async function main() {
     );
     assert.match(subs[0], /^every 5m \u00b7 next Sun, Sep 27, 5:00\s?AM PDT \(/);
     assert.match(subs[1], /^every 5m \u00b7 next Tue, Dec 1, 9:00\s?AM PST \(/);
+  });
+
+  await test('Schedule rows: edit, run now, pause / resume, copy and delete buttons', () => {
+    const {win, posted} = makeWebview(REMOTE);
+    send(win, {
+      type: 'cronJobs',
+      jobs: [
+        job({id: 'a', name: 'Digest'}),
+        job({id: 'b', name: 'Backup', kind: 'command', what: 'rsync', running: true}),
+        job({id: 'c', name: 'Old', enabled: false}),
+      ],
+    });
+    const rows = Array.from(el(win, 'meta-schedule-list').children);
+    const labels = r =>
+      Array.from(r.querySelectorAll('.sidebar-panel-row-top > button')).map(
+        b => b.getAttribute('aria-label'),
+      );
+    eq(labels(rows[0]), [
+      'Edit the job',
+      'Run the job now',
+      'Disable the job',
+      'Copy the scheduled task to clipboard',
+      'Delete the job',
+    ]);
+    eq(labels(rows[1]), [
+      'Edit the job',
+      'Run the job now',
+      'Disable the job',
+      'Copy the scheduled command to clipboard',
+      'Delete the job',
+    ]);
+    assert.strictEqual(labels(rows[2])[2], 'Enable the job');
+    const button = (r, label) => r.querySelector(`[aria-label="${label}"]`);
+    assert.ok(button(rows[1], 'Run the job now').disabled, 'a running job cannot be run again');
+    assert.ok(!button(rows[0], 'Run the job now').disabled);
+    posted.length = 0;
+    button(rows[0], 'Run the job now').click();
+    button(rows[0], 'Disable the job').click();
+    button(rows[2], 'Enable the job').click();
+    eq(posted, [
+      {type: 'cronAction', action: 'run_now', jobId: 'a'},
+      {type: 'cronAction', action: 'pause', jobId: 'a'},
+      {type: 'cronAction', action: 'resume', jobId: 'c'},
+    ]);
+    // Delete is a two-step inline confirm: the trash icon only reveals
+    // Delete / Cancel; Cancel posts nothing, Delete posts the removal.
+    posted.length = 0;
+    const del = button(rows[0], 'Delete the job');
+    del.click();
+    const confirm = rows[0].querySelector('.sidebar-item-confirm');
+    assert.strictEqual(confirm.style.display, '');
+    assert.strictEqual(del.style.display, 'none');
+    confirm.querySelector('.sidebar-confirm-no').click();
+    eq(posted, []);
+    assert.strictEqual(confirm.style.display, 'none');
+    del.click();
+    confirm.querySelector('.sidebar-confirm-yes').click();
+    eq(posted, [{type: 'cronAction', action: 'remove', jobId: 'a'}]);
+    // The reply to an action carries an error when the daemon refused
+    // it: shown on the status line, cleared by the next clean reply.
+    send(win, {type: 'cronJobs', jobs: [job({id: 'a'})], error: 'job is already running'});
+    const status = el(win, 'meta-schedule-status');
+    assert.strictEqual(status.textContent, 'job is already running');
+    assert.ok(status.classList.contains('is-error'));
+    send(win, {type: 'cronJobs', jobs: [job({id: 'a'})]});
+    assert.strictEqual(status.textContent, '');
+    assert.ok(!status.classList.contains('is-error'));
+  });
+
+  await test('Schedule rows: the edit button opens an in-place editor that saves or cancels', () => {
+    const {win, posted} = makeWebview(REMOTE);
+    const jobs = [
+      job({id: 'a', name: 'Digest', schedule: '0 9 * * *', what: 'summarize'}),
+      job({id: 'b', name: 'Backup', kind: 'command', what: 'rsync'}),
+    ];
+    send(win, {type: 'cronJobs', jobs});
+    const list = el(win, 'meta-schedule-list');
+    const edit = r => r.querySelector('[aria-label="Edit the job"]');
+    edit(list.children[0]).click();
+    let form = list.children[0].querySelector('form.sidebar-inline-form');
+    assert.ok(form, 'the editor sits under its row');
+    eq(
+      Array.from(form.querySelectorAll('.sidebar-inline-form-label')).map(l => l.textContent),
+      ['Name', 'Schedule', 'Task'],
+    );
+    assert.strictEqual(form.elements.name.value, 'Digest');
+    assert.strictEqual(form.elements.schedule.value, '0 9 * * *');
+    assert.strictEqual(form.elements.what.value, 'summarize');
+    assert.strictEqual(form.elements.what.tagName, 'TEXTAREA');
+    assert.strictEqual(win.document.activeElement, form.elements.name);
+    // A second edit click (or one on another row) opens one editor at a time.
+    edit(list.children[1]).click();
+    assert.strictEqual(list.querySelectorAll('form').length, 1);
+    form = list.children[1].querySelector('form');
+    assert.strictEqual(
+      form.querySelectorAll('.sidebar-inline-form-label')[2].textContent,
+      'Command',
+    );
+    // Cancel (the button, or Escape anywhere in the form) closes it.
+    form.querySelector('.sidebar-confirm-no').click();
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+    assert.strictEqual(win.document.activeElement, list.children[1]);
+    edit(list.children[0]).click();
+    form = list.querySelector('form');
+    form.elements.schedule.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
+    );
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+    // Save posts the update; Enter in an input saves, Enter in the
+    // textarea does not (Ctrl+Enter does).
+    edit(list.children[0]).click();
+    form = list.querySelector('form');
+    form.elements.name.value = 'Morning digest';
+    form.elements.schedule.value = 'every 2h';
+    form.elements.what.value = 'summarize my email';
+    posted.length = 0;
+    form.elements.what.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
+    );
+    eq(posted, []);
+    form.elements.what.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: 'Enter', ctrlKey: true, bubbles: true}),
+    );
+    const update = {
+      type: 'cronAction',
+      action: 'update',
+      jobId: 'a',
+      name: 'Morning digest',
+      schedule: 'every 2h',
+      what: 'summarize my email',
+    };
+    eq(posted, [update]);
+    posted.length = 0;
+    form.elements.schedule.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
+    );
+    eq(posted, [update]);
+    posted.length = 0;
+    form.querySelector('.sidebar-inline-form-save').click();
+    eq(posted, [update]);
+    // A refused update re-opens the editor with the typed values; the
+    // periodic poll (no action) and another row's action keep it too,
+    // with whatever was typed meanwhile; the reply acknowledging the
+    // update closes it.
+    send(win, {type: 'cronJobs', jobs, action: 'update', error: "schedule 'every 2h' never fires"});
+    form = list.children[0].querySelector('form');
+    assert.ok(form, 'the editor is back under its row');
+    assert.strictEqual(form.elements.name.value, 'Morning digest');
+    assert.strictEqual(form.elements.what.value, 'summarize my email');
+    assert.strictEqual(el(win, 'meta-schedule-status').textContent, "schedule 'every 2h' never fires");
+    form.elements.schedule.value = 'every 3h';
+    send(win, {type: 'cronJobs', jobs});
+    form = list.children[0].querySelector('form');
+    assert.ok(form, 'a poll keeps the editor open');
+    assert.strictEqual(form.elements.schedule.value, 'every 3h', 'with the draft');
+    send(win, {type: 'cronJobs', jobs, action: 'pause', error: ''});
+    assert.ok(list.children[0].querySelector('form'), "another row's action keeps it");
+    send(win, {type: 'cronJobs', jobs, action: 'update', error: ''});
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+    // A poll with no editor open changes nothing.
+    send(win, {type: 'cronJobs', jobs});
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+  });
+
+  await test('Schedule: the header + opens an in-place form that schedules a job', () => {
+    const {win, posted} = makeWebview(REMOTE);
+    const jobs = [
+      job({id: 'a', name: 'Digest', schedule: '0 9 * * *', what: 'summarize'}),
+      job({id: 'b', name: 'Backup', kind: 'command', what: 'rsync'}),
+    ];
+    send(win, {type: 'cronJobs', jobs: []});
+    assert.match(
+      el(win, 'meta-schedule-status').textContent,
+      /^No scheduled jobs\. Click \+ to schedule one/,
+      'the empty hint points at the +',
+    );
+    send(win, {type: 'cronJobs', jobs});
+    const list = el(win, 'meta-schedule-list');
+    const addBtn = el(win, 'meta-schedule-add');
+    assert.strictEqual(addBtn.getAttribute('aria-label'), 'Add job');
+    assert.strictEqual(
+      addBtn.closest('.meta-section-hdr'),
+      el(win, 'meta-schedule-refresh').closest('.meta-section-hdr'),
+      'the + sits in the Schedule header, next to the refresh button',
+    );
+    const topForm = () =>
+      list.firstElementChild.classList.contains('sched-add-row')
+        ? list.firstElementChild.querySelector('form.sidebar-inline-form')
+        : null;
+    const labels = form =>
+      Array.from(form.querySelectorAll('.sidebar-inline-form-label')).map(l => l.textContent);
+    addBtn.click();
+    let form = topForm();
+    assert.ok(form, 'the form opens at the top of the list');
+    assert.strictEqual(list.children.length, 3, 'above the two rows');
+    eq(labels(form), ['Name', 'Schedule', 'Run', 'Task']);
+    assert.strictEqual(form.elements.kind.tagName, 'SELECT');
+    eq(
+      Array.from(form.elements.kind.options).map(o => [o.value, o.textContent]),
+      [['prompt', 'A task (an LLM prompt)'], ['command', 'A shell command']],
+    );
+    assert.strictEqual(form.elements.kind.value, 'prompt');
+    assert.strictEqual(form.elements.what.tagName, 'TEXTAREA');
+    assert.strictEqual(win.document.activeElement, form.elements.name);
+    // Picking a shell command relabels the task field.
+    form.elements.kind.value = 'command';
+    form.elements.kind.dispatchEvent(new win.Event('change', {bubbles: true}));
+    eq(labels(form), ['Name', 'Schedule', 'Run', 'Command']);
+    form.elements.kind.value = 'prompt';
+    form.elements.kind.dispatchEvent(new win.Event('change', {bubbles: true}));
+    eq(labels(form), ['Name', 'Schedule', 'Run', 'Task']);
+    // One form at a time: a second press replaces it, blank; a row's
+    // edit button closes it (and the + closes an open editor).
+    form.elements.name.value = 'typed';
+    addBtn.click();
+    assert.strictEqual(list.querySelectorAll('form').length, 1);
+    form = topForm();
+    assert.strictEqual(form.elements.name.value, '');
+    list.children[1].querySelector('[aria-label="Edit the job"]').click();
+    assert.strictEqual(list.querySelectorAll('form').length, 1);
+    assert.strictEqual(topForm(), null, 'the add row is gone');
+    assert.ok(list.children[0].querySelector('form'), 'the editor is open');
+    addBtn.click();
+    assert.strictEqual(list.querySelectorAll('form').length, 1);
+    assert.ok(topForm(), 'the add form replaced the editor');
+    // Cancel closes it and returns the focus to the +.
+    form = topForm();
+    form.querySelector('.sidebar-confirm-no').click();
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+    assert.strictEqual(list.children.length, 2);
+    assert.strictEqual(win.document.activeElement, addBtn);
+    // Save posts a create with the kind; Enter in an input saves too.
+    addBtn.click();
+    form = topForm();
+    form.elements.name.value = 'Nightly';
+    form.elements.schedule.value = 'every 1d';
+    form.elements.kind.value = 'command';
+    form.elements.what.value = 'echo night';
+    posted.length = 0;
+    form.elements.schedule.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
+    );
+    const create = {
+      type: 'cronAction',
+      action: 'create',
+      name: 'Nightly',
+      schedule: 'every 1d',
+      what: 'echo night',
+      kind: 'command',
+    };
+    eq(posted, [create]);
+    posted.length = 0;
+    form.querySelector('.sidebar-inline-form-save').click();
+    eq(posted, [create]);
+    // A refused create re-opens the form, at the top, with the typed
+    // values (the kind included); the periodic poll and another job's
+    // action keep it, with whatever was typed meanwhile; the reply
+    // acknowledging the create (the job listed) closes it.
+    send(win, {type: 'cronJobs', jobs, action: 'create', error: 'duplicate: job a'});
+    form = topForm();
+    assert.ok(form, 'the form is back at the top');
+    assert.strictEqual(form.elements.kind.value, 'command');
+    assert.strictEqual(form.elements.what.value, 'echo night');
+    eq(labels(form), ['Name', 'Schedule', 'Run', 'Command'], 'relabelled for the kind');
+    assert.strictEqual(el(win, 'meta-schedule-status').textContent, 'duplicate: job a');
+    form.elements.name.value = 'Nightly 2';
+    send(win, {type: 'cronJobs', jobs});
+    form = topForm();
+    assert.ok(form, 'a poll keeps the form open');
+    assert.strictEqual(form.elements.name.value, 'Nightly 2', 'with the draft');
+    send(win, {type: 'cronJobs', jobs, action: 'pause', error: ''});
+    assert.ok(topForm(), "another job's action keeps it");
+    const created = jobs.concat([job({id: 'c', name: 'Nightly 2', kind: 'command', what: 'echo night'})]);
+    posted.length = 0;
+    topForm().querySelector('.sidebar-inline-form-save').click();
+    assert.strictEqual(posted[0].name, 'Nightly 2', 'the retry sends the draft');
+    send(win, {type: 'cronJobs', jobs: created, action: 'create', error: ''});
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+    assert.strictEqual(list.children.length, 3);
+    // A create acknowledged after the + already opened a fresh form
+    // (its own create still pending, or never sent) leaves that form
+    // and its draft alone; only the form that sent the create closes.
+    addBtn.click();
+    form = topForm();
+    form.elements.name.value = 'Weekly';
+    form.elements.schedule.value = 'every 7d';
+    form.elements.what.value = 'report';
+    form.querySelector('.sidebar-inline-form-save').click();
+    addBtn.click();
+    form = topForm();
+    form.elements.name.value = 'Fresh';
+    send(win, {type: 'cronJobs', jobs: created, action: 'create', error: ''});
+    form = topForm();
+    assert.ok(form, "an earlier form's acknowledgment keeps the fresh form");
+    assert.strictEqual(form.elements.name.value, 'Fresh', 'with its draft');
+    assert.strictEqual(list.querySelectorAll('form').length, 1);
+    form.elements.schedule.value = 'every 2d';
+    form.elements.what.value = 'f';
+    form.querySelector('.sidebar-inline-form-save').click();
+    send(win, {type: 'cronJobs', jobs: created, action: 'create', error: 'nope'});
+    form = topForm();
+    assert.ok(form, 'its refused create re-opens it');
+    assert.strictEqual(form.elements.name.value, 'Fresh');
+    send(win, {type: 'cronJobs', jobs: created, action: 'create', error: ''});
+    assert.ok(topForm(), 'a stray acknowledgment after the refusal keeps it');
+    form = topForm();
+    form.querySelector('.sidebar-inline-form-save').click();
+    send(win, {type: 'cronJobs', jobs: created, action: 'create', error: ''});
+    assert.strictEqual(list.querySelectorAll('form').length, 0, 'its own closes it');
   });
 
   for (const [label, attrs] of [
@@ -500,6 +867,165 @@ async function main() {
     assert.match(rule, /overflow: hidden/);
   });
 
+  await test('Machines: rows show the status, the name, a local badge, the tooltip and the buttons', async () => {
+    const {win, posted} = makeWebview(REMOTE);
+    const copied = [];
+    Object.defineProperty(win.navigator, 'clipboard', {
+      value: {writeText: t => (copied.push(t), Promise.resolve())},
+      configurable: true,
+    });
+    send(win, {type: 'machines', machines: 'bogus', checkedAt: 0});
+    assert.strictEqual(el(win, 'meta-machines-status').textContent, 'No machines.');
+    assert.strictEqual(el(win, 'meta-machines-list').children.length, 0);
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+    assert.strictEqual(el(win, 'meta-machines-status').textContent, '');
+    const rows = Array.from(el(win, 'meta-machines-list').children);
+    assert.strictEqual(rows.length, 3);
+    const name = r => r.querySelector('.sidebar-panel-name').textContent;
+    const sub = r => r.querySelector('.sidebar-panel-sub').textContent;
+    const dot = r => r.querySelector('.machine-status');
+    eq(rows.map(name), ['laptop', 'gpu-box', 'office']);
+    assert.strictEqual(rows[0].querySelector('.sidebar-panel-badge').textContent, 'local');
+    assert.strictEqual(rows[1].querySelector('.sidebar-panel-badge'), null);
+    assert.ok(dot(rows[0]).classList.contains('reachable'));
+    assert.strictEqual(dot(rows[0]).getAttribute('aria-label'), 'reachable');
+    assert.ok(dot(rows[2]).classList.contains('unreachable'));
+    assert.ok(rows[2].classList.contains('unreachable'));
+    assert.strictEqual(sub(rows[0]), 'https://10.0.0.5:8787 \u00b7 reachable');
+    assert.strictEqual(sub(rows[2]), 'ssh me@office \u00b7 unreachable');
+    assert.strictEqual(rows[0].dataset.tooltip, 'IP 10.0.0.5 \u00b7 port 8787');
+    assert.strictEqual(rows[1].dataset.tooltip, 'IP 10.0.0.9 \u00b7 port 41234');
+    assert.strictEqual(
+      rows[2].dataset.tooltip,
+      'IP office \u00b7 port none (tunnel closed)\n\noffice: ssh exited',
+    );
+    const labels = r =>
+      Array.from(r.querySelectorAll('.sidebar-panel-row-top > button')).map(
+        b => b.getAttribute('aria-label'),
+      );
+    eq(labels(rows[1]), [
+      'Copy the machine address to clipboard',
+      'Delete the machine',
+    ]);
+    assert.strictEqual(
+      rows[1].querySelector('[aria-label="Add a machine"]'),
+      null,
+      'a row has no add button: the header has the one +',
+    );
+    const button = (r, label) => r.querySelector(`[aria-label="${label}"]`);
+    const localDel = button(rows[0], 'Delete the machine');
+    assert.ok(localDel.disabled, 'the local machine cannot be deleted');
+    assert.strictEqual(localDel.dataset.tooltip, 'The local machine cannot be deleted');
+    assert.ok(!button(rows[1], 'Delete the machine').disabled);
+    button(rows[1], 'Copy the machine address to clipboard').click();
+    await new Promise(r => setTimeout(r, 0));
+    eq(copied, ['ssh me@gpu']);
+    posted.length = 0;
+    button(rows[1], 'Delete the machine').click();
+    rows[1].querySelector('.sidebar-confirm-yes').click();
+    eq(posted, [{type: 'machineAction', action: 'remove', name: 'gpu-box'}]);
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 2, error: "no machine named 'gpu-box'"});
+    const status = el(win, 'meta-machines-status');
+    assert.strictEqual(status.textContent, "no machine named 'gpu-box'");
+    assert.ok(status.classList.contains('is-error'));
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 3});
+    assert.strictEqual(status.textContent, '');
+    assert.ok(!status.classList.contains('is-error'));
+  });
+
+  await test('Machines: the header + opens an in-place form that registers a machine', () => {
+    const {win, posted} = makeWebview(REMOTE);
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+    const list = el(win, 'meta-machines-list');
+    const addBtn = el(win, 'meta-machines-add');
+    assert.strictEqual(addBtn.getAttribute('aria-label'), 'Add machine');
+    assert.ok(
+      addBtn.closest('.meta-section-hdr'),
+      'the + sits in the Machines header',
+    );
+    const topForm = () =>
+      list.firstElementChild.classList.contains('machine-add-row')
+        ? list.firstElementChild.querySelector('form.sidebar-inline-form')
+        : null;
+    addBtn.click();
+    let form = topForm();
+    assert.ok(form, 'the form opens at the top of the list');
+    assert.strictEqual(list.children.length, 4, 'above the three rows');
+    eq(
+      Array.from(form.querySelectorAll('.sidebar-inline-form-label')).map(l => l.textContent),
+      ['Name', 'Address', 'Password'],
+    );
+    assert.strictEqual(form.elements.password.type, 'password');
+    assert.strictEqual(win.document.activeElement, form.elements.name);
+    // One form at a time: a second press replaces it.
+    form.elements.name.value = 'typed';
+    addBtn.click();
+    assert.strictEqual(list.querySelectorAll('form').length, 1);
+    form = topForm();
+    assert.strictEqual(form.elements.name.value, '');
+    form.querySelector('.sidebar-confirm-no').click();
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+    assert.strictEqual(list.children.length, 3);
+    assert.strictEqual(win.document.activeElement, addBtn);
+    addBtn.click();
+    form = topForm();
+    form.elements.name.value = 'lab';
+    form.elements.address.value = 'https://lab.example.org:8787';
+    form.elements.password.value = 'pw';
+    posted.length = 0;
+    form.elements.address.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
+    );
+    const addCmd = {
+      type: 'machineAction',
+      action: 'add',
+      name: 'lab',
+      address: 'https://lab.example.org:8787',
+      password: 'pw',
+    };
+    eq(posted, [addCmd]);
+    // A refused add re-opens the form, at the top, with the typed
+    // values; the periodic poll keeps it (with the draft); the reply
+    // acknowledging the add (the machine registered) closes it.
+    send(win, {
+      type: 'machines', machines: MACHINES, checkedAt: 2, action: 'add', error: 'lab: unreachable',
+    });
+    form = topForm();
+    assert.ok(form, 'the form is back at the top');
+    assert.strictEqual(form.elements.address.value, 'https://lab.example.org:8787');
+    assert.strictEqual(el(win, 'meta-machines-status').textContent, 'lab: unreachable');
+    form.elements.name.value = 'lab2';
+    send(win, {type: 'machines', machines: MACHINES.slice(0, 2), checkedAt: 3});
+    form = topForm();
+    assert.ok(form, 'a poll keeps the form open');
+    assert.strictEqual(form.elements.name.value, 'lab2', 'with the draft');
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 4, action: 'add', error: ''});
+    assert.strictEqual(list.querySelectorAll('form').length, 0);
+  });
+
+  await test('Machines: the chat header lists the reachable ones and a pick is per tab', () => {
+    const {win, posted} = makeWebview(REMOTE);
+    const select = el(win, 'chat-machine');
+    send(win, {type: 'configData', config: {}, machine: 'laptop'});
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+    eq(
+      Array.from(select.options).map(o => o.value),
+      ['', 'gpu-box'],
+      'this machine, then the reachable registered ones',
+    );
+    const pick = value => {
+      select.value = value;
+      select.dispatchEvent(new win.Event('change', {bubbles: true}));
+    };
+    pick('gpu-box');
+    assert.ok(select.classList.contains('remote'));
+    pick('');
+    assert.ok(!select.classList.contains('remote'));
+    posted.length = 0;
+    select.dispatchEvent(new win.Event('focus'));
+    eq(types(posted), ['getMachines'], 'reaching for the list asks for a fresh one');
+  });
+
   await test('Apps: connected first, status line, buttons for the rest, failure hint', () => {
     const {win} = makeWebview(REMOTE);
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1790000000000});
@@ -540,22 +1066,44 @@ async function main() {
     btn.click();
     eq(posted, [
       {type: 'getCronJobs'},
+      {type: 'getMachines'},
       {type: 'getAppsStatus', refresh: true},
       {type: 'getSpendReport'},
+      {type: 'getRecommendations'},
     ]);
     assert.ok(btn.disabled && btn.classList.contains('spinning'));
     posted.length = 0;
     el(win, 'meta-spend-refresh').click();
     eq(posted, [{type: 'getSpendReport'}]);
+    posted.length = 0;
+    const recBtn = el(win, 'meta-recommendations-refresh');
+    recBtn.click();
+    eq(posted, [{type: 'getRecommendations'}]);
+    assert.ok(recBtn.disabled && recBtn.classList.contains('spinning'));
+    send(win, {type: 'recommendations', generatedAt: 0, tasks: []});
+    assert.ok(!recBtn.disabled && !recBtn.classList.contains('spinning'));
+    recBtn.click();
+    send(win, {type: 'daemonStatus', connected: false});
+    assert.ok(!recBtn.disabled, 'a dropped connection stops the recommendations spin');
+    posted.length = 0;
+    const machinesBtn = el(win, 'meta-machines-refresh');
+    machinesBtn.click();
+    eq(posted, [{type: 'getMachines', refresh: true}]);
+    assert.ok(machinesBtn.disabled && machinesBtn.classList.contains('spinning'));
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
     assert.ok(!btn.disabled && !btn.classList.contains('spinning'));
-    // A dropped connection never answers: the button recovers.
+    assert.ok(machinesBtn.disabled, 'an apps reply does not stop the machines spin');
+    send(win, {type: 'machines', machines: [], checkedAt: 1});
+    assert.ok(!machinesBtn.disabled && !machinesBtn.classList.contains('spinning'));
+    // A dropped connection never answers: the buttons recover.
     btn.click();
+    machinesBtn.click();
     send(win, {type: 'daemonStatus', connected: false});
     assert.ok(!btn.disabled && !btn.classList.contains('spinning'));
+    assert.ok(!machinesBtn.disabled && !machinesBtn.classList.contains('spinning'));
   });
 
-  await test('a daemon (re)connect requests the three subpanels again', () => {
+  await test('a daemon (re)connect requests the five subpanels again', () => {
     const {win, posted} = makeWebview(REMOTE);
     posted.length = 0;
     send(win, {type: 'daemonStatus', connected: true});
@@ -877,6 +1425,102 @@ async function main() {
     assert.ok(posted[0].pendingText.startsWith('Connect my Matrix app'));
   });
 
+  await test('Recommendations: the empty state shows a hint; rows show the sentences and when they were suggested', () => {
+    const {win} = makeWebview(REMOTE);
+    const status = () => el(win, 'meta-recommendations-status').textContent;
+    send(win, {type: 'recommendations', generatedAt: 0, tasks: []});
+    assert.match(status(), /^No recommendations yet: \/recommendations now/);
+    assert.strictEqual(recommendationRows(win).length, 0);
+    // A malformed reply (no list, blank entries) is the empty state too.
+    send(win, {type: 'recommendations', tasks: 'bogus'});
+    assert.match(status(), /^No recommendations yet/);
+    send(win, {type: 'recommendations', generatedAt: 1, tasks: ['', '  ', null]});
+    assert.match(status(), /^No recommendations yet/);
+
+    const generatedAt = Date.now() - 23 * 60000;
+    send(win, {
+      type: 'recommendations',
+      generatedAt,
+      tasks: [' ' + FIVE_TASKS[0] + ' ', ...FIVE_TASKS.slice(1)],
+    });
+    assert.strictEqual(status(), 'Suggested 23m ago');
+    const rows = recommendationRows(win);
+    eq(rows.map(r => r.textContent), FIVE_TASKS);
+    eq(rows.map(r => r.dataset.task), FIVE_TASKS);
+    for (const row of rows) {
+      assert.strictEqual(row.tabIndex, 0);
+      assert.strictEqual(row.dataset.tooltip, 'Open a new chat with this task');
+      assert.ok(row.querySelector('.sidebar-panel-name'));
+    }
+    // A reply without a time shows the rows and no status line.
+    send(win, {type: 'recommendations', tasks: FIVE_TASKS.slice(0, 2)});
+    assert.strictEqual(status(), '');
+    assert.strictEqual(recommendationRows(win).length, 2);
+    // A later empty reply clears the rows again.
+    send(win, {type: 'recommendations', generatedAt: 0, tasks: []});
+    assert.strictEqual(recommendationRows(win).length, 0);
+  });
+
+  for (const [label, attrs] of [
+    ['remote webapp', REMOTE],
+    ['sidebar-chat drawer', SIDEBAR],
+  ]) {
+    await test(`${label}: activating a recommendation opens a new chat with the task in the composer, unsent`, () => {
+      const {win, posted} = makeWebview(attrs);
+      const inp = el(win, 'task-input');
+      inp.value = 'my draft';
+      inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+      el(win, 'meta-panel').classList.add('open');
+      send(win, {type: 'recommendations', generatedAt: Date.now(), tasks: FIVE_TASKS});
+      const chatTabs = () =>
+        win._testApi.openTabs().filter(t => !t.isContentTab && !t.isSubagentTab);
+      const firstTab = win._testApi.getActiveTabId();
+      const list = el(win, 'meta-recommendations-list');
+      posted.length = 0;
+      // Other keys, and a click on the list outside a row, do nothing.
+      recommendationRows(win)[1].dispatchEvent(
+        new win.KeyboardEvent('keydown', {key: 'a', bubbles: true}),
+      );
+      list.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+      assert.strictEqual(win._testApi.getActiveTabId(), firstTab);
+      eq(chatTabs().map(t => t.id), [firstTab]);
+
+      recommendationRows(win)[1].click();
+      const newTab = win._testApi.getActiveTabId();
+      assert.notStrictEqual(newTab, firstTab, 'a new chat is on screen');
+      assert.strictEqual(inp.value, FIVE_TASKS[1], 'the task is in the composer');
+      assert.ok(!posted.some(m => m.type === 'submit'), 'nothing is submitted');
+      eq(chatTabs().map(t => t.id), [firstTab, newTab]);
+      assert.ok(!el(win, 'meta-panel').classList.contains('open'), 'drawer closed');
+      win._testApi.switchToTab(firstTab);
+      assert.strictEqual(inp.value, 'my draft', 'the draft survives');
+      win._testApi.switchToTab(newTab);
+
+      // Enter and Space on a focused row do the same.
+      posted.length = 0;
+      recommendationRows(win)[2].dispatchEvent(
+        new win.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}),
+      );
+      assert.strictEqual(inp.value, FIVE_TASKS[2]);
+      assert.notStrictEqual(win._testApi.getActiveTabId(), newTab);
+      recommendationRows(win)[3].dispatchEvent(
+        new win.KeyboardEvent('keydown', {key: ' ', bubbles: true}),
+      );
+      assert.strictEqual(inp.value, FIVE_TASKS[3]);
+      assert.ok(!posted.some(m => m.type === 'submit'), 'still nothing submitted');
+    });
+  }
+
+  await test('Task Info view: a recommendation asks the host for a chat panel with the text, not submitted', () => {
+    const {win, posted} = makeWebview(META_VIEW);
+    send(win, {type: 'recommendations', generatedAt: Date.now(), tasks: FIVE_TASKS});
+    posted.length = 0;
+    recommendationRows(win)[4].click();
+    eq(posted, [
+      {type: 'openChatPanel', pendingText: FIVE_TASKS[4], autoSubmit: false},
+    ]);
+  });
+
   for (const [label, attrs] of [
     ['chat editor panel', EDITOR_PANEL],
     ['history panel', HISTORY],
@@ -884,13 +1528,23 @@ async function main() {
     await test(`${label}: never requests nor renders the subpanels`, () => {
       const {win, posted, intervals} = makeWebview(attrs);
       send(win, {type: 'daemonStatus', connected: true});
-      for (const cmd of PANEL_COMMANDS) assert.ok(!types(posted).includes(cmd), cmd);
+      // The chat editor panel asks for the machines once, for the
+      // chat header's machine drop-down, not for a subpanel.
+      const theirs = attrs === EDITOR_PANEL ? ['getMachines'] : [];
+      for (const cmd of PANEL_COMMANDS)
+        if (!theirs.includes(cmd)) assert.ok(!types(posted).includes(cmd), cmd);
+      if (attrs === EDITOR_PANEL)
+        assert.strictEqual(types(posted).filter(t => t === 'getMachines').length, 1);
+      send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+      assert.strictEqual(el(win, 'meta-machines-list').children.length, 0);
       send(win, {type: 'cronJobs', jobs: [job({})]});
       send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
       send(win, spendReport());
+      send(win, {type: 'recommendations', generatedAt: 1, tasks: FIVE_TASKS});
       assert.strictEqual(el(win, 'meta-schedule-list').children.length, 0);
       assert.strictEqual(appRows(win).length, 0);
       assert.strictEqual(cells(win).length, 0);
+      assert.strictEqual(recommendationRows(win).length, 0);
       assert.ok(!intervals.some(i => i.ms === 30000));
     });
   }

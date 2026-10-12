@@ -2,43 +2,42 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Audit 0903: WorktreeSorcarAgent.run's exception wrapping, both paths.
+"""Audit 0903: SorcarAgent.run's exception wrapping.
 
-``WorktreeSorcarAgent.run`` carried two byte-identical
+The worktree agent's ``run`` once carried two byte-identical
 ``try/except KISSError/except Exception`` blocks around its
 ``super().run`` delegation — one for the direct-execution fallback and
-one for the worktree path.  Duplicated wrapping logic drifts (a future
-edit fixing one copy silently leaves the other), so the two were merged
-into a single block.  A pure duplication that has not drifted cannot be
-reproduced by a failing behavior test; this test PINS the wrapping
-contract on every path instead, so the de-duplication (and any future
-change) is verified against real behavior:
+one for the worktree path.  The worktree refactor left a single path
+(the agent's ``create_worktree`` tool makes the worktree on demand, so
+``run`` never creates one up front), now ``SorcarAgent.run`` itself;
+this test PINS the wrapping contract of that path against real behavior:
 
 * a non-``KISSError`` exception from the underlying run is wrapped into
-  a ``success: false`` YAML result — on the direct path and on the
-  worktree path alike;
-* a ``KISSError`` propagates unwrapped on both paths;
-* the worktree path still broadcasts ``worktree_created`` before
-  delegating.
+  a ``success: false`` YAML result — in a plain directory and in a git
+  repository alike;
+* a ``KISSError`` propagates unwrapped;
+* a repository ``work_dir`` does not make ``run`` create a worktree or
+  broadcast ``worktree_created``.
 
 End-to-end: real agents, a real scratch git repo, a real server
-printer.  The underlying run is made to fail by a printer whose
-``agent_task_allocated`` hook raises — a real caller-owned collaborator
-(the same channel VS Code's server uses), not a mock of the code under
-test.
+printer.  The underlying run is made to fail by a ``tools_hook`` that
+raises — a real caller-owned collaborator (the channel a SEA's
+``tools()`` uses), called inside ``SorcarAgent.run`` once the toolset
+is built — not a mock of the code under test.  (A failure in
+``ChatSorcarAgent.run``'s own setup, before the inner run, propagates:
+the daemon's task runner reports it as ``Task failed: ...``.)
 """
 
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Iterator
-from pathlib import Path
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
 import yaml
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.kiss_error import KISSError
 from kiss.tests.server.parallel_agent_harness import (
     CapturePrinter,
@@ -46,15 +45,13 @@ from kiss.tests.server.parallel_agent_harness import (
 )
 
 
-class _RaisingPrinter(CapturePrinter):
-    """A real server printer whose task-allocation hook raises."""
+class _RaisingToolsHook:
+    """A SEA-style ``tools`` hook that raises instead of returning the toolset."""
 
     def __init__(self, exc: BaseException) -> None:
-        super().__init__()
         self._exc = exc
 
-    def agent_task_allocated(self, agent: Any, task_id: Any, chat_id: str = "") -> None:
-        super().agent_task_allocated(agent, task_id, chat_id)
+    def __call__(self, tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:
         raise self._exc
 
 
@@ -80,12 +77,13 @@ def test_direct_path_wraps_exception_into_failure_yaml(
     env: IsolatedKissHome,
 ) -> None:
     """Non-repo work_dir → direct execution; a crash becomes YAML."""
-    agent = WorktreeSorcarAgent("audit0903-wrap-direct")
+    agent = ChatSorcarAgent("audit0903-wrap-direct")
     with tempfile.TemporaryDirectory() as plain_dir:
         result = agent.run(
             prompt_template="crash please",
             work_dir=plain_dir,
-            printer=_RaisingPrinter(RuntimeError("boom-direct")),
+            printer=CapturePrinter(),
+            tools_hook=_RaisingToolsHook(RuntimeError("boom-direct")),
         )
     assert agent._wt is None
     assert "Task failed with error: boom-direct" in _failure_summary(result)
@@ -93,35 +91,30 @@ def test_direct_path_wraps_exception_into_failure_yaml(
 
 def test_direct_path_propagates_kiss_error(env: IsolatedKissHome) -> None:
     """A KISSError from the underlying run is never wrapped."""
-    agent = WorktreeSorcarAgent("audit0903-wrap-kisserror")
+    agent = ChatSorcarAgent("audit0903-wrap-kisserror")
     with tempfile.TemporaryDirectory() as plain_dir:
         with pytest.raises(KISSError, match="kiss-boom"):
             agent.run(
                 prompt_template="crash please",
-                use_worktree=False,
                 work_dir=plain_dir,
-                printer=_RaisingPrinter(KISSError("kiss-boom")),
+                printer=CapturePrinter(),
+                tools_hook=_RaisingToolsHook(KISSError("kiss-boom")),
             )
 
 
-def test_worktree_path_wraps_exception_and_broadcasts_creation(
+def test_repo_work_dir_wraps_exception_without_a_worktree(
     env: IsolatedKissHome,
 ) -> None:
-    """Repo work_dir → worktree path; same wrapping, after the
-    worktree_created broadcast."""
-    agent = WorktreeSorcarAgent("audit0903-wrap-worktree")
-    printer = _RaisingPrinter(RuntimeError("boom-worktree"))
+    """Repo work_dir → same wrapping; no worktree is created up front."""
+    agent = ChatSorcarAgent("audit0903-wrap-worktree")
+    printer = CapturePrinter()
     result = agent.run(
         prompt_template="crash please",
         work_dir=str(env.repo),
         printer=printer,
+        tools_hook=_RaisingToolsHook(RuntimeError("boom-worktree")),
     )
     assert "Task failed with error: boom-worktree" in _failure_summary(result)
-    created = printer.events_of_type("worktree_created")
-    assert len(created) == 1
-    assert agent._wt is not None
-    wt_dir = Path(created[0]["worktreeDir"])
-    assert wt_dir == agent._wt.wt_dir
-    # Clean up the pending worktree so the scratch repo tears down.
-    agent.discard()
+    assert printer.events_of_type("worktree_created") == []
     assert agent._wt is None
+    assert not (env.repo / ".kiss-worktrees").exists()

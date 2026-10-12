@@ -10,7 +10,7 @@ into its worktree and then failed on budget.  Clicking "Auto-commit and
 merge" ran the commit-message step, which read the entire
 ``git diff --cached`` into memory (the daemon reached 45 GB) and never
 returned.  The merge thread held the tab's ``is_merging`` claim, so
-every main-tree prompt was refused with "A worktree merge is in
+the tab refused every new prompt with "A worktree merge is in
 progress. Wait for it to finish before starting a task." and the claim
 could not self-heal because its thread was alive.
 
@@ -18,7 +18,7 @@ This drives the real ``worktreeAction`` command against a real
 repository whose worktree stages several megabytes of generated
 content, with the commit-message model unreachable
 (:class:`OfflineFastModel`), and checks that the merge lands, the claim
-is released, the main-tree gate opens, and the merge is logged.
+is released, and the merge is logged.
 """
 
 from __future__ import annotations
@@ -31,16 +31,15 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     COMMIT_MESSAGE_DIFF_LIMIT_BYTES,
     GitWorktree,
     GitWorktreeOps,
     _git,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.server.task_runner import _wt_merge_on_repo
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome, OfflineFastModel
 
 _TAB = "huge-merge-tab"
@@ -65,11 +64,10 @@ class _Env:
             "task-huge-merge", tab_id=_TAB, server_owned=True,
         )
         self.state.agent = self._pending_worktree_agent()
-        self.state.use_worktree = True
         agent_state.register(self.state)
         self.server.tab_registry.open_tab(_TAB, "huge")
 
-    def _pending_worktree_agent(self) -> WorktreeSorcarAgent:
+    def _pending_worktree_agent(self) -> ChatSorcarAgent:
         branch = "kiss/wt-huge-merge"
         original = GitWorktreeOps.current_branch(self.repo)
         assert original is not None
@@ -83,7 +81,7 @@ class _Env:
                 "".join(f"file {i} line {j} " + "x" * 40 + "\n" for j in range(_LINES_PER_FILE)),
                 encoding="utf-8",
             )
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         agent._wt = GitWorktree(
             repo_root=self.repo, branch=branch, original_branch=original, wt_dir=wt_dir,
         )
@@ -144,7 +142,6 @@ def test_merge_of_a_huge_worktree_lands_and_releases_the_claim(
     with env.server._state_lock:
         assert env.state.is_merging is False
         assert env.state.merge_thread is None
-    assert _wt_merge_on_repo(env.state, env.repo) is False
 
     head_files = _git("ls-tree", "-r", "--name-only", "HEAD", cwd=env.repo)
     assert head_files.stdout.count(f"{_RESULTS_DIR}/run-") == _FILES

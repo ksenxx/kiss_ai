@@ -29,7 +29,8 @@ from typing import Any
 from websockets.asyncio.client import connect
 
 from kiss.tests.conftest import posix_only
-from kiss.tests.server.test_local_lan_urls import _LiveServerCase, _no_verify_ssl
+from kiss.tests.server.conftest import no_verify_ssl
+from kiss.tests.server.test_local_lan_urls import _LiveServerCase
 
 OLD = "https://old.example.test"
 NEW = "https://new.example.test"
@@ -62,7 +63,7 @@ class TestUrlPublishGeneration(_LiveServerCase):
         self.server.use_tunnel = True
         self.server._active_url = OLD
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()
         ) as ws:
             await self._auth_ws(ws)
             self.server._republish_urls()
@@ -86,7 +87,7 @@ class TestUrlPublishGeneration(_LiveServerCase):
         self.server.use_tunnel = False
         self.server._url_file = fifo
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()
         ) as ws:
             await self._auth_ws(ws)
             self.server._active_url = None

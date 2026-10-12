@@ -143,12 +143,18 @@ def test_slash_command_task_splits_a_registered_command(tmp_path: Path) -> None:
 
 def test_slash_command_task_leaves_plain_prompt_untouched(tmp_path: Path) -> None:
     """A non-command prompt, an unknown command, a bare command and ``help`` run as usual."""
-    _seed_seas_md(tmp_path / "user-seas", "notify")
+    _seed_seas_md(
+        tmp_path / "user-seas",
+        "notify",
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\nclass NotifySea(BaseSea):\n"
+        "    pass\n",
+    )
     assert slash_command_task("please summarize this file") is None
     # A slash prefix that does not match a known command also passes
     # through unchanged.
     assert slash_command_task("/unknowncmd anything") is None
-    # A bare command has no task text to run the SEA on.
+    # A bare command has no task text to run a stock SEA on (one whose
+    # ``prompt()`` supplies a default task does run; see the registry tests).
     assert slash_command_task("/notify") is None
     assert slash_command_task("/notify   ") is None
     # ``/xxx help`` is answered by ``description()`` without running the SEA.
@@ -262,7 +268,7 @@ class Sea(BaseSea):
         self._record_runs(runs)
         raw_prompt = '/notify send "hi" now'
         result = sorcar.run(
-            raw_prompt, work_dir=self.repo, use_worktree=False, auto_commit=False,
+            raw_prompt, work_dir=self.repo,
             endpoint_file=self.endpoint_file, timeout=60,
         )
         assert result.success is True, result

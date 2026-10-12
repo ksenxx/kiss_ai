@@ -33,9 +33,9 @@ const FOLD_KEY = 'kiss-content-pane-folded';
 
 /**
  * A fresh page. `bodyAttrs` are the <body> attributes the host stamps:
- * ' class="remote-chat"' (the remote webapp), the editor-tab attributes
- * (SorcarTab.editorTabBodyAttrs: the mode class and the panel's root
- * tab id) or '' (the VS Code secondary-sidebar chat view). `desktop`
+ * ' class="remote-chat"' (the remote webapp), ' class="editor-tab-mode"'
+ * (the chat editor tab, SorcarTab.EDITOR_TAB_BODY_ATTRS) or '' (the VS
+ * Code secondary-sidebar chat view). `desktop`
  * is the (min-width: 900px) media query of the remote page.
  */
 function makeWebview(opts) {
@@ -252,14 +252,12 @@ test('a tab catching up on a task already running does not fold', () => {
 });
 
 test('an editor-tab chat opened on a running task tells the host nothing', () => {
-  // A panel opened from a history row (data-kiss-resume-chat-id) or
-  // restored by a window reload: the root tab is born known, and the
-  // daemon's replay of the run already going arrives `attached`.
-  const {win, posted} = makeWebview({
-    bodyAttrs:
-      ' class="editor-tab-mode" data-kiss-tab-id="a1"' +
-      ' data-kiss-resume-chat-id="chat-a1"',
-  });
+  // The chat editor tab adopts a chat already running elsewhere from
+  // the registry snapshot, and the daemon's replay of the run already
+  // going arrives `attached`.
+  const {win, posted} = makeWebview({bodyAttrs: ' class="editor-tab-mode"'});
+  openChats(win, ['a1']);
+  win._testApi.switchToTab('a1');
   send(win, {
     type: 'status',
     running: true,
@@ -288,16 +286,12 @@ test('the phone layout has no pane to fold', () => {
 test('the VS Code chat surfaces tell the host once per start', () => {
   const surfaces = [
     {name: 'sidebar chat view', bodyAttrs: ''},
-    {
-      name: 'editor-tab chat',
-      bodyAttrs: ' class="editor-tab-mode" data-kiss-tab-id="a1"',
-    },
+    {name: 'editor-tab chat', bodyAttrs: ' class="editor-tab-mode"'},
   ];
   for (const {name, bodyAttrs} of surfaces) {
     const {win, posted} = makeWebview({bodyAttrs});
-    // The sidebar view hears of its tabs from the daemon; an editor-tab
-    // panel is born with its single root tab (data-kiss-tab-id).
-    if (!bodyAttrs) openChats(win, ['a1']);
+    // Both surfaces hear of their tabs from the daemon.
+    openChats(win, ['a1']);
     assert.strictEqual(win._testApi.getActiveTabId(), 'a1', name);
     start(win, 'a1');
     assert.strictEqual(

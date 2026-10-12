@@ -62,8 +62,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import socket
-import ssl
 import tempfile
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
@@ -77,22 +75,7 @@ from kiss.server.web_server import (
     _AUTH_LOCKOUT,
     RemoteAccessServer,
 )
-
-
-def _pick_free_port() -> int:
-    """Return an OS-assigned free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Permissive SSL context for the dev self-signed cert."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 _PASSWORD = "correct-horse-battery-staple"
 
@@ -102,7 +85,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         """Start a real ``RemoteAccessServer`` with a known password."""
-        self._port = _pick_free_port()
+        self._port = find_free_port()
         self._orig_config: str | None = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -128,7 +111,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         """Open a fresh WSS connection to /ws on the test server."""
         return await connect(
             f"wss://127.0.0.1:{self._port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         )
 
     async def _probe(self, password: str) -> str | None:

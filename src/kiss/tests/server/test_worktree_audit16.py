@@ -5,14 +5,14 @@
 """Audit 16: Integration tests for bugs/inconsistencies found in audit 16.
 
 BUG-68: post-task pending-worktree cleanup silently left a pending
-    empty-change worktree when ``_any_non_wt_running()`` was True —
-    the user saw no buttons and had no indication that a worktree
-    existed.  (Historically observed through the since-removed
-    ``_finish_merge``; the shared logic now lives in
-    ``_present_pending_worktree``.)
+    empty-change worktree when another tab's task was running (the
+    since-removed ``_any_non_wt_running()`` main-tree claim) — the user
+    saw no buttons and had no indication that a worktree existed.
+    (Historically observed through the since-removed ``_finish_merge``;
+    the shared logic now lives in ``_present_pending_worktree``.)
 
     Resolved by removing the cause rather than reporting it: an
-    empty worktree is now discarded even while a non-wt task runs,
+    empty worktree is now discarded even while another tab's task runs,
     since that discard touches neither the main working tree's files
     nor its HEAD.  There is no orphaned branch left to tell the user
     about, and no meaningless merge/discard prompt.  See
@@ -51,8 +51,8 @@ from typing import Any, cast
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
@@ -97,17 +97,16 @@ def _register_wt_tab(task_id: str, tab_id: str) -> AgentState:
     """Register a server-owned worktree-mode state with a real agent."""
     state = AgentState(
         task_id,
-        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        agent=ChatSorcarAgent("Sorcar VS Code"),
         tab_id=tab_id,
         server_owned=True,
     )
-    state.use_worktree = True
     agent_state.register(state)
     return state
 
 
 def _create_wt(
-    repo: Path, branch: str, agent: WorktreeSorcarAgent,
+    repo: Path, branch: str, agent: ChatSorcarAgent,
 ) -> GitWorktree:
     """Create a real worktree + branch and assign it to *agent*."""
     slug = branch.replace("/", "_")
@@ -139,18 +138,18 @@ class _RecordingPrinter:
 
 class TestBug68PresentPendingNoBroadcastOnEmptyNonWtBusy:
     """``_present_pending_worktree`` with no worktree changes and a
-    concurrent non-wt task must discard the empty worktree WITHOUT
-    broadcasting the meaningless ``worktree_done`` prompt.
+    concurrent task on another tab must discard the empty worktree
+    WITHOUT broadcasting the meaningless ``worktree_done`` prompt.
 
     The frontend renders ``worktree_done`` as "Auto-commit and merge
     or Discard?", which makes no sense when there are zero changed
     files.  Leaving the branch behind instead is not an option
     either: nothing ever retried the cleanup, so the worktree leaked
     permanently.  Discarding an empty worktree is safe while the main
-    tree is busy — it touches neither its files nor its HEAD.
+    repo is busy — it touches neither its files nor its HEAD.
     """
 
-    def test_present_pending_empty_wt_non_wt_busy(
+    def test_present_pending_empty_wt_other_tab_busy(
         self, tmp_path: Path,
     ) -> None:
         repo = _make_repo(tmp_path / "repo")
@@ -163,12 +162,12 @@ class TestBug68PresentPendingNoBroadcastOnEmptyNonWtBusy:
         tab_id = "tab-bug68a"
         state = _register_wt_tab("task-bug68a", tab_id)
 
-        agent = cast(WorktreeSorcarAgent, state.agent)
+        agent = cast(ChatSorcarAgent, state.agent)
         branch = "kiss/wt-bug68a-1"
         wt = _create_wt(repo, branch, agent)
 
         other = AgentState("task-other-68a", tab_id="other-bug68a")
-        other.is_running_non_wt = True
+        other.is_task_active = True
         agent_state.register(other)
 
         server._present_pending_worktree(tab_id)
@@ -180,7 +179,7 @@ class TestBug68PresentPendingNoBroadcastOnEmptyNonWtBusy:
             f"there are no changes.  Events: {printer.events}"
         )
         assert agent._wt is None, (
-            "BUG-68: a busy non-wt task blocked the discard of an empty "
+            "BUG-68: another tab's running task blocked the discard of an empty "
             "worktree, leaking the branch and directory forever."
         )
         assert not GitWorktreeOps.branch_exists(repo, branch), (
@@ -190,12 +189,12 @@ class TestBug68PresentPendingNoBroadcastOnEmptyNonWtBusy:
             "worktree directory survived the auto-discard."
         )
 
-        other.is_running_non_wt = False
+        other.is_task_active = False
 
-    def test_present_pending_empty_wt_non_wt_idle_discards(
+    def test_present_pending_empty_wt_idle_discards(
         self, tmp_path: Path,
     ) -> None:
-        """Regression: when no non-wt task is running, the empty
+        """Regression: when no other task is running, the empty
         worktree must still be auto-discarded (BUG-42 behavior)."""
         repo = _make_repo(tmp_path / "repo")
         server = VSCodeServer()
@@ -206,14 +205,14 @@ class TestBug68PresentPendingNoBroadcastOnEmptyNonWtBusy:
         tab_id = "tab-bug68b"
         state = _register_wt_tab("task-bug68b", tab_id)
 
-        agent = cast(WorktreeSorcarAgent, state.agent)
+        agent = cast(ChatSorcarAgent, state.agent)
         _create_wt(repo, "kiss/wt-bug68b-1", agent)
 
         server._present_pending_worktree(tab_id)
 
         assert agent._wt is None, (
             "Regression: empty worktree was not auto-discarded when "
-            "no non-wt task was running."
+            "no other task was running."
         )
 
 
@@ -243,7 +242,7 @@ class TestBug70UntrackedFileConflict:
         tab_id = "tab-bug70"
         state = _register_wt_tab("task-bug70", tab_id)
 
-        agent = cast(WorktreeSorcarAgent, state.agent)
+        agent = cast(ChatSorcarAgent, state.agent)
         branch = "kiss/wt-bug70-1"
         wt = _create_wt(repo, branch, agent)
 
@@ -288,7 +287,7 @@ class TestBug70UntrackedFileConflict:
         tab_id = "tab-bug70b"
         state = _register_wt_tab("task-bug70b", tab_id)
 
-        agent = cast(WorktreeSorcarAgent, state.agent)
+        agent = cast(ChatSorcarAgent, state.agent)
         wt = _create_wt(repo, "kiss/wt-bug70-2", agent)
 
         (wt.wt_dir / "foo.py").write_text("agent content\n")

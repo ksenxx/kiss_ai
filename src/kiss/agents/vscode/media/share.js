@@ -29,9 +29,6 @@
       if (
         node.classList.contains('panel-copy-btn') ||
         node.classList.contains('panel-stop-btn') ||
-        // Pages shared before the headers lost their chevron still
-        // carry one.
-        node.classList.contains('collapse-chv') ||
         node.classList.contains('collapse-preview') ||
         node.classList.contains('panel-ts') ||
         node.classList.contains('panel-time')
@@ -51,10 +48,11 @@
   /**
    * Fill or clear a panel's one-line collapsed preview, mirroring
    * collapsePreview in media/main.js: an expanded panel and a summary
-   * panel show no preview; a collapsed Bash panel previews its
-   * description and a collapsed Read or Write panel its path (no
-   * "description:" / "path:" label); any other collapsed panel
-   * previews its content text.
+   * panel show no preview; a collapsed panel with a description
+   * argument (Bash, run_agent, run_parallel, run_commands_parallel)
+   * previews its description and a collapsed Read or Write panel its
+   * path (no "description:" / "path:" label); any other collapsed
+   * panel previews its content text.
    *
    * @param {Element} panelEl The collapsible panel.
    */
@@ -77,7 +75,7 @@
       return;
     }
     let briefSel = null;
-    if (panelEl.classList.contains('tc-bash'))
+    if (panelEl.classList.contains('tc-desc'))
       briefSel = '.tc-arg-desc .tc-arg-val';
     else if (panelEl.classList.contains('tc-path'))
       briefSel = '.tc-arg-path .tp';

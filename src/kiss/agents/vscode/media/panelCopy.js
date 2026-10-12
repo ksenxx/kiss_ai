@@ -31,7 +31,6 @@
   const SKIP_CLASSES = [
     'panel-copy-btn',
     'panel-stop-btn',
-    'collapse-chv',
     'collapse-preview',
     'panel-ts',
     'panel-time',

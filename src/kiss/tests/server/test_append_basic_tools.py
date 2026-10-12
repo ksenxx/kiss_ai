@@ -10,7 +10,7 @@ against it.  The only replaced boundary is the LLM itself: the
 per-session executor's :meth:`kiss.core.kiss_agent.KISSAgent.run` is
 swapped for a stub that records the ``tools`` it was handed, so the
 daemon's full run pipeline — ``run`` command dispatch → worker thread →
-SEA overrides → ``WorktreeSorcarAgent.run`` →
+SEA overrides → ``ChatSorcarAgent.run`` →
 ``SorcarAgent.perform_task`` tool assembly →
 ``RelentlessAgent.perform_task``'s ``finish`` prepend — executes for
 real without any model API calls.
@@ -45,7 +45,7 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.server.test_sea_path import _init_repo
+from kiss.tests.server.conftest import init_repo
 
 
 class DaemonRunApiHarness(unittest.TestCase):
@@ -68,7 +68,7 @@ class DaemonRunApiHarness(unittest.TestCase):
         self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo(self.repo)
+        init_repo(self.repo)
 
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -348,7 +348,6 @@ class DaemonRunApiHarness(unittest.TestCase):
                 "taskId": uuid.uuid4().hex,
                 "workDir": self.repo,
                 "model": "",
-                "useWorktree": False,
                 "useWebTools": False,
                 **extra_cmd,
             }
@@ -392,7 +391,6 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             "task with basic tools",
             work_dir=self.repo,
             sea_path=self._write_tools_agent(),
-            use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -422,7 +420,6 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             "task with only script tools",
             work_dir=self.repo,
             sea_path=self._write_tools_agent(only_script_tools=True),
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -437,7 +434,6 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             "task with no tools at all",
             work_dir=self.repo,
             sea_path=self._write_tools_agent("[]", only_script_tools=True),
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -486,7 +482,6 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             "script strips basic tools",
             work_dir=self.repo,
             sea_path=sea_path,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -526,7 +521,6 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             "script adds to basic tools",
             work_dir=self.repo,
             sea_path=sea_path,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -558,7 +552,6 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             "script with broken tools()",
             work_dir=self.repo,
             sea_path=sea_path,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -589,7 +582,6 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             "restricted task whose first session fails",
             work_dir=self.repo,
             sea_path=self._write_tools_agent("[]", only_script_tools=True),
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -618,7 +610,6 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "default task whose first session fails",
             work_dir=self.repo,
-            use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
             timeout=60,

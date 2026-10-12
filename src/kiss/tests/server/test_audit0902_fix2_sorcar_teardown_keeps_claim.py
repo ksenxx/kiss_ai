@@ -5,7 +5,7 @@
 """Review-2 #1: a tab close whose preserve marker cannot be written must
 keep the worktree protected from a same-daemon reclaim.
 
-``WorktreeSorcarAgent._keep_for_review`` fails closed — when the
+``ChatSorcarAgent._keep_for_review`` fails closed — when the
 ``kiss-preserve`` marker cannot be written (``.git/config.lock`` held)
 the agent keeps ``self._wt`` — but the tab-teardown paths in
 :class:`VSCodeServer` (``_drop_tab_state`` / ``_dispose_if_closed``)
@@ -17,8 +17,10 @@ protection, so the retained claim was invisible: the next task in the
 same daemon squash-merged the unaccepted work into the user's branch
 and deleted the worktree.
 
-Everything here is real: a real git repository, a real
-``.git/config.lock`` held during the close, the real server teardown,
+Everything here is real: a real git repository whose ``pre-commit``
+hook refuses every commit (so the parked work is genuinely
+uncommittable and the preserve step keeps the worktree directory), a
+real ``.git/config.lock`` held during the close, the real server teardown,
 the real reclaim pass with the exclusion set a second agent in the same
 process would build, and a real retry once the lock is gone.
 """
@@ -33,11 +35,11 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
+from kiss.tests.server.parallel_agent_harness import IsolatedKissHome, OfflineFastModel
 
 
 class _Env:
@@ -46,6 +48,16 @@ class _Env:
     def __init__(self) -> None:
         self.isolated = IsolatedKissHome("kiss-audit0902-fix2-teardown-")
         self.repo: Path = self.isolated.repo
+        # The preserve step commits the pending work to its branch; a
+        # refusing pre-commit hook makes that commit fail so the work
+        # stays uncommitted and the worktree directory is kept.
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+        # The commit-message generator must not leave the machine.
+        self.offline = OfflineFastModel()
+        self.offline.__enter__()
         self.server = VSCodeServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
@@ -58,27 +70,24 @@ class _Env:
     def cleanup(self) -> None:
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
+        self.offline.__exit__(None, None, None)
         self.isolated.cleanup()
 
-    def park_unaccepted_work(self, tab_id: str, *, active: bool = False) -> WorktreeSorcarAgent:
+    def park_unaccepted_work(self, tab_id: str, *, active: bool = False) -> ChatSorcarAgent:
         """Register a tab whose agent holds a stopped task's uncommittable work."""
-        agent = WorktreeSorcarAgent(f"audit0902-fix2-{tab_id}")
-        # Auto-commit OFF + an uncommitted file: the preserve step must
-        # keep the worktree directory instead of committing it.
-        agent.auto_commit_enabled = False
+        agent = ChatSorcarAgent(f"audit0902-fix2-{tab_id}")
+        # An uncommitted file the pre-commit hook refuses: the preserve
+        # step must keep the worktree directory instead of removing it.
         assert agent._try_setup_worktree(self.repo, str(self.repo)) is not None
         wt = agent._wt
         assert wt is not None
         (wt.wt_dir / "agent.txt").write_text("unaccepted work\n", encoding="utf-8")
-        agent._pending_review = True
         agent.printer = self.server.printer  # type: ignore[attr-defined]
         with self.server._state_lock:
             state = agent_state.AgentState(
                 f"task-for-{tab_id}", tab_id=tab_id, server_owned=True, agent=agent,
                 is_task_active=active,
             )
-            state.use_worktree = True
-            state.auto_commit_mode = False
             agent_state.register(state)
         self.server.tab_registry.open_tab(tab_id, "audit")
         return agent
@@ -114,14 +123,14 @@ def _same_daemon_reclaim(env: _Env) -> int:
     through the printer's ``live_worktree_branches`` bridge (registered
     states only); this reproduces that wiring without a second LLM run.
     """
-    other = WorktreeSorcarAgent("audit0902-fix2-other-tab")
+    other = ChatSorcarAgent("audit0902-fix2-other-tab")
     other.printer = env.server.printer  # type: ignore[attr-defined]
     return GitWorktreeOps.reclaim_orphaned_worktrees(
         env.repo, exclude_branches=other._live_worktree_branches(),
     )
 
 
-def _assert_untouched(env: _Env, agent: WorktreeSorcarAgent, wt_dir: Path, branch: str) -> None:
+def _assert_untouched(env: _Env, agent: ChatSorcarAgent, wt_dir: Path, branch: str) -> None:
     assert wt_dir.is_dir(), "the kept worktree directory was deleted"
     assert branch in _wt_branches(env.repo), "the kept branch was deleted"
     assert not (env.repo / "agent.txt").exists(), "unaccepted work was published to main"
@@ -145,7 +154,7 @@ def test_close_tab_with_marker_failure_survives_same_daemon_reclaim(env: _Env) -
 
         # (a) the agent kept its claim and the decision is not durable yet.
         assert agent._wt is wt, "the in-memory claim was dropped"
-        assert agent._pending_review is True
+        assert agent._wt_pending
         assert GitWorktreeOps._load_branch_config(env.repo, branch, "kiss-preserve") is None
         # (b) the state is still registered, so the live exclusion sees it.
         state = agent_state.find_by_tab(tab_id)
@@ -176,7 +185,7 @@ def test_close_tab_with_marker_failure_survives_same_daemon_reclaim(env: _Env) -
     env.server._close_tab(tab_id)
     assert GitWorktreeOps.load_preserve_marker(env.repo, branch)
     assert agent._wt is None
-    assert agent._pending_review is False
+    assert not agent._wt_pending
     assert agent_state.find_by_tab(tab_id) is None
     _assert_untouched(env, agent, wt_dir, branch)
     # With the marker durable the process-local claim is gone: a reclaim

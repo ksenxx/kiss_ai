@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 import ssl
 import stat
 import sys
@@ -52,6 +51,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.server.web_server as _wsmod
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import find_free_port
 
 _SSL_DELAY_SECS = 3.0
 
@@ -60,14 +60,6 @@ _CTOR_BUDGET_SECS = 1.5
 # A loop blocked by the SSL build would stall its ticker for the whole
 # _SSL_DELAY_SECS; a loop that is free ticks every few milliseconds.
 _MAX_LOOP_STALL_SECS = 1.0
-
-
-def _find_free_port() -> int:
-    """Return an available TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
 
 
 class SslBuildOffLoopTest(IsolatedAsyncioTestCase):
@@ -124,7 +116,7 @@ class SslBuildOffLoopTest(IsolatedAsyncioTestCase):
         ctor_started = time.monotonic()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             use_tunnel=False,
             url_file=self.url_file,
             local_endpoint_file=self.endpoint_file,

@@ -59,7 +59,7 @@ session = {
     "events": [],
     "extra": json.dumps({
         "model": "m", "work_dir": "/w", "is_parallel": True,
-        "is_worktree": False, "startTs": 1700000000000, "max_budget": 2.5,
+        "startTs": 1700000000000, "max_budget": 2.5,
         "subagent": {"parent_task_id": "parent-1"},
     }),
 }

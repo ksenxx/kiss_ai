@@ -7,24 +7,21 @@
 Each test CONFIRMS the bug exists (assertions pass when buggy behaviour
 is present).
 
-BUG-25: _release_worktree orphans branch silently when original_branch
-        is None — _finalize_worktree removes the worktree dir, but the
-        if-wt.original_branch block is skipped entirely, so the branch
-        is never deleted and no warning is set.
+BUG-25: merge() with an unknown original_branch (crash during setup)
+        must not orphan the branch silently: the branch is kept and the
+        user is told the target branch is unknown.
 
 BUG-26: merge() calls delete_branch and sets self._wt = None OUTSIDE
-        repo_lock — inconsistent with _release_worktree which does both
-        inside the lock.  Creates a window for concurrent operations on
-        the same repo.
+        repo_lock.  Creates a window for concurrent operations on the
+        same repo.
 
 BUG-28 (obsolete): covered _start_merge_session, removed together
         with the interactive diff/merge review workflow.
 
-BUG-29: _release_worktree pops the user stash after a merge conflict
-        (cherry-pick --abort / reset --hard), restoring the dirty
-        working tree, then emits instructions telling the user to run
-        `git merge --squash` — which git will refuse because the
-        working tree is dirty.
+BUG-29: merge() keeps the user's dirty state stashed after a merge
+        conflict; the instructions must tell the user to run
+        `git stash pop` after resolving, since `git merge --squash`
+        refuses a dirty working tree.
 """
 
 from __future__ import annotations
@@ -36,13 +33,13 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
     _git,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -105,16 +102,10 @@ def _unpatch_super_run(original: Any) -> None:
     parent_class.run = original
 
 
-class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
-    """BUG-25: When original_branch is None, _release_worktree:
-      1. Calls _finalize_worktree which removes the worktree directory
-      2. Skips the entire `if wt.original_branch:` block
-      3. Never deletes the branch
-      4. Sets no _merge_conflict_warning
-      5. Returns None — user gets no notification
-
-    The branch becomes a permanent orphan discoverable only via
-    cleanup_orphans.
+class TestBug25MergeBranchKeptOnNoneOriginal:
+    """BUG-25: When original_branch is None, merge() must keep the
+    branch and tell the user the target branch is unknown instead of
+    silently orphaning it.
     """
 
     def setup_method(self) -> None:
@@ -125,11 +116,11 @@ class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
         _restore_db(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_branch_orphaned_no_warning(self) -> None:
-        """BUG-25: Branch is orphaned and no warning is set."""
+    def test_branch_kept_and_user_told(self) -> None:
+        """BUG-25: Branch is kept and the message names it."""
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "test25"
 
         wt_work = agent._try_setup_worktree(repo, str(repo))
@@ -150,45 +141,26 @@ class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
             baseline_commit=wt.baseline_commit,
         )
 
-        result = agent._release_worktree()
-
-        assert result is None
+        result = agent.merge()
 
         assert GitWorktreeOps.branch_exists(repo, branch_name), (
             "Branch must be preserved for manual resolution"
         )
-
-        assert agent._merge_conflict_warning is not None, (
-            "BUG-50 fix: warning should be set on orphan branch"
-        )
-        assert branch_name in agent._merge_conflict_warning
-        assert "original branch is unknown" in agent._merge_conflict_warning
+        assert branch_name in result
+        assert "original branch is unknown" in result
         assert agent._stash_pop_warning is None
-
-        assert not wt.wt_dir.exists(), (
-            "Worktree dir should have been removed by _finalize_worktree"
-        )
-
-        assert agent._wt is None, "_wt should be cleared"
+        assert agent._wt is not None, "the branch stays pending"
 
 
 
 
 
 class TestBug29ConflictInstructionsIgnoreDirtyState:
-    """BUG-29: When _release_worktree encounters a merge conflict AND
-    the user had dirty state that was stashed, it:
-      1. Stash-pushes the user's dirty files
-      2. Attempts merge (fails — conflict)
-      3. Aborts/resets (cherry-pick --abort or reset --hard)
-      4. Pops the stash (restores dirty files)
-      5. Sets _merge_conflict_warning with instructions:
-         `git merge --squash <branch>`
-
-    But `git merge --squash` requires a clean working tree.  The
-    popped stash has restored the dirty files, so the instructions
-    will fail.  The warning should mention that the user needs to
-    stash or commit their changes first.
+    """BUG-29: When merge() encounters a merge conflict AND the user
+    had dirty state that was stashed, the instructions must account
+    for the stash: `git merge --squash` requires a clean working
+    tree, so the user's files stay stashed and the steps end with
+    `git stash pop`.
     """
 
     def setup_method(self) -> None:
@@ -203,7 +175,7 @@ class TestBug29ConflictInstructionsIgnoreDirtyState:
         """BUG-29: Demonstrate that the conflict instructions fail."""
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "test29"
 
         (repo / "user_file.txt").write_text("user dirty state\n")
@@ -223,11 +195,14 @@ class TestBug29ConflictInstructionsIgnoreDirtyState:
 
         (repo / "user_file.txt").write_text("user dirty state again\n")
 
-        result = agent._release_worktree()
-        assert result is None, "Should fail with conflict"
-
-        warning = agent._merge_conflict_warning
-        assert warning is not None, "Warning should be set"
+        warning = agent.merge()
+        assert "Merge conflict detected" in warning
+        assert "git stash pop" in warning, (
+            "the user's dirty state is stashed; the steps must restore it"
+        )
+        assert not (repo / "user_file.txt").exists(), (
+            "dirty state must stay stashed so the squash merge can run"
+        )
 
         if wt.baseline_commit:
             assert "cherry-pick" in warning, (

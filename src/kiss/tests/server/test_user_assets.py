@@ -38,14 +38,6 @@ from kiss.server.user_assets import (
 from kiss.tests.conftest import is_root, posix_only
 
 
-@pytest.fixture
-def kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect ``KISS_HOME`` to a fresh ``tmp_path`` for each test."""
-    home = tmp_path / ".kiss"
-    monkeypatch.setenv("KISS_HOME", str(home))
-    return home
-
-
 def test_kiss_home_dir_honours_env(kiss_home: Path) -> None:
     assert kiss_home_dir() == kiss_home
 

@@ -51,8 +51,8 @@ from typing import Any
 import pytest
 
 import kiss.agents.sorcar.persistence as persistence
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import _git
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 # ---------------------------------------------------------------------------
 # Finding 2: _RWLock vs. asynchronously injected KeyboardInterrupt
@@ -480,9 +480,9 @@ class TestMergeHoldsCrossProcessLock:
         failure-path ``git reset --hard`` can wipe its staged work."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
-            agent = WorktreeSorcarAgent("review0911-merge-lock")
-            wt_work = agent._try_setup_worktree(repo, None)
-            assert wt_work is not None
+            agent = ChatSorcarAgent("review0911-merge-lock")
+            agent.work_dir = str(repo)
+            assert agent.create_worktree().startswith("Created worktree ")
             assert agent._wt is not None
             (agent._wt.wt_dir / "agent.txt").write_text("agent change\n")
             _git("add", "-A", cwd=agent._wt.wt_dir)

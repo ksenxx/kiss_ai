@@ -201,6 +201,18 @@ _EMPTY_VIEW = _LedgerView(0.0, 0, 0, 0, _SeenMap())
 #: instead of quadratic O(n^2).
 _COMPACTION_THRESHOLD = 200
 
+# Serializes "snapshot the task's banked totals, publish them as printer
+# offsets" across its two writers: the session-start rebase on the agent
+# thread (:meth:`RelentlessAgent._set_printer_offsets`) and a finished
+# child's fold on its own thread (``sorcar_agent._attribute_sub_usage``).
+# Each writer takes its snapshot INSIDE the lock, so publishes land in
+# snapshot order and the offsets never decrease; a snapshot taken
+# outside it could be published after a newer, larger one and leave the
+# tab under-counting the child's spend for the whole session.  Only
+# ledger reads and the printer's own lock are taken under it, so no
+# caller can deadlock on it.
+_OFFSET_PUBLISH_LOCK = threading.Lock()
+
 
 class _UsageLedger:
     """One accounting epoch: an append-only record list plus a folded view.
@@ -1359,7 +1371,7 @@ class RelentlessAgent(Base):
                 if partial is None:
                     raise exhausted
                 return partial
-            self._set_printer_offsets(budget_banked, tokens_banked, steps_banked)
+            self._set_printer_offsets()
             logger.info(
                 "Session %d start: agent=%s budget_remaining=$%.4f "
                 "total_tokens=%d total_steps=%d",
@@ -1600,19 +1612,23 @@ class RelentlessAgent(Base):
         result: str = yaml.dump(payload, sort_keys=False)
         return result
 
-    def _set_printer_offsets(self, budget: float, tokens: int, steps: int) -> None:
+    def _set_printer_offsets(self) -> None:
         """Make the printer add this task's banked totals to every event.
 
         Each sub-session (and the failed-session summarizer) is a fresh
         :class:`KISSAgent` whose counters start at zero; the printer adds
         these offsets so the UI shows the task's cumulative usage.
 
-        Args:
-            budget: Banked spend in USD.
-            tokens: Banked token count.
-            steps: Banked step count.
+        The totals are snapshotted under :data:`_OFFSET_PUBLISH_LOCK`,
+        the lock a child's fold (``sorcar_agent._attribute_sub_usage``)
+        publishes under from its own thread, so a fold landing between
+        this method's snapshot and its publish can never be overwritten
+        by the older, smaller snapshot.
         """
-        if self.printer:
+        if self.printer is None:
+            return
+        with _OFFSET_PUBLISH_LOCK:
+            budget, tokens, steps = self.usage_snapshot()
             self.printer.tokens_offset = tokens  # type: ignore[attr-defined]
             self.printer.budget_offset = budget  # type: ignore[attr-defined]
             self.printer.steps_offset = steps  # type: ignore[attr-defined]
@@ -1666,7 +1682,7 @@ class RelentlessAgent(Base):
             # offsets still exclude the failed session just banked; its
             # usage events would show the task's cost dropping by that
             # session's spend until the next session re-bases them.
-            self._set_printer_offsets(*self.usage_snapshot())
+            self._set_printer_offsets()
             summarizer_agent = KISSAgent(f"{self.name} Summarizer")
             try:
                 summarizer_result = summarizer_agent.run(

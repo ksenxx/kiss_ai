@@ -64,21 +64,13 @@ from kiss.core.kiss_error import KISSError
 from kiss.tests.agents.sorcar.docker_test_containers import (
     IMAGE,
     image_container_ids,
+    is_docker_available,
     remove_new_image_containers,
 )
 
-
-def _docker_available() -> bool:
-    try:
-        docker.from_env().ping()
-        return True
-    except Exception:
-        return False
-
-
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not _docker_available(), reason="Docker daemon is not running"),
+    pytest.mark.skipif(not is_docker_available(), reason="Docker daemon is not running"),
 ]
 
 

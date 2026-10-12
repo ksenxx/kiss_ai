@@ -404,27 +404,99 @@ body {
   }
 }
 
-/* The server's machine name, centred at the top of the chat pane in
-   bold green on every chat surface (main.js fills it from
-   configData.machine); the strip takes no room until it has a name.
-   The same hairline as the tab rows parts it from the transcript. */
-#chat-machine {
+/* The machine the chat's tasks run on: a drop-down centred at the
+   top of the chat pane in bold green on every chat surface, styled as
+   plain text (main.js lists this daemon's machine, from
+   configData.machine, and the reachable registered machines); the
+   strip takes no room until it has a name.  A remote pick turns
+   orange: the task is not going to run here.  Disabled while the
+   chat runs (a running chat cannot move).  The same hairline as the
+   tab rows parts it from the transcript. */
+#chat-header {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
   padding: var(--space-0-5) var(--space-3);
   border-bottom: 1px solid var(--border);
-  text-align: center;
   font-size: var(--fs-base);
   font-weight: 700;
   color: var(--green);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-#chat-machine:empty { display: none; }
+/* "machine: directory" -- the ":" hugs the machine name; a long
+   directory ellipsizes before the name shrinks. */
+#chat-header-sep { flex-shrink: 0; margin-right: var(--space-1); }
+
+/* Each select sits in a span that draws a down chevron after its
+   text, so the plain-text styling still reads as a drop-down.  The
+   chevron is the span's ::after (a bordered square turned 45deg, in
+   the current colour) laid over the select's right padding; it takes
+   no pointer events, so a click on it opens the native list. */
+.chat-header-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-header-select::after {
+  content: '';
+  position: absolute;
+  right: 0.3em;
+  top: 50%;
+  width: 0.4em;
+  height: 0.4em;
+  border-right: 2px solid currentcolor;
+  border-bottom: 2px solid currentcolor;
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
+#chat-machine-wrap { flex-shrink: 0; }
+
+#chat-workdir-wrap { flex: 0 1 auto; }
+
+#chat-machine,
+#chat-workdir {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 1.1em 0 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  text-align: center;
+  text-align-last: center;
+  font: inherit;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  appearance: none;
+}
+
+/* A remote pick turns the name and its chevron orange. */
+#chat-machine-wrap:has(> .remote) { color: var(--orange); }
+
+#chat-machine:disabled { cursor: default; }
+
+#chat-machine-wrap:has(> :disabled) { opacity: 0.85; }
+
+#chat-machine option,
+#chat-workdir option { color: var(--fg); background: var(--bg); font-weight: 400; }
+
+/* The machine drop-down (and its chevron) takes no room until a name
+   is known (the directory one always offers at least "Choose ..."). */
+#chat-machine:empty,
+#chat-machine-wrap:has(> #chat-machine:empty) { display: none; }
 
 /* A stacked surface showing a content tab in place of the chat. */
-body.content-tab-open #chat-machine { display: none; }
+body.content-tab-open #chat-header { display: none; }
 
 #tab-status-bar {
   display: flex;
@@ -1940,8 +2012,14 @@ body.remote-chat #terminal-btn { display: flex; }
    right-hand drawer in the extension's sidebar chat view; in an
    editor-tab chat webview it stays hidden and only mirrors values for
    the host relay.  Its drawer affordances (the tab-bar toggle and the
-   close button) exist only on the drawer surfaces. */
-#meta-panel { display: none; }
+   close button) exist only on the drawer surfaces.  --meta-hdr-row
+   is the height of a section header's icon buttons, and of the
+   header row they sit in (see .meta-section-hdr below). */
+#meta-panel {
+  --meta-hdr-row: 14px;
+
+  display: none;
+}
 
 #meta-drawer-btn,
 #meta-close { display: none; }
@@ -1981,12 +2059,27 @@ body.remote-chat #terminal-btn { display: flex; }
    update status line) keeps its own height; only bodies flex. */
 .meta-section > :not(.meta-section-body) { flex: 0 0 auto; }
 
+/* A short header row: a tight text line (a plain title row is 12px)
+   or the --meta-hdr-row icon buttons, then a 4px gap to the body --
+   at least a fifth less than the 18px row and 8px gap the panel had
+   (26px -> 18px with buttons, 21px -> 16px without).  A collapsed
+   section has no body to keep a gap from, so its header drops the
+   gap: a collapsed section costs its header row plus the separator
+   and nothing else.  The drawers' close button (#meta-close) sizes
+   itself from --meta-hdr-row too: its box ends where the first header
+   row ends, so it never covers the header that follows a collapsed
+   first section. */
 .meta-section-hdr {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
+  line-height: 1;
 }
+
+.sidebar-hdr.meta-section-hdr { margin-bottom: var(--space-1); }
+
+.meta-section.collapsed > .meta-section-hdr { margin-bottom: 0; }
 
 .meta-section-toggle {
   display: flex;
@@ -2088,8 +2181,8 @@ body.meta-section-resizing {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: var(--meta-hdr-row);
+  height: var(--meta-hdr-row);
   padding: 0;
   border: none;
   border-radius: var(--radius-sm);
@@ -2115,7 +2208,7 @@ body.meta-section-resizing {
 .meta-info-status {
   font-size: var(--fs-xs);
   color: color-mix(in srgb, var(--fg) 55%, transparent);
-  margin: calc(-1 * var(--space-1-5)) 0 var(--space-1-5);
+  margin: calc(-1 * var(--space-0-5)) 0 var(--space-1-5);
   max-height: 5.5em;
   overflow-y: auto;
   overflow-wrap: anywhere;
@@ -2159,10 +2252,105 @@ body.meta-section-resizing {
 
 .sched-row.paused { opacity: 0.6; }
 
-/* The copy button (the job's prompt or command) sits at the right edge
-   of the name line; it takes the line's own gap, not the task panels'
-   margin. */
-.sched-row .sidebar-item-copy { margin-left: 0; }
+/* The row buttons (edit, run, pause, copy, delete) sit right-justified
+   on the name line; they take the line's own gap, not the task panels'
+   margin.  The name stretches, so the first button starts the group at
+   the right edge. */
+.sched-row .sidebar-item-copy,
+.sched-row .sidebar-item-edit,
+.sched-row .sidebar-item-delete,
+.machine-row .sidebar-item-copy,
+.machine-row .sidebar-item-edit,
+.machine-row .sidebar-item-delete { margin-left: 0; }
+
+.sched-row .sidebar-item-edit:disabled,
+.machine-row .sidebar-item-delete:disabled { opacity: 0.2; cursor: default; }
+
+.machine-row,
+.recommendation-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--space-1) var(--space-0-5);
+  border-radius: var(--radius-sm);
+}
+
+.machine-row:hover,
+.machine-row:focus-visible,
+.recommendation-row:hover,
+.recommendation-row:focus-visible {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  outline: none;
+}
+
+/* A Recommendations row is a click target (it opens a new chat with
+   the task in the composer); the whole sentence shows, wrapped. */
+.recommendation-row { cursor: pointer; }
+
+.recommendation-row .sidebar-panel-name {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.machine-row.unreachable .sidebar-panel-name { opacity: 0.6; }
+
+/* The reachability dot before a machine's name. */
+.machine-status {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-ok);
+}
+
+.machine-status.unreachable { background: var(--status-fail); }
+
+/* The in-place editor of a Schedule row and the add forms of the
+   Schedule and Machines headers' + buttons: labelled inputs (a select
+   for a choice) stacked under the row, then Save / Cancel. */
+.sidebar-inline-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  font-size: var(--fs-xs);
+}
+
+.sidebar-inline-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-inline-form-label {
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
+.sidebar-inline-form input,
+.sidebar-inline-form select,
+.sidebar-inline-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-0-5) var(--space-1);
+}
+
+.sidebar-inline-form textarea { resize: vertical; }
+
+.sidebar-inline-form-buttons {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.sidebar-inline-form-save { color: var(--accent); }
+.sidebar-inline-form-save:hover { background: color-mix(in srgb, var(--accent) 12%, var(--surface2)); border-color: var(--accent); }
+
+.meta-info-status.is-error { color: var(--status-fail); }
 
 .sidebar-panel-row-top,
 .app-row-main {
@@ -2363,7 +2551,10 @@ button.app-row-main .app-state { color: var(--accent); }
 /* Custom tooltip for the hovered cell or bar: the native ``title``
    would be lost to the re-render every poll triggers.  It never gets
    wider than the graph (a narrow sidebar wraps its lines) so the
-   centering clamp in main.js can always keep it inside. */
+   centering clamp in main.js can always keep it inside.  Its lines
+   are set tight: today's three lines wrap to six in a 240px panel,
+   and at the body line-height that stack is as tall as the seven
+   cell rows, so it could no longer clear a weekend cell. */
 .spend-tip {
   position: absolute;
   box-sizing: border-box;
@@ -2374,6 +2565,7 @@ button.app-row-main .app-state { color: var(--accent); }
   background: var(--surface);
   color: var(--fg);
   font-size: var(--fs-sm);
+  line-height: 1.2;
   overflow-wrap: anywhere;
   text-align: center;
   pointer-events: none;
@@ -2512,10 +2704,6 @@ body.sidebar-chat-mode #meta-list {
 .meta-item[hidden] { display: none !important; }
 .meta-item .meta-label { white-space: nowrap; }
 
-/* The Machine row heads the list on every surface and its value is
-   bold: which daemon's machine a task runs on is read first. */
-#meta-machine { font-weight: 700; }
-
 body.meta-panel-mode .meta-item,
 body.sidebar-chat-mode .meta-item {
   display: list-item;
@@ -2570,17 +2758,22 @@ body.sidebar-chat-mode #meta-panel {
 
 body.sidebar-chat-mode #meta-panel.open { transform: translateX(0); }
 
+/* The box ends with the first header row (the panel's 16px padding
+   plus the row) and the glyph sits on that row: the header after a
+   collapsed first section lies below the button, clear of its taps. */
 body.sidebar-chat-mode #meta-close {
   display: block;
   position: absolute;
-  top: 12px;
+  top: var(--space-1);
   right: 12px;
+  height: calc(var(--space-4) - var(--space-1) + var(--meta-hdr-row));
   background: none;
   border: none;
   color: color-mix(in srgb, var(--fg) 60%, transparent);
   font-size: var(--fs-2xl);
+  line-height: 1;
   cursor: pointer;
-  padding: var(--space-1) var(--space-2);
+  padding: var(--space-1-5) var(--space-2) 0;
   border-radius: var(--radius-sm);
 }
 
@@ -2599,13 +2792,11 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
 }
 
 /* The dimming backdrop behind every side panel -- history sidebar,
-   task info drawer, settings, tricks, working directory: one rule,
-   five ids. */
+   task info drawer, settings, tricks: one rule, four ids. */
 #sidebar-overlay,
 #meta-overlay,
 #settings-overlay,
-#tricks-overlay,
-#workdir-overlay {
+#tricks-overlay {
   position: fixed; inset: 0; background: var(--scrim);
   z-index: var(--z-scrim); opacity: 0; pointer-events: none; transition: opacity var(--dur-slow) var(--ease);
 }
@@ -2613,8 +2804,7 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
 #sidebar-overlay.open,
 #meta-overlay.open,
 #settings-overlay.open,
-#tricks-overlay.open,
-#workdir-overlay.open { opacity: 1; pointer-events: auto; }
+#tricks-overlay.open { opacity: 1; pointer-events: auto; }
 
 /* The settings panel: a centered dialog. No entry animation — it is
    display-toggled, never slid in from an edge. */
@@ -2646,10 +2836,8 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
 
 #settings-panel.open { visibility: visible; }
 
-/* The bottom sheets ("..." menu): promptlets and the working
-   directory share one geometry. */
-#tricks-panel,
-#workdir-panel {
+/* The promptlets bottom sheet ("..." menu). */
+#tricks-panel {
   position: fixed;
   left: 5%;
   right: 5%;
@@ -2670,37 +2858,32 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
   flex-direction: column;
 }
 
-#tricks-panel.open,
-#workdir-panel.open { transform: translateY(0); }
+#tricks-panel.open { transform: translateY(0); }
 
-/* The "x" of every side panel; the bottom sheets' buttons also stack
-   above their own list pane. */
+/* The "x" of every side panel; the bottom sheet's button also stacks
+   above its own list pane. */
 #sidebar-close,
 #settings-panel-close,
-#tricks-panel-close,
-#workdir-panel-close {
+#tricks-panel-close {
   position: absolute; top: 12px; right: 12px; background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); font-size: var(--fs-2xl); cursor: pointer; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm);
 }
 
-#tricks-panel-close,
-#workdir-panel-close { z-index: var(--z-raised); }
+#tricks-panel-close { z-index: var(--z-raised); }
 
 #sidebar-close:hover,
 #settings-panel-close:hover,
-#tricks-panel-close:hover,
-#workdir-panel-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+#tricks-panel-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
-/* The scrolling list pane of the bottom sheets. */
-#tricks-list,
-#workdir-list {
+/* The scrolling list pane of the bottom sheet. */
+#tricks-list {
   flex: 1;
   overflow-y: auto;
   margin-top: var(--space-0-5);
 }
 
-/* One previously opened working directory: its path and when it was
-   last opened. */
+/* One previously selected working directory in the folder picker's
+   "Recently opened" section: its path and when it was last selected. */
 .workdir-item {
   display: flex;
   align-items: baseline;
@@ -2730,23 +2913,6 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
   color: color-mix(in srgb, var(--fg) 55%, transparent);
   white-space: nowrap;
 }
-
-#workdir-empty,
-#workdir-current,
-#workdir-error {
-  padding: var(--space-2) var(--space-2-5);
-  font-size: var(--fs-sm);
-  color: color-mix(in srgb, var(--fg) 55%, transparent);
-}
-
-#workdir-current {
-  padding-top: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-#workdir-error { color: var(--red); margin-bottom: var(--space-1-5); }
 
 .tricks-item {
   padding: var(--space-2) var(--space-2-5);
@@ -3100,6 +3266,10 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
 
 .scm-count:empty { display: none; }
 
+/* The number of uncommitted files right after the "Source Control"
+   title (readable while the section is folded). */
+#scm-hdr-count { margin-left: 0; text-transform: none; }
+
 .scm-list[hidden] { display: none; }
 
 /* Under a worktree header (several worktrees) the group headers indent
@@ -3424,8 +3594,8 @@ body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section
   border-color: var(--accent);
 }
 
-/* "Recently opened": the Working directory panel's recent folders,
-   offered above the subfolder list so one click adds one of them. */
+/* "Recently opened": the folder picker's recent folders, offered
+   above the subfolder list so one click adds one of them. */
 .folder-picker-recent {
   flex: 0 1 auto;
   min-height: 60px; /* the header and two rows, on the shortest screens */
@@ -3682,8 +3852,7 @@ body.pdf-preview-body {
 
 #history-search,
 #tricks-search,
-#tricks-add-input,
-#workdir-input {
+#tricks-add-input {
   width: 100%; background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
   border-radius: var(--radius-md); color: var(--fg); font-size: var(--fs-base); padding: var(--space-1-5) 28px var(--space-1-5) var(--space-2-5);
   outline: none; box-sizing: border-box;
@@ -3692,19 +3861,12 @@ body.pdf-preview-body {
 
 #history-search:focus,
 #tricks-search:focus,
-#tricks-add-input:focus,
-#workdir-input:focus { border-color: var(--accent); }
+#tricks-add-input:focus { border-color: var(--accent); }
 
-/* The Inject promptlet panel's "new promptlet" box with its Add button,
-   and the Working directory panel's path box with its Open and
-   folder buttons. */
-#tricks-add-row,
-#workdir-open-row { display: flex; align-items: center; gap: var(--space-1-5); margin-bottom: var(--space-2-5); }
+/* The Inject promptlet panel's "new promptlet" box with its Add button. */
+#tricks-add-row { display: flex; align-items: center; gap: var(--space-1-5); margin-bottom: var(--space-2-5); }
 
-#tricks-add-row #tricks-add-input,
-#workdir-open-row #workdir-input { flex: 1; min-width: 0; padding-right: var(--space-2-5); }
-
-#workdir-pick-btn { padding: var(--space-1-5) var(--space-2); }
+#tricks-add-row #tricks-add-input { flex: 1; min-width: 0; padding-right: var(--space-2-5); }
 
 /* The search box with the flat-list / chat-panels switch on its right. */
 .history-search-row { display: flex; align-items: center; gap: var(--space-1-5); margin-bottom: var(--space-2-5); }
@@ -3884,6 +4046,15 @@ body.pdf-preview-body {
 
 .history-filter-sea-select option {
   background: var(--bg); color: var(--fg);
+}
+
+/* The WORKDIR filter: the SEA pill with room for a path, taking the
+   accent (like the tag pill) while a directory is chosen. */
+.history-filter-workdir .history-filter-sea-select { max-width: 22em; }
+
+.history-filter-workdir.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .history-filter-date-group {
@@ -4129,6 +4300,12 @@ body.pdf-preview-body {
 
 .history-chat-launched:empty { display: none; }
 
+/* A chat that lives only on a remote machine names it on its header. */
+.history-chat-launched + .history-chat-machine::before {
+  content: '•';
+  margin-right: var(--space-0-5);
+}
+
 /* The chat's task rows, indented under the header behind a hairline
    guide so the nesting reads without a tinted band. */
 .history-chat-body {
@@ -4353,7 +4530,8 @@ body.remote-chat .running-item.history-active-task:hover {
    "3 hours ago" label and in the same muted style, so they read as one
    line of metadata. */
 .sidebar-item-tags,
-.sidebar-item-sea {
+.sidebar-item-sea,
+.sidebar-item-machine {
   flex-shrink: 1;
   min-width: 0;
   margin-left: var(--space-0-5);
@@ -4365,9 +4543,21 @@ body.remote-chat .running-item.history-active-task:hover {
   text-overflow: ellipsis;
 }
 
+/* The remote machine a task belongs to (a link to that machine's web
+   UI, where the chat can be opened). */
+.sidebar-item-machine {
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.sidebar-item-machine:hover { opacity: 1; text-decoration: underline; }
+
 .sidebar-item-launched + .sidebar-item-tags::before,
 .sidebar-item-launched + .sidebar-item-sea::before,
-.sidebar-item-tags + .sidebar-item-sea::before {
+.sidebar-item-tags + .sidebar-item-sea::before,
+.sidebar-item-launched + .sidebar-item-machine::before,
+.sidebar-item-tags + .sidebar-item-machine::before,
+.sidebar-item-sea + .sidebar-item-machine::before {
   content: '•';
   margin-right: var(--space-0-5);
 }

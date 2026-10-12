@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Any
 
 import requests
@@ -145,6 +146,8 @@ class TwitchChannelBackend(ToolMethodBackend):
         self._user_id: str = ""
         self._http: Any = requests
         self._muse: bool = False
+        self._lazy_muse: bool = False
+        self._wire_lock = threading.Lock()
         self._connection_info: str = ""
 
     def _headers(self) -> dict[str, str]:
@@ -190,7 +193,31 @@ class TwitchChannelBackend(ToolMethodBackend):
         self._muse = True
         return True
 
+    def _wire_deferred(self) -> dict[str, Any] | None:
+        """Run the Muse wiring :class:`TwitchAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of wiring at construction,
+        so building it for its tool list (``sea lint``, ``sea docs``,
+        run start) touches no daemon.  Concurrent first requests wait on
+        the lock and share the one surrogate; :meth:`_wire_muse`
+        publishes ``_muse`` last, so a request that sees it set sees the
+        whole wired state.
+
+        Returns:
+            None once the backend holds a surrogate (or needs none), or
+            the ``{"ok": false, "error": ...}`` reply to return when no
+            Twitch credential can be wired.
+        """
+        if not self._lazy_muse or self._muse:
+            return None
+        with self._wire_lock:
+            if self._muse or self._wire_muse():
+                return None
+        return {"ok": False, "error": self._connection_info}
+
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
+        if (unwired := self._wire_deferred()) is not None:
+            return unwired
         resp = self._http.get(
             f"{self._helix_base}{path}", headers=self._headers(), params=params, timeout=30
         )
@@ -200,6 +227,8 @@ class TwitchChannelBackend(ToolMethodBackend):
         return result
 
     def _post(self, path: str, json_body: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
+        if (unwired := self._wire_deferred()) is not None:
+            return unwired
         resp = self._http.post(
             f"{self._helix_base}{path}", headers=self._headers(), json=json_body, timeout=30
         )
@@ -612,19 +641,12 @@ class TwitchAgent(BaseChannelAgent):
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
-            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
-
-            # Muse-auth mode: wire a vault surrogate and the boundary
-            # session (no network round trip); the real token never
-            # enters this process once migrated.  A daemon failure
-            # leaves the agent constructible (fail closed, tokenless)
-            # so its authenticate/clear tools stay available.
-            try:
-                self._backend._wire_muse()
-            except MuseAuthError as e:
-                self._backend._access_token = ""
-                self._backend._client_id = ""
-                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            # Muse-auth mode: the backend wires its vault surrogate and
+            # boundary session on the first request, so building the
+            # tool list (``sea lint``, ``sea docs``, run start) touches
+            # no daemon; the real token never enters this process once
+            # migrated.
+            self._backend._lazy_muse = True
             return
         cfg = _config.load()
         if cfg:  # pragma: no branch
@@ -636,10 +658,21 @@ class TwitchAgent(BaseChannelAgent):
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
-            # In Muse mode only a wired boundary session counts: after a
-            # failed enrollment rollback the backend holds no credential
-            # and must not fall back to direct legacy requests.
-            return self._backend._muse and bool(self._backend._access_token)
+            # In Muse mode only a wired boundary session, or a credential
+            # the deferred wiring will enroll (vault entry or legacy
+            # config token), counts: after a failed enrollment rollback
+            # the backend holds no credential and must not fall back to
+            # direct legacy requests.
+            backend = self._backend
+            if backend._muse and backend._access_token:
+                return True
+            if not backend._lazy_muse:
+                return False
+            from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
+
+            return vault_has_credentials("twitch") or bool(
+                (_config.load_metadata() or {}).get("access_token")
+            )
         return bool(self._backend._client_id)
 
     def _get_auth_tools(self) -> list:

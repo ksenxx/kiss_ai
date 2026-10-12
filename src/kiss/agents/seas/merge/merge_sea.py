@@ -6,8 +6,9 @@
 
 Two ways to run it:
 
-1. **Auto-commit mode.**  When the post-task auto-merge of a worktree
-   branch conflicts, :mod:`kiss.server.merge_conflict_resolver`
+1. **Conflict resolver.**  When a task's ``commit_and_merge`` tool (or
+   the Merge button of a pending worktree) squash-merges a worktree
+   branch and conflicts, :mod:`kiss.agents.sorcar.merge_conflict_resolver`
    re-applies the branch onto the original branch with the conflict
    markers left in place and runs this SEA in-process, as a sub-agent
    of the task whose merge failed, so the agent's cost, tokens and
@@ -15,23 +16,27 @@ Two ways to run it:
    conflicted files; the resolver verifies the tree and commits.
 2. **The ``/merge`` slash command.**  Typed into an idle tab, the
    command dispatches this file as a Sorcar Extension Agent through
-   ``run_agent`` on the tab's working directory (no worktree, no
-   auto-commit), with the user's text as the task — for example
+   ``run_agent`` on the tab's working directory (a worker: it edits
+   the checkout in place, without the worktree tools), with the
+   user's text as the task — for example
    ``/merge finish the conflicted merge of kiss/wt-foo into main``.
 
 Both ways run the same prompt: :class:`MergeSea`'s ``prompt(task)``
 wraps the task — the user's text, or the facts block
-:func:`conflict_task` builds for an auto-commit run — with the standing
-merge instructions.  The methods follow the SEA contract in
+:func:`~kiss.agents.sorcar.merge_conflict_resolver.conflict_task`
+builds for a resolver run — with the standing merge instructions.
+The methods follow the SEA contract in
 :mod:`kiss.agents.seas.base.base_sea`.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from kiss.agents.seas.base.base_sea import WorkerSea
+from kiss.agents.sorcar.merge_conflict_resolver import conflict_task
+
+__all__ = ["MergeSea", "conflict_task"]
 from kiss.core.brand import PRODUCT_NAME
 
 MAX_BUDGET_USD = 5.0
@@ -80,7 +85,9 @@ Rules you MUST follow:
   other occurrence(s) and extend `old_string` with the unique line before or after the
   conflict block; use `replace_all=True` only when every occurrence takes the same
   resolution.
-"""
+- When the `Steps:` footer of a tool result ends in 9, make your next call `summary`: the
+  10th, 20th, ... call is refused otherwise and has to be repeated (4 wasted steps of 50
+  in one merge)."""
 
 
 class MergeSea(WorkerSea):
@@ -114,7 +121,7 @@ class MergeSea(WorkerSea):
 
         The SEA ``prompt(task)`` method, so ``/merge <text>`` and
         ``run_agent(agent="merge", task=...)`` get the same instructions as
-        an auto-commit run (:func:`conflict_task`).
+        a resolver run (:func:`~kiss.agents.sorcar.merge_conflict_resolver.conflict_task`).
         """
         return (
             f"{task.strip()}\n\n"
@@ -122,48 +129,3 @@ class MergeSea(WorkerSea):
             "resolved files with `git add`. Do not commit."
         )
 
-
-def conflict_task(
-    repo: Path,
-    branch: str,
-    original_branch: str,
-    conflicted_files: list[str],
-    task_prompt: str | None = None,
-) -> str:
-    """Return the task text of one auto-commit conflict-resolution run.
-
-    The facts :func:`prompt` wraps: the repository, the two branches,
-    the conflicted files and the task that produced the branch.
-
-    Args:
-        repo: The repository whose checkout holds the conflicted merge.
-        branch: The task branch being merged in (the "theirs" side).
-        original_branch: The branch checked out in *repo* (the "ours"
-            side).
-        conflicted_files: Repository-relative paths still unmerged.
-        task_prompt: The prompt of the task that produced *branch*, so
-            the agent knows what the incoming changes were meant to
-            do, or ``None``.
-
-    Returns:
-        The task text.
-    """
-    files = "\n".join(f"- {path}" for path in conflicted_files)
-    lines = [
-        f"Repository: {repo}",
-        f"Checked-out branch (ours, HEAD): {original_branch}",
-        f"Incoming task branch (theirs): {branch}",
-        "",
-        "A squash merge of the task branch into the checked-out branch stopped "
-        "with conflicts in these files:",
-        files,
-    ]
-    if task_prompt:
-        lines += [
-            "",
-            "The task branch was produced by an agent working on this task:",
-            "<task>",
-            task_prompt.strip(),
-            "</task>",
-        ]
-    return "\n".join(lines)

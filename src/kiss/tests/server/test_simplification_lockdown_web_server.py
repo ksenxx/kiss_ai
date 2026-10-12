@@ -37,8 +37,6 @@ import contextlib
 import json
 import re
 import shutil
-import socket
-import ssl
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,23 +54,9 @@ from kiss.server.web_server import (
     _version_tuple,
 )
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
-
-
-def _find_free_port() -> int:
-    """Return a free TCP port on 127.0.0.1."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return a TLS client context that accepts the self-signed cert."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
 
 
 def _parse_http_response(raw: bytes) -> tuple[int, dict[str, str], bytes]:
@@ -102,7 +86,7 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -121,7 +105,7 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
     async def _raw_request(self, payload: bytes) -> bytes:
         """Send raw HTTPS bytes to the server and read until EOF."""
         reader, writer = await asyncio.open_connection(
-            "127.0.0.1", self.port, ssl=_no_verify_ssl(),
+            "127.0.0.1", self.port, ssl=no_verify_ssl(),
             limit=16 * 1024 * 1024,
         )
         try:

@@ -95,17 +95,12 @@ function makeRow(overrides) {
   );
 }
 
-function uncheckWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {
     type: 'configData',
     config: {work_dir: ''},
     apiKeys: {},
   });
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function openBurgerMenu(win) {
@@ -131,7 +126,7 @@ function testRunningTaskShowsAtTopAfterBurgerOpen() {
   const {win, posted} = makeWebview();
 
   openBurgerMenu(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   const getHist = posted.find(m => m && m.type === 'getHistory');
   assert.ok(
     getHist,
@@ -192,7 +187,7 @@ function testRunningTaskShowsAtTopAfterBurgerOpen() {
 function testFinishedTaskShowsSolidGreenCircle() {
   const {win, posted} = makeWebview();
   openBurgerMenu(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   const getHist = posted.find(m => m && m.type === 'getHistory');
   assert.ok(getHist, 'burger menu open must post getHistory');
 
@@ -348,7 +343,7 @@ function testFinishedTaskShowsSolidGreenCircle() {
 function testIndicatorsAreVerticallyCenteredInTaskPanels() {
   const {win, posted} = makeWebview();
   openBurgerMenu(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   const getHist = posted.find(m => m && m.type === 'getHistory');
   assert.ok(getHist, 'burger menu open must post getHistory');
 

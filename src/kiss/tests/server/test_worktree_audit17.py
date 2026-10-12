@@ -13,13 +13,13 @@ BUG-71: ``VSCodeServer._new_chat`` does not check whether a worktree
     agent's in-progress edits, the baseline commit, and produces a
     garbage squash-merge into the original branch.
 
-    The existing BUG-44 / BUG-35 checks only guard against concurrent
-    *non-worktree* tasks (via ``_any_non_wt_running``); they do not
-    protect the tab's own running worktree task.
+    The existing BUG-44 / BUG-35 checks only guarded against concurrent
+    *non-worktree* tasks (via the since-removed ``_any_non_wt_running``);
+    they did not protect the tab's own running worktree task.
 
 BUG-72: ``VSCodeServer._handle_worktree_action("merge"/"discard")``
-    only guards against concurrent non-worktree tasks via
-    ``_any_non_wt_running``, but does NOT check whether the tab's own
+    only guarded against concurrent non-worktree tasks via the
+    since-removed ``_any_non_wt_running``, and did NOT check whether the tab's own
     worktree task is still running.  A misbehaving client (or a race
     between ``worktree_done`` broadcast and ``task_thread`` cleanup)
     can trigger ``agent.merge()`` or ``agent.discard()`` while the
@@ -40,8 +40,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, cast
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
@@ -49,9 +49,8 @@ from kiss.server.server import VSCodeServer
 def _register_state(
     task_id: str,
     tab_id: str,
-    agent: WorktreeSorcarAgent,
+    agent: ChatSorcarAgent,
     *,
-    use_worktree: bool = True,
     is_task_active: bool = False,
 ) -> agent_state.AgentState:
     """Register a server-owned AgentState for *tab_id* running *agent*."""
@@ -62,7 +61,6 @@ def _register_state(
         server_owned=True,
         is_task_active=is_task_active,
     )
-    state.use_worktree = use_worktree
     agent_state.register(state)
     return state
 
@@ -91,7 +89,7 @@ def _make_repo(path: Path) -> Path:
 
 
 def _create_wt(
-    repo: Path, branch: str, agent: WorktreeSorcarAgent,
+    repo: Path, branch: str, agent: ChatSorcarAgent,
 ) -> GitWorktree:
     """Create a real git worktree + branch and assign it to *agent*."""
     slug = branch.replace("/", "_")
@@ -140,7 +138,7 @@ class TestNewChatSimpleBroadcast:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug71-ok"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         agent._wt = None
         state = _register_state("task-bug71-ok", tab_id, agent)
         try:
@@ -169,7 +167,7 @@ class TestBug72WorktreeActionDuringRunningTask:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug72-merge"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         wt = _create_wt(repo, "kiss/wt-bug72m-1", agent)
 
         state = _register_state(
@@ -211,7 +209,7 @@ class TestBug72WorktreeActionDuringRunningTask:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug72-discard"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         wt = _create_wt(repo, "kiss/wt-bug72d-1", agent)
 
         state = _register_state(

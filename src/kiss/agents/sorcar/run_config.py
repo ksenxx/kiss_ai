@@ -37,7 +37,7 @@ RUN_CONFIG_KEYS = (
     "timeout",
     "inherited",
     "pinned",
-    "classified",
+    "defaulted",
 )
 """The ``task_settings`` keys :func:`run_config_line` reads besides ``model``, ``work_dir``
 and ``max_budget``.
@@ -52,8 +52,9 @@ and ``max_budget``.
 ``inherited``: the setting keys filled from the calling agent;
 ``pinned``: ``{key: [before, pinned]}`` for every inherited or default value the SEA's
 ``settings()`` replaced;
-``classified``: ``{key: [before, after]}`` for every default the daemon's pre-run
-classifier changed (today only ``use_worktree``, demoted for a non-development task).
+``defaulted``: the setting keys that neither the call, the SEA, the calling agent nor
+the tab supplied, so the daemon filled them from its own defaults
+(:func:`defaulted_keys`).
 """
 
 PROVENANCE_EXPLICIT = "explicit"
@@ -122,6 +123,33 @@ def sea_pinned(
     return pinned
 
 
+def defaulted_keys(
+    before: Mapping[str, Any],
+    staged: Mapping[str, Any],
+    fields: Mapping[str, str],
+) -> list[str]:
+    """Return the setting keys no source supplies, so the daemon fills them from its defaults.
+
+    Args:
+        before: The ``run`` command as the caller sent it, with the
+            model the tab remembers from its picker filled in (the
+            task runner's ``_apply_sea``), since that model, not the
+            daemon default, is what a tab's run without one gets.
+        staged: The wire fields the SEA's settings write
+            (``{wire field: value}``).
+        fields: ``{setting key: wire field}`` (``SETTING_FIELDS``).
+
+    Returns:
+        The sorted keys of *fields* whose wire field the SEA does not
+        write and whose command value is absent, ``None`` or ``""``.
+    """
+    return sorted(
+        key
+        for key, field in fields.items()
+        if field not in staged and before.get(field) in (None, "")
+    )
+
+
 def inherited_keys(provenance: Any) -> list[str]:
     """Return the setting keys a ``run`` command's ``provenance`` marks as inherited.
 
@@ -140,7 +168,7 @@ def is_explicit(provenance: Any, key: str) -> bool:
     Args:
         provenance: The command's ``provenance`` wire field (anything
             but a dict counts as empty).
-        key: The setting key (``use_worktree``, ``model``, ...).
+        key: The setting key (``model``, ``max_budget``, ...).
     """
     return isinstance(provenance, Mapping) and provenance.get(key) == PROVENANCE_EXPLICIT
 
@@ -148,16 +176,12 @@ def is_explicit(provenance: Any, key: str) -> bool:
 def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
     """Render a task's effective configuration as one line.
 
-    Example (``/sh`` run from a task that uses a worktree)::
+    Example (``/sh`` run from a task)::
 
         sh model=gpt-5 tools=bash budget=$1.00 timeout=3600s
-        inherited=model,chat_id,max_budget pinned=use_worktree(True->False)
+        inherited=model,chat_id,max_budget pinned=use_web_tools(True->False)
 
     A channel's line starts ``slack (channel)``.
-
-    A plain sub-agent whose worktree default the classifier dropped
-    ends with ``classified=use_worktree(True->False)`` instead; the
-    entry is absent when the classifier changed nothing.
 
     Args:
         settings: A ``task_settings`` payload (see :data:`RUN_CONFIG_KEYS`);
@@ -187,9 +211,6 @@ def run_config_line(settings: Mapping[str, Any], alias: str = "") -> str:
         f"timeout={timeout_text} inherited={inherited_text} "
         f"pinned={_changes_text(settings.get('pinned')) or 'none'}"
     )
-    classified = _changes_text(settings.get("classified"))
-    if classified:
-        line += f" classified={classified}"
     return f'{line} (also agent="{alias}")' if alias else line
 
 

@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -38,15 +37,7 @@ from kiss.server.web_server import (
     _save_url_file,
 )
 from kiss.tests.conftest import TRANSIENT_REPLACE_READ_ERRORS
-from kiss.tests.server.test_web_server import _find_free_port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """SSL context that skips certificate verification (self-signed)."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 class TestSaveUrlFileLocalLan(TestCase):
@@ -97,7 +88,7 @@ class _LiveServerCase(IsolatedAsyncioTestCase):
     password = ""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -147,7 +138,7 @@ class TestLoopbackOnlyServer(_LiveServerCase):
         """remote_url carries loopbackUrl; lanUrls is [] (LAN would 403)."""
         self.server._active_url = "https://lan-test.trycloudflare.com"
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()
         ) as ws:
             await self._auth_ws(ws)
             await ws.send(json.dumps({"type": "getWelcomeInfo"}))
@@ -196,7 +187,7 @@ class TestLanCapableServer(_LiveServerCase):
         """getWelcomeInfo's remote_url has loopbackUrl and lanUrls."""
         self.server._active_url = "https://lan-test.trycloudflare.com"
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()
         ) as ws:
             await self._auth_ws(ws)
             await ws.send(json.dumps({"type": "getWelcomeInfo"}))
@@ -265,7 +256,7 @@ class TestLanCapableServer(_LiveServerCase):
         self.server._last_ips = frozenset({"192.168.77.1"})
         new_ips = frozenset({"192.168.77.2"})
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()
         ) as ws:
             await self._auth_ws(ws)
             restarted = False

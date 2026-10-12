@@ -27,12 +27,12 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar import sea_commands, sea_settings
 from kiss.core.config import kiss_home
 from kiss.tests.conftest import is_root, posix_only
 
@@ -256,11 +256,16 @@ def test_slash_command_task_is_none_for_unknown_command() -> None:
 def test_slash_command_task_is_none_without_trailing_text(tmp_path: Path) -> None:
     """``/xxx`` alone (no task text) and ``/xxx help`` are not SEA runs.
 
-    The bare command has no task to run; ``help`` is answered by
+    A stock SEA passes the empty task through, so the bare command has
+    no task to run; ``help`` is answered by
     :func:`sea_commands.help_text_if_command` instead.
     """
     folder = tmp_path / "seas"
-    _touch_sea(folder, "solo")
+    sea_path = _touch_sea(folder, "solo")
+    sea_path.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\nclass SoloSea(BaseSea):\n    pass\n",
+        encoding="utf-8",
+    )
     _write_seas_md([str(folder)])
     sea_commands.refresh_registry()
     assert sea_commands.slash_command_task("/solo") is None
@@ -268,6 +273,32 @@ def test_slash_command_task_is_none_without_trailing_text(tmp_path: Path) -> Non
     assert sea_commands.slash_command_task("/solo help") is None
     assert sea_commands.slash_command_task("/solo HELP") is None
     assert sea_commands.slash_command_task("/solo help me") is not None
+
+
+def test_slash_command_task_runs_bare_command_with_default_task(tmp_path: Path) -> None:
+    """``/xxx`` alone runs a SEA whose ``prompt()`` gives the empty task text.
+
+    The task text comes back empty (the daemon's ``apply_sea`` lets the
+    SEA's ``prompt()`` supply the text); a broken SEA raises instead of
+    silently running the bare command as an ordinary prompt.
+    """
+    folder = tmp_path / "seas"
+    sea_path = _touch_sea(folder, "daily")
+    sea_path.write_text(
+        "from kiss.agents.seas.base.base_sea import BaseSea\n\nclass DailySea(BaseSea):\n"
+        "    def prompt(self, task):\n        return task or 'do the daily chores'\n",
+        encoding="utf-8",
+    )
+    broken = _touch_sea(folder, "broken")
+    _write_seas_md([str(folder)])
+    sea_commands.refresh_registry()
+    assert sea_commands.slash_command_task("/daily") == ("", sea_path.resolve())
+    assert sea_commands.slash_command_task("/daily   ") == ("", sea_path.resolve())
+    assert sea_commands.slash_command_task("/daily help") is None
+    assert sea_commands.slash_command_task("/daily now") == ("now", sea_path.resolve())
+    with pytest.raises(sea_commands.SeaError):
+        sea_commands.slash_command_task("/broken")
+    assert sea_commands.slash_command_task("/broken now") == ("now", broken.resolve())
 
 
 def test_slash_command_task_ignores_prompts_that_are_not_slash_commands() -> None:
@@ -558,15 +589,15 @@ from kiss.agents.seas.base.base_sea import BaseSea
 class Verdict:
     """String annotations: resolved through ``sys.modules[__module__]``."""
 
-    worktree: bool
+    memory: bool
     note: typing.ClassVar[str] = "relay stays on the real checkout"
 
 
 class Sea(BaseSea):
     def settings(self, settings):
         hints = typing.get_type_hints(Verdict)
-        assert hints == {"worktree": bool, "note": typing.ClassVar[str]}, hints
-        return settings | {"use_worktree": Verdict(worktree=False).worktree, "auto_commit": True}
+        assert hints == {"memory": bool, "note": typing.ClassVar[str]}, hints
+        return settings | {"use_memory": Verdict(memory=False).memory, "use_web_tools": True}
 
 
 '''
@@ -592,7 +623,7 @@ def test_dataclass_sea_with_future_annotations_loads(tmp_path: Path) -> None:
 
     assert sea_commands.slash_command_task("/verdict go") == ("go", sea.resolve())
     settings = sea_commands.sea_settings(sea)
-    assert settings == {"use_worktree": False, "auto_commit": True}
+    assert settings == {"use_memory": False, "use_web_tools": True}
     loaded = sea_commands.load_sea(sea)
     name = type(loaded).__module__
     assert name.startswith("_kiss_sea_verdict_sea_")
@@ -640,7 +671,7 @@ class Sea(BaseSea):
         time.sleep({delay})
         hints = typing.get_type_hints({cls})
         assert hints["parent"] == ({cls} | None), hints
-        return settings | {{"use_worktree": False}}
+        return settings | {{"use_memory": False}}
 '''
 
 
@@ -666,7 +697,7 @@ def test_concurrent_same_stem_loads_do_not_clobber_each_other(
 
     def _evaluate(label: str, sea: Path) -> None:
         try:
-            results[label] = sea_commands.sea_settings(sea)["use_worktree"] is False
+            results[label] = sea_commands.sea_settings(sea)["use_memory"] is False
         except sea_commands.SeaError as exc:
             results[label] = exc
 
@@ -680,6 +711,170 @@ def test_concurrent_same_stem_loads_do_not_clobber_each_other(
     assert len({n for n in sys.modules if n.startswith("_kiss_sea_shared_sea_")}) == 2
 
 
+_GATED_SEA = '''\
+"""SEA whose import blocks until a gate file appears (at most 20 s)."""
+
+import os
+import time
+
+from kiss.agents.seas.base.base_sea import BaseSea
+
+with open({started!r}, "a") as _log:
+    _log.write("x")
+for _ in range(400):
+    if os.path.exists({gate!r}):
+        break
+    time.sleep(0.05)
+
+
+class Sea(BaseSea):
+    def settings(self, settings):
+        return settings | {{"use_memory": False}}
+'''
+
+
+def test_slow_sea_import_does_not_block_other_files(tmp_path: Path) -> None:
+    """One file's import-time code holds up only re-executions of that file.
+
+    The daemon loads SEAs from many threads: a task's ``seaPath``, the
+    ``ready`` fan-out's model-picker probe, the slash-command registry.
+    A SEA that is slow to import (heavy dependencies, a script that
+    blocks) used to hold a global lock for the whole execution, so
+    every other loader — and with it every client's ``ready`` — waited
+    for it.  Executions of the SAME file still serialise, so a failed
+    re-execution restores the entry that is current when it fails.
+    """
+    gate = tmp_path / "gate"
+    started_log = tmp_path / "started"
+    slow = tmp_path / "slow_sea.py"
+    quick = tmp_path / "quick_sea.py"
+    slow.write_text(
+        _GATED_SEA.format(gate=str(gate), started=str(started_log)), encoding="utf-8",
+    )
+    quick.write_text(
+        _GATED_SEA.format(gate=str(tmp_path), started=str(tmp_path / "quick_started")),
+        encoding="utf-8",
+    )
+
+    done: dict[str, float] = {}
+
+    def _load(label: str, sea: Path) -> None:
+        sea_commands.sea_settings(sea)
+        done[label] = time.monotonic()
+
+    slow_first = threading.Thread(target=_load, args=("slow", slow), daemon=True)
+    slow_again = threading.Thread(target=_load, args=("slow_again", slow), daemon=True)
+    def _marker(text: str) -> bool:
+        return started_log.exists() and started_log.read_text(encoding="utf-8") == text
+
+    try:
+        slow_first.start()
+        _wait_for(lambda: _marker("x"))  # inside its import-time wait
+        slow_again.start()
+        # The second loader is queued behind the first (its wait is
+        # registered with the loader) before the other file is tried.
+        _wait_for(lambda: slow_again in sea_settings._EXECUTING_WAIT)
+        started = time.monotonic()
+        _load("quick", quick)
+        assert done["quick"] - started < 2.0, "a different file waited for the slow import"
+        assert done.keys() == {"quick"}, "the slow file finished before its gate opened"
+        # The second execution of the SAME file has not begun.
+        assert _marker("x")
+    finally:
+        gate.write_text("", encoding="utf-8")
+        for thread in (slow_first, slow_again):
+            if thread.ident is not None:
+                thread.join(timeout=20)
+    assert done.keys() == {"quick", "slow", "slow_again"}, done
+    assert _marker("xx")
+
+
+def _wait_for(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Poll *condition* until true, failing after *timeout* seconds."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "condition not met in time"
+        time.sleep(0.02)
+
+
+_CROSS_LOADING_SEA = '''\
+"""SEA that derives from another SEA file, which in turn derives from this one."""
+
+import os
+import time
+
+from kiss.agents.sorcar.sea_commands import sea_class
+
+with open({started!r}, "a+") as _log:
+    _log.write("x")
+    _log.seek(0)
+    if len(_log.read()) > 2:
+        # The surviving thread re-executes the cycle on its own thread
+        # until the recursion limit; cut that short.
+        raise RuntimeError("loaded again")
+# Both files are being imported before either loads the other.
+for _ in range(400):
+    if os.path.exists({other_started!r}):
+        break
+    time.sleep(0.05)
+
+
+class Sea(sea_class({other!r})):
+    pass
+'''
+
+
+def test_circular_sea_imports_across_threads_fail_instead_of_deadlocking(
+    tmp_path: Path,
+) -> None:
+    """Two threads loading files that load each other both get an error.
+
+    Each file's import waits for the other's import to have started,
+    then loads the other: the thread that closes the cycle is refused
+    (the other file's thread is waiting for this one), the other thread
+    then re-executes the cycle on its own thread (re-entrant) until
+    the fixture stops it.  Neither thread hangs.
+    """
+    sea_a = tmp_path / "a_sea.py"
+    sea_b = tmp_path / "b_sea.py"
+    started_a = tmp_path / "a_started"
+    started_b = tmp_path / "b_started"
+    sea_a.write_text(
+        _CROSS_LOADING_SEA.format(
+            started=str(started_a), other_started=str(started_b), other=str(sea_b),
+        ),
+        encoding="utf-8",
+    )
+    sea_b.write_text(
+        _CROSS_LOADING_SEA.format(
+            started=str(started_b), other_started=str(started_a), other=str(sea_a),
+        ),
+        encoding="utf-8",
+    )
+    errors: dict[str, str] = {}
+
+    def _load(label: str, sea: Path) -> None:
+        try:
+            sea_commands.sea_settings(sea)
+        except sea_commands.SeaError as exc:
+            errors[label] = str(exc)
+        else:
+            errors[label] = "no error"
+
+    threads = [
+        threading.Thread(target=_load, args=(label, sea), daemon=True)
+        for label, sea in (("a", sea_a), ("b", sea_b))
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not any(thread.is_alive() for thread in threads), "circular SEA loads deadlocked"
+    assert errors.keys() == {"a", "b"}, errors
+    assert any("circular SEA imports" in message for message in errors.values()), errors
+    assert all("failed to import" in message for message in errors.values()), errors
+
+
 _DESCRIBED_SEA = '''\
 """SEA with the mandatory description() getter."""
 
@@ -691,7 +886,7 @@ class Sea(BaseSea):
         return "  Echoes the task back; use it as /echo <text>.  "
 
     def settings(self, settings):
-        return settings | {"use_worktree": False}
+        return settings | {"use_memory": False}
 
 
 '''

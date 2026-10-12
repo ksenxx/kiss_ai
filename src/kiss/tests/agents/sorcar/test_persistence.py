@@ -74,14 +74,14 @@ class TestChatEvents:
     def test_load_chat_events_includes_extra(self):
         task_id, _ = th._add_task("extra-task", chat_id="1005")
         th._append_chat_event({"b": 2}, task_id=task_id)
-        extra = {"model": "gpt-4o", "is_worktree": True, "is_parallel": False}
+        extra = {"model": "gpt-4o", "is_parallel": True, "steps": 7}
         th._save_task_extra(extra, task_id=task_id)
         result = th._load_latest_chat_events_by_chat_id("1005")
         assert result is not None
         loaded = json.loads(str(result["extra"]))
         assert loaded["model"] == "gpt-4o"
-        assert loaded["is_worktree"] is True
-        assert loaded.get("is_parallel", False) is False
+        assert loaded["is_parallel"] is True
+        assert loaded["steps"] == 7
 
     def test_set_events_stores_timestamps(self):
         task_id, _ = th._add_task("ts-task", chat_id="ts1")
@@ -196,8 +196,8 @@ class TestSaveTaskExtra:
             "version": "0.2.79",
             "tokens": 1234,
             "cost": 0.0567,
-            "is_parallel": False,
-            "is_worktree": True,
+            "is_parallel": True,
+            "steps": 9,
         }
         th._save_task_extra(extra, task_id=task_id)
         entries = th._load_history(limit=1)
@@ -208,8 +208,8 @@ class TestSaveTaskExtra:
         assert stored["version"] == "0.2.79"
         assert stored["tokens"] == 1234
         assert stored["cost"] == 0.0567
-        assert stored.get("is_parallel", False) is False
-        assert stored["is_worktree"] is True
+        assert stored["is_parallel"] is True
+        assert stored["steps"] == 9
 
     def test_save_extra_by_task_name(self):
         th._add_task("lookup task")
@@ -234,12 +234,10 @@ class TestSaveTaskExtra:
             "model": "",
             "work_dir": "",
             "version": "",
-            "auto_commit_mode": False,
             "tokens": 0,
             "cost": 0.0,
             "steps": 0,
             "is_parallel": False,
-            "is_worktree": False,
             "endTs": 0,
             "max_budget": 0.0,
             "is_favorite": False,

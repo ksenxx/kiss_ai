@@ -104,8 +104,6 @@ const STORED = {
   custom_api_key: '',
   custom_headers: 'X-One: 1',
   remote_password: 'pw-one',
-  auto_commit_mode: true,
-  is_worktree: true,
 };
 
 // A push that arrives with the panel shut belongs to nobody's edit, so
@@ -189,15 +187,15 @@ function testToggleMarksAreReleasedBetweenSessions() {
   openSettings(win);
   send(win, {type: 'configData', config: STORED, apiKeys: {}});
 
-  const wt = doc.getElementById('cfg-use-worktree');
+  const wt = doc.getElementById('cfg-use-web-tools');
   wt.checked = false;
   wt.dispatchEvent(new win.Event('change', {bubbles: true}));
   closeSettings(win);
 
-  // The daemon reports worktrees back ON (another window re-enabled it).
+  // The daemon reports web tools back ON (another window re-enabled it).
   send(win, {
     type: 'configData',
-    config: {...STORED, is_worktree: true},
+    config: {...STORED, use_web_browser: true},
     apiKeys: {},
   });
   assert.strictEqual(

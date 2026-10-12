@@ -32,7 +32,7 @@ from types import FrameType
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.tests.server.test_web_server_tab_mirroring import (
@@ -175,7 +175,7 @@ class TestScopedReplayResubscribeGap(TabMirroringBase):
             {"type": "prompt", "text": "running prompt"}, task_id=persisted_id,
         )
         provisional_id = uuid.uuid4().hex
-        agent = WorktreeSorcarAgent("agent")
+        agent = ChatSorcarAgent("agent")
         state = AgentState(
             provisional_id,
             agent=agent,

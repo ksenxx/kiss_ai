@@ -22,7 +22,6 @@ same server object is asserted to still be serving afterwards.
 
 from __future__ import annotations
 
-import socket
 import subprocess
 import sys
 import tempfile
@@ -37,13 +36,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
 )
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
-
-
-def _free_port() -> int:
-    """Return a currently-free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+from kiss.tests.server.conftest import find_free_port
 
 
 class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
@@ -54,7 +47,7 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
         tmp = Path(self._tmp.name)
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_free_port(),
+            port=find_free_port(),
             use_tunnel=False,
             url_file=tmp / "remote-url.json",
             local_endpoint_file=tmp / "sorcar-local.json",
@@ -133,7 +126,7 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
         proc.terminate()
         proc.wait(timeout=2)
         self.server._tunnel_proc = proc
-        self.server._tunnel_metrics_port = _free_port()
+        self.server._tunnel_metrics_port = find_free_port()
         self.server._tunnel_started_at = time.monotonic()
 
         await self.server._check_and_restart_tunnel()
@@ -145,7 +138,7 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
         """A confirmed ``readyConnections == 0`` force-restart spares the server."""
         proc = self._spawn_dummy()
         self.server._tunnel_proc = proc
-        self.server._tunnel_metrics_port = _free_port()
+        self.server._tunnel_metrics_port = find_free_port()
         self.server._tunnel_started_at = (
             time.monotonic() - _TUNNEL_STARTUP_GRACE - 1
         )

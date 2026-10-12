@@ -22,8 +22,6 @@ import json
 import logging
 import shutil
 import signal
-import socket
-import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -39,19 +37,7 @@ from kiss.server.web_server import (
     _generate_self_signed_cert,
 )
 from kiss.tests.local_ws import open_local_connection
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 class TestLocalChannelOnEveryPlatform(IsolatedAsyncioTestCase):
@@ -65,7 +51,7 @@ class TestLocalChannelOnEveryPlatform(IsolatedAsyncioTestCase):
         vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
         certfile, keyfile = self.tmpdir / "cert.pem", self.tmpdir / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.port = _free_port()
+        self.port = find_free_port()
         self.endpoint_file = self.tmpdir / "sorcar-local.json"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -107,7 +93,7 @@ class TestLocalChannelOnEveryPlatform(IsolatedAsyncioTestCase):
 
     async def _wss_auth_round_trip(self) -> None:
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             while True:

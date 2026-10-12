@@ -51,6 +51,7 @@ class TestRunParallelTool:
         params = list(inspect.signature(rp).parameters.keys())
         assert params == [
             "tasks", "agent", "model", "tool_profile", "max_budget", "timeout", "options",
+            "description",
         ]
 
     def test_empty_tasks_array_is_refused(self) -> None:

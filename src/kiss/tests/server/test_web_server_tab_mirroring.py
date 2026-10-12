@@ -32,8 +32,6 @@ import asyncio
 import json
 import os
 import shutil
-import socket
-import ssl
 import tempfile
 import time
 import unittest
@@ -53,38 +51,12 @@ from kiss.server.web_server import (
 )
 from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.local_ws import open_local_connection
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    """Point the sorcar persistence layer at a per-test directory."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    """Undo :func:`_redirect_persistence`."""
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
-
-
-def _find_free_port() -> int:
-    """Return an available TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return an SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import (
+    find_free_port,
+    no_verify_ssl,
+    redirect_persistence,
+    restore_persistence,
+)
 
 
 def _tab_ids(snapshot: dict[str, Any]) -> list[str]:
@@ -105,7 +77,7 @@ class TabMirroringBase(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-tab-mirror-")
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self._orig_cfg_dir = vc.CONFIG_DIR
         self._orig_cfg_path = vc.CONFIG_PATH
         vc.CONFIG_DIR = Path(self.tmpdir) / "config"
@@ -114,14 +86,14 @@ class TabMirroringBase(IsolatedAsyncioTestCase):
         self.certfile = Path(self.tmpdir) / "cert.pem"
         self.keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(self.certfile, self.keyfile)
-        self.ctx = _no_verify_ssl()
+        self.ctx = no_verify_ssl()
         self._sockets: list[ClientConnection] = []
         self.server: RemoteAccessServer | None = None
         await self._start_server()
 
     async def _start_server(self) -> None:
         """Start a fresh daemon over the test's persistence dir."""
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.url = f"wss://127.0.0.1:{self.port}/ws"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -151,7 +123,7 @@ class TabMirroringBase(IsolatedAsyncioTestCase):
             agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         vc.CONFIG_DIR = self._orig_cfg_dir
         vc.CONFIG_PATH = self._orig_cfg_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -173,10 +145,16 @@ class TabMirroringBase(IsolatedAsyncioTestCase):
         self,
         ws: ClientConnection,
         restored: list[dict[str, str]] | None = None,
+        tab_id: str = "",
     ) -> None:
-        """Send a ``ready`` handshake for *ws*."""
+        """Send a ``ready`` handshake for *ws*.
+
+        *tab_id* names the tab the client shows: the only one whose
+        transcript the daemon replays at once (every other bound tab
+        is answered with ``replay_deferred``).
+        """
         await self._send(ws, {
-            "type": "ready", "tabId": "", "restoredTabs": restored or [],
+            "type": "ready", "tabId": tab_id, "restoredTabs": restored or [],
         })
 
     async def _wait_for_event(
@@ -391,7 +369,7 @@ class TestTabMirroring(TabMirroringBase):
         ))
 
         ws_c = await self._connect_ok()
-        await self._ready(ws_c)
+        await self._ready(ws_c, tab_id="tab-l2")
         snap_c = await self._wait_for_snapshot_with(
             ws_c, present={"tab-l1", "tab-l2"},
         )
@@ -563,7 +541,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
 
         # ANY client's ready must not lose the selected task.
         ws_c = await self._connect_ok()
-        await self._ready(ws_c)
+        await self._ready(ws_c, tab_id="tab-t")
         replay_c = await self._wait_for_event(
             ws_c, "task_events",
             pred=lambda ev: ev.get("tabId") == "tab-t",
@@ -795,7 +773,7 @@ class Sea(BaseSea):
                 )
 
                 ws_b = await self._connect_ok()
-                await self._ready(ws_b)
+                await self._ready(ws_b, tab_id=tab_id)
                 replay = await self._wait_for_event(
                     ws_b, "task_events",
                     pred=lambda ev: ev.get("tabId") == tab_id,

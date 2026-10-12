@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
@@ -29,20 +28,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-
-
-def _redirect(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore(saved: tuple) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class TestEventPersistenceNoDuplicate:
@@ -50,14 +36,14 @@ class TestEventPersistenceNoDuplicate:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
         agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_broadcast_persists_each_event_exactly_once(self) -> None:

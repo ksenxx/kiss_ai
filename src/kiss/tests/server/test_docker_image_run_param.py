@@ -37,22 +37,15 @@ import pytest
 from kiss.agents.sorcar import local_endpoint
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
+from kiss.tests.server.conftest import docker_available
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 IMAGE = "python:3.11-slim"
 
 
-def _docker_available() -> bool:
-    try:
-        docker.from_env().ping()
-        return True
-    except Exception:
-        return False
-
-
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not _docker_available(), reason="Docker daemon is not running"),
+    pytest.mark.skipif(not docker_available(), reason="Docker daemon is not running"),
 ]
 
 
@@ -155,7 +148,6 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         result = sorcar.run(
             "attach task",
             work_dir=self.repo,
-            use_worktree=False,
             use_web_tools=False,
             docker_image=f"container:{self.container.id}",
             endpoint_file=self.endpoint_file,
@@ -181,7 +173,6 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         result = sorcar.run(
             "parent task",
             work_dir=self.repo,
-            use_worktree=False,
             use_web_tools=False,
             docker_image=f"container:{self.container.id}",
             endpoint_file=self.endpoint_file,
@@ -208,11 +199,8 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
 
             class Sea(BaseSea):
                 def settings(self, settings):
-                    """The container the run's tools execute in; no worktree."""
-                    return settings | {{
-                        "docker_image": "container:{self.container.id}",
-                        "use_worktree": False,
-                    }}
+                    """The container the run's tools execute in."""
+                    return settings | {{"docker_image": "container:{self.container.id}"}}
             ''',
         )
         result = sorcar.run(
@@ -249,7 +237,6 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         result = sorcar.run(
             "bad sea task",
             work_dir=self.repo,
-            use_worktree=False,
             use_web_tools=False,
             sea_path=script,
             endpoint_file=self.endpoint_file,

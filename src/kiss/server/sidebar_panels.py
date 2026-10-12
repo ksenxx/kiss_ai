@@ -11,36 +11,55 @@ global subpanels under the per-task ones:
 * **Schedule** lists the scheduled cron jobs
   (:mod:`kiss.agents.sorcar.cron_agent`), answered by
   :func:`cron_jobs_report` for the ``getCronJobs`` command;
+* **Machines** lists the local machine and every registered remote
+  machine (:mod:`kiss.agents.sorcar.machines`) with its reachability,
+  answered by :func:`machines_report` for the ``getMachines`` command;
+  its add / delete buttons send ``machineAction``, see
+  :func:`machine_action`;
 * **Apps** lists every third-party channel agent with its
   authentication state, answered by :func:`apps_status` for the
   ``getAppsStatus`` command;
 * **Spend** draws a daily cost heatmap and cost-by-model bars from the
   task history, answered by :func:`spend_report` for the
-  ``getSpendReport`` command.
+  ``getSpendReport`` command;
+* **Recommendations** lists the five next tasks the last
+  ``/recommendations`` run suggested (a 6-hourly default cron job,
+  :data:`kiss.agents.sorcar.cron_agent.DEFAULT_JOBS`), answered by
+  :func:`recommendations_report` for the ``getRecommendations`` command.
+
+The Schedule subpanel's edit / run / pause / delete buttons send
+``cronAction``, applied by :func:`kiss.agents.sorcar.cron_agent.apply_job_action`.
 
 Probing the apps imports every channel module and builds its agent, so
 it runs in a short-lived subprocess
 (``python -m kiss.agents.third_party_agents.auth_status``) and the
 result is cached for :data:`APPS_STATUS_TTL_SECONDS`; concurrent
-requests share one probe.
+requests share one probe.  Probing the machines pings each one through
+its cached daemon link (concurrently, one thread per machine) and the
+result is cached for :data:`MACHINES_STATUS_TTL_SECONDS`.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import socket
 import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+from urllib.parse import urlsplit
 
-from kiss.agents.sorcar import cron_agent
+from kiss.agents.seas.recommendations.recommendations_sea import load_recommendations
+from kiss.agents.sorcar import cron_agent, machines
 from kiss.agents.sorcar.persistence import _spend_by_day_and_model
 
 logger = logging.getLogger(__name__)
 
 APPS_STATUS_TTL_SECONDS = 30.0
+MACHINES_STATUS_TTL_SECONDS = 60.0
 # Upper bound for the probe subprocess (the probe gives up on slow
 # channels after 20 s by itself).
 _PROBE_PROCESS_TIMEOUT_SECONDS = 45.0
@@ -202,3 +221,132 @@ def apps_status(refresh: bool = False) -> tuple[list[dict[str, Any]], int]:
                 _apps_cache = apps
                 _apps_checked_at = _apps_attempted_at
         return list(_apps_cache), _epoch_ms(_apps_checked_at)
+
+
+_machines_lock = threading.Lock()
+_machines_cache: list[dict[str, Any]] = []
+_machines_checked_at = 0.0
+
+
+def _resolve_ip(host: str) -> str:
+    """Return the IPv4 address *host* resolves to, or *host* itself when it does not."""
+    try:
+        return socket.gethostbyname(host)
+    except OSError:
+        return host
+
+
+def _machine_row(machine: machines.Machine) -> dict[str, Any]:
+    """Ping one registered machine through its cached link and describe it.
+
+    Returns:
+        ``name``, ``address`` (as registered), ``ip`` (the host's
+        address), ``port`` (the daemon port of a URL machine, the local
+        port of an SSH machine's tunnel, 0 while the tunnel is closed),
+        ``local`` (False), ``status`` (``"reachable"`` or
+        ``"unreachable"``) and ``error`` (the reason when unreachable).
+    """
+    link = machines.link_for(machine)
+    try:
+        link.request({"type": "ping"}, "pong")
+        status, error = "reachable", ""
+    except machines.MachineError as exc:
+        status, error = "unreachable", str(exc)
+    if link.tunnel is not None:
+        host = urlsplit("ssh://" + machine.ssh).hostname or ""
+        port = urlsplit(link.tunnel.url).port or 0
+    else:
+        parts = urlsplit(machine.url)
+        host, port = parts.hostname or "", parts.port or machines.DEFAULT_PORT
+    return {
+        "name": machine.name, "address": machine.address(), "ip": _resolve_ip(host),
+        "port": port, "local": False, "status": status, "error": error,
+    }
+
+
+def machines_report(
+    local_ip: str, local_port: int, refresh: bool = False
+) -> tuple[list[dict[str, Any]], int]:
+    """Return the local machine and every registered machine with its status.
+
+    The local row (first) describes this daemon at *local_ip*:*local_port*
+    and is always reachable.  The registered rows are pinged in
+    parallel (each through its cached :class:`~kiss.agents.sorcar.machines.MachineLink`,
+    whose backoff keeps an offline machine cheap) and cached for
+    :data:`MACHINES_STATUS_TTL_SECONDS`; *refresh* pings again.
+    Blocks for the slowest ping, so async callers run it in a thread.
+
+    Args:
+        local_ip: The address the local daemon is reached at.
+        local_port: The local daemon's port.
+        refresh: Ping again even when the cache is fresh.
+
+    Returns:
+        ``(rows, checked_at)``: the rows of :func:`_machine_row` after the
+        local one, and the epoch-millisecond time of the ping they came
+        from.
+    """
+    global _machines_cache, _machines_checked_at
+    requested_at = time.time()
+    with _machines_lock:
+        if (
+            time.time() - _machines_checked_at >= MACHINES_STATUS_TTL_SECONDS
+            or (refresh and _machines_checked_at < requested_at)
+        ):
+            registered = machines.load_machines()
+            with ThreadPoolExecutor(max_workers=max(1, len(registered))) as pool:
+                _machines_cache = list(pool.map(_machine_row, registered))
+            _machines_checked_at = time.time()
+        local = {
+            "name": machines.local_machine_name(), "address": f"https://{local_ip}:{local_port}",
+            "ip": local_ip, "port": local_port, "local": True, "status": "reachable", "error": "",
+        }
+        return [local, *_machines_cache], _epoch_ms(_machines_checked_at)
+
+
+def machine_action(action: str, name: str, address: str = "", password: str = "") -> str:
+    """Apply a MACHINES subpanel button: ``add`` or ``remove`` a machine.
+
+    Either action drops the cached report so the next
+    :func:`machines_report` pings the new registry.
+
+    Args:
+        action: ``"add"`` (register *name* at *address*, with the
+            daemon *password* unless it is an SSH address) or
+            ``"remove"``.
+        name: The machine name (``add``: empty defaults to the host).
+        address: ``https://host:port`` or ``user@host[:port]`` (``add``).
+        password: The remote daemon's password (``add``).
+
+    Returns:
+        ``""`` on success, else the error text for the user.
+    """
+    global _machines_checked_at
+    try:
+        if action == "add":
+            machines.add_machine(name.strip(), address.strip(), password)
+        elif action == "remove":
+            if not machines.remove_machine(name.strip()):
+                return f"no machine named {name.strip()!r}"
+        else:
+            return f"unknown action {action!r}"
+    except machines.MachineError as exc:
+        return str(exc)
+    with _machines_lock:
+        _machines_checked_at = 0.0
+    return ""
+
+
+def recommendations_report() -> dict[str, Any]:
+    """Return the RECOMMENDATIONS subpanel's content.
+
+    The five suggested tasks the last ``/recommendations`` run stored
+    (:func:`kiss.agents.seas.recommendations.recommendations_sea.load_recommendations`).
+
+    Returns:
+        ``{"generatedAt": int, "tasks": list[str]}``: when the run
+        stored them (epoch milliseconds, ``0`` when none has yet) and
+        its task sentences (empty until the first run).
+    """
+    stored = load_recommendations()
+    return {"generatedAt": _epoch_ms(stored["generatedAt"]), "tasks": stored["tasks"]}

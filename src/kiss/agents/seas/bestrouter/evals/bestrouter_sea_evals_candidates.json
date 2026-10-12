@@ -1,0 +1,203 @@
+{
+ "rollout": {
+  "web_tools": false,
+  "is_parallel": false,
+  "use_memory": false
+ },
+ "tasks": [
+  {
+   "id": "hist-652d79d757bd4d7d825cd81242978dc7",
+   "prompt": "Can you git pull origin/<current-branch>, merge with <current-branch>, and push?",
+   "split": "select",
+   "source_task_id": "652d79d757bd4d7d825cd81242978dc7",
+   "expect": [
+    "Current branch was main with a clean working tree."
+   ]
+  },
+  {
+   "id": "hist-42416ae652204c8ba7d1cf5b0359d764",
+   "prompt": "get rid of the commit cad5bb85c51d87f04ab24c36e1a7d79c0b7c6dc6",
+   "split": "select",
+   "source_task_id": "42416ae652204c8ba7d1cf5b0359d764",
+   "expect": [
+    "js, the preserveFocus plumbing added to SorcarPanelManager.",
+    "ts, the two new test files historyKeyboardNavAndFill.",
+    "js and historyRelayKeepsKeyboard."
+   ]
+  },
+  {
+   "id": "hist-0c2f345377fc485aa0fcc75b14dcf79d",
+   "prompt": "Can you git pull origin/<current-branch>, merge with <current-branch>, and push?",
+   "split": "select",
+   "source_task_id": "0c2f345377fc485aa0fcc75b14dcf79d",
+   "expect": [
+    "No merge commit was needed since there were no local commits to merge.",
+    "py, which upstream deleted — expected).",
+    "Push: git push origin main → \"Everything up-to-date\" (fast-forward meant nothing new to push)."
+   ]
+  },
+  {
+   "id": "hist-182013e70b0749a6bcf10ad86c64ca9c",
+   "prompt": "In a task I asked how can I access the KISS web server via ssh.  What is the id of that task?",
+   "split": "select",
+   "source_task_id": "182013e70b0749a6bcf10ad86c64ca9c",
+   "expect": [
+    "\"can you embed user's default browser from the machine where kiss sorcar is running as a tab across all surfaces in kiss sorcar?",
+    "It must work even if KISS sorcar is running on a remote machine to which I only have ssh access.",
+    "\"Analyze and understand how various information are synced and accessed on the GCP server via ssh."
+   ]
+  },
+  {
+   "id": "hist-7f0a93aacd924db591eed9991fb165a7",
+   "prompt": "Can you git pull origin/<current-branch>, merge with <current-branch>, and push?",
+   "split": "select",
+   "source_task_id": "7f0a93aacd924db591eed9991fb165a7",
+   "expect": [
+    "git pull origin main → Already up to date (nothing to merge, no conflicts).",
+    "git push origin main → Everything up-to-date."
+   ]
+  },
+  {
+   "id": "hist-3299b693acd94a8799ba1d13d323aba0",
+   "prompt": "Commit the staged fixes and push them to origin/main, then capture the WebSocket frames of test_summary_persistent_panels::test_background_summary_does_not_leak_panels during a full 49-split Windows run to pin down its load-only failure.",
+   "split": "select",
+   "source_task_id": "3299b693acd94a8799ba1d13d323aba0",
+   "expect": [
+    "Root cause: the daemon answers every \"+\" (newChat, server.",
+    "Classification: test bug.",
+    "A real run always begins with the daemon's setTaskText echo, and the clear handler copies it into currentTaskName (main."
+   ]
+  },
+  {
+   "id": "hist-b118713ddcb648efb3a62d635c1c281f",
+   "prompt": "Test: Can you run all tests (Python and JavaScript) of the latest code in parallel on the local machine, on a Linux machine at ssh ksen@104.197.214.66, and on a Windows machine after starting it via gcloud: ssh ksen@136.71.157.18. Turn the machines on (if necessary). Determine which test failures are due to a bug in the project or a bug in the test. Fix them accordingly. Shut down the Windows machine when you are done. Make sure that all fixes are staged on the local machine.",
+   "split": "train",
+   "source_task_id": "b118713ddcb648efb3a62d635c1c281f",
+   "expect": [
+    "cmd shims mangle the CLI argument list.",
+    "which(\"claude\") returns claude.",
+    "CMD; Popen runs it through cmd."
+   ]
+  },
+  {
+   "id": "hist-e2f7376e2de549d990cc1f460b506aae",
+   "prompt": "Can you git pull origin/<current-branch>, merge with <current-branch>, and push?",
+   "split": "train",
+   "source_task_id": "e2f7376e2de549d990cc1f460b506aae",
+   "expect": [
+    "The first merge attempt was refused because the index had staged changes.",
+    "I stashed them (git stash push), merged, then restored them with git stash pop --index."
+   ]
+  },
+  {
+   "id": "hist-c06013c5e7e64ee489ed1f98cde8c9c4",
+   "prompt": "Can you git pull origin/<current-branch>, merge with <current-branch>, and push?",
+   "split": "train",
+   "source_task_id": "c06013c5e7e64ee489ed1f98cde8c9c4",
+   "expect": [
+    "git push origin main → Everything up-to-date.",
+    "py modified) were left untouched and are not part of any push."
+   ]
+  },
+  {
+   "id": "hist-0facbebe54c447f7af8aed6d26c3b41f",
+   "prompt": "Push the reverted main to origin (git push origin main) and close PR #58 on GitHub if it should not be re-imported.  Do not push anything to the kiss_ai repo.",
+   "split": "train",
+   "source_task_id": "0facbebe54c447f7af8aed6d26c3b41f",
+   "expect": [
+    "Pushed: git push origin main to git@github.",
+    "py) were not included in the push."
+   ]
+  },
+  {
+   "id": "hist-49788a3fc8694d3a85b55efaa9e342da",
+   "prompt": "What files did https://github.com/ksenxx/kiss_ai/pull/58 modify?",
+   "split": "train",
+   "source_task_id": "49788a3fc8694d3a85b55efaa9e342da",
+   "expect": [
+    "sh, Dockerfile, pyproject.",
+    "md — how the lists were computed.",
+    "No code was changed, so no reviewer sub-agent was dispatched."
+   ]
+  },
+  {
+   "id": "hist-9153145bd8074f28afbb4bff6ac5e7a0",
+   "prompt": "can you get rid of the merge of the pull request https://github.com/ksenxx/kiss_ai/pull/58 completely?",
+   "split": "train",
+   "source_task_id": "9153145bd8074f28afbb4bff6ac5e7a0",
+   "expect": [
+    "ts, cliConnectionsModels.",
+    "py: HEAD version minus the PR's import and three decorators; server.",
+    "md counts patched to match."
+   ]
+  },
+  {
+   "id": "hist-56751061ae644a0e924cf5b9bf9be3e4",
+   "prompt": "/review_paper Can you review the paper at ~/Downloads/icse2027-paper1048.pdf for ICSE 2027 critically in less than 1000 words?",
+   "split": "train",
+   "source_task_id": "56751061ae644a0e924cf5b9bf9be3e4",
+   "expect": [
+    "Recommendation: Major Revision.",
+    "cks, an implementation track and a test track, that read the requirement separately and cross-check each other at the requirement, architecture, and code stages.",
+    "ver the best baselines are real, but the headline overstates them, no run count or spread is given, and the oracle migration fits DECO better than the baselines."
+   ]
+  },
+  {
+   "id": "hist-6d994673e9f7436692c4e5a667e063ca",
+   "prompt": "You are running as an unattended scheduled automation (cron job). Nobody can answer questions; never ask the user anything. Do not create, modify, or remove scheduled jobs during this run. Your final summary is delivered verbatim to the job's delivery targets; reply with exactly [SILENT] if there is nothing worth reporting — never a bare acknowledgement such as 'OK' or 'tick-OK' — and never post a heartbeat or status message to a messaging channel yourself.\n\nCheck whether the GitHub organization Berkeley-CS-264 has been upgraded from Free to Team: run `gh api orgs/Berkeley-CS-264 --jq .plan.name`. If it still prints `free`, finish with a short reminder to the user: 'Reminder: the Berkeley-CS-264 org is still on GitHub Free, so CS 264 students cannot accept hw1. Please complete the GitHub Education teacher application at https://github.com/settings/education/benefits (Teacher, University of California Berkeley, ksen@berkeley.edu, upload proof of faculty status), and after approval upgrade the org at https://github.com/education/teachers (or pay for Team on the org billing page). Then tell me the hw1 due date and where the CS 264 roster CSV is (columns: username,first_name,last_name,email,section) so I can finish the Classroom 50 setup.' If it prints `team` (or anything other than `free`), run `gh teacher init Berkeley-CS-264 --yes` and then `gh teacher audit Berkeley-CS-264`, report their output, verify that GitHub Pages is enabled on Berkeley-CS-264/classroom50 (`gh api repos/Berkeley-CS-264/classroom50/pages`), trigger `gh workflow run publish-pages.yaml --repo Berkeley-CS-264/classroom50`, and finish by asking the user for the hw1 due date and the roster CSV path, reminding them of the commands: `gh teacher assignment add Berkeley-CS-264 cs264 hw1 --name 'Homework 1' --template Berkeley-CS-264/cs264-hw1 --due <ISO8601> --runtime reports/cs264-classroom/hw1-runtime.json --tests reports/cs264-classroom/hw1-tests.json --pass-threshold 50` and `gh teacher roster import Berkeley-CS-264 cs264 <roster.csv>`. Do not create any new files outside ./tmp.",
+   "split": "train",
+   "source_task_id": "6d994673e9f7436692c4e5a667e063ca",
+   "expect": [
+    ": auth scopes (admin:org, read:org, repo, workflow), org access, plan team (supports Pages from a private repo), org ownership, service token already configured.",
+    "t: member public-repo creation stays enabled on Team because GitHub couples public+private creation into one control and the student flow needs private creation.",
+    "Set \"App access requests\" to \"Members only\" (or \"Disable app access requests\")."
+   ]
+  },
+  {
+   "id": "hist-7ce601ca05334d6d91596b3048e87582",
+   "prompt": "If I have ssh access to a machine, say 121.56.78.34, and sorcar daemon is running on the machine, I do not want to access the server via 121.56.78.34:8787 and the remote password because password based security is unsafe.  Could you suggest a better and easy alternative to access the KISS Sorcar daemon without password?",
+   "split": "train",
+   "source_task_id": "7ce601ca05334d6d91596b3048e87582",
+   "expect": [
+    "No VS Code involved, and no password typed anywhere.",
+    "I checked the daemon code to confirm this works without any code change.",
+    "You get the full remote web app: chat tabs, Task Info, Explorer, Source Control, Monaco editor, Terminal tab, and so on."
+   ]
+  },
+  {
+   "id": "hist-389c76c873154499a9446ef888bf7994",
+   "prompt": "You are running as an unattended scheduled automation (cron job). Nobody can answer questions; never ask the user anything. Do not create, modify, or remove scheduled jobs during this run. Your final summary is delivered verbatim to the job's delivery targets; reply with exactly [SILENT] if there is nothing worth reporting — never a bare acknowledgement such as 'OK' or 'tick-OK' — and never post a heartbeat or status message to a messaging channel yourself.\n\nHourly Gmail triage for ksen (unattended run; never call ask_user_question).\n1. Use run_agent with agent 'gmail' to fetch unread emails received in the last 70 minutes in the inbox of ksen@berkeley.edu (Gmail is already connected via Composio; if check_gmail_auth reports not authenticated, stop and report that in the summary instead of trying to authenticate). Ask it to return, for each email, the message id, thread id, sender, subject, date and a short summary. Skip newsletters, notifications, promotions, automated/no-reply messages and mailing-list traffic.\n2. Decide which remaining emails require ksen's immediate attention: a direct question or request addressed to him, a deadline within ~48 hours, a meeting/scheduling request, a student/colleague/collaborator blocked on his reply, or anything marked urgent/time-sensitive.\n3. For each such email, ask the gmail agent to save a DRAFT reply inside the original conversation. It must call reply_to_message(message_id=<message id>, body=<reply>, draft_only=True). If the installed reply_to_message tool has no draft_only parameter, it must instead call create_draft(to=\"\", subject=\"\", body=<reply>, thread_id=<thread id>) (if thread_id is also unsupported, call create_draft with To = the sender and Subject = 'Re: <original subject>'). NOTHING MAY BE SENT: the gmail agent must never call send_email, and never call reply_to_message without draft_only=True. The draft must be a concise, professional reply written in the first person as Koushik Sen that addresses the sender's points; where a decision is needed from ksen, leave a clearly marked placeholder like [ksen: confirm date]. Afterwards verify with the gmail agent that the drafts exist (search in:drafts) and that nothing was sent (search in:sent newer_than:1h to the same recipients).\n4. If at least one urgent email was found, use run_agent with agent 'slack' to send ONE direct message to ksen's Slack DM channel D0B2ZCM7SBV (do not use D0C3G9BD02E, it returns channel_not_found) listing each urgent email as: sender, subject, one-line reason it is urgent, and a note that a draft reply is waiting in Gmail Drafts. If no urgent email was found, do not post to Slack.\n5. Finish with a short summary of what was found and drafted.",
+   "split": "train",
+   "source_task_id": "389c76c873154499a9446ef888bf7994"
+  },
+  {
+   "id": "hist-a12a5a1fb32441a68eb06a2cc8304ad6",
+   "prompt": "You are running as an unattended scheduled automation (cron job). Nobody can answer questions; never ask the user anything. Do not create, modify, or remove scheduled jobs during this run. Your final summary is delivered verbatim to the job's delivery targets; reply with exactly [SILENT] if there is nothing worth reporting — never a bare acknowledgement such as 'OK' or 'tick-OK' — and never post a heartbeat or status message to a messaging channel yourself.\n\nHourly Gmail triage for ksen (unattended run; never call ask_user_question).\n1. Use run_agent with agent 'gmail' to fetch unread emails received in the last 70 minutes in the inbox of ksen@berkeley.edu (Gmail is already connected via Composio; if check_gmail_auth reports not authenticated, stop and report that in the summary instead of trying to authenticate). Ask it to return, for each email, the message id, thread id, sender, subject, date and a short summary. Skip newsletters, notifications, promotions, automated/no-reply messages and mailing-list traffic.\n2. Decide which remaining emails require ksen's immediate attention: a direct question or request addressed to him, a deadline within ~48 hours, a meeting/scheduling request, a student/colleague/collaborator blocked on his reply, or anything marked urgent/time-sensitive.\n3. For each such email, ask the gmail agent to save a DRAFT reply inside the original conversation. It must call reply_to_message(message_id=<message id>, body=<reply>, draft_only=True). If the installed reply_to_message tool has no draft_only parameter, it must instead call create_draft(to=\"\", subject=\"\", body=<reply>, thread_id=<thread id>) (if thread_id is also unsupported, call create_draft with To = the sender and Subject = 'Re: <original subject>'). NOTHING MAY BE SENT: the gmail agent must never call send_email, and never call reply_to_message without draft_only=True. The draft must be a concise, professional reply written in the first person as Koushik Sen that addresses the sender's points; where a decision is needed from ksen, leave a clearly marked placeholder like [ksen: confirm date]. Afterwards verify with the gmail agent that the drafts exist (search in:drafts) and that nothing was sent (search in:sent newer_than:1h to the same recipients).\n4. If at least one urgent email was found, use run_agent with agent 'slack' to send ONE direct message to ksen's Slack DM channel D0B2ZCM7SBV (do not use D0C3G9BD02E, it returns channel_not_found) listing each urgent email as: sender, subject, one-line reason it is urgent, and a note that a draft reply is waiting in Gmail Drafts. If no urgent email was found, do not post to Slack.\n5. Finish with a short summary of what was found and drafted.",
+   "split": "train",
+   "source_task_id": "a12a5a1fb32441a68eb06a2cc8304ad6"
+  },
+  {
+   "id": "hist-826aaac0a6114a14ac4885f03322632c",
+   "prompt": "Explain to me oauth 2.0 in layman’s terms",
+   "split": "train",
+   "source_task_id": "826aaac0a6114a14ac4885f03322632c",
+   "expect": [
+    "Imagine you're staying at a hotel and a friend wants to use the gym on your behalf.",
+    "You don't hand them your wallet, ID, and credit card (that's like giving an app your password – it can do anything as you).",
+    "Instead, you go to the front desk, prove who you are, and ask for a guest key-card that only opens the gym, only until Friday."
+   ]
+  },
+  {
+   "id": "hist-551bebbdd4034da4874ac6c68b2fccad",
+   "prompt": "You are running as an unattended scheduled automation (cron job). Nobody can answer questions; never ask the user anything. Do not create, modify, or remove scheduled jobs during this run. Your final summary is delivered verbatim to the job's delivery targets; reply with exactly [SILENT] if there is nothing worth reporting — never a bare acknowledgement such as 'OK' or 'tick-OK' — and never post a heartbeat or status message to a messaging channel yourself.\n\nHourly Gmail triage for ksen (unattended run; never call ask_user_question).\n1. Use run_agent with agent 'gmail' to fetch unread emails received in the last 70 minutes in the inbox of ksen@berkeley.edu (Gmail is already connected via Composio; if check_gmail_auth reports not authenticated, stop and report that in the summary instead of trying to authenticate). Ask it to return, for each email, the message id, thread id, sender, subject, date and a short summary. Skip newsletters, notifications, promotions, automated/no-reply messages and mailing-list traffic.\n2. Decide which remaining emails require ksen's immediate attention: a direct question or request addressed to him, a deadline within ~48 hours, a meeting/scheduling request, a student/colleague/collaborator blocked on his reply, or anything marked urgent/time-sensitive.\n3. For each such email, ask the gmail agent to save a DRAFT reply inside the original conversation. It must call reply_to_message(message_id=<message id>, body=<reply>, draft_only=True). If the installed reply_to_message tool has no draft_only parameter, it must instead call create_draft(to=\"\", subject=\"\", body=<reply>, thread_id=<thread id>) (if thread_id is also unsupported, call create_draft with To = the sender and Subject = 'Re: <original subject>'). NOTHING MAY BE SENT: the gmail agent must never call send_email, and never call reply_to_message without draft_only=True. The draft must be a concise, professional reply written in the first person as Koushik Sen that addresses the sender's points; where a decision is needed from ksen, leave a clearly marked placeholder like [ksen: confirm date]. Afterwards verify with the gmail agent that the drafts exist (search in:drafts) and that nothing was sent (search in:sent newer_than:1h to the same recipients).\n4. If at least one urgent email was found, use run_agent with agent 'slack' to send ONE direct message to ksen's Slack DM channel D0B2ZCM7SBV (do not use D0C3G9BD02E, it returns channel_not_found) listing each urgent email as: sender, subject, one-line reason it is urgent, and a note that a draft reply is waiting in Gmail Drafts. If no urgent email was found, do not post to Slack.\n5. Finish with a short summary of what was found and drafted.",
+   "split": "train",
+   "source_task_id": "551bebbdd4034da4874ac6c68b2fccad"
+  },
+  {
+   "id": "hist-1c13429af7d54bd8af412c1c24d391de",
+   "prompt": "You are running as an unattended scheduled automation (cron job). Nobody can answer questions; never ask the user anything. Do not create, modify, or remove scheduled jobs during this run. Your final summary is delivered verbatim to the job's delivery targets; reply with exactly [SILENT] if there is nothing worth reporting — never a bare acknowledgement such as 'OK' or 'tick-OK' — and never post a heartbeat or status message to a messaging channel yourself.\n\nHourly Gmail triage for ksen (unattended run; never call ask_user_question).\n1. Use run_agent with agent 'gmail' to fetch unread emails received in the last 70 minutes in the inbox of ksen@berkeley.edu (Gmail is already connected via Composio; if check_gmail_auth reports not authenticated, stop and report that in the summary instead of trying to authenticate). Ask it to return, for each email, the message id, thread id, sender, subject, date and a short summary. Skip newsletters, notifications, promotions, automated/no-reply messages and mailing-list traffic.\n2. Decide which remaining emails require ksen's immediate attention: a direct question or request addressed to him, a deadline within ~48 hours, a meeting/scheduling request, a student/colleague/collaborator blocked on his reply, or anything marked urgent/time-sensitive.\n3. For each such email, ask the gmail agent to save a DRAFT reply inside the original conversation. It must call reply_to_message(message_id=<message id>, body=<reply>, draft_only=True). If the installed reply_to_message tool has no draft_only parameter, it must instead call create_draft(to=\"\", subject=\"\", body=<reply>, thread_id=<thread id>) (if thread_id is also unsupported, call create_draft with To = the sender and Subject = 'Re: <original subject>'). NOTHING MAY BE SENT: the gmail agent must never call send_email, and never call reply_to_message without draft_only=True. The draft must be a concise, professional reply written in the first person as Koushik Sen that addresses the sender's points; where a decision is needed from ksen, leave a clearly marked placeholder like [ksen: confirm date]. Afterwards verify with the gmail agent that the drafts exist (search in:drafts) and that nothing was sent (search in:sent newer_than:1h to the same recipients).\n4. If at least one urgent email was found, use run_agent with agent 'slack' to send ONE direct message to ksen's Slack DM channel D0B2ZCM7SBV (do not use D0C3G9BD02E, it returns channel_not_found) listing each urgent email as: sender, subject, one-line reason it is urgent, and a note that a draft reply is waiting in Gmail Drafts. If no urgent email was found, do not post to Slack.\n5. Finish with a short summary of what was found and drafted.",
+   "split": "train",
+   "source_task_id": "1c13429af7d54bd8af412c1c24d391de"
+  }
+ ]
+}

@@ -8,11 +8,10 @@ Concurrency audit (F3, reviewer R3 finding 7): ``_await_active_merges``
 — the only consumer of ``AgentState.merge_thread`` — joins the threads
 published there so ``stop_async`` / the SIGTERM ``finally`` do not
 return while git is still rewriting the repository.  Only the direct
-Merge/Discard click published its thread; the resume-time
-``_finalize_pending_worktree`` (auto-commit merge or discard), the
-empty-worktree auto-discard in ``_present_pending_worktree`` and the
-tab-close worktree retirement all claimed ``is_merging`` WITHOUT a
-thread, so the shutdown wait saw nothing and returned immediately.
+Merge/Discard click published its thread; the empty-worktree
+auto-discard in ``_present_pending_worktree`` and the tab-close
+worktree retirement both claimed ``is_merging`` WITHOUT a thread, so
+the shutdown wait saw nothing and returned immediately.
 
 The interleaving is forced for real with the per-repo ``repo_lock``:
 a holder thread owns it so the mutation blocks inside its git section
@@ -31,22 +30,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
     repo_lock,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.merge_flow import _PendingOutcome
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.server.test_worktree_audit18 import (
-    _make_repo,
-    _register_wt_state,
-    _server,
-)
+from kiss.tests.server.test_worktree_audit18 import _make_repo, _server
 
 
 class TestAwaitActiveMergesCoversAllClaims(unittest.TestCase):
@@ -67,14 +61,18 @@ class TestAwaitActiveMergesCoversAllClaims(unittest.TestCase):
             local_endpoint_file=self.tmp_dir / "sorcar-local.json",
         )
         self.server: VSCodeServer = _server(self.repo)
-        self.state: AgentState = _register_wt_state("a")
+        self.state = AgentState(
+            "task-a", agent=ChatSorcarAgent("Sorcar VS Code"),
+            tab_id="a", server_owned=True,
+        )
+        agent_state.register(self.state)
         # An EMPTY pending worktree: every path below picks "discard"
         # or "retire", each of which mutates git under repo_lock.
         branch = "kiss/wt-f3-claim"
         self.wt_dir = self.repo / ".kiss-worktrees" / "kiss_wt-f3-claim"
         self.assertTrue(GitWorktreeOps.create(self.repo, branch, self.wt_dir))
         GitWorktreeOps.save_original_branch(self.repo, branch, "main")
-        cast(WorktreeSorcarAgent, self.state.agent)._wt = GitWorktree(
+        cast(ChatSorcarAgent, self.state.agent)._wt = GitWorktree(
             repo_root=self.repo, branch=branch, original_branch="main",
             wt_dir=self.wt_dir,
         )
@@ -136,28 +134,10 @@ class TestAwaitActiveMergesCoversAllClaims(unittest.TestCase):
         self.assertIsNone(self.state.merge_thread)
         return results[0]
 
-    def test_resume_time_finalize(self) -> None:
-        outcome = self._assert_shutdown_waits_for(
-            lambda: self.server._finalize_pending_worktree("a"),
-        )
-        self.assertEqual(outcome, _PendingOutcome.FINALIZED)
-
     def test_present_pending_worktree_auto_discard(self) -> None:
         self._assert_shutdown_waits_for(
             lambda: self.server._present_pending_worktree("a"),
         )
-
-    def test_present_claim_release_clears_thread(self) -> None:
-        # ``_finalize_pending_worktree`` hands the presentation claim
-        # (thread included) to the caller when auto-commit is off; the
-        # release must drop both fields again.
-        self.state.auto_commit_mode = False
-        outcome = self.server._finalize_pending_worktree("a")
-        self.assertEqual(outcome, _PendingOutcome.PRESENT_CLAIMED)
-        self.assertIs(self.state.merge_thread, threading.current_thread())
-        self.server._release_present_claim("a")
-        self.assertFalse(self.state.is_merging)
-        self.assertIsNone(self.state.merge_thread)
 
     def test_deferred_tab_close_teardown(self) -> None:
         self.state.frontend_closed = True

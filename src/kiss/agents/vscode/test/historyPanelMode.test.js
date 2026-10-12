@@ -101,13 +101,8 @@ function historyRows(win) {
   );
 }
 
-function disableWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function session(overrides) {
@@ -169,7 +164,7 @@ function testBootOpensSidebarAndLoadsHistory() {
 
 function testResumableRowClickPostsOpenChatPanel() {
   const {win, posted} = makeWebview(BODY_ATTRS);
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   sendHistory(win, posted, [session()]);
   const rows = historyRows(win);
   assert.strictEqual(rows.length, 1, 'the session renders one row');
@@ -194,7 +189,7 @@ function testResumableRowClickPostsOpenChatPanel() {
 
 function testNonResumableRowClickOpensFreshPanel() {
   const {win, posted} = makeWebview(BODY_ATTRS);
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   sendHistory(win, posted, [
     session({id: '', task_id: null, has_events: false, is_running: false}),
   ]);
@@ -213,7 +208,7 @@ function testNonResumableRowClickOpensFreshPanel() {
   console.log('PASS a non-resumable row click opens a fresh panel');
 }
 
-function testBroadcastsAndVisibilityRefresh() {
+async function testBroadcastsAndVisibilityRefresh() {
   const {win, posted} = makeWebview(BODY_ATTRS);
   const before = byType(posted, 'getHistory').length;
 
@@ -223,6 +218,9 @@ function testBroadcastsAndVisibilityRefresh() {
     afterBroadcast > before,
     'tasks_updated must refresh the (always open) history panel',
   );
+  // A refresh in the same tick folds into the end-of-tick refetch: let
+  // that tick end so the visibility checks below see a fresh tick.
+  await new Promise(resolve => setTimeout(resolve, 0));
 
   Object.defineProperty(win.document, 'visibilityState', {
     value: 'hidden',
@@ -345,10 +343,17 @@ function testBurgerAndChromeHiddenByCss() {
   console.log('PASS burger and drawer chrome are hidden where required');
 }
 
-testBootOpensSidebarAndLoadsHistory();
-testResumableRowClickPostsOpenChatPanel();
-testNonResumableRowClickOpensFreshPanel();
-testBroadcastsAndVisibilityRefresh();
-testRegistrySnapshotsNeverCloseThePanel();
-testBurgerAndChromeHiddenByCss();
-console.log('All historyPanelMode tests passed.');
+async function main() {
+  testBootOpensSidebarAndLoadsHistory();
+  testResumableRowClickPostsOpenChatPanel();
+  testNonResumableRowClickOpensFreshPanel();
+  await testBroadcastsAndVisibilityRefresh();
+  testRegistrySnapshotsNeverCloseThePanel();
+  testBurgerAndChromeHiddenByCss();
+  console.log('All historyPanelMode tests passed.');
+}
+
+main().catch(e => {
+  console.error(e);
+  process.exit(1);
+});

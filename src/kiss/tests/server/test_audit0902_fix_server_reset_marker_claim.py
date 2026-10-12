@@ -24,7 +24,6 @@ import asyncio
 import json
 import os
 import shutil
-import socket
 import stat
 import tempfile
 from pathlib import Path
@@ -36,14 +35,9 @@ import kiss.server.web_server as web_server_mod
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.local_ws import LocalWriter, open_local_connection
+from kiss.tests.server.conftest import find_free_port
 
 _VALID_MARKER = json.dumps({"requested_at": 0.0, "conn_id": ""})
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 class TestResetMarkerClaim(IsolatedAsyncioTestCase):
@@ -88,7 +82,7 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
     async def _start(self) -> RemoteAccessServer:
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             certfile=str(self.certfile),
             keyfile=str(self.keyfile),
             url_file=self.url_dir / "remote-url.json",

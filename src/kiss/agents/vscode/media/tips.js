@@ -337,7 +337,9 @@
   }
 
   function copyTextToClipboard(text) {
-    // Looked up at call time: panelCopy.js loads after tips.js.
+    // Looked up at call time: chat.html loads panelCopy.js first, but a
+    // page that ships tips.js alone (tests, a future host) must still
+    // show its tips with a Copy button that merely fails.
     const pc = window.PanelCopy;
     return pc ? pc.copyText(text) : Promise.resolve(false);
   }

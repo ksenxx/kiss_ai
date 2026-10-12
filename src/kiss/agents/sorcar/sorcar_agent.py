@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import functools
 import logging
 import math
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -34,14 +36,37 @@ from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide
 from kiss.agents.sorcar.fanout_guard import (
     is_implementation_task,
 )
+from kiss.agents.sorcar.git_worktree import (
+    _PRECOMMIT_FIX_LINES,
+    _PRESERVE_MARKER_ATTEMPTS,
+    _PRESERVE_MARKER_RETRY_DELAY,
+    _WORKTREE_SUBDIR,
+    GitWorktree,
+    GitWorktreeOps,
+    MergeConflictResolver,
+    MergeResult,
+    _manual_merge_cmd,
+    _merge_fix_steps,
+    _path_inside,
+    _reclaim_process_lock,
+    _repo_key,
+    _rescue_failed_warning,
+    _rescue_ignored_files,
+    _WorktreeCleanupOutcome,
+    inside_kiss_worktree,
+    kiss_worktree_root,
+    repo_lock,
+)
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.relentless_agent import (
+    _OFFSET_PUBLISH_LOCK,
     RelentlessAgent,
     _session_usage,
     resolve_work_dir,
 )
 from kiss.agents.sorcar.sea_commands import model_sea
 from kiss.agents.sorcar.sea_settings import (
+    SeaError,
     alias_free_profile,
 )
 from kiss.agents.sorcar.skills import make_skill_tool
@@ -53,6 +78,7 @@ from kiss.agents.sorcar.task_classifier import (
 from kiss.agents.sorcar.useful_tools import (
     BackgroundJob,
     UsefulTools,
+    _absolutize,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
@@ -98,8 +124,8 @@ tools of every configured MCP server."""
 TOOL_GROUPS: dict[str, frozenset[str]] = {
     # Run commands and read files (and their output).
     "shell": frozenset({"Bash", "bash_job", "Read", "run_commands_parallel"}),
-    # Change files.
-    "edit": frozenset({"Edit", "Write"}),
+    # Change files — in a git worktree the agent creates and merges itself.
+    "edit": frozenset({"Edit", "Write", "create_worktree", "commit_and_merge"}),
     # Drive the Chromium browser.
     "browser": BROWSER_TOOL_NAMES,
     # Persistent memory pages.
@@ -561,15 +587,6 @@ def _safe_notify(
         logger.debug("auto_commit_changes notify_fn raised", exc_info=True)
 
 
-def _yaml_failure(exc: BaseException) -> str:
-    """Return a YAML result string for an unhandled sub-agent exception."""
-    failure: str = yaml.dump(
-        {"success": False, "summary": f"Unhandled exception: {exc}"},
-        sort_keys=False,
-    )
-    return failure
-
-
 def _agent_usage(agent: Any) -> tuple[float, int, int]:
     """Return ``(budget_used, total_tokens_used, total_steps)`` for *agent*.
 
@@ -767,15 +784,6 @@ def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
     return budget + live_budget, tokens + live_tokens, steps + live_steps
 
 
-# Serializes "snapshot the parent's totals, publish them as printer
-# offsets" in ``_attribute_sub_usage``: two concurrent attributions each
-# read the ledger and publish later, so without ordering an older, smaller
-# snapshot could land after a newer one and leave the tab under-counting
-# until the next attribution.  Only ledger reads and the printer's own
-# lock are taken under it, so no caller can deadlock on it.
-_OFFSET_PUBLISH_LOCK = threading.Lock()
-
-
 def _attribute_sub_usage(
     agent: RelentlessAgent,
     budget: float,
@@ -831,6 +839,10 @@ def _attribute_sub_usage(
     printer: Any = agent.printer
     if printer is not None:
         try:
+            # Snapshot and publish under the lock the agent thread's
+            # session-start rebase (``_set_printer_offsets``) also takes,
+            # so publishes land in snapshot order and the offsets never
+            # decrease.
             with _OFFSET_PUBLISH_LOCK:
                 # One coherent triple (see _agent_usage): separate property
                 # reads could tear across a concurrent snapshot publish.
@@ -962,13 +974,62 @@ def _attachment_parts(attachments: list[Attachment]) -> list[str]:
 
 
 class SorcarAgent(RelentlessAgent):
-    """Agent with both coding tools and browser automation for web + code tasks."""
+    """Agent with coding tools, browser automation and git-worktree isolation.
 
-    uses_worktree: bool = False
+    A task starts in the caller's ``work_dir``.  The agent's
+    ``create_worktree`` tool moves the work dir into a fresh
+    ``<repo>/.kiss-worktrees/kiss_wt-*`` worktree of the repository the
+    path belongs to (one worktree per repository, each on its own
+    ``kiss/wt-*`` branch; see :mod:`kiss.agents.sorcar.git_worktree`),
+    and ``commit_and_merge`` commits every worktree's changes and
+    squash-merges each branch into the branch the task started from.
+    The write guard (:meth:`_guard_worktree`) refuses ``Write`` /
+    ``Edit`` of a tracked checkout path that no worktree isolates, and
+    the first ``finish`` with an unmerged worktree is refused once.  A
+    worktree the task leaves unmerged is kept for the user's decision:
+    the server's merge / discard / leave-as-is bar calls :meth:`merge`,
+    :meth:`discard` and :meth:`leave_as_is`, and the next task on the
+    same agent retires it first (:meth:`_retire_previous_worktree`).
+
+    Worktrees are not associated with a chat: branch names use a unique
+    time + random suffix, and there is no cross-process state
+    restoration based on chat session.
+
+    Attributes:
+        _wts: The current/pending worktrees keyed by repository root,
+            in creation order; empty when idle.
+    """
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
+        # The run's file/shell tools; kept so ``create_worktree``, which
+        # moves the work directory mid-run, can re-point them.
+        self._useful_tools: UsefulTools | None = None
+        self._wts: dict[Path, GitWorktree] = {}
+        self._stash_pop_warning: str | None = None
+        self._merge_conflict_warning: str | None = None
+        self._warning_lock: threading.Lock = threading.Lock()
+        # Start of the current task block, stamped by the daemon's task
+        # runner (``cmd["_start_ms"]``) and read back when a tab rebinds.
+        self._task_start_ms: int = 0
+        self._last_preserve_outcome: _WorktreeCleanupOutcome | None = None
+        # Set by ``_do_merge``: the last merge conflicted and the merge
+        # SEA resolved it (``merge`` reports this in its message).
+        self._last_merge_resolved_by_agent: bool = False
+        # Why ``create_worktree`` cannot isolate anything in this run
+        # (a Docker container): the write guard then lets the task edit
+        # the checkout directly.  Reset per run.
+        self._worktree_unavailable: str | None = None
+        # Repositories whose worktree setup failed (detached HEAD, no
+        # commits, a git failure): the task edits them in place.
+        self._unisolated_repos: set[Path] = set()
+        # Repository root -> worktree directory of the calling tasks'
+        # worktrees (:meth:`inherit_worktrees`); never created here.
+        self._inherited_worktrees: dict[Path, Path] = {}
+        # One-shot ``finish`` gate: the first ``finish`` with a worktree
+        # still pending is refused once with "call commit_and_merge".
+        self._worktree_finish_gate_used: bool = False
         # Per-run settings taken from :meth:`run`'s arguments; the
         # defaults are what a run that never reached ``run`` reports.
         self._launch_model_name: str = ""
@@ -1003,8 +1064,8 @@ class SorcarAgent(RelentlessAgent):
         self._use_memory_override: bool | None = None
         self._use_web_tools: bool = True
         # The daemon's BrowserTabService (kiss.server.browser_tab) when
-        # running under kiss-web: the web tools then browse in the
-        # Browser tab on every surface, where the user watches.
+        # running under kiss-web: show_browser() then puts the page in
+        # the Browser tab on every surface instead of a local window.
         self._live_browser: Any = None
         self._is_parallel: bool = True
         # The caller's extra tools of the current run (``run(tools=...)``:
@@ -1013,6 +1074,10 @@ class SorcarAgent(RelentlessAgent):
         # ``run_agent`` sub-task dispatched DURING the run can take
         # them over (``task_runner`` reads them off the parent agent).
         self._extra_tools: list[Callable[..., Any]] = []
+        # The names of every tool the current run offers the model
+        # (the executor holds the callables); the worktree guard reads
+        # it to know whether ``create_worktree`` is available.
+        self._run_tool_names: frozenset[str] = frozenset()
         # The ``appendToPrompt`` suffix of the current run (see
         # ``run(prompt_suffix=...)``), kept on self for the same reason.
         self._prompt_suffix: str = ""
@@ -1025,9 +1090,9 @@ class SorcarAgent(RelentlessAgent):
         self._tool_profile_name: str = ""
         # Pre-run task classification state (see
         # :meth:`_classify_task_once`).  ``_classification_attempted``
-        # makes the classifier run at most once per task even though
-        # both ``WorktreeSorcarAgent.run`` (for the worktree decision)
-        # and :meth:`run` (for the system prompt) consult it; one
+        # makes the classifier run at most once per task even when a
+        # driver pre-seeded the verdict (:meth:`classify_task_for_run`)
+        # before :meth:`run` consults it for the system prompt; one
         # immutable ``_classifier_spend`` record holds the classifier's
         # spend until :meth:`_fold_classifier_usage` banks it into the
         # run totals.
@@ -1383,11 +1448,13 @@ class SorcarAgent(RelentlessAgent):
                 work_dir=self.work_dir,
                 jobs=self._background_jobs,
             )
+            self._useful_tools = useful_tools
             tools = [
                 useful_tools.Bash, useful_tools.bash_job,
                 useful_tools.run_commands_parallel,
                 useful_tools.Read, useful_tools.Edit, useful_tools.Write,
             ]
+            tools.extend([self.create_worktree, self.commit_and_merge])
             # The Read dedupe assumes an earlier output is still in the
             # model's context; the executor calls this when it is not.
             self.context_reset_hook = useful_tools.forget_reads
@@ -1687,12 +1754,13 @@ class SorcarAgent(RelentlessAgent):
             all_tools = list(by_name.values())
             extra = [tool for tool in all_tools if tool not in built_in]
         self._extra_tools = extra
+        self._run_tool_names = frozenset(tool.__name__ for tool in all_tools)
         # Always install the steering hooks: they are self-guarding
         # no-ops when no follow-up channel exists (a printer without
         # the duck-typed ``drain_pending_user_messages`` bridge), and
         # the server UI's printer bridge must be drained when present.
         self.pre_step_hook = self._drain_pending_user_messages
-        self.tool_call_guard = self._guard_finish
+        self.tool_call_guard = self._guard_tool_call
         self._live_jobs_finish_gate_used = False
         return super().perform_task(all_tools, attachments=attachments)
 
@@ -1768,15 +1836,15 @@ class SorcarAgent(RelentlessAgent):
         return settings
 
     def _reset_task_classification(self) -> None:
-        """Forget any classification state left over from an earlier run.
+        """Forget the classification state of the run that just ended.
 
-        Called at the start of every top-level entry point that
-        classifies (``WorktreeSorcarAgent.run``) so a run that crashed
-        before :meth:`run`'s cleanup cannot leak a stale verdict into
-        the next task on a reused agent instance.  Unfolded classifier
-        spend from such a crashed run is dropped with the verdict:
-        folding it into an unrelated later run would corrupt that run's
-        accounting worse than losing the (≤ classifier-cap) telemetry.
+        Called by :meth:`_fold_classifier_usage` in :meth:`run`'s
+        cleanup (and by :meth:`classify_task_for_run` before it seeds a
+        new verdict) so a stale verdict never leaks into the next task
+        on a reused agent instance.  Unfolded classifier spend is
+        dropped with the verdict: folding it into an unrelated later
+        run would corrupt that run's accounting worse than losing the
+        (≤ classifier-cap) telemetry.
 
         A verdict pre-seeded by :meth:`classify_task_for_run` survives:
         the external driver established it for the current submission,
@@ -1797,18 +1865,13 @@ class SorcarAgent(RelentlessAgent):
     ) -> TaskClassification | None:
         """Classify *task* now and pre-seed the verdict for coming runs.
 
-        For external drivers that must know the run's effective
-        worktree mode BEFORE calling :meth:`run` — the server's task
-        runner decides its main-tree claims, merge presentation, and
-        persistence from ``use_worktree``, so it classifies here, sets
-        ``use_worktree = use_worktree and verdict.is_development`` (the
-        verdict can only demote a run that asked for a worktree, never
-        promote a pinned-off one), and passes that
-        value to the run.  The pre-seeded verdict is then reused by the
-        run itself (worktree gating and system prompt selection) and by
-        every later subtask of the same submission, so the driver and
-        the agent can never disagree.  The seed lasts until the next
-        ``classify_task_for_run`` call on this agent.
+        For external drivers that classify BEFORE calling :meth:`run`
+        (the server's task runner shows a "Classifying task…" phase).
+        The pre-seeded verdict is then reused by the run itself (system
+        prompt selection) and by every later subtask of the same
+        submission, so the driver and the agent can never disagree.
+        The seed lasts until the next ``classify_task_for_run`` call on
+        this agent.
 
         Args:
             model_name: The model the run will use, possibly None.
@@ -1852,9 +1915,10 @@ class SorcarAgent(RelentlessAgent):
         allows it — with the same resolved model and model config the
         main run will use, and publishes the classifier's spend as one
         ``_classifier_spend`` record for :meth:`_fold_classifier_usage`
-        to bank.  Every later call returns the cached verdict, so
-        ``WorktreeSorcarAgent.run`` (worktree decision) and :meth:`run`
-        (system prompt selection) share one classification.
+        to bank.  Every later call returns the cached verdict, so a
+        driver that classified ahead of :meth:`run`
+        (:meth:`classify_task_for_run`) and :meth:`run` (system prompt
+        selection) share one classification.
 
         Args:
             model_name: The run's resolved model name (see
@@ -1903,9 +1967,7 @@ class SorcarAgent(RelentlessAgent):
         self._task_classification = outcome.classification
         if outcome.classification is not None:
             logger.info(
-                "Task classified: is_simple=%s is_development=%s",
-                outcome.classification.is_simple,
-                outcome.classification.is_development,
+                "Task classified: is_simple=%s", outcome.classification.is_simple,
             )
         return self._task_classification
 
@@ -1986,6 +2048,18 @@ class SorcarAgent(RelentlessAgent):
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
+        A worktree still pending from an earlier run of this agent is
+        retired first (:meth:`_retire_previous_worktree`: committed to
+        its own branch, never merged), so the task starts in *work_dir*
+        and its ``create_worktree`` tool makes a fresh worktree.  The
+        warnings left by the retirement are flushed to *printer*.  A
+        run that ends with a worktree unmerged leaves its branch marked
+        preserved (:meth:`GitWorktreeOps.save_preserve_marker`), so no
+        orphan reclaim in another process merges it behind the user's
+        back.  An unexpected exception becomes a ``success: false``
+        result; a :class:`KISSError` or :class:`SeaError` (a setup
+        failure the caller must see as a diagnostic) propagates.
+
         Args:
             model_name: LLM model to use. Defaults to config value.
             prompt_template: Task prompt template with format placeholders.
@@ -2004,10 +2078,10 @@ class SorcarAgent(RelentlessAgent):
             docker_image: Docker image name to run tools inside a container.
             web_tools: Whether to include browser/web tools. Defaults to True.
             live_browser: The daemon's ``BrowserTabService``; when given,
-                the web tools browse in the Browser tab on every surface
-                (forwarded to every sub-agent).  None (no daemon)
-                browses headless until ``show_browser()`` opens a local
-                window.  Set to False for terminal-only environments.
+                ``show_browser()`` opens the page in the Browser tab on
+                every surface (forwarded to every sub-agent).  None (no
+                daemon) shows a local window instead.
+                Set to False for terminal-only environments.
             prompt_suffix: The caller-supplied text (the daemon's
                 ``appendToPrompt`` wire field, e.g. a ``run_agent``
                 call's ``add_to_prompt`` option) that the caller has
@@ -2142,171 +2216,219 @@ class SorcarAgent(RelentlessAgent):
         self._system_prompt_suffix = system_prompt if system_prompt else ""
         self.web_use_tool = None
         self._memory_tools = None
+        self._begin_task(printer)
         # Resolved ONCE for the whole run (see _resolve_model_name):
         # the classifier, the memory-root gate and ``_reset`` all get
         # this string, so they cannot disagree about the model.
         model_name = self._launch_model_name = self._resolve_model_name(model_name)
         try:
-            # Pre-run task classification (idempotent per run:
-            # WorktreeSorcarAgent.run may have classified already for
-            # its worktree decision).  A task the classifier deems
-            # simple — no software development, no Internet search —
-            # runs on the reduced SYSTEM_LITE.md prompt; everything
-            # else (including a failed or disabled classification)
-            # keeps the full SYSTEM.md.  A caller-supplied
-            # *base_system_prompt* replaces both.
-            classification = self._classify_task_once(
-                model_name, prompt_template, model_config,
-                arguments=arguments,
-            )
-            default_base_prompt = (
-                SYSTEM_PROMPT_LITE
-                if classification is not None and classification.is_simple
-                else SYSTEM_PROMPT
-            )
-            system_instructions = (
-                (self._base_system_prompt or default_base_prompt)
-                + (system_prompt if system_prompt else "")
-            )
-            if system_prompt_hook is not None:
-                # The SEA's return is the run's system prompt, as its
-                # ``prompt()`` return is the run's prompt.  Neither is
-                # forwarded to sub-agents: they inherit the caller's
-                # *base_system_prompt* and *system_prompt* and their own
-                # SEA layers shape their prompt (the daemon applies
-                # them), so an appended rule is
-                # stated once per run without any deduplication.
-                system_instructions = system_prompt_hook(system_instructions)
-            memory_root = _memory_root_for_run(
-                self._append_basic_tools,
-                docker_image,
-                model_name,
-                caller_system_instruction=bool(
-                    (model_config or {}).get("system_instruction")
-                ),
-                use_memory_override=use_memory,
-            )
-            if memory_root is not None:
-                self._memory_tools = MemoryTools(
-                    memory_root, domains=_repo_memory_domains(resolve_work_dir(work_dir))
-                )
-            profile = self._tool_profile(prompt_template)
-            # No note without a built-in toolset to cut down: a run with
-            # ``append_basic_tools=False`` has only ``finish`` and the
-            # caller's tools, whatever profile it names.
-            allowed = resolve_tool_profile(profile)
-            if allowed is not None and self._append_basic_tools:
-                # The note lists what :meth:`_get_tools` will build,
-                # never a tool this run cannot have: the docker toolset
-                # has no job registry (see the docker ``Bash`` shim),
-                # the browser needs the settings panel's "Use web
-                # tools", the fan-out needs parallel mode, memory needs
-                # a memory root, ``decide`` the decisions model and
-                # ``skill`` a configured user or project skill.
-                offered = set(allowed)
-                if docker_image:
-                    offered.discard("bash_job")
-                if not web_tools:
-                    offered -= BROWSER_TOOL_NAMES
-                if not is_parallel:
-                    offered -= {"run_parallel", "number_of_cores"}
-                if memory_root is None:
-                    offered -= MEMORY_TOOL_NAMES
-                if not decisions_tool_available():
-                    offered.discard("decide")
-                if "skill" in offered and make_skill_tool(resolve_work_dir(work_dir)) is None:
-                    offered.discard("skill")
-                listed = sorted(offered)
-                if allowed & MCP_AUTH_TOOL_NAMES:
-                    listed.append("the tools of every configured MCP server")
-                system_instructions += RESTRICTED_PROFILE_NOTE.format(
-                    profile=profile, tools=", ".join(listed),
-                )
-                if not web_tools and allowed & BROWSER_TOOL_NAMES:
-                    system_instructions += WEB_TOOLS_OFF_NOTE
-            elif self._append_basic_tools and not web_tools:
-                # The settings panel's "Use web tools" is off: the
-                # browser tools are not built (:meth:`_get_tools`), so
-                # the static Web Research rules above must not send the
-                # model after go_to_url() or a curl substitute.
-                system_instructions += WEB_TOOLS_OFF_NOTE
-            if self._memory_tools is not None:
-                system_instructions += "\n\n" + self._memory_tools.protocol()
-            prompt = prompt_template
-            if attachments:
-                parts = _attachment_parts(attachments)
-                if parts:
-                    prompt += (
-                        f"\n\n# Important\n - User attached {', '.join(parts)}. "
-                        f"The files are included in this message as inline content "
-                        f"that you can see directly. "
-                        f"Do NOT launch a browser, call screenshot(), go_to_url(), "
-                        f"or any other browser tool to view these attachments — "
-                        f"you already have them."
-                    )
-            if current_editor_file:
-                system_instructions += (
-                    "\n\n- The path of the file open in the editor is "
-                    f"{current_editor_file}"
-                )
-            return super().run(
-                model_name=model_name,
-                system_prompt=system_instructions,
-                prompt_template=prompt,
-                arguments=arguments,
-                max_steps=max_steps,
-                max_budget=max_budget,
-                model_config=model_config,
-                work_dir=work_dir,
-                printer=printer,
-                max_sub_sessions=max_sub_sessions,
-                docker_image=docker_image,
-                verbose=verbose,
-                tools=tools or [],
-                attachments=attachments,
-                llm_call_hook=llm_call_hook,
-                tool_call_hook=tool_call_hook,
-            )
-        finally:
-            # No sub-task outlives its caller: a run_agent job the run
-            # neither waited for nor killed is stopped here, before the
-            # run's terminal status goes out.  The cancels are sent
-            # before its bounded join, and a stop's injected interrupt
-            # landing in that join must not skip the cleanup below: it
-            # is held and re-raised after it when the run was otherwise
-            # returning normally (the stop must still be honoured), or
-            # dropped when the run is already unwinding on an exception.
-            unwinding = sys.exc_info()[1] is not None
-            interrupted: BaseException | None = None
             try:
-                if kill_jobs_of(self):
-                    logger.info("stopped run_agent jobs still running at the end of the task")
-            except BaseException as exc:  # noqa: BLE001 — held, see above
-                logger.warning("interrupted while waiting for cancelled run_agent jobs")
-                interrupted = None if unwinding else exc
-            self._fold_classifier_usage()
-            if self.web_use_tool:
-                self.web_use_tool.close()
-            self.web_use_tool = None
-            self._memory_tools = None
-            self._ask_user_question_callback = None
-            self.pre_step_hook = None
-            self.tool_call_guard = None
-            # The hook is a bound method of this run's UsefulTools;
-            # left in place it would keep that instance (its read
-            # cache, stream callback, stop event) alive for the next
-            # run and be called by a docker run that never installs one.
-            self.context_reset_hook = None
-            # The run's last word on its spend, always: a sub-task's
-            # fold can land on its own thread at any point after the
-            # run's last event (between a session's final event and its
-            # bank, during the join above, or ahead of the classifier
-            # fold), so no snapshot taken here can tell whether that
-            # event already carried it.  The persisted row reads the
-            # same totals after ``run`` returns.
-            self._emit_usage_totals()
-            if interrupted is not None:
-                raise interrupted
+                # Pre-run task classification (idempotent per run: a driver
+                # may have pre-seeded the verdict).
+                # A task the classifier deems
+                # simple — no software development, no Internet search —
+                # runs on the reduced SYSTEM_LITE.md prompt; everything
+                # else (including a failed or disabled classification)
+                # keeps the full SYSTEM.md.  A caller-supplied
+                # *base_system_prompt* replaces both.
+                classification = self._classify_task_once(
+                    model_name, prompt_template, model_config,
+                    arguments=arguments,
+                )
+                default_base_prompt = (
+                    SYSTEM_PROMPT_LITE
+                    if classification is not None and classification.is_simple
+                    else SYSTEM_PROMPT
+                )
+                system_instructions = (
+                    (self._base_system_prompt or default_base_prompt)
+                    + (system_prompt if system_prompt else "")
+                )
+                if system_prompt_hook is not None:
+                    # The SEA's return is the run's system prompt, as its
+                    # ``prompt()`` return is the run's prompt.  Neither is
+                    # forwarded to sub-agents: they inherit the caller's
+                    # *base_system_prompt* and *system_prompt* and their own
+                    # SEA layers shape their prompt (the daemon applies
+                    # them), so an appended rule is
+                    # stated once per run without any deduplication.
+                    system_instructions = system_prompt_hook(system_instructions)
+                memory_root = _memory_root_for_run(
+                    self._append_basic_tools,
+                    docker_image,
+                    model_name,
+                    caller_system_instruction=bool(
+                        (model_config or {}).get("system_instruction")
+                    ),
+                    use_memory_override=use_memory,
+                )
+                if memory_root is not None:
+                    self._memory_tools = MemoryTools(
+                        memory_root, domains=_repo_memory_domains(resolve_work_dir(work_dir))
+                    )
+                profile = self._tool_profile(prompt_template)
+                # No note without a built-in toolset to cut down: a run with
+                # ``append_basic_tools=False`` has only ``finish`` and the
+                # caller's tools, whatever profile it names.
+                allowed = resolve_tool_profile(profile)
+                if allowed is not None and self._append_basic_tools:
+                    # The note lists what :meth:`_get_tools` will build,
+                    # never a tool this run cannot have: the docker toolset
+                    # has no job registry (see the docker ``Bash`` shim),
+                    # the browser needs the settings panel's "Use web
+                    # tools", the fan-out needs parallel mode, memory needs
+                    # a memory root, ``decide`` the decisions model and
+                    # ``skill`` a configured user or project skill.
+                    offered = set(allowed)
+                    if docker_image:
+                        offered.discard("bash_job")
+                    if not web_tools:
+                        offered -= BROWSER_TOOL_NAMES
+                    if not is_parallel:
+                        offered -= {"run_parallel", "number_of_cores"}
+                    if memory_root is None:
+                        offered -= MEMORY_TOOL_NAMES
+                    if not decisions_tool_available():
+                        offered.discard("decide")
+                    if "skill" in offered and make_skill_tool(resolve_work_dir(work_dir)) is None:
+                        offered.discard("skill")
+                    listed = sorted(offered)
+                    if allowed & MCP_AUTH_TOOL_NAMES:
+                        listed.append("the tools of every configured MCP server")
+                    system_instructions += RESTRICTED_PROFILE_NOTE.format(
+                        profile=profile, tools=", ".join(listed),
+                    )
+                    if not web_tools and allowed & BROWSER_TOOL_NAMES:
+                        system_instructions += WEB_TOOLS_OFF_NOTE
+                elif self._append_basic_tools and not web_tools:
+                    # The settings panel's "Use web tools" is off: the
+                    # browser tools are not built (:meth:`_get_tools`), so
+                    # the static Web Research rules above must not send the
+                    # model after go_to_url() or a curl substitute.
+                    system_instructions += WEB_TOOLS_OFF_NOTE
+                if self._memory_tools is not None:
+                    system_instructions += "\n\n" + self._memory_tools.protocol()
+                prompt = prompt_template
+                if attachments:
+                    parts = _attachment_parts(attachments)
+                    if parts:
+                        prompt += (
+                            f"\n\n# Important\n - User attached {', '.join(parts)}. "
+                            f"The files are included in this message as inline content "
+                            f"that you can see directly. "
+                            f"Do NOT launch a browser, call screenshot(), go_to_url(), "
+                            f"or any other browser tool to view these attachments — "
+                            f"you already have them."
+                        )
+                if current_editor_file:
+                    system_instructions += (
+                        "\n\n- The path of the file open in the editor is "
+                        f"{current_editor_file}"
+                    )
+                return super().run(
+                    model_name=model_name,
+                    system_prompt=system_instructions,
+                    prompt_template=prompt,
+                    arguments=arguments,
+                    max_steps=max_steps,
+                    max_budget=max_budget,
+                    model_config=model_config,
+                    work_dir=work_dir,
+                    printer=printer,
+                    max_sub_sessions=max_sub_sessions,
+                    docker_image=docker_image,
+                    verbose=verbose,
+                    tools=tools or [],
+                    attachments=attachments,
+                    llm_call_hook=llm_call_hook,
+                    tool_call_hook=tool_call_hook,
+                )
+            finally:
+                # No sub-task outlives its caller: a run_agent job the run
+                # neither waited for nor killed is stopped here, before the
+                # run's terminal status goes out.  The cancels are sent
+                # before its bounded join, and a stop's injected interrupt
+                # landing in that join must not skip the cleanup below: it
+                # is held and re-raised after it when the run was otherwise
+                # returning normally (the stop must still be honoured), or
+                # dropped when the run is already unwinding on an exception.
+                unwinding = sys.exc_info()[1] is not None
+                interrupted: BaseException | None = None
+                try:
+                    if kill_jobs_of(self):
+                        logger.info("stopped run_agent jobs still running at the end of the task")
+                except BaseException as exc:  # noqa: BLE001 — held, see above
+                    logger.warning("interrupted while waiting for cancelled run_agent jobs")
+                    interrupted = None if unwinding else exc
+                # A worktree the run leaves unmerged awaits the user's
+                # decision: marked on disk so no orphan reclaim in another
+                # process merges its branch behind the user's back.
+                self._mark_unmerged_worktree_preserved()
+                self._fold_classifier_usage()
+                if self.web_use_tool:
+                    self.web_use_tool.close()
+                self.web_use_tool = None
+                self._memory_tools = None
+                self._ask_user_question_callback = None
+                self.pre_step_hook = None
+                self.tool_call_guard = None
+                # The hook is a bound method of this run's UsefulTools;
+                # left in place it would keep that instance (its read
+                # cache, stream callback, stop event) alive for the next
+                # run and be called by a docker run that never installs one.
+                self.context_reset_hook = None
+                # The run's last word on its spend, always: a sub-task's
+                # fold can land on its own thread at any point after the
+                # run's last event (between a session's final event and its
+                # bank, during the join above, or ahead of the classifier
+                # fold), so no snapshot taken here can tell whether that
+                # event already carried it.  The persisted row reads the
+                # same totals after ``run`` returns.
+                self._emit_usage_totals()
+                if interrupted is not None:
+                    raise interrupted
+        except (KISSError, SeaError):
+            # A broken SEA method (its ``system_prompt`` or ``tools``
+            # run inside the agent) is a setup failure the caller must
+            # see as a diagnostic, not a summarised task result.
+            raise
+        except Exception as exc:
+            # The task's failure and the cleanup's alike: the caller
+            # gets a result, not a traceback.
+            return str(
+                yaml.dump(
+                    {
+                        "success": False,
+                        "summary": f"Task failed with error: {exc}",
+                    }
+                )
+            )
+
+    def _begin_task(self, printer: Printer | None) -> None:
+        """Clear the way for a new task before anything of it is recorded.
+
+        Binds *printer* (so the retirement below can notify), resets the
+        per-run worktree flags, retires a worktree still pending from an
+        earlier run of this agent (committed to its own branch and kept
+        for review, never merged: the new task starts in the caller's
+        ``work_dir`` and ``create_worktree`` makes it a fresh worktree)
+        and flushes the warnings that left.  Called by :meth:`run`, and
+        before it by ``ChatSorcarAgent.run`` — ahead of the chat state
+        the retirement's commit message is generated from
+        (:meth:`_commit_context`) being replaced by the new task's; the
+        second call then finds nothing to do.
+
+        Args:
+            printer: The run's printer, or ``None`` to keep the current one.
+        """
+        if printer is not None:
+            self.set_printer(printer)
+        self._worktree_unavailable = None
+        self._unisolated_repos = set()
+        self._worktree_finish_gate_used = False
+        if self._wts:
+            self._retire_previous_worktree()
+        self._flush_warnings(printer)
 
     def _drain_pending_user_messages(self, model: Any) -> None:
         """Append any queued follow-up prompts to *model*'s conversation.
@@ -2409,11 +2531,1355 @@ class SorcarAgent(RelentlessAgent):
             f"finishing again kills every job still running."
         )
 
-    def _guard_finish(self, name: str, args: dict[str, Any]) -> str | None:
-        """The run's tool-call guard: every reason a ``finish`` is rejected, first one wins."""
+    @property
+    def _wt(self) -> GitWorktree | None:
+        """The pending worktree the work dir is in, else the first one; ``None`` when idle."""
+        work_dir = Path(self.work_dir).resolve() if self.work_dir else None
+        for wt in self._wts.values():
+            if work_dir is not None and _path_inside(work_dir, wt.wt_dir) is not None:
+                return wt
+        return next(iter(self._wts.values()), None)
+
+    @_wt.setter
+    def _wt(self, wt: GitWorktree | None) -> None:
+        """Make *wt* the only pending worktree (``None``: none)."""
+        self._wts = {} if wt is None else {_repo_key(wt): wt}
+
+    @property
+    def worktree(self) -> GitWorktree | None:
+        """The first worktree pending merge/discard, or ``None``."""
+        return self._wt
+
+    @property
+    def worktrees(self) -> list[GitWorktree]:
+        """Every worktree pending merge/discard, in creation order."""
+        return list(self._wts.values())
+
+    @property
+    def _repo_root(self) -> Path | None:
+        """Git repo root path, or ``None`` if not in a repo."""
+        return self._wt.repo_root if self._wt else None
+
+    @property
+    def _wt_branch(self) -> str | None:
+        """Branch name of the current/pending worktree task."""
+        return self._wt.branch if self._wt else None
+
+    @property
+    def _original_branch(self) -> str | None:
+        """The branch the user was on when the task started."""
+        return self._wt.original_branch if self._wt else None
+
+    @property
+    def _wt_pending(self) -> bool:
+        """Whether a worktree task is pending merge/discard."""
+        return bool(self._wts)
+
+    @property
+    def _wt_dir(self) -> Path | None:
+        """Worktree directory path."""
+        return self._wt.wt_dir if self._wt else None
+
+    @property
+    def _wt_work_dir(self) -> Path | None:
+        """The task's working directory inside the worktree.
+
+        ``wt_dir`` plus the original work dir's offset from the repo
+        root; differs from ``wt_dir`` when the task was launched from a
+        subdirectory of the repo.
+        """
+        return None if self._wt is None else self._wt_work_dir_of(self._wt)
+
+    # ------------------------------------------------------------------
+    # Tools
+    # ------------------------------------------------------------------
+
+    def _enter_work_dir(self, work_dir: str) -> None:
+        """Point this agent and its live tools at *work_dir*.
+
+        Args:
+            work_dir: The directory Bash commands run in and relative
+                paths resolve against from now on.
+        """
+        self.work_dir = work_dir
+        for tools in (self._useful_tools, self.web_use_tool):
+            if tools is not None:
+                tools.work_dir = work_dir
+
+    def _wt_for_repo(self, repo: Path) -> GitWorktree | None:
+        """This task's worktree of the repository rooted at *repo*, if any."""
+        return self._wts.get(repo.resolve())
+
+    def _work_dir_in_checkout_of(self, repo: Path) -> bool:
+        """Whether the work dir is inside *repo*'s checkout (not a worktree).
+
+        True for the repository the task was launched in: creating its
+        worktree moves the work dir into it.  False for every other
+        repository the task touches, and for a work dir that is itself
+        inside a worktree (a sub-agent of a worktree task).
+
+        Args:
+            repo: A git repository root.
+        """
+        work_dir = self.work_dir or ""
+        if not work_dir or inside_kiss_worktree(work_dir):
+            return False
+        return _path_inside(Path(work_dir).resolve(), repo) is not None
+
+    def create_worktree(self, path: str = "") -> str:
+        """Create a git worktree for the repository of *path* (default: the work dir).
+
+        Call this once per repository, before the first change (create,
+        edit, write, or make a folder) to a Git-tracked file or folder
+        of that repository.  The task's edits to the repository then
+        land on a private ``kiss/wt-*`` branch checked out under
+        ``<repo>/.kiss-worktrees/`` instead of the user's checkout.  For
+        the repository containing the work dir the work dir moves into
+        the worktree, so relative paths and Bash commands use it from
+        then on; for any other repository, edit its files under the
+        returned worktree directory (``<repo>/x.py`` becomes
+        ``<worktree>/x.py``).  Call ``commit_and_merge`` when the work is
+        done: it merges every worktree.  A no-op when the repository
+        already has a worktree or *path* is not inside a git repository.
+
+        Args:
+            path: A file or directory inside the repository to isolate;
+                relative to the work dir.  Empty: the work dir itself.
+
+        Returns:
+            The worktree directory and branch (and the new work dir when
+            it moved), or the reason no worktree was created (edit the
+            files in place then).
+        """
+        work_dir = self.work_dir or ""
+        if self.docker_manager is not None:
+            self._worktree_unavailable = "the task runs in a Docker container"
+            return (
+                "No worktree: the task runs in a Docker container, so edit "
+                f"the files in {work_dir} directly."
+            )
+        target = Path(_absolutize(path, work_dir)).resolve() if path else Path(work_dir).resolve()
+        anchor = target
+        while not anchor.is_dir():
+            anchor = anchor.parent
+        repo = GitWorktreeOps.discover_repo(anchor) if work_dir or path else None
+        existing = next(
+            (wt for wt in self.worktrees if _path_inside(target, wt.wt_dir) is not None),
+            self._wt_for_repo(repo) if repo is not None else None,
+        )
+        if existing is not None:
+            if _path_inside(Path(work_dir).resolve(), existing.wt_dir) is not None:
+                return (
+                    f"A worktree is already active: work dir {self._wt_work_dir_of(existing)} "
+                    f"on branch '{existing.branch}'. Keep working there."
+                )
+            return (
+                f"A worktree is already active for {existing.repo_root}: {existing.wt_dir} "
+                f"on branch '{existing.branch}'. Edit that repository's files there."
+            )
+        if inside_kiss_worktree(target):
+            return (
+                f"No new worktree needed: {target} is already inside the "
+                "worktree of the calling task. Edit the files in place; the "
+                "calling task commits and merges them."
+            )
+        if repo is None:
+            return (
+                f"No worktree: {target if work_dir or path else 'the work dir'} is not "
+                "inside a git repository. Edit the files in place, or pass a path "
+                "inside the repository to isolate."
+            )
+        callers = self._isolating_worktree_dir(repo)
+        if callers is not None:
+            return (
+                f"No new worktree needed: the calling task already isolates "
+                f"{repo} in the worktree {callers}. Edit that repository's files "
+                "there; the calling task commits and merges them."
+            )
+        moves_work_dir = self._work_dir_in_checkout_of(repo)
+        wt_work_dir = self._try_setup_worktree(repo, work_dir if moves_work_dir else str(repo))
+        if wt_work_dir is None:
+            self._unisolated_repos.add(repo.resolve())
+            return (
+                f"No worktree could be created for {repo} (detached HEAD, no "
+                "commits, or a git failure; see the log). Edit its files in "
+                "place."
+            )
+        wt = self._wt_for_repo(repo)
+        assert wt is not None
+        if moves_work_dir:
+            self._enter_work_dir(str(wt_work_dir))
+        self._worktree_finish_gate_used = False
+        printer = getattr(self, "printer", None)
+        if printer is not None and hasattr(printer, "broadcast"):
+            event: dict[str, object] = {
+                "type": "worktree_created",
+                "worktreeDir": str(wt.wt_dir),
+                "branch": wt.branch,
+            }
+            if moves_work_dir:
+                event["worktreeWorkDir"] = str(wt_work_dir)
+            self._broadcast_to_watchers(printer, event)
+        created = (
+            f"Created worktree {wt.wt_dir} on branch '{wt.branch}' "
+            f"(from '{wt.original_branch}')."
+        )
+        if moves_work_dir:
+            return (
+                f"{created} The work dir is now {wt_work_dir}: relative paths "
+                "and Bash commands use it. Call commit_and_merge when the work "
+                "is done."
+            )
+        return (
+            f"{created} The work dir is unchanged ({work_dir}): edit the files "
+            f"of {repo} under {wt.wt_dir} (absolute paths). Call "
+            "commit_and_merge when the work is done."
+        )
+
+    @staticmethod
+    def _wt_work_dir_of(wt: GitWorktree) -> Path:
+        """The task's work directory inside *wt* (its root for a legacy snapshot)."""
+        return wt.work_dir or wt.wt_dir
+
+    def commit_and_merge(self) -> str:
+        """Commit every worktree's changes and merge them into their original branches.
+
+        For each worktree created by ``create_worktree``, commits every
+        change on its task branch (with a generated commit message),
+        squash-merges the branch into the branch the task started from,
+        deletes the branch and removes the worktree; the work dir
+        returns to the user's checkout.  A merge conflict is resolved
+        by the merge SEA running as a sub-agent; when it cannot, that
+        branch is kept and the manual steps are returned.  Call this
+        after the work is complete and verified, before ``finish``.
+
+        Returns:
+            What was merged, or why a merge did not complete.
+        """
+        if not self._wts:
+            return (
+                "No worktree is active for this task (create_worktree was not "
+                "called, or its branches were already merged); nothing to commit "
+                "or merge."
+            )
+        from kiss.agents.sorcar.merge_conflict_resolver import resolve_merge_conflict
+
+        messages = []
+        for wt in self.worktrees:
+            branch = wt.branch
+            message = self._merge_one(wt, conflict_resolver=resolve_merge_conflict)
+            merged = self._wt_for_repo(wt.repo_root) is None
+            if not merged and not wt.wt_dir.exists():
+                # The branch holds the commits but its directory is
+                # gone: give the task its working copy back so it can
+                # fix the problem (a rejected hook, a conflict the merge
+                # agent could not resolve) and retry, instead of editing
+                # the user's checkout while the worktree counts as active.
+                message += self._reattach_after_failed_merge(wt)
+            printer = getattr(self, "printer", None)
+            if printer is not None and hasattr(printer, "broadcast"):
+                self._broadcast_to_watchers(printer, {
+                    "type": "worktree_result",
+                    "action": "merge",
+                    "branch": branch,
+                    "worktreeDir": str(wt.wt_dir),
+                    "success": merged,
+                    "message": message,
+                })
+            messages.append(message)
+        text = "\n\n".join(messages)
+        if not self._wts:
+            return f"{text} The work dir is {self.work_dir} again."
+        return text
+
+    def _reattach_after_failed_merge(self, wt: GitWorktree) -> str:
+        """Check *wt* out again after a failed merge removed its directory.
+
+        Git restores tracked files only, so the task's (possibly empty
+        or ignored) work subdirectory and the node_modules links are
+        recreated the way the initial setup did them; the work dir
+        re-enters the worktree when it had been moved there.
+
+        Args:
+            wt: The still-pending worktree whose directory is gone.
+
+        Returns:
+            Text telling the agent where to continue, to append to the
+            merge message.
+        """
+        if not GitWorktreeOps.reattach(wt.repo_root, wt.branch, wt.wt_dir):
+            return (
+                f"\n\nThe worktree could not be checked out again; the work is "
+                f"on branch '{wt.branch}' for the user to merge or discard. Make no "
+                "further edits and finish."
+            )
+        wt_work_dir = self._wt_work_dir_of(wt)
+        wt_work_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            GitWorktreeOps.link_node_modules(wt.repo_root, wt.wt_dir)
+        except OSError:
+            logger.warning("Failed to link node_modules into worktree", exc_info=True)
+        if self._work_dir_in_checkout_of(wt.repo_root):
+            self._enter_work_dir(str(wt_work_dir))
+            return (
+                f"\n\nThe worktree is checked out again at {wt.wt_dir}; the work "
+                f"dir is {self.work_dir}. Fix the problem there and call "
+                "commit_and_merge again."
+            )
+        return (
+            f"\n\nThe worktree is checked out again at {wt.wt_dir}. Fix the "
+            "problem there and call commit_and_merge again."
+        )
+
+    def _guard_worktree(self, name: str, args: dict[str, Any]) -> str | None:
+        """Worktree guardrail on every tool call.
+
+        * ``Write`` / ``Edit`` of a path inside a git repository's
+          checkout that is not git-ignored is refused: when the
+          repository is isolated in a worktree the work dir is not in
+          (another repository's worktree, or one a calling task made)
+          the refusal names the path to use inside the worktree;
+          when no worktree isolates it the refusal asks for
+          ``create_worktree`` of that repository first.  Paths inside
+          a worktree, checkout paths of the work dir's own worktree
+          (the tools remap them), git-ignored paths, and repositories
+          whose worktree setup failed pass.
+        * The first ``finish`` while a worktree is unmerged is refused
+          once, asking for ``commit_and_merge``; a second ``finish``
+          passes so the agent is never trapped.
+
+        Args:
+            name: The tool being called.
+            args: Its arguments.
+
+        Returns:
+            The refusal text, or ``None`` to let the call through.
+        """
+        if name == "finish":
+            if not self._wts or self._worktree_finish_gate_used:
+                return None
+            self._worktree_finish_gate_used = True
+            branches = ", ".join(f"'{wt.branch}'" for wt in self.worktrees)
+            noun = "worktree" if len(self._wts) == 1 else "worktrees"
+            return (
+                f"The {noun} on branch {branches} has not been merged. "
+                "Call commit_and_merge() first, then finish again (or finish again "
+                "as is to leave the branch for the user to merge or discard)."
+            )
+        if name not in ("Write", "Edit") or not isinstance(args.get("file_path"), str):
+            return None
+        if self._worktree_unavailable is not None:
+            return None
+        # A run without the tool (a WorkerSea, a profile without the
+        # edit group's worktree tools) edits the tree in place.
+        if "create_worktree" not in self._run_tool_names or self.docker_manager is not None:
+            return None
+        path = Path(_absolutize(args["file_path"], self.work_dir)).resolve()
+        if inside_kiss_worktree(path):
+            return None
+        anchor = path
+        while not anchor.is_dir():
+            anchor = anchor.parent
+        repo = GitWorktreeOps.discover_repo(anchor)
+        if (
+            repo is None
+            or repo.resolve() in self._unisolated_repos
+            or GitWorktreeOps.is_ignored(repo, path)
+        ):
+            return None
+        wt_dir = self._isolating_worktree_dir(repo)
+        offset = _path_inside(path, repo)
+        if wt_dir is not None and offset is not None:
+            if _path_inside(Path(self.work_dir or "").resolve(), wt_dir) is not None:
+                # The tools remap a checkout path of the work dir's own
+                # worktree into it (``_active_worktree_remap``).
+                return None
+            return (
+                f"Error: {name} of {path} refused: the repository {repo} is "
+                f"isolated in the worktree {wt_dir}; {name} {wt_dir / offset} instead."
+            )
+        call = "create_worktree()" if self._work_dir_in_checkout_of(repo) else (
+            f"create_worktree({str(repo)!r})"
+        )
+        return (
+            f"Error: {name} of {path} refused: it is inside the git repository "
+            f"{repo} and is not git-ignored. Call {call} first, "
+            f"then retry the {name}."
+        )
+
+    def _isolating_worktree_dir(self, repo: Path) -> Path | None:
+        """The worktree directory holding this task's copy of *repo*, if any.
+
+        A worktree this task created for *repo*, a calling task's
+        worktree of *repo* (:meth:`inherit_worktrees`), or the enclosing
+        worktree of the work dir when it lies inside a worktree of
+        *repo* (a sub-agent of a worktree task started without the
+        daemon's inheritance).
+
+        Args:
+            repo: A git repository root.
+        """
+        own = self._wt_for_repo(repo)
+        if own is not None:
+            return own.wt_dir
+        inherited = self._inherited_worktrees.get(repo.resolve())
+        if inherited is not None:
+            return inherited
+        enclosing = kiss_worktree_root(self.work_dir or "")
+        if enclosing is not None and enclosing.parent.parent.resolve() == repo.resolve():
+            return enclosing
+        return None
+
+    def inherit_worktrees(self, worktrees: dict[Path, Path]) -> None:
+        """Adopt the calling tasks' worktrees before this agent runs as a sub-agent.
+
+        A sub-agent never creates a worktree for a repository a calling
+        task (any ancestor) has already isolated: ``create_worktree``
+        points at the ancestor's worktree instead, and the write guard
+        maps the repository's checkout paths into it.  The ancestors
+        commit and merge those worktrees.
+
+        Args:
+            worktrees: Repository root -> worktree directory, as
+                :meth:`isolated_repos` of the calling agent returns it.
+        """
+        self._inherited_worktrees = {
+            repo.resolve(): wt_dir for repo, wt_dir in worktrees.items()
+        }
+
+    def isolated_repos(self) -> dict[Path, Path]:
+        """Repository root -> worktree directory for every repo this task isolates.
+
+        Its own worktrees and the ones it inherited from calling tasks,
+        so a sub-agent of a sub-agent still sees the top task's
+        worktrees.
+        """
+        return {
+            **self._inherited_worktrees,
+            **{repo: wt.wt_dir for repo, wt in self._wts.items()},
+        }
+
+    # ------------------------------------------------------------------
+    # Worktree creation
+    # ------------------------------------------------------------------
+
+    def _live_worktree_branches(self) -> set[str]:
+        """Return the set of ``kiss/wt-*`` branches owned by live agents.
+
+        Union of *self*'s current worktree branch (if any) and every
+        other live agent's branch as tracked by the server's agent-state
+        registry, reached through the printer's duck-typed
+        ``live_worktree_branches`` bridge.  Excluded from the orphan
+        reclaim in :meth:`_try_setup_worktree` so a concurrent live
+        agent's active worktree is never adopted, merged, or removed.
+        """
+        branches = {wt.branch for wt in self._wts.values()}
+        live = getattr(
+            getattr(self, "printer", None), "live_worktree_branches", None,
+        )
+        if live is not None:
+            branches.update(live())
+        return branches
+
+    def _try_setup_worktree(self, repo: Path, work_dir_str: str) -> Path | None:
+        """Create a worktree branch for the current task.
+
+        Side effect: registers the worktree in ``self._wts`` on success.
+
+        Args:
+            repo: Git repo root path.
+            work_dir_str: The task's current work directory inside *repo*.
+
+        Returns:
+            The worktree-relative work directory, or ``None`` when no
+            worktree can be created (detached HEAD, no commits, a git
+            failure).
+        """
+        # The whole baseline snapshot — reading the main tree's
+        # checked-out branch and copying its dirty state — must be one
+        # consistent read of the SHARED main worktree.  ``repo_lock``
+        # only excludes threads of this process; a peer process's
+        # merge/reclaim/discard stashes, checks out and resets that same
+        # tree under the cross-process flock, so the capture takes the
+        # flock too (repo_lock -> flock order, like every other taker).
+        with repo_lock(repo), _reclaim_process_lock(repo):
+            original_branch = GitWorktreeOps.current_branch(repo)
+            if original_branch is None:
+                logger.warning("Detached HEAD, no worktree for %s", repo)
+                return None
+            try:
+                offset = Path(work_dir_str).resolve().relative_to(repo.resolve())
+            except ValueError:  # pragma: no cover
+                logger.warning("work_dir not inside repo, no worktree")
+                return None
+            try:
+                GitWorktreeOps.prepare_repo(repo)
+                GitWorktreeOps.ensure_scratch_merge_driver(repo)
+            except Exception:  # pragma: no cover — filesystem permission error
+                logger.warning("Failed to update git exclude", exc_info=True)
+            # Reclaim before sweep: reclaim may merge and delete orphan
+            # branches, and sweep purges leftover config sections whose
+            # branches were just removed.
+            try:
+                GitWorktreeOps.reclaim_orphaned_worktrees(
+                    repo, exclude_branches=self._live_worktree_branches(),
+                )
+                GitWorktreeOps.sweep_orphaned_state(repo)
+            except Exception:  # pragma: no cover — unexpected git failure
+                logger.warning("Orphan-worktree maintenance failed", exc_info=True)
+            branch = GitWorktreeOps.new_task_branch(repo)
+            wt_dir = repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
+            if not GitWorktreeOps.create(repo, branch, wt_dir):
+                # pragma: no cover — git worktree add failure
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return None
+            if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
+                # pragma: no cover — git config failure
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return None
+            try:
+                dirty_copied = GitWorktreeOps.copy_dirty_state(repo, wt_dir)
+            except OSError:
+                logger.warning(
+                    "Failed to copy dirty state into worktree", exc_info=True,
+                )
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return None
+            baseline_commit: str | None = None
+            if dirty_copied:
+                GitWorktreeOps.stage_all(wt_dir)
+                if GitWorktreeOps.commit_staged(
+                    wt_dir, "kiss: baseline from dirty state", no_verify=True,
+                ):
+                    baseline_commit = GitWorktreeOps.head_sha(wt_dir)
+                    if baseline_commit:
+                        GitWorktreeOps.save_baseline_commit(repo, branch, baseline_commit)
+                elif GitWorktreeOps.has_uncommitted_changes(wt_dir):
+                    logger.warning("Baseline commit failed in new worktree")
+                    GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                    return None
+            wt_work_dir = wt_dir / offset
+            self._wts[repo.resolve()] = GitWorktree(
+                repo_root=repo,
+                branch=branch,
+                original_branch=original_branch,
+                wt_dir=wt_dir,
+                baseline_commit=baseline_commit,
+                work_dir=wt_work_dir,
+            )
+            wt_work_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                GitWorktreeOps.link_node_modules(repo, wt_dir)
+            except OSError:
+                logger.warning("Failed to link node_modules into worktree", exc_info=True)
+            return wt_work_dir
+
+    def _restore_work_dir_after_teardown(self, wt: GitWorktree) -> None:
+        """Point ``work_dir`` back at the parent repository once *wt* is gone.
+
+        The sub-directory offset the task was launched from is kept, so
+        a run started in ``<wt>/pkg`` ends in ``<repo>/pkg``.  A
+        ``work_dir`` outside *wt* is left alone.
+
+        Args:
+            wt: The worktree whose directory was just removed.
+        """
+        if not self.work_dir:
+            return
+        try:
+            offset = Path(self.work_dir).resolve().relative_to(wt.wt_dir.resolve())
+        except ValueError:
+            return
+        self._enter_work_dir(str(wt.repo_root.resolve() / offset))
+
+    # ------------------------------------------------------------------
+    # Commit / merge engine
+    # ------------------------------------------------------------------
+
+    def _commit_worktree(self, wt: GitWorktree | None = None) -> bool:
+        """Commit any uncommitted changes in a worktree.
+
+        Args:
+            wt: The worktree to commit; ``None`` for the first pending one.
+
+        Stages all changes once, generates a commit message from the
+        staged diff, then commits the already-staged changes.  Falls
+        back to a generic commit message when the LLM-based message
+        generator is unavailable.  Emits two best-effort UI
+        notifications (``"Generating commit message"``, ``"Committed
+        <subject>"``) through :meth:`_broadcast_commit_notification`.
+
+        Returns:
+            True if a commit was created, False if nothing to commit.
+        """
+        if wt is None:
+            wt = self._wt
+        if wt is None or not wt.wt_dir.exists():
+            return False
+        commit_run_id = f"autocommit-{time.time_ns()}"
+        user_prompt, task_result = self._commit_context()
+        return auto_commit_changes(
+            wt.wt_dir,
+            user_prompt,
+            _generate_commit_message,
+            notify_fn=functools.partial(
+                self._broadcast_commit_notification, commit_run_id,
+            ),
+            task_result=task_result,
+        )
+
+    def _commit_context(self) -> tuple[str | None, str | None]:
+        """The task text and result a worktree commit message is generated from.
+
+        ``(None, None)`` here: :class:`~kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent`,
+        which keeps the chat's last prompt and result summary, overrides it.
+        """
+        return None, None
+
+    def _broadcast_commit_notification(
+        self, notification_id: str, stage: str, subject: str,
+    ) -> None:
+        """Broadcast a commit life-cycle notification to the webview.
+
+        Hook used by :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`.
+        Silently no-ops when no printer with a ``broadcast`` method is
+        attached, and never raises into the caller.
+
+        Args:
+            notification_id: Toast id shared across the stages of ONE
+                commit, so the webview updates the toast in place.
+            stage: ``"generating"``, ``"committed"`` or ``"failed"``.
+            subject: First non-empty line of the commit message (the
+                toast body for ``"committed"``).
+        """
+        printer = getattr(self, "printer", None)
+        if printer is None or not hasattr(printer, "broadcast"):
+            return
+        severity = "info"
+        if stage == "generating":
+            message = "Generating commit message"
+        elif stage == "committed":
+            message = f"Committed {subject}" if subject else "Committed"
+        elif stage == "failed":
+            message = (
+                "Commit failed (a pre-commit hook may have "
+                "rejected it); the worktree is preserved"
+            )
+            severity = "warning"
+        else:
+            return
+        event: dict[str, object] = {
+            "type": "notification",
+            "id": notification_id,
+            "severity": severity,
+            "message": message,
+        }
+        if stage == "generating":
+            event["sticky"] = True
+        try:
+            self._broadcast_to_watchers(printer, event)
+        except Exception:  # pragma: no cover — best-effort UI hook
+            logger.debug("commit notification broadcast failed", exc_info=True)
+
+    def _broadcast_to_watchers(self, printer: Any, event: dict[str, object]) -> None:
+        """Broadcast *event* so it reaches this agent's tab.
+
+        The printer's ``broadcast_transient`` primitive resolves every
+        tab currently watching the task and stamps one copy per tab,
+        falling back to this agent's tab; printers without it get one
+        copy stamped with the tab id directly.
+
+        Args:
+            printer: A ``broadcast``-capable printer.
+            event: The event to route; must not carry ``tabId``.
+        """
+        transient = getattr(printer, "broadcast_transient", None)
+        if callable(transient):
+            # ``last_task_id``: the ``task_history`` row of a ChatSorcarAgent.
+            task_id = str(getattr(self, "last_task_id", "") or "")
+            transient(event, task_id=task_id or None, tab_id=self._tab_id)
+            return
+        printer.broadcast({**event, "tabId": self._tab_id})
+
+    def _commit_and_clean_worktree(
+        self, wt: GitWorktree,
+    ) -> tuple[_WorktreeCleanupOutcome, str]:
+        """Commit *wt*'s changes, then remove the worktree and prune.
+
+        After the LLM-driven commit, a single-shot retry runs
+        :meth:`GitWorktreeOps.commit_all` with a generic message to
+        catch a file appearing between the staging and the commit.
+
+        Args:
+            wt: The worktree to commit and clean up.
+
+        Returns:
+            A ``(outcome, leftover)`` pair.  ``leftover`` is the raw
+            ``git status --porcelain`` output when the outcome is
+            :attr:`_WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED`
+            (e.g. a pre-commit hook rejection), otherwise ``""``.  The
+            worktree directory is removed only on
+            :attr:`_WorktreeCleanupOutcome.COMMITTED_AND_REMOVED`; the
+            preserved outcomes leave it in place so no work is lost.
+        """
+        if wt.wt_dir.exists():
+            self._commit_worktree(wt)
+            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                GitWorktreeOps.commit_all(wt.wt_dir, "kiss: commit late-arriving changes")
+            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
+                return _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED, leftover
+            # ``git add -A`` skips git-ignored task output; without
+            # this rescue the removal below would destroy it.  Fails
+            # closed: the worktree is preserved when a file could not
+            # be landed in the main repo.
+            if not _rescue_ignored_files(wt):
+                return _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED, ""
+        GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+        self._restore_work_dir_after_teardown(wt)
+        return _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED, ""
+
+    def _finalize_worktree(self, wt: GitWorktree | None = None) -> bool:
+        """Commit, remove worktree, prune; log why a worktree was preserved.
+
+        Args:
+            wt: The worktree to finalize; ``None`` for the first pending one.
+
+        Returns:
+            True if the worktree was cleaned up successfully.  False if
+            uncommitted changes remain after both the commit and the
+            retry, or ignored output could not be rescued — the
+            worktree directory is preserved so no work is lost.
+        """
+        if wt is None:
+            wt = self._wt
+        assert wt is not None
+        outcome, leftover = self._commit_and_clean_worktree(wt)
+        self._last_preserve_outcome = outcome
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
+            logger.warning(
+                "Worktree has uncommitted changes after commit and retry "
+                "(a pre-commit hook rejection, a commit failure, or a "
+                "concurrent write); preserving %s\ngit status --porcelain:\n%s",
+                wt.wt_dir, leftover,
+            )
+            return False
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
+            logger.warning(
+                "Git-ignored task output in worktree '%s' could not be "
+                "rescued into the main repository; preserving %s",
+                wt.branch, wt.wt_dir,
+            )
+            return False
+        return True
+
+    def _do_merge(
+        self,
+        wt: GitWorktree,
+        conflict_resolver: MergeConflictResolver | None = None,
+    ) -> tuple[MergeResult, str, str]:
+        """Stash, checkout, squash-merge, pop for a worktree branch.
+
+        Serialized under ``repo_lock`` and the cross-process flock so
+        concurrent tabs and processes cannot interleave operations on
+        the main repository.
+
+        Args:
+            wt: The worktree state to merge.
+            conflict_resolver: Called as ``(self, wt, user_prompt,
+                task_result)`` when the squash merge conflicts, with
+                the main tree clean and checked out on the original
+                branch, still under the merge locks; it must leave the
+                tree clean again unless it returns
+                :attr:`MergeResult.SUCCESS` with the merge committed.
+                ``_last_merge_resolved_by_agent`` records a success.
+
+        Returns:
+            ``(result, stash_warning, cleanup_warning)`` where *result*
+            is the merge outcome, *stash_warning* is non-empty if
+            stash-pop failed, and *cleanup_warning* is non-empty when
+            the merge succeeded but the task branch could not be
+            deleted.  A dirty main tree whose ``git stash push`` failed
+            returns :attr:`MergeResult.STASH_FAILED` without touching
+            the repo.
+        """
+        stash_warning = ""
+        cleanup_warning = ""
+        self._last_merge_resolved_by_agent = False
+        if wt.original_branch is None:
+            return (MergeResult.CHECKOUT_FAILED, "", "")
+        with repo_lock(wt.repo_root), _reclaim_process_lock(wt.repo_root):
+            try:
+                GitWorktreeOps.ensure_scratch_merge_driver(wt.repo_root)
+            except Exception:  # pragma: no cover — filesystem permission error
+                logger.warning("Failed to install scratch merge driver", exc_info=True)
+            did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
+            if not did_stash and GitWorktreeOps.has_uncommitted_changes(wt.repo_root):
+                return (MergeResult.STASH_FAILED, "", "")
+            current = GitWorktreeOps.current_branch(wt.repo_root)
+            if current != wt.original_branch:
+                ok, err = GitWorktreeOps.checkout(wt.repo_root, wt.original_branch)
+                if not ok:
+                    logger.warning("Cannot checkout '%s': %s", wt.original_branch, err)
+                    if did_stash and not GitWorktreeOps.stash_pop(wt.repo_root):
+                        stash_warning = (
+                            "Your uncommitted changes were stashed "
+                            "before the failed checkout and could not "
+                            "be auto-restored. Run 'git stash pop' to "
+                            "recover them."
+                        )
+                    return (MergeResult.CHECKOUT_FAILED, stash_warning, "")
+
+            user_prompt, task_result = self._commit_context()
+            result = GitWorktreeOps.squash_merge(
+                wt.repo_root, wt.branch, wt.baseline_commit,
+                user_prompt=user_prompt, task_result=task_result,
+            )
+            if result == MergeResult.CONFLICT and conflict_resolver is not None:
+                try:
+                    result = conflict_resolver(self, wt, user_prompt, task_result)
+                except BaseException:
+                    # The resolver runs an agent for minutes, so a user
+                    # stop lands here.  It restored the clean tree
+                    # before re-raising; give the user's stashed edits
+                    # back now, because nothing below runs.
+                    if did_stash and not GitWorktreeOps.stash_pop(wt.repo_root):
+                        self._set_warnings(stash=(
+                            "Your uncommitted changes were stashed before "
+                            "the interrupted merge and could not be "
+                            "auto-restored. Run 'git stash pop' to "
+                            "recover them."
+                        ))
+                    raise
+                self._last_merge_resolved_by_agent = result == MergeResult.SUCCESS
+            if did_stash:
+                if result == MergeResult.SUCCESS:
+                    if not GitWorktreeOps.stash_pop(wt.repo_root):
+                        stash_warning = (
+                            "Your uncommitted changes could not be "
+                            "auto-restored after merging the worktree "
+                            f"('{wt.branch}'). Run 'git stash pop' to "
+                            "recover them."
+                        )
+                        logger.warning("git stash pop failed after merge of '%s'", wt.branch)
+                else:
+                    stash_warning = (
+                        "Your uncommitted changes were saved before "
+                        "the merge attempt and are safe in "
+                        "'git stash'. After resolving the merge, "
+                        "run 'git stash pop' to restore them."
+                    )
+
+            if result == MergeResult.SUCCESS and not GitWorktreeOps.delete_branch(
+                wt.repo_root, wt.branch
+            ):
+                logger.warning(
+                    "Merged branch '%s' could not be deleted; it still exists in %s",
+                    wt.branch, wt.repo_root,
+                )
+                cleanup_warning = (
+                    f"Merged branch '{wt.branch}' could not be deleted "
+                    "and still exists. Run "
+                    f"'git branch -D {shlex.quote(wt.branch)}' to "
+                    "remove it."
+                )
+
+        return (result, stash_warning, cleanup_warning)
+
+    def merge(self, conflict_resolver: MergeConflictResolver | None = None) -> str:
+        """Merge every pending task branch into its original branch.
+
+        Every step is idempotent — safe to re-run after a crash.
+        Commits any uncommitted changes in each worktree before merging
+        it.  If a main working tree has uncommitted changes, they are
+        stashed before the merge and restored afterward.  A worktree
+        whose merge fails stays pending; the others are still merged.
+
+        Args:
+            conflict_resolver: Resolves a merge conflict and completes
+                the merge (see :meth:`_do_merge`) instead of this method
+                returning the manual-resolution steps.
+
+        Returns:
+            One success or error message per worktree, blank-line
+            separated.
+
+        Raises:
+            RuntimeError: If no worktree task is pending.
+        """
+        if not self._wts:
+            raise RuntimeError("No pending worktree task to merge")
+        return "\n\n".join(
+            self._merge_one(wt, conflict_resolver) for wt in self.worktrees
+        )
+
+    def _merge_one(
+        self, wt: GitWorktree, conflict_resolver: MergeConflictResolver | None,
+    ) -> str:
+        """Merge one pending worktree (see :meth:`merge`); drop it on success.
+
+        Args:
+            wt: A pending worktree of this agent.
+            conflict_resolver: See :meth:`merge`.
+
+        Returns:
+            The success or error message.
+        """
+        if wt.original_branch is None:
+            merge_cmd = _manual_merge_cmd(wt)
+            return (
+                "Cannot merge: original branch is unknown (likely due to a "
+                "crash during setup).  Please specify the target branch "
+                "manually:\n"
+                f"    git checkout <branch> && {merge_cmd}"
+            )
+
+        if not self._finalize_worktree(wt):
+            if self._last_preserve_outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
+                return (
+                    "Cannot merge: " + _rescue_failed_warning(wt)
+                    + "\n\nFix the destination in the main repository, "
+                    "then retry the merge."
+                )
+            return (
+                f"Cannot merge: committing '{wt.branch}' failed "
+                "(a pre-commit hook may have rejected the commit). "
+                f"The worktree is preserved at: {wt.wt_dir}\n\n"
+                "Fix the issue, then commit manually:\n"
+                f"    cd {shlex.quote(str(wt.wt_dir))}\n"
+                "    git add -A && git commit -m 'agent work'\n\n"
+                "Then retry the merge."
+            )
+
+        result, stash_warning, cleanup_warning = self._do_merge(
+            wt, conflict_resolver=conflict_resolver,
+        )
+        stash_suffix = ""
+        if self._last_merge_resolved_by_agent:
+            stash_suffix = " The merge agent resolved the conflicts."
+        if stash_warning:
+            stash_suffix += "\n\n⚠️  " + stash_warning
+        if cleanup_warning:
+            stash_suffix += "\n\n⚠️  " + cleanup_warning
+
+        if result == MergeResult.CHECKOUT_FAILED:
+            return (
+                f"Cannot checkout '{wt.original_branch}'.\n"
+                "Fix the issue and retry the merge, or discard the branch."
+                + stash_suffix
+            )
+
+        if result == MergeResult.STASH_FAILED:
+            return (
+                "Cannot merge: your uncommitted changes in the main "
+                "repository could not be stashed (git stash push "
+                "failed), so the merge was aborted to avoid mixing "
+                "them into the merge commit.\n"
+                "Commit or clean up the changes, then retry the merge, "
+                "or discard the branch." + stash_suffix
+            )
+
+        if result == MergeResult.SUCCESS:
+            self._wts.pop(_repo_key(wt), None)
+            return f"Successfully merged branch '{wt.branch}'." + stash_suffix
+
+        stash_step = ""
+        if stash_warning:
+            stash_step = "    git stash pop  # restore your uncommitted changes\n"
+
+        if result == MergeResult.MERGE_FAILED:
+            return (
+                f"Merge of '{wt.branch}' applied cleanly but the commit "
+                "failed (a pre-commit hook may have rejected it). "
+                "The branch is kept — retry manually:\n"
+                + _merge_fix_steps(wt, _PRECOMMIT_FIX_LINES)
+                + "\n" + stash_step + "\nOr discard the branch." + stash_suffix
+            )
+
+        return (
+            "Merge conflict detected.  Resolve manually:\n"
+            + _merge_fix_steps(
+                wt,
+                "    # resolve conflicts in your editor\n"
+                "    git add .\n"
+                "    git commit\n",
+            )
+            + "\n" + stash_step + "\nOr discard the branch."
+        )
+
+    def leave_as_is(self) -> str:
+        """Detach from the pending worktrees, leaving them untouched on disk.
+
+        Serves the "Do nothing" button of the post-task worktree bar:
+        each branch, its worktree directory, and any uncommitted
+        changes inside it are left exactly as the task ended.  A
+        preserve-for-review marker is persisted on every branch so
+        :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` in a future
+        process also refuses to silently publish it.
+
+        Returns:
+            Messages telling the user where the untouched worktrees are.
+
+        Raises:
+            RuntimeError: If no worktree task is pending, or if a
+                preserve marker could not be written (that worktree
+                stays pending and the bar keeps its controls).
+        """
+        if not self._wts:
+            raise RuntimeError("No pending worktree task to leave as is")
+        messages = []
+        for wt in self.worktrees:
+            if not GitWorktreeOps.save_preserve_marker(wt.repo_root, wt.branch):
+                raise RuntimeError(
+                    f"Could not record the keep decision for branch "
+                    f"'{wt.branch}' (writing the preserve marker to git "
+                    "config failed); the worktree is still pending. Retry, "
+                    "or merge/discard it instead."
+                )
+            self._wts.pop(_repo_key(wt), None)
+            messages.append(
+                f"Left branch '{wt.branch}' and its worktree at "
+                f"{wt.wt_dir} as they are. Merge or discard them "
+                "manually when you are ready."
+            )
+        return "\n\n".join(messages)
+
+    def discard(self, *, rescue_ignored: bool = False) -> str:
+        """Throw away every pending task branch and worktree, checkout original.
+
+        Every step is idempotent — safe to call multiple times.
+
+        Args:
+            rescue_ignored: When True, git-ignored files the task
+                created in a worktree are copied into its main
+                repository (never overwriting existing files) before
+                the directory is removed.  The automatic discard of a
+                worktree without changes passes True, because the
+                changed-files probe cannot see ignored files.
+
+        Returns:
+            One confirmation message per worktree (including a warning
+            if checkout to the original branch failed), or a "Discard
+            deferred" message when ignored output could not be rescued.
+
+        Raises:
+            RuntimeError: If no worktree task is pending.
+        """
+        if not self._wts:
+            raise RuntimeError("No pending worktree task to discard")
+        return "\n\n".join(
+            self._discard_one(wt, rescue_ignored) for wt in self.worktrees
+        )
+
+    def _discard_one(self, wt: GitWorktree, rescue_ignored: bool) -> str:
+        """Discard one pending worktree (see :meth:`discard`).
+
+        Args:
+            wt: A pending worktree of this agent.
+            rescue_ignored: See :meth:`discard`.
+
+        Returns:
+            The confirmation or "Discard deferred" message.
+        """
+        checkout_warning = ""
+        delete_warning = ""
+        with repo_lock(wt.repo_root), _reclaim_process_lock(wt.repo_root):
+            if rescue_ignored and wt.wt_dir.exists() and not _rescue_ignored_files(wt):
+                logger.warning(
+                    "Deferring discard of worktree '%s': its "
+                    "git-ignored output could not be rescued",
+                    wt.branch,
+                )
+                return (
+                    f"Discard deferred: git-ignored files created "
+                    f"by the task in branch '{wt.branch}' could not "
+                    f"be copied into the main repository, so the "
+                    f"worktree at {wt.wt_dir} was kept — it holds "
+                    "the only copy of those files."
+                )
+            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+            self._restore_work_dir_after_teardown(wt)
+            if wt.original_branch:
+                ok, err = GitWorktreeOps.checkout(wt.repo_root, wt.original_branch)
+                if not ok:
+                    checkout_warning = f"\n⚠️  Could not checkout '{wt.original_branch}': {err}"
+            if not GitWorktreeOps.delete_branch(wt.repo_root, wt.branch):
+                delete_warning = (
+                    f"\n⚠️  Branch '{wt.branch}' could not be deleted "
+                    "and still exists.  Switch to a different branch "
+                    f"(e.g. 'git checkout <other>') and run "
+                    f"'git branch -D {shlex.quote(wt.branch)}' to remove it."
+                )
+        self._wts.pop(_repo_key(wt), None)
+        if delete_warning:
+            return f"Partially discarded branch '{wt.branch}'.{checkout_warning}{delete_warning}"
+        return f"Discarded branch '{wt.branch}'.{checkout_warning}"
+
+    # ------------------------------------------------------------------
+    # Pending worktrees of earlier runs
+    # ------------------------------------------------------------------
+
+    def _preserve_pending_worktree_for_review(self) -> bool:
+        """Commit pending worktree changes onto the branch, no merge.
+
+        Called before a new task, a new chat, or a tab disposal when a
+        worktree of an earlier run is still pending: the partial work
+        is committed to its ``kiss/wt-*`` branch (recoverable via ``git
+        checkout <branch>``), the worktree directory is removed and
+        pruned, and the branch is never squash-merged into the user's
+        original branch behind their back.  When the commit does not
+        happen (a hook refusing it) the directory is kept instead,
+        because it is then the only copy of the work.
+
+        Records the cleanup outcome in ``_last_preserve_outcome``.
+
+        Returns:
+            True when a pending worktree was preserved (or had no
+            uncommitted work and was just cleaned up).  False when
+            there was nothing to do.  A preserved worktree whose keep
+            decision could not be made durable (:meth:`_keep_for_review`)
+            still returns True but stays pending.
+        """
+        self._last_preserve_outcome = None
+        if not self._wts:
+            return False
+        # A stale warning from an earlier run must not hide this one's.
+        self._set_warnings(merge="")
+        for wt in self.worktrees:
+            self._preserve_one_for_review(wt)
+        return True
+
+    def _preserve_one_for_review(self, wt: GitWorktree) -> None:
+        """Preserve one pending worktree (see :meth:`_preserve_pending_worktree_for_review`).
+
+        Args:
+            wt: A pending worktree of this agent.
+        """
+        outcome, leftover = self._commit_and_clean_worktree(wt)
+        self._last_preserve_outcome = outcome
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
+            logger.warning(
+                "Worktree '%s' has uncommitted changes after "
+                "preserve-for-review (likely a pre-commit hook "
+                "rejection); preserving worktree directory %s\n"
+                "git status --porcelain:\n%s",
+                wt.branch, wt.wt_dir, leftover,
+            )
+            self.add_warning(
+                f"Branch '{wt.branch}' still has uncommitted changes — the "
+                f"commit was refused, most likely by a pre-commit hook. Its "
+                f"worktree directory {wt.wt_dir} was kept so the work is not "
+                f"lost; recover it there. git status --porcelain:\n{leftover}"
+            )
+        elif outcome is _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED:
+            logger.warning(
+                "Git-ignored output of worktree '%s' could not be "
+                "rescued; preserving worktree directory %s",
+                wt.branch, wt.wt_dir,
+            )
+            self.add_warning(_rescue_failed_warning(wt))
+        else:
+            self.add_warning(
+                f"The unmerged work of the previous task was committed to "
+                f"branch '{wt.branch}' (not merged into "
+                f"'{wt.original_branch}'). Merge or delete it when you are "
+                "ready."
+            )
+        if not self._keep_for_review(wt):
+            # The worktree is preserved on disk, but the keep decision
+            # is not durable yet: keep the claim so a later retry (or an
+            # explicit merge/discard) can still make it so.
+            return
+        self._wts.pop(_repo_key(wt), None)
+
+    def _keep_for_review(self, wt: GitWorktree) -> bool:
+        """Make the "keep *wt* for manual review" decision durable.
+
+        The ``kiss-preserve`` marker is the ONLY thing that stops
+        :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` — running in
+        a fresh process after this one has exited — from squash-merging
+        and deleting the parked work, so it fails closed: when the
+        ``git config`` write fails the caller must keep ``self._wt``
+        and a warning tells the user why the worktree is still pending.
+
+        Args:
+            wt: The worktree being kept for review.
+
+        Returns:
+            True when the marker is on disk and the in-memory claim may
+            be dropped; False when it is not and the claim must stay.
+        """
+        if GitWorktreeOps.save_preserve_marker(wt.repo_root, wt.branch):
+            return True
+        logger.warning(
+            "Could not record the keep-for-review marker for branch '%s'; "
+            "keeping its worktree %s pending on this agent",
+            wt.branch, wt.wt_dir,
+        )
+        self.add_warning(
+            f"The keep decision for branch '{wt.branch}' could not be "
+            "recorded in git config, so its worktree is still pending on "
+            "this tab: merge, discard, or leave it as is explicitly once "
+            "git config is writable again."
+        )
+        return False
+
+    def _retire_previous_worktree(self) -> None:
+        """Clear the way for a new task without publishing the old one.
+
+        A new task must not inherit the previous task's branch, and the
+        user typing a new prompt is not a decision about the old
+        task's unmerged work: the pending worktree is committed to its
+        own ``kiss/wt-*`` branch and kept for review
+        (:meth:`_preserve_pending_worktree_for_review`), never merged
+        into the user's branch behind their back.
+
+        When the retire kept the worktree but could not make that
+        decision durable (see :meth:`_keep_for_review`), ``self._wt``
+        is still set on return.
+        """
+        self._preserve_pending_worktree_for_review()
+
+    def retire_for_disposal(self) -> bool:
+        """Retire the pending worktree because its tab is going away.
+
+        Returns:
+            True when this agent no longer holds a worktree claim and
+            the caller may drop it; False when the claim is retained
+            (the keep decision could not be made durable) and the
+            caller must keep this agent reachable so a later disposal
+            attempt can retry.
+        """
+        self._retire_previous_worktree()
+        return not self._wts
+
+    def new_chat(self) -> None:
+        """Start afresh (VS Code's 'Clear'), preserving any pending worktree.
+
+        The warning the preserve sets is flushed to the attached printer
+        now: if the user never runs another task on this agent, no later
+        :meth:`run` would flush it.
+        """
+        self._retire_previous_worktree()
+        self._flush_warnings(getattr(self, "printer", None))
+
+    # ------------------------------------------------------------------
+    # Warnings
+    # ------------------------------------------------------------------
+
+    def _set_warnings(self, stash: str | None = None, merge: str | None = None) -> None:
+        """Set pending warning attribute(s) under ``_warning_lock``.
+
+        Args:
+            stash: New ``_stash_pop_warning`` value, or ``None`` to
+                leave it unchanged.
+            merge: New ``_merge_conflict_warning`` value, or ``None`` to
+                leave it unchanged.
+        """
+        with self._warning_lock:
+            if stash is not None:
+                self._stash_pop_warning = stash
+            if merge is not None:
+                self._merge_conflict_warning = merge
+
+    def add_warning(self, text: str, *, prepend: bool = False) -> None:
+        """Combine *text* with the pending merge warning atomically.
+
+        Args:
+            text: The warning to add.  Joined to the pending warning
+                with a newline; becomes the whole warning when none is
+                pending.
+            prepend: Put *text* before the pending warning instead of
+                after it.
+        """
+        with self._warning_lock:
+            current = self._merge_conflict_warning
+            if not current:
+                combined = text
+            elif prepend:
+                combined = f"{text}\n{current}"
+            else:
+                combined = f"{current}\n{text}"
+            self._merge_conflict_warning = combined
+
+    def _flush_warnings(self, printer: Any) -> None:
+        """Broadcast and clear any pending stash/merge warnings.
+
+        The take-and-clear of both warning attributes happens
+        atomically under ``_warning_lock`` before any broadcast, so
+        two concurrent flushes never broadcast the same warning twice
+        and a warning set concurrently survives for the next flush.
+        A broadcast that fails puts the warning back.
+
+        Args:
+            printer: An object with a ``broadcast(event)`` method, or
+                any other value (ignored when ``broadcast`` is absent).
+        """
+        if printer is None or not hasattr(printer, "broadcast"):
+            return
+        with self._warning_lock:
+            stash_warning = self._stash_pop_warning
+            self._stash_pop_warning = None
+            merge_warning = self._merge_conflict_warning
+            self._merge_conflict_warning = None
+        if stash_warning:
+            try:
+                self._broadcast_to_watchers(
+                    printer, {"type": "warning", "message": stash_warning},
+                )
+            except Exception:
+                logger.debug("stash warning broadcast failed", exc_info=True)
+                with self._warning_lock:
+                    current = self._stash_pop_warning
+                    self._stash_pop_warning = (
+                        f"{stash_warning}\n{current}" if current else stash_warning
+                    )
+        if merge_warning:
+            try:
+                self._broadcast_to_watchers(
+                    printer, {"type": "warning", "message": merge_warning},
+                )
+            except Exception:
+                logger.debug("merge warning broadcast failed", exc_info=True)
+                self.add_warning(merge_warning, prepend=True)
+
+    def _mark_unmerged_worktree_preserved(self) -> None:
+        """Record on disk that the pending worktree awaits the user's decision.
+
+        Called when a run ends with ``create_worktree``'s branch still
+        unmerged; the marker keeps
+        :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` of any later
+        process from committing and squash-merging the branch.  The
+        write is serialised with the other git-config transactions on
+        the repo (``repo_lock`` then the cross-process reclaim lock)
+        and retried a few times, since a concurrent ``git`` command
+        can hold ``.git/config.lock`` briefly; when it still fails only
+        the in-memory claim protects the branch within this process.
+        """
+        for wt in self.worktrees:
+            marked = False
+            for _ in range(_PRESERVE_MARKER_ATTEMPTS):
+                # One ``git config`` per attempt under the locks; the
+                # retry delay is slept with both released, so the other
+                # takers (this process's merges and setups, peer daemons
+                # waiting on the flock) are not parked for it.
+                with repo_lock(wt.repo_root), _reclaim_process_lock(wt.repo_root):
+                    marked = GitWorktreeOps.save_preserve_marker(wt.repo_root, wt.branch)
+                if marked:
+                    break
+                time.sleep(_PRESERVE_MARKER_RETRY_DELAY)
+            if not marked:
+                logger.warning(
+                    "Could not mark branch '%s' as preserved; a reclaim in another "
+                    "process may merge it", wt.branch,
+                )
+
+    def _guard_tool_call(self, name: str, args: dict[str, Any]) -> str | None:
+        """The run's tool-call guard: every reason a call is rejected, first one wins."""
         return (
             self._block_finish_when_user_message_pending(name, args)
             or self._block_finish_with_live_jobs(name, args)
+            or self._guard_worktree(name, args)
         )
 
 
@@ -2548,7 +4014,12 @@ def main() -> None:
     # printing the raw YAML again would show it twice.  Piped/redirected
     # stdout gets exactly the raw YAML result and nothing else.
     verbose = sys.stdout.isatty()
-    agent = SorcarAgent("Sorcar CLI")
+    # The daemon's agent class (imported here: its module imports this
+    # one), minus the chat history: ``_skip_persistence`` keeps the
+    # run's result out of ``history.db``.
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+    agent = ChatSorcarAgent("Sorcar CLI")
     result = agent.run(
         model_name=model_name,
         prompt_template=task,
@@ -2556,9 +4027,15 @@ def main() -> None:
         max_budget=args.max_budget,
         verbose=verbose,
         ask_user_question_callback=_ask_user_in_terminal,
+        _skip_persistence=True,
     )
     if not verbose:
         print(result)
+    for wt in agent.worktrees:
+        sys.stderr.write(
+            f"sorcar: the task left its work unmerged on branch '{wt.branch}' "
+            f"(worktree {wt.wt_dir}); merge or delete it when you are ready.\n"
+        )
     try:
         success = bool(yaml.safe_load(result).get("success"))
     except Exception:

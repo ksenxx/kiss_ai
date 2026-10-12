@@ -33,12 +33,12 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
-from kiss.tests.server.test_worktree_no_autocommit_branch import _init_repo
+from kiss.tests.server.conftest import init_repo
 
 _TAB = "rr-startup-window-tab"
 
@@ -54,7 +54,7 @@ class TestStartupWindowBlocksWorktreeActions(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-rr-startup-window-")
         self.repo = Path(self.tmpdir) / "repo"
         self.repo.mkdir()
-        _init_repo(str(self.repo))
+        init_repo(str(self.repo))
         self.branch = "kiss/wt-rr-startup"
         subprocess.run(
             ["git", "-C", str(self.repo), "branch", self.branch],
@@ -64,7 +64,7 @@ class TestStartupWindowBlocksWorktreeActions(unittest.TestCase):
         self.events: list[dict[str, Any]] = []
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
-        agent = WorktreeSorcarAgent("rr startup-window agent")
+        agent = ChatSorcarAgent("rr startup-window agent")
         agent._wt = GitWorktree(
             repo_root=self.repo,
             branch=self.branch,
@@ -79,7 +79,6 @@ class TestStartupWindowBlocksWorktreeActions(unittest.TestCase):
                 server_owned=True,
                 agent=agent,
             )
-            self.state.use_worktree = True
             agent_state.register(self.state)
 
     def tearDown(self) -> None:
@@ -99,9 +98,7 @@ class TestStartupWindowBlocksWorktreeActions(unittest.TestCase):
     def test_check_worktree_busy_reports_busy_in_startup_window(self) -> None:
         self._register_unstarted_worker()
         with self.server._state_lock:
-            busy = self.server._check_worktree_busy(
-                self.state, "merging", self.repo,
-            )
+            busy = self.server._check_worktree_busy(self.state, "merging")
         assert busy is not None, (
             "_check_worktree_busy admitted a manual action while a "
             "submitted run's worker thread was registered but not "
@@ -143,9 +140,7 @@ class TestStartupWindowBlocksWorktreeActions(unittest.TestCase):
         thread.join(timeout=30)
         with self.server._state_lock:
             self.state.task_thread = thread
-            busy = self.server._check_worktree_busy(
-                self.state, "merging", self.repo,
-            )
+            busy = self.server._check_worktree_busy(self.state, "merging")
         self.assertIsNone(busy)
 
 

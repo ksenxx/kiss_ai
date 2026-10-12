@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -29,7 +28,6 @@ from kiss.agents.sorcar.daemon_client import _net_totals, _to_task_result
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _agent_usage, _attribute_sub_usage
 from kiss.core.kiss_agent import KISSAgent
-from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.task_update import charge_side_channel_usage
 
@@ -56,12 +54,7 @@ class _CapturingPrinter(JsonPrinter):
         self.broadcast(dict(event, taskId=task_id))
 
 
-@pytest.fixture(autouse=True)
-def _clean_registry() -> Iterator[None]:
-    """Leave no agent states behind."""
-    yield
-    for state in agent_state.snapshot():
-        agent_state.unregister(state.task_id, state)
+pytestmark = pytest.mark.usefixtures("clean_registry")
 
 
 def _events_of(printer: _CapturingPrinter, kind: str) -> list[dict[str, Any]]:

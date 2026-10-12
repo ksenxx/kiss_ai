@@ -5,48 +5,30 @@
 """Audit 9: Tests verifying fixes for bugs, inconsistencies, and
 redundancies in both non-worktree and worktree workflows.
 
-BUG-39: `is_running_non_wt` flag is now cleared at the very start of
-    the finally block's try (before any risky calls) AND in the outer
-    except handler, so it can never get permanently stuck.
-
-BUG-40 / INC-4: `_do_merge` now returns `(MergeResult.CHECKOUT_FAILED, "")`
-    instead of `(None, checkout_error_str)`.  `_release_worktree` checks
-    `result == MergeResult.CHECKOUT_FAILED` instead of `result is None`,
-    so the checkout error is never misattributed to `_stash_pop_warning`.
-
+BUG-39 / BUG-40 / BUG-44 / RED-5 (obsolete): covered `is_running_non_wt`,
+    `_release_worktree` and `tab.use_worktree`, all removed with the
+    `create_worktree` / `commit_and_merge` tools.
 BUG-41 / RED-6 (obsolete): covered `_start_merge_session`, removed
     together with the interactive diff/merge review workflow.
-
 BUG-42 / INC-5: Auto-discard of an empty pending worktree is safe and
-    runs even while a non-worktree task is active (it touches neither
-    the main tree's files nor its HEAD).
-
+    runs even while a task is active (it touches neither the main
+    tree's files nor its HEAD).
 BUG-43: Manual merge instructions now use `git cherry-pick --no-commit
     baseline..branch` when a baseline commit exists, matching what the
-    auto-merge actually does.
-
-BUG-44: `_new_chat` guard now checks `tab.agent._wt_pending` regardless
-    of `tab.use_worktree`, so a tab that switched modes still gets the
-    non-wt-running guard.
-
+    merge actually does.
 INC-6: `_check_merge_conflict` now checks both unstaged AND staged
     files for dirty-file overlap (historically via the since-removed
     `unstaged_files()`/`staged_files()` helpers).
-
-RED-5: The two consecutive `if not tab.use_worktree:` blocks in
-    `_run_task_inner`'s finally are now a single block.
 """
 
 from __future__ import annotations
 
 import subprocess
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
-)
-from kiss.agents.sorcar.worktree_sorcar_agent import (
-    WorktreeSorcarAgent,
 )
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
@@ -80,7 +62,7 @@ class TestInc6Fix:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -93,7 +75,6 @@ class TestInc6Fix:
             tab_id="inc6-tab",
             server_owned=True,
         )
-        st.use_worktree = True
         agent_state.register(st)
         try:
             has_conflict = server._check_merge_conflict("inc6-tab")

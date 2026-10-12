@@ -24,7 +24,7 @@ persisted asynchronously by a background writer thread; at the moment
 the round-trip ``resumeSession`` arrives, the events table for the
 freshly-allocated sub-agent row is almost always empty.
 
-Returning early meant ``_reattach_running_chat`` was never called and
+Returning early meant ``_attach_viewer_to_running_chat`` was never called and
 ``printer.subscribe_tab(sub_task_id, new_tab_id)`` was never
 invoked — so subsequent live broadcasts from the sub-agent (tagged
 with ``taskId=sub_task_id``) had **no fan-out target** for the new
@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
@@ -52,20 +51,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
-
-
-def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class _SubscribeCapturingPrinter(JsonPrinter):
@@ -98,7 +84,7 @@ class TestReplaySessionRunningSubagentNoEvents:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
@@ -106,7 +92,7 @@ class TestReplaySessionRunningSubagentNoEvents:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_new_tab_subscribes_to_live_subagent_with_no_persisted_events(

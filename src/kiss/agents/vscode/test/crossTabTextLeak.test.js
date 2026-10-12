@@ -1533,6 +1533,10 @@ test('history still renders in the sidebar', () => {
 test('clearChat still opens a new conversation', () => {
   const {win} = makeWebview();
   const {first, second} = twoTabs(win);
+  // The New Conversation command reuses a chat that is still new, so
+  // the daemon's task-text echo makes both chats "used" first.
+  send(win, {type: 'setTaskText', text: 'first task', tabId: first});
+  send(win, {type: 'setTaskText', text: 'second task', tabId: second});
   send(win, {type: 'clear', chat_id: 'chat-QK75', tabId: second});
   send(win, {type: 'clearChat'});
   const now = win._testApi.getActiveTabId();
@@ -1578,6 +1582,25 @@ test('appendToInput still writes the visible input', () => {
   assert.ok(
     taskInput(win).value.includes('appended-QK73'),
     'the Insert Selection command must still write the visible input',
+  );
+  win.close();
+});
+
+test('appendToInput appends to a draft unless it asks to replace it', () => {
+  const {win} = makeWebview();
+  twoTabs(win);
+  setInput(win, 'draft-QK75');
+  send(win, {type: 'appendToInput', text: 'more-QK75'});
+  assert.strictEqual(
+    taskInput(win).value,
+    'draft-QK75\nmore-QK75',
+    'without replace the text lands on a new line under the draft',
+  );
+  send(win, {type: 'appendToInput', text: 'prefill-QK75', replace: true});
+  assert.strictEqual(
+    taskInput(win).value,
+    'prefill-QK75',
+    'a Recommendations prefill replaces the carried-over draft',
   );
   win.close();
 });

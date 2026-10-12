@@ -338,9 +338,32 @@ class GitHubChannelBackend(ToolMethodBackend):
         self._base_url: str = "https://api.github.com"
         self._token: str = ""
         self._http: Any = requests
+        self._muse: bool = False
+        self._lazy_muse: bool = False
         self._read_only: bool = False
+        self._wire_lock = threading.Lock()
         self._request_lock = threading.Lock()
         self._connection_info: str = ""
+
+    def _wire_deferred(self) -> bool:
+        """Run the Muse wiring :class:`GitHubAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of calling :meth:`connect`
+        at construction, so building it for its tool list (``sea lint``,
+        ``sea docs``, run start) touches no daemon.  Concurrent first
+        requests wait on the lock and share the one surrogate;
+        :meth:`connect` publishes ``_muse`` last, so a request that sees
+        it set sees the whole wired state.
+
+        Returns:
+            True once the backend is wired (or Muse is off); False when
+            no GitHub credential could be wired, with the reason in
+            ``_connection_info``.
+        """
+        if not self._lazy_muse or self._muse:
+            return True
+        with self._wire_lock:
+            return self._muse or self.connect()
 
     def connect(self) -> bool:
         """Load the GitHub config from disk.
@@ -382,6 +405,9 @@ class GitHubChannelBackend(ToolMethodBackend):
             # The read_only flag lives in config.json; read it leniently
             # so it survives after the token key is migrated out.
             self._read_only = _relaxed_config().get("read_only", "false") == "true"
+            # Published last: a request that sees ``_muse`` set sees the
+            # whole wired state (see ``_wire_deferred``).
+            self._muse = True
             mode = "read-only" if self._read_only else "read-write"
             self._connection_info = f"GitHub configured ({mode}, Muse-auth)."
             return True
@@ -417,8 +443,11 @@ class GitHubChannelBackend(ToolMethodBackend):
         Returns:
             ``(data, "")`` on success — *data* is the decoded JSON (or
             raw text for the diff/raw media types and non-JSON
-            responses) — or ``(None, error)`` on an HTTP error status.
+            responses) — or ``(None, error)`` on an HTTP error status
+            (or when Muse-auth is on and no GitHub credential can be wired).
         """
+        if not self._wire_deferred():
+            return None, self._connection_info
         url = self._base_url.rstrip("/") + path
         headers = {
             "Authorization": f"Bearer {self._token}",
@@ -1225,10 +1254,14 @@ class GitHubAgent(BaseChannelAgent):
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
-            # Muse-auth mode: connect() wires a vault surrogate and the
-            # boundary session; the real token never enters this process
-            # once migrated.
-            self._backend.connect()
+            # Muse-auth mode: the backend wires its vault surrogate and
+            # boundary session on the first request, so building the
+            # tool list (``sea lint``, ``sea docs``, run start) touches
+            # no daemon; the real token never enters this process.  The
+            # read_only flag guards write tools before any request, so
+            # it is read here (leniently: the token may be migrated out).
+            self._backend._read_only = _relaxed_config().get("read_only", "false") == "true"
+            self._backend._lazy_muse = True
             return
         cfg = _config.load()
         if cfg:
@@ -1236,8 +1269,14 @@ class GitHubAgent(BaseChannelAgent):
             self._backend._read_only = cfg.get("read_only", "false") == "true"
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return bool(self._backend._token)
+        """Return True if a GitHub token is loaded, enrolled in the vault, or in the config."""
+        if self._backend._token:
+            return True
+        if not self._backend._lazy_muse:
+            return False
+        from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
+
+        return vault_has_credentials("github") or bool((_config.load() or {}).get("token"))
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""

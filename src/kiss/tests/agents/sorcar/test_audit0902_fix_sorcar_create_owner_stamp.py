@@ -31,7 +31,6 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import worktree_pool
 from kiss.agents.sorcar.git_worktree import _WORKTREE_SUBDIR, GitWorktreeOps
 
 
@@ -81,7 +80,7 @@ def repo() -> Iterator[Path]:
 
 def test_create_fails_closed_when_owner_stamp_cannot_be_written(repo: Path) -> None:
     """A held ``.git/config.lock`` makes ``create`` return False and leave nothing."""
-    branch = worktree_pool.new_task_branch(repo)
+    branch = GitWorktreeOps.new_task_branch(repo)
     wt_dir = repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
     config_lock = repo / ".git" / "config.lock"
     config_lock.write_text("")  # what a concurrent `git config` holds
@@ -99,7 +98,7 @@ def test_create_fails_closed_when_owner_stamp_cannot_be_written(repo: Path) -> N
 
 def test_peer_reclaim_finds_nothing_after_failed_owner_stamp(repo: Path) -> None:
     """The peer's reclaim must have no owner-less live worktree to destroy."""
-    branch = worktree_pool.new_task_branch(repo)
+    branch = GitWorktreeOps.new_task_branch(repo)
     wt_dir = repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
     config_lock = repo / ".git" / "config.lock"
     config_lock.write_text("")
@@ -118,7 +117,7 @@ def test_peer_reclaim_finds_nothing_after_failed_owner_stamp(repo: Path) -> None
 
 def test_create_succeeds_and_stamps_owner_when_config_is_writable(repo: Path) -> None:
     """The happy path is unchanged: one stamp, owned by this process."""
-    branch = worktree_pool.new_task_branch(repo)
+    branch = GitWorktreeOps.new_task_branch(repo)
     wt_dir = repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
     assert GitWorktreeOps.create(repo, branch, wt_dir) is True
     assert wt_dir.is_dir()

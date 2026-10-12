@@ -106,38 +106,5 @@ class TestUserAnswerNoDeadIsNotNoneCheck(TestCase):
         server._cmd_user_answer({"type": "userAnswer", "tabId": "", "answer": "x"})
 
 
-class TestIsRunningNonWtClearedOnSnapshotFailure(TestCase):
-    """is_running_non_wt should be False after a snapshot failure."""
-
-    def test_is_running_non_wt_cleared(self) -> None:
-        server, events = _make_server()
-        tab_id = "nwt-fail-tab"
-
-        cmd: dict[str, Any] = {
-            "type": "run",
-            "tabId": tab_id,
-            "prompt": "test",
-            "useWorktree": False,
-            "model": server._default_model,
-            "workDir": "/nonexistent/dir/that/will/fail",
-        }
-
-        try:
-            try:
-                server._run_task(cmd)
-            except (FileNotFoundError, OSError):
-                pass
-
-            # Looked up by tab: the state is re-keyed to the allocated
-            # task id mid-run (see B2 test above).
-            state = agent_state.find_by_tab(tab_id)
-            assert state is not None, "run never registered an agent state"
-            assert state.is_running_non_wt is False, (
-                "is_running_non_wt should be False after setup failure"
-            )
-        finally:
-            agent_state.agent_states.clear()
-
-
 if __name__ == "__main__":
     unittest.main()

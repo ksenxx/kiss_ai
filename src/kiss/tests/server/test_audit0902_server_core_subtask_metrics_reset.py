@@ -31,8 +31,8 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import persistence
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -58,7 +58,7 @@ class _CapturePrinter(JsonPrinter):
         self.events.append(event)
 
 
-class _ResettingAgent(WorktreeSorcarAgent):
+class _ResettingAgent(ChatSorcarAgent):
     """Real agent whose ``run`` resets its counters exactly like production.
 
     Mirrors what ``ChatSorcarAgent.run`` does under

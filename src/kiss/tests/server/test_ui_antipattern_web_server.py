@@ -42,7 +42,6 @@ import ipaddress
 import json
 import re
 import socket
-import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -53,8 +52,8 @@ from playwright.sync_api import sync_playwright
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import get_available_models
 from kiss.core.utils import finish
@@ -71,6 +70,7 @@ from kiss.server.web_server import (
     _share_page_filename,
 )
 from kiss.tests.conftest import goto_retrying_network_change
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 PAGE_URL = "https://shim-ui.test/"
 _PASSWORD = "correct-horse-battery-staple"
@@ -498,21 +498,6 @@ def test_auth_modal_markup_is_a_labelled_dialog():
 # --------------------------------------------------------------------------
 
 
-def _pick_free_port() -> int:
-    """Return an OS-assigned free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Permissive SSL context for the dev self-signed cert."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 def _lan_ip() -> str | None:
     """Return a non-loopback IP of this machine, or None if it has none."""
     try:
@@ -526,7 +511,7 @@ def _lan_ip() -> str | None:
     return ip
 
 
-class _ScriptedAgent(WorktreeSorcarAgent):
+class _ScriptedAgent(ChatSorcarAgent):
     """Real agent subclass whose ``run`` finishes at once with a fixed result.
 
     Stands in for the model call only: it allocates the ``task_history``
@@ -563,7 +548,7 @@ class _LiveServer(IsolatedAsyncioTestCase):
     host = "127.0.0.1"
 
     async def asyncSetUp(self) -> None:
-        self._port = _pick_free_port()
+        self._port = find_free_port()
         self._work_dir = tempfile.mkdtemp()
         self._orig_config: str | None = None
         if CONFIG_PATH.exists():
@@ -587,7 +572,7 @@ class _LiveServer(IsolatedAsyncioTestCase):
                 CONFIG_PATH.unlink()
 
     async def _ws(self, host: str = "127.0.0.1") -> Any:
-        return await connect(f"wss://{host}:{self._port}/ws", ssl=_no_verify_ssl())
+        return await connect(f"wss://{host}:{self._port}/ws", ssl=no_verify_ssl())
 
     async def _recv(self, ws: Any) -> dict[str, Any]:
         msg: dict[str, Any] = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
@@ -605,7 +590,7 @@ class _LiveServer(IsolatedAsyncioTestCase):
     ) -> tuple[int, dict[str, str], bytes]:
         """GET *path* over raw HTTPS; return (status, headers, body)."""
         reader, writer = await asyncio.open_connection(
-            host, self._port, ssl=_no_verify_ssl(), limit=16 * 1024 * 1024,
+            host, self._port, ssl=no_verify_ssl(), limit=16 * 1024 * 1024,
         )
         try:
             writer.write(
@@ -845,26 +830,41 @@ class TestTipsOptOut(_LiveServer):
             self._marker.write_text("test session opt-out\n")
         await super().asyncTearDown()
 
-    async def _send_and_settle(self, ws: Any, cmd: dict[str, Any]) -> None:
+    async def _send_and_settle(
+        self, ws: Any, cmd: dict[str, Any], marker_present: bool | None = None,
+    ) -> None:
+        """Send *cmd* and wait for the daemon to act on it.
+
+        No reply is defined for the command (an unknown one would come
+        back as an ``error`` frame), so the daemon is given a moment of
+        silence -- and, when *marker_present* says what the marker file
+        should look like afterwards, up to ten seconds for the file to
+        get there: on a loaded machine the frame is handled later than
+        any fixed pause.
+        """
         await ws.send(json.dumps(cmd))
-        # No reply is defined for the command; an unknown command
-        # would come back as an ``error`` frame, so give it a moment.
-        with contextlib.suppress(asyncio.TimeoutError):
-            while True:
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while True:
+            try:
                 msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.5))
-                self.assertNotEqual(msg.get("type"), "error", msg)
+            except TimeoutError:
+                settled = marker_present is None or self._marker.is_file() == marker_present
+                if settled or asyncio.get_running_loop().time() > deadline:
+                    return
+                continue
+            self.assertNotEqual(msg.get("type"), "error", msg)
 
     async def test_marker_written_then_removed(self) -> None:
         marker = self._marker
         ws = await self._authenticated_ws()
         try:
-            await self._send_and_settle(ws, {"type": "tipsOptOut", "optOut": True})
+            await self._send_and_settle(ws, {"type": "tipsOptOut", "optOut": True}, True)
             self.assertTrue(marker.is_file())
-            await self._send_and_settle(ws, {"type": "tipsOptOut"})
+            await self._send_and_settle(ws, {"type": "tipsOptOut"}, True)
             self.assertTrue(marker.is_file(), "absent optOut means opt out")
-            await self._send_and_settle(ws, {"type": "tipsOptOut", "optOut": False})
+            await self._send_and_settle(ws, {"type": "tipsOptOut", "optOut": False}, False)
             self.assertFalse(marker.exists())
-            await self._send_and_settle(ws, {"type": "tipsOptOut", "optOut": False})
+            await self._send_and_settle(ws, {"type": "tipsOptOut", "optOut": False}, False)
             self.assertFalse(marker.exists(), "removing twice is fine")
         finally:
             await ws.close()

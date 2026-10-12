@@ -14,7 +14,7 @@ produced it.
 These tests exercise the real
 :func:`~kiss.server.helpers.generate_commit_message_from_diff`
 and
-:meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._auto_commit_worktree`
+:meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._auto_commit_worktree`
 paths against on-disk git repositories.  The LLM call inside the
 helper is forced through its ``except Exception`` fallback by
 patching :class:`~kiss.core.kiss_agent.KISSAgent.run` to raise — so

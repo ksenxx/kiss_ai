@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
@@ -75,7 +75,7 @@ class _ReplayNoRowBase(unittest.TestCase):
         self, tab_id: str, chat_id: str, task_id: str,
     ) -> agent_state.AgentState:
         """Register a live running task the way ``_cmd_run`` leaves it."""
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         agent._last_task_id = task_id
         state = agent_state.AgentState(
             task_id,

@@ -4,17 +4,13 @@
 # add your name here
 """Audit 2026-09-02 (sorcar-agents): preserve-outcome warnings must match the cause.
 
-``WorktreeSorcarAgent._commit_and_clean_worktree`` reports WHY a
+``ChatSorcarAgent._commit_and_clean_worktree`` reports WHY a
 worktree was preserved (``PRESERVED_SUBAGENT_ACTIVE``,
-``PRESERVED_RESCUE_FAILED``, ``PRESERVED_COMMIT_FAILED``,
-``PRESERVED_NO_AUTOCOMMIT``).  ``_preserve_pending_worktree_for_review``
-turns each outcome into a matching user warning, but the two other
-callers collapsed the outcome to a bool:
-
-* ``_release_worktree`` (auto-merge on new task / new chat) blamed a
-  pre-commit hook for EVERY preserved outcome with Auto-commit on;
-* ``merge()`` returned "auto-commit ... failed (a pre-commit hook may
-  have rejected the commit)" for every preserved outcome.
+``PRESERVED_RESCUE_FAILED``, ``PRESERVED_COMMIT_FAILED``).
+``_preserve_pending_worktree_for_review`` turns each outcome into a
+matching user warning, but ``merge()`` collapsed the outcome to a bool
+and returned "auto-commit ... failed (a pre-commit hook may have
+rejected the commit)" for every preserved outcome.
 
 So a user whose worktree was kept because a git-ignored output file
 could not be rescued into the main repo was told to go fix a pre-commit
@@ -33,10 +29,8 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.worktree_sorcar_agent import (
-    WorktreeSorcarAgent,
-    _WorktreeCleanupOutcome,
-)
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.git_worktree import _WorktreeCleanupOutcome
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 
@@ -58,10 +52,9 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout
 
 
-def _agent_with_worktree(env: IsolatedKissHome) -> WorktreeSorcarAgent:
+def _agent_with_worktree(env: IsolatedKissHome) -> ChatSorcarAgent:
     """Create an agent with a live worktree holding one uncommitted file."""
-    agent = WorktreeSorcarAgent("audit0902-preserve")
-    agent.auto_commit_enabled = True
+    agent = ChatSorcarAgent("audit0902-preserve")
     wt_work_dir = agent._try_setup_worktree(env.repo, str(env.repo))
     assert wt_work_dir is not None
     assert agent._wt is not None
@@ -69,7 +62,7 @@ def _agent_with_worktree(env: IsolatedKissHome) -> WorktreeSorcarAgent:
     return agent
 
 
-def _make_rescue_fail(env: IsolatedKissHome, agent: WorktreeSorcarAgent) -> None:
+def _make_rescue_fail(env: IsolatedKissHome, agent: ChatSorcarAgent) -> None:
     """Arrange a git-ignored task output that cannot be rescued.
 
     The main repo carries ``out`` as a symlink pointing OUTSIDE the
@@ -92,16 +85,15 @@ def _make_rescue_fail(env: IsolatedKissHome, agent: WorktreeSorcarAgent) -> None
     (agent._wt.wt_dir / ".gitignore").write_text("out/\n", encoding="utf-8")
 
 
-def test_release_warning_names_failed_rescue_not_hook(
+def test_preserve_warning_names_failed_rescue_not_hook(
     env: IsolatedKissHome,
 ) -> None:
-    """Auto-release preserved for an unrescuable ignored file must say so."""
+    """Preserve-for-review kept for an unrescuable ignored file must say so."""
     agent = _agent_with_worktree(env)
     wt = agent._wt
     assert wt is not None
     _make_rescue_fail(env, agent)
-    released = agent._release_worktree()
-    assert released is None
+    assert agent._preserve_pending_worktree_for_review() is True
     assert wt.wt_dir.exists(), "worktree deleted with the only copy of out/"
     assert agent._last_preserve_outcome is (
         _WorktreeCleanupOutcome.PRESERVED_RESCUE_FAILED
@@ -124,33 +116,23 @@ def _install_rejecting_pre_commit_hook(repo: Path) -> Path:
     return hook
 
 
-def test_release_hook_and_autocommit_off_wordings_are_kept(
+def test_preserve_hook_wording_is_kept(
     env: IsolatedKissHome,
 ) -> None:
-    """The two historical wordings survive for their own outcomes."""
+    """A rejecting pre-commit hook is the one case that SHOULD blame the hook."""
     agent = _agent_with_worktree(env)
     wt = agent._wt
     assert wt is not None
-    agent.auto_commit_enabled = False
-    assert agent._release_worktree() is None
-    assert agent._last_preserve_outcome is (
-        _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT
-    )
-    assert "Auto-commit is turned off" in (agent._merge_conflict_warning or "")
-
-    # A rejecting pre-commit hook is the one case that SHOULD blame the hook.
-    agent2 = _agent_with_worktree(env)
-    wt2 = agent2._wt
-    assert wt2 is not None
     hook = _install_rejecting_pre_commit_hook(env.repo)
     try:
-        assert agent2._release_worktree() is None
+        assert agent._preserve_pending_worktree_for_review() is True
     finally:
         hook.unlink()
-    assert agent2._last_preserve_outcome is (
+    assert wt.wt_dir.exists(), "worktree deleted with the only copy of the work"
+    assert agent._last_preserve_outcome is (
         _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED
     )
-    assert "pre-commit hook" in (agent2._merge_conflict_warning or "")
+    assert "pre-commit hook" in (agent._merge_conflict_warning or "")
 
 
 def test_merge_still_blames_hook_when_commit_was_rejected(

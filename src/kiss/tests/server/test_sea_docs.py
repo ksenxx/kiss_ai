@@ -67,7 +67,8 @@ def test_bases_table_states_each_base_class_without_machine_paths() -> None:
     table = rows(bases_table())
     assert list(table) == list(base_class_defaults()) == ["BaseSea", "WorkerSea", "ChannelSea"]
     assert table["BaseSea"][1] == "nothing"
-    assert "`use_worktree=False`" in table["WorkerSea"][1]
+    assert "`auto_classify=False`" in table["WorkerSea"][1]
+    assert "use_worktree" not in table["WorkerSea"][1]
     assert "`work_dir='<home>/channel_work'`" in table["ChannelSea"][1]
     assert str(Path.home()) not in bases_table()
 

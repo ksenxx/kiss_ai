@@ -49,13 +49,9 @@ def test_empty_summary_falls_back_to_raw_result() -> None:
     assert summary_for_reply(raw) == raw
 
 
-def test_non_yaml_result_is_returned_verbatim() -> None:
-    """A non-YAML raw string is used as the reply text."""
-    assert summary_for_reply("plain text result") == "plain text result"
-
-
 def test_yaml_scalar_result_falls_back_to_raw() -> None:
-    """A YAML scalar (non-dict) result falls back to the raw string."""
+    """A YAML scalar (str or int, i.e. no mapping) falls back to the raw string."""
+    assert summary_for_reply("plain text result") == "plain text result"
     assert summary_for_reply("42") == "42"
 
 

@@ -45,6 +45,7 @@ from kiss.core.processes import pid_alive
 from kiss.core.stop_signal import set_thread_stop_event
 from kiss.core.tool_verdict import ALLOW, Verdict
 from kiss.tests.conftest import posix_only
+from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -52,7 +53,6 @@ from kiss.tests.server.parallel_agent_harness import (
     StandInModelServer,
     finish_response,
     request_text,
-    run_git,
     tool_call_response,
     wait_for,
 )

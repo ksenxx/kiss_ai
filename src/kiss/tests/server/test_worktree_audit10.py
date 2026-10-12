@@ -9,9 +9,9 @@ BUG-49: `_do_merge` pops stash on CONFLICT/MERGE_FAILED, making manual
     `git cherry-pick --no-commit` (or `git merge --squash`) refuses to
     run.  The user cannot follow the printed instructions.
 
-BUG-50: `_release_worktree` silently orphans a branch when
-    `original_branch` is None — no warning, no cleanup, the branch
-    lingers forever without the user knowing it exists.
+BUG-50: `merge()` must not silently orphan a branch when
+    `original_branch` is None — the branch is kept and the user is
+    told the target branch is unknown.
 
 BUG-51: `_get_worktree_changed_files` returns `[]` when `git diff`
     fails (bad base_ref, corrupt repo, etc.), which triggers silent
@@ -26,8 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, MergeResult
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
@@ -39,12 +39,11 @@ def _clean_agent_registry():
     agent_state.agent_states.clear()
 
 
-def _register_wt_tab(tab_id: str, agent: WorktreeSorcarAgent) -> None:
+def _register_wt_tab(tab_id: str, agent: ChatSorcarAgent) -> None:
     """Register a server-owned worktree tab state for *agent*."""
     state = agent_state.AgentState(
         "task-" + tab_id, agent=agent, tab_id=tab_id, server_owned=True,
     )
-    state.use_worktree = True
     agent_state.register(state)
 
 
@@ -145,7 +144,7 @@ class TestBug49StashPopOnMergeFailure:
 
         (repo / "user_file.txt").write_text("user wip")
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "bug49a"
         wt = GitWorktree(
             repo_root=repo,
@@ -205,7 +204,7 @@ class TestBug49StashPopOnMergeFailure:
 
         (repo / "user_dirty.txt").write_text("user wip")
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "bug49b"
         wt = GitWorktree(
             repo_root=repo,
@@ -247,7 +246,7 @@ class TestBug49StashPopOnMergeFailure:
 
         (repo / "user_file.txt").write_text("user wip")
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "bug49c"
         wt = GitWorktree(
             repo_root=repo,
@@ -271,46 +270,6 @@ class TestBug49StashPopOnMergeFailure:
 
         _cleanup(repo, branch, wt_dir)
 
-    def test_release_worktree_conflict_instructions_mention_stash(
-        self, tmp_path: Path,
-    ) -> None:
-        """_release_worktree CONFLICT warning must mention stash pop."""
-        repo = _make_repo(tmp_path)
-        branch = "kiss/wt-bug49d-1"
-        wt_dir, baseline = _create_worktree_branch(repo, branch)
-
-        _add_agent_commit(wt_dir, "init.txt", "agent version")
-        GitWorktreeOps.remove(repo, wt_dir)
-        GitWorktreeOps.prune(repo)
-
-        (repo / "init.txt").write_text("main conflict")
-        subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "conflict"], cwd=repo, capture_output=True,
-        )
-
-        (repo / "user.txt").write_text("wip")
-
-        agent = WorktreeSorcarAgent("test")
-        agent._chat_id = "bug49d"
-        agent._wt = GitWorktree(
-            repo_root=repo, branch=branch, original_branch="main",
-            wt_dir=wt_dir, baseline_commit=baseline,
-        )
-
-        released = agent._release_worktree()
-        assert released is None
-        assert agent._merge_conflict_warning is not None
-
-        warning = agent._merge_conflict_warning
-        assert "stash" in warning.lower(), (
-            "BUG-49: CONFLICT instructions must mention 'git stash pop' "
-            "because user's uncommitted changes are in the stash"
-        )
-
-        subprocess.run(["git", "stash", "drop"], cwd=repo, capture_output=True)
-        _cleanup(repo, branch, wt_dir)
-
     def test_merge_conflict_instructions_mention_stash(
         self, tmp_path: Path,
     ) -> None:
@@ -330,7 +289,7 @@ class TestBug49StashPopOnMergeFailure:
         )
         (repo / "user.txt").write_text("wip")
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "bug49e"
         agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
@@ -346,22 +305,17 @@ class TestBug49StashPopOnMergeFailure:
         _cleanup(repo, branch, wt_dir)
 
 
-class TestBug50ReleaseOrphansBranch:
+class TestBug50MergeOrphansBranch:
     """BUG-50: When `original_branch` is None (crash recovery scenario
-    where git config was not written and HEAD is detached),
-    `_release_worktree` sets `_wt = None` without deleting the branch,
-    without setting `_merge_conflict_warning`, and without notifying
-    the user.  The branch lingers forever as an orphan.
-
-    FIX: Set `_merge_conflict_warning` with the branch name and
-    instructions for manual cleanup.
+    where git config was not written and HEAD is detached), `merge()`
+    must keep the branch and tell the user, with the branch name and
+    instructions for manual cleanup, instead of orphaning it silently.
     """
 
-    def test_warning_set_when_original_branch_is_none(
+    def test_user_told_when_original_branch_is_none(
         self, tmp_path: Path,
     ) -> None:
-        """_release_worktree must set _merge_conflict_warning when
-        original_branch is None."""
+        """merge() must name the branch when original_branch is None."""
         repo = _make_repo(tmp_path)
         branch = "kiss/wt-bug50a-1"
         wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
@@ -370,7 +324,7 @@ class TestBug50ReleaseOrphansBranch:
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "bug50a"
         agent._wt = GitWorktree(
             repo_root=repo,
@@ -379,17 +333,13 @@ class TestBug50ReleaseOrphansBranch:
             wt_dir=wt_dir,
         )
 
-        released = agent._release_worktree()
-        assert released is None
-        assert agent._wt is None
-
-        assert agent._merge_conflict_warning is not None, (
-            "BUG-50: _release_worktree must set _merge_conflict_warning "
-            "when original_branch is None — branch silently orphaned"
+        msg = agent.merge()
+        assert agent._wt is not None, "the branch stays pending"
+        assert "original branch is unknown" in msg, (
+            "BUG-50: merge() must tell the user when original_branch is "
+            "None — branch silently orphaned"
         )
-        assert branch in agent._merge_conflict_warning, (
-            "Warning must mention the orphaned branch name"
-        )
+        assert branch in msg, "Message must mention the orphaned branch name"
 
         assert GitWorktreeOps.branch_exists(repo, branch), (
             "Branch should be preserved for manual recovery"
@@ -400,7 +350,7 @@ class TestBug50ReleaseOrphansBranch:
     def test_no_warning_when_original_branch_set_and_success(
         self, tmp_path: Path,
     ) -> None:
-        """Normal release (original_branch set, merge succeeds) should NOT
+        """Normal merge (original_branch set, merge succeeds) should NOT
         set _merge_conflict_warning."""
         repo = _make_repo(tmp_path)
         branch = "kiss/wt-bug50b-1"
@@ -409,15 +359,16 @@ class TestBug50ReleaseOrphansBranch:
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "bug50b"
         agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
             wt_dir=wt_dir, baseline_commit=baseline,
         )
 
-        released = agent._release_worktree()
-        assert released == "main"
+        msg = agent.merge()
+        assert "Successfully merged" in msg
+        assert agent._wt is None
         assert agent._merge_conflict_warning is None
 
         _cleanup(repo, branch, wt_dir)
@@ -453,7 +404,7 @@ class TestBug51DiffFailureSilentDiscard:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _register_wt_tab("bug51a-tab", agent)
         agent._wt = GitWorktree(
             repo_root=repo,
@@ -481,7 +432,7 @@ class TestBug51DiffFailureSilentDiscard:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _register_wt_tab("bug51b-tab", agent)
         agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
@@ -501,7 +452,7 @@ class TestBug51DiffFailureSilentDiscard:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _register_wt_tab("bug51c-tab", agent)
         agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
@@ -534,7 +485,7 @@ class TestBug51DiffFailureSilentDiscard:
         bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         server = VSCodeServer()
         server.work_dir = str(repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _register_wt_tab("bug51d-tab", agent)
         agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",

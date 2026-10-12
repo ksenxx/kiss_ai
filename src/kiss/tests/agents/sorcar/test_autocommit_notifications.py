@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end tests for the auto-commit lifecycle notifications.
 
-When the agent finishes a task and the worktree auto-commit path
-runs, the chat webview should receive two ``notification`` toasts:
+When the agent's ``commit_and_merge`` tool commits the worktree, the
+chat webview should receive two ``notification`` toasts:
 
 * ``"Generating commit message"`` immediately before the (typically
   slow) LLM call that generates the commit message — so the user
@@ -16,7 +16,7 @@ runs, the chat webview should receive two ``notification`` toasts:
   the moment the commit is created.
 
 These tests drive the real
-:meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._auto_commit_worktree`
+:meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._commit_worktree`
 path against on-disk git repositories with a fake printer that
 records every :meth:`broadcast` call.  The LLM call inside the
 commit-message helper is forced through its ``except Exception``
@@ -37,9 +37,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import auto_commit_changes
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(path: Path) -> Path:
@@ -153,12 +153,12 @@ def _notification_events(printer: _RecordingPrinter) -> list[tuple[dict[str, Any
 
 
 def _setup_worktree_agent(tmp: Path, branch_slug: str) -> tuple[
-    WorktreeSorcarAgent, Path, Path
+    ChatSorcarAgent, Path, Path
 ]:
-    """Build a real on-disk worktree backed by a ``WorktreeSorcarAgent``.
+    """Build a real on-disk worktree backed by a ``ChatSorcarAgent``.
 
     Returns ``(agent, repo, wt_dir)``.  The agent's ``_wt`` is
-    populated so ``_auto_commit_worktree`` can run end-to-end.
+    populated so ``_commit_worktree`` can run end-to-end.
     """
     repo = _make_repo(tmp / "repo")
     branch = f"kiss/wt-test-{branch_slug}"
@@ -167,7 +167,7 @@ def _setup_worktree_agent(tmp: Path, branch_slug: str) -> tuple[
     assert GitWorktreeOps.create(repo, branch, wt_dir)
     _git_config_user(wt_dir)
 
-    agent = WorktreeSorcarAgent("test")
+    agent = ChatSorcarAgent("test")
     agent._wt = GitWorktree(
         repo_root=repo,
         branch=branch,
@@ -343,8 +343,8 @@ class TestAutoCommitChangesNotifyFn:
             assert invocations == []
 
 
-class TestWorktreeAutoCommitBroadcasts:
-    """``WorktreeSorcarAgent._auto_commit_worktree`` routes the two
+class TestWorktreeCommitBroadcasts:
+    """``ChatSorcarAgent._commit_worktree`` routes the two
     life-cycle notifications through ``self.printer.broadcast`` with
     the chat-webview-expected payload shape.
     """
@@ -362,7 +362,7 @@ class TestWorktreeAutoCommitBroadcasts:
             agent.printer = printer  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             notifs = _notification_events(printer)
             assert len(notifs) == 2
@@ -403,7 +403,7 @@ class TestWorktreeAutoCommitBroadcasts:
             agent.printer = printer  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is False
+                assert agent._commit_worktree() is False
 
             assert _notification_events(printer) == []
             assert _head_sha(wt_dir) == head_before
@@ -419,7 +419,7 @@ class TestWorktreeAutoCommitBroadcasts:
             agent.printer = None  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             assert _head_message(wt_dir).startswith(
                 "kiss: auto-commit agent work"
@@ -439,22 +439,7 @@ class TestWorktreeAutoCommitBroadcasts:
             agent.printer = _NoBroadcast()  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
-
-    def test_worktree_disabled_emits_no_notifications(self) -> None:
-        """When ``auto_commit_enabled`` is False the path short-circuits
-        before staging — neither notification is sent."""
-        with tempfile.TemporaryDirectory() as tmp_str:
-            tmp = Path(tmp_str)
-            agent, _repo, wt_dir = _setup_worktree_agent(tmp, "notif-off")
-            (wt_dir / "new.txt").write_text("hi\n")
-            agent.auto_commit_enabled = False
-
-            printer = _RecordingPrinter(wt_dir)
-            agent.printer = printer  # type: ignore[assignment]
-
-            assert agent._auto_commit_worktree() is False
-            assert _notification_events(printer) == []
+                assert agent._commit_worktree() is True
 
     def test_worktree_generating_and_committed_share_id(self) -> None:
         """Bug 2 (gpt-5.5 review): the "generating" and "committed"
@@ -473,7 +458,7 @@ class TestWorktreeAutoCommitBroadcasts:
             agent.printer = printer  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             notifs = _notification_events(printer)
             assert len(notifs) == 2
@@ -507,7 +492,7 @@ class TestWorktreeAutoCommitBroadcasts:
             sa._generate_commit_message = spy  # type: ignore[assignment]
             try:
                 with _LLMUnavailable():
-                    assert agent._auto_commit_worktree() is False
+                    assert agent._commit_worktree() is False
             finally:
                 sa._generate_commit_message = original  # type: ignore[assignment]
 

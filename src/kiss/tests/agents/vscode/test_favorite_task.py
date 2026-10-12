@@ -2,15 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests for the favourite (star) feature on the history panel.
+"""Frontend wiring of the favourite (star) button on the history panel.
 
-Covers:
-
-1. Backend: ``_get_history`` includes ``is_favorite`` (default False).
-2. Backend: ``_handle_set_favorite`` persists the flag.
-3. Command dispatch: a ``setFavorite`` command updates the DB row.
-4. Frontend (static checks on ``media/main.js``): a star button is
-   rendered for each history row and posts ``setFavorite`` on click.
+Static checks on ``media/main.js`` / ``media/api.js`` / ``media/main.css``:
+a star button is rendered for each history row, reads ``s.is_favorite``
+and posts ``setFavorite`` on click.  The backend (``_get_history``
+populating ``is_favorite``, the ``setFavorite`` command persisting it)
+is covered by ``kiss/tests/server/test_favorite_task.py``.
 """
 
 from __future__ import annotations

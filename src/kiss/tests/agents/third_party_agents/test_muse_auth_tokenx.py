@@ -1005,24 +1005,42 @@ def test_agents_construct_and_fail_closed(
     # Happy path: enrolled vault, no config.
     store_credentials("telegram", {"kind": "path", "token": _REAL_TG_TOKEN}, [])
     tg_agent = TelegramAgent()
-    assert tg_agent._backend._muse is True
+    # Construction exposes the tools without touching the daemon; the
+    # first use of the adapter wires the surrogate.
     assert tg_agent._is_authenticated() is True
+    assert tg_agent._backend._muse is False
+    assert tg_agent._backend._bot is not None
+    assert tg_agent._backend._muse is True
     _ms_enroll(api_server)
     ms_agent = MSTeamsAgent()
     assert ms_agent._is_authenticated() is True
     # A credential the daemon rejects at enrollment (embedded newline)
-    # fails closed but keeps the agents constructible.
+    # fails closed at first use but keeps the agents constructible.
     clear_credentials("telegram")
     clear_credentials("msteams")
     tg_config.save({"bot_token": "bad\ntoken"})
     tg_agent = TelegramAgent()
-    assert tg_agent._backend._bot is None
-    assert "Muse-auth wiring failed" in tg_agent._backend._connection_info
+    tg_agent._backend._api_base = api_server.base()
+    before = len(api_server.requests)
+    for _ in range(2):  # the first use and a retry both fail closed
+        with pytest.raises(MuseAuthError, match="invalid path credential token"):
+            tg_agent._backend._bot  # noqa: B018 - the property wires the adapter
+    assert tg_agent._backend._bot_obj is None
     assert not vault_has_credentials("telegram")
-    # With no MS Teams enrollment the agent is constructible and tokenless.
+    # The direct Bot API paths wire first too, so nothing reaches the
+    # server without a credential.
+    assert tg_agent._backend.poll_messages("", "0") == ([], "0")
+    tg_agent._backend.send_typing("12")
+    assert len(api_server.requests) == before
+    # With no MS Teams enrollment the agent is constructible and tokenless,
+    # and the first request (and a retry) reports the missing credential.
     ms_agent = MSTeamsAgent()
     assert ms_agent._backend._access_token == ""
+    assert ms_agent._is_authenticated() is False
+    for _ in range(2):
+        assert "No MS Teams credential" in ms_agent._backend._get("/me")["error"]
     assert "No MS Teams credential" in ms_agent._backend._connection_info
+    assert len(api_server.requests) == before
 
 
 def test_telegram_adapter_and_scrub_edges(muse_env: Path, api_server: _TokenXApiServer) -> None:
@@ -1966,6 +1984,7 @@ def test_rotation_during_connection_setup_never_emits_old_credential(
     saturator.settimeout(5.0)
     saturator.connect(("127.0.0.1", port))  # fills the accept queue
     result: dict[str, Any] = {}
+    accepted: list[socket.socket] = []
 
     def blocked_request() -> None:
         # The boundary surfaces the abort as a synthetic 403 with a
@@ -1993,7 +2012,6 @@ def test_rotation_during_connection_setup_never_emits_old_credential(
         store_credentials("telegram", {"kind": "path", "token": "2:new-generation-token"}, [])
         # Drain the backlog so the blocked connect can complete.
         listener.settimeout(15.0)
-        accepted = []
         for _ in range(2):
             try:
                 accepted.append(listener.accept()[0])
@@ -2010,8 +2028,9 @@ def test_rotation_during_connection_setup_never_emits_old_credential(
             conn.settimeout(1.0)
             with contextlib.suppress(OSError):
                 received += conn.recv(65536)
-            conn.close()
         assert received == b""
     finally:
+        for conn in accepted:
+            conn.close()
         saturator.close()
         listener.close()

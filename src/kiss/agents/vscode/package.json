@@ -2,7 +2,7 @@
   "name": "kiss-sorcar",
   "displayName": "KISS Sorcar",
   "description": "The open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench. Free, local, bring your own API key.",
-  "version": "2026.10.8",
+  "version": "2026.10.10",
   "publisher": "ksenxx",
   "repository": {
     "type": "git",
@@ -213,7 +213,7 @@
         "kissSorcar.editorTabsMode": {
           "type": "boolean",
           "default": true,
-          "description": "Open each KISS Sorcar chat as an editor tab instead of the secondary-sidebar chat view (toggleable from the chat's settings panel)"
+          "description": "Show the KISS Sorcar chat in one editor tab instead of the secondary-sidebar chat view (toggleable from the chat's settings panel)"
         },
         "kissSorcar.checkForUpdates": {
           "type": "boolean",

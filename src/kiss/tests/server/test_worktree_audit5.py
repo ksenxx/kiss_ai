@@ -6,7 +6,7 @@
 
 BUG-19: discard() now acquires repo_lock — checkout serialized with
         merge/release from other tabs.
-BUG-20: _release_worktree checkout failure now sets _merge_conflict_warning.
+BUG-20: merge() reports a checkout failure instead of silently failing.
 BUG-21: checkout_error() removed — checkout() returns (bool, stderr).
 BUG-22: _check_merge_conflict misses staged files — KNOWN LIMITATION.
 BUG-23: _try_setup_worktree now checks commit_staged return value and
@@ -21,12 +21,12 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
     _git,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.tests.agents.sorcar.test_worktree_audit5 import (  # noqa: F401
@@ -54,7 +54,7 @@ class TestBug22ConflictMissesStaged:
         """BUG-22: Staged overlap is not detected (known limitation)."""
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "test22"
         wt_work = agent._try_setup_worktree(repo, str(repo))
         assert wt_work is not None
@@ -73,7 +73,6 @@ class TestBug22ConflictMissesStaged:
         state = agent_state.AgentState(
             "task-t22", agent=agent, tab_id="t22", server_owned=True,
         )
-        state.use_worktree = True
         agent_state.register(state)
         try:
             has_conflict = server._check_merge_conflict("t22")
@@ -100,7 +99,7 @@ class TestBug24SilentDiscardOnGitFailure:
         try:
             repo = _make_repo(Path(tmpdir) / "repo")
 
-            agent = WorktreeSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             agent._chat_id = "test24"
             wt_work = agent._try_setup_worktree(repo, str(repo))
             assert wt_work is not None
@@ -116,7 +115,6 @@ class TestBug24SilentDiscardOnGitFailure:
             state = agent_state.AgentState(
                 "task-t24", agent=agent, tab_id="t24", server_owned=True,
             )
-            state.use_worktree = True
             agent_state.register(state)
             agent._wt = GitWorktree(
                 repo_root=wt.repo_root,

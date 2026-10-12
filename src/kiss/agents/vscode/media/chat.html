@@ -35,10 +35,22 @@
          further down, unfolds it. -->
     <div id="content-tab-bar"><div id="content-tab-list"></div><button type="button" id="content-pane-hide" aria-label="Hide editor" aria-controls="content-tab-area" title="Hide editor"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg></button></div>
 
-    <!-- The machine the agent runs on (configData.machine), centred
-         over the transcript on every chat surface: it is the one
-         value a user with several daemons reads before anything else. -->
-    <div id="chat-machine" title="Server machine"></div>
+    <!-- The chat header, centred over the transcript on every chat
+         surface: "machine: working directory".  The machine drop-down
+         lists this daemon's machine (configData.machine) and the
+         reachable registered machines (the MACHINES subpanel); main.js
+         sends the pick as `machine` with every submit.  The working
+         directory drop-down lists every directory selected so far
+         (configData.recent_work_dirs) and ends with "Choose ...",
+         which opens a folder picker; a pick becomes the global working
+         directory every surface's next task runs in.  Each select sits
+         in a .chat-header-select span whose ::after draws the down
+         chevron (main.css) that marks it as a drop-down. -->
+    <div id="chat-header">
+      <span id="chat-machine-wrap" class="chat-header-select"><select id="chat-machine" title="The machine this chat's tasks run on" aria-label="Machine"></select></span>
+      <span id="chat-header-sep" aria-hidden="true" hidden>:</span>
+      <span id="chat-workdir-wrap" class="chat-header-select"><select id="chat-workdir" title="The working directory the next task runs in" aria-label="Working directory"></select></span>
+    </div>
 
     <div id="tab-status-bar">
       <div class="status">
@@ -100,10 +112,6 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
               </button>
               <div id="more-menu" role="menu" aria-label="More actions">
-                <button id="workdir-btn" class="more-menu-item" role="menuitem" data-tooltip="Working directory: the folder the next task runs in" aria-label="Working directory: the folder the next task runs in">
-                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
-                  <span class="more-item-label">Working directory</span>
-                </button>
                 <button id="voice-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Voice trigger: listen for the words 'Hey Sorcar'" aria-label="Voice trigger: listen for the words 'Hey Sorcar'">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></span>
                   <span class="more-item-label">Voice trigger</span>
@@ -201,9 +209,6 @@
             <label class="hf-chip hf-chip-succeeded" title="Show successfully completed tasks">
               <input type="checkbox" id="hf-completed" checked><span class="hf-chip-dot status-tick" aria-hidden="true"></span><span class="hf-chip-label">Succeeded</span>
             </label>
-            <label class="hf-chip" title="Show only tasks whose work_dir matches the configured workspace">
-              <input type="checkbox" id="hf-workspace" checked><svg class="hf-chip-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3l1.5 1.8h6.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V4z"/></svg><span class="hf-chip-label">Workspace</span>
-            </label>
             <label class="hf-chip hf-chip-favorite" title="Show only tasks marked as favourite">
               <input type="checkbox" id="hf-favorite"><svg class="hf-chip-icon" viewBox="0 0 16 16" fill="currentColor" stroke="none" aria-hidden="true"><path d="M8 1.6l1.9 3.9 4.3.62-3.1 3.03.73 4.28L8 11.4l-3.83 2.03.73-4.28-3.1-3.03 4.3-.62z"/></svg><span class="hf-chip-label">Favorites</span>
             </label>
@@ -222,6 +227,31 @@
             <select id="hf-sea" class="history-filter-sea-select" title="Show only tasks run by this SEA" aria-label="SEA">
               <option value="">All</option>
               <option value="__none__">None</option>
+            </select>
+          </div>
+          <!-- Machine filter: the local daemon or one of the remote
+               machines registered with /machine. Hidden until a remote
+               machine is registered (refreshHistoryMachineOptions in
+               main.js rebuilds it from every history reply). -->
+          <div class="history-filter-sea" role="group" aria-label="Filter tasks by machine" hidden>
+            <label for="hf-machine" class="history-filter-date-lbl">Machine</label>
+            <select id="hf-machine" class="history-filter-sea-select" title="Show only tasks of this machine" aria-label="Machine">
+              <option value="">All</option>
+            </select>
+          </div>
+          <!-- WORKDIR filter: the same directories as the chat
+               header's working-directory drop-down (the current one,
+               then the ones adopted before, newest first).  The
+               options arrive as `workDirs` on page one of every
+               history view (refreshHistoryWorkDirOptions in
+               main.js); the daemon
+               applies the chosen directory in SQL, so the whole
+               history of a project is listed, not only the rows
+               already loaded. -->
+          <div class="history-filter-sea history-filter-workdir" role="group" aria-label="Filter tasks by working directory">
+            <label for="hf-workdir" class="history-filter-date-lbl">WORKDIR</label>
+            <select id="hf-workdir" class="history-filter-sea-select" title="Show only tasks that ran in this working directory" aria-label="WORKDIR">
+              <option value="">All</option>
             </select>
           </div>
           <!-- Tag filter: one of the classification tags the daemon
@@ -293,10 +323,6 @@
           <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Task Info</span></button>
         </div>
         <ul id="meta-list" class="meta-section-body">
-          <!-- The machine the agent runs on comes first, in bold: it is
-               the one value a user with several daemons reads before
-               anything else. -->
-          <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Tokens:</span><span id="meta-tokens" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Cost:</span><span id="meta-cost" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Steps:</span><span id="meta-steps" class="meta-value">&mdash;</span></li>
@@ -306,8 +332,6 @@
           <!-- The task's own settings (a task_settings event). -->
           <li class="meta-item"><span class="meta-label">Date:</span><span id="meta-date" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Base model:</span><span id="meta-model" class="meta-value">&mdash;</span></li>
-          <li class="meta-item"><span class="meta-label">Worktree mode:</span><span id="meta-worktree" class="meta-value">&mdash;</span></li>
-          <li class="meta-item"><span class="meta-label">Parallel mode:</span><span id="meta-parallel" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Chat id:</span><span id="meta-chat-id" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Task id:</span><span id="meta-task-id" class="meta-value">&mdash;</span></li>
           <li class="meta-item" id="meta-parent-item" hidden><span class="meta-label">Parent task:</span><span id="meta-parent-id" class="meta-value">&mdash;</span></li>
@@ -356,7 +380,7 @@
            commits (gitLog); a commit expands to the files it modified. -->
       <section class="meta-section" id="meta-scm" aria-label="Source Control" hidden>
         <div class="sidebar-hdr meta-section-hdr meta-info-hdr">
-          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="scm-body"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Source Control</span></button>
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="scm-body"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Source Control</span><span id="scm-hdr-count" class="scm-count" title="Uncommitted files"></span></button>
           <span id="scm-branch" class="scm-branch"></span>
           <button type="button" id="scm-refresh" class="meta-section-refresh" title="Refresh source control" aria-label="Refresh source control"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg></button>
         </div>
@@ -376,21 +400,35 @@
         </div>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Source Control section" aria-controls="scm-body" tabindex="0"></div>
-      <!-- Schedule and Apps sections: global, not per task (the
-           sidebarpanels block of main.js polls the daemon for them).
-           Schedule lists the scheduled cron jobs; Apps lists every
-           third-party agent with its authentication state, and a
-           click on an app that is not connected launches a new task
-           that connects it. -->
+      <!-- Schedule, Machines and Apps sections: global, not per task
+           (the sidebarpanels block of main.js polls the daemon for
+           them).  Schedule lists the scheduled cron jobs, each with
+           edit / run / pause / copy / delete buttons, and its header's
+           + opens an in-place form that schedules a new job; Machines lists
+           the local machine and every registered remote one with its
+           reachability; Apps lists every third-party agent with its
+           authentication state, and a click on an app that is not
+           connected launches a new task that connects it. -->
       <section class="meta-section" id="meta-schedule" aria-label="Schedule">
         <div class="sidebar-hdr meta-section-hdr">
           <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-schedule-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Schedule</span></button>
+          <button type="button" id="meta-schedule-add" class="meta-section-refresh" title="Schedule a new job" aria-label="Add job"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 4v16M4 12h16"/></svg></button>
           <button type="button" id="meta-schedule-refresh" class="meta-section-refresh" title="Reload the scheduled jobs" aria-label="Refresh schedule"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
         </div>
         <div id="meta-schedule-status" class="meta-info-status" aria-live="polite">Loading&hellip;</div>
         <ul id="meta-schedule-list" class="meta-section-body sidebar-panel-list"></ul>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Schedule section" aria-controls="meta-schedule-list" tabindex="0"></div>
+      <section class="meta-section" id="meta-machines" aria-label="Machines">
+        <div class="sidebar-hdr meta-section-hdr">
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-machines-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Machines</span></button>
+          <button type="button" id="meta-machines-add" class="meta-section-refresh" title="Add a machine" aria-label="Add machine"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 4v16M4 12h16"/></svg></button>
+          <button type="button" id="meta-machines-refresh" class="meta-section-refresh" title="Check the machines again" aria-label="Refresh machines"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
+        </div>
+        <div id="meta-machines-status" class="meta-info-status" aria-live="polite">Checking&hellip;</div>
+        <ul id="meta-machines-list" class="meta-section-body sidebar-panel-list"></ul>
+      </section>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Machines section" aria-controls="meta-machines-list" tabindex="0"></div>
       <section class="meta-section" id="meta-apps" aria-label="Apps">
         <div class="sidebar-hdr meta-section-hdr">
           <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-apps-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Apps</span></button>
@@ -416,6 +454,20 @@
         </div>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Spend section" aria-controls="meta-spend-body" tabindex="0"></div>
+      <!-- Recommendations section: global too.  The sidebarpanels block
+           of main.js lists the five next tasks the 6-hourly
+           /recommendations cron job suggested from the last day's task
+           history (the daemon's recommendations reply); activating a
+           row opens a new chat with that task in the composer. -->
+      <section class="meta-section" id="meta-recommendations" aria-label="Recommendations">
+        <div class="sidebar-hdr meta-section-hdr">
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-recommendations-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Recommendations</span></button>
+          <button type="button" id="meta-recommendations-refresh" class="meta-section-refresh" title="Reload the recommendations" aria-label="Refresh recommendations"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
+        </div>
+        <div id="meta-recommendations-status" class="meta-info-status" aria-live="polite">Loading&hellip;</div>
+        <ul id="meta-recommendations-list" class="meta-section-body sidebar-panel-list"></ul>
+      </section>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Recommendations section" aria-controls="meta-recommendations-list" tabindex="0"></div>
       <div id="meta-resizer" role="separator" aria-orientation="vertical" aria-label="Resize task info panel" aria-controls="meta-panel" tabindex="0"></div>
     </div>
     <div id="meta-overlay"></div>
@@ -452,30 +504,6 @@
     </div>
     <div id="tricks-overlay"></div>
 
-    <!-- The "Working directory" panel ("..." menu): type a directory or
-         choose one with the folder button, or reopen one of the
-         directories opened so far (most recently opened first).  In a
-         VS Code window the pick only changes the active chat's working
-         directory (the window keeps its folder). -->
-    <div id="workdir-panel" role="dialog" aria-labelledby="workdir-panel-hdr" aria-hidden="true" inert>
-      <button id="workdir-panel-close" aria-label="Close">&times;</button>
-      <div class="sidebar-section sidebar-tab-panel">
-        <div class="sidebar-hdr" id="workdir-panel-hdr">Working directory</div>
-        <div id="workdir-current" hidden></div>
-        <div id="workdir-open-row">
-          <input type="text" id="workdir-input" placeholder="Path of a working directory..." aria-label="Working directory path" autocomplete="off" spellcheck="false">
-          <button type="button" id="workdir-open-btn" class="config-update-btn" disabled>Open</button>
-          <button type="button" id="workdir-pick-btn" class="config-update-btn" data-tooltip="Choose a folder" aria-label="Choose a folder">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-          </button>
-        </div>
-        <div id="workdir-error" role="alert" hidden></div>
-        <div class="sidebar-hdr">Opened so far</div>
-        <div id="workdir-list" role="list"></div>
-      </div>
-    </div>
-    <div id="workdir-overlay"></div>
-
     <div id="settings-panel">
       <button id="settings-panel-close" aria-label="Close settings">&times;</button>
       <div class="sidebar-section">
@@ -493,14 +521,6 @@
           </label>
           <label class="config-label">Max budget per task ($)
             <input type="number" id="cfg-max-budget" min="0" step="1">
-          </label>
-          <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-auto-commit" checked>
-            Auto commit
-          </label>
-          <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-use-worktree" checked>
-            Use worktree
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-web-tools" checked>
@@ -525,7 +545,7 @@
             Use persistent memory
           </label>
           <!-- VS Code only (main.js unhides it outside the remote web
-               app): chats as editor tabs instead of the sidebar view.
+               app): the chat in an editor tab instead of the sidebar view.
                Not part of the daemon config — the change posts
                setEditorTabsMode straight to the extension host. -->
           <label class="config-label config-checkbox" id="cfg-editor-tabs-mode-label" style="display:none;">

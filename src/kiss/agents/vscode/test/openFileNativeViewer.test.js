@@ -475,6 +475,14 @@ async function runTests() {
 
   clear();
   wv.fireMessage({type: 'openFile', path: 'src'});
+  // The reveal lands after the async path resolution; wait for it rather
+  // than a fixed delay (a loaded machine takes longer), then give any
+  // stray editor open a moment to show up before the negative checks.
+  await waitFor(
+    () => executedCommands.some(c => c.cmd === 'revealInExplorer'),
+    'directory: revealInExplorer expected',
+    5000,
+  );
   await new Promise(r => setTimeout(r, 100));
   assert.deepStrictEqual(
     openedTextDocs,

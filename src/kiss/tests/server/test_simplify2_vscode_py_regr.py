@@ -14,20 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import socket
 import ssl
 import tempfile
 import unittest
 from pathlib import Path
 
 from kiss.server.web_server import RemoteAccessServer
-
-
-def _free_port() -> int:
-    """Grab an ephemeral localhost port for the live-server test."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+from kiss.tests.server.conftest import find_free_port
 
 
 class TestHttpWireProtocol(unittest.IsolatedAsyncioTestCase):
@@ -35,7 +28,7 @@ class TestHttpWireProtocol(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-simp2-http-")
-        self.port = _free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,

@@ -11,7 +11,7 @@
   is_alive()`` checks now use ``AgentState.thread_alive()``, which
   also counts the run-startup window (created-but-unstarted thread);
   exercised via ``_get_running_task_ids`` and
-  ``_reattach_running_chat`` with real registry states.
+  ``_attach_viewer_to_running_chat`` with real registry states.
 * C-R3 — the two duplicated failure-``result`` payload constructions
   were merged into ``_broadcast_failure_result``; a real failing run
   must still produce exactly ONE failure result event.
@@ -47,7 +47,7 @@ class _ExplodingRecordingPrinter(JsonPrinter):
     real ``ChatSorcarAgent.run`` (after the task id is allocated),
     driving the task runner's per-subtask failure path without
     touching the agent stack.  A ``KISSError`` because that is the
-    one exception type ``WorktreeSorcarAgent.run`` re-raises instead
+    one exception type ``ChatSorcarAgent.run`` re-raises instead
     of stringifying.
     """
 

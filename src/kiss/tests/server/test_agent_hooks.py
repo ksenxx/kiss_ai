@@ -13,7 +13,7 @@ replaced boundary is the LLM itself: the per-session executor's
 records the ``llm_call_hook`` / ``tool_call_hook`` it was handed, so
 the daemon's full run pipeline — ``run`` command dispatch → worker
 thread → ``apply_sea`` hook staging →
-``WorktreeSorcarAgent.run`` → ``SorcarAgent.run`` →
+``ChatSorcarAgent.run`` → ``SorcarAgent.run`` →
 ``RelentlessAgent.perform_task`` → ``KISSAgent.run`` — executes for
 real without any model API calls.
 
@@ -120,7 +120,6 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             "task with SEA hooks",
             work_dir=self.repo,
             sea_path=self._write_hooks_agent(),
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -169,7 +168,6 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task without hooks",
             work_dir=self.repo,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -208,7 +206,6 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             "task with a default tool hook",
             work_dir=self.repo,
             sea_path=sea_path,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -245,7 +242,6 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             "task with a broken hook getter",
             work_dir=self.repo,
             sea_path=sea_path,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )

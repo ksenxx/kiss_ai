@@ -25,13 +25,13 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     MergeResult,
     _git,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -78,10 +78,17 @@ def _make_repo(path: Path) -> Path:
 def _patch_super_run(
     return_value: str = "success: true\nsummary: test done\n",
 ) -> Any:
+    """Replace the LLM-driven parent ``run`` with a stub that isolates
+    the task in a worktree (as the real agent's ``create_worktree`` tool
+    call would) and finishes without ``commit_and_merge``."""
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
     def fake_run(self_agent: object, **kwargs: object) -> str:
+        agent = cast(ChatSorcarAgent, self_agent)
+        agent._enter_work_dir(str(kwargs.get("work_dir") or ""))
+        message = agent.create_worktree()
+        assert agent._wt_pending, message
         return return_value
 
     parent_class.run = fake_run
@@ -107,8 +114,8 @@ class TestDirtyWorkingTreeMerge:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _agent(self) -> WorktreeSorcarAgent:
-        return WorktreeSorcarAgent("test")
+    def _agent(self) -> ChatSorcarAgent:
+        return ChatSorcarAgent("test")
 
     @pytest.mark.slow
     def test_squash_merge_fails_with_dirty_overlap(self) -> None:

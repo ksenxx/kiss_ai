@@ -12,15 +12,7 @@
    then deleted that later publication.  ``update_tab`` now returns
    its own stamp from the locked update.
 
-2. **Post-task commit claim leaks** — the claim was published under
-   ``_state_lock`` but recorded for release only afterwards
-   (``held_claim = repo``); an injected ``KeyboardInterrupt`` in that
-   gap (or one skipping the ``finally``) stranded the claim until
-   daemon restart.  Claims are now appended to a caller-armed holder
-   BEFORE publication, releases are identity-conditional, and a claim
-   whose owner thread died heals on the next check.
-
-3. **Removal-generation wiring** — explicit-close and
+2. **Removal-generation wiring** — explicit-close and
    chat-displacement cleanup tails (``_drop_tab_state`` /
    ``_teardown_tab_resources``) were identity-blind: a reopen landing
    between the registry removal and the tail's state drop had its NEW
@@ -38,15 +30,10 @@ publication line — the same bytecode-boundary class the production
 
 from __future__ import annotations
 
-import inspect
-import sys
 import threading
-from pathlib import Path
-from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.server import VSCodeServer
 from kiss.tests.server.test_review2_stale_run_undo import _Base
 
 
@@ -129,125 +116,6 @@ class TestAtomicGenerationCapture(_Base):
         self.assertEqual(reg.generation("legacy"), 0)
         self.assertFalse(reg.close_tab_if_generation("legacy", 0))
         self.assertTrue(reg.has_tab("legacy"))
-
-
-class TestClaimLeakHardening(_Base):
-    """Finding 2: no strandable gap, and stranded claims heal."""
-
-    def test_holder_is_armed_before_publication(self) -> None:
-        """Inject the stop at the exact publication bytecode: whatever
-        the interleaving, a published claim is always release-armed, so
-        the caller's ``finally`` (or the healing below) clears it."""
-        repo = Path(self.work_dir)
-        target = None
-        lines, start = inspect.getsourcelines(VSCodeServer._claim_main_tree)
-        for i, line in enumerate(lines):
-            if "self._main_tree_claims[key] = claim" in line:
-                target = start + i
-                break
-        self.assertIsNotNone(target)
-
-        holder: list[Any] = []
-        escaped: list[BaseException] = []
-
-        def tracer(frame: Any, event: str, arg: Any) -> Any:
-            if (
-                event == "line"
-                and frame.f_lineno == target
-                and frame.f_code.co_name == "_claim_main_tree"
-            ):
-                raise KeyboardInterrupt("injected at publication")
-            return tracer
-
-        try:
-            sys.settrace(tracer)
-            try:
-                with self.server._state_lock:
-                    self.server._claim_main_tree(
-                        repo, "post-task commit", holder=holder,
-                    )
-            finally:
-                sys.settrace(None)
-        except KeyboardInterrupt as exc:
-            escaped.append(exc)
-        finally:
-            # The caller's release discipline: everything in the
-            # holder is released, identity-conditionally.
-            with self.server._state_lock:
-                for claim in holder:
-                    self.server._release_main_tree_claim(claim)
-        self.assertTrue(escaped, "the injected stop never escaped")
-        # The claim was armed before (or never) published — either
-        # way nothing is stranded.
-        with self.server._state_lock:
-            self.assertIsNone(self.server._main_tree_claim_reason(repo))
-
-    def test_dead_owner_claim_heals_for_admission_and_claimants(self) -> None:
-        """A claim stranded by a skipped ``finally`` (owner thread
-        gone) must not refuse admission or new claimants forever —
-        pre-fix it wedged the repository until daemon restart."""
-        repo = Path(self.work_dir)
-
-        def claim_and_die() -> None:
-            with self.server._state_lock:
-                self.assertTrue(
-                    self.server._claim_main_tree(repo, "post-task commit")
-                )
-
-        thread = threading.Thread(target=claim_and_die)
-        thread.start()
-        thread.join(timeout=10)
-        self.assertFalse(thread.is_alive())
-        # The admission check heals the dead-owner claim...
-        with self.server._state_lock:
-            self.assertIsNone(self.server._main_tree_claim_reason(repo))
-        # ...and a new claimant can publish.
-        holder: list[Any] = []
-        with self.server._state_lock:
-            self.assertTrue(
-                self.server._claim_main_tree(repo, "discard", holder=holder)
-            )
-            self.assertEqual(
-                self.server._main_tree_claim_reason(repo), "discard",
-            )
-            for claim in holder:
-                self.server._release_main_tree_claim(claim)
-
-    def test_stale_release_cannot_pop_a_successors_claim(self) -> None:
-        """Release is conditional on the claim object's identity: an
-        old cleanup releasing after a successor healed-and-claimed must
-        leave the successor's claim in place."""
-        repo = Path(self.work_dir)
-        stranded: list[Any] = []
-
-        def claim_and_die() -> None:
-            with self.server._state_lock:
-                self.assertTrue(
-                    self.server._claim_main_tree(
-                        repo, "post-task commit", holder=stranded,
-                    )
-                )
-
-        thread = threading.Thread(target=claim_and_die)
-        thread.start()
-        thread.join(timeout=10)
-
-        successor: list[Any] = []
-        with self.server._state_lock:
-            self.assertTrue(
-                self.server._claim_main_tree(
-                    repo, "manual commit", holder=successor,
-                )
-            )
-            # The stranded owner's late release must be a no-op now.
-            for claim in stranded:
-                self.server._release_main_tree_claim(claim)
-            self.assertEqual(
-                self.server._main_tree_claim_reason(repo), "manual commit",
-            )
-            for claim in successor:
-                self.server._release_main_tree_claim(claim)
-            self.assertIsNone(self.server._main_tree_claim_reason(repo))
 
 
 class TestRemovalGenerationWiring(_Base):

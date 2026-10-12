@@ -34,6 +34,7 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -93,12 +94,14 @@ if os.path.exists(os.path.join(here, "linger")):
 
 
 @pytest.fixture()
-def fake_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def fake_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Install the recording browser as ``$BROWSER`` on a non-headless host.
 
-    Returns:
+    Yields:
         The directory holding the script, its ``browser-log`` and the
-        ``refuse`` / ``linger`` behaviour markers.
+        ``refuse`` / ``linger`` behaviour markers.  A ``linger`` opener
+        the test started is released and reaped at teardown, whether or
+        not the test's assertions passed.
     """
     home = tmp_path / "browser"
     home.mkdir()
@@ -107,7 +110,8 @@ def fake_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     launcher = script.with_name("browser.cmd") if IS_WINDOWS else script
     monkeypatch.setenv("BROWSER", str(launcher))
     monkeypatch.setenv("KISS_HEADLESS", "0")
-    return home
+    yield home
+    _release_lingering_opener(home)
 
 
 class _BrowserTab:
@@ -165,17 +169,17 @@ def _release_lingering_opener(home: Path) -> None:
     """Let the ``linger`` opener exit and reap it.
 
     ``open_in_default_browser`` deliberately leaves a still-running
-    opener alone (it may be the browser itself), so the test ends it
-    instead of leaving it to the subprocess reaper.  On Windows the pid
-    is the interpreter behind the ``.cmd`` shim, not our child, so only
-    the marker is removed there.
+    opener alone (it may be the browser itself), so the fixture ends it
+    instead of leaving it to the subprocess reaper.  A no-op when no
+    opener lingered.  On Windows the pid is the interpreter behind the
+    ``.cmd`` shim, not our child, so only the marker is removed there.
     """
-    (home / "linger").unlink()
-    if IS_WINDOWS:
+    (home / "linger").unlink(missing_ok=True)
+    pid_file = home / "linger-pid"
+    if IS_WINDOWS or not pid_file.exists():
         return
-    pid = int((home / "linger-pid").read_text())
     with contextlib.suppress(ChildProcessError):  # already reaped
-        os.waitpid(pid, 0)
+        os.waitpid(int(pid_file.read_text()), 0)
 
 
 def _unique_url(path: str = "signin") -> str:
@@ -262,7 +266,6 @@ def test_concurrent_callers_open_one_tab(fake_browser: Path) -> None:
         assert not thread.is_alive(), "open_in_default_browser did not return"
     assert results == [True, True]
     assert _opened(fake_browser) == [[url]]
-    _release_lingering_opener(fake_browser)
 
 
 def test_headless_and_disallowed_schemes_never_launch(
@@ -299,7 +302,6 @@ def test_lingering_opener_counts_as_opened(fake_browser: Path) -> None:
     url = _unique_url("linger")
     assert open_in_default_browser(url) is True
     assert _opened(fake_browser) == [[url]]
-    _release_lingering_opener(fake_browser)
 
 
 def test_recently_opened_url_is_not_opened_twice(fake_browser: Path) -> None:

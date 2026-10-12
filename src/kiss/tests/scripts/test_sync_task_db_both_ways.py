@@ -242,7 +242,7 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         self.assertIn("live local task", result.stdout)
 
     def test_the_remotes_tasks_arrive_pointing_at_this_checkout(self) -> None:
-        """Otherwise the panel's Workspace chip hides the whole import.
+        """Imported tasks must point at a directory that exists here.
 
         Both machines have the project at their own path, so each side's
         tasks have to be translated on the way in — the checkout itself

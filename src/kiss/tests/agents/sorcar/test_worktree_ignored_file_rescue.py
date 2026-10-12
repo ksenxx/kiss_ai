@@ -12,10 +12,11 @@ capture them, and ``git worktree remove --force`` then deletes the
 directory.  Had the same task run without a worktree, those files
 would still be on disk.
 
-These tests drive the real ``WorktreeSorcarAgent`` against a real git
+These tests drive the real ``ChatSorcarAgent`` against a real git
 repository (the parent class' ``run`` is replaced with a deterministic
-stub that writes files — the same no-mock pattern the rest of the
-worktree suite uses) and assert the rescue behavior:
+stub that calls the agent's real ``create_worktree`` tool and writes
+files — the same no-mock pattern the rest of the worktree suite uses)
+and assert the rescue behavior:
 
 * merge / release rescues ignored files into the main repository;
 * an existing main-tree file is NEVER overwritten by a rescue;
@@ -38,9 +39,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+from kiss.agents.sorcar.relentless_agent import resolve_work_dir
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 _IGNORED_REL = "data/out.csv"
 
@@ -95,6 +97,10 @@ def _make_repo(path: Path) -> Path:
 def _stub_parent_run(files: dict[str, str]) -> Any:
     """Replace the parent class' ``run`` with a file-writing stub.
 
+    The stub does what a model-driven run does before its first edit:
+    it enters the run's ``work_dir`` and calls the agent's real
+    ``create_worktree`` tool, then writes *files* into the worktree.
+
     Args:
         files: Relative path -> content, written into the per-run
             ``work_dir`` (the worktree) by the stub.
@@ -105,13 +111,13 @@ def _stub_parent_run(files: dict[str, str]) -> Any:
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
-    def stub_run(self_agent: object, **kwargs: object) -> str:
-        work_dir = kwargs.get("work_dir")
-        if isinstance(work_dir, str) and work_dir:
-            for rel, content in files.items():
-                target = Path(work_dir) / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content)
+    def stub_run(self_agent: Any, **kwargs: Any) -> str:
+        self_agent.work_dir = resolve_work_dir(kwargs.get("work_dir"))
+        self_agent.create_worktree()
+        for rel, content in files.items():
+            target = Path(self_agent.work_dir) / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
         return "success: true\nsummary: stub\n"
 
     parent_class.run = stub_run
@@ -133,11 +139,11 @@ class TestIgnoredFileRescueAgent:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _run_task(self, files: dict[str, str]) -> WorktreeSorcarAgent:
+    def _run_task(self, files: dict[str, str]) -> ChatSorcarAgent:
         """Run one stubbed worktree task that writes *files*."""
         self._original_run = _stub_parent_run(files)
-        agent = WorktreeSorcarAgent("rescue-test")
-        agent.run("task", work_dir=str(self.repo), auto_commit=True)
+        agent = ChatSorcarAgent("rescue-test")
+        agent.run("task", work_dir=str(self.repo))
         assert agent._wt_pending, "worktree should be pending after run"
         return agent
 
@@ -242,15 +248,16 @@ class TestIgnoredFileRescueAgent:
         assert not (self.repo / "mod.pyc").exists()
 
     def test_release_on_next_run_rescues_ignored_file(self) -> None:
-        """The auto-release before a new task rescues ignored output."""
+        """Retiring a pending worktree before a new task rescues ignored output."""
         agent = self._run_task({
             "tracked.txt": "tracked\n",
             _IGNORED_REL: _IGNORED_CONTENT,
         })
-        # Second run retires (auto-merges) the first worktree.
-        agent.run("task 2", work_dir=str(self.repo), auto_commit=True)
+        # The caller retires the first worktree before the second run.
+        agent._retire_previous_worktree()
+        agent.run("task 2", work_dir=str(self.repo))
         assert (self.repo / _IGNORED_REL).is_file(), (
-            "ignored output of the released worktree was destroyed"
+            "ignored output of the retired worktree was destroyed"
         )
         # Retire the second worktree so teardown is clean.
         agent.merge()

@@ -3,10 +3,10 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The extension-host half of the "Working directory" panel: the webview
-// posts `openWorkDir {path}` (typed path or a row of the opened-so-far
-// list) or `pickWorkDir` (the folder button) -- neither names a tab, the
-// working directory is ONE global value -- and the compiled
+// The extension-host half of the chat header's working directory
+// drop-down: the webview posts `openWorkDir {path}` (a directory selected
+// so far) or `pickWorkDir` (its "Choose ..." entry) -- neither names a
+// tab, the working directory is ONE global value -- and the compiled
 // SorcarSidebarView makes the folder's real path the daemon's global
 // working directory (a `setWorkDir` command, nothing is sent as
 // `recordWorkDir`) and answers `workDirPicked {path}` without a tabId;

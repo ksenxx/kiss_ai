@@ -38,6 +38,7 @@ from kiss.server.file_index import (
 )
 from kiss.server.server import VSCodeServer
 from kiss.tests.conftest import IS_WINDOWS, posix_only
+from kiss.tests.server.conftest import touch
 
 
 def _wait(pred: Callable[[], bool], timeout: float = 10.0) -> None:
@@ -48,14 +49,6 @@ def _wait(pred: Callable[[], bool], timeout: float = 10.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError("condition not met in time")
-
-
-def _touch(root: Path, *rel: str) -> None:
-    """Create empty files at each *rel* path below *root*."""
-    for r in rel:
-        p = root / r
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("")
 
 
 def _texts(items: list[dict[str, str]]) -> list[str]:
@@ -78,7 +71,7 @@ def _build(reg: FileIndexRegistry, work_dir: str) -> FileView:
 
 class TestScan:
     def test_lists_files_and_directories_skipping_dot_and_junk_dirs(self, tmp_path: Path) -> None:
-        _touch(
+        touch(
             tmp_path, "README.md", "src/main.py", ".env", ".git/HEAD",
             "node_modules/x/index.js", "__pycache__/m.pyc", "venv/bin/python",
             "src/site-packages/p.py",
@@ -89,7 +82,7 @@ class TestScan:
     def test_empty_query_order_is_shallow_first_then_data_and_dotfiles_last(
         self, tmp_path: Path,
     ) -> None:
-        _touch(
+        touch(
             tmp_path, "b.py", "a.py", "run.log", ".hidden", "src/x.py", "src/y.json",
             "src/deep/z.py",
         )
@@ -111,7 +104,7 @@ class TestScan:
         junctions point back into it, so following them recursed to
         ``MAX_DEPTH`` and a home scan took a minute.
         """
-        _touch(tmp_path, "a.py", "AppData/Local/cache.bin", "src/b.py")
+        touch(tmp_path, "a.py", "AppData/Local/cache.bin", "src/b.py")
         subprocess.run(["attrib", "+h", str(tmp_path / "AppData")], check=True)
         subprocess.run(
             ["cmd", "/c", "mklink", "/J", str(tmp_path / "Application Data"),
@@ -127,7 +120,7 @@ class TestScan:
 
     def test_nested_gitignores_apply_to_dirs_and_files_below_them(self, tmp_path: Path) -> None:
         (tmp_path / ".gitignore").write_text("build/\n/top-only\nsecret.txt\n!keep\n*.log\n")
-        _touch(
+        touch(
             tmp_path, "build/a.o", "top-only/x", "nested/top-only/y", "secret.txt",
             "nested/secret.txt", "keep", "run.log", "repo/.gitignore", "repo/tmp/junk",
             "repo/src/tmp/also-junk", "repo/generated/out.py", "repo/deeper/generated/in.py",
@@ -148,14 +141,14 @@ class TestScan:
         assert "repo/.gitignore" in paths
 
     def test_rescan_reuses_unchanged_listings_and_sees_changes(self, tmp_path: Path) -> None:
-        _touch(tmp_path, "a/one.py", "b/two.py")
+        touch(tmp_path, "a/one.py", "b/two.py")
         first = FileIndex.scan(str(tmp_path))
         assert first.relisted
         same = FileIndex.scan(str(tmp_path), first.listings)
         assert not same.relisted
         assert same.paths == first.paths
         time.sleep(0.02)
-        _touch(tmp_path, "a/three.py")
+        touch(tmp_path, "a/three.py")
         (tmp_path / "b" / "two.py").unlink()
         changed = FileIndex.scan(str(tmp_path), first.listings)
         assert changed.relisted
@@ -166,7 +159,7 @@ class TestScan:
         )
 
     def test_gitignore_edit_takes_effect_without_relisting(self, tmp_path: Path) -> None:
-        _touch(tmp_path, ".gitignore", "out/x.py", "src/y.py")
+        touch(tmp_path, ".gitignore", "out/x.py", "src/y.py")
         first = FileIndex.scan(str(tmp_path))
         assert "out/" in first.paths
         (tmp_path / ".gitignore").write_text("out\n")
@@ -177,7 +170,7 @@ class TestScan:
         self, tmp_path: Path,
     ) -> None:
         deep = "/".join(f"d{i}" for i in range(MAX_DEPTH + 1))
-        _touch(tmp_path, f"{deep}/leaf.py")
+        touch(tmp_path, f"{deep}/leaf.py")
         paths = FileIndex.scan(str(tmp_path)).paths
         at_max = "/".join(f"d{i}" for i in range(MAX_DEPTH))
         assert f"{at_max}/d{MAX_DEPTH}/" in paths
@@ -186,7 +179,7 @@ class TestScan:
     def test_entry_cap_bounds_the_index(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _touch(tmp_path, *[f"d{i // 10}/f{i}.py" for i in range(100)])
+        touch(tmp_path, *[f"d{i // 10}/f{i}.py" for i in range(100)])
         monkeypatch.setattr(file_index, "_SCAN_FILES_CAP", 25)
         index = FileIndex.scan(str(tmp_path))
         assert len(index.paths) == 25
@@ -194,7 +187,7 @@ class TestScan:
 
     def test_bulk_data_directories_collapse_to_their_entry(self, tmp_path: Path) -> None:
         dumps = [f"bench/results/r{i}.json" for i in range(_BULK_DATA_MIN_FILES)]
-        _touch(tmp_path, "bench/run.py", *dumps)
+        touch(tmp_path, "bench/run.py", *dumps)
         index = FileIndex.scan(str(tmp_path))
         assert "bench/results/" in index.paths
         assert not any(p.startswith("bench/results/r") for p in index.paths)
@@ -203,7 +196,7 @@ class TestScan:
         assert "bench" in index.dirs
 
     def test_root_is_never_a_wide_container(self, tmp_path: Path) -> None:
-        _touch(
+        touch(
             tmp_path, "src/deep/test_cli.py",
             *[f"pkg{i:02d}/mod.py" for i in range(WIDE_DIR_MIN_CHILDREN)],
             *[f"pkg00/runs/run{i:03d}/test_cli.py" for i in range(WIDE_DIR_MIN_CHILDREN)],
@@ -213,11 +206,11 @@ class TestScan:
         assert _texts(index.view("").search("test_cli", {}))[0] == "src/deep/test_cli.py"
 
     def test_root_is_never_a_bulk_dump(self, tmp_path: Path) -> None:
-        _touch(tmp_path, *[f"r{i}.json" for i in range(_BULK_DATA_MIN_FILES)])
+        touch(tmp_path, *[f"r{i}.json" for i in range(_BULK_DATA_MIN_FILES)])
         assert len(FileIndex.scan(str(tmp_path)).paths) == _BULK_DATA_MIN_FILES
 
     def test_wide_container_contents_rank_last(self, tmp_path: Path) -> None:
-        _touch(
+        touch(
             tmp_path, "src/test_a.py",
             *[f"artifacts/run{i:03d}/test_a.py" for i in range(WIDE_DIR_MIN_CHILDREN)],
         )
@@ -235,7 +228,7 @@ class TestScan:
         assert FileIndex.empty("/nowhere").dirs == frozenset({""})
 
     def test_view_of_subdirectory_strips_prefix_and_excludes_itself(self, tmp_path: Path) -> None:
-        _touch(tmp_path, "top.py", "kiss/README.md", "kiss/src/a.py", "kissing/b.py")
+        touch(tmp_path, "top.py", "kiss/README.md", "kiss/src/a.py", "kissing/b.py")
         index = FileIndex.scan(str(tmp_path))
         view = index.view("kiss/")
         assert view.paths == ["README.md", "src/", "src/a.py"]
@@ -302,7 +295,7 @@ class TestSearch:
         assert _texts(many.search("f", {})) == [f"src/f{i}.py" for i in range(20)]
 
     def test_non_ascii_names_are_searchable(self, tmp_path: Path) -> None:
-        _touch(tmp_path, "docs/résumé.md", "plain.py")
+        touch(tmp_path, "docs/résumé.md", "plain.py")
         index = FileIndex.scan(str(tmp_path))
         view = index.view("")
         assert "docs/résumé.md" in view.paths and "docs/résumé.md" in view
@@ -311,7 +304,7 @@ class TestSearch:
 
     @posix_only("non-UTF-8 file names (NTFS names are UTF-16)")
     def test_undecodable_names_are_searchable(self, tmp_path: Path) -> None:
-        _touch(tmp_path, "plain.py")
+        touch(tmp_path, "plain.py")
         raw = os.path.join(os.fsencode(tmp_path), b"bad_\xff.py")
         try:
             with open(raw, "wb"):
@@ -329,7 +322,7 @@ class TestSearch:
 class TestRegistry:
     def test_root_resolution(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
-        _touch(home, "proj/a.py", "proj/.gitignore", "proj/ignored/b.py", ".hidden/c.py")
+        touch(home, "proj/a.py", "proj/.gitignore", "proj/ignored/b.py", ".hidden/c.py")
         (home / "proj" / ".gitignore").write_text("ignored\n")
         reg = _registry(tmp_path, home)
         assert reg.root_for(str(home)) == (str(home), "")
@@ -353,7 +346,7 @@ class TestRegistry:
 
     def test_ensure_builds_in_background_and_refresh_rescans(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
-        _touch(home, "proj/a.py")
+        touch(home, "proj/a.py")
         reg = _registry(tmp_path, home)
         assert reg.view_for(str(home / "proj")) is None
         view = _build(reg, str(home / "proj"))
@@ -361,18 +354,18 @@ class TestRegistry:
         reg.refresh(str(tmp_path / "unknown"))
         assert reg.view_for(str(tmp_path / "unknown")) is None, "refresh never indexes new roots"
         time.sleep(0.02)
-        _touch(home, "proj/b.py")
+        touch(home, "proj/b.py")
         reg.refresh(str(home / "proj"))
         _wait(lambda: (reg.view_for(str(home / "proj")) or view).paths == ["a.py", "b.py"])
         reg.stop()
 
     def test_stale_view_schedules_a_refresh(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "a.py")
+        touch(root, "a.py")
         reg = _registry(tmp_path, tmp_path / "home")
         _build(reg, str(root))
         time.sleep(0.02)
-        _touch(root, "b.py")
+        touch(root, "b.py")
         assert reg.view_for(str(root)).paths == ["a.py"]  # type: ignore[union-attr]
         reg._indexes[str(root)].built_at -= file_index.STALE_AFTER + 1
         assert reg.view_for(str(root)).paths == ["a.py"], "the stale view is served at once"  # type: ignore[union-attr]
@@ -381,7 +374,7 @@ class TestRegistry:
 
     def test_listings_persist_across_registries(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "a.py", "sub/b.py")
+        touch(root, "a.py", "sub/b.py")
         first = _registry(tmp_path, tmp_path / "home")
         _build(first, str(root))
         first.stop()
@@ -407,7 +400,7 @@ class TestRegistry:
         self, tmp_path: Path,
     ) -> None:
         root = tmp_path / "root"
-        _touch(root, "a.py")
+        touch(root, "a.py")
         reg = _registry(tmp_path, tmp_path / "home")
         path = reg._cache_path(str(root))
         path.parent.mkdir(parents=True)
@@ -433,7 +426,7 @@ class TestRegistry:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
         root = tmp_path / "root"
-        _touch(root, "a.py")
+        touch(root, "a.py")
         reg = _registry(tmp_path, tmp_path / "home")
         _build(reg, str(root))
         # Block the worker so the refreshes queue up behind this job.
@@ -452,7 +445,7 @@ class TestRegistry:
 
     def test_callback_exception_does_not_kill_the_worker(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "a.py")
+        touch(root, "a.py")
         reg = _registry(tmp_path, tmp_path / "home")
 
         def boom() -> None:
@@ -464,7 +457,7 @@ class TestRegistry:
 
     def test_stop_ignores_later_requests_and_queued_callbacks(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "a.py")
+        touch(root, "a.py")
         reg = _registry(tmp_path, tmp_path / "home")
         gate = threading.Event()
         reg.ensure(str(root), gate.wait)
@@ -480,7 +473,7 @@ class TestRegistry:
 
     def test_refresh_queued_during_a_scan_is_not_skipped(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "a.py")
+        touch(root, "a.py")
         reg = _registry(tmp_path, tmp_path / "home")
         _build(reg, str(root))
         index = reg._indexes[str(root)]
@@ -488,7 +481,7 @@ class TestRegistry:
         # already running must not be treated as satisfied by it.
         reg._jobs.put((str(root), index.built_at + 1e-6, None))
         time.sleep(0.02)
-        _touch(root, "b.py")
+        touch(root, "b.py")
         done = threading.Event()
         reg.ensure(str(root), done.set)
         assert done.wait(10.0)
@@ -543,7 +536,7 @@ class _Server:
 class TestServerWiring:
     def test_cold_request_emits_loading_then_populated_reply(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "alpha.py", "sub/beta.py")
+        touch(root, "alpha.py", "sub/beta.py")
         s = _Server(tmp_path, tmp_path / "home", str(root))
         s.get_files("be", str(root))
         first = s.files_events()[0]
@@ -557,7 +550,7 @@ class TestServerWiring:
 
     def test_cold_request_on_a_stopped_registry_releases_its_token(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "a.py")
+        touch(root, "a.py")
         s = _Server(tmp_path, tmp_path / "home", str(root))
         s.server._file_index.stop()
         s.get_files("", str(root))
@@ -566,7 +559,7 @@ class TestServerWiring:
 
     def test_warm_request_is_answered_synchronously(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "alpha.py", "sub/beta.py")
+        touch(root, "alpha.py", "sub/beta.py")
         s = _Server(tmp_path, tmp_path / "home", str(root))
         _build(s.server._file_index, str(root))
         s.get_files("", str(root))
@@ -577,7 +570,7 @@ class TestServerWiring:
 
     def test_empty_work_dir_falls_back_to_the_daemon_work_dir(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "only.py")
+        touch(root, "only.py")
         s = _Server(tmp_path, tmp_path / "home", str(root))
         s.get_files("", "")
         assert _texts(s.wait_populated()["files"]) == ["./only.py"]
@@ -585,7 +578,7 @@ class TestServerWiring:
 
     def test_non_string_prefix_is_treated_as_empty(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "only.py")
+        touch(root, "only.py")
         s = _Server(tmp_path, tmp_path / "home", str(root))
         s.server._handle_command({"type": "getFiles", "prefix": {"a": 1}, "workDir": str(root)})
         reply = s.wait_populated()
@@ -594,7 +587,7 @@ class TestServerWiring:
 
     def test_tab_below_home_is_served_by_the_home_index(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
-        _touch(home, "notes.md", "proj/a.py", "proj/src/b.py", "other/c.py")
+        touch(home, "notes.md", "proj/a.py", "proj/src/b.py", "other/c.py")
         s = _Server(tmp_path, home, str(home))
         s.get_files("", str(home / "proj"))
         items = s.wait_populated()["files"]
@@ -614,7 +607,7 @@ class TestServerWiring:
         self, tmp_path: Path,
     ) -> None:
         home = tmp_path / "home"
-        _touch(home, ".gitignore", "scratch/work.py", "proj/a.py")
+        touch(home, ".gitignore", "scratch/work.py", "proj/a.py")
         (home / ".gitignore").write_text("scratch\n")
         s = _Server(tmp_path, home, str(home))
         s.get_files("", str(home / "scratch"))
@@ -626,7 +619,7 @@ class TestServerWiring:
 
     def test_superseded_cold_request_is_dropped(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "abc.py", "abd.py")
+        touch(root, "abc.py", "abd.py")
         s = _Server(tmp_path, tmp_path / "home", str(root))
         gate = threading.Event()
         s.server._file_index.ensure(str(tmp_path / "unrelated"), gate.wait)
@@ -643,7 +636,7 @@ class TestServerWiring:
 
     def test_superseded_second_round_is_abandoned(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
-        _touch(home, ".gitignore", "scratch/work.py")
+        touch(home, ".gitignore", "scratch/work.py")
         (home / ".gitignore").write_text("scratch\n")
         s = _Server(tmp_path, home, str(home))
         gate = threading.Event()
@@ -664,7 +657,7 @@ class TestServerWiring:
 
     def test_connections_have_independent_tokens(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "a.py")
+        touch(root, "a.py")
         s = _Server(tmp_path, tmp_path / "home", str(root))
         s.get_files("", str(root), conn_id="c1")
         s.get_files("", str(root), conn_id="c2")
@@ -674,14 +667,14 @@ class TestServerWiring:
 
     def test_refresh_after_task_picks_up_new_files(self, tmp_path: Path) -> None:
         root = tmp_path / "root"
-        _touch(root, "a.py")
+        touch(root, "a.py")
         s = _Server(tmp_path, tmp_path / "home", str(root))
         s.server._refresh_files_after_task(str(root))
         time.sleep(0.1)
         assert s.server._file_index.view_for(str(root)) is None, "never-indexed roots stay alone"
         _build(s.server._file_index, str(root))
         time.sleep(0.02)
-        _touch(root, "new_test.py")
+        touch(root, "new_test.py")
         s.server._refresh_files_after_task(str(root))
         reg = s.server._file_index
         _wait(lambda: "new_test.py" in (reg.view_for(str(root)) or FileView([])).paths)
@@ -692,8 +685,8 @@ class TestServerWiring:
 
     def test_set_work_dir_prewarms_the_new_directory(self, tmp_path: Path) -> None:
         old, new = tmp_path / "old", tmp_path / "new"
-        _touch(old, "o.py")
-        _touch(new, "n.py")
+        touch(old, "o.py")
+        touch(new, "n.py")
         s = _Server(tmp_path, tmp_path / "home", str(old))
         s.server._handle_command({"type": "setWorkDir", "workDir": str(new)})
         assert s.server.work_dir == str(new)

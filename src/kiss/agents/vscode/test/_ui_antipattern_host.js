@@ -64,9 +64,6 @@ class FakeSidebarView {
   appendToInput() {
     return Promise.resolve();
   }
-  onRegistryTabsState() {
-    return makeDisposable();
-  }
   onCommitMessage() {
     return makeDisposable();
   }

@@ -29,6 +29,7 @@ import json
 import os
 import re
 import sys
+import threading
 from typing import Any
 
 import requests
@@ -165,6 +166,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         self._connection_info: str = ""
         self._graph_base: str = graph_base
         self._http: Any = requests
+        self._lazy_muse: bool = False
+        self._wire_lock = threading.Lock()
 
     def _wire_muse(self) -> bool:
         """Acquire an MS Teams surrogate and wire the boundary session.
@@ -189,8 +192,10 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         cfg = _raw_config()
         self._tenant_id = str(cfg.get("tenant_id") or "")
         self._bot_id = str(cfg.get("bot_id") or "")
-        self._access_token = handle.token
         self._http = MuseBoundarySession("msteams")
+        # Published last: a request that sees the token set sees the
+        # boundary session too (see ``_wire_deferred``).
+        self._access_token = handle.token
         return True
 
     def _muse_probe(self) -> tuple[bool, str]:
@@ -206,7 +211,31 @@ class MSTeamsChannelBackend(ToolMethodBackend):
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._access_token}", "Content-Type": "application/json"}
 
+    def _wire_deferred(self) -> dict[str, Any] | None:
+        """Run the Muse wiring :class:`MSTeamsAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of wiring at construction,
+        so building it for its tool list (``sea lint``, ``sea docs``,
+        run start) touches no daemon.  Concurrent first requests wait on
+        the lock and share the one surrogate; :meth:`_wire_muse`
+        publishes ``_access_token`` last, so a request that sees it set
+        sees the whole wired state.
+
+        Returns:
+            None once the backend holds a surrogate (or needs none), or
+            the ``{"ok": false, "error": ...}`` reply to return when no
+            MS Teams credential can be wired.
+        """
+        if not self._lazy_muse or self._access_token:
+            return None
+        with self._wire_lock:
+            if self._access_token or self._wire_muse():
+                return None
+        return {"ok": False, "error": self._connection_info}
+
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
+        if (unwired := self._wire_deferred()) is not None:
+            return unwired
         resp = self._http.get(
             f"{self._graph_base}{path}", headers=self._headers(), params=params, timeout=30
         )
@@ -218,6 +247,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         return result
 
     def _post(self, path: str, body: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
+        if (unwired := self._wire_deferred()) is not None:
+            return unwired
         resp = self._http.post(
             f"{self._graph_base}{path}", headers=self._headers(), json=body, timeout=30
         )
@@ -690,21 +721,21 @@ class MSTeamsAgent(BaseChannelAgent):
 
         if not muse_auth_enabled():
             return
-        from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
-
-        # Wire a vault surrogate and the boundary session (no network
-        # round trip).  A daemon failure leaves the agent constructible
-        # (fail closed, tokenless) so its authenticate/clear tools stay
-        # available.
-        try:
-            self._backend._wire_muse()
-        except MuseAuthError as e:
-            self._backend._access_token = ""
-            self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+        # The backend wires its vault surrogate and boundary session on
+        # the first request, so building the tool list (``sea lint``,
+        # ``sea docs``, run start) touches no daemon.
+        self._backend._lazy_muse = True
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend holds a vault surrogate."""
-        return bool(self._backend._access_token)
+        """Return True if the backend holds a vault surrogate or the vault has a credential."""
+        backend = self._backend
+        if backend._access_token:
+            return True
+        if not backend._lazy_muse:
+            return False
+        from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
+
+        return vault_has_credentials("msteams")
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
@@ -716,9 +747,10 @@ class MSTeamsAgent(BaseChannelAgent):
             Returns:
                 Authentication status or instructions.
             """
-            if not agent._backend._access_token:
+            backend = agent._backend
+            if backend._wire_deferred() is not None or not backend._access_token:
                 return _NOT_AUTHENTICATED
-            ok, message = agent._backend._muse_probe()
+            ok, message = backend._muse_probe()
             if ok:
                 return json.dumps({"ok": True, "message": "MS Teams authenticated (Muse-auth)."})
             return json.dumps({"ok": False, "error": message})

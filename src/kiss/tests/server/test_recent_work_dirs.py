@@ -2,10 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The daemon side of the "Working directory" panel's opened-so-far list.
+"""The daemon side of the chat header drop-down's selected-so-far list.
 
 Every directory adopted as the global working directory -- a
-"Working directory" panel pick or Explorer check mark on any surface
+chat-header drop-down pick or Explorer check mark on any surface
 (``setWorkDir``), a VS Code window's connect-time seed, a ``saveConfig``
 carrying ``work_dir`` -- passes through ``_apply_new_work_dir``, which
 records it in ``config.json`` (``recent_work_dirs``: ``{path, ts}``
@@ -35,6 +35,7 @@ import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class _IsolatedConfig:
@@ -90,6 +91,17 @@ class TestRecentWorkDirHelpers(unittest.TestCase):
         # other settings.
         stored = json.loads(vc.CONFIG_PATH.read_text())["recent_work_dirs"]
         self.assertEqual(len(stored), 2)
+
+    def test_another_spelling_replaces_the_row(self) -> None:
+        # The clients tell directories apart by samePath (trailing
+        # separator ignored); recording the other spelling must not
+        # leave two rows for one directory.
+        vc.record_recent_work_dir(str(self.dir_a))
+        vc.record_recent_work_dir(str(self.dir_b))
+        vc.record_recent_work_dir(str(self.dir_a) + "/")
+        self.assertEqual(
+            self._paths(), [str(self.dir_a) + "/", str(self.dir_b)],
+        )
 
     def test_recording_keeps_other_settings(self) -> None:
         vc.save_config({"max_budget": 7, "work_dir": str(self.dir_a)})
@@ -180,26 +192,12 @@ class TestRecentWorkDirHelpers(unittest.TestCase):
             self.assertNotIn(gone, paths)
 
 
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
-
-
 class TestRecentWorkDirsOverLocalChannel(IsolatedAsyncioTestCase):
     """``setWorkDir`` / ``saveConfig`` record, ``getConfig`` reports."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.cfg = _IsolatedConfig()
         self.cfg.enter(self.tmpdir)
 
@@ -234,7 +232,7 @@ class TestRecentWorkDirsOverLocalChannel(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         self.cfg.exit()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -346,8 +344,37 @@ class TestRecentWorkDirsOverLocalChannel(IsolatedAsyncioTestCase):
         shutil.rmtree(self.dir_a)
         self.assertEqual(await self._recent_paths(reader, writer), [])
 
+    async def test_save_config_reply_omits_deleted_directory(self) -> None:
+        """The ``configData`` a ``saveConfig`` answers with is what the
+        chat header's drop-down shows next: like ``getConfig`` it must
+        leave out a recorded directory that was deleted since, even
+        though the stored list still names it."""
+        reader, writer = await self._connect()
+        await self._send(
+            writer, {"type": "setWorkDir", "workDir": str(self.dir_a)},
+        )
+        await self._wait_recorded(str(self.dir_a))
+        await asyncio.sleep(0.02)
+        await self._send(
+            writer, {"type": "setWorkDir", "workDir": str(self.dir_b)},
+        )
+        await self._wait_recorded(str(self.dir_b))
+        shutil.rmtree(self.dir_a)
+        stored = json.loads(vc.CONFIG_PATH.read_text())["recent_work_dirs"]
+        self.assertIn(str(self.dir_a), [e["path"] for e in stored])
+        await self._send(
+            writer, {"type": "saveConfig", "config": {"classify_tasks": True}},
+        )
+        msg = await self._drain_until(
+            reader, lambda m: m.get("type") == "configData",
+        )
+        self.assertEqual(
+            [e["path"] for e in msg["config"]["recent_work_dirs"]],
+            [str(self.dir_b)],
+        )
+
     async def test_panel_pick_records_persists_and_broadcasts(self) -> None:
-        """A folder picked in any surface's "Working directory" panel
+        """A folder picked in any surface's chat-header drop-down
         arrives as ``setWorkDir``: it joins the shared history, becomes
         the global working directory, is persisted as ``config.json``
         ``work_dir`` and is broadcast as ``workDirChanged`` to every

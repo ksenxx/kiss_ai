@@ -17,7 +17,6 @@ const MEDIA = path.join(__dirname, '..', 'media');
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wtrecheck-'));
 const realFile = path.join(tmpDir, 'real.txt');
 fs.writeFileSync(realFile, 'hello\n');
-const missingFile = path.join(tmpDir, 'missing.txt');
 fs.mkdirSync(path.join(tmpDir, 'somedir'));
 
 function checkPathsOnRealFs(msg) {

@@ -57,7 +57,7 @@ from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 @pytest.fixture
 def home() -> Iterator[IsolatedKissHome]:
     isolated = IsolatedKissHome(prefix="kiss-sea-s1s9-")
-    isolated.write_config(is_worktree=False, auto_commit_mode=False, classify_tasks=False)
+    isolated.write_config(classify_tasks=False)
     try:
         yield isolated
     finally:
@@ -136,11 +136,11 @@ def test_pinned_is_the_run_config_key_and_renders_a_reachable_example() -> None:
     line = run_config_line({
         "sea": "sh", "channel": False, "model": "gpt-5", "tool_profile": "bash",
         "max_budget": 1.0, "timeout": 3600, "inherited": ["model", "chat_id", "max_budget"],
-        "pinned": {"use_worktree": [True, False]},
+        "pinned": {"use_memory": [True, False]},
     })
     assert line == (
         "sh model=gpt-5 tools=bash budget=$1.00 timeout=3600s "
-        "inherited=model,chat_id,max_budget pinned=use_worktree(True->False)"
+        "inherited=model,chat_id,max_budget pinned=use_memory(True->False)"
     )
     assert run_config_line({}).endswith("inherited=none pinned=none")
 
@@ -165,8 +165,7 @@ def test_channel_base_locks_the_worker_keys_and_work_dir() -> None:
     assert all(resolved[key] is False for key in WORKER_DEFAULTS)
     assert resolved["locked"] == sorted({"work_dir", *WORKER_DEFAULTS})
     assert set(resolved["locked"]) == {
-        "work_dir", "use_worktree", "auto_commit", "auto_classify",
-        "use_web_tools", "use_memory",
+        "work_dir", "auto_classify", "use_web_tools", "use_memory",
     }
     # The lock survives in a SEA that inherits from the channel (its own
     # locks are added to the base's); other bases lock only what they declare.

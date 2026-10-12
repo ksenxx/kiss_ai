@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import ssl
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,30 +54,13 @@ from kiss.server.web_server import (
     _forwarded_client_ip,
     _is_loopback_ip,
 )
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 def _conn(**attrs: Any) -> ServerConnection:
     """Build a stand-in ``ServerConnection`` exposing only the attributes
     (``remote_address`` / ``request``) that the IP helpers read."""
     return cast(ServerConnection, SimpleNamespace(**attrs))
-
-
-def _find_free_port() -> int:
-    """Return a free TCP port on localhost."""
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return a client SSL context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
 
 
 class TestForwardedIpHelpers(unittest.TestCase):
@@ -175,7 +157,7 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
         _persistence._DB_PATH = self._persistence_dir / "history.db"
         _persistence._db_conn = None
 
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = (
             CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
         )
@@ -216,7 +198,7 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
         """
         headers = {"Cf-Connecting-Ip": client_ip}
         async with connect(
-            self._url(), ssl=_no_verify_ssl(), additional_headers=headers
+            self._url(), ssl=no_verify_ssl(), additional_headers=headers
         ) as ws:
             try:
                 await ws.send(json.dumps({"type": "auth", "password": password}))
@@ -234,7 +216,7 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
         made = 0
         while made < guesses:
             async with connect(
-                self._url(), ssl=_no_verify_ssl(), additional_headers=headers
+                self._url(), ssl=no_verify_ssl(), additional_headers=headers
             ) as ws:
                 await ws.send(json.dumps({"type": "auth", "password": "nope"}))
                 try:

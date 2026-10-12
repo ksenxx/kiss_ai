@@ -16,26 +16,14 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-import threading
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import _chat_first_tasks
-from kiss.server.server import VSCodeServer
-
-from .test_history_task_meta_server import _redirect, _restore
-
-
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    server = VSCodeServer()
-    events: list[dict] = []
-    lock = threading.Lock()
-
-    def capture(event: dict) -> None:
-        with lock:
-            events.append(event)
-
-    server.printer.broadcast = capture  # type: ignore[assignment]
-    return server, events
+from kiss.tests.server.conftest import (
+    make_capturing_server,
+    redirect_persistence,
+    restore_persistence,
+)
 
 
 def _history_sessions(events: list[dict]) -> list[dict]:
@@ -51,13 +39,13 @@ class TestChatFirstTask:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_every_row_of_a_chat_names_its_first_task(self) -> None:
@@ -65,7 +53,7 @@ class TestChatFirstTask:
         _, chat_a = th._add_task("first task of A")
         th._add_task("second task of A", chat_id=chat_a)
         _, chat_b = th._add_task("only task of B")
-        server, events = _make_server()
+        server, events = make_capturing_server()
 
         server._get_history(query=None)
 
@@ -86,7 +74,7 @@ class TestChatFirstTask:
         even when the first task itself does not match the query."""
         _, chat_a = th._add_task("first task of A")
         th._add_task("needle in A", chat_id=chat_a)
-        server, events = _make_server()
+        server, events = make_capturing_server()
 
         server._get_history(query="needle")
 
@@ -101,7 +89,7 @@ class TestChatFirstTask:
             extra={"subagent": {"parent_task_id": "deadbeef" * 4}},
         )
         th._add_task("real first task", chat_id=chat)
-        server, events = _make_server()
+        server, events = make_capturing_server()
 
         server._get_history(query=None)
 
@@ -117,7 +105,7 @@ class TestChatFirstTask:
         huge = "x" * 5000
         _, chat = th._add_task(huge)
         th._add_task("second task", chat_id=chat)
-        server, events = _make_server()
+        server, events = make_capturing_server()
 
         server._get_history(query=None)
 

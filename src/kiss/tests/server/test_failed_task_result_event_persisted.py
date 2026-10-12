@@ -40,10 +40,11 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.web_server import Payload, WebPrinter
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class _CapturingWebPrinter(WebPrinter):
@@ -62,26 +63,11 @@ class _CapturingWebPrinter(WebPrinter):
             self.wire.append(json.loads(data))
 
 
-def _redirect(tmpdir: str):
-    """Redirect the DB to a temp dir and reset the singleton connection."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return old
-
-
-def _restore(saved):
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
 class TestFailedTaskResultEventPersisted:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         th._flush_chat_events()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.printer = _CapturingWebPrinter()
 
     def teardown_method(self):
@@ -90,14 +76,14 @@ class TestFailedTaskResultEventPersisted:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _register_task(self, task: str) -> str:
         """Create a task row and register its agent in the state registry."""
         task_id, _ = th._add_task(task, chat_id="chat-1")
         th._flush_chat_events()
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         agent._last_task_id = task_id
         agent_state.register(AgentState(str(task_id), agent=agent))
         return str(task_id)
@@ -212,7 +198,7 @@ class TestTaskRunnerFailureResultPersistedE2E:
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
         self.tmpdir = tempfile.mkdtemp()
         th._flush_chat_events()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.work_dir = str(Path(self.tmpdir) / "wd")
         Path(self.work_dir).mkdir()
         from kiss.server.server import VSCodeServer
@@ -227,7 +213,7 @@ class TestTaskRunnerFailureResultPersistedE2E:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _run_failing_task(
@@ -244,7 +230,7 @@ class TestTaskRunnerFailureResultPersistedE2E:
         ``_last_task_id``, printer-bridge registration, launcher-tab
         subscription via ``_on_task_id_allocated``) before raising.
         """
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         state = AgentState(
             f"pre-{tab_id}",
             agent=agent,

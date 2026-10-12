@@ -1,9 +1,8 @@
-"""``WorktreeSorcarAgent.work_dir`` leaves the worktree with the worktree.
+"""``ChatSorcarAgent.work_dir`` leaves the worktree with the worktree.
 
-``WorktreeSorcarAgent.run`` redirects ``work_dir`` into the task's
-``.kiss-worktrees/kiss_wt-*`` checkout and ``RelentlessAgent._reset``
-stores that path in ``self.work_dir``.  Once the worktree is torn down
-(auto-commit + squash-merge on the next run, ``merge``, ``discard``,
+The agent's ``create_worktree`` tool redirects ``work_dir`` into the
+task's ``.kiss-worktrees/kiss_wt-*`` checkout.  Once the worktree is
+torn down (retired for review on the next run, ``merge``, ``discard``,
 or a server tab teardown) the attribute used to keep naming the
 removed directory, and every later reader — the task-update side
 channel, ``run_agent`` sub-tasks, the printer's image resolver — was
@@ -26,10 +25,17 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar import worktree_sorcar_agent as wta_mod
+from kiss.agents.sorcar import sorcar_agent as wta_mod
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.tests.server.parallel_agent_harness import CapturePrinter, IsolatedKissHome
+from kiss.tests.server.parallel_agent_harness import (
+    STANDIN_MODEL,
+    CapturePrinter,
+    IsolatedKissHome,
+    StandInModelServer,
+    finish_response,
+    tool_call_response,
+)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -59,9 +65,9 @@ def _make_repo_with_worktree(root: Path) -> tuple[Path, Path, str]:
 
 def _agent_in_worktree(
     repo: Path, wt_dir: Path, branch: str, *, offset: str = "pkg",
-) -> WorktreeSorcarAgent:
+) -> ChatSorcarAgent:
     """An agent whose last run lived in ``wt_dir/<offset>``."""
-    agent = WorktreeSorcarAgent("test")
+    agent = ChatSorcarAgent("test")
     wt_work_dir = wt_dir / offset if offset else wt_dir
     agent._wt = GitWorktree(
         repo_root=repo, branch=branch, original_branch="main",
@@ -105,21 +111,26 @@ class TestWorkDirRestoredWhenWorktreeRemoved:
 
         assert agent.work_dir == str(repo)
 
-    def test_release_worktree_restores_work_dir(
+    def test_retire_previous_worktree_restores_work_dir(
         self, tmp_path: Path, no_llm_commit_message: None,
     ) -> None:
-        """The automatic retire-on-next-run path (``_release_worktree``)."""
+        """The retire-on-next-run path (``_retire_previous_worktree``).
+
+        The pending work is committed to its own branch and kept for
+        review, never merged; the directory is gone, so ``work_dir``
+        goes back to the parent repository.
+        """
         repo, wt_dir, branch = _make_repo_with_worktree(tmp_path)
         (wt_dir / "pkg" / "new.py").write_text("y = 2\n")
         agent = _agent_in_worktree(repo, wt_dir, branch)
-        agent.auto_commit_enabled = True
 
-        released = agent._release_worktree()
+        agent._retire_previous_worktree()
 
-        assert released == "main"
         assert agent._wt is None
+        assert not wt_dir.exists()
         assert agent.work_dir == str(repo / "pkg")
-        assert (repo / "pkg" / "new.py").read_text() == "y = 2\n"
+        assert not (repo / "pkg" / "new.py").exists()
+        assert _git(repo, "show", f"{branch}:pkg/new.py") == "y = 2"
 
     def test_merge_restores_work_dir(
         self, tmp_path: Path, no_llm_commit_message: None,
@@ -161,11 +172,16 @@ class TestWorkDirRestoredWhenWorktreeRemoved:
 class TestWorkDirUntouchedWhenWorktreeKept:
     """Preserved worktrees still exist, so ``work_dir`` must keep naming them."""
 
-    def test_no_autocommit_preserve_keeps_work_dir(self, tmp_path: Path) -> None:
+    def test_rejected_commit_preserve_keeps_work_dir(
+        self, tmp_path: Path, no_llm_commit_message: None,
+    ) -> None:
+        """A pre-commit hook refusing the commit keeps the only copy of the work."""
         repo, wt_dir, branch = _make_repo_with_worktree(tmp_path)
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
         (wt_dir / "pkg" / "new.py").write_text("y = 2\n")
         agent = _agent_in_worktree(repo, wt_dir, branch)
-        agent.auto_commit_enabled = False
 
         assert agent._finalize_worktree() is False
 
@@ -202,30 +218,44 @@ def env() -> Iterator[IsolatedKissHome]:
         isolated.cleanup()
 
 
-def _abort_before_llm(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``llm_call_hook`` that ends the run before any network call."""
-    raise RuntimeError("stop-before-llm")
+def _create_worktree_then_finish(request: dict[str, Any]) -> dict[str, Any]:
+    """Stand-in model: ``create_worktree`` first, then ``finish`` until it passes.
+
+    The worktree guard refuses the first ``finish`` while the worktree
+    is unmerged and lets the second through, so the run ends with the
+    worktree pending — the state a tab teardown or discard acts on.
+    """
+    if any(m.get("role") == "tool" for m in request["messages"]):
+        return finish_response("left the worktree pending")
+    return tool_call_response("create_worktree", {})
 
 
-def _run_in_worktree(agent: WorktreeSorcarAgent, repo: Path) -> Path:
-    """Drive a real ``run`` on *repo*; return the worktree it set up.
+def _run_in_worktree(agent: ChatSorcarAgent, repo: Path) -> Path:
+    """Drive a real ``run`` on *repo*; return the worktree the agent made.
 
     ``RelentlessAgent._reset`` runs for real, so ``agent.work_dir`` is
-    the value production code hands to later readers.  The run is
-    ended by the hook before the first LLM call.
+    the value production code hands to later readers.  The stand-in
+    model calls ``create_worktree`` and then finishes, leaving the
+    worktree pending.
     """
-    agent.run(
-        prompt_template="x",
-        work_dir=str(repo),
-        printer=CapturePrinter(),
-        model_name="claude-haiku-4-5",
-        llm_call_hook=_abort_before_llm,
-        web_tools=False,
-        is_parallel=False,
-        verbose=False,
-        max_steps=3,
-    )
-    assert agent._wt is not None, "run() did not set up a worktree"
+    standin = StandInModelServer(_create_worktree_then_finish)
+    try:
+        result = agent.run(
+            prompt_template="x",
+            work_dir=str(repo),
+            printer=CapturePrinter(),
+            model_name=STANDIN_MODEL,
+            model_config=standin.model_config,
+            web_tools=False,
+            is_parallel=False,
+            verbose=False,
+            max_steps=5,
+            max_sub_sessions=1,
+        )
+    finally:
+        standin.stop()
+    assert "left the worktree pending" in result, result
+    assert agent._wt is not None, "the agent did not set up a worktree"
     assert agent.work_dir == str(agent._wt.wt_dir)
     return agent._wt.wt_dir
 
@@ -234,7 +264,7 @@ class TestRunThenTeardownEndToEnd:
     """The full path: ``run`` → ``_reset`` → teardown → ``work_dir`` restored."""
 
     def test_discard_after_run(self, env: IsolatedKissHome) -> None:
-        agent = WorktreeSorcarAgent("workdir-restore-discard")
+        agent = ChatSorcarAgent("workdir-restore-discard")
         wt_dir = _run_in_worktree(agent, env.repo)
 
         agent.discard()
@@ -245,9 +275,8 @@ class TestRunThenTeardownEndToEnd:
 
     def test_retire_for_disposal_after_run(self, env: IsolatedKissHome) -> None:
         """The server's tab-teardown path publishes the work and drops the claim."""
-        agent = WorktreeSorcarAgent("workdir-restore-retire")
+        agent = ChatSorcarAgent("workdir-restore-retire")
         wt_dir = _run_in_worktree(agent, env.repo)
-        agent.auto_commit_enabled = True
 
         assert agent.retire_for_disposal() is True
 

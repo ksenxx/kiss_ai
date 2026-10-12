@@ -165,7 +165,7 @@ class TestSystemPromptTaskSettings(_DBRedirect):
         assert "- Max budget (USD): $3.50" in body
         assert "- Starting time: " in body
         assert "- Parallel mode: sequential" in body
-        assert "- Worktree mode: no worktree" in body
+        assert "Worktree mode" not in body
         assert f"- Chat id: {agent.chat_id}" in body
         assert f"- Task id: {agent.last_task_id}" in body
         assert "- Is subagent: no" in body
@@ -200,7 +200,6 @@ class TestSystemPromptTaskSettings(_DBRedirect):
             docker_image=None,
         )
         agent._is_parallel = True
-        agent._run_is_worktree = True
         agent._chat_id = "c" * 32
         agent._last_task_id = "b" * 32
         agent._subagent_info = {"parent_task_id": PARENT_ID}
@@ -208,7 +207,6 @@ class TestSystemPromptTaskSettings(_DBRedirect):
         assert "- Model name: m1" in section
         assert "- Max budget (USD): $2.00" in section
         assert "- Parallel mode: parallel" in section
-        assert "- Worktree mode: worktree" in section
         assert f"- Chat id: {'c' * 32}" in section
         assert f"- Task id: {'b' * 32}" in section
         assert "- Is subagent: yes" in section
@@ -348,13 +346,16 @@ class TestTaskSettingsEventPersisted(_DBRedirect):
         assert settings["model"] == "gpt-4o-mini"
         assert settings["work_dir"] == str(Path(self.tmpdir).resolve())
         assert settings["is_parallel"] is True
-        assert settings["is_worktree"] is False
+        assert "is_worktree" not in settings
         assert settings["max_budget"] == 3.5
         assert settings["chat_id"] == agent.chat_id
         assert settings["task_id"] == agent.last_task_id
         assert settings["is_subagent"] is False
         assert "parent_task_id" not in settings
         assert settings["start_ts"] > 0
+        # The machine the run is on: the s10s hub sync sends only the tasks
+        # that ran on the sending machine, and this is how it tells.
+        assert settings["host"] == platform.node() != ""
         # The event's start time is the row's startTs — one timestamp.
         extra = _extra(session)
         assert extra["startTs"] == settings["start_ts"]
@@ -410,7 +411,6 @@ class TestWithTaskSettingsSynthesis(_DBRedirect):
                 "model": "m3",
                 "work_dir": "/w",
                 "is_parallel": True,
-                "is_worktree": True,
                 "max_budget": 4.25,
                 "startTs": 1234,
                 "subagent": {"parent_task_id": PARENT_ID},
@@ -428,7 +428,6 @@ class TestWithTaskSettingsSynthesis(_DBRedirect):
             "model": "m3",
             "work_dir": "/w",
             "is_parallel": True,
-            "is_worktree": True,
             "chat_id": chat_id,
             "task_id": task_id,
             "start_ts": 1234,

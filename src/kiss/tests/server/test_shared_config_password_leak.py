@@ -41,8 +41,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import socket
-import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -53,21 +51,7 @@ from websockets.asyncio.client import connect
 from kiss.core import vscode_config as vc
 from kiss.core.vscode_config import load_config, save_config
 from kiss.server.web_server import RemoteAccessServer
-
-
-def _pick_free_port() -> int:
-    """Return an OS-assigned free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Permissive SSL context for the dev self-signed cert."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 def test_step1_save_restore_teardown_pattern_pins_overrides() -> None:
@@ -143,7 +127,7 @@ class TestAuthHandshakeAfterLeakers(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         """Start a real ``RemoteAccessServer`` on the shared config."""
-        self._port = _pick_free_port()
+        self._port = find_free_port()
         self._server = RemoteAccessServer(
             host="127.0.0.1",
             port=self._port,
@@ -159,7 +143,7 @@ class TestAuthHandshakeAfterLeakers(IsolatedAsyncioTestCase):
     async def _handshake_reply(self) -> Any:
         """Send one empty-password ``auth`` frame; return the reply type."""
         async with await connect(
-            f"wss://127.0.0.1:{self._port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self._port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             raw = await asyncio.wait_for(ws.recv(), timeout=10)

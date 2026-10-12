@@ -204,11 +204,14 @@ function testAddTabControlIsAccessibleButton() {
     'new-chat control must be named "New chat" for screen readers',
   );
 
-  // "+" opens one fresh chat and retires the idle one it leaves (no
+  // "+" on a chat that is still new only focuses the composer; the
+  // daemon's task-text echo makes the boot chat "used" first.  "+" then
+  // opens one fresh chat and retires the idle one it leaves (no
   // task, no question, no draft), so the count does not grow: the set
   // of open chats gains exactly one id.
   const left = win._testApi.getActiveTabId();
   const before = openChatIds(win);
+  send(win, {type: 'setTaskText', text: 'first task'});
   addBtn.click();
   const after = openChatIds(win);
   const added = after.filter(id => before.indexOf(id) === -1);

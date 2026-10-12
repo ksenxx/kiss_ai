@@ -22,11 +22,10 @@ from __future__ import annotations
 import logging
 import queue
 import threading
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 logger = logging.getLogger(__name__)
 
@@ -73,15 +72,10 @@ class AgentState:
         "is_task_active",
         "is_merging",
         "merge_thread",
-        "is_running_non_wt",
-        "non_wt_repo_root",
-        "wt_merge_deferred_branch",
         "interrupted_by_shutdown",
         "stop_acknowledged",
         "frontend_closed",
-        "use_worktree",
         "use_parallel",
-        "auto_commit_mode",
         "last_user_prompt",
         "last_result_summary",
         "client_run_token",
@@ -91,7 +85,7 @@ class AgentState:
         self,
         task_id: str,
         *,
-        agent: WorktreeSorcarAgent | None = None,
+        agent: ChatSorcarAgent | None = None,
         chat_id: str = "",
         tab_id: str = "",
         conn_id: str = "",
@@ -102,7 +96,7 @@ class AgentState:
         is_task_active: bool = False,
     ) -> None:
         self.task_id: str = task_id
-        self.agent: WorktreeSorcarAgent | None = agent
+        self.agent: ChatSorcarAgent | None = agent
         self.chat_id: str = chat_id
         self.tab_id: str = tab_id
         self.conn_id: str = conn_id
@@ -145,18 +139,6 @@ class AgentState:
         # must never be cut short.  It runs in the event loop's default
         # executor, not in ``task_thread``.
         self.merge_thread: threading.Thread | None = None
-        self.is_running_non_wt: bool = False
-        # Resolved main-repo root a non-worktree task occupies (set
-        # when the task starts), so worktree merges in OTHER
-        # repositories are not blocked by it (repo-aware busy guard).
-        self.non_wt_repo_root: Path | None = None
-        # Branch of this tab's pending worktree whose merge was refused
-        # because another tab's non-worktree task occupied the main
-        # tree.  ``_merge_deferred_worktrees`` retries the merge once
-        # that task's changes are committed; cleared the moment any
-        # worktree action actually runs.  Keyed by branch so a stale
-        # value can never target a later worktree of the same tab.
-        self.wt_merge_deferred_branch: str | None = None
         self.interrupted_by_shutdown: bool = False
         # Raised by the task runner the moment a cancelling
         # ``KeyboardInterrupt`` has been caught and turned into the
@@ -167,9 +149,7 @@ class AgentState:
         # alive.  Reset with the other per-run flags when the run ends.
         self.stop_acknowledged: bool = False
         self.frontend_closed: bool = False
-        self.use_worktree: bool = True
         self.use_parallel: bool = True
-        self.auto_commit_mode: bool = True
         self.last_user_prompt: str = ""
         self.last_result_summary: str = ""
         # The client-minted per-submission ``taskId`` of the ``run``
@@ -353,7 +333,7 @@ def find_by_agent(agent: object) -> AgentState | None:
     return None
 
 
-def current_agent() -> WorktreeSorcarAgent | None:
+def current_agent() -> ChatSorcarAgent | None:
     """Return the agent whose task thread is the calling thread, or ``None``.
 
     Lets code that runs on a task's worker thread without a handle to

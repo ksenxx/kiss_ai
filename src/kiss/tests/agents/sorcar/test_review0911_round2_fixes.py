@@ -19,17 +19,16 @@ remaining issues (see ``tmp/review2-sorcar.md``):
    after a failed replay and then receives later appends (replay order
    became middle, old, new), and undefined when mtimes tie (random
    ``<pid>-<uuid>`` pathname order).
-3. ``WorktreeSorcarAgent._try_setup_worktree`` captured the main
+3. ``ChatSorcarAgent._try_setup_worktree`` captured the main
    tree's branch and dirty state WITHOUT the cross-process
-   ``kiss-reclaim.lock`` flock; on the pooled-spare path it completed
-   while another process held the flock, so a peer's merge could
-   mutate the shared main tree mid-capture.
+   ``kiss-reclaim.lock`` flock, so a peer's merge could mutate the
+   shared main tree mid-capture.
 
 Everything here is real: real threads receiving real
 ``PyThreadState_SetAsyncExc`` injections, real journal files and a
 real SQLite database (made to refuse writes by really replacing the
-database path with a directory), real git repos, a real pooled spare
-worktree, and a real second OS process holding a real ``flock``.
+database path with a directory), real git repos, and a real second OS
+process holding a real ``flock``.
 Nothing is mocked or patched.
 """
 
@@ -52,8 +51,7 @@ from pathlib import Path
 import pytest
 
 import kiss.agents.sorcar.persistence as persistence
-from kiss.agents.sorcar import worktree_pool
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.tests.conftest import posix_only
 
 # ---------------------------------------------------------------------------
@@ -528,17 +526,15 @@ handle.close()
 class TestSetupWorktreeHoldsCrossProcessLock:
     """Finding 3: baseline capture must hold ``kiss-reclaim.lock``."""
 
-    def test_pooled_spare_setup_blocks_while_flock_held(self) -> None:
-        """With a real pooled spare available (the fast path, which
-        pre-fix took NO flock at all), ``_try_setup_worktree`` must
-        block while a second OS process holds ``kiss-reclaim.lock`` —
-        that peer may be mid stash/checkout/merge on the shared main
-        tree, and capturing the branch tip and dirty state meanwhile
-        reads a torn snapshot."""
+    def test_setup_blocks_while_flock_held(self) -> None:
+        """``_try_setup_worktree`` must block while a second OS process
+        holds ``kiss-reclaim.lock`` — that peer may be mid
+        stash/checkout/merge on the shared main tree, and capturing the
+        branch tip and dirty state meanwhile reads a torn snapshot."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
+            agent = ChatSorcarAgent("review0911r2-setup-lock")
             try:
-                assert worktree_pool.prewarm(repo, None), "no pooled spare"
                 (repo / "dirty.txt").write_text("uncommitted user edit\n")
                 held = Path(tmp) / "held"
                 release = Path(tmp) / "release"
@@ -555,12 +551,11 @@ class TestSetupWorktreeHoldsCrossProcessLock:
                         assert time.monotonic() < deadline, "holder never locked"
                         time.sleep(0.02)
 
-                    agent = WorktreeSorcarAgent("review0911r2-setup-lock")
                     done = threading.Event()
                     result: list[Path | None] = []
 
                     def setup() -> None:
-                        result.append(agent._try_setup_worktree(repo, None))
+                        result.append(agent._try_setup_worktree(repo, str(repo)))
                         done.set()
 
                     runner = threading.Thread(target=setup, daemon=True)
@@ -585,23 +580,23 @@ class TestSetupWorktreeHoldsCrossProcessLock:
                     "dirty state was not captured into the worktree"
                 )
             finally:
-                worktree_pool.discard_all()
+                agent.discard()
 
     def test_uncontended_setup_does_not_self_deadlock(self) -> None:
-        """The slow path (empty pool) calls reclaim / sweep / create,
-        which each take the flock themselves; with the capture now
-        wrapping them in the same flock, the nested takes must
-        re-enter, not deadlock on a second file descriptor."""
+        """The setup calls reclaim / sweep / create, which each take the
+        flock themselves; with the capture now wrapping them in the
+        same flock, the nested takes must re-enter, not deadlock on a
+        second file descriptor."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
+            agent = ChatSorcarAgent("review0911r2-setup-reentry")
             try:
                 (repo / "dirty.txt").write_text("uncommitted user edit\n")
-                agent = WorktreeSorcarAgent("review0911r2-setup-reentry")
                 done = threading.Event()
                 result: list[Path | None] = []
 
                 def setup() -> None:
-                    result.append(agent._try_setup_worktree(repo, None))
+                    result.append(agent._try_setup_worktree(repo, str(repo)))
                     done.set()
 
                 runner = threading.Thread(target=setup, daemon=True)
@@ -615,4 +610,4 @@ class TestSetupWorktreeHoldsCrossProcessLock:
                 assert agent._wt is not None
                 assert (agent._wt.wt_dir / "dirty.txt").exists()
             finally:
-                worktree_pool.discard_all()
+                agent.discard()

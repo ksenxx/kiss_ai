@@ -11,7 +11,7 @@ test pins down the leaf-level
 
 This file pins down the *user-facing* contract one level up: when a
 file appears during the LLM commit-message call,
-:meth:`WorktreeSorcarAgent._finalize_worktree` must NOT log the
+:meth:`ChatSorcarAgent._finalize_worktree` must NOT log the
 misleading "pre-commit hook may have rejected" warning.  Before the
 fix, that wording was the only signal in the kiss-web log — and
 because no pre-commit hook actually existed in the repo, the wrong
@@ -30,9 +30,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from kiss.agents.sorcar import worktree_sorcar_agent as wta_mod
+from kiss.agents.sorcar import sorcar_agent as wta_mod
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo_with_worktree(tmp: Path) -> tuple[Path, Path, str]:
@@ -104,7 +104,7 @@ def test_finalize_worktree_no_spurious_hook_warning(
             wta_mod, "_generate_commit_message", racing_message_fn,
         )
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -114,7 +114,7 @@ def test_finalize_worktree_no_spurious_hook_warning(
         )
 
         with caplog.at_level(  # type: ignore[attr-defined]
-            logging.WARNING, logger="kiss.agents.sorcar.worktree_sorcar_agent",
+            logging.WARNING, logger="kiss.agents.sorcar.sorcar_agent",
         ):
             ok = agent._finalize_worktree()
 
@@ -178,7 +178,7 @@ def test_finalize_worktree_warning_includes_porcelain_when_truly_stuck(
             wta_mod, "_generate_commit_message", msg_fn,
         )
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -188,7 +188,7 @@ def test_finalize_worktree_warning_includes_porcelain_when_truly_stuck(
         )
 
         with caplog.at_level(  # type: ignore[attr-defined]
-            logging.WARNING, logger="kiss.agents.sorcar.worktree_sorcar_agent",
+            logging.WARNING, logger="kiss.agents.sorcar.sorcar_agent",
         ):
             ok = agent._finalize_worktree()
 

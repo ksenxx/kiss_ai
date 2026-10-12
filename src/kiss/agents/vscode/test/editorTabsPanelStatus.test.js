@@ -6,7 +6,9 @@
 // End-to-end tests for editor-tabs mode's TAB STATUS (icon + title
 // prefix) and finished-task reveal (out/SorcarPanelManager.js +
 // out/SorcarSidebarView.js) against a real local-WSS daemon
-// stub:
+// stub. The mode runs ONE chat editor tab whose webview mirrors the
+// whole registry; `panelTitle {title, state}` describes the chat on
+// screen and paints that single tab:
 //  - `panelTitle {state:'running'}` swaps the tab ICON to the green ring
 //    spinner (media/spinner-running.svg, SMIL-rotated like the
 //    composer's wait spinner) and leaves the title undecorated;
@@ -17,7 +19,8 @@
 //    without stealing focus (preserveFocus);
 //  - a serializer-revived panel drops the status prefix a previous
 //    session persisted into its title, including the 🟢 / 🔴 circles
-//    older versions used.
+//    older versions used; a husk revived while a panel already exists
+//    is dropped (one panel only).
 
 'use strict';
 
@@ -183,20 +186,35 @@ const {SorcarPanelManager, CHAT_PANEL_VIEW_TYPE} = require(
   path.join(OUT_DIR, 'SorcarPanelManager.js'),
 );
 
+/** Revive *panel* through the registered serializer, as the workbench
+ * does after a window reload. */
+function revive(panel) {
+  panel.active = false;
+  return registeredSerializer.serializer.deserializeWebviewPanel(panel, {});
+}
+
 async function runTest() {
   server.listen(endpointPath);
   const manager = new SorcarPanelManager(vscodeStub.Uri.file(EXT_ROOT));
   manager.registerSerializer();
   assert.strictEqual(registeredSerializer.viewType, CHAT_PANEL_VIEW_TYPE);
 
-  manager.openNewChat();
+  const controller = manager.open();
+  assert.strictEqual(createdPanels.length, 1, 'open() creates the panel');
+  assert.strictEqual(manager.controller(), controller);
   const panel = createdPanels[0];
-  const m = /data-kiss-tab-id="([^"]+)"/.exec(panel.webview.html);
-  assert.ok(m, 'panel html must carry data-kiss-tab-id');
-  const tabId = m[1];
+  assert.strictEqual(panel.viewType, CHAT_PANEL_VIEW_TYPE);
+  assert.ok(
+    /<body[^>]*class="editor-tab-mode"/.test(panel.webview.html),
+    'the panel webview runs main.js in editor-tab mode',
+  );
+  assert.ok(
+    !/data-kiss-tab-id=/.test(panel.webview.html),
+    'the single panel is pinned to no root tab id',
+  );
 
   // --- no state: plain title -------------------------------------------
-  panel._recv.fire({type: 'panelTitle', title: 'fix the bug', tabId, state: ''});
+  panel._recv.fire({type: 'panelTitle', title: 'fix the bug', state: ''});
   await waitFor(
     () => panel.title === 'fix the bug',
     'a stateless panelTitle must set the plain title',
@@ -212,7 +230,6 @@ async function runTest() {
   panel._recv.fire({
     type: 'panelTitle',
     title: 'fix the bug',
-    tabId,
     state: 'running',
   });
   await waitFor(
@@ -230,7 +247,6 @@ async function runTest() {
   panel._recv.fire({
     type: 'panelTitle',
     title: 'fix the bug (step 2)',
-    tabId,
     state: 'running',
   });
   await waitFor(
@@ -262,12 +278,7 @@ async function runTest() {
   );
 
   // --- ok: steady green tick ---------------------------------------------
-  panel._recv.fire({
-    type: 'panelTitle',
-    title: 'fix the bug',
-    tabId,
-    state: 'ok',
-  });
+  panel._recv.fire({type: 'panelTitle', title: 'fix the bug', state: 'ok'});
   await waitFor(
     () => panel.title === TICK + 'fix the bug',
     'a successful task must paint the green tick',
@@ -279,12 +290,7 @@ async function runTest() {
   );
 
   // --- fail: steady red cross --------------------------------------------
-  panel._recv.fire({
-    type: 'panelTitle',
-    title: 'fix the bug',
-    tabId,
-    state: 'fail',
-  });
+  panel._recv.fire({type: 'panelTitle', title: 'fix the bug', state: 'fail'});
   await waitFor(
     () => panel.title === CROSS + 'fix the bug',
     'a failed task must paint the red cross',
@@ -293,6 +299,23 @@ async function runTest() {
     panel.iconPath && panel.iconPath.fsPath,
     KISS_ICON,
     'a failed task shows the KISS logo, not the spinner',
+  );
+
+  // --- switching chats in place repaints from the shown chat ------------
+  // The webview switched to another chat of the registry: its title
+  // and status replace the previous chat's on the one tab.
+  panel._recv.fire({type: 'panelTitle', title: 'other chat', state: ''});
+  await waitFor(
+    () => panel.title === 'other chat',
+    'the tab describes whichever chat is on screen',
+  );
+  assert.strictEqual(panel.iconPath && panel.iconPath.fsPath, KISS_ICON);
+
+  // --- an empty title falls back to the product name --------------------
+  panel._recv.fire({type: 'panelTitle', title: '', state: ''});
+  await waitFor(
+    () => panel.title === require(path.join(OUT_DIR, 'brand.js')).PRODUCT_NAME,
+    'a new chat with no title shows the product name',
   );
 
   // --- revealPanel brings the tab forward without stealing focus --------
@@ -312,7 +335,6 @@ async function runTest() {
   panel._recv.fire({
     type: 'panelTitle',
     title: TICK + 'deploy status',
-    tabId,
     state: 'fail',
   });
   await waitFor(
@@ -320,7 +342,21 @@ async function runTest() {
     'a chat legitimately titled with a leading tick must keep it',
   );
 
+  // --- a husk revived while the panel exists is dropped ------------------
+  const duplicate = makeFakePanel(CHAT_PANEL_VIEW_TYPE, TICK + 'old chat');
+  await revive(duplicate);
+  assert.ok(duplicate.disposed, 'one panel only: the revived husk is dropped');
+  assert.strictEqual(
+    manager.controller(),
+    controller,
+    'the live panel keeps its controller',
+  );
+
   // --- a revived panel drops the persisted status prefix ----------------
+  // The panel closed before the reload; each revival adopts the husk
+  // as THE panel, so the previous one is closed before the next.
+  panel.dispose();
+  assert.strictEqual(manager.controller(), undefined);
   for (const [prefix, what] of [
     [TICK, 'tick'],
     [CROSS, 'cross'],
@@ -329,10 +365,8 @@ async function runTest() {
     [LEGACY_RED, 'legacy red circle'],
   ]) {
     const revived = makeFakePanel(CHAT_PANEL_VIEW_TYPE, prefix + 'old chat');
-    revived.active = false;
-    await registeredSerializer.serializer.deserializeWebviewPanel(revived, {
-      editorRootTabId: 'revived-tab-' + what,
-    });
+    await revive(revived);
+    assert.ok(!revived.disposed, 'the husk is adopted when no panel exists');
     assert.strictEqual(
       revived.title,
       'old chat',
@@ -343,36 +377,48 @@ async function runTest() {
       KISS_ICON,
       'a revived panel gets the KISS logo icon',
     );
+    assert.ok(manager.controller(), 'a revived panel gets a controller');
+    revived.dispose();
   }
 
   // --- ... and leaves braille that is not a spinner frame alone ---------
   const braille = makeFakePanel(CHAT_PANEL_VIEW_TYPE, '\u28FF load-test notes');
-  braille.active = false;
-  await registeredSerializer.serializer.deserializeWebviewPanel(braille, {
-    editorRootTabId: 'revived-tab-braille',
-  });
+  await revive(braille);
   assert.strictEqual(
     braille.title,
     '\u28FF load-test notes',
     'revival must only strip the frames the spinner can have persisted',
   );
+  braille.dispose();
 
   // --- ... but strips only the ONE decoration it added itself ------------
   const revived2 = makeFakePanel(
     CHAT_PANEL_VIEW_TYPE,
     CROSS + TICK + 'deploy status',
   );
-  revived2.active = false;
-  await registeredSerializer.serializer.deserializeWebviewPanel(revived2, {
-    editorRootTabId: 'revived-tab-2',
-  });
+  await revive(revived2);
   assert.strictEqual(
     revived2.title,
     TICK + 'deploy status',
     'revival must keep a legitimate leading tick in the chat title',
   );
+  // A revived panel is painted like any other.
+  revived2._recv.fire({
+    type: 'panelTitle',
+    title: 'deploy status',
+    state: 'running',
+  });
+  await waitFor(
+    () => revived2.iconPath && revived2.iconPath.fsPath === SPINNER_ICON,
+    'a revived panel paints the running state',
+  );
+  assert.strictEqual(revived2.title, 'deploy status');
 
   manager.dispose();
+  assert.ok(
+    !revived2.disposed,
+    'teardown leaves the panel standing for the serializer',
+  );
 }
 /**
  * An installed (packaged) extension names its icons through
@@ -400,22 +446,16 @@ async function runHashedIconsTest() {
   );
   const manager = new SorcarPanelManager(vscodeStub.Uri.file(packaged));
   const before = createdPanels.length;
-  manager.openNewChat();
+  manager.open();
   const panel = createdPanels[before];
-  const tabId = /data-kiss-tab-id="([^"]+)"/.exec(panel.webview.html)[1];
-  panel._recv.fire({type: 'panelTitle', title: 'hashed', tabId, state: ''});
+  panel._recv.fire({type: 'panelTitle', title: 'hashed', state: ''});
   await waitFor(() => panel.title === 'hashed');
   assert.strictEqual(
     panel.iconPath.fsPath,
     path.join(packaged, hashedKiss),
     'idle icon follows index.json',
   );
-  panel._recv.fire({
-    type: 'panelTitle',
-    title: 'hashed',
-    tabId,
-    state: 'running',
-  });
+  panel._recv.fire({type: 'panelTitle', title: 'hashed', state: 'running'});
   await waitFor(
     () => panel.iconPath.fsPath === path.join(packaged, hashedSpinner),
     'spinner follows index.json',

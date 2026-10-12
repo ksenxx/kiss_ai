@@ -12,7 +12,7 @@ and what the agent reported it did.
 These tests exercise the real
 :func:`~kiss.server.helpers.generate_commit_message_from_diff`,
 :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`, and
-:meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._auto_commit_worktree`
+:meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._commit_worktree`
 paths against on-disk git repositories.  The LLM call inside the
 helper is forced through its ``except Exception`` fallback by
 patching :class:`~kiss.core.kiss_agent.KISSAgent` to raise — so the
@@ -27,9 +27,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import auto_commit_changes
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(path: Path) -> Path:
@@ -146,7 +146,7 @@ class TestAutoCommitChangesFallbackIncludesResult:
 
 
 class TestWorktreeAutoCommitIncludesTaskResult:
-    """End-to-end: ``WorktreeSorcarAgent._auto_commit_worktree``
+    """End-to-end: ``ChatSorcarAgent._commit_worktree``
     commits with a message that includes BOTH the task description
     (``self._last_user_prompt``) and the task result
     (``self._last_result_summary``).
@@ -174,7 +174,7 @@ class TestWorktreeAutoCommitIncludesTaskResult:
             repo, wt_dir = self._make_worktree(tmp, "kiss/wt-test-result")
             (wt_dir / "new.txt").write_text("hello\n")
 
-            agent = WorktreeSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             agent._wt = GitWorktree(
                 repo_root=repo,
                 branch="kiss/wt-test-result",
@@ -186,7 +186,7 @@ class TestWorktreeAutoCommitIncludesTaskResult:
             agent._last_result_summary = "Implemented feature Z in z.py"
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             msg = _head_message(wt_dir)
             assert "User prompt:\nimplement feature Z" in msg
@@ -197,7 +197,7 @@ class TestWorktreeAutoCommitIncludesTaskResult:
             repo, wt_dir = self._make_worktree(tmp, "kiss/wt-test-nores")
             (wt_dir / "new.txt").write_text("hi\n")
 
-            agent = WorktreeSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             agent._wt = GitWorktree(
                 repo_root=repo,
                 branch="kiss/wt-test-nores",
@@ -207,7 +207,7 @@ class TestWorktreeAutoCommitIncludesTaskResult:
             )
             agent._last_user_prompt = "implement feature Q"
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             msg = _head_message(wt_dir)
             assert "Result:" not in msg

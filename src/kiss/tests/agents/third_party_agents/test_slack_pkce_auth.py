@@ -6,7 +6,7 @@
 
 ``authenticate_slack()`` starts a PKCE authorization-code session on the
 loopback redirect port; the tests play the user's browser by requesting
-``http://127.0.0.1:53682/callback`` with the code, and a real local HTTP
+the loopback callback with the code, and a real local HTTP
 server (``KISS_SLACK_BASE_URL``) plays Slack's token endpoint and Web
 API.  Muse-auth mode is covered in ``test_muse_auth_channels.py``.
 """
@@ -24,7 +24,6 @@ import requests
 
 from kiss.agents.third_party_agents import _oauth_apps
 from kiss.agents.third_party_agents._device_auth import ConsentSession
-from kiss.agents.third_party_agents._oauth_apps import LOOPBACK_PORT, LOOPBACK_REDIRECT_URI
 from kiss.agents.third_party_agents.slack.slack_sea import (
     _USER_SCOPES,
     SlackAgent,
@@ -40,25 +39,27 @@ from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     sign_in,
     start_sign_in,
 )
-from kiss.tests.conftest import hold_loopback_port, occupy_loopback_port
+from kiss.tests.conftest import occupy_loopback_port
 
 
 @pytest.fixture()
-def slack(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[SlackOAuthState, SlackApiServer]]:
+def slack(
+    loopback_redirect_port: int, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[tuple[SlackOAuthState, SlackApiServer]]:
     """Run the emulated Slack in legacy (plaintext token file) mode.
 
-    Reserves the fixed redirect port across pytest processes for the
-    test's duration.
+    The redirect listener runs on the test's own ephemeral port.
     """
     oauth = SlackOAuthState()
     server = SlackApiServer(oauth)
-    monkeypatch.setenv("KISS_MUSE_AUTH", "0")
-    monkeypatch.setenv("KISS_SLACK_BASE_URL", server.base_url + "/")
-    monkeypatch.setenv("KISS_SLACK_CLIENT_ID", CLIENT_ID)
-    with hold_loopback_port(LOOPBACK_PORT):
+    try:
+        monkeypatch.setenv("KISS_MUSE_AUTH", "0")
+        monkeypatch.setenv("KISS_SLACK_BASE_URL", server.base_url + "/")
+        monkeypatch.setenv("KISS_SLACK_CLIENT_ID", CLIENT_ID)
         yield oauth, server
         ConsentSession.cancel_active("slack")
-    server.stop()
+    finally:
+        server.stop()
 
 
 def _tools(agent: SlackAgent) -> dict[str, Any]:
@@ -92,7 +93,7 @@ def test_authorize_url_requests_user_scopes_with_pkce(
     assert query["user_scope"] == _USER_SCOPES
     assert "scope" not in query  # bot scopes need an https redirect
     assert query["code_challenge_method"] == "S256"
-    assert query["redirect_uri"] == LOOPBACK_REDIRECT_URI
+    assert query["redirect_uri"] == _oauth_apps.LOOPBACK_REDIRECT_URI
 
     # Before the user approves, finishing reports pending; clearing
     # cancels the session and frees the redirect port.
@@ -115,7 +116,7 @@ def test_sign_in_stores_rotating_user_token_and_refreshes(
     assert (done["team"], done["user"]) == ("KISS", "alice")
     exchange = oauth.forms[-1]
     assert exchange["grant_type"] == "authorization_code"
-    assert exchange["redirect_uri"] == LOOPBACK_REDIRECT_URI
+    assert exchange["redirect_uri"] == _oauth_apps.LOOPBACK_REDIRECT_URI
     assert "client_secret" not in exchange
     assert server.requests[-1] == ("/api/auth.test", "Bearer xoxp-access-1")
     cfg = _load_config("default")
@@ -179,7 +180,7 @@ def test_rejected_or_failed_sign_in_keeps_the_stored_token(
     oauth.challenge = "not-the-challenge"
     state = parse_qs(urlsplit(started["verification_uri"]).query)["state"][0]
     requests.get(
-        f"http://127.0.0.1:{LOOPBACK_PORT}/callback",
+        f"http://127.0.0.1:{_oauth_apps.LOOPBACK_PORT}/callback",
         params={"code": "test-code", "state": state},
         timeout=10,
     )
@@ -243,7 +244,7 @@ def test_busy_redirect_port_is_reported(
     slack: tuple[SlackOAuthState, SlackApiServer],
 ) -> None:
     """Another program holding the redirect port makes the start fail cleanly."""
-    with occupy_loopback_port(LOOPBACK_PORT):
+    with occupy_loopback_port(_oauth_apps.LOOPBACK_PORT):
         result = json.loads(_tools(SlackAgent())["authenticate_slack"]())
     assert result["ok"] is False
     assert "Could not start the Slack sign-in" in result["error"]

@@ -195,12 +195,12 @@ export interface ChatWebviewHost {
 }
 
 /**
- * Editor-tabs-mode notifications a per-panel controller raises for its
- * panel manager: everything the webview asks of its hosting EDITOR TAB
- * rather than of the daemon.
+ * Editor-tabs-mode notifications a hosted controller raises for the
+ * panel manager: everything the webview asks of its hosting EDITOR
+ * TAB (or sidebar panel) rather than of the daemon.
  */
 export type PanelEvent =
-  // The root chat tab renamed itself or its task's status changed;
+  // The chat on screen renamed itself or its task's status changed;
   // retitle the editor tab. `state` is '' (no task yet), 'running',
   // 'ok' or 'fail' — the internal tab strip's status icon.
   | {kind: 'title'; title: string; state?: string}
@@ -208,78 +208,36 @@ export type PanelEvent =
   // `force`: a question is waiting, so reveal even while the user is
   // in a text editor.
   | {kind: 'reveal'; force?: boolean}
-  // A task just started in the panel's chat tab: bring the Task Info
+  // A task just started in the chat on screen: bring the Task Info
   // view up in the secondary side bar, keyboard focus kept in the chat.
   | {kind: 'taskStarted'}
-  // Open another chat as a new editor tab (fresh when chatId is '').
+  // The history panel clicked a chat, or the Task Info view's Apps
+  // subpanel launched a connect task: show it in the chat panel.
   | {
       kind: 'openChat';
       chatId?: string;
       taskId?: string | number | null;
       title?: string;
-      // Fresh chats: composer draft to seed the new panel's textarea.
+      // The connect task's prompt, submitted in a new chat (autoSubmit).
       pendingText?: string;
-      // Fresh chats: submit pendingText as the first task once ready.
       autoSubmit?: boolean;
     }
-  // Close this panel. retire=true means the USER closed the root chat
-  // inside the panel, so the host must also retire the tab from the
-  // daemon registry; without it the registry already dropped the tab.
-  | {kind: 'closeSelf'; retire?: boolean}
-  // The root chat tab bound to a backend chat id (dedupe key for
-  // history opens).
-  | {kind: 'chatBound'; chatId: string}
-  // The client gave up on the panel's own registry registration
-  // (`openTab`/`resumeSession` dropped after an outage): the daemon
-  // never saw it and the webview does not retry it, so the panel's
-  // chat claim is void.
-  | {kind: 'registrationDropped'}
   // The panel's live task-info values changed (tokens, cost, steps,
-  // time, machine, workdir, max budget, task update): the panel
-  // manager caches them and, when this is the ACTIVE panel, relays
-  // them to the secondary sidebar's Task Info view.
+  // time, workdir, max budget, task update): the panel
+  // manager relays them to the secondary sidebar's Task Info view.
   | {
       kind: 'metaUpdate';
       values: MetaPanelValues;
       taskUpdate: TaskUpdateState | null;
     };
 
-/** One tab of the daemon's canonical `tabs_state` registry snapshot. */
-export interface RegistryTabEntry {
-  tabId: string;
-  chatId: string;
-  title: string;
-  workDir: string;
-}
-
-/** One `tabs_state` snapshot as seen by the extension host (see
- * onRegistryTabsState). */
-export interface RegistryTabsDelta {
-  /**
-   * Tabs newly listed — or first bound to a chat — relative to the
-   * previous snapshot (ALL listed tabs when this is the first one).
-   */
-  added: RegistryTabEntry[];
-  /**
-   * Every entry the snapshot lists. The subscriber syncs open panels'
-   * chat bindings from it, and can tell a chat whose old tab was
-   * DISPLACED by the one-tab-per-chat invariant (old id no longer
-   * listed) from an ordinary duplicate.
-   */
-  listed: RegistryTabEntry[];
-  /**
-   * True for the controller's first snapshot. Its tabs predate this
-   * session, and a reloaded window may still hold some of them as
-   * serialized editor-tab placeholders the panel manager has not
-   * adopted yet — adopting is then unsafe (duplicate panels).
-   */
-  firstSnapshot: boolean;
-}
-
-/** Editor-tabs mode wiring handed to a per-panel chat controller. */
+/** Editor-tabs mode wiring handed to a hosted chat controller. */
 export interface PanelHooks {
-  /** The panel's single root chat tab id (owned from the start). */
-  rootTabId: string;
+  /**
+   * A fixed root tab id the surface's webview adopts (the history and
+   * Task Info panels, see SorcarTab); the chat panel has none.
+   */
+  rootTabId?: string;
   /** Receives the panel-directed events listed in PanelEvent. */
   onEvent: (event: PanelEvent) => void;
   /**
@@ -308,7 +266,10 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   tipsOptOut: ['optOut'],
   newChat: ['tabId'],
   openTab: ['tabId', 'title', 'workDir'],
-  getHistory: ['query', 'tag', 'offset', 'generation'],
+  // The panel's filters the daemon applies in SQL (tag, machine, the
+  // WORKDIR dropdown) must reach it, or a VS Code window would keep
+  // seeing every row while the browser tab sees the filtered page.
+  getHistory: ['query', 'tag', 'machine', 'workDir', 'offset', 'generation'],
   setFavorite: ['taskId', 'isFavorite'],
   // tabId must survive: the daemon echoes it on the `files` reply so the
   // webview can tell whether the @-mention picker still belongs to the
@@ -366,12 +327,16 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // agent when due (or when `refresh` is set) and answers with a
   // direct `taskUpdate` that the client-listener relay passes back.
   getTaskUpdate: ['tabId', 'knownSig', 'token', 'refresh'],
-  // The right sidebar's Schedule / Apps / Spend subpanels; the direct
-  // `cronJobs` / `appsStatus` / `spendReport` replies come back through
-  // the client relay.
+  // The right sidebar's Schedule / Machines / Apps / Spend subpanels;
+  // the direct `cronJobs` / `machines` / `appsStatus` / `spendReport`
+  // replies come back through the client relay.
   getCronJobs: [],
+  cronAction: ['action', 'jobId', 'name', 'schedule', 'what', 'kind'],
+  getMachines: ['refresh'],
+  machineAction: ['action', 'name', 'address', 'password'],
   getAppsStatus: ['refresh'],
   getSpendReport: [],
+  getRecommendations: [],
   // The daemon owns the model-catalog refresh: it spawns
   // kiss.scripts.update_models against ~/.kiss/MODEL_INFO.json and
   // reports progress/failures back over the connection, so the settings
@@ -467,7 +432,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /**
    * Called with the raw chat / task ids of the task this view's chat
    * webview shows whenever they change (its `activeTask` message). The
-   * panel manager sets it on every editor panel's controller and
+   * panel manager sets it on the chat editor tab's controller and
    * extension.ts on the sidebar chat view, so the ids of the surface
    * on screen reach the primary-sidebar history panel (postActiveTask).
    */
@@ -475,8 +440,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /**
    * Task Info view only (meta-panel-mode): called when the view's
    * task-update refresh button is pressed (its `metaRefresh` message).
-   * extension.ts relays it to the active chat editor panel, which
-   * polls the daemon with `refresh: true`.
+   * extension.ts relays it to the chat editor tab, which polls the
+   * daemon with `refresh: true`.
    */
   public onMetaRefresh?: () => void;
   private _extensionUri: vscode.Uri;
@@ -488,6 +453,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // A prompt to submit as soon as the webview is ready (see
   // submitWhenReady); '' when none is waiting.
   private _pendingSubmit = '';
+  // A new chat requested before the webview was ready (newConversation).
+  private _pendingNewChat = false;
+  // Text to append to the composer as soon as the webview is ready
+  // (see appendToInput); '' when none is waiting.  It replaces the
+  // composer's draft instead of appending when _pendingAppendReplaces.
+  private _pendingAppend = '';
+  private _pendingAppendReplaces = false;
 
   private _voiceWake: VoiceWakeService | undefined;
   private _voiceSensitivity: number | undefined;
@@ -510,7 +482,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }>();
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _commitPendingTabs: Set<string> = new Set();
-  private _worktreeDirs: Map<string, string> = new Map();
+  // Every worktree directory a tab opened in the SCM view (one per
+  // repository the task isolated), closed together on merge/discard.
+  private _worktreeDirs: Map<string, Set<string>> = new Map();
   // Tab ids listed by the daemon's last canonical `tabs_state`
   // snapshot. A tab that drops out of the snapshot was closed by
   // another client — that close never echoes back through this
@@ -518,26 +492,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // host releases the tab's resources (worktree fallback dir,
   // running/commit flags) instead of holding them forever.
   private _registryTabs: Set<string> = new Set();
-  // The last canonical snapshot's full entries, so the extension can
-  // materialize editor-tab panels for the registry's tabs when the
-  // user switches editor-tabs mode on (see getRegistryTabEntries).
-  private _registryEntries: Map<string, RegistryTabEntry> = new Map();
-  // Whether a canonical `tabs_state` snapshot has been received yet.
-  // The FIRST snapshot is a baseline only: its tabs predate this
-  // session (a reloaded window may still hold them as serialized
-  // editor-tab placeholders the panel manager has not adopted yet);
-  // the delta's firstSnapshot flag tells the subscriber.
-  private _seenTabsState: boolean = false;
-  private _onRegistryTabsState = new vscode.EventEmitter<RegistryTabsDelta>();
-  /**
-   * Fires on every canonical `tabs_state` snapshot with the full list
-   * and the delta of tabs another client created — or first bound to
-   * a chat, which is how a task run in the remote web app surfaces on
-   * an idle tab. Editor-tabs mode mirrors added tabs as editor tabs
-   * the same way sidebar mode's webview adopts them into its internal
-   * strip, and syncs open panels' chat bindings from the full list.
-   */
-  public readonly onRegistryTabsState = this._onRegistryTabsState.event;
   private _worktreeActionResolves: Map<string, () => void> = new Map();
   private _worktreeProgresses: Map<
     string,
@@ -677,13 +631,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   constructor(extensionUri: vscode.Uri, panelHooks?: PanelHooks) {
     this._extensionUri = extensionUri;
     this._panelHooks = panelHooks;
-    if (panelHooks) {
-      // The panel's root chat tab is this controller's own from the
-      // start: broadcasts stamped with it (commit messages, worktree
-      // results) must be treated as this window's even before the
-      // webview has sent any message carrying the id.
-      this._ownTabs.add(panelHooks.rootTabId);
-    }
+    if (panelHooks?.rootTabId) this._ownTabs.add(panelHooks.rootTabId);
     const configured = vscode.workspace
       .getConfiguration('kissSorcar')
       .get<string>('defaultModel');
@@ -826,19 +774,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       });
       return;
     }
-    if (
-      this._panelHooks &&
-      tabId === this._panelHooks.rootTabId &&
-      (dropped.type === 'openTab' || dropped.type === 'resumeSession')
-    ) {
-      // The panel's registry registration is gone for good: the daemon
-      // never received it and the webview only re-sends `ready` (not
-      // the resume) on reconnect. The panel manager must release the
-      // panel's chat claim, or a registry tab another client bound to
-      // the same chat would be skipped forever as a "duplicate" of a
-      // panel that can never actually bind.
-      this._panelHooks.onEvent({kind: 'registrationDropped'});
-    }
   }
 
   private _installClientListener(client: AgentClient): void {
@@ -885,9 +820,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // the SCM view when its branch is merged (worktree_result);
         // file-path resolution against a pending worktree is the
         // daemon's job (RemoteAccessServer._resolve_tab_file).
-        const dir = msg.worktreeDir;
-        if (dir && this._isOwnTab(msg.tabId)) {
-          if (msg.tabId !== undefined) this._worktreeDirs.set(msg.tabId, dir);
+        const dirs = [msg.worktreeDir];
+        if (msg.type === 'worktree_done' && Array.isArray(msg.worktrees)) {
+          for (const wt of msg.worktrees) dirs.push(wt.worktreeDir);
+        }
+        for (const dir of dirs) {
+          if (!dir || !this._isOwnTab(msg.tabId)) continue;
+          if (msg.tabId !== undefined) {
+            let known = this._worktreeDirs.get(msg.tabId);
+            if (!known) {
+              known = new Set();
+              this._worktreeDirs.set(msg.tabId, known);
+            }
+            if (known.has(dir)) continue;
+            known.add(dir);
+          }
           void this._openWorktreeInScm(dir);
         }
       }
@@ -919,17 +866,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // snapshots, so only ids seen in a previous snapshot are
         // eligible for pruning.
         const listed = new Set<string>();
-        const entries = new Map<string, RegistryTabEntry>();
         for (const t of msg.tabs) {
-          if (t && t.tabId) {
-            listed.add(t.tabId);
-            entries.set(t.tabId, {
-              tabId: t.tabId,
-              chatId: t.chatId || '',
-              title: t.title || '',
-              workDir: t.workDir || '',
-            });
-          }
+          if (t && t.tabId) listed.add(t.tabId);
         }
         for (const staleId of this._registryTabs) {
           if (!listed.has(staleId)) {
@@ -937,37 +875,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             this._cleanupTabResources(staleId);
           }
         }
-        // Tabs another client created — or first bound to a chat (a
-        // task run allocates the chat id) — since the previous
-        // snapshot: e.g. a task run in the remote web app. On the
-        // first snapshot every listed tab counts as added (the daemon
-        // only broadcasts on mutations and webview `ready`s, so this
-        // may itself be the remote run's mutation); the subscriber
-        // uses the firstSnapshot flag to decide whether adopting is
-        // safe (see RegistryTabsDelta).
-        const added: RegistryTabEntry[] = [];
-        const firstSnapshot = !this._seenTabsState;
-        for (const [id, entry] of entries) {
-          const prev = this._registryEntries.get(id);
-          if (!prev || (entry.chatId && !prev.chatId)) added.push(entry);
-        }
-        this._seenTabsState = true;
         this._registryTabs = listed;
-        this._registryEntries = entries;
-        this._onRegistryTabsState.fire({
-          added,
-          listed: [...entries.values()],
-          firstSnapshot,
-        });
-        if (this._panelHooks) {
-          // Report the root tab's chat binding so the panel manager
-          // can route a history open of the same chat to this panel
-          // instead of stacking a second one.
-          const own = entries.get(this._panelHooks.rootTabId);
-          if (own?.chatId) {
-            this._panelHooks.onEvent({kind: 'chatBound', chatId: own.chatId});
-          }
-        }
       }
       if (msg.type === 'worktree_progress') {
         const wpTabId = msg.tabId;
@@ -986,9 +894,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // open.
         const doneTabId = msg.tabId;
         if (doneTabId !== undefined) {
-          const doneDir = this._worktreeDirs.get(doneTabId);
-          if (doneDir) {
-            void this._closeWorktreeInScm(doneDir);
+          // A result naming one worktree (commit_and_merge merges
+          // one repository at a time) retires only that one; a
+          // merge/discard of everything pending names none.
+          const doneDirs = this._worktreeDirs.get(doneTabId);
+          const oneDir =
+            typeof msg.worktreeDir === 'string' ? msg.worktreeDir : '';
+          if (doneDirs && oneDir && doneDirs.has(oneDir)) {
+            void this._closeWorktreeInScm(oneDir);
+            doneDirs.delete(oneDir);
+            if (doneDirs.size === 0) this._worktreeDirs.delete(doneTabId);
+          } else if (doneDirs && !oneDir) {
+            for (const doneDir of doneDirs)
+              void this._closeWorktreeInScm(doneDir);
             this._worktreeDirs.delete(doneTabId);
           }
         }
@@ -1006,9 +924,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._resolveAllWorktreeActions();
         }
         // The outcome is one task's text, so the toast carries the
-        // task's tab: the webview shows it only over that tab, and the
-        // panel manager posts it to that tab's panel, never to whatever
-        // chat the user is looking at now.
+        // task's tab: the webview shows it only over that tab, never
+        // over whatever chat the user is looking at now.
         const wrToast = {tabId: msg.tabId};
         if (msg.success) {
           if (!isSilentDiscardMessage(msg.message)) {
@@ -1024,41 +941,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           );
         }
       }
-      if (msg.type === 'main_tree_result' && this._isOwnTab(msg.tabId)) {
-        // Same toast rule as worktree_result above: the post-task
-        // main-tree bar's Discard / Do nothing outcome is surfaced as
-        // a notification (the webview renders the transcript line).
-        const mtToast = {tabId: msg.tabId};
-        if (msg.success) {
-          showInformationNotification(
-            msg.message || 'Main-tree action completed.',
-            mtToast,
-          );
-        } else {
-          showErrorNotification(
-            msg.message || 'Main-tree action failed.',
-            mtToast,
-          );
-        }
-      }
-      if (
-        msg.type === 'autocommit_done' &&
-        this._isOwnTab(msg.tabId) &&
-        // A manual Git Commit already broadcasts its own toast
-        // notification from the daemon; toasting here too would
-        // show the same outcome twice.
-        !msg.manual
-      ) {
-        const acToast = {tabId: msg.tabId};
-        if (msg.success) {
-          showInformationNotification(
-            msg.message || 'Auto-commit completed.',
-            acToast,
-          );
-        } else {
-          showErrorNotification(msg.message || 'Auto-commit failed.', acToast);
-        }
-      }
+      // autocommit_done (the manual Git Commit button's outcome) needs
+      // no toast here: the daemon broadcasts its own notification.
 
       // A question raised by a still-running task must not steal focus: the
       // webview flags the waiting tab instead, so the user decides when to
@@ -1130,8 +1014,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._webviewHasFocus = false;
     if (!this._panelHooks) {
       // In editor-tabs mode the panel manager owns the shared toast
-      // poster (it routes to the active panel); a per-panel controller
-      // installing its own would steal every other panel's toasts.
+      // poster for the chat editor tab; a hosted controller (the chat
+      // panel, the history and Task Info panels) installs none.
       const poster = (message: ToWebviewMessage) => {
         this._sendToWebview(message);
       };
@@ -1327,18 +1211,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     return !tabId || this._ownTabs.has(tabId);
   }
 
-  /**
-   * True when this webview holds *tabId*: its root tab, a chat tab it
-   * opened, or a sub-agent tab nested under one of those.  The panel
-   * manager uses it to post a task's toast to the panel that shows the
-   * task, not to whichever panel is active.
-   *
-   * @param tabId The chat tab id to look up.
-   */
-  ownsTab(tabId: string): boolean {
-    return this._ownTabs.has(tabId);
-  }
-
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
     // A message already queued when dispose() ran must be dropped: handling
     // it could rebuild the daemon client and its listeners after teardown.
@@ -1385,20 +1257,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // replies (models / input history / config), merges any legacy
         // restoredTabs into an empty registry, answers with the
         // canonical `tabs_state` snapshot, and replays every
-        // chat-bound tab's transcript to this connection (only the
-        // `singleTabId` one for an editor-tab panel).
+        // chat-bound tab's transcript to this connection (none to the
+        // history and Task Info panels, whose `singleTabId` names
+        // their never-bound root).
         this._send({
           type: 'ready',
           tabId: message.tabId,
           restoredTabs: message.restoredTabs,
           singleTabId: message.singleTabId,
         } as AgentCommand);
+        if (this._pendingNewChat) {
+          this._pendingNewChat = false;
+          this._sendToWebview({type: 'clearChat'});
+        }
         if (this._pendingSubmit) {
           this._sendToWebview({
             type: 'insertAndSubmit',
             text: this._pendingSubmit,
           });
           this._pendingSubmit = '';
+        }
+        if (this._pendingAppend) {
+          this._sendToWebview({
+            type: 'appendToInput',
+            text: this._pendingAppend,
+            replace: this._pendingAppendReplaces,
+          });
+          this._pendingAppend = '';
+          this._pendingAppendReplaces = false;
         }
         break;
       }
@@ -1465,6 +1351,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           chatId: message.chatId ?? message.id,
           taskId: message.taskId,
           tabId: message.tabId,
+          // A deferred tab's fetch (replay_deferred): this webview's
+          // connection alone gets the transcript.
+          ...(message.scoped ? {scoped: true} : {}),
         });
         break;
       }
@@ -1507,24 +1396,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
-      // The post-task bar of a non-worktree manual-commit run: the
-      // daemon discards the main tree's uncommitted changes (or, for
-      // "nothing", just acknowledges) and reports the outcome through
-      // a broadcast main_tree_result event that the webview renders on
-      // its own. (The bar's Auto commit button sends autocommitAction.)
-      case 'mainTreeAction':
-        this._send({
-          type: 'mainTreeAction',
-          action: message.action,
-          tabId: message.tabId,
-          workDir: message.workDir || this._getWorkDir(),
-        });
-        break;
-
       // The settings panel's "Git Commit" button: the daemon commits
-      // the tab's working tree and reports progress and the outcome
-      // through broadcast autocommit_progress/autocommit_done events
-      // that the webview renders on its own.
+      // the tab's working tree and reports the outcome through a
+      // broadcast autocommit_done event (manual: true) that the
+      // webview renders on its own.
       case 'autocommitAction':
         this._send({
           type: 'autocommitAction',
@@ -1755,13 +1630,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         });
         break;
 
-      case 'closePanel':
-        this._panelHooks?.onEvent({
-          kind: 'closeSelf',
-          retire: !!message.retire,
-        });
-        break;
-
       case 'setEditorTabsMode': {
         // The settings UI's editor-tabs toggle. Handled in BOTH modes
         // (the sidebar switches the mode on, a panel switches it off);
@@ -1802,7 +1670,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Make *dir*, chosen in the "Working directory" panel, the global
+   * Make *dir*, chosen in the chat header's work-dir drop-down, the global
    * working directory every task on every surface runs in.
    *
    * The window keeps its workspace folder (no `vscode.openFolder`).  An
@@ -1833,26 +1701,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._daemonWorkDir = real;
     this._send({type: 'setWorkDir', workDir: real});
     this._sendToWebview({type: 'workDirPicked', path: real});
-  }
-
-  /**
-   * The daemon registry's last canonical tab snapshot, one entry per
-   * chat tab; empty before the first `tabs_state` arrives.
-   */
-  public getRegistryTabEntries(): RegistryTabEntry[] {
-    return [...this._registryEntries.values()];
-  }
-
-  /**
-   * Retire *tabId* from the daemon's shared tab registry — the host
-   * counterpart of the webview's own `closeTab` message, used when the
-   * USER closes an editor-tab panel (the panel's webview is torn down
-   * before it could send anything itself).
-   */
-  public closeChatTab(tabId: string): void {
-    if (this._terminated || !tabId) return;
-    this._cleanupTabResources(tabId);
-    this._send({type: 'closeTab', tabId});
   }
 
   /** Release every host-side resource owned by a closed tab. */
@@ -2106,23 +1954,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Ask the webview to bring one of its chat's tasks on screen —
-   * scroll to the task's transcript region or replay it (editor-tabs
-   * mode: a history-panel click on a chat whose panel already exists).
-   *
-   * @param taskId The task's history-row id.
-   */
-  public showTask(taskId: string): void {
-    this._sendToWebview({type: 'showTask', taskId});
-  }
-
-  /**
-   * Open a chat in the sidebar chat view — a primary-sidebar history
-   * panel click while editor-tabs mode is OFF. Reveals the view,
-   * waits briefly for a freshly created webview to report `ready`,
-   * then relays the click; the webview mirrors its own in-page
-   * history rows (switch to the chat's tab, resume it in a fresh tab,
-   * or show the task text read-only when there is nothing to resume).
+   * Open a chat in this webview — a primary-sidebar history panel
+   * click (the sidebar chat view while editor-tabs mode is OFF, the
+   * chat editor panel while it is ON). Reveals the surface, waits
+   * briefly for a freshly created webview to report `ready`, then
+   * relays the click; the webview mirrors its own in-page history
+   * rows (switch to the chat's tab, resume it in a fresh tab, or show
+   * the task text read-only when there is nothing to resume).
    *
    * @param event The clicked chat/task: backend chat id ('' or absent
    *     when the task has nothing to resume), the task's id and the
@@ -2136,13 +1974,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     await this.focusChatInput();
     await this._waitForWebviewReady();
     // The reveal above can outlive the routing decision that chose
-    // this surface: editor-tabs mode flipped ON mid-wait hides this
-    // view (its `when` clause), and posting now would resume the chat
-    // invisibly. The user's next click routes to the panel manager.
+    // this surface: the mode flipped mid-wait hides the sidebar view
+    // (its `when` clause) or closes the editor panel, and posting now
+    // would resume the chat invisibly. The user's next click routes
+    // to the surface the mode now shows.
     const modeNow = vscode.workspace
       .getConfiguration('kissSorcar')
       .get<boolean>('editorTabsMode', false);
-    if (modeNow) return;
+    if (modeNow !== !!this._panelHooks) return;
     this._sendToWebview({
       type: 'openChatFromHistory',
       chatId: event.chatId ? String(event.chatId) : '',
@@ -2210,17 +2049,39 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  public async appendToInput(text: string): Promise<void> {
+  /**
+   * Put *text* in the chat composer (not submitted) and focus it.
+   *
+   * @param text The text to add.
+   * @param replace True to replace the composer's current draft (a
+   *     prompt prefilled into a new chat must not land under the draft
+   *     the "+" carried over); false (default) appends on a new line.
+   */
+  public async appendToInput(text: string, replace = false): Promise<void> {
     // Resolve/show the view first so the command also works before the
     // sidebar has ever been opened (parity with submitTask).
     await this.focusChatInput();
-    if (this._view) {
-      this._sendToWebview({type: 'appendToInput', text});
+    if (!this._view) return;
+    // A webview still loading has no listener yet: the text waits for
+    // its `ready` (see the ready handler), like a pending submit does.
+    if (this._webviewReady) {
+      this._sendToWebview({type: 'appendToInput', text, replace});
+    } else if (replace || !this._pendingAppend) {
+      this._pendingAppend = text;
+      this._pendingAppendReplaces = replace;
+    } else {
+      this._pendingAppend += '\n' + text;
     }
   }
 
+  /**
+   * Put a new chat on screen — the webview reuses an idle new chat or
+   * opens one. A webview still loading has no listener yet: the
+   * request waits for its `ready`, ahead of any pending submit.
+   */
   public newConversation(): void {
-    this._sendToWebview({type: 'clearChat'});
+    if (this._webviewReady) this._sendToWebview({type: 'clearChat'});
+    else this._pendingNewChat = true;
   }
 
   /**
@@ -2605,7 +2466,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._onCommitMessage.fire({message: '', tabId});
     }
     this._onCommitMessage.dispose();
-    this._onRegistryTabsState.dispose();
     // Each panel's onDidDispose deletes its own map entry, so iterate a
     // snapshot and clear at the end.
     for (const panel of [...this._htmlPreviewPanels.values()]) {

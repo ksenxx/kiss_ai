@@ -67,9 +67,66 @@ from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
+from kiss.core import tool_interrupt
 from kiss.core.file_lock import exclusive_file_lock
 
 logger = logging.getLogger(__name__)
+
+#: Length of one blocking wait slice on the tool thread.  One
+#: ``future.result(timeout)`` or ``Event.wait(timeout)`` over the whole
+#: deadline blocks in C for all of it, where an injected Stop
+#: (``ToolCallInterrupted`` from the tool panel, ``KeyboardInterrupt``
+#: from the task's stop watchdog) cannot land; short slices return to
+#: Python between them, and the tool panel's Stop is honoured
+#: cooperatively there too.
+_WAIT_SLICE_S = 0.2
+
+
+def _result_interruptible(future: Any, timeout: float) -> Any:
+    """Return *future*'s result, waiting in :data:`_WAIT_SLICE_S` slices.
+
+    Args:
+        future: A ``concurrent.futures.Future``.
+        timeout: Seconds to wait at most.
+
+    Raises:
+        TimeoutError: When *timeout* passes first.
+        ToolCallInterrupted: When the calling thread's tool call was
+            interrupted meanwhile.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return future.result(timeout=min(max(deadline - time.monotonic(), 0.0), _WAIT_SLICE_S))
+        except TimeoutError:
+            # concurrent.futures.TimeoutError is builtins.TimeoutError: a
+            # finished operation that raised one looks like an expired
+            # slice, so only an unfinished future is waited for again.
+            if future.done() or time.monotonic() >= deadline:
+                raise
+            tool_interrupt.raise_if_interrupted()
+
+
+def _wait_interruptible(event: threading.Event, timeout: float) -> bool:
+    """Wait for *event* in :data:`_WAIT_SLICE_S` slices; see :func:`_result_interruptible`.
+
+    Args:
+        event: The event to wait for.
+        timeout: Seconds to wait at most.
+
+    Returns:
+        Whether *event* was set before *timeout* passed.
+
+    Raises:
+        ToolCallInterrupted: When the calling thread's tool call was
+            interrupted meanwhile.
+    """
+    deadline = time.monotonic() + timeout
+    while not event.wait(min(max(deadline - time.monotonic(), 0.0), _WAIT_SLICE_S)):
+        if time.monotonic() >= deadline:
+            return False
+        tool_interrupt.raise_if_interrupted()
+    return True
 
 CONNECT_TIMEOUT = 60.0
 _CONNECT_STRAGGLER_GRACE_S = 5.0
@@ -803,7 +860,7 @@ class MCPManager:
                     self._loop,
                 )
         self._evict_surplus(key)
-        if not conn.ready.wait(CONNECT_TIMEOUT):
+        if not _wait_interruptible(conn.ready, CONNECT_TIMEOUT):
             with self._lock:
                 if self._connections.get(key) is conn:
                     del self._connections[key]
@@ -965,11 +1022,14 @@ class MCPManager:
             self._loop,
         )
         try:
-            result = future.result(timeout=CALL_TIMEOUT + 5)
+            result = _result_interruptible(future, CALL_TIMEOUT + 5)
         except Exception as exc:
-            future.cancel()
             return f"Error: MCP tool call failed: {exc}"
         finally:
+            # A no-op once the call completed; a timeout, an interrupt
+            # or an injected Stop must not leave the call running on
+            # the loop with its lease released.
+            future.cancel()
             with self._lock:
                 conn.in_flight -= 1
                 conn.last_used = time.monotonic()

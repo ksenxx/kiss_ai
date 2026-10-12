@@ -40,10 +40,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
-
-
-def _clear_registry() -> None:
-    agent_state.agent_states.clear()
+from kiss.tests.server.conftest import clear_agent_states
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
@@ -113,10 +110,10 @@ class TestAppendUserMessageHandler:
     """``_cmd_append_user_message`` queues prompts for active tabs."""
 
     def setup_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def teardown_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def test_queues_prompt_and_echoes_when_task_active(self) -> None:
         server, events = _make_server()
@@ -197,10 +194,10 @@ class TestDrainPendingUserMessages:
     """``SorcarAgent._drain_pending_user_messages`` injects + clears."""
 
     def setup_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def teardown_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def test_drain_injects_each_message_and_clears_queue(self) -> None:
         printer, st = _bridge_printer("task-d1", ["msg1", "msg2", "msg3"])
@@ -339,10 +336,10 @@ class TestPreStepHookIntegration:
     """``KISSAgent.pre_step_hook`` invokes the drain before each model call."""
 
     def setup_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def teardown_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def _make_kiss_agent(self, model_obj: Any) -> Any:
         from kiss.core.kiss_agent import KISSAgent
@@ -425,10 +422,10 @@ class TestPreStepHookInstalledByPerformTask:
     """
 
     def setup_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def teardown_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def _run_and_capture(self, printer: Any) -> dict[str, Any]:
         from kiss.agents.sorcar.relentless_agent import RelentlessAgent
@@ -471,7 +468,7 @@ class TestPreStepHookInstalledByPerformTask:
         assert captured.get("hook") is not None
         assert captured["hook"] == agent._drain_pending_user_messages
         assert captured.get("guard") is not None
-        assert captured["guard"] == agent._guard_finish
+        assert captured["guard"] == agent._guard_tool_call
 
     def test_hooks_installed_without_drain_capable_printer(self) -> None:
         """Steering hooks are installed regardless of printer capability.
@@ -486,7 +483,7 @@ class TestPreStepHookInstalledByPerformTask:
         captured = self._run_and_capture(None)
         agent = captured["agent"]
         assert captured.get("hook") == agent._drain_pending_user_messages
-        assert captured.get("guard") == agent._guard_finish
+        assert captured.get("guard") == agent._guard_tool_call
 
 
 class TestSteeringMessageWrappedForModel:
@@ -505,10 +502,10 @@ class TestSteeringMessageWrappedForModel:
     """
 
     def setup_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def teardown_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def test_queued_steering_message_is_wrapped_end_to_end(self) -> None:
         """End-to-end: frontend command → queue → drain → wrapped."""
@@ -564,10 +561,10 @@ class TestFinishBlockedWhilePending:
     """``finish`` is rejected while a queued follow-up is undrained."""
 
     def setup_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def teardown_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def test_finish_blocked_when_message_pending(self) -> None:
         printer, _st = _bridge_printer("task-fb", ["steer me"])
@@ -610,10 +607,10 @@ class TestPendingMessagesClearedOnTaskFinish:
     """Lingering queued messages must not leak across successive tasks."""
 
     def setup_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def teardown_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
 
     def test_agent_state_default_is_empty_list(self) -> None:
         st = AgentState("task-x", tab_id="tab-x")
@@ -639,14 +636,12 @@ class TestPendingMessagesClearedOnTaskFinish:
         import os
         import queue
 
-        from kiss.agents.sorcar.worktree_sorcar_agent import (
-            WorktreeSorcarAgent,
-        )
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
         server = VSCodeServer()
         tab_id = "tab-clear-after-run"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         st = AgentState(
             "task-clear-after-run",
             agent=agent,
@@ -664,8 +659,6 @@ class TestPendingMessagesClearedOnTaskFinish:
             "tabId": tab_id,
             "workDir": "/tmp",
             "isParallel": False,
-            "useWorktree": False,
-            "autoCommit": False,
             "_state_key": "task-clear-after-run",
         }
 

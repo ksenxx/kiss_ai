@@ -465,6 +465,101 @@ def _stop_and_await_confirmation(
     return deadline
 
 
+def run_command(
+    prompt: str,
+    *,
+    tab_id: str,
+    run_token: str,
+    work_dir: str = "",
+    scope_work_dir: str = "",
+    parent_task_id: str = "",
+    parent_tab_id: str = "",
+    parent_reviewer: bool = False,
+    side_channel: bool = False,
+    model: str = "",
+    chat_id: str = "",
+    system_prompt: str = "",
+    sea_path: str = "",
+    max_budget: float | None = None,
+    model_config: dict[str, Any] | None = None,
+    use_web_tools: bool | None = None,
+    auto_classify: bool | None = None,
+    use_memory: bool | None = None,
+    is_parallel: bool = True,
+    add_to_system_prompt: str = "",
+    add_to_prompt: str = "",
+    tool_profile: str = "",
+    docker_image: str = "",
+    inherit_tools: bool = False,
+    isolated_repos: dict[str, str] | None = None,
+    workspace: str = "",
+    provenance: dict[str, str] | None = None,
+    timeout: float | None = None,
+    machine: str = "",
+    sea_command: str = "",
+) -> dict[str, Any]:
+    """Encode a run's arguments as the ``run`` command :func:`run` sends the daemon.
+
+    One wire field per argument; the setting arguments land in the
+    fields :data:`~kiss.agents.sorcar.sea_settings.SETTING_FIELDS`
+    names, and *provenance* marks which of them the caller passed
+    explicitly.  Pure: :func:`run` sends what this returns.  The
+    arguments not listed below are those of :func:`run`.
+
+    Args:
+        prompt: The task text.
+        tab_id: The tab the run is shown under.
+        run_token: The client-minted per-submission run token.
+        sea_path: The resolved SEA file (``""`` for none).
+        timeout: The seconds recorded as the run's ``timeout`` setting
+            (``None`` for the daemon default).
+        machine: The registered remote machine the run executes on
+            (wire field ``machine``, set only when non-empty).
+        sea_command: The registered command whose SEA the executing
+            daemon runs as its own copy (wire field ``seaCommand``,
+            set only when non-empty).
+
+    Returns:
+        The command dict.
+    """
+    cmd = {
+        "type": "run",
+        "prompt": prompt,
+        "tabId": tab_id,
+        "taskId": run_token,
+        "chatId": chat_id,
+        "workDir": work_dir,
+        "tabScopeWorkDir": scope_work_dir,
+        "parentTaskId": parent_task_id,
+        "parentTabId": parent_tab_id,
+        "parentReviewer": parent_reviewer,
+        "sideChannel": side_channel,
+        "model": model,
+        "systemPrompt": system_prompt,
+        "seaPath": sea_path,
+        "maxBudget": max_budget,
+        "modelConfig": model_config,
+        "useWebTools": use_web_tools,
+        "classifyTasks": auto_classify,
+        "useMemory": use_memory,
+        "isParallel": is_parallel,
+        "appendToSystemPrompt": add_to_system_prompt,
+        "appendToPrompt": add_to_prompt,
+        "toolProfile": tool_profile,
+        "dockerImage": docker_image,
+        "inheritTools": inherit_tools,
+        "isolatedRepos": dict(isolated_repos or {}),
+        "workspace": workspace,
+        "provenance": provenance or {},
+        "timeout": timeout,
+    }
+    if machine:
+        cmd["machine"] = machine
+    if sea_command:
+        cmd["seaCommand"] = sea_command
+    return cmd
+
+
 def run(
     prompt: str,
     *,
@@ -478,8 +573,6 @@ def run(
     chat_id: str = "",
     system_prompt: str = "",
     sea_path: str = "",
-    use_worktree: bool = True,
-    auto_commit: bool = True,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     use_web_tools: bool | None = None,
@@ -491,6 +584,7 @@ def run(
     tool_profile: str = "",
     docker_image: str = "",
     inherit_tools: bool = False,
+    isolated_repos: dict[str, str] | None = None,
     workspace: str = "",
     provenance: dict[str, str] | None = None,
     timeout: float | None = 3600.0,
@@ -499,6 +593,8 @@ def run(
     endpoint_file: str | Path | None = None,
     cancel: threading.Event | None = None,
     running: threading.Event | None = None,
+    machine: str = "",
+    sea_command: str = "",
 ) -> TaskResult:
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
 
@@ -605,7 +701,7 @@ def run(
             transport, identity and prompt ones (``prompt`` and
             ``system_prompt`` are the methods above, not settings)
             laid over it: ``work_dir``, ``model``, ``chat_id``,
-            ``use_worktree``, ``auto_commit``, ``max_budget`` (finite),
+            ``max_budget`` (finite),
             ``model_config``, ``use_web_tools``, ``auto_classify``,
             ``use_memory``, ``tool_profile``, ``docker_image``; plus
             two dispatcher keys: ``timeout`` (seconds a ``run_agent``
@@ -617,8 +713,8 @@ def run(
             string key, means "no override".  The base class says what
             the SEA is: ``BaseSea`` changes nothing; ``WorkerSea``
             lays the worker defaults under the explicit keys
-            (``use_worktree``, ``auto_commit``, ``auto_classify``,
-            ``use_web_tools``, ``use_memory`` all off); ``ChannelSea``
+            (``auto_classify``, ``use_web_tools``, ``use_memory`` all
+            off) and drops the worktree tools; ``ChannelSea``
             (a worker) marks a messaging channel: it defaults
             ``work_dir`` to ``$KISS_HOME/channel_work`` and locks it
             with the worker keys, gives the run the channel preamble
@@ -683,10 +779,6 @@ def run(
             kind, or a wrong-typed value) stops the task: the daemon
             fails the run and the returned :class:`TaskResult` carries
             the diagnostic error in its ``text`` with ``success=False``.
-        use_worktree: Run the task in an isolated git worktree.
-            Defaults to True.
-        auto_commit: Auto-commit the task's changes on success.
-            Defaults to True.
         max_budget: Per-task budget override in USD; ``None`` uses the
             daemon's configured default.
         model_config: Per-task model configuration override (custom
@@ -705,13 +797,8 @@ def run(
             is configured and the settings panel's "Use Jev"
             checkbox (``classify_with_decisions``) is on, else a
             non-agentic call on the run's own LLM — to pick the system
-            prompt (lite vs. full) and decide worktree isolation for
-            the run (the verdict can only
-            demote a run that asked for a worktree to direct
-            execution; a *use_worktree* of ``False`` passed here is
-            never overridden).  ``True`` forces
-            classification on, ``False`` skips it — the run then keeps
-            the *use_worktree* value passed here and the full system
+            prompt (lite vs. full).  ``True`` forces classification on,
+            ``False`` skips it — the run then uses the full system
             prompt — and ``None`` (the default) uses the daemon's
             configured default (the settings panel's "Classify tasks
             before running" checkbox, persisted as ``classify_tasks``).
@@ -775,6 +862,13 @@ def run(
             container.  ``bash_job`` and persistent memory are
             unavailable in a Docker run.  Empty (default) runs the
             tools on the host.
+        isolated_repos: Repository root -> worktree directory of the
+            calling agent's git worktrees (its ``isolated_repos()``).
+            The task never creates a worktree for one of these
+            repositories: it edits the caller's worktree, which the
+            caller merges.  Carried on the wire because a caller run
+            outside the daemon (the CLI) has no registered state for
+            the daemon to read it from.
         inherit_tools: Whether the task also gets the extra tools of
             the task *parent_task_id* names — the tool callables that
             parent's SEA added through ``tools()`` (and those the
@@ -830,7 +924,7 @@ def run(
             true``; every daemon stop/cancel/failure path broadcasts
             ``success: false``).  A successful result WITHOUT the
             terminal status never settles the wait: the daemon's
-            persistence / auto-commit / worktree cleanup still run
+            persistence / worktree cleanup still run
             after the result is emitted, so only the terminal status
             proves the task is dead, and the grace expiring with just
             the result in hand raises
@@ -857,6 +951,21 @@ def run(
             ``run_agent`` job thread sets it after recording the
             dispatch's outcome, so a ``wait="false"`` call woken by it
             either has a tab to report or the finished result.
+        machine: The name of a registered remote machine
+            (:func:`kiss.agents.sorcar.machines.load_machines`) the
+            task executes on: the local daemon forwards the ``run``
+            to that machine's daemon and relays its frames back
+            (:mod:`kiss.server.remote_tabs`), so this wait is the same.
+            *work_dir* and *sea_path* are then paths on that machine
+            (*sea_path* is still checked to exist here).  Empty (the
+            default) runs the task on the local daemon.
+        sea_command: The name of a registered command: the executing
+            daemon runs its own copy of that command's SEA (the wire
+            field ``seaCommand``, resolved by the daemon's SEA
+            pipeline; an unknown name fails the run).  How a run on a
+            *machine* names a SEA that machine has under its own
+            paths; it replaces *sea_path*.  Empty (the default) sends
+            *sea_path*.
 
     Returns:
         A :class:`TaskResult` with the result text, success flag, cost
@@ -899,11 +1008,7 @@ def run(
     while blocked in a ``run_agent`` dispatch — additionally sends the
     daemon a ``stop`` for the dispatched task's tab before
     disconnecting.  Without the cascade, the orphaned sub-task kept
-    running invisibly and, when it was a non-worktree task, kept its
-    repository flagged busy: a manual Git Commit pressed after the
-    parent showed "Task stopped by user" was refused with "A task is
-    still running in this folder" with no visible task running.  A
-    timeout intentionally does NOT stop the task (see above) unless
+    running invisibly.  A timeout intentionally does NOT stop the task (see above) unless
     *stop_on_timeout* is true: by default the caller chose to stop
     waiting, not to cancel the work.  Such an abort's exception gets a
     ``task_result`` attribute: a :class:`TaskResult` with the spend the
@@ -934,39 +1039,39 @@ def run(
             open_timeout=10.0 if timeout is None else min(timeout, 10.0),
             max_size=_MAX_LINE_BYTES,
         )
-        cmd = {
-            "type": "run",
-            "prompt": prompt,
-            "tabId": tab_id,
-            "taskId": run_token,
-            "chatId": chat_id,
-            "workDir": work_dir,
-            "tabScopeWorkDir": scope_work_dir,
-            "parentTaskId": parent_task_id,
-            "parentTabId": parent_tab_id,
-            "parentReviewer": parent_reviewer,
-            "sideChannel": side_channel,
-            "model": model,
-            "systemPrompt": system_prompt,
-            "seaPath": sea_file,
-            "useWorktree": use_worktree,
-            "autoCommit": auto_commit,
-            "maxBudget": max_budget,
-            "modelConfig": model_config,
-            "useWebTools": use_web_tools,
-            "classifyTasks": auto_classify,
-            "useMemory": use_memory,
-            "isParallel": is_parallel,
-            "appendToSystemPrompt": add_to_system_prompt,
-            "appendToPrompt": add_to_prompt,
-            "toolProfile": tool_profile,
-            "dockerImage": docker_image,
-            "inheritTools": inherit_tools,
-            "workspace": workspace,
-            "provenance": provenance or {},
-            "timeout": (timeout if stop_on_timeout else None) if record_timeout is None
+        cmd = run_command(
+            prompt,
+            tab_id=tab_id,
+            run_token=run_token,
+            work_dir=work_dir,
+            scope_work_dir=scope_work_dir,
+            parent_task_id=parent_task_id,
+            parent_tab_id=parent_tab_id,
+            parent_reviewer=parent_reviewer,
+            side_channel=side_channel,
+            model=model,
+            chat_id=chat_id,
+            system_prompt=system_prompt,
+            sea_path=sea_file,
+            max_budget=max_budget,
+            model_config=model_config,
+            use_web_tools=use_web_tools,
+            auto_classify=auto_classify,
+            use_memory=use_memory,
+            is_parallel=is_parallel,
+            add_to_system_prompt=add_to_system_prompt,
+            add_to_prompt=add_to_prompt,
+            tool_profile=tool_profile,
+            docker_image=docker_image,
+            inherit_tools=inherit_tools,
+            isolated_repos=isolated_repos,
+            workspace=workspace,
+            provenance=provenance,
+            timeout=(timeout if stop_on_timeout else None) if record_timeout is None
             else record_timeout,
-        }
+            machine=machine,
+            sea_command=sea_command,
+        )
         try:
             local_endpoint.send(ws, json.dumps(cmd))
         except ConnectionClosed as exc:
@@ -1024,8 +1129,8 @@ def run(
                         # the caller must not be told it was stopped.
                         # Even a stored SUCCESSFUL result is no proof
                         # the task is dead: the agent emits it BEFORE
-                        # the daemon's persistence / auto-commit /
-                        # worktree cleanup stages run, and a stop can
+                        # the daemon's persistence / worktree cleanup
+                        # stages run, and a stop can
                         # still take effect during those stages, so
                         # returning the result here would let the
                         # caller (``run_agent``) release its workspace
@@ -1161,11 +1266,8 @@ def run(
             # The wait was aborted — typically by the KeyboardInterrupt
             # injected when the CALLING task is stopped while blocked
             # here.  Cascade the stop to the dispatched task: without
-            # it the orphan keeps running invisibly and, when it is a
-            # non-worktree task, keeps its repository flagged busy, so
-            # a manual Git Commit after the parent's "Task stopped by
-            # user" is refused with "A task is still running in this
-            # folder".  A TimeoutError is excluded on purpose: its
+            # it the orphan keeps running invisibly.  A TimeoutError
+            # is excluded on purpose: its
             # documented contract is "the task keeps running", and a
             # ``stop_on_timeout`` timeout or a *cancel* already sent its
             # stop (and awaited confirmation) inside the read loop.

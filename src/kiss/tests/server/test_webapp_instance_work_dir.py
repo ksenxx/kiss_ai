@@ -6,7 +6,7 @@
 
 Each browser tab running the standalone web client is one webapp
 instance.  The working directory is a single daemon-wide value: a
-``setWorkDir`` from any instance (the "Working directory" panel, the
+``setWorkDir`` from any instance (the chat-header work-dir drop-down, the
 Explorer's check mark) adopts it for every task of every instance and
 every VS Code window, persists it as ``config.json`` ``work_dir`` and
 is broadcast back as ``workDirChanged``.  Nothing is pinned per tab:
@@ -27,8 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import socket
-import ssl
 import subprocess
 import tempfile
 import unittest
@@ -43,6 +41,13 @@ import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.server import web_server
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.server.conftest import (
+    file_names,
+    find_free_port,
+    no_verify_ssl,
+    redirect_persistence,
+    restore_persistence,
+)
 
 _SHIM_PRELUDE = """
 'use strict';
@@ -191,53 +196,12 @@ out.sent = ws0.sent.map(s => JSON.parse(s));
         self.assertEqual([m["type"] for m in out["sent"]], ["auth"])
 
 
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
-
-
-def _find_free_port() -> int:
-    """Find an available TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return an SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
-def _file_names(event: dict[str, Any]) -> list[str]:
-    """Extract the file-name strings from a ``files`` event."""
-    names: list[str] = []
-    for entry in event.get("files", []):
-        if isinstance(entry, dict):
-            names.append(str(entry.get("text", "")))
-        else:
-            names.append(str(entry))
-    return names
-
-
 class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
     """Two real WSS connections (= two webapp instances), one daemon."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
         self._orig_cfg_dir = vc.CONFIG_DIR
         self._orig_cfg_path = vc.CONFIG_PATH
@@ -256,9 +220,9 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.url = f"wss://127.0.0.1:{self.port}/ws"
-        self.ctx = _no_verify_ssl()
+        self.ctx = no_verify_ssl()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -279,7 +243,7 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         vc.CONFIG_DIR = self._orig_cfg_dir
         vc.CONFIG_PATH = self._orig_cfg_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -339,7 +303,7 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
             return (
                 msg.get("type") == "files"
                 and not msg.get("loading")
-                and name in _file_names(msg)
+                and name in file_names(msg)
             )
         return _pred
 
@@ -357,13 +321,13 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         ev_a = await self._drain_until(
             ws_a, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("./alpha.txt", _file_names(ev_a))
+        self.assertNotIn("./alpha.txt", file_names(ev_a))
 
         await self._send(ws_b, {"type": "getFiles", "prefix": ""})
         ev_b = await self._drain_until(
             ws_b, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("./alpha.txt", _file_names(ev_b))
+        self.assertNotIn("./alpha.txt", file_names(ev_b))
 
     async def test_reconnected_instance_sees_global_work_dir(self) -> None:
         """A reconnecting instance replays nothing (there is no pin) and
@@ -379,7 +343,7 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         ev = await self._drain_until(
             ws_a2, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("./alpha.txt", _file_names(ev))
+        self.assertNotIn("./alpha.txt", file_names(ev))
 
     async def test_set_work_dir_replaces_persisted_value(self) -> None:
         """A pick (``setWorkDir``) replaces a previously persisted

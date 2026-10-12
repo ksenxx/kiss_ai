@@ -18,7 +18,6 @@ INCLUDE_FILES: set[Path] = {
     Path("agents/sorcar/relentless_agent.py"),
     Path("agents/sorcar/sorcar_agent.py"),
     Path("agents/sorcar/chat_sorcar_agent.py"),
-    Path("agents/sorcar/worktree_sorcar_agent.py"),
     # The synchronous client API (``run`` / ``TaskResult``), defined in
     # the sorcar layer and re-exported by ``kiss.server.sorcar``.
     Path("agents/sorcar/daemon_client.py"),
@@ -395,7 +394,6 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
         "kiss.agents.sorcar.relentless_agent",
         "kiss.agents.sorcar.sorcar_agent",
         "kiss.agents.sorcar.chat_sorcar_agent",
-        "kiss.agents.sorcar.worktree_sorcar_agent",
         "kiss.server.sorcar",
         "kiss.agents.sorcar.daemon_client",
     ]

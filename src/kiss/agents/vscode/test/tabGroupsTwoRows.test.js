@@ -34,8 +34,7 @@ function makeWebview(opts) {
   if (opts.editorRoot) {
     html = html.replace(
       '<body',
-      `<body class="editor-tab-mode" data-kiss-tab-id="${opts.editorRoot}"` +
-        ' data-kiss-tab-title="My chat"',
+      `<body class="editor-tab-mode" data-kiss-tab-id="${opts.editorRoot}"`,
     );
   }
   const dom = new JSDOM(html, {

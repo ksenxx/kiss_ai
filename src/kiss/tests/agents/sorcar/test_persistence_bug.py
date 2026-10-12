@@ -39,7 +39,7 @@ class TestPersistence(unittest.TestCase):
         """An event naming a task that was never persisted is a no-op."""
         persistence._append_chat_event(event={}, task_id="999")
         persistence._flush_chat_events("999")
-        self.assertFalse(persistence._task_has_events("999"))
+        self.assertFalse(persistence._task_has_transcript_events("999"))
 
 
 if __name__ == "__main__":

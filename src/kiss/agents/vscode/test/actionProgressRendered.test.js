@@ -3,19 +3,17 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (JSDOM) tests for the two user-facing progress events the
-// daemon broadcasts during the commit/merge flows:
+// End-to-end (JSDOM) tests for the user-facing progress event the
+// daemon broadcasts during a merge flow:
 //
-//   * ``autocommit_progress`` ("Staging changes…", "Generating commit
-//     message…", "Committing…") — emitted three times per non-worktree
-//     task and, until this test, rendered by NO client (F08-3).
-//   * ``worktree_progress``   ("Generating commit message…") — rendered
-//     only by the VS Code host's native progress toast, so a remote or
-//     mobile browser user clicking Merge saw nothing at all (F08-4).
+//   * ``worktree_progress`` ("Staging changes…", "Generating commit
+//     message…", "Committing…") — once rendered only by the VS Code
+//     host's native progress toast, so a remote or mobile browser user
+//     clicking Merge saw nothing at all (F08-4).
 //
-// Both carry a plain string that any client can show, and both have a
-// terminal sibling (``autocommit_done`` / ``worktree_result``) that must
-// clear the live line again.
+// It carries a plain string that any client can show, and its terminal
+// sibling (``worktree_result``) must clear the live line again; so must
+// the manual Git Commit button's ``autocommit_done``.
 
 'use strict';
 
@@ -87,44 +85,44 @@ function progressLines(root) {
   );
 }
 
-function testAutocommitProgressRendered() {
+function testProgressReplacedInPlaceAndClearedByAutocommitDone() {
   const {win} = makeWebview();
   const doc = win.document;
   const out = doc.getElementById('output');
   const tabId = win._testApi.getActiveTabId();
 
   send(win, {
-    type: 'autocommit_progress',
+    type: 'worktree_progress',
     message: 'Staging changes\u2026',
     tabId,
   });
   assert.deepStrictEqual(
     progressLines(out),
     ['Staging changes\u2026'],
-    'autocommit_progress must render its message in the transcript ' +
-      '(the daemon broadcasts it three times per task and no client ' +
-      'showed any of them)',
+    'worktree_progress must render its message in the transcript',
   );
 
   // The three messages are one flow, not three log lines: the live line
   // is replaced in place.
   send(win, {
-    type: 'autocommit_progress',
+    type: 'worktree_progress',
     message: 'Generating commit message\u2026',
     tabId,
   });
-  send(win, {type: 'autocommit_progress', message: 'Committing\u2026', tabId});
+  send(win, {type: 'worktree_progress', message: 'Committing\u2026', tabId});
   assert.deepStrictEqual(
     progressLines(out),
     ['Committing\u2026'],
-    'successive autocommit_progress messages must replace the live line',
+    'successive worktree_progress messages must replace the live line',
   );
 
-  // The terminal event clears the progress line and reports the outcome.
+  // A failed manual Git Commit clears the progress line and reports
+  // the outcome in the transcript.
   send(win, {
     type: 'autocommit_done',
-    success: true,
-    message: 'chore: update README',
+    success: false,
+    manual: true,
+    message: 'Nothing to commit',
     tabId,
   });
   assert.deepStrictEqual(
@@ -133,11 +131,13 @@ function testAutocommitProgressRendered() {
     'autocommit_done must clear the live progress line',
   );
   assert.ok(
-    out.textContent.includes('chore: update README'),
-    'autocommit_done must still render its own result line',
+    out.textContent.includes('Nothing to commit'),
+    'a failed autocommit_done must still render its own result line',
   );
   win.close();
-  console.log('  ok - autocommit_progress renders, replaces and clears');
+  console.log(
+    '  ok - worktree_progress replaces in place; autocommit_done clears',
+  );
 }
 
 function testWorktreeProgressRendered() {
@@ -190,14 +190,14 @@ function testProgressForBackgroundTabGoesToThatTab() {
 
   // Progress addressed to the hidden tab must not appear on screen.
   send(win, {
-    type: 'autocommit_progress',
+    type: 'worktree_progress',
     message: 'Staging changes\u2026',
     tabId: tabA,
   });
   assert.deepStrictEqual(
     progressLines(out),
     [],
-    "another tab's autocommit_progress must not paint the visible tab",
+    "another tab's worktree_progress must not paint the visible tab",
   );
 
   // ...but it must be waiting there when the user switches back.
@@ -224,7 +224,7 @@ function testProgressForBackgroundTabGoesToThatTab() {
 }
 
 function main() {
-  testAutocommitProgressRendered();
+  testProgressReplacedInPlaceAndClearedByAutocommitDone();
   testWorktreeProgressRendered();
   testProgressForBackgroundTabGoesToThatTab();
   console.log('actionProgressRendered.test.js: all tests passed');

@@ -168,10 +168,12 @@ def sign_in(tools: dict[str, Any], oauth: SlackOAuthState) -> dict[str, Any]:
         The decoded ``finish_slack_auth()`` answer.
     """
     started = start_sign_in(tools, oauth)
-    state = parse_qs(urlsplit(started["verification_uri"]).query)["state"][0]
+    query = parse_qs(urlsplit(started["verification_uri"]).query)
     # What the user's browser does after they click Allow.
     requests.get(
-        "http://127.0.0.1:53682/callback", params={"code": "test-code", "state": state}, timeout=10
+        query["redirect_uri"][0],
+        params={"code": "test-code", "state": query["state"][0]},
+        timeout=10,
     )
     done: dict[str, Any] = json.loads(tools["finish_slack_auth"]())
     return done

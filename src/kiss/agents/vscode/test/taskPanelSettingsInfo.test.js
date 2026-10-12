@@ -5,8 +5,8 @@
 //
 // End-to-end tests for the task-settings rows of the Task Info panel
 // (#meta-list in media/chat.html, painted by updateMetaTaskDetails in
-// media/main.js) — Date, Base model, Worktree mode, Parallel mode,
-// Chat id, Task id and (when the task has one) Parent task — and for the
+// media/main.js) — Date, Base model, Chat id, Task id and (when the
+// task has one) Parent task; there is no Parallel mode row — and for the
 // task panels of a shared page, which carry a settings block each:
 //
 // * a live task's `task_settings` event paints the rows,
@@ -128,8 +128,6 @@ function infoRows(win) {
   return {
     date: val('meta-date'),
     model: val('meta-model'),
-    worktree: val('meta-worktree'),
-    parallel: val('meta-parallel'),
     chatId: val('meta-chat-id'),
     taskId: val('meta-task-id'),
     parent: val('meta-parent-id'),
@@ -140,7 +138,7 @@ function infoRows(win) {
 /** The rows' text joined, for "shows X" / "shows nothing" checks. */
 function infoText(win) {
   const r = infoRows(win);
-  return [r.date, r.model, r.worktree, r.parallel, r.chatId, r.taskId, r.parent]
+  return [r.date, r.model, r.chatId, r.taskId, r.parent]
     .filter(t => t !== DASH)
     .join(' | ');
 }
@@ -148,7 +146,6 @@ function infoText(win) {
 const SETTINGS = {
   model: 'model-x',
   work_dir: '/repo',
-  is_worktree: true,
   is_parallel: true,
   max_budget: 5,
   start_ts: Date.UTC(2026, 1, 3, 4, 5),
@@ -177,8 +174,11 @@ test('live task_settings paints the info block; new submit clears it', () => {
     'work dir shown',
   );
   assert.strictEqual(rows.model, 'model-x', 'model shown');
-  assert.strictEqual(rows.worktree, 'worktree', 'worktree mode shown');
-  assert.strictEqual(rows.parallel, 'parallel', 'parallel mode shown');
+  assert.strictEqual(
+    win.document.getElementById('meta-parallel'),
+    null,
+    'is_parallel paints no row: the Parallel mode item is gone',
+  );
   assert.strictEqual(
     win.document.getElementById('meta-max-budget').textContent,
     '$5.00',
@@ -239,8 +239,16 @@ test('a run with an agent script shows the Agent row; a plain run hides it', () 
   const TAB = tabIdOf(wv);
   const doc = win.document;
   send(win, {type: 'setTaskText', text: 'plain', tabId: TAB});
-  send(win, {type: 'task_settings', settings: SETTINGS, tabId: TAB, taskId: 'task-1'});
-  assert.ok(doc.getElementById('meta-agent-item').hidden, 'no script: row hidden');
+  send(win, {
+    type: 'task_settings',
+    settings: SETTINGS,
+    tabId: TAB,
+    taskId: 'task-1',
+  });
+  assert.ok(
+    doc.getElementById('meta-agent-item').hidden,
+    'no script: row hidden',
+  );
   assert.strictEqual(doc.getElementById('meta-agent').textContent, DASH);
   send(win, {
     type: 'task_settings',
@@ -263,10 +271,13 @@ test('a run with an agent script shows the Agent row; a plain run hides it', () 
       'pinned use_worktree(true->false), work_dir(empty->/tmp/x)',
   );
   send(win, {type: 'clear', chat_id: 'chat-abc', tabId: TAB});
-  assert.ok(doc.getElementById('meta-agent-item').hidden, 'a new run clears the row');
+  assert.ok(
+    doc.getElementById('meta-agent-item').hidden,
+    'a new run clears the row',
+  );
 });
 
-test('subagent settings show no-wt, sequential and parentage', () => {
+test('subagent settings show sequential and parentage', () => {
   const wv = makeWebview();
   const win = wv.win;
   const TAB = tabIdOf(wv);
@@ -275,7 +286,6 @@ test('subagent settings show no-wt, sequential and parentage', () => {
     type: 'task_settings',
     settings: {
       model: 'model-y',
-      is_worktree: false,
       is_parallel: false,
       chat_id: 'chat-abc',
       task_id: 'task-2',
@@ -286,13 +296,11 @@ test('subagent settings show no-wt, sequential and parentage', () => {
     taskId: 'task-2',
   });
   const rows = infoRows(win);
-  assert.strictEqual(rows.worktree, 'no worktree', 'no worktree shown');
-  assert.strictEqual(rows.parallel, 'sequential', 'sequential shown');
   assert.strictEqual(rows.date, DASH, 'unknown start time is a dash');
   assert.strictEqual(rows.parent, 'task-1', 'parent shown');
   assert.ok(!rows.parentHidden, 'the Parent task row shows for a subagent');
   assert.strictEqual(rows.taskId, 'task-2 (subagent)', 'subagent marker');
-  // Settings that name neither mode show dashes, not a guessed mode.
+  // Settings without a task id show dashes, not a guessed value.
   send(win, {
     type: 'task_settings',
     settings: {model: 'bare', is_subagent: true},
@@ -300,8 +308,6 @@ test('subagent settings show no-wt, sequential and parentage', () => {
     taskId: 'task-2',
   });
   const bare = infoRows(win);
-  assert.strictEqual(bare.worktree, DASH);
-  assert.strictEqual(bare.parallel, DASH);
   assert.strictEqual(bare.taskId, DASH, 'no task id, no subagent suffix');
   assert.ok(bare.parentHidden, 'no parent id: the Parent task row hides');
   // A parent id shows whatever the subagent flag says: the row names

@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import http.server
 import os
-import shutil
 import socketserver
 import threading
 import time
@@ -51,8 +50,8 @@ from typing import Any, cast
 
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 from kiss.tests.server.test_subagent_tabs_all_surfaces import (
-    _JSDOM_PKG,
     SurfaceBridge,
+    skip_unless_bridge_runs,
 )
 
 _PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
@@ -102,10 +101,7 @@ class BrowserTabAllSurfacesTest(DaemonLocalHarness):
     """Open everywhere while the page lives, closed everywhere when it closes."""
 
     def setUp(self) -> None:
-        if shutil.which("node") is None:
-            self.skipTest("node is not available on PATH")
-        if not _JSDOM_PKG.is_file():
-            self.skipTest("jsdom is not installed under agents/vscode")
+        skip_unless_bridge_runs(self)
         if not _PLAYWRIGHT_CACHE.is_dir():
             self.skipTest("Playwright browsers are not installed")
         self.httpd = socketserver.TCPServer(("127.0.0.1", 0), _Handler)

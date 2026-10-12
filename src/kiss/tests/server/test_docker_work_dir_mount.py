@@ -36,6 +36,7 @@ import pytest
 from kiss.agents.sorcar import local_endpoint
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
+from kiss.tests.server.conftest import docker_available
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 IMAGE = "python:3.11-slim"
@@ -43,17 +44,9 @@ NOTE = "index/notes/hello.md"
 NOTE_TEXT = "# hello from the host checkout\n"
 
 
-def _docker_available() -> bool:
-    try:
-        docker.from_env().ping()
-        return True
-    except Exception:
-        return False
-
-
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not _docker_available(), reason="Docker daemon is not running"),
+    pytest.mark.skipif(not docker_available(), reason="Docker daemon is not running"),
 ]
 
 
@@ -121,7 +114,6 @@ class DockerWorkDirMountTest(DaemonRunApiHarness):
         return sorcar.run(
             task,
             work_dir=self.repo,
-            use_worktree=False,
             use_web_tools=False,
             docker_image=IMAGE,
             endpoint_file=self.endpoint_file,

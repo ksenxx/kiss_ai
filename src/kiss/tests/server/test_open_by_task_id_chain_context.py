@@ -29,7 +29,6 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from typing import Any, cast
@@ -37,26 +36,15 @@ from typing import Any, cast
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _load_task_chain_context
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+from kiss.tests.server.conftest import (
+    make_recording_server,
+    patch_sorcar_parent_run,
+    redirect_persistence,
+    restore_persistence,
+    restore_sorcar_parent_run,
+)
 
 
 def _init_git_repo(tmpdir: str) -> None:
@@ -70,24 +58,6 @@ def _init_git_repo(tmpdir: str) -> None:
     subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir,
                    capture_output=True)
-
-
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
-    server = VSCodeServer()
-    events: list[dict[str, Any]] = []
-    lock = threading.Lock()
-    printer = server.printer
-
-    def capture(event: dict[str, Any]) -> None:
-        ev = printer._inject_task_id(event)
-        with printer._lock:
-            printer._record_event(ev)
-        printer._persist_event(ev)
-        with lock:
-            events.append(ev)
-
-    printer.broadcast = capture  # type: ignore[assignment]
-    return server, events, lock
 
 
 class _PromptCapture:
@@ -110,21 +80,6 @@ class _PromptCapture:
                 "success": True,
             })
         return f"success: true\nsummary: {summary}\n"
-
-
-def _patch_parent_run(capture: _PromptCapture) -> Any:
-    parent = cast(Any, SorcarAgent.__mro__[1])
-    original = parent.run
-
-    def _run_proxy(self_agent: object, **kwargs: object) -> str:
-        return capture.fake_run(self_agent, **kwargs)
-
-    parent.run = _run_proxy
-    return original
-
-
-def _unpatch_parent_run(original: Any) -> None:
-    cast(Any, SorcarAgent.__mro__[1]).run = original
 
 
 def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
@@ -189,15 +144,15 @@ class _ChainContextBase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         _init_git_repo(self.tmpdir)
-        self.server, self.events, self.lock = _make_server()
+        self.server, self.events, self.lock = make_recording_server()
         self.capture = _PromptCapture()
-        self.original_run = _patch_parent_run(self.capture)
+        self.original_run = patch_sorcar_parent_run(self.capture.fake_run)
 
     def tearDown(self) -> None:
-        _unpatch_parent_run(self.original_run)
-        _restore_db(self.saved)
+        restore_sorcar_parent_run(self.original_run)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()

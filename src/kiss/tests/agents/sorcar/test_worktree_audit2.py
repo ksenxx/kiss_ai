@@ -22,13 +22,14 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     MergeResult,
     _git,
 )
+from kiss.agents.sorcar.relentless_agent import resolve_work_dir
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -80,10 +81,13 @@ def _make_repo(path: Path) -> Path:
 def _patch_super_run(
     return_value: str = "success: true\nsummary: test done\n",
 ) -> Any:
+    """Stub the parent ``run``: enter the work dir and call ``create_worktree``."""
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
-    def fake_run(self_agent: object, **kwargs: object) -> str:
+    def fake_run(self_agent: Any, **kwargs: Any) -> str:
+        self_agent.work_dir = resolve_work_dir(kwargs.get("work_dir"))
+        self_agent.create_worktree()
         return return_value
 
     parent_class.run = fake_run
@@ -117,7 +121,7 @@ class TestBug6FinalizeIgnoresCommitFailure:
         the worktree directory when auto-commit is rejected by a
         pre-commit hook, preventing data loss.
         """
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
 
         wt_dir = agent._wt_dir
@@ -190,7 +194,7 @@ class TestBug7SquashMergeDoesntCheckCommit:
         db_saved = _redirect_db(tmpdir2)
         original_run = _patch_super_run()
         try:
-            agent = WorktreeSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             agent.run(prompt_template="task1", work_dir=str(self.repo))
 
             wt_dir = agent._wt_dir

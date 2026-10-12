@@ -13,6 +13,7 @@ emission time — on both the base :class:`JsonPrinter` path and the
 while replayed events must KEEP their original stamp.
 """
 
+import json
 import time
 
 from kiss.server.json_printer import JsonPrinter, stamp_event_ts
@@ -133,6 +134,9 @@ def test_replay_ignores_junk_legacy_timestamps() -> None:
 
     Covers the data-forensics cases: TEXT/BLOB column junk, NaN, inf,
     non-positive values, and values beyond the ECMAScript Date range.
+    Non-numeric junk is dropped from the event so the replay frame
+    stays JSON-serializable (bytes would otherwise crash ``json.dumps``
+    in the frame sizing and the transport).
     """
     junk = ["garbage", b"\x00", float("nan"), float("inf"), 0, -1, 9e12]
     events = _coalesced_replay_events([
@@ -140,6 +144,9 @@ def test_replay_ignores_junk_legacy_timestamps() -> None:
         for i, v in enumerate(junk)
     ])
     assert all("ts" not in ev for ev in events)
+    assert "_timestamp" not in events[0] and "_timestamp" not in events[1]
+    assert events[4]["_timestamp"] == 0
+    json.dumps(events)
 
 
 def test_replay_non_list_events_returns_empty() -> None:

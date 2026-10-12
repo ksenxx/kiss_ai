@@ -158,11 +158,8 @@ class FakeSidebarView {
   gitCommit() {
     return Promise.resolve();
   }
-  getRegistryTabEntries() {
-    return [];
-  }
-  onRegistryTabsState() {
-    return makeDisposable();
+  openChatFromHistory() {
+    return Promise.resolve();
   }
   onCommitMessage() {
     return makeDisposable();
@@ -181,34 +178,31 @@ class FakeSidebarView {
   dispose() {}
 }
 
+// The single chat editor panel: the mode is OFF throughout this test,
+// so the extension never opens it (chatController routes to the
+// sidebar view); the stand-in only has to carry the manager's API.
 class FakePanelManager {
   static modeEnabled() {
     return false;
   }
-  get panelCount() {
-    return 0;
-  }
   registerSerializer() {
     return makeDisposable();
   }
-  watchEditorTabs() {
-    return makeDisposable();
-  }
-  ensureChatOpen() {
+  controller() {
     return undefined;
   }
-  activeController() {
-    return undefined;
+  open() {
+    throw new Error('mode off: the chat panel must never be opened');
   }
-  revealActiveOrCreate() {
-    return undefined;
+  ensureOpen() {}
+  openSettings() {
+    return Promise.resolve();
   }
   openChat() {}
-  adoptRegistryTabs() {}
-  enterMode() {}
-  closeAll() {}
   setMetaSink() {}
+  refreshActiveTaskUpdate() {}
   setActiveTaskSink() {}
+  close() {}
   dispose() {}
 }
 

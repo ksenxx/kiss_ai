@@ -6,8 +6,12 @@
 (function (global) {
   'use strict';
 
+  // The daemon commands the chat webview sends (on both surfaces: the
+  // VS Code extension's webview and the remote webapp run this same
+  // file).  Commands the daemon accepts from other clients only (the
+  // Python ``run`` API, the extension host's ``getTabsState``, the
+  // ``ready`` fan-out's ``getModels``/``getSeaCommands``) are not here.
   const SORCAR_API_COMMANDS = [
-    'run',
     'submit',
     'appendUserMessage',
     'stop',
@@ -22,10 +26,7 @@
     'getAdjacentTask',
     'setFavorite',
     'getInputHistory',
-    'getSeaCommands',
     'getWelcomeInfo',
-    'activeTasksQuery',
-    'getModels',
     'selectModel',
     'getConfig',
     'saveConfig',
@@ -43,8 +44,12 @@
     'checkPaths',
     'getTaskUpdate',
     'getCronJobs',
+    'cronAction',
+    'getMachines',
+    'machineAction',
     'getAppsStatus',
     'getSpendReport',
+    'getRecommendations',
     'listDir',
     'gitStatus',
     'gitLog',
@@ -55,7 +60,6 @@
     'shareChatTasks',
     'complete',
     'worktreeAction',
-    'mainTreeAction',
     'generateCommitMessage',
     'autocommitAction',
     'auth',

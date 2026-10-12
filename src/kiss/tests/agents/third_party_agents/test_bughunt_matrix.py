@@ -39,11 +39,13 @@ class TestMatrixPersistentLoop:
     def test_disconnect_stops_loop_and_allows_restart(self) -> None:
         """disconnect() stops the loop; a later call lazily restarts it."""
         backend = MatrixChannelBackend()
-        assert backend._run(asyncio.sleep(0, result=1)) == 1
-        loop = backend._loop
-        thread = backend._loop_thread
-        assert loop is not None and thread is not None
-        backend.disconnect()
+        try:
+            assert backend._run(asyncio.sleep(0, result=1)) == 1
+            loop = backend._loop
+            thread = backend._loop_thread
+            assert loop is not None and thread is not None
+        finally:
+            backend.disconnect()
         assert backend._loop is None
         assert backend._loop_thread is None
         assert not thread.is_alive()

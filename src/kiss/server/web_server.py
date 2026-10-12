@@ -97,11 +97,15 @@ from kiss.core.brand import BRAND, HOME_DIR, PRODUCT_NAME
 from kiss.core.browser_handoff import set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
-from kiss.core.file_lock import lock_exclusive
-from kiss.core.processes import find_bash
+from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.processes import find_bash, suppress_error_dialogs
 from kiss.core.processes import pid_alive as _is_pid_alive
 from kiss.core.processes import process_identity as _process_identity
-from kiss.core.utils import is_root_dir, replace_waiting_for_readers
+from kiss.core.utils import (
+    is_root_dir,
+    read_bytes_waiting_for_writer,
+    replace_waiting_for_readers,
+)
 from kiss.core.vscode_config import (
     apply_config_to_env,
     load_api_keys,
@@ -2389,38 +2393,16 @@ def _generate_self_signed_cert(
     tls_certs.issue_server_cert(cert_path, key_path, ca_cert_path, ca_key_path)
 
 
-def _flock_with_deadline(lock_file: Any, timeout: float) -> None:
-    """Take an exclusive file lock on *lock_file*, giving up after *timeout*.
-
-    Polls the non-blocking lock with short sleeps instead of blocking:
-    the blocking call cannot be interrupted by
-    cancelling the coroutine that offloaded it to the executor, so a
-    sibling process that wedged while holding the lock would stall
-    startup forever.
-
-    Args:
-        lock_file: An open file object whose descriptor is locked.
-        timeout: Maximum seconds to keep trying.
-
-    Raises:
-        TimeoutError: The lock was still held by another process when
-            *timeout* elapsed.
-    """
-    deadline = time.monotonic() + timeout
-    while not lock_exclusive(lock_file, blocking=False):
-        if time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"{lock_file.name} still locked by another process "
-                f"after {timeout:.0f}s",
-            )
-        time.sleep(0.05)
-
-
 def _tls_lock_path() -> Path:
-    """Return the lock file serialising sibling daemons' access to :func:`_tls_dir`."""
-    tls_dir = _tls_dir()
-    tls_dir.mkdir(parents=True, exist_ok=True)
-    return tls_dir / ".tls.lock"
+    """Return the lock file serialising sibling daemons' access to :func:`_tls_dir`.
+
+    Held through :func:`kiss.core.file_lock.exclusive_file_lock` with
+    :data:`_TLS_LOCK_TIMEOUT_S`: the bounded wait polls the non-blocking
+    lock, since a blocking ``flock`` offloaded to the executor cannot be
+    interrupted by cancelling its coroutine, and a sibling that wedged
+    while holding the lock would otherwise stall startup forever.
+    """
+    return _tls_dir() / ".tls.lock"
 
 
 def _load_local_tls_pair(ctx: ssl.SSLContext, lan_ips: Iterable[str]) -> bytes:
@@ -2452,8 +2434,7 @@ def _load_local_tls_pair(ctx: ssl.SSLContext, lan_ips: Iterable[str]) -> bytes:
         The PEM bytes of the certificate that was loaded.
     """
     tls_dir = _tls_dir()
-    with open(_tls_lock_path(), "w", encoding="utf-8") as lock_file:
-        _flock_with_deadline(lock_file, _TLS_LOCK_TIMEOUT_S)
+    with exclusive_file_lock(_tls_lock_path(), timeout=_TLS_LOCK_TIMEOUT_S):
         cert_path, key_path = tls_certs.ensure_local_tls_pair(tls_dir, lan_ips)
         try:
             ctx.load_cert_chain(str(cert_path), str(key_path))
@@ -2479,8 +2460,7 @@ def _refresh_local_tls_pair(lan_ips: Iterable[str]) -> bytes:
     Args:
         lan_ips: See :func:`_load_local_tls_pair`.
     """
-    with open(_tls_lock_path(), "w", encoding="utf-8") as lock_file:
-        _flock_with_deadline(lock_file, _TLS_LOCK_TIMEOUT_S)
+    with exclusive_file_lock(_tls_lock_path(), timeout=_TLS_LOCK_TIMEOUT_S):
         cert_path, _key_path = tls_certs.ensure_local_tls_pair(_tls_dir(), lan_ips)
         return cert_path.read_bytes()
 
@@ -2507,10 +2487,8 @@ def _reload_local_tls_pair_if_unlocked(ctx: ssl.SSLContext, cert_pem: bytes) -> 
     tls_dir = _tls_dir()
     cert_path = tls_dir / tls_certs.SERVER_CERT_FILE
     key_path = tls_dir / tls_certs.SERVER_KEY_FILE
-    with open(_tls_lock_path(), "w", encoding="utf-8") as lock_file:
-        if not lock_exclusive(lock_file, blocking=False):
-            return False
-        if cert_path.read_bytes() != cert_pem:
+    with exclusive_file_lock(_tls_lock_path(), blocking=False) as locked:
+        if not locked or cert_path.read_bytes() != cert_pem:
             return False
         ctx.load_cert_chain(str(cert_path), str(key_path))
         return True
@@ -2707,8 +2685,12 @@ class WebPrinter(JsonPrinter):
                 if isinstance(wt_work_dir, str) and wt_work_dir
                 else event.get("worktreeDir")
             )
+            # A worktree of another repository (no ``worktreeWorkDir``:
+            # the task's work dir did not move into it) never replaces
+            # the work dir's worktree, which relative file links need.
+            keep_existing = not (isinstance(wt_work_dir, str) and wt_work_dir)
             if isinstance(wt_dir, str) and wt_dir:
-                self._record_tab_worktree_dir(tab_id, wt_dir, task_id)
+                self._record_tab_worktree_dir(tab_id, wt_dir, task_id, keep_existing)
         elif (
             etype == "worktree_result"
             and event.get("success")
@@ -2718,11 +2700,21 @@ class WebPrinter(JsonPrinter):
             # disk, so the remote client's openFile/checkPaths fallback
             # must survive for transcript file links to keep resolving
             # into it — mirroring the VS Code host (gpt-5.6-sol review
-            # finding).
-            self._tab_worktree_dirs.pop(tab_id, None)
+            # finding).  A result naming another repository's worktree
+            # (one per repository from commit_and_merge) leaves the
+            # recorded one, still pending, alone.
+            result_dir = event.get("worktreeDir")
+            with self._lock:
+                recorded = self._tab_worktree_dirs.get(tab_id, "")
+                if (
+                    recorded and isinstance(result_dir, str) and result_dir
+                    and not Path(recorded).is_relative_to(result_dir)
+                ):
+                    return
+                self._tab_worktree_dirs.pop(tab_id, None)
 
     def _record_tab_worktree_dir(
-        self, tab_id: str, wt_dir: str, task_id: Any,
+        self, tab_id: str, wt_dir: str, task_id: Any, keep_existing: bool = False,
     ) -> None:
         """Record *wt_dir* as *tab_id*'s worktree, unless the copy is stale.
 
@@ -2742,6 +2734,9 @@ class WebPrinter(JsonPrinter):
             task_id: The task the fan-out copy belongs to, or ``None``
                 for an event addressed to the tab directly (always
                 recorded).
+            keep_existing: Record *wt_dir* only when the tab has no
+                worktree directory yet (a second repository's worktree
+                must not displace the work dir's).
         """
         with self._lock:
             if task_id is not None:
@@ -2749,6 +2744,8 @@ class WebPrinter(JsonPrinter):
                 viewers = self._subscribers.get(key) if key else None
                 if not viewers or tab_id not in viewers:
                     return
+            if keep_existing and self._tab_worktree_dirs.get(tab_id):
+                return
             self._tab_worktree_dirs[tab_id] = wt_dir
 
     def worktree_dir_for_tab(self, tab_id: str) -> str:
@@ -4376,20 +4373,29 @@ def _record_update_snooze(latest: str) -> None:
 
 
 _ASSET_LOAD_GUARD_JS = r"""
-// Reloads the remote webapp once when one of its own page assets
-// fails to load.  A page script that never arrives leaves the app
-// half-booted (with api.js missing, main.js throws at
-// ``createSorcarApi`` and the loading overlay covers #app for good
-// while the WebSocket authenticates happily); a stylesheet that never
-// arrives leaves it unstyled for its whole lifetime (without
-// remote-codex.css the docked history panel is main.css's 90vw
-// drawer, open on top of the chat).  Chromium aborts every in-flight
-// request with ERR_NETWORK_CHANGED when the network path changes
-// during the load (a Wi-Fi/cellular hand-over on a phone), so this is
-// a transient a reload fixes.  Load errors do not bubble, but a
-// capture-phase listener on window still sees them.  The timestamp
-// in sessionStorage stops a reload loop when an asset is really
-// broken: one reload per 30 s, then the failure stays visible.
+// Reloads the remote webapp when one of its own page assets fails to
+// load.  A page script that never arrives leaves the app half-booted
+// (with api.js missing, main.js throws at ``createSorcarApi`` and the
+// loading overlay covers #app for good while the WebSocket
+// authenticates happily); a stylesheet that never arrives leaves it
+// unstyled for its whole lifetime (without remote-codex.css the
+// docked history panel is main.css's 90vw drawer, open on top of the
+// chat).  Chromium aborts every in-flight request with
+// ERR_NETWORK_CHANGED when the network path changes during the load
+// (a Wi-Fi/cellular hand-over on a phone; on a busy CI host, the
+// veth links of other jobs' containers), so this is a transient a
+// reload fixes.  Load errors do not bubble, but a capture-phase
+// listener on window still sees them.  The reload timestamps in
+// sessionStorage stop a reload loop when an asset is really broken:
+// up to three reloads per 30 s, then the failure stays visible.  (One
+// change can outlast a single reload: in the full-suite run of
+// 2026-10-11 the reloaded page's remote-codex.css was aborted too and
+// a one-reload budget left the chat under the drawer.)  The reload is
+// immediate, from inside the error event: a reload deferred to a
+// timer lets the broken document go on booting (main.js runs, the
+// WebSocket opens) with requests in flight that the reload then
+// aborts, after which Chromium has failed the reloaded page's own
+// assets with ERR_TOO_MANY_RETRIES.
 //
 // This script is the first thing in <head> (the HEAD_SCRIPT
 // placeholder of media/chat.html), before the stylesheet links: a
@@ -4403,7 +4409,14 @@ _ASSET_LOAD_GUARD_JS = r"""
 // from its CDN, the voice model, the swapped highlight theme sheet)
 // have their own fallbacks and must not restart the app.
 (function() {
-  var _RELOADED_AT = 'sorcar-script-reloaded-at';
+  // A JSON list of the Date.now() stamps of this tab's recent reloads.
+  var _RELOADS = 'sorcar-asset-reloads';
+  var _WINDOW_MS = 30000;
+  var _MAX_RELOADS = 3;
+  // Set once this document reloads: the other assets of the same
+  // document that fail too (the document lives on until the reload
+  // commits) must not each take a stamp of the budget.
+  var _reloading = false;
   // The URL of the failed asset ('' for anything else: an inline
   // script, an image, the window's own error events).  src / href /
   // rel read as '' when the attribute is missing.
@@ -4416,16 +4429,22 @@ _ASSET_LOAD_GUARD_JS = r"""
   function _reloadOnAssetLoadError(ev) {
     var url = _assetUrl(ev.target);
     if (!url) return;
+    if (_reloading) return;
     if (document.readyState !== 'loading') return;
     if (url.indexOf(window.location.origin + '/') !== 0) return;
     try {
-      var last = Number(sessionStorage.getItem(_RELOADED_AT)) || 0;
-      if (Date.now() - last < 30000) return;
-      sessionStorage.setItem(_RELOADED_AT, String(Date.now()));
+      var now = Date.now();
+      var reloads = (JSON.parse(sessionStorage.getItem(_RELOADS)) || []).filter(
+        function(stamp) { return now - stamp < _WINDOW_MS; }
+      );
+      if (reloads.length >= _MAX_RELOADS) return;
+      reloads.push(now);
+      sessionStorage.setItem(_RELOADS, JSON.stringify(reloads));
     } catch(e) {
       // No storage means no loop guard: leave the failure visible.
       return;
     }
+    _reloading = true;
     window.location.reload();
   }
   window.addEventListener('error', _reloadOnAssetLoadError, true);
@@ -4703,11 +4722,21 @@ _WS_SHIM_JS = r"""
   var _STALE_AFTER_MS = 45000;
   var _lastFrameAt = 0;
   var _staleTimer = null;
+  // The reconnect backoff is forgiven only once a session has stayed
+  // up this long.  Forgiving it on ``auth_ok`` let a daemon that
+  // accepts the socket and then stalls or drops it during the replay
+  // be retried every half second for as long as it kept failing.
+  var _STABLE_AFTER_MS = 30000;
+  var _stableTimer = null;
 
   function _stopStaleCheck() {
     if (_staleTimer !== null) {
       try { clearTimeout(_staleTimer); } catch (e) {}
       _staleTimer = null;
+    }
+    if (_stableTimer !== null) {
+      try { clearTimeout(_stableTimer); } catch (e) {}
+      _stableTimer = null;
     }
   }
 
@@ -4782,10 +4811,15 @@ _WS_SHIM_JS = r"""
 
   function _scheduleReconnect() {
     if (_reconnectTimer !== null) return;
-    // Aggressive backoff: 250ms, 500ms, 1s, 2s, 4s, capped at 5s.
-    // The old 3000ms fixed delay made reconnects feel sluggish on
-    // mobile Safari, which already pauses JS in backgrounded tabs.
-    var delay = Math.min(5000, 250 * Math.pow(2, _reconnectAttempt));
+    // Exponential backoff with full jitter: 0.5-1s, 1-2s, 2-4s, ...
+    // capped at 30-60s.  The first attempt is quick so a blip heals
+    // at once (visibilitychange / online reconnect immediately
+    // anyway, see _reconnectNowIfNeeded); the cap is high so a daemon
+    // that is busy or stalled is not hammered every few seconds by
+    // every open browser, and the jitter keeps the browsers that one
+    // outage disconnected together from reconnecting in one burst.
+    var base = Math.min(30000, 500 * Math.pow(2, _reconnectAttempt));
+    var delay = base + Math.floor(Math.random() * base);
     _reconnectAttempt++;
     _reconnectTimer = setTimeout(function () {
       _reconnectTimer = null;
@@ -5145,7 +5179,10 @@ _WS_SHIM_JS = r"""
         _authenticated = true;
         _stopStaleCheck();
         _staleTimer = setTimeout(_checkStale, _STALE_CHECK_MS);
-        _reconnectAttempt = 0;
+        _stableTimer = setTimeout(function () {
+          _stableTimer = null;
+          _reconnectAttempt = 0;
+        }, _STABLE_AFTER_MS);
         _outageSince = 0;
         _lockedUntil = 0;
         _promptDeclined = false;
@@ -5797,7 +5834,11 @@ class RemoteAccessServer:
                     "_ensure_voice_model() returned None: the download "
                     "from the model host failed or timed out.",
                 )
-            body = await asyncio.to_thread(model_file.read_bytes)
+            # A sibling process (a second daemon, a test beside a live
+            # one) may be publishing its own download of the archive at
+            # this very moment; on Windows its ``os.replace`` denies a
+            # plain open of the name for a few milliseconds.
+            body = await asyncio.to_thread(read_bytes_waiting_for_writer, model_file)
             return _http_response(200, "application/gzip", body)
         if path.startswith("/media/"):
             filepath = MEDIA_DIR / path[7:]
@@ -6336,12 +6377,14 @@ class RemoteAccessServer:
                 None, self._spawn_update_script, script, conn_id,
             )
         finally:
+            # The spawn is over (a running installer now holds the
+            # single-flight guard through ``_update_proc``).
+            self._update_starting = False
             if spawned is None:
                 # No installer owns the barrier (spawn failure, or a
                 # raise/cancellation before the spawn): admit runs
                 # again and let a later Update click start over.
                 self._set_update_barrier(False)
-                self._update_starting = False
         if spawned is None:
             return
         self._update_watch_task = asyncio.create_task(
@@ -6493,8 +6536,6 @@ class RemoteAccessServer:
                 "text": f"Failed to start {PRODUCT_NAME} update: {exc}",
             }, conn_id)
             return None
-        finally:
-            self._update_starting = False
 
     async def _watch_update_exit(
         self, proc: subprocess.Popen[bytes], log_offset: int, conn_id: str,
@@ -8453,18 +8494,19 @@ class RemoteAccessServer:
         then synchronizes the client with the shared tab registry:
         the client's legacy ``restoredTabs`` are adopted only into an
         EMPTY registry (one-time migration), a canonical ``tabs_state``
-        snapshot is broadcast, and every chat-bound registry tab is
-        replayed TO THIS CLIENT so it converges on the transcripts the
-        other clients already show (``replayConnId``: the other windows
-        have those transcripts and must not rebuild them because a new
-        panel connected).  A client that mirrors exactly one registry
-        tab (a VS Code editor-tab panel, which names it in
-        ``singleTabId``) receives only that tab's replay: it drops
-        every other tab's events on arrival, so sending them only costs
-        the serialization of every transcript.  The one exception is a
-        ``ready`` whose legacy ``restoredTabs`` seed an EMPTY registry:
-        those tabs are new to every client, so all of them are replayed
-        to everyone.
+        snapshot is broadcast, the tab the client shows (``tabId``) is
+        replayed TO THIS CLIENT (``replayConnId``: the other windows
+        have that transcript and must not rebuild it because a new
+        panel connected), and every other chat-bound registry tab is
+        deferred (``deferred: true`` → :meth:`VSCodeServer._defer_replay`):
+        the client gets its running state and a ``replay_deferred``
+        offer and fetches the transcript when the user opens the tab.
+        A client that mirrors exactly one registry tab (a VS Code
+        editor-tab panel, which names it in ``singleTabId``) receives
+        only that tab's replay: it drops every other tab's events on
+        arrival.  The one exception is a ``ready`` whose legacy
+        ``restoredTabs`` seed an EMPTY registry: those tabs are new to
+        every client, so all of them are replayed to everyone.
         Tab state is server-canonical — clients never keep a tab set
         of their own — so the same path serves VS Code webviews (local)
         and remote web apps (WSS) alike.
@@ -8527,6 +8569,16 @@ class RemoteAccessServer:
         # their transcripts, so the replays must reach everyone — every
         # seeded tab's, even when the seeding client shows only one.
         replay_conn_id = "" if adopted else conn_id
+        # Only the tab the client is looking at (``tabId``, or the one
+        # tab an editor panel mirrors) gets its transcript now.  The
+        # other bound tabs are DEFERRED: the client receives their
+        # running state and a ``replay_deferred`` offer, and asks for
+        # a transcript (a ``scoped`` ``resumeSession``) when the user
+        # opens the tab.  Replaying every tab used to send a laptop
+        # with twenty tabs hundreds of megabytes per reconnect and
+        # stalled the daemon while it loaded and serialized them,
+        # which in turn made the client reconnect again.
+        focused_tab_id = single_tab_id or tab_id
         for rt_id, rt_chat, rt_task in bound:
             if single_tab_id and not adopted and rt_id != single_tab_id:
                 continue
@@ -8534,6 +8586,8 @@ class RemoteAccessServer:
                 "type": "resumeSession", "chatId": rt_chat,
                 "tabId": rt_id, "replayConnId": replay_conn_id,
             }
+            if not adopted and rt_id != focused_tab_id:
+                resume["deferred"] = True
             # A tab pinned to a specific historical task replays THAT
             # task; without the taskId the replay would silently
             # switch every client's tab to the chat's latest task.
@@ -8700,9 +8754,7 @@ class RemoteAccessServer:
             # visible editor the VS Code host reports.
             "activeFile": cmd.get("activeFile"),
             "attachments": attachments,
-            "useWorktree": cmd.get("useWorktree", True),
             "isParallel": cmd.get("isParallel", True),
-            "autoCommit": cmd.get("autoCommit", True),
             # Absent/non-bool means "no per-run override": the task
             # runner then falls back to the persisted "Use web tools"
             # setting (config key ``use_web_browser``).
@@ -9851,6 +9903,13 @@ class RemoteAccessServer:
         cancelled by :meth:`stop_async`) would otherwise drop the
         ``Server`` object and leave the port bound until process exit.
         On cancellation the listener is closed as soon as it exists.
+
+        The library's keep-alive is off because the daemon runs its
+        own: the watchdog pings every connection every
+        :data:`TUNNEL_CHECK_INTERVAL` seconds and closes one that does
+        not answer within :data:`_WS_PING_TIMEOUT`
+        (:meth:`_ping_one_ws`), then sends the ``heartbeat`` frame the
+        remote page's shim watches.
         """
         bind = asyncio.ensure_future(serve(
             self._ws_handler,
@@ -10196,7 +10255,10 @@ class RemoteAccessServer:
         # endpoint.  Only this blocking lifecycle (the real `kiss-web`
         # daemon) owns the scheduler: `start_async()` embedders —
         # in-process helper daemons and tests — must not fire the
-        # user's scheduled jobs.
+        # user's scheduled jobs.  The default jobs every installation
+        # gets (the 6-hourly /recommendations run) are seeded first, once
+        # per home.
+        cron_agent.seed_default_jobs()
         cron_stop = cron_agent.start_scheduler_thread(
             endpoint_file=str(self._local_endpoint_file),
         )
@@ -10685,11 +10747,16 @@ class RemoteAccessServer:
             # last save succeeded.
             self._vscode_server.tab_registry.flush()
             # The Browser tab dies with this server: a later hand-off in
-            # this process must fall back to the default browser.
+            # this process must fall back to the default browser, and
+            # the streamed browser is closed here rather than killed by
+            # the driver at process exit (same as ``stop_async``).
             set_browser_tab_opener(None)
+            self._vscode_server.browser_tabs.shutdown()
             # Terminal-tab shells are hung up (and killed when they
             # ignore it) rather than left to outlive the daemon.
             self._vscode_server.terminals.shutdown()
+            # Streams of the tabs running on remote machines.
+            self._server_api.remote_tabs.close_all()
             self._stop_sea_command_watcher()
             file_index.stop()
             if stall_watchdog is not None:
@@ -10810,6 +10877,8 @@ class RemoteAccessServer:
             await asyncio.to_thread(self._vscode_server.browser_tabs.shutdown)
             # Terminal-tab shells are children of this daemon too.
             await asyncio.to_thread(self._vscode_server.terminals.shutdown)
+            # Streams of the tabs running on remote machines.
+            await asyncio.to_thread(self._server_api.remote_tabs.close_all)
             # An interactive merge/discard runs in the default executor,
             # not on a task thread: WAIT for it before anything else is
             # torn down, or the repository keeps being rewritten after
@@ -10885,13 +10954,13 @@ def main() -> None:  # pragma: no cover — CLI entry point
 
     tunnel_token, tunnel_url = _resolve_tunnel_settings()
 
+    suppress_error_dialogs()
     server = RemoteAccessServer(
         use_tunnel=True,
         tunnel_token=tunnel_token,
         tunnel_url=tunnel_url,
         work_dir=args.workdir,
     )
-    server._vscode_server.prewarm_worktree_pool()
     server.start()
 
 

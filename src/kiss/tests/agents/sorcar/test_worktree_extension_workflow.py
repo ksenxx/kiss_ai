@@ -2,13 +2,14 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for WorktreeSorcarAgent ↔ VSCode extension workflow.
+"""Integration tests for ChatSorcarAgent ↔ VSCode extension workflow.
 
 Validates the full commit-and-merge / discard workflow as exercised by
-the extension: task execution → worktree_done broadcast → user action
-(merge or discard) → worktree_result broadcast → git state cleanup.
+the extension: task execution (the agent calls its ``create_worktree``
+tool) → user action (merge or discard) → git state cleanup.
 
-Every test uses real git repos (no mocks).
+Every test uses real git repos; only the agent loop is replaced by a
+canned run that calls ``create_worktree`` the way the model would.
 """
 
 from __future__ import annotations
@@ -22,9 +23,10 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
+from kiss.agents.sorcar.relentless_agent import resolve_work_dir
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -68,21 +70,23 @@ def _make_repo(path: Path) -> Path:
 
 def _patch_super_run(
     return_value: str = "success: true\nsummary: test done\n",
-    raise_exc: BaseException | None = None,
 ) -> Any:
     """Patch SorcarAgent's parent ``run()`` to return a canned value.
 
+    The fake run does what the real agent loop does before the model's
+    first edit: it binds the work dir and calls the ``create_worktree``
+    tool, so the task's worktree is pending when ``run()`` returns.
+
     Args:
         return_value: String to return from the fake run.
-        raise_exc: If set, the fake run raises this exception instead
-            of returning *return_value*.
     """
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
-    def fake_run(self_agent: object, **kwargs: object) -> str:
-        if raise_exc is not None:
-            raise raise_exc
+    def fake_run(self_agent: ChatSorcarAgent, **kwargs: Any) -> str:
+        self_agent.work_dir = resolve_work_dir(cast(str | None, kwargs.get("work_dir")))
+        created = self_agent.create_worktree()
+        assert created.startswith("Created worktree "), created
         return return_value
 
     parent_class.run = fake_run
@@ -129,8 +133,8 @@ class TestWorktreeWorkflow:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _agent(self) -> WorktreeSorcarAgent:
-        return WorktreeSorcarAgent("test")
+    def _agent(self) -> ChatSorcarAgent:
+        return ChatSorcarAgent("test")
 
 
     def test_merge_propagates_file_changes_to_original_branch(self) -> None:
@@ -262,7 +266,7 @@ class TestWorktreeWorkflow:
 
 
     def test_do_nothing_method_does_not_exist(self) -> None:
-        """WorktreeSorcarAgent no longer has a do_nothing() method."""
+        """ChatSorcarAgent no longer has a do_nothing() method."""
         agent = self._agent()
         assert not hasattr(agent, "do_nothing")
 

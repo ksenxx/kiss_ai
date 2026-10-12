@@ -31,7 +31,6 @@ from __future__ import annotations
 import http.server
 import json
 import os
-import socket
 import subprocess
 import tempfile
 import threading
@@ -42,6 +41,7 @@ from pathlib import Path
 
 from kiss.server import web_server as ws
 from kiss.tests.conftest import install_fake_cloudflared, posix_only
+from kiss.tests.server.conftest import find_free_port
 
 _FAKE_BODY = "import time\ntime.sleep(120)\n"
 
@@ -82,12 +82,6 @@ class _NoUrlHandler(_HealthyHandler):
         self.wfile.write(data)
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
 def _wait_until(predicate: Callable[[], bool], timeout: float = 15.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -107,7 +101,7 @@ class TestStrayCloudflared(unittest.TestCase):
         self._old_pidfile = ws._CLOUDFLARED_PIDFILE
         ws._CLOUDFLARED_PIDFILE = self.dir / "cloudflared.pid"
         self.fake = install_fake_cloudflared(self.dir, _FAKE_BODY)
-        self.local_port = _free_port()
+        self.local_port = find_free_port()
         self._procs: list[subprocess.Popen[bytes]] = []
         self._httpds: list[http.server.HTTPServer] = []
 
@@ -149,7 +143,7 @@ class TestStrayCloudflared(unittest.TestCase):
     def test_scan_matches_only_our_port(self) -> None:
         """The scan returns ``(pid, metrics_port)`` for our port only."""
         ours = self._spawn_fake(41001, self.local_port)
-        other = self._spawn_fake(41002, _free_port())
+        other = self._spawn_fake(41002, find_free_port())
         found = ws._find_cloudflared_forwarding_to(self.local_port)
         self.assertEqual(found, [(ours.pid, 41001)])
         self.assertIsNone(other.poll())
@@ -301,7 +295,7 @@ class TestStrayCloudflared(unittest.TestCase):
         own = self._spawn_fake(41004, self.local_port)
         stray_a = self._spawn_fake(41005, self.local_port)
         stray_b = self._spawn_fake(41006, self.local_port)
-        elsewhere = self._spawn_fake(41007, _free_port())
+        elsewhere = self._spawn_fake(41007, find_free_port())
         ws._cloudflared_pidfile().write_text(json.dumps({
             "pid": own.pid, "metrics_port": 41004, "url": "https://own.trycloudflare.com",
         }))

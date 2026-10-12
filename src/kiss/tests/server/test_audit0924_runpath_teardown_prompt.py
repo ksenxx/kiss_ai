@@ -21,7 +21,7 @@ steering echo because the re-dispatched run echoes it as its own prompt.
 
 Harness (same as ``test_queued_followup_tasks.py``): a real
 ``VSCodeServer`` + ``JsonPrinter`` subclass, a real
-``WorktreeSorcarAgent`` subclass whose ``run`` returns a scripted
+``ChatSorcarAgent`` subclass whose ``run`` returns a scripted
 ``finish()`` result, and the first run started through the REAL
 ``_cmd_run`` so ``task_thread`` is installed exactly as in production.
 The re-dispatched second run must not call a model: the run command
@@ -44,8 +44,8 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.core.utils import finish
 from kiss.server import agent_state
@@ -69,7 +69,7 @@ def _clear_states(prefix: str) -> None:
         agent_state.unregister(task_id)
 
 
-class _TeardownAgent(WorktreeSorcarAgent):
+class _TeardownAgent(ChatSorcarAgent):
     """Real agent whose first ``run`` submits a prompt right before returning.
 
     The submission lands after the agent's last (and only) step and

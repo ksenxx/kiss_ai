@@ -301,31 +301,6 @@ def backend(gh_server):
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 
-_READ_TOOLS = [
-    "gh_get_file_contents",
-    "gh_get_issue",
-    "gh_get_me",
-    "gh_get_pull_request",
-    "gh_get_pull_request_diff",
-    "gh_get_repository",
-    "gh_list_branches",
-    "gh_list_commits",
-    "gh_list_issue_comments",
-    "gh_list_issues",
-    "gh_list_pull_requests",
-    "gh_search_code",
-    "gh_search_issues",
-    "gh_search_repositories",
-]
-_WRITE_TOOLS = [
-    "gh_comment_on_issue",
-    "gh_create_issue",
-    "gh_create_pull_request",
-    "gh_merge_pull_request",
-    "gh_update_issue",
-]
-
-
 def _call_every_tool(b: GitHubChannelBackend) -> list[str]:
     """Invoke every backend tool once with valid arguments; return the results."""
     return [

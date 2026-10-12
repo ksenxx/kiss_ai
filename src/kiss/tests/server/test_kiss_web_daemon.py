@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
-import ssl
 import urllib.request
 from unittest import IsolatedAsyncioTestCase
 
@@ -26,14 +25,7 @@ from kiss.server.web_server import (
     _remove_url_file,
     _save_url_file,
 )
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return an SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import no_verify_ssl
 
 
 class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
@@ -127,7 +119,7 @@ class TestDaemonDetection(IsolatedAsyncioTestCase):
 
         try:
             loop = asyncio.get_event_loop()
-            ctx = _no_verify_ssl()
+            ctx = no_verify_ssl()
             resp = await loop.run_in_executor(
                 None,
                 lambda: urllib.request.urlopen(
@@ -185,7 +177,7 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
         _save_url_file(_URL_FILE, f"https://localhost:{port}")
 
         loop = asyncio.get_event_loop()
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
         resp = await loop.run_in_executor(
             None,
             lambda: urllib.request.urlopen(
@@ -204,7 +196,7 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
         _save_url_file(_URL_FILE, f"https://localhost:{port}")
 
         try:
-            ctx2 = _no_verify_ssl()
+            ctx2 = no_verify_ssl()
             resp2 = await loop.run_in_executor(
                 None,
                 lambda: urllib.request.urlopen(

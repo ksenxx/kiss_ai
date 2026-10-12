@@ -11,18 +11,20 @@
   const PRODUCT_NAME =
     (window.__BRAND__ && window.__BRAND__.productName) || 'KISS Sorcar';
 
-  // Editor-tabs mode: this webview is hosted in a VS Code EDITOR TAB
-  // (WebviewPanel) pinned to a single root chat tab, instead of the
-  // secondary-sidebar view with its internal tab bar. The hosting
-  // extension marks the mode (and the tab's initial state) on <body>
-  // — see SorcarTab.editorTabBodyAttrs / SorcarPanelManager.
+  // Editor-tab mode: this webview is hosted in the VS Code chat EDITOR
+  // TAB (one WebviewPanel) instead of the secondary-sidebar view. The
+  // tab model is the sidebar view's — the daemon's whole tab registry,
+  // chats switched in place — only the surface differs: the shown
+  // chat's title and task-info values go to the host, which paints
+  // the editor tab and the Task Info view. The hosting extension marks
+  // the mode on <body> — see SorcarTab.EDITOR_TAB_BODY_ATTRS.
   const EDITOR_TAB_MODE = document.body.classList.contains('editor-tab-mode');
 
   // History-panel mode: this webview is the PRIMARY-sidebar history
-  // panel of editor-tabs mode. It runs as an editor-tab surface (so a
-  // history click posts `openChatPanel` and the host opens the chat as
-  // an editor tab) but shows ONLY the history sidebar, permanently
-  // open — see body.history-panel-mode in main.css.
+  // panel of editor-tabs mode. It runs as an editor-tab surface but
+  // shows ONLY the history sidebar, permanently open — see
+  // body.history-panel-mode in main.css; a history click posts
+  // `openChatPanel` and the host shows the chat in the chat editor tab.
   const HISTORY_PANEL_MODE =
     document.body.classList.contains('history-panel-mode');
 
@@ -32,6 +34,11 @@
   // main.css) and renders the `metaState` relays of the active chat
   // editor tab instead of mirroring its own (idle) status spans.
   const META_PANEL_MODE = document.body.classList.contains('meta-panel-mode');
+
+  // The two panel-shaped surfaces run no chats: they never adopt the
+  // registry's tabs (the chat editor tab shows them), ask the daemon
+  // for no replay, and adopt no sub-agent tab.
+  const CHATLESS_PANEL = HISTORY_PANEL_MODE || META_PANEL_MODE;
 
   // Sidebar-chat mode: this webview is the extension's SECONDARY-
   // sidebar chat view (editor-tabs mode OFF) — the surface with the
@@ -48,13 +55,12 @@
   // postToHost; the remote webapp's postMessage goes to the daemon.
   const VSCODE_CHAT_HOST = EDITOR_TAB_MODE || SIDEBAR_CHAT_MODE;
 
-  // Chat panels of editor-tabs mode report their task-info values to
-  // the host (metaUpdate), which relays the ACTIVE panel's into the
+  // The chat editor tab of editor-tabs mode reports its task-info
+  // values to the host (metaUpdate), which relays them into the
   // Task Info view. The two panel-shaped surfaces (history, task info)
   // never report: they run no tasks, and a report from them would
   // blank the view.
-  const POST_META_UPDATES =
-    EDITOR_TAB_MODE && !HISTORY_PANEL_MODE && !META_PANEL_MODE;
+  const POST_META_UPDATES = EDITOR_TAB_MODE && !CHATLESS_PANEL;
 
   // Every VS Code chat surface (editor-tab panel or the sidebar chat
   // view) tells the host which chat / task it shows (activeTask), and
@@ -509,6 +515,10 @@
   }
 
   const notificationTimers = new Map();
+  // Ids for toasts raised without one: a counter, not Date.now(), so
+  // two anonymous toasts in the same millisecond do not collapse into
+  // one (the second would update the first instead of appearing).
+  let anonymousNotificationSeq = 0;
 
   function ensureNotificationContainer() {
     let container = document.getElementById('kiss-notification-container');
@@ -580,7 +590,7 @@
 
   function showNotification(ev) {
     const container = ensureNotificationContainer();
-    const id = ev.id || String(Date.now());
+    const id = ev.id || 'anon-' + ++anonymousNotificationSeq;
     let toast = container.querySelector(notificationSelector(id));
     const severity = ev.severity || 'info';
     const actions = Array.isArray(ev.actions) ? ev.actions : [];
@@ -1045,6 +1055,10 @@
   let historyLoading = false;
   let historyHasMore = true;
   let historyGeneration = 0;
+  // refreshHistory coalescing: the trailing-refetch timer of the current
+  // tick and whether a refresh was folded into it.
+  let historyRefreshTrailing = null;
+  let historyRefreshWanted = false;
   let historyDateRangeUserSet = false;
   const historyLastRunningTaskIds = new Set();
   const historyJustCompletedTaskIds = new Set();
@@ -1145,6 +1159,12 @@
 
   let tabs = [];
   let activeTabId = '';
+  // Per tab, the registered machine its tasks run on ('' = this
+  // machine): the chat header's drop-down (renderChatMachine).  The
+  // tabs whose entry is a pick the user has not submitted yet: the
+  // daemon's binding (`tabMachine`) does not overwrite it.
+  const tabMachines = new Map();
+  const tabMachinePicked = new Set();
   // The file tab the user looked at most recently (see editorContext).
   let lastViewedContentTabId = '';
   // The tab the bar last scrolled into view.  renderTabBar() runs on
@@ -1186,6 +1206,10 @@
       // (status / task_events) arrives: its task may be running on
       // another surface, so retireIdleChat() must not close it yet.
       statusKnown: true,
+      // {chatId, taskId} while the daemon holds the tab's transcript
+      // back (`replay_deferred`); cleared by the replay the first
+      // activation requests (requestDeferredReplay).
+      replayPending: null,
       // Raised by the Stop button until the task actually ends, so a
       // stop the agent has not reached yet looks different from a stop
       // that never arrived (see stop_button_delay_2026-08-05.html).
@@ -1996,10 +2020,8 @@
     return t;
   }
 
-  /** The tabs of *root*'s group, in tab order, *root* included. In
-   *  editor-tabs mode the panel is one group, so every tab belongs. */
+  /** The tabs of *root*'s group, in tab order, *root* included. */
   function groupMembers(root) {
-    if (EDITOR_TAB_MODE) return tabs.slice();
     return tabs.filter(t => rootTabOf(t) === root);
   }
 
@@ -2036,38 +2058,30 @@
     // Checked on <body> inline — not via EDITOR_TAB_MODE — so the
     // function stays self-contained.
     const editorTabMode = document.body.classList.contains('editor-tab-mode');
-    if (editorTabMode) {
-      // The EDITOR TAB is this chat's tab: mirror the root chat tab's
-      // label (the task on screen while the root is shown, see
-      // tabLabel) onto it through the host.
-      const root = editorRootTab();
-      if (root) {
-        const title = tabLabel(root) || 'new chat';
-        // Mirror the internal tab strip's status icon onto the EDITOR
-        // tab: the host paints a spinner while the task runs and a
-        // green tick / red cross after it ends (the same states
-        // .chat-tab-spinner / .chat-tab-ok / .chat-tab-fail render in
-        // sidebar mode).
-        const state = root.isRunning
-          ? 'running'
-          : root.hasRunTask
-            ? root.lastTaskFailed
-              ? 'fail'
-              : 'ok'
-            : '';
-        if (
-          title !== lastNotifiedPanelTitle ||
-          state !== lastNotifiedPanelState
-        ) {
-          lastNotifiedPanelTitle = title;
-          lastNotifiedPanelState = state;
-          postToHost({
-            type: 'panelTitle',
-            title: title,
-            tabId: root.id,
-            state: state,
-          });
-        }
+    if (editorTabMode && shownRoot) {
+      // The EDITOR TAB shows the chat on screen: mirror its label (the
+      // task on screen while the root is shown, see tabLabel) onto it
+      // through the host.
+      const title = tabLabel(shownRoot) || 'new chat';
+      // Mirror the internal tab strip's status icon onto the EDITOR
+      // tab: the host paints a spinner while the task runs and a
+      // green tick / red cross after it ends (the same states
+      // .chat-tab-spinner / .chat-tab-ok / .chat-tab-fail render in
+      // sidebar mode).
+      const state = shownRoot.isRunning
+        ? 'running'
+        : shownRoot.hasRunTask
+          ? shownRoot.lastTaskFailed
+            ? 'fail'
+            : 'ok'
+          : '';
+      if (
+        title !== lastNotifiedPanelTitle ||
+        state !== lastNotifiedPanelState
+      ) {
+        lastNotifiedPanelTitle = title;
+        lastNotifiedPanelState = state;
+        postToHost({type: 'panelTitle', title: title, state: state});
       }
     }
 
@@ -2423,12 +2437,6 @@
         _rpTabPanel.delete(child.id);
       }
     }
-    if (EDITOR_TAB_MODE && !tabs[origIdx].isSubagentTab) {
-      // Retire the root through the host's long-lived connection before
-      // disposing this editor panel and its own daemon connection.
-      postToHost({type: 'closePanel', retire: !fromServer});
-      return;
-    }
     const activeWasClosed = toClose.has(activeTabId);
     const closed = tabs[origIdx];
     // A file a closing sub-agent opened stays with the chat: it moves up
@@ -2449,6 +2457,8 @@
       const i = tabs.findIndex(t => t.id === id);
       if (i >= 0) tabs.splice(i, 1);
       forgetPendingFileLinks(id);
+      tabMachines.delete(id);
+      tabMachinePicked.delete(id);
       // report-coverage:start
       discardReadyReports(id);
       // report-coverage:end
@@ -3009,6 +3019,7 @@
       return;
     }
     restoreTab(newTab);
+    requestDeferredReplay(newTab);
     setRunningState(newTab.isRunning);
     // A tab that ran while hidden comes back looking like one that ran
     // on screen: everything but its newest two panels collapsed. This
@@ -3023,6 +3034,49 @@
     }
     applyChevronState(currentTaskName);
     focusInputWithRetry();
+  }
+
+  /**
+   * Fetch the transcript the daemon withheld for *tab* on the last
+   * `ready` (`replay_deferred`: only the tab on screen is replayed).
+   * A sub-agent tab's transcript travels with its root chat's replay,
+   * so the nearest ancestor still pending is the one asked for.  The
+   * request is scoped to this connection: the other windows already
+   * show the tab and must not rebuild it.
+   */
+  function requestDeferredReplay(tab) {
+    let chat = tab;
+    while (chat && !chat.replayPending && chat.isSubagentTab) {
+      chat = tabOwner(chat);
+    }
+    const pending = chat && chat.replayPending;
+    if (!pending) return;
+    chat.replayPending = null;
+    const req = {id: pending.chatId, tabId: chat.id, scoped: true};
+    if (pending.taskId) req.taskId = pending.taskId;
+    api.resumeSession(req);
+  }
+
+  /**
+   * A history click on a chat whose tab is open: show the tab and,
+   * when the clicked task is not in its transcript, replay the tab at
+   * that task.  A tab whose transcript the daemon withheld
+   * (replayPending) is replayed at the clicked task outright: that
+   * explicit resume supersedes the deferred fetch the activation would
+   * send, so one transcript is loaded, not two.
+   */
+  function resumeExistingChatTab(tab, chatId, taskId) {
+    const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
+    const deferred = !tab.isContentTab && !!tab.replayPending;
+    if (deferred && hasTaskId) tab.replayPending = null;
+    switchToTab(tab.id);
+    if (
+      !tab.isContentTab &&
+      hasTaskId &&
+      (deferred || !scrollChatToTask(taskId))
+    ) {
+      api.resumeSession({id: chatId, taskId: taskId, tabId: tab.id});
+    }
   }
 
   function disposeTabContentView(tab) {
@@ -4633,10 +4687,12 @@
   function renderBinaryContent(tab, view, ev) {
     const mime = String(ev.mime || 'application/octet-stream');
     let url = '';
+    let bytes = null;
     try {
       const raw = window.atob(String(ev.base64 || ''));
-      const bytes = new Uint8Array(raw.length);
+      bytes = new Uint8Array(raw.length);
       for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      // The Blob copies the bytes: `bytes` stays ours to hand to pdf.js.
       url = URL.createObjectURL(new Blob([bytes], {type: mime}));
     } catch (_e) {
       url = '';
@@ -4655,10 +4711,7 @@
     if (mime === 'application/pdf') {
       // pdfView.js draws the pages itself (see its header for why the
       // browser's PDF plugin is not used); pdf.js takes the byte buffer
-      // over, so decode the bytes again rather than share the blob's.
-      const raw = window.atob(String(ev.base64 || ''));
-      const bytes = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      // over, which is fine: the Blob above holds its own copy.
       tab.pdfViewer = window.mountPdfViewer(holder, bytes, {
         name: ev.name || 'PDF',
         downloadUrl: url,
@@ -5183,7 +5236,7 @@
    * *left* is the tab the user was on; its whole group goes.
    */
   function retireIdleChat(left, draftMoved) {
-    if (!left || left.isContentTab || EDITOR_TAB_MODE) return;
+    if (!left || left.isContentTab) return;
     const root = rootTabOf(left);
     const active = getTab(activeTabId);
     if (!getTab(root.id) || (active && rootTabOf(active) === root)) return;
@@ -5200,19 +5253,64 @@
     closeTab(root.id, false, false);
   }
 
-  /** "+" and its kin: a fresh chat on screen, the chat left behind
-   *  retired when idle (its composer draft moves to the new chat). */
+  /** True for a root chat tab no task has ever touched: it still shows
+   *  the welcome and nothing is pending in it, so it IS a new chat and
+   *  "+" can hand it over instead of opening a second one.  A tab
+   *  adopted from the registry counts only once its status is known. */
+  function isFreshChat(t) {
+    if (!t || t.isContentTab || t.isSubagentTab || !t.statusKnown) return false;
+    // The tab on screen keeps its task in the module-level state
+    // (saveCurrentTab copies it back only on a switch).
+    const shown = t.id === activeTabId;
+    const taskId = shown ? currentTaskId : t.currentTaskId;
+    const task = shown
+      ? currentTaskName || pendingTaskText
+      : t.taskText || t.pendingTaskText;
+    return (
+      !t.backendChatId &&
+      !t.hasRunTask &&
+      !taskId &&
+      !t.pendingTaskId &&
+      !t.isRunning &&
+      t.askPendingQuestion === null &&
+      !t.unackedPrompt &&
+      !task
+    );
+  }
+
+  /** "+" and its kin: a new chat on screen.  The chat the user is on
+   *  is kept when it is still new; otherwise an existing new chat (one
+   *  opened earlier, here or on another surface) is brought forward,
+   *  and only when there is none is a tab opened.  The chat left
+   *  behind is retired when idle; its composer draft moves along
+   *  unless the chat brought forward has a draft of its own. */
   function openNewChat() {
     const left = getTab(activeTabId);
-    createNewTab();
-    retireIdleChat(left, true);
+    if (isFreshChat(left)) {
+      focusInputWithRetry();
+      return;
+    }
+    const fresh = tabs.find(isFreshChat);
+    if (!fresh) {
+      createNewTab();
+      retireIdleChat(left, true);
+      return;
+    }
+    const draft = inp.value || '';
+    const draftMoved = !!draft.trim() && !(fresh.inputValue || '').trim();
+    if (draftMoved) {
+      inp.value = '';
+      fresh.inputValue = draft;
+    }
+    switchToTab(fresh.id);
+    retireIdleChat(left, draftMoved);
+    focusInputWithRetry();
   }
 
   function openHistoryTaskInNewTab(taskText) {
     createNewTab();
     const t = (taskText || '').trim();
-    // Editor-tabs mode opens the task in a new editor panel instead.
-    if (!t || document.body.classList.contains('editor-tab-mode')) return;
+    if (!t) return;
     currentTaskName = t;
     setShownTask(t);
     if (welcome) {
@@ -5223,18 +5321,6 @@
   }
 
   function createNewTab() {
-    // Editor-tabs mode: a new conversation is a new EDITOR tab, never a
-    // second internal chat tab in this panel. (Checked on <body> inline
-    // — not via EDITOR_TAB_MODE — so the function stays self-contained
-    // for the harness that replays it in isolation, see
-    // test_history_click_creates_new_tab_each_time.py.)
-    if (document.body.classList.contains('editor-tab-mode')) {
-      // Carry the composer draft into the new editor tab (the host
-      // stamps it back as data-kiss-pending-text), exactly like the
-      // in-webview path below copies it into the new internal tab.
-      vscode.postMessage({type: 'openChatPanel', pendingText: inp.value || ''});
-      return;
-    }
     // Opening a chat is the user taking over: the launch is over, and no
     // backend event may move them off the tab they just asked for.
     closeLaunchSwitch();
@@ -5268,7 +5354,6 @@
   // state persisted locally is what stays client-local by design: the
   // selected tab and the drawer preferences.
   function persistTabState() {
-    const root = EDITOR_TAB_MODE ? editorRootTab() : null;
     const composer = document.getElementById('task-input');
     const active = getTab(activeTabId);
     // Every tab's unsent prompt, keyed by tab id.  The user can reload
@@ -5302,11 +5387,8 @@
       chatId: activeTabId,
       inputDrafts,
       askDrafts,
-      // Editor-tabs mode: the panel serializer re-adopts THIS chat tab
-      // after a window reload (SorcarPanelManager.registerSerializer).
-      // The active tab id will not do — a sub-agent tab may be on
-      // screen when the window goes down.
-      editorRootTabId: root ? root.id : undefined,
+      tabMachines: Object.fromEntries(tabMachines),
+      tabMachinePicked: Array.from(tabMachinePicked),
       inputDrawerCollapsed: inputDrawerCollapsed,
       inputDrawerUserSet: inputDrawerUserSet,
       drawersVersion: DRAWERS_VERSION,
@@ -5377,29 +5459,6 @@
     return shownTaskName ? clipTabTitle(shownTaskName) : tab.title;
   }
 
-  // Editor-tabs mode: the panel's single top-level chat tab. Sub-agent
-  // and content tabs hang off it; nothing else exists in the panel.
-  function editorRootTab() {
-    return (
-      tabs.find(t => {
-        return !t.isSubagentTab && !t.isContentTab;
-      }) || null
-    );
-  }
-
-  // Re-scope the workspace-derived UI after configWorkDir changes: the
-  // history filter and the Explorer / Source Control views browse the
-  // workspace. The tab bar is NOT workspace-scoped: every client of
-  // the daemon shows the same registry tabs, whatever folder each tab
-  // runs in, so a running task is visible on every surface until the
-  // user closes it. Purely client-local: no registry command is sent.
-  function applyWorkspaceScope() {
-    try {
-      applyHistoryFilterVisibility();
-    } catch (_e) {}
-    refreshSidebarDataViews(false);
-  }
-
   // Reconcile the local tab bar against the canonical `tabs_state`
   // snapshot: adopt tabs other clients opened, drop tabs they closed,
   // and follow the registry's titles, order and chat bindings.
@@ -5414,69 +5473,8 @@
   // (the remote web app's stand-in for the VS Code editor — editors
   // are per-user surfaces on every client, so file views are not
   // mirrored).
-  // Whether this panel already asked its host to close it; a snapshot
-  // storm must not dispose the same panel twice.
-  let editorClosePosted = false;
-
-  // Editor-tabs mode's reconcile: the snapshot is still canonical, but
-  // this panel mirrors exactly ONE of its tabs — the root chat tab.
-  // Entries for other tabs belong to other panels (or other windows)
-  // and are never adopted; the root entry's title / chat binding /
-  // work dirs are followed; and a snapshot that no longer lists a
-  // root the registry had confirmed means another client closed the
-  // chat, so the panel asks its host to close it.
-  function reconcileTabsEditor(list) {
-    const root = editorRootTab();
-    if (!root) return;
-    const entry = list.find(e => {
-      return !!e && e.tabId === root.id;
-    });
-    if (entry) {
-      pendingOpenTabs.delete(root.id);
-      root.inRegistry = true;
-      if (entry.title) root.title = clipTabTitle(entry.title);
-      if (
-        entry.chatId &&
-        String(root.backendChatId || '') !== String(entry.chatId)
-      ) {
-        root.backendChatId = String(entry.chatId);
-      }
-      // A chat binding proves a task ran in this chat (chat ids are
-      // allocated by the first run) — the same inference the shared
-      // reconcile makes for tabs it adopts — so a revived or migrated
-      // panel gets its status icon back without waiting for a
-      // replay.
-      if (entry.chatId) root.hasRunTask = true;
-      if (entry.workDir && !root.workDir) root.workDir = entry.workDir;
-      if (typeof entry.workDir === 'string') {
-        root.registryWorkDir = entry.workDir;
-      }
-    } else {
-      // Same pending-open expiry as the shared reconcile: an id the
-      // daemon never confirms stops being treated as registered, but
-      // the local tab lives on as this panel's placeholder.
-      const misses = pendingOpenTabs.get(root.id);
-      if (misses !== undefined) {
-        if (misses + 1 >= PENDING_OPEN_MAX_MISSES) {
-          pendingOpenTabs.delete(root.id);
-        } else {
-          pendingOpenTabs.set(root.id, misses + 1);
-        }
-      } else if (root.inRegistry && !editorClosePosted) {
-        editorClosePosted = true;
-        postToHost({type: 'closePanel'});
-        return;
-      }
-    }
-    renderTabBar();
-    persistTabState();
-  }
-
   function reconcileTabs(list) {
-    if (EDITOR_TAB_MODE) {
-      reconcileTabsEditor(list);
-      return;
-    }
+    if (CHATLESS_PANEL) return;
     const byId = new Map(
       tabs.map(t => {
         return [t.id, t];
@@ -5596,6 +5594,10 @@
     // parentTabId), so there is no editor to dispose.
     removedIds.forEach(id => {
       forgetPendingFileLinks(id);
+      // A tab closed on another surface forgets its machine pick, as a
+      // tab closed here does (closeTab): both maps are persisted.
+      tabMachines.delete(id);
+      tabMachinePicked.delete(id);
       // report-coverage:start
       discardReadyReports(id);
       // report-coverage:end
@@ -5745,28 +5747,31 @@
         }
       });
     }
+    const machines = saved && saved.tabMachines;
+    if (machines && typeof machines === 'object') {
+      Object.keys(machines).forEach(id => {
+        if (typeof machines[id] === 'string' && machines[id]) {
+          tabMachines.set(id, machines[id]);
+        }
+      });
+    }
+    const picked = saved && saved.tabMachinePicked;
+    if (Array.isArray(picked)) {
+      picked.forEach(id => {
+        if (typeof id === 'string' && id) tabMachinePicked.add(id);
+      });
+    }
     if (saved && saved.chatId) savedActiveTabId = String(saved.chatId);
     const initial = makeTab('new chat');
     if (savedInputDrafts && savedActiveTabId) {
       initial.inputValue = savedInputDrafts[savedActiveTabId] || '';
     }
-    if (EDITOR_TAB_MODE) {
-      // The hosting editor tab pins this webview to one root chat tab:
-      // adopt the id (and title) the extension stamped on <body>, so
-      // the daemon's registry / replays address this panel directly.
-      const ds = document.body.dataset;
-      if (ds.kissTabId) initial.id = ds.kissTabId;
-      if (ds.kissTabTitle) initial.title = clipTabTitle(ds.kissTabTitle);
-      // A panel materialized FROM a registry entry (mode switch-on)
-      // starts out registered: if another client closes the tab before
-      // this webview's first snapshot arrives, the root is already
-      // eligible for the vanished-from-registry closePanel path.
-      if (ds.kissInRegistry) initial.inRegistry = true;
-      // A composer draft carried over from the panel whose + / Cmd+T
-      // opened this one (createNewTab's openChatPanel post). init()
-      // copies it into the textarea — restoreTab never runs for the
-      // boot tab — and tab switches then round-trip it as usual.
-      if (ds.kissPendingText) initial.inputValue = ds.kissPendingText;
+    // The history and Task Info panels of editor-tabs mode run under a
+    // fixed root tab id stamped on <body> (SorcarTab.HISTORY_PANEL_TAB_ID
+    // / META_PANEL_TAB_ID), so a reloaded window's panel is the same
+    // client as before.
+    if (document.body.dataset.kissTabId) {
+      initial.id = document.body.dataset.kissTabId;
     }
     tabs.push(initial);
     activeTabId = initial.id;
@@ -5818,7 +5823,6 @@
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
-  const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
   const webToolsToggleBtn = document.getElementById('cfg-use-web-tools');
   // Whether #cfg-use-web-tools reflects a KNOWN state — the persisted
   // config (populateConfigForm ran) or an explicit user toggle.  Until
@@ -5826,10 +5830,8 @@
   // checkbox still holds chat.html's hardcoded ``checked``, and an
   // invented ``useWebTools: true`` would defeat the daemon's fallback to
   // the persisted "Use web tools" setting (config key
-  // ``use_web_browser``).  Unlike ``useWorktree``/``autoCommit`` —
-  // whose wire value IS the source of truth for the run — ``useWebTools``
-  // has that server-side config fallback, so omitting it is the
-  // correct "no opinion yet" signal.
+  // ``use_web_browser``).  ``useWebTools`` has that server-side config
+  // fallback, so omitting it is the correct "no opinion yet" signal.
   let webToolsStateKnown = false;
   if (webToolsToggleBtn) {
     webToolsToggleBtn.addEventListener('change', () => {
@@ -5849,7 +5851,6 @@
   const serverResetConfirmCancelBtn = document.getElementById(
     'server-reset-confirm-cancel',
   );
-  const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const classifyTasksToggleBtn = document.getElementById('cfg-classify-tasks');
   const classifyWithDecisionsToggleBtn = document.getElementById(
     'cfg-classify-with-decisions',
@@ -5896,13 +5897,12 @@
   }
   // The Task Info view renders ONLY relayed metaState values: its own
   // status spans never run a task, and mirroring them would overwrite
-  // the active panel's relayed values with idle placeholders.
+  // the chat editor tab's relayed values with idle placeholders.
   if (!META_PANEL_MODE) {
     mirrorStatusIntoMetaPanel('status-tokens', 'meta-tokens', true);
     mirrorStatusIntoMetaPanel('status-budget', 'meta-cost', true);
     mirrorStatusIntoMetaPanel('status-steps', 'meta-steps', true);
     mirrorStatusIntoMetaPanel('status-text', 'meta-time', false);
-    mirrorStatusIntoMetaPanel('status-machine', 'meta-machine', false);
   }
 
   // metasections-coverage:start
@@ -6185,17 +6185,27 @@
     });
   }
 
+  /**
+   * A click on a section's header: a collapsed section opens and every
+   * other section folds (the panel shows one section at a time, as
+   * much of it as fits); an open section just folds.
+   *
+   * @param {Element} section The .meta-section element clicked.
+   */
+  function onMetaSectionToggle(section) {
+    if (!section.classList.contains('collapsed')) {
+      setMetaSectionCollapsed(section, true);
+      return;
+    }
+    for (const other of metaSections())
+      setMetaSectionCollapsed(other, other !== section);
+  }
+
   function setupMetaSections() {
     for (const section of metaSections()) {
       const toggle = section.querySelector('.meta-section-toggle');
-      if (toggle) {
-        toggle.addEventListener('click', () => {
-          setMetaSectionCollapsed(
-            section,
-            !section.classList.contains('collapsed'),
-          );
-        });
-      }
+      if (toggle)
+        toggle.addEventListener('click', () => onMetaSectionToggle(section));
       let collapsed = null;
       let height = null;
       try {
@@ -6224,6 +6234,20 @@
     const panel = document.getElementById('meta-panel');
     if (panel && typeof ResizeObserver === 'function')
       new ResizeObserver(applyMetaSectionLayout).observe(panel);
+    // A section taken out of (or put back into) the stack with the
+    // `hidden` attribute changes the shares and the separators too.
+    // (The records are delivered later: a page torn down meanwhile,
+    // as a test closes its window, has no document to lay out.)
+    if (panel && typeof MutationObserver === 'function') {
+      const hiddenWatcher = new MutationObserver(() => {
+        if (typeof document !== 'undefined') applyMetaSectionLayout();
+      });
+      for (const section of metaSections())
+        hiddenWatcher.observe(section, {
+          attributes: true,
+          attributeFilter: ['hidden'],
+        });
+    }
   }
   setupMetaSections();
   // metasections-coverage:end
@@ -6544,7 +6568,7 @@
   if (metaInfoRefreshBtn) {
     // The refresh button runs the agent now.  The Task Info view (a
     // panel-shaped webview that never polls) asks the host to relay
-    // the press to the active chat editor panel, which polls.
+    // the press to the chat editor tab, which polls.
     metaInfoRefreshBtn.addEventListener('click', () => {
       if (META_PANEL_MODE) {
         postToHost({type: 'metaRefresh'});
@@ -6673,8 +6697,8 @@
   // mode — mirrorStatusIntoMetaPanel and updateMetaTaskDetails write it
   // unconditionally — so the panel simply reports those display strings
   // (plus the task-update report) to the host whenever they change.
-  // The host caches per panel and forwards the ACTIVE panel's report to
-  // the secondary sidebar's Task Info view (see SorcarPanelManager).
+  // The host caches the report and forwards it to the secondary
+  // sidebar's Task Info view (see SorcarPanelManager).
   let metaPostTimer = null;
 
   /** Read one #meta-* value's display text ('' when absent). */
@@ -6709,13 +6733,10 @@
         steps: metaValueText('meta-steps'),
         time: metaValueText('meta-time'),
         timeColor: timeEl ? timeEl.style.color || '' : '',
-        machine: metaValueText('meta-machine'),
         workdir: metaValueText('meta-workdir'),
         maxBudget: metaValueText('meta-max-budget'),
         date: metaValueText('meta-date'),
         model: metaValueText('meta-model'),
-        worktree: metaValueText('meta-worktree'),
-        parallel: metaValueText('meta-parallel'),
         chatId: metaValueText('meta-chat-id'),
         taskId: metaValueText('meta-task-id'),
         parentTask: metaValueText('meta-parent-id'),
@@ -6742,8 +6763,8 @@
   if (POST_META_UPDATES) {
     // One observer on the whole list catches every writer — the five
     // status mirrors and updateMetaTaskDetails — without patching any
-    // of them; the initial report seeds the host cache so a panel
-    // switch right after opening never shows another panel's values.
+    // of them; the initial report seeds the host cache so the Task
+    // Info view never starts from stale values.
     const metaListEl = document.getElementById('meta-list');
     if (metaListEl && typeof MutationObserver === 'function') {
       new MutationObserver(postMetaUpdateSoon).observe(metaListEl, {
@@ -6774,13 +6795,10 @@
     setMetaValue('meta-cost', v('cost'), '');
     setMetaValue('meta-steps', v('steps'), '');
     setMetaValue('meta-time', v('time') || 'Ready', v('timeColor'));
-    setMetaValue('meta-machine', v('machine'), '');
     setMetaValue('meta-workdir', v('workdir'), '');
     setMetaValue('meta-max-budget', v('maxBudget'), '');
     setMetaValue('meta-date', v('date'));
     setMetaValue('meta-model', v('model'));
-    setMetaValue('meta-worktree', v('worktree'));
-    setMetaValue('meta-parallel', v('parallel'));
     setMetaValue('meta-chat-id', v('chatId'));
     setMetaValue('meta-task-id', v('taskId'));
     setMetaParentTask(v('parentTask') || '\u2014');
@@ -6799,6 +6817,8 @@
   //
   // * Schedule lists the scheduled cron jobs (daemon reply `cronJobs`
   //   to getCronJobs, kiss/server/sidebar_panels.py cron_jobs_report);
+  // * Machines lists the local machine and every registered one with
+  //   its reachability (reply `machines` to getMachines);
   // * Apps lists every third-party agent with its authentication state
   //   (reply `appsStatus` to getAppsStatus).  Clicking an app that is
   //   not connected launches a new task that connects it;
@@ -6814,12 +6834,26 @@
   const scheduleList = document.getElementById('meta-schedule-list');
   const scheduleStatus = document.getElementById('meta-schedule-status');
   const scheduleRefreshBtn = document.getElementById('meta-schedule-refresh');
+  const scheduleAddBtn = document.getElementById('meta-schedule-add');
+  const machinesList = document.getElementById('meta-machines-list');
+  const machinesStatusLine = document.getElementById('meta-machines-status');
+  const machinesRefreshBtn = document.getElementById('meta-machines-refresh');
+  const machinesAddBtn = document.getElementById('meta-machines-add');
   const appsList = document.getElementById('meta-apps-list');
   const appsStatusLine = document.getElementById('meta-apps-status');
   const appsRefreshBtn = document.getElementById('meta-apps-refresh');
   const spendGraph = document.getElementById('meta-spend-graph');
   const spendStatus = document.getElementById('meta-spend-status');
   const spendRefreshBtn = document.getElementById('meta-spend-refresh');
+  const recommendationsList = document.getElementById(
+    'meta-recommendations-list',
+  );
+  const recommendationsStatusLine = document.getElementById(
+    'meta-recommendations-status',
+  );
+  const recommendationsRefreshBtn = document.getElementById(
+    'meta-recommendations-refresh',
+  );
   const SIDEBAR_PANELS_POLL_MS = 30000;
   const SIDEBAR_PANELS_SHOWN = !POST_META_UPDATES && !HISTORY_PANEL_MODE;
   // Apps with a connect task launched from this webview (name -> launch
@@ -6831,7 +6865,8 @@
   let sidebarPanelsTimer = 0;
 
   /**
-   * Ask the daemon for the Schedule, Apps and Spend data.
+   * Ask the daemon for the Schedule, Machines, Apps, Spend and
+   * Recommendations data.
    *
    * @param {boolean} refreshApps Re-probe the apps' authentication
    *     state instead of accepting the daemon's cached answer.
@@ -6839,20 +6874,50 @@
   function requestSidebarPanels(refreshApps) {
     if (!SIDEBAR_PANELS_SHOWN) return;
     api.getCronJobs();
+    api.getMachines();
     api.getAppsStatus(refreshApps ? {refresh: true} : undefined);
     api.getSpendReport();
-    if (refreshApps) {
-      appsRefreshBtn.disabled = true;
-      appsRefreshBtn.classList.add('spinning');
-    }
+    api.getRecommendations();
+    if (refreshApps) setRefreshSpin(appsRefreshBtn, true);
+  }
+
+  /** Ask the daemon for the recommendations again (the Recommendations refresh button). */
+  function requestRecommendationsRefresh() {
+    api.getRecommendations();
+    setRefreshSpin(recommendationsRefreshBtn, true);
+  }
+
+  /** Ask the daemon to ping every machine again (the Machines refresh button). */
+  function requestMachinesRefresh() {
+    api.getMachines({refresh: true});
+    setRefreshSpin(machinesRefreshBtn, true);
   }
 
   /** Boot the subpanels: refresh buttons, hover and resize handlers, the first request. */
   function startSidebarPanels() {
     if (!SIDEBAR_PANELS_SHOWN) return;
     scheduleRefreshBtn.addEventListener('click', () => api.getCronJobs());
+    scheduleAddBtn.addEventListener('click', () =>
+      openScheduleAddForm({
+        values: {name: '', schedule: '', kind: 'prompt', what: ''},
+        saving: false,
+      }),
+    );
+    machinesRefreshBtn.addEventListener('click', requestMachinesRefresh);
+    machinesAddBtn.addEventListener('click', () =>
+      openMachineAddForm({name: '', address: '', password: ''}),
+    );
     appsRefreshBtn.addEventListener('click', () => requestSidebarPanels(true));
     spendRefreshBtn.addEventListener('click', () => api.getSpendReport());
+    recommendationsRefreshBtn.addEventListener(
+      'click',
+      requestRecommendationsRefresh,
+    );
+    recommendationsList.addEventListener('click', onRecommendationRowActivate);
+    recommendationsList.addEventListener(
+      'keydown',
+      onRecommendationRowActivate,
+    );
     spendGraph.addEventListener('mouseover', onSpendGraphHover);
     spendGraph.addEventListener('mouseleave', hideSpendTip);
     spendGraph.addEventListener('click', onSpendGraphClick);
@@ -6878,12 +6943,23 @@
   }
 
   /**
-   * The apps refresh button stops turning: its reply arrived, or the
-   * daemon connection dropped (the reply will never come).
+   * Start or stop a refresh button's spin: it turns, disabled, while a
+   * re-probe is in flight, and stops when the reply arrives or the
+   * daemon connection drops (the reply will never come).
+   *
+   * @param {HTMLButtonElement} btn The refresh button.
+   * @param {boolean} on Whether a probe is in flight.
    */
-  function stopAppsRefreshSpin() {
-    appsRefreshBtn.disabled = false;
-    appsRefreshBtn.classList.remove('spinning');
+  function setRefreshSpin(btn, on) {
+    btn.disabled = on;
+    btn.classList.toggle('spinning', on);
+  }
+
+  /** The daemon connection dropped: no pending re-probe will be answered. */
+  function stopSidebarRefreshSpins() {
+    setRefreshSpin(appsRefreshBtn, false);
+    setRefreshSpin(machinesRefreshBtn, false);
+    setRefreshSpin(recommendationsRefreshBtn, false);
   }
 
   /**
@@ -6946,32 +7022,313 @@
     return span;
   }
 
+  const SIDEBAR_PLAY_SVG =
+    '<svg width="11" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M6 3l14 9-14 9z"/></svg>';
+  const SIDEBAR_PAUSE_SVG =
+    '<svg width="11" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M5 3h5v18H5zM14 3h5v18h-5z"/></svg>';
+
+  /**
+   * An icon button of a Schedule or Machines row.
+   *
+   * @param {string} cls The button class (its styling).
+   * @param {string} svg The icon markup.
+   * @param {string} label The tooltip and accessible name.
+   * @param {function(): void} onClick The action.
+   * @returns {HTMLButtonElement} The button.
+   */
+  function sidebarRowButton(cls, svg, label, onClick) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = cls;
+    btn.innerHTML = svg;
+    btn.dataset.tooltip = label;
+    btn.setAttribute('aria-label', label);
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      onClick();
+    });
+    return btn;
+  }
+
+  /**
+   * An in-place form under a Schedule or Machines row: one labelled
+   * input per field (a textarea for a multi-line one, a select for a
+   * choice), then Save and Cancel.  Enter in an input (Ctrl+Enter in
+   * a textarea) saves, Escape cancels.
+   *
+   * @param {Array<{key: string, label: string, value: string,
+   *     multiline?: boolean, type?: string,
+   *     options?: Array<[string, string]>}>} fields The inputs; a
+   *     field with `options` ([value, text] pairs) is a select.
+   * @param {function(Object<string, string>): void} onSave Gets the
+   *     values by key.
+   * @param {function(): void} onCancel Closes the form.
+   * @returns {HTMLFormElement} The form; its first input gets focus
+   *     once attached (`form.querySelector('[name]').focus()`).
+   */
+  function sidebarInlineForm(fields, onSave, onCancel) {
+    const form = document.createElement('form');
+    form.className = 'sidebar-inline-form';
+    for (const field of fields) {
+      const label = document.createElement('label');
+      label.appendChild(
+        sidebarPanelSpan('sidebar-inline-form-label', field.label),
+      );
+      const input = document.createElement(
+        field.options ? 'select' : field.multiline ? 'textarea' : 'input',
+      );
+      for (const [value, text] of field.options || []) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = text;
+        input.appendChild(option);
+      }
+      if (!field.multiline && !field.options) input.type = field.type || 'text';
+      input.name = field.key;
+      input.value = field.value;
+      input.setAttribute('aria-label', field.label);
+      if (field.multiline) input.rows = 3;
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && (!field.multiline || e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          form.dispatchEvent(new Event('submit', {cancelable: true}));
+        }
+      });
+      label.appendChild(input);
+      form.appendChild(label);
+    }
+    const buttons = document.createElement('div');
+    buttons.className = 'sidebar-inline-form-buttons';
+    const save = document.createElement('button');
+    save.type = 'submit';
+    save.className = 'sidebar-confirm-yes sidebar-inline-form-save';
+    save.textContent = 'Save';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'sidebar-confirm-no';
+    cancel.textContent = 'Cancel';
+    cancel.setAttribute('data-inline-cancel', 'true');
+    cancel.addEventListener('click', onCancel);
+    buttons.appendChild(save);
+    buttons.appendChild(cancel);
+    form.appendChild(buttons);
+    form.addEventListener('keydown', onInlineConfirmKey);
+    form.addEventListener('click', e => e.stopPropagation());
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const values = {};
+      for (const field of fields)
+        values[field.key] = form.elements[field.key].value;
+      onSave(values);
+    });
+    return form;
+  }
+
+  // The job whose in-place editor is open ({id, values}), the job add
+  // form that is open ({values, saving}; at most one of the two, see
+  // closeScheduleForms) and the machine add form that is open
+  // ({values}), kept across re-renders: the periodic poll and a reply
+  // that reports an error re-open the form with the values typed so
+  // far, so neither costs retyping; only the reply acknowledging the
+  // form's own action (`update`, `create`, `add`) without an error
+  // closes it (`saving`: the add form sent its create and awaits that
+  // reply, so a reply to an earlier form's create, arriving after the
+  // `+` opened a fresh one, leaves the fresh one alone).
+  let scheduleEdit = null;
+  let scheduleAdd = null;
+  let machineAdd = null;
+
+  /**
+   * The values typed into the open in-place form of a list, by field.
+   *
+   * @param {HTMLElement} list The Schedule or Machines list.
+   * @returns {Object<string, string>|null} The values, or null when no
+   *     form is open.
+   */
+  function openFormValues(list) {
+    const form = list.querySelector('form.sidebar-inline-form');
+    if (!form) return null;
+    const values = {};
+    for (const input of form.querySelectorAll('[name]'))
+      values[input.name] = input.value;
+    return values;
+  }
+
+  /**
+   * Close the Schedule subpanel's open in-place form, if any (the add
+   * row at the top of the list, or a row's editor), forgetting its
+   * draft: one form at a time.
+   */
+  function closeScheduleForms() {
+    scheduleEdit = null;
+    scheduleAdd = null;
+    const addRow = scheduleList.querySelector('.sched-add-row');
+    if (addRow) addRow.remove();
+    const form = scheduleList.querySelector('.sidebar-inline-form');
+    if (form) form.remove();
+  }
+
+  /**
+   * The label of a job's task field: "Command" for a shell command,
+   * "Task" for a prompt.
+   *
+   * @param {string} kind The job kind, `command` or `prompt`.
+   * @returns {string} The label.
+   */
+  function scheduleWhatLabel(kind) {
+    return kind === 'command' ? 'Command' : 'Task';
+  }
+
+  /**
+   * Open the in-place editor of a Schedule row: the job's name,
+   * schedule and task (prompt or shell command).
+   *
+   * @param {HTMLLIElement} li The row.
+   * @param {Object} job The job of the row.
+   * @param {Object<string, string>} values The values to show.
+   */
+  function openScheduleEditor(li, job, values) {
+    scheduleEdit = {id: job.id, values: values};
+    const form = sidebarInlineForm(
+      [
+        {key: 'name', label: 'Name', value: values.name},
+        {key: 'schedule', label: 'Schedule', value: values.schedule},
+        {
+          key: 'what',
+          label: scheduleWhatLabel(job.kind),
+          value: values.what,
+          multiline: true,
+        },
+      ],
+      saved => {
+        scheduleEdit = {id: job.id, values: saved};
+        api.cronAction({
+          action: 'update',
+          jobId: job.id,
+          name: saved.name,
+          schedule: saved.schedule,
+          what: saved.what,
+        });
+      },
+      () => {
+        scheduleEdit = null;
+        form.remove();
+        li.focus();
+      },
+    );
+    li.appendChild(form);
+    form.querySelector('[name]').focus();
+  }
+
+  /**
+   * Open the add-job form at the top of the Schedule list (the
+   * header's `+` button), the editor's fields plus the job's kind: the
+   * name, the schedule (`every 30m`, a 5-field cron expression, a
+   * one-shot delay or ISO time, in Pacific time), whether the job runs
+   * a task (an LLM prompt) or a shell command, and that task or
+   * command.  Saving sends a `create` cronAction; the other job
+   * settings keep the cron_job tool's defaults.  One form at a time:
+   * an open editor or add form is replaced.
+   *
+   * @param {{values: Object<string, string>, saving: boolean}} state
+   *     The form's state (see scheduleAdd): the values to show and
+   *     whether its create is in flight.
+   */
+  function openScheduleAddForm(state) {
+    closeScheduleForms();
+    scheduleAdd = state;
+    const values = state.values;
+    const row = document.createElement('li');
+    row.className = 'sidebar-panel-row sched-add-row';
+    const form = sidebarInlineForm(
+      [
+        {key: 'name', label: 'Name', value: values.name},
+        {key: 'schedule', label: 'Schedule', value: values.schedule},
+        {
+          key: 'kind',
+          label: 'Run',
+          value: values.kind,
+          options: [
+            ['prompt', 'A task (an LLM prompt)'],
+            ['command', 'A shell command'],
+          ],
+        },
+        {
+          key: 'what',
+          label: scheduleWhatLabel(values.kind),
+          value: values.what,
+          multiline: true,
+        },
+      ],
+      saved => {
+        scheduleAdd = {values: saved, saving: true};
+        api.cronAction({
+          action: 'create',
+          name: saved.name,
+          schedule: saved.schedule,
+          what: saved.what,
+          kind: saved.kind,
+        });
+      },
+      () => {
+        scheduleAdd = null;
+        row.remove();
+        scheduleAddBtn.focus();
+      },
+    );
+    const kind = form.elements.kind;
+    const whatLabel = form.elements.what.previousElementSibling;
+    kind.addEventListener('change', () => {
+      whatLabel.textContent = scheduleWhatLabel(kind.value);
+    });
+    row.appendChild(form);
+    scheduleList.prepend(row);
+    form.querySelector('[name]').focus();
+  }
+
   /**
    * Render the daemon's `cronJobs` reply into the Schedule subpanel.
-   * Each row shows the job's name, a running / paused badge, a button
-   * that copies the scheduled task (the job's prompt, or its shell
-   * command) to the clipboard, its schedule and its next (or, when
-   * paused, last) run; the row's tooltip (the custom `data-tooltip`
-   * one: the native title truncates long prompts and never opens for
-   * keyboard users) shows that same task verbatim and the last run's
-   * outcome.
+   * Each row shows the job's name, a running / paused badge, buttons
+   * to edit the job in place, run it now, pause or resume it, copy
+   * the scheduled task (the job's prompt, or its shell command) to the
+   * clipboard and delete it (after an inline confirmation), its
+   * schedule and its next (or, when paused, last) run; the row's
+   * tooltip (the custom `data-tooltip` one: the native title truncates
+   * long prompts and never opens for keyboard users) shows that same
+   * task verbatim and the last run's outcome.  The header's `+` adds
+   * a job (openScheduleAddForm, an in-place form at the top of the
+   * list that survives a re-render with what was typed).  The reply
+   * to an action carries the `action` and, when the daemon refused
+   * it, `error`: shown on the status line.
    *
-   * @param {{jobs: Array<Object>}} ev The reply.
+   * @param {{jobs: Array<Object>, action?: string, error?: string}} ev
+   *     The reply.
    */
   function renderCronJobs(ev) {
     if (!SIDEBAR_PANELS_SHOWN) return;
     ensureSidebarPanelsPoll();
     const jobs = Array.isArray(ev.jobs) ? ev.jobs : [];
+    const error = String(ev.error || '');
+    const draft = openFormValues(scheduleList);
+    if (draft && scheduleEdit) scheduleEdit.values = draft;
+    else if (draft && scheduleAdd) scheduleAdd.values = draft;
     scheduleList.textContent = '';
-    scheduleStatus.textContent = jobs.length
-      ? ''
-      : 'No scheduled jobs. Ask Sorcar to schedule a task, e.g. "every morning at 9 summarize my email".';
+    scheduleStatus.textContent =
+      error ||
+      (jobs.length
+        ? ''
+        : 'No scheduled jobs. Click + to schedule one, or ask Sorcar, e.g. "every morning at 9 summarize my email".');
+    scheduleStatus.classList.toggle('is-error', Boolean(error));
+    if (ev.action === 'update' && !error) scheduleEdit = null;
+    if (ev.action === 'create' && scheduleAdd && scheduleAdd.saving)
+      scheduleAdd = error ? {values: scheduleAdd.values, saving: false} : null;
     for (const job of jobs) {
       const li = document.createElement('li');
       li.className = 'sidebar-panel-row sched-row';
       li.classList.toggle('paused', !job.enabled);
       li.tabIndex = 0;
       const task = String(job.what == null ? '' : job.what);
+      const kind = job.kind === 'command' ? 'command' : 'task';
       const top = document.createElement('div');
       top.className = 'sidebar-panel-row-top';
       top.appendChild(sidebarPanelSpan('sidebar-panel-name', job.name));
@@ -6981,15 +7338,54 @@
         );
       else if (!job.enabled)
         top.appendChild(sidebarPanelSpan('sidebar-panel-badge', 'paused'));
+      const values = {
+        name: String(job.name),
+        schedule: String(job.schedule),
+        what: task,
+      };
+      top.appendChild(
+        sidebarRowButton(
+          'sidebar-item-edit',
+          SIDEBAR_EDIT_SVG,
+          'Edit the job',
+          () => {
+            closeScheduleForms();
+            openScheduleEditor(li, job, values);
+          },
+        ),
+      );
+      const play = sidebarRowButton(
+        'sidebar-item-edit sched-play',
+        SIDEBAR_PLAY_SVG,
+        'Run the job now',
+        () => api.cronAction({action: 'run_now', jobId: job.id}),
+      );
+      play.disabled = Boolean(job.running);
+      top.appendChild(play);
+      top.appendChild(
+        sidebarRowButton(
+          'sidebar-item-edit sched-toggle',
+          job.enabled ? SIDEBAR_PAUSE_SVG : SIDEBAR_PLAY_SVG,
+          job.enabled ? 'Disable the job' : 'Enable the job',
+          () =>
+            api.cronAction({
+              action: job.enabled ? 'pause' : 'resume',
+              jobId: job.id,
+            }),
+        ),
+      );
       const copyBtn = makeSidebarCopyButton(
         task,
-        'Copy the scheduled ' +
-          (job.kind === 'command' ? 'command' : 'task') +
-          ' to clipboard',
+        'Copy the scheduled ' + kind + ' to clipboard',
       );
-      copyBtn.dataset.tooltip =
-        'Copy the scheduled ' + (job.kind === 'command' ? 'command' : 'task');
+      copyBtn.dataset.tooltip = 'Copy the scheduled ' + kind;
       top.appendChild(copyBtn);
+      const del = makeSidebarDeleteConfirm({
+        ariaLabel: 'Delete the job',
+        onConfirm: () => api.cronAction({action: 'remove', jobId: job.id}),
+      });
+      top.appendChild(del.delBtn);
+      top.appendChild(del.confirmWrap);
       li.appendChild(top);
       const when = job.enabled
         ? job.nextRunAt && 'next ' + scheduleTimeText(job.nextRunAt)
@@ -7004,8 +7400,227 @@
       if (job.lastStatus) tip.push('Last run: ' + job.lastStatus);
       li.dataset.tooltip = tip.join('\n\n');
       scheduleList.appendChild(li);
+      if (scheduleEdit && scheduleEdit.id === job.id)
+        openScheduleEditor(li, job, scheduleEdit.values);
     }
+    if (scheduleAdd) openScheduleAddForm(scheduleAdd);
     applyMetaSectionLayout();
+  }
+
+  /**
+   * Open the add-machine form at the top of the Machines list (the
+   * header's `+` button): the new machine's name (optional: the host
+   * by default), its address (`https://host:port` of a daemon or
+   * `user@host` of an SSH login) and the daemon's password (unused for
+   * SSH).  One form at a time: an open one is replaced.
+   *
+   * @param {Object<string, string>} values The values to show.
+   */
+  function openMachineAddForm(values) {
+    const open = machinesList.querySelector('.machine-add-row');
+    if (open) open.remove();
+    machineAdd = {values: values};
+    const row = document.createElement('li');
+    row.className = 'sidebar-panel-row machine-add-row';
+    const form = sidebarInlineForm(
+      [
+        {key: 'name', label: 'Name', value: values.name},
+        {key: 'address', label: 'Address', value: values.address},
+        {
+          key: 'password',
+          label: 'Password',
+          value: values.password,
+          type: 'password',
+        },
+      ],
+      saved => {
+        machineAdd = {values: saved};
+        api.machineAction({
+          action: 'add',
+          name: saved.name,
+          address: saved.address,
+          password: saved.password,
+        });
+      },
+      () => {
+        machineAdd = null;
+        row.remove();
+        machinesAddBtn.focus();
+      },
+    );
+    row.appendChild(form);
+    machinesList.prepend(row);
+    form.querySelector('[name]').focus();
+  }
+
+  /**
+   * Render the daemon's `machines` reply into the Machines subpanel:
+   * the local machine first, then every registered one.  A row shows
+   * a reachability dot, the machine's name, a `local` badge, and
+   * buttons to copy the machine's address to the clipboard and delete
+   * it (after an inline confirmation; the local machine cannot be
+   * deleted); the header's `+` adds a machine (openMachineAddForm, an
+   * in-place form at the top of the list that survives a re-render
+   * with what was typed).  A row's second
+   * line is the address and the status; the tooltip gives the IP
+   * address and the mapped port (an SSH machine's local tunnel port)
+   * and, when unreachable, the reason.
+   *
+   * @param {{machines: Array<Object>, action?: string, error?: string}} ev
+   *     The reply.
+   */
+  function renderMachines(ev) {
+    if (!SIDEBAR_PANELS_SHOWN) return;
+    ensureSidebarPanelsPoll();
+    setRefreshSpin(machinesRefreshBtn, false);
+    const rows = Array.isArray(ev.machines) ? ev.machines : [];
+    const error = String(ev.error || '');
+    const draft = openFormValues(machinesList);
+    if (draft && machineAdd) machineAdd.values = draft;
+    machinesList.textContent = '';
+    machinesStatusLine.textContent =
+      error || (rows.length ? '' : 'No machines.');
+    machinesStatusLine.classList.toggle('is-error', Boolean(error));
+    if (ev.action === 'add' && !error) machineAdd = null;
+    for (const m of rows) {
+      const reachable = m.status === 'reachable';
+      const li = document.createElement('li');
+      li.className = 'sidebar-panel-row machine-row';
+      li.classList.toggle('unreachable', !reachable);
+      li.tabIndex = 0;
+      li.dataset.machine = String(m.name);
+      const top = document.createElement('div');
+      top.className = 'sidebar-panel-row-top';
+      const dot = sidebarPanelSpan(
+        'machine-status ' + (reachable ? 'reachable' : 'unreachable'),
+        '',
+      );
+      dot.setAttribute('role', 'img');
+      dot.setAttribute('aria-label', m.status);
+      top.appendChild(dot);
+      top.appendChild(sidebarPanelSpan('sidebar-panel-name', m.name));
+      if (m.local)
+        top.appendChild(sidebarPanelSpan('sidebar-panel-badge', 'local'));
+      const copyBtn = makeSidebarCopyButton(
+        String(m.address),
+        'Copy the machine address to clipboard',
+      );
+      copyBtn.dataset.tooltip = 'Copy the machine address';
+      top.appendChild(copyBtn);
+      const del = makeSidebarDeleteConfirm({
+        ariaLabel: 'Delete the machine',
+        onConfirm: () => api.machineAction({action: 'remove', name: m.name}),
+      });
+      if (m.local) {
+        del.delBtn.disabled = true;
+        del.delBtn.dataset.tooltip = 'The local machine cannot be deleted';
+      }
+      top.appendChild(del.delBtn);
+      top.appendChild(del.confirmWrap);
+      li.appendChild(top);
+      li.appendChild(
+        sidebarPanelSpan(
+          'sidebar-panel-sub',
+          m.address + ' \u00b7 ' + m.status,
+        ),
+      );
+      const tip = [
+        'IP ' + m.ip + ' \u00b7 port ' + (m.port || 'none (tunnel closed)'),
+      ];
+      if (m.error) tip.push(m.error);
+      li.dataset.tooltip = tip.join('\n\n');
+      machinesList.appendChild(li);
+    }
+    if (machineAdd) openMachineAddForm(machineAdd.values);
+    applyMetaSectionLayout();
+  }
+
+  // -------------------------------------------------------------------
+  // The machine drop-down at the top of the chat pane shows, per tab,
+  // the registered machine the tab's tasks run on (tabMachines; '' =
+  // this machine); every submit carries the pick as `machine`, and the
+  // daemon binds the tab to that machine's daemon and relays its
+  // events (kiss.server.remote_tabs).  The picks are persisted with
+  // the drafts across reloads (persistTabState).  Next to it, after a
+  // ":", the working directory drop-down (renderChatWorkDir).
+  const chatMachineSelect = document.getElementById('chat-machine');
+  const chatWorkDirSelect = document.getElementById('chat-workdir');
+  // This daemon's machine (configData.machine / the `local` row of a
+  // `machines` reply) and the registered machines that answered the
+  // daemon's last ping.
+  let localMachineName = '';
+  let reachableMachines = [];
+  /**
+   * The machine `tabId`'s tasks run on.
+   *
+   * @param {string} tabId The tab.
+   * @returns {string} The registered machine's name, '' for this machine.
+   */
+  function tabMachine(tabId) {
+    return tabMachines.get(tabId) || '';
+  }
+
+  /**
+   * Repaint the drop-down for the active tab: this machine first, then
+   * every reachable registered machine, plus the tab's own pick when
+   * that machine is down right now (the pick is kept, the daemon
+   * refuses the submit with the reason).  Disabled while the chat runs:
+   * a running chat cannot move.  Empty (hidden) until a name is known.
+   */
+  function renderChatMachine() {
+    if (!chatMachineSelect) return;
+    const tab = getTab(activeTabId);
+    const chosen = tab && !tab.isContentTab ? tabMachine(tab.id) : '';
+    chatMachineSelect.textContent = '';
+    if (localMachineName || reachableMachines.length || chosen) {
+      const names = reachableMachines.slice();
+      if (chosen && !names.includes(chosen)) names.push(chosen);
+      const option = (value, label) => {
+        const el = document.createElement('option');
+        el.value = value;
+        el.textContent = label;
+        chatMachineSelect.appendChild(el);
+      };
+      option('', localMachineName || 'this machine');
+      names.forEach(name => option(name, name));
+      chatMachineSelect.value = chosen;
+      chatMachineSelect.disabled = !!(tab && tab.isRunning);
+      chatMachineSelect.classList.toggle('remote', !!chosen);
+    }
+    renderChatHeaderSeparator();
+  }
+
+  /**
+   * Note the daemon's `machines` reply for the drop-down.
+   *
+   * @param {Array<Object>} rows The machines (the local one flagged `local`).
+   */
+  function noteMachines(rows) {
+    reachableMachines = rows
+      .filter(m => m && !m.local && m.status === 'reachable')
+      .map(m => String(m.name));
+    const local = rows.find(m => m && m.local && m.name);
+    if (local) localMachineName = String(local.name);
+    renderChatMachine();
+  }
+
+  if (chatMachineSelect) {
+    chatMachineSelect.addEventListener('change', () => {
+      const tab = getTab(activeTabId);
+      if (!tab || tab.isContentTab) return;
+      const picked = chatMachineSelect.value;
+      if (picked) tabMachines.set(tab.id, picked);
+      else tabMachines.delete(tab.id);
+      tabMachinePicked.add(tab.id);
+      persistTabState();
+      renderChatMachine();
+    });
+    // The list is as fresh as the daemon's last ping: ask again when
+    // the user reaches for the drop-down (a surface without the
+    // Machines subpanel has no poll of its own).
+    chatMachineSelect.addEventListener('focus', () => {
+      if (daemonConnected) api.getMachines();
+    });
   }
 
   /**
@@ -7019,7 +7634,7 @@
   function renderAppsStatus(ev) {
     if (!SIDEBAR_PANELS_SHOWN) return;
     ensureSidebarPanelsPoll();
-    stopAppsRefreshSpin();
+    setRefreshSpin(appsRefreshBtn, false);
     const apps = (Array.isArray(ev.apps) ? ev.apps : []).slice();
     for (const app of apps) {
       if (app.authenticated === true) appsAwaitingAuth.delete(app.name);
@@ -7105,34 +7720,101 @@
   }
 
   /**
-   * Launch the task that connects *app* in a new chat.  Editor-tabs
-   * surfaces (the Task Info view) ask the host for a fresh chat editor
-   * panel that submits the prompt as soon as it is ready; the others
-   * open a new internal tab and submit there, closing the mobile
-   * drawer so the new chat is on screen.
+   * Put *prompt* in a new chat's composer, submitted at once when
+   * *submit*.  Editor-tabs surfaces (the Task Info view) ask the host
+   * for a fresh chat editor panel; the others open a new internal tab,
+   * closing the mobile drawer so the new chat is on screen.
    *
-   * @param {{name: string, label: string}} app The app to connect.
+   * @param {string} prompt The task text.
+   * @param {boolean} submit Whether to send it right away.
    */
-  function launchAppAuthTask(app) {
-    const prompt = appAuthPrompt(app);
-    appsAwaitingAuth.set(app.name, Date.now());
-    if (EDITOR_TAB_MODE) {
+  function openNewChatWithPrompt(prompt, submit) {
+    if (META_PANEL_MODE) {
+      // The Task Info view runs no chats: the host fills (and submits)
+      // the prompt in a new chat of the chat editor tab.
       postToHost({
         type: 'openChatPanel',
         pendingText: prompt,
-        autoSubmit: true,
+        autoSubmit: submit,
       });
       return;
     }
-    // The connect prompt replaces whatever "+" carried over, so the
-    // draft stays with the chat left behind (which it then keeps open).
+    // The prompt replaces whatever "+" carried over, so the draft
+    // stays with the chat left behind (which it then keeps open).
     const left = getTab(activeTabId);
     createNewTab();
     inp.value = prompt;
     inp.dispatchEvent(new Event('input', {bubbles: true}));
     setMetaDrawerOpen(false);
-    sendMessage();
+    if (submit) sendMessage();
+    else focusInputWithRetry(true);
     retireIdleChat(left, false);
+  }
+
+  /**
+   * Launch the task that connects *app* in a new chat.
+   *
+   * @param {{name: string, label: string}} app The app to connect.
+   */
+  function launchAppAuthTask(app) {
+    appsAwaitingAuth.set(app.name, Date.now());
+    openNewChatWithPrompt(appAuthPrompt(app), true);
+  }
+
+  // ---- Recommendations subpanel ----
+  //
+  // The five next tasks the 6-hourly `/recommendations` cron job
+  // suggested from the last day's task history (the daemon's
+  // `recommendations` reply, sidebar_panels.recommendations_report).
+  // Activating a row puts the task in a new chat's composer, where the
+  // user reads it before sending.
+
+  /**
+   * Paint the Recommendations subpanel from the daemon's reply.
+   *
+   * @param {{generatedAt?: number, tasks?: string[]}} ev The reply.
+   */
+  function renderRecommendations(ev) {
+    if (!SIDEBAR_PANELS_SHOWN) return;
+    ensureSidebarPanelsPoll();
+    setRefreshSpin(recommendationsRefreshBtn, false);
+    const tasks = (Array.isArray(ev.tasks) ? ev.tasks : [])
+      .map(task => String(task || '').trim())
+      .filter(Boolean);
+    const generatedAt = Number(ev.generatedAt) || 0;
+    recommendationsList.textContent = '';
+    if (!tasks.length) {
+      recommendationsStatusLine.textContent =
+        'No recommendations yet: /recommendations now suggests five tasks from your last 24 hours.';
+      return;
+    }
+    recommendationsStatusLine.textContent = generatedAt
+      ? 'Suggested ' + sidebarPanelTimeText(generatedAt)
+      : '';
+    for (const task of tasks) {
+      const li = document.createElement('li');
+      li.className = 'sidebar-panel-row recommendation-row';
+      li.tabIndex = 0;
+      li.dataset.task = task;
+      li.dataset.tooltip = 'Open a new chat with this task';
+      li.appendChild(sidebarPanelSpan('sidebar-panel-name', task));
+      recommendationsList.appendChild(li);
+    }
+  }
+
+  /**
+   * A click or Enter / Space on a recommendation row: a new chat with
+   * the task in its composer.
+   *
+   * @param {Event} e The click or keydown event.
+   */
+  function onRecommendationRowActivate(e) {
+    if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+    const target = /** @type {Element} */ (e.target);
+    const li = target.closest('.recommendation-row');
+    if (!li || !li.dataset.task) return;
+    e.preventDefault();
+    openNewChatWithPrompt(li.dataset.task, false);
   }
 
   // ---- Spend subpanel ----
@@ -7612,6 +8294,7 @@
   const explorerTree = document.getElementById('explorer-tree');
   const scmChangesList = document.getElementById('scm-changes');
   const scmChangesCount = document.getElementById('scm-changes-count');
+  const scmHeaderCount = document.getElementById('scm-hdr-count');
   const scmGraphList = document.getElementById('scm-graph');
   const scmGraphCount = document.getElementById('scm-graph-count');
   const scmBranchEl = document.getElementById('scm-branch');
@@ -8110,7 +8793,7 @@
 
   // The sequence (workDirCheckSeq) of the daemon check the Explorer's
   // check mark / "Set as Working Directory" last asked for; the
-  // "Working directory" panel's own checks never carry this number.
+  // chat header drop-down's own checks never carry this number.
   // Its reply rebuilds the tree and hands the keyboard back to it
   // (handleWorkDirListing).
   let explorerWorkDirCheckSeq = 0;
@@ -8396,7 +9079,8 @@
         token: token,
       });
     }
-    node.row.classList.remove('loading');
+    // The spinner stays while the coalesced follow-up is in flight.
+    if (!node.loading) node.row.classList.remove('loading');
     if (typeof ev.path === 'string' && ev.path) node.realPath = ev.path;
     const kids = node.kids;
     const depth = node.depth + 1;
@@ -8806,6 +9490,17 @@
     changes: 'Changes',
   };
 
+  /**
+   * Show the number of uncommitted files on the Changes row and on the
+   * Source Control header (so it reads while the section is folded).
+   *
+   * @param {number} total The count; 0 clears both.
+   */
+  function setScmChangesCount(total) {
+    scmChangesCount.textContent = total ? String(total) : '';
+    scmHeaderCount.textContent = scmChangesCount.textContent;
+  }
+
   function renderScmChanges() {
     if (!scmChangesList) return;
     scmChangesList.textContent = '';
@@ -8817,17 +9512,17 @@
       scmBranchEl.title = scmBranchEl.textContent;
     }
     if (!scmWorkDir) {
-      scmChangesCount.textContent = '';
+      setScmChangesCount(0);
       scmEmpty(scmChangesList, 'No workspace folder');
       return;
     }
     if (!scmStatus) {
-      scmChangesCount.textContent = '';
+      setScmChangesCount(0);
       scmEmpty(scmChangesList, 'Loading...');
       return;
     }
     if (scmStatus.error) {
-      scmChangesCount.textContent = '';
+      setScmChangesCount(0);
       scmEmpty(scmChangesList, String(scmStatus.error));
       return;
     }
@@ -8836,7 +9531,7 @@
     worktrees.forEach(wt => {
       total += Array.isArray(wt.changes) ? wt.changes.length : 0;
     });
-    scmChangesCount.textContent = total ? String(total) : '';
+    setScmChangesCount(total);
     if (!total && worktrees.length <= 1) {
       scmEmpty(scmChangesList, 'No changes');
       return;
@@ -10669,10 +11364,10 @@
   //
   // A modal browser of the host's folders: the path box and the list
   // navigate (listDir with a `picker:` token), "Select Folder" makes the
-  // folder the workspace — the same pin the "Working directory" panel
+  // folder the workspace — the same pin the chat header's drop-down
   // sets — so the Explorer, the Source Control view and new tasks
   // follow it.  In "Add Folder to Explorer" mode the dialog also offers
-  // the panel's recently opened folders (renderPickerRecentFolders),
+  // the working directories selected so far (renderPickerRecentFolders),
   // each added with one click.
   let folderPickerEl = null;
   let folderPickerDir = '';
@@ -10951,20 +11646,23 @@
   }
 
   /**
-   * Make *dir* the global working directory (remote webapp: the panel's
-   * Open button and the Explorer's check mark).  The daemon adopts,
-   * persists and broadcasts it (setWorkDir); this client re-scopes
-   * right away rather than waiting for its own broadcast.
+   * Make *dir* the global working directory (remote webapp: the chat
+   * header's drop-down, the folder picker and the Explorer's check
+   * mark).  The daemon adopts, persists and broadcasts it (setWorkDir);
+   * this client re-scopes right away rather than waiting for its own
+   * broadcast.  A listDir check still in flight for an earlier pick is
+   * superseded: its late reply must not undo this one.
    */
   function applyPickedWorkDir(dir) {
+    workDirCheckSeq++;
+    workDirCheckPath = '';
     api.setWorkDir({workDir: dir});
     adoptWorkDir(dir);
-    closeWorkDirPanel();
   }
 
   /**
    * Re-scope this client to the global working directory *dir*: the
-   * Explorer, SCM view, history filter and the panel's "Current:" line
+   * Explorer, SCM view, history filter and the chat header's drop-down
    * follow it, and every tab's next task runs in it (a running task
    * keeps the folder it started in).  Used for this client's own pick
    * (applyPickedWorkDir, workDirPicked) and for the daemon's
@@ -10972,127 +11670,166 @@
    */
   function adoptWorkDir(dir) {
     closeFolderPicker();
-    if (dir !== configWorkDir) {
-      configWorkDir = dir;
-      applyWorkspaceScope();
-    }
+    configWorkDir = dir;
     explorerRoot = '';
     scmWorkDir = '';
     refreshSidebarDataViews(true);
-    renderCurrentWorkDir();
+    // The daemon records every adopted directory at the front of
+    // recent_work_dirs (record_recent_work_dir: one row per directory,
+    // the list capped); mirror that here so the chat header's
+    // drop-down and the CHATS WORKDIR filter list it right away,
+    // before the next configData or history reply (the folder picker
+    // was just closed; it reads the list when it opens again).
+    recentWorkDirs = [{path: dir, ts: Date.now() / 1000}]
+      .concat(recentWorkDirs.filter(r => !samePath(r.path, dir)))
+      .slice(0, MAX_RECENT_WORK_DIRS);
+    renderChatWorkDir();
+    refreshHistoryWorkDirOptions(chatWorkDirList());
     // The task-info panel's Workdir item falls back to the global
     // directory while the visible task has no settings of its own.
     updateMetaTaskDetails(metaShownSettings);
   }
 
-  // ---- The "Working directory" panel ("..." menu) ----------------------
-  // The directories opened so far as the daemon reports them in
+  // ---- The working directory drop-down of the chat header -------------
+  // The directories selected so far as the daemon reports them in
   // configData.recent_work_dirs: {path, ts} rows, ts = epoch seconds of
-  // the last open, kept most recently opened first.
+  // the last selection, kept most recently selected first.
   let recentWorkDirs = [];
+  // The daemon keeps at most this many (kiss/core/vscode_config.py
+  // MAX_RECENT_WORK_DIRS); the client's copy follows the same cap so
+  // the two lists agree between replies.
+  const MAX_RECENT_WORK_DIRS = 30;
   // Sequence of the remote surface's pending listDir check (token
   // 'workdir:<seq>') and the directory it is checking.
   let workDirCheckSeq = 0;
   let workDirCheckPath = '';
-  // Whether the open panel is waiting on an openWorkDir / pickWorkDir
-  // reply from the VS Code host; false once the panel is closed, so a
-  // late reply to a request made from a panel the user has since
-  // closed neither closes nor reports into a reopened one.
-  let workDirRequestPending = false;
-
-  function openWorkDirPanel() {
-    const panel = document.getElementById('workdir-panel');
-    if (!panel) return;
-    setPanelOpen(panel, document.getElementById('workdir-overlay'), true);
-    // The closed sheet is only slid off-screen; `inert` keeps its
-    // controls out of the tab order and the accessibility tree.
-    panel.removeAttribute('inert');
-    panel.setAttribute('aria-hidden', 'false');
-    setWorkDirError('');
-    const input = document.getElementById('workdir-input');
-    if (input) {
-      input.value = '';
-      syncWorkDirOpenBtn();
-    }
-    renderCurrentWorkDir();
-    renderRecentWorkDirs();
-    // Another window may have opened a folder since the last reply.
-    api.getConfig();
-    window.setTimeout(() => {
-      if (input && panel.classList.contains('open')) input.focus();
-    }, 0);
-  }
-
-  function closeWorkDirPanel() {
-    // A check still in flight belongs to the closed panel.
-    workDirCheckSeq++;
-    workDirCheckPath = '';
-    workDirRequestPending = false;
-    const panel = document.getElementById('workdir-panel');
-    if (!panel || !panel.classList.contains('open')) return;
-    // Focus must not be stranded inside the sheet that just went inert;
-    // it goes back to the "..." button the sheet was opened from.
-    if (panel.contains(document.activeElement)) {
-      const moreBtn = document.getElementById('more-btn');
-      try {
-        if (moreBtn) moreBtn.focus();
-        else document.activeElement.blur();
-      } catch (_e) {}
-    }
-    panel.setAttribute('inert', '');
-    panel.setAttribute('aria-hidden', 'true');
-    setPanelOpen(panel, document.getElementById('workdir-overlay'), false);
-  }
 
   /**
-   * Report why a working directory was refused.  The panel shows it in
-   * its own error line; a switch asked for from the Explorer's check
-   * mark (the panel is closed) gets an error notification instead, so
-   * the refusal is never silent.
+   * Report why a working directory was refused, as an error
+   * notification: the refusal of a pick (the chat header's drop-down,
+   * the Explorer's check mark, the VS Code host's folder dialog) is
+   * never silent.
    *
-   * @param {string} text The reason; '' clears the panel's error line.
+   * @param {string} text The reason; '' reports nothing.
    */
   function setWorkDirError(text) {
-    const panel = document.getElementById('workdir-panel');
-    if (text && !(panel && panel.classList.contains('open'))) {
-      showNotification({message: text, severity: 'error'});
+    if (text) showNotification({message: text, severity: 'error'});
+  }
+
+  /**
+   * Append an option to the chat header's working directory drop-down.
+   *
+   * @param {string} value The directory ('' for the two non-directory
+   *     entries).
+   * @param {string} label The text shown.
+   * @param {string} [id] The option's id, for the non-directory entries.
+   * @returns {HTMLOptionElement} The appended option.
+   */
+  function appendChatWorkDirOption(value, label, id) {
+    const el = document.createElement('option');
+    el.value = value;
+    el.textContent = label;
+    if (id) el.id = id;
+    chatWorkDirSelect.appendChild(el);
+    return el;
+  }
+
+  /**
+   * The directories both WORKDIR menus (the chat header's drop-down
+   * and the CHATS filter) offer, in order: the directory the active
+   * chat's next task runs in, then every other directory selected so
+   * far, most recent first.  The daemon sends the same list as the
+   * history reply's workDirs; this one is at hand between replies.
+   *
+   * @returns {string[]} The directories, the current one first.
+   */
+  function chatWorkDirList() {
+    const current = workDirForTab(activeTabId);
+    const dirs = recentWorkDirs.map(r => r.path);
+    if (current && !dirs.some(p => samePath(p, current))) dirs.unshift(current);
+    return dirs;
+  }
+
+  /**
+   * Repaint the chat header's working directory drop-down: the
+   * directory the active chat's next task runs in (selected), every
+   * other directory selected so far (configData.recent_work_dirs: a
+   * directory is listed only once someone selected it as the working
+   * directory; the directories the task history ran in are not
+   * offered), most recent first, then "Choose ...".  While no
+   * directory is known a disabled "No working directory" placeholder
+   * is the selected entry, so "Choose ..." is always a pick away (an
+   * already-selected option fires no change).
+   */
+  function renderChatWorkDir() {
+    if (!chatWorkDirSelect) return;
+    const current = workDirForTab(activeTabId);
+    chatWorkDirSelect.textContent = '';
+    const dirs = chatWorkDirList();
+    if (!current) {
+      appendChatWorkDirOption(
+        '',
+        'No working directory',
+        'chat-workdir-none',
+      ).disabled = true;
+    }
+    dirs.forEach(dir => appendChatWorkDirOption(dir, dir));
+    // Both non-directory entries carry the empty value (no path is
+    // empty); only "Choose ..." can be picked, and it is told apart
+    // by its id.
+    appendChatWorkDirOption('', 'Choose ...', 'chat-workdir-choose');
+    if (current) {
+      chatWorkDirSelect.value = dirs.find(p => samePath(p, current));
+    } else {
+      chatWorkDirSelect.selectedIndex = 0;
+    }
+    chatWorkDirSelect.title = current
+      ? 'The next task runs in ' + current
+      : 'Choose the working directory the next task runs in';
+    renderChatHeaderSeparator();
+  }
+
+  /**
+   * Show the ":" of the chat header only once the machine drop-down
+   * has a name to put before it (the directory drop-down always has
+   * at least its "Choose ..." entry).
+   */
+  function renderChatHeaderSeparator() {
+    const sep = document.getElementById('chat-header-sep');
+    if (!sep) return;
+    sep.hidden = !(chatMachineSelect && chatMachineSelect.options.length);
+  }
+
+  /**
+   * A pick in the chat header's drop-down: "Choose ..." opens a folder
+   * picker (the in-page one on the remote webapp, the editor's own
+   * dialog in a VS Code window, whose pick comes back as workDirPicked);
+   * a listed directory becomes the working directory (openWorkDir).
+   * The drop-down springs back to the current directory meanwhile: it
+   * follows the daemon's answer (adoptWorkDir), not the wish.
+   */
+  function onChatWorkDirChange() {
+    const option = chatWorkDirSelect.options[chatWorkDirSelect.selectedIndex];
+    const picked = option ? option.value : '';
+    const choose = !!option && option.id === 'chat-workdir-choose';
+    renderChatWorkDir();
+    if (choose) {
+      if (document.body.classList.contains('remote-chat')) {
+        openFolderPicker('workdir');
+      } else {
+        postToHost({type: 'pickWorkDir'});
+      }
       return;
     }
-    const el = document.getElementById('workdir-error');
-    if (!el) return;
-    el.textContent = text;
-    el.hidden = !text;
+    if (picked && !samePath(picked, workDirForTab(activeTabId))) {
+      openWorkDir(picked);
+    }
   }
 
   /**
-   * Show the directory the active chat's next task runs in (the tab's
-   * own pin, else the workspace) at the top of the panel.
-   */
-  function renderCurrentWorkDir() {
-    const el = document.getElementById('workdir-current');
-    if (!el) return;
-    const dir = workDirForTab(activeTabId);
-    el.textContent = dir ? 'Current: ' + dir : '';
-    el.hidden = !dir;
-  }
-
-  /**
-   * Enable the panel's Open button only while its box holds text, and
-   * say why it is disabled otherwise.
-   */
-  function syncWorkDirOpenBtn() {
-    const btn = document.getElementById('workdir-open-btn');
-    const input = document.getElementById('workdir-input');
-    if (!btn || !input) return;
-    const empty = !input.value.trim();
-    btn.disabled = empty;
-    if (empty) btn.title = 'Pick or type a folder first';
-    else btn.removeAttribute('title');
-  }
-
-  /**
-   * Remember the daemon's list of opened working directories and
-   * repaint the panel's list when it is on screen.
+   * Remember the daemon's list of selected working directories and
+   * repaint the chat header's drop-down, the CHATS WORKDIR filter and
+   * the folder picker's "Recently opened" section.
    *
    * @param {Array} rows configData.recent_work_dirs ({path, ts} rows).
    */
@@ -11107,27 +11844,25 @@
       )
       .map(r => ({path: r.path, ts: Number(r.ts)}))
       .sort((a, b) => b.ts - a.ts);
-    const panel = document.getElementById('workdir-panel');
-    if (panel && panel.classList.contains('open')) renderRecentWorkDirs();
+    renderChatWorkDir();
+    refreshHistoryWorkDirOptions(chatWorkDirList());
     renderPickerRecentFolders();
   }
 
   /**
-   * One row of a recently opened folder: its path and when it was last
-   * opened.  Shared by the panel's list and the folder picker's
-   * "Recently opened" section.
+   * One row of the folder picker's "Recently opened" section: the
+   * folder's path and when it was last selected.
    *
    * @param {{path: string, ts: number}} entry A recentWorkDirs row.
    * @param {number} now Date.now(), so every row of a list agrees.
-   * @param {string} verb What a click does with the row ('Open', 'Add').
    */
-  function recentWorkDirItem(entry, now, verb) {
+  function recentWorkDirItem(entry, now) {
     const item = document.createElement('div');
     item.className = 'workdir-item';
     item.setAttribute('role', 'listitem');
     item.tabIndex = 0;
     item.dataset.path = entry.path;
-    item.title = verb + ' ' + entry.path;
+    item.title = 'Add ' + entry.path;
     const pathEl = document.createElement('span');
     pathEl.className = 'workdir-item-path';
     pathEl.textContent = entry.path;
@@ -11145,37 +11880,25 @@
    * keyboard where it was: the row of the focused folder, if still
    * listed, is focused again.
    */
-  function renderRecentRows(list, rows, verb) {
+  function renderRecentRows(list, rows) {
     const focused = list.contains(document.activeElement)
       ? document.activeElement.dataset.path
       : '';
     list.textContent = '';
     const now = Date.now();
     rows.forEach(entry => {
-      const item = recentWorkDirItem(entry, now, verb);
+      const item = recentWorkDirItem(entry, now);
       list.appendChild(item);
       if (entry.path === focused) item.focus();
     });
   }
 
-  function renderRecentWorkDirs() {
-    const list = document.getElementById('workdir-list');
-    if (!list) return;
-    renderRecentRows(list, recentWorkDirs, 'Open');
-    if (!recentWorkDirs.length) {
-      const empty = document.createElement('div');
-      empty.id = 'workdir-empty';
-      empty.textContent = 'No working directory opened yet.';
-      list.appendChild(empty);
-    }
-  }
-
   /**
    * The folder picker's "Recently opened" section: in "Add Folder to
-   * Explorer" mode it lists the panel's recent working directories
+   * Explorer" mode it lists the working directories selected so far
    * that the Explorer does not show yet, each added with one click;
-   * the section is hidden in "Open Folder" mode (the panel underneath
-   * already lists them) and when nothing is left to offer.
+   * the section is hidden in "Open Folder" mode (the chat header's
+   * drop-down already lists them) and when nothing is left to offer.
    */
   function renderPickerRecentFolders() {
     if (!folderPickerEl || folderPickerEl.hidden) return;
@@ -11188,11 +11911,7 @@
           )
         : [];
     section.hidden = !rows.length;
-    renderRecentRows(
-      section.querySelector('.folder-picker-recent-list'),
-      rows,
-      'Add',
-    );
+    renderRecentRows(section.querySelector('.folder-picker-recent-list'), rows);
   }
 
   /**
@@ -11203,12 +11922,12 @@
    * workDirError); the window's own folder is left alone.  On the
    * remote webapp the daemon lists *dir* first (listDir with a
    * 'workdir:' token): a real folder is adopted through
-   * applyPickedWorkDir, anything else is reported (setWorkDirError: in
-   * the panel, or as a notification when the Explorer's check mark
-   * asked with the panel closed).  Either way the daemon persists the
-   * directory and broadcasts workDirChanged to every other surface.
+   * applyPickedWorkDir, anything else is reported as an error
+   * notification (setWorkDirError).  Either way the daemon persists
+   * the directory and broadcasts workDirChanged to every other
+   * surface.
    *
-   * @param {string} dir The typed, chosen or previously opened path.
+   * @param {string} dir The chosen or previously selected path.
    */
   function openWorkDir(dir) {
     dir = String(dir || '').trim();
@@ -11219,9 +11938,7 @@
       );
       return;
     }
-    setWorkDirError('');
     if (!document.body.classList.contains('remote-chat')) {
-      workDirRequestPending = true;
       postToHost({type: 'openWorkDir', path: dir});
       return;
     }
@@ -11263,10 +11980,7 @@
   /**
    * The VS Code host verified *dir* is a folder and sent it to the
    * daemon (workDirPicked): it is the global working directory now, so
-   * this webview re-scopes to it.  The panel is only closed when it is
-   * still waiting on this request: the user may have closed it and
-   * reopened it while the host's folder dialog was up, and that panel,
-   * with whatever was typed into it, stays.
+   * this webview re-scopes to it.
    *
    * @param {string} dir The folder in the host's canonical spelling.
    */
@@ -11274,69 +11988,19 @@
     dir = String(dir || '').trim();
     if (!dir || isRootDir(dir)) return;
     adoptWorkDir(dir);
-    if (workDirRequestPending) closeWorkDirPanel();
   }
 
-  /** Wire the "Working directory" menu item and its panel. */
-  function setupWorkDirPanel() {
-    const btn = document.getElementById('workdir-btn');
-    const input = document.getElementById('workdir-input');
-    const openBtn = document.getElementById('workdir-open-btn');
-    const pickBtn = document.getElementById('workdir-pick-btn');
-    const list = document.getElementById('workdir-list');
-    if (btn) btn.addEventListener('click', openWorkDirPanel);
-    const close = document.getElementById('workdir-panel-close');
-    if (close) close.addEventListener('click', closeWorkDirPanel);
-    const overlay = document.getElementById('workdir-overlay');
-    if (overlay) overlay.addEventListener('click', closeWorkDirPanel);
-    document.addEventListener('keydown', e => {
-      // Escape closes the sheet -- unless the folder browser is open on
-      // top of it, in which case Escape is the browser's to handle.
-      const panel = document.getElementById('workdir-panel');
-      if (e.key !== 'Escape' || !panel || !panel.classList.contains('open'))
-        return;
-      if (folderPickerEl && !folderPickerEl.hidden) return;
-      closeWorkDirPanel();
+  /** Wire the chat header's working directory drop-down. */
+  function setupChatWorkDir() {
+    if (!chatWorkDirSelect) return;
+    chatWorkDirSelect.addEventListener('change', onChatWorkDirChange);
+    // The list is as fresh as the daemon's last configData: ask again
+    // when the user reaches for the drop-down, since another surface
+    // may have selected a directory meanwhile.
+    chatWorkDirSelect.addEventListener('focus', () => {
+      if (daemonConnected) api.getConfig();
     });
-    if (input) {
-      input.addEventListener('input', syncWorkDirOpenBtn);
-      input.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          openWorkDir(input.value);
-        }
-      });
-    }
-    if (openBtn && input) {
-      openBtn.addEventListener('click', () => openWorkDir(input.value));
-    }
-    if (pickBtn) {
-      pickBtn.addEventListener('click', () => {
-        // The in-page folder browser lists folders through the daemon's
-        // listDir, which only the remote webapp's connection relays; a
-        // VS Code window uses the editor's own folder dialog (the pick
-        // comes back as workDirPicked).
-        if (document.body.classList.contains('remote-chat')) {
-          openFolderPicker('workdir');
-          return;
-        }
-        workDirRequestPending = true;
-        postToHost({type: 'pickWorkDir'});
-      });
-    }
-    if (list) {
-      list.addEventListener('click', e => {
-        const item = e.target.closest('.workdir-item');
-        if (item) openWorkDir(item.dataset.path);
-      });
-      list.addEventListener('keydown', e => {
-        if (e.key !== 'Enter' && e.key !== ' ') return;
-        const item = e.target.closest('.workdir-item');
-        if (!item) return;
-        e.preventDefault();
-        openWorkDir(item.dataset.path);
-      });
-    }
+    renderChatWorkDir();
   }
 
   /**
@@ -11650,7 +12314,7 @@
    * A task's settings info as HTML for the task panels of the shared
    * page (the live panels show none: the Task Info panel carries them)
    * — the same shape the history sidebar's info rows use: a
-   * `workDir • model • wt • parallel • budget • started` line and a
+   * `workDir • model • parallel • budget • started` line and a
    * `chat • task • parent • subagent` ids line.
    *
    * @param {object|null} s A task_settings event's settings payload.
@@ -11661,7 +12325,6 @@
     const parts = [];
     if (s.work_dir) parts.push(String(s.work_dir));
     if (s.model) parts.push(String(s.model));
-    if ('is_worktree' in s) parts.push(s.is_worktree ? 'wt' : 'no-wt');
     if ('is_parallel' in s) {
       parts.push(s.is_parallel ? 'parallel' : 'sequential');
     }
@@ -11781,9 +12444,8 @@
   /**
    * Paint the task-settings items of the task-info panel (#meta-panel:
    * the remote desktop dock, the sidebar-chat drawer, the mobile
-   * drawer): Workdir, Max budget, Date, Base model, Worktree mode,
-   * Parallel mode, Chat id, Task id and — when the task has one —
-   * Parent task.  This is the choke point every task-settings repaint (tab
+   * drawer): Workdir, Max budget, Date, Base model, Chat id, Task id
+   * and — when the task has one — Parent task.  This is the choke point every task-settings repaint (tab
    * switch, task_settings event, scroll into a neighbouring task) goes
    * through, so the items always describe the task the tab label
    * names.  A task without settings falls back to the tab's
@@ -11820,22 +12482,6 @@
     }
     setMetaValue('meta-date', metaText(s ? taskStartText(s.start_ts) : ''));
     setMetaValue('meta-model', metaText(s ? s.model : ''));
-    setMetaValue(
-      'meta-worktree',
-      s && 'is_worktree' in s
-        ? s.is_worktree
-          ? 'worktree'
-          : 'no worktree'
-        : '\u2014',
-    );
-    setMetaValue(
-      'meta-parallel',
-      s && 'is_parallel' in s
-        ? s.is_parallel
-          ? 'parallel'
-          : 'sequential'
-        : '\u2014',
-    );
     setMetaValue('meta-chat-id', metaText(s ? s.chat_id : ''));
     const taskId = metaText(s ? s.task_id : '');
     setMetaValue(
@@ -12439,6 +13085,10 @@
   document.body.appendChild(tooltipEl);
   let tooltipTimer = null;
   function showTooltipFor(target) {
+    // The hover timer may fire after a re-render replaced the element
+    // under the pointer; a detached node measures 0x0 at the origin and
+    // would park the tooltip in the corner with no mouseout to hide it.
+    if (!target.isConnected) return;
     tooltipEl.textContent = target.dataset.tooltip;
     const rect = target.getBoundingClientRect();
     // Measure at the origin first: a fixed box placed near the right
@@ -13079,10 +13729,22 @@
   }
 
   /**
+   * The tools whose `description` argument titles the call: folded,
+   * their panel reads "<Tool> <description>" (class `tc-desc`).
+   */
+  const DESCRIPTION_TITLED_TOOLS = new Set([
+    'Bash',
+    'run_agent',
+    'run_parallel',
+    'run_commands_parallel',
+  ]);
+
+  /**
    * The one argument a folded tool panel's header shows after the tool
-   * name: a Bash call's description ("Bash list the files"), a Read or
-   * Write call's path ("Read src/app.py"), with no "description:" or
-   * "path:" label in between.
+   * name: the description of a Bash, run_agent, run_parallel or
+   * run_commands_parallel call ("Bash list the files", "run_parallel
+   * review the diff"), a Read or Write call's path ("Read src/app.py"),
+   * with no "description:" or "path:" label in between.
    *
    * @param {Element} panelEl The collapsed panel.
    * @returns {string|null} The argument text, or null for a panel whose
@@ -13090,7 +13752,7 @@
    */
   function briefPreviewText(panelEl) {
     let sel = null;
-    if (panelEl.classList.contains('tc-bash')) sel = '.tc-arg-desc .tc-arg-val';
+    if (panelEl.classList.contains('tc-desc')) sel = '.tc-arg-desc .tc-arg-val';
     else if (panelEl.classList.contains('tc-path')) sel = '.tc-arg-path .tp';
     if (!sel) return null;
     const el = panelEl.querySelector(':scope > .tc-b > ' + sel);
@@ -14573,11 +15235,16 @@
           hdr.appendChild(hint);
           // summaryhint-coverage:end
         }
-        // Folded, a Bash panel's header reads "Bash <description>" and
-        // a Read or Write panel's "Read <path>" (collapsePreview finds
-        // the text by the `tc-arg-desc` / `tc-arg-path` classes).
+        // Folded, a Bash, run_agent, run_parallel or run_commands_parallel
+        // panel reads "<Tool> <description>" (those tools' `description`
+        // argument is the call's title; a calendar tool's is the event
+        // body, so it keeps the whole-body preview) and a Read or Write
+        // panel "Read <path>" (collapsePreview finds the text by the
+        // `tc-arg-desc` / `tc-arg-path` classes).
         if (ev.name === 'Read' || ev.name === 'Write')
           c.classList.add('tc-path');
+        if (ev.description && DESCRIPTION_TITLED_TOOLS.has(ev.name))
+          c.classList.add('tc-desc');
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
@@ -15062,7 +15729,6 @@
         break;
       }
       // taskinfo-coverage:end
-      case 'autocommit_progress':
       case 'worktree_progress': {
         renderActionProgress(target, ev.message || ev.text || '');
         break;
@@ -16020,12 +16686,10 @@
     return false;
   }
 
-  /** Whether a sheet (settings / promptlets), the work-dir panel or
-   *  the server-reset confirm is open over the page. */
+  /** Whether a sheet (settings / promptlets) or the server-reset
+   *  confirm is open over the page. */
   function sheetOrModalOpen() {
     if (openSheets.length) return true;
-    const workdirPanel = document.getElementById('workdir-panel');
-    if (workdirPanel && workdirPanel.classList.contains('open')) return true;
     return Boolean(
       serverResetConfirmModal &&
       serverResetConfirmModal.classList.contains('open'),
@@ -16073,13 +16737,16 @@
 
   /**
    * Ask the daemon for one page of history under the current search
-   * text and tag filter.  `offset` 0 (the default) is the first page of
-   * a fresh view; callers reset pagination before requesting it.
+   * text and tag, machine and WORKDIR filters.  `offset` 0 (the
+   * default) is the first page of a fresh view; callers reset
+   * pagination before requesting it.
    */
   function requestHistory(offset = 0) {
     api.getHistory({
       query: historySearch ? historySearch.value : '',
       tag: historyTagFilter(),
+      machine: historyMachineFilter(),
+      workDir: historyWorkDirFilter(),
       offset,
       generation: historyGeneration,
     });
@@ -16091,14 +16758,34 @@
     requestHistory();
   }
 
+  // A burst of task news (the daemon replays one `status` per tab after
+  // every `ready`; a task end is a `status` plus a `tasks_updated`) must
+  // not cost one history.db query per event: the first refresh of a
+  // tick goes out at once and the rest fold into ONE trailing refetch
+  // at the end of the tick, so a late change is still picked up.
   function refreshHistory() {
-    if (sidebar.classList.contains('open')) requestHistoryFromStart();
+    if (sidebar.classList.contains('open')) {
+      if (historyRefreshTrailing) {
+        historyRefreshWanted = true;
+      } else {
+        requestHistoryFromStart();
+        historyRefreshTrailing = setTimeout(flushHistoryRefresh, 0);
+      }
+    }
     // Task news (a run started or finished, a commit landed) may have
     // changed the workspace: re-list the Explorer folders on screen /
     // re-read git for the Source Control view.  A hidden view — or one
     // behind a closed phone drawer — is only marked dirty and reloads
     // when it next shows.
     refreshSidebarDataViews(true);
+  }
+
+  /** End of the tick: one refetch for every refresh folded into it. */
+  function flushHistoryRefresh() {
+    historyRefreshTrailing = null;
+    if (!historyRefreshWanted) return;
+    historyRefreshWanted = false;
+    if (sidebar.classList.contains('open')) requestHistoryFromStart();
   }
 
   /**
@@ -16217,7 +16904,6 @@
   // default branch — anything else must never reach processOutputEvent.
   const TRANSCRIPT_EVENT_TYPES = new Set([
     ...TASK_SCOPED_STREAM_TYPES,
-    'autocommit_progress',
     'autocommit_done',
     'worktree_progress',
     'warning',
@@ -16533,7 +17219,7 @@
         setServerLoading(!ev.connected, ev.reconnecting === true);
         if (!ev.connected) {
           forgetInFlightPathChecks();
-          stopAppsRefreshSpin();
+          stopSidebarRefreshSpins();
           abandonExplorerListings();
           setAutocommitInFlight(false);
           tabs.forEach(t => {
@@ -16938,9 +17624,10 @@
         if (typeof ev.machine === 'string') {
           const statusMachine = document.getElementById('status-machine');
           if (statusMachine) statusMachine.textContent = ev.machine;
-          // ...and, in bold green, at the top of the chat pane itself.
-          const chatMachine = document.getElementById('chat-machine');
-          if (chatMachine) chatMachine.textContent = ev.machine;
+          // ...and, in bold green, at the top of the chat pane itself,
+          // as the first entry of the machine drop-down.
+          localMachineName = ev.machine;
+          renderChatMachine();
         }
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
         if (ev.config && Array.isArray(ev.config.recent_work_dirs)) {
@@ -16949,9 +17636,8 @@
         break;
       case 'workDirError':
         // The VS Code host found no folder at the path asked for by
-        // openWorkDir / pickWorkDir.  Reported into the panel only
-        // while it still waits on that request.
-        if (workDirRequestPending) setWorkDirError(String(ev.text || ''));
+        // openWorkDir / pickWorkDir.
+        setWorkDirError(String(ev.text || ''));
         break;
       case 'workDirPicked':
         // The VS Code host verified the folder and made it the global
@@ -17018,11 +17704,37 @@
       case 'cronJobs':
         renderCronJobs(ev);
         break;
+      case 'machines':
+        noteMachines(Array.isArray(ev.machines) ? ev.machines : []);
+        renderMachines(ev);
+        break;
+      case 'tabMachine':
+        // The daemon bound (or unbound) a tab to a machine: every
+        // surface's drop-down shows the same pick for the tab.  A pick
+        // the user made here and has not submitted yet stands: it is
+        // where THEIR next task goes.
+        if (typeof ev.tabId === 'string' && ev.tabId) {
+          const machine = ev.machine ? String(ev.machine) : '';
+          if (
+            tabMachinePicked.has(ev.tabId) &&
+            tabMachine(ev.tabId) !== machine
+          )
+            break;
+          if (machine) tabMachines.set(ev.tabId, machine);
+          else tabMachines.delete(ev.tabId);
+          tabMachinePicked.delete(ev.tabId);
+          persistTabState();
+          renderChatMachine();
+        }
+        break;
       case 'appsStatus':
         renderAppsStatus(ev);
         break;
       case 'spendReport':
         renderSpendReport(ev);
+        break;
+      case 'recommendations':
+        renderRecommendations(ev);
         break;
       case 'metaState':
         // The host relays the ACTIVE chat editor panel's task-info
@@ -17054,6 +17766,13 @@
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         autofillHistoryDateRange(ev.dateRange);
+        refreshHistoryMachineOptions(ev.machines, ev.localMachine);
+        // A stale reply (an older generation, dropped by renderHistory)
+        // must not rebuild the options either: its directory list may
+        // lack the one just chosen and would reset the selection.
+        if ((ev.generation || 0) === historyGeneration) {
+          refreshHistoryWorkDirOptions(ev.workDirs);
+        }
         break;
       case 'files': {
         // tableak-coverage:start
@@ -17197,7 +17916,6 @@
         // previous task that never reached a terminal event is stale.
         discardReadyReports(ev.tabId);
         // report-coverage:end
-        dropStaleMainTreeBar(ev.tabId);
         const clearTab =
           ev.tabId !== undefined ? getTab(ev.tabId) : getTab(activeTabId);
         if (clearTab) {
@@ -17206,6 +17924,10 @@
           // A new run replaces the tab's task: its settings arrive
           // with the run's own task_settings event.
           clearTab.taskSettings = null;
+          // Its live events are the transcript now: a transcript the
+          // daemon withheld on the last ready (pinned to the replaced
+          // task) must not be fetched over them.
+          clearTab.replayPending = null;
           // The tab keeps the replaced task's id until the new run's
           // first id-bearing event (sendMessage claims a pending id only
           // for a tab that has none), so a `/ask` answer for the old task
@@ -17278,56 +18000,17 @@
       case 'gitCommit':
         triggerManualGitCommit();
         break;
-      // The primary-sidebar history panel clicked a task of THIS
-      // panel's chat: mirror the in-webview history-click behavior —
-      // scroll the task's region into view, or replay the tab at that
-      // task when its events are not spliced into the transcript.
-      case 'showTask': {
-        if (!EDITOR_TAB_MODE) break;
-        const stRoot = editorRootTab();
-        if (!stRoot) break;
-        if (activeTabId !== stRoot.id) switchToTab(stRoot.id);
-        if (
-          !scrollChatToTask(ev.taskId) &&
-          ev.taskId !== undefined &&
-          ev.taskId !== null &&
-          ev.taskId !== '' &&
-          stRoot.backendChatId
-        ) {
-          api.resumeSession({
-            id: stRoot.backendChatId,
-            taskId: ev.taskId,
-            tabId: stRoot.id,
-          });
-        }
-        break;
-      }
-      // The primary-sidebar history panel clicked a task while the
-      // extension runs in SIDEBAR mode: open the chat here, exactly
-      // like the in-webview history rows do — switch to the chat's
-      // tab, resume the chat in a fresh tab, or (no chat id) show the
-      // task text read-only in a fresh tab.
+      // The primary-sidebar history panel clicked a task: open the
+      // chat here, exactly like the in-webview history rows do — switch
+      // to the chat's tab, resume the chat in a fresh tab, or (no chat
+      // id) show the task text read-only in a fresh tab.
       case 'openChatFromHistory': {
-        if (EDITOR_TAB_MODE) break;
         const chatId = typeof ev.chatId === 'string' ? ev.chatId : '';
         const taskText = typeof ev.title === 'string' ? ev.title : '';
-        const hasTaskId =
-          ev.taskId !== undefined && ev.taskId !== null && ev.taskId !== '';
         const ocTab = chatId ? getTabByBackendChatId(chatId) : null;
         const ocLeft = getTab(activeTabId);
         if (ocTab) {
-          switchToTab(ocTab.id);
-          if (
-            !ocTab.isContentTab &&
-            !scrollChatToTask(ev.taskId) &&
-            hasTaskId
-          ) {
-            api.resumeSession({
-              id: chatId,
-              taskId: ev.taskId,
-              tabId: ocTab.id,
-            });
-          }
+          resumeExistingChatTab(ocTab, chatId, ev.taskId);
         } else if (chatId) {
           openHistoryTaskInNewTab(taskText);
           api.resumeSession({
@@ -17342,17 +18025,9 @@
         retireIdleChat(ocLeft, false);
         break;
       }
-      case 'clearChat': {
-        const ccTab = getTab(activeTabId);
-        const ccWelcome =
-          welcome && welcome.style.display !== 'none' && O.contains(welcome);
-        if (ccTab && !ccTab.backendChatId && ccWelcome) {
-          focusInputWithRetry();
-        } else {
-          openNewChat();
-        }
+      case 'clearChat':
+        openNewChat();
         break;
-      }
       case 'showWelcome': {
         const swTabId = ev.tabId || activeTabId;
         const swTab = getTab(swTabId);
@@ -17433,10 +18108,35 @@
         api.getInputHistory();
         break;
 
+      case 'replay_deferred': {
+        // The daemon's answer to `ready` for every registry tab but
+        // the one on screen: no transcript, just the offer.  The tab
+        // keeps whatever it shows (possibly stale after an outage) and
+        // asks for the transcript the first time the user opens it.
+        const rdTab = getTab(ev.tabId);
+        if (!rdTab) break;
+        rdTab.statusKnown = true;
+        rdTab.replayPending = {
+          chatId: ev.chatId || '',
+          taskId: ev.taskId || '',
+        };
+        // The ready named the tab the webview showed when it was sent;
+        // the user may have moved meanwhile.
+        // Fetch now when the tab on screen is this one or sits under
+        // it (a sub-agent tab under an offered parent); an offered
+        // sub-agent tab on screen fetches itself.
+        let rdUp = getTab(activeTabId);
+        const rdSeen = new Set();
+        while (rdUp && rdUp !== rdTab && !rdSeen.has(rdUp.id)) {
+          rdSeen.add(rdUp.id);
+          rdUp = tabOwner(rdUp);
+        }
+        if (rdUp === rdTab) requestDeferredReplay(getTab(activeTabId));
+        break;
+      }
       case 'task_events': {
         const teTabId = ev.tabId || activeTabId;
         const teTab = getTab(teTabId);
-        dropStaleMainTreeBar(teTabId);
         // faildot-coverage:start
         // The replay REPLACES the tab's transcript, so the status icon
         // must describe the replayed task: its own failed `result`
@@ -17446,7 +18146,10 @@
         // faildot-coverage:end
         // The daemon sends a running task's `status` before its replay,
         // so once the replay is here the tab's state is settled.
-        if (teTab) teTab.statusKnown = true;
+        if (teTab) {
+          teTab.statusKnown = true;
+          teTab.replayPending = null;
+        }
         if (ev.chat_id && teTab) {
           teTab.backendChatId = ev.chat_id;
           if (!teTab.workDir && configWorkDir) {
@@ -17720,7 +18423,10 @@
       // focus it even while another field has the caret.
       case 'appendToInput':
         if (ev.text) {
-          inp.value = inp.value ? inp.value + '\n' + ev.text : ev.text;
+          // `replace`: a prompt prefilled into a new chat takes the
+          // composer over instead of landing under a carried-over draft.
+          inp.value =
+            inp.value && !ev.replace ? inp.value + '\n' + ev.text : ev.text;
           inp.dispatchEvent(new Event('input', {bubbles: true}));
         }
         focusInputWithRetry(true);
@@ -17829,35 +18535,23 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgWtTab = getTab(ev.tabId);
           if (bgWtTab) {
-            bgWtTab.worktreeBarEl = createWorktreeBar(ev.tabId, ev.branch);
+            bgWtTab.worktreeBarEl = createWorktreeBar(
+              ev.tabId,
+              worktreeBranchLabel(ev),
+            );
           }
           break;
         }
         showWorktreeActions(ev);
         break;
-      case 'main_tree_done': {
-        // Post-task presentation for a non-worktree manual-commit run:
-        // the task's edits sit uncommitted in the main checkout, so
-        // show the Auto commit / Discard / Do nothing bar.
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const bgMtTab = getTab(ev.tabId);
-          if (bgMtTab) {
-            bgMtTab.worktreeBarEl = createMainTreeBar(
-              ev.tabId,
-              ev.workDir || '',
-            );
-          }
-          break;
-        }
-        showMainTreeActions(ev);
-        break;
-      }
-      case 'main_tree_result':
       case 'worktree_result':
         // A merge just copied the task's committed files into the
         // original checkout; a discard just deleted the worktree copy.
         // Either way the tab's file links may have flipped existence,
         // so re-verify them (foreground and background tabs alike).
+        // The event also arrives mid-task, from the agent's own
+        // commit_and_merge tool: the tab then holds no pending bar and
+        // the result simply lands in the transcript.
         if (ev.success) recheckFileLinksForTab(ev.tabId);
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgWrTab = getTab(ev.tabId);
@@ -17889,16 +18583,9 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgAdTab = getTab(ev.tabId);
           if (bgAdTab) {
-            // Terminal for the main-tree bar's "Auto commit" button
-            // (success or failure — same one-shot rule as
-            // handleWorktreeResult), matched by workDir so a commit
-            // in another repository sharing the tab leaves the bar
-            // alone. A pending WORKTREE bar stays: a Git Commit on
-            // the main tree says nothing about the still-undecided
-            // worktree branch.
-            if (autocommitDoneOwnsMainTreeBar(bgAdTab.worktreeBarEl, ev)) {
-              bgAdTab.worktreeBarEl = null;
-            }
+            // A pending WORKTREE bar stays: a Git Commit on the main
+            // tree says nothing about the still-undecided worktree
+            // branch.
             clearActionProgress(bgAdTab.outputFragment);
             // A successful manual Git Commit is reported by a toast
             // notification instead; only failures earn transcript text.
@@ -17907,12 +18594,6 @@
             }
           }
           break;
-        }
-        // Foreground twin of the background main-tree-bar dismissal
-        // above; clearing first so handleAutocommitResult's input
-        // refocus lands on a visible input box.
-        if (autocommitDoneOwnsMainTreeBar(worktreeBar, ev)) {
-          clearWorktreeBar();
         }
         handleAutocommitResult(ev);
         break;
@@ -17990,12 +18671,10 @@
       case 'new_tab': {
         const spawnParent = nearestOpenAncestorTab(ev.parent_tab_id);
         if (ev.parent_tab_id && !spawnParent) break;
-        // Editor-tabs mode: a parentless spawn (e.g. a run_agent
-        // sub-task) belongs to no particular panel, and EVERY panel
-        // receives the broadcast — each adopting it would open the
-        // same orphan tab (and post duplicate resumeSessions) in every
-        // editor tab. Only spawns owned by this panel's chats join it.
-        if (EDITOR_TAB_MODE && !ev.parent_tab_id) break;
+        // A parentless spawn (e.g. a run_agent sub-task) is the chat
+        // surface's to adopt; the panel-shaped surfaces receive the
+        // same broadcast.
+        if (CHATLESS_PANEL && !ev.parent_tab_id) break;
         if (ev.task_id === undefined || ev.task_id === null) break;
         const parentTabBeforeNew = spawnParent;
         // One sub-agent, one tab: a re-delivered spawn for a sub-agent
@@ -18377,6 +19056,8 @@
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
     renderStopButton();
+    renderChatMachine();
+    renderChatWorkDir();
 
     updateInputDisabled();
     if (running) {
@@ -18470,8 +19151,6 @@
       if (hasStart) t0 = doneStartTs;
       endTs = hasEnd ? doneEndTs : Date.now();
       setRunningState(false);
-      stopTimer();
-      removeSpinner();
       statusText.textContent = label || 'Ready';
       // A finished task (or its replay after a reconnect) must not raise
       // the phone's keyboard, nor pull the caret out of a field the user
@@ -18984,12 +19663,12 @@
     const tab = getTab(activeTabId);
     const htmlStr = buildShareableHtml(tasks);
     if (!htmlStr) {
-      addError('Share failed: the chat is empty');
+      notifyShareFailed('the chat is empty');
       flashShareBtn(false);
       return;
     }
     if (utf8ByteLength(JSON.stringify(htmlStr)) > SHARE_MAX_HTML_JSON_BYTES) {
-      addError('Share failed: this chat is too large to export as one page');
+      notifyShareFailed('this chat is too large to export as one page');
       flashShareBtn(false);
       return;
     }
@@ -19326,7 +20005,9 @@
    */
   function copyFollowupToInput(text) {
     inp.value = text;
-    syncClearBtn();
+    // The input listener resizes the composer, syncs the clear button
+    // and resets the history cursor, as for typed text.
+    inp.dispatchEvent(new Event('input', {bubbles: true}));
     inp.focus();
   }
 
@@ -19491,7 +20172,7 @@
   }
 
   /**
-   * Build a post-task action bar (worktree / main-tree choices).
+   * Build a post-task action bar (the worktree choices).
    *
    * A button with a `confirm` message is destructive: its first click
    * only swaps the row for an inline question naming what is about to
@@ -19591,8 +20272,8 @@
    * Append the terminal result line of a commit / merge / discard flow
    * to *target* (the visible transcript, a hidden tab's fragment, or a
    * replay container). One renderer for the foreground, background and
-   * replay variants of `worktree_result` / `main_tree_result` /
-   * `autocommit_done`, which used to carry hand-copied twins.
+   * replay variants of `worktree_result` / `autocommit_done`, which
+   * used to carry hand-copied twins.
    *
    * @param {Element|DocumentFragment|null} target Where to render.
    * @param {object} ev The terminal event (success / message).
@@ -19617,8 +20298,8 @@
   /**
    * Show the daemon's live progress line for a commit or merge flow.
    *
-   * `autocommit_progress` and `worktree_progress` are the steps of ONE
-   * operation ("Staging changes…" → "Generating commit message…" →
+   * `worktree_progress` events are the steps of ONE operation
+   * ("Staging changes…" → "Generating commit message…" →
    * "Committing…"), so they share a single line that is replaced in
    * place and removed again by the terminal event. Rendering them here
    * is what gives the remote web client the feedback the VS Code host
@@ -19685,10 +20366,22 @@
     worktreeBar = null;
   }
 
+  // The branch(es) a worktree_done names: one per repository the task
+  // touched (ev.worktrees), falling back to the single ev.branch.
+  function worktreeBranchLabel(ev) {
+    const list = ev && Array.isArray(ev.worktrees) ? ev.worktrees : [];
+    const names = list.map(w => w && w.branch).filter(Boolean);
+    if (names.length > 1) {
+      return 'branches ' + names.map(n => "'" + n + "'").join(', ');
+    }
+    const branch = names[0] || (ev && ev.branch);
+    return branch ? "branch '" + branch + "'" : '';
+  }
+
   // Discard is the destructive choice: it sits last (away from the
-  // default "merge" click) and asks once more, naming the branch.
-  function createWorktreeBar(ownerTabId, branch) {
-    const what = branch ? "branch '" + branch + "'" : 'this worktree';
+  // default "merge" click) and asks once more, naming the branch(es).
+  function createWorktreeBar(ownerTabId, what) {
+    if (!what) what = 'this worktree';
     return createActionBar('Auto-commit and merge, Do nothing, or Discard?', [
       {
         cls: 'wt-merge',
@@ -19721,107 +20414,11 @@
     ]);
   }
 
-  // The non-worktree counterpart of createWorktreeBar: after a
-  // manual-commit task edited the main checkout directly, the daemon's
-  // main_tree_done event offers the same explicit choice. "Auto
-  // commit" reuses the settings drawer's autocommitAction flow (its
-  // terminal autocommit_done event dismisses the bar); Discard and Do
-  // nothing go through mainTreeAction / main_tree_result. The bar is
-  // stored in the same worktreeBar / tab.worktreeBarEl slot — a tab
-  // can only ever have one pending bar — and is tagged with the
-  // main-tree-bar class so autocommit_done can tell it apart from a
-  // worktree bar (which a Git Commit on the MAIN tree must not close).
-  function createMainTreeBar(ownerTabId, workDir) {
-    const where = workDir ? ' in ' + workDir : '';
-    const bar = createActionBar('Auto-commit, Do nothing, or Discard?', [
-      {
-        cls: 'wt-merge',
-        text: 'Auto commit',
-        msg: () => ({
-          type: 'autocommitAction',
-          tabId: ownerTabId,
-          workDir: workDir,
-        }),
-      },
-      {
-        cls: 'wt-nothing',
-        text: 'Do nothing',
-        msg: () => ({
-          type: 'mainTreeAction',
-          action: 'nothing',
-          tabId: ownerTabId,
-          workDir: workDir,
-        }),
-      },
-      {
-        cls: 'wt-discard',
-        text: 'Discard',
-        confirm: "Throw away the task's uncommitted changes" + where + '?',
-        msg: () => ({
-          type: 'mainTreeAction',
-          action: 'discard',
-          tabId: ownerTabId,
-          workDir: workDir,
-        }),
-      },
-    ]);
-    bar.classList.add('main-tree-bar');
-    bar.dataset.workDir = workDir || '';
-    return bar;
-  }
-
-  function isMainTreeBar(bar) {
-    return !!(bar && bar.classList.contains('main-tree-bar'));
-  }
-
-  // Whether an autocommit_done event is the terminal of THIS main-tree
-  // bar's "Auto commit" click. The bar stamps its workDir on the
-  // autocommitAction it sends and the daemon echoes it back on the
-  // event, so a commit targeting a DIFFERENT repository that happens
-  // to share the tab (a settings-drawer Git Commit from another
-  // window, a post-task commit of another repo) can never strip the
-  // bar's controls while its own tree is still dirty.
-  function autocommitDoneOwnsMainTreeBar(bar, ev) {
-    return (
-      isMainTreeBar(bar) &&
-      !!ev &&
-      typeof ev.workDir === 'string' &&
-      ev.workDir === (bar.dataset.workDir || '')
-    );
-  }
-
-  // A new task (`clear`) or a replayed transcript (`task_events`)
-  // replaces the tab's task binding; a main-tree bar left over from
-  // the previous task would keep offering actions on its OLD workDir
-  // (e.g. a Discard resetting a repository the tab no longer shows),
-  // so it is retired. A WORKTREE bar is deliberately left alone: its
-  // pending branch outlives the transcript, and the daemon
-  // re-presents or finalizes it through its own lifecycle.
-  function dropStaleMainTreeBar(tabId) {
-    if (
-      isMainTreeBar(worktreeBar) &&
-      (tabId === undefined || tabId === activeTabId)
-    ) {
-      clearWorktreeBar();
-    }
-    const tab = getTab(tabId === undefined ? activeTabId : tabId);
-    if (tab && isMainTreeBar(tab.worktreeBarEl)) tab.worktreeBarEl = null;
-  }
-
   function showWorktreeActions(ev) {
     clearWorktreeBar();
     worktreeBar = createWorktreeBar(
       (ev && ev.tabId) || activeTabId,
-      ev && ev.branch,
-    );
-    attachActionBar(worktreeBar);
-  }
-
-  function showMainTreeActions(ev) {
-    clearWorktreeBar();
-    worktreeBar = createMainTreeBar(
-      (ev && ev.tabId) || activeTabId,
-      (ev && ev.workDir) || '',
+      worktreeBranchLabel(ev),
     );
     attachActionBar(worktreeBar);
   }
@@ -19889,10 +20486,14 @@
     }
     // readychat-coverage:end
     setAutocommitInFlight(true);
-    // Close the drawer so the transcript's autocommit_progress /
-    // autocommit_done lines are visible instead of hidden behind
-    // the opaque settings sheet.
-    closeSettingsPanel();
+    // Close the drawer so the transcript's autocommit_done line is
+    // visible instead of hidden behind the opaque settings sheet.  Only
+    // an open sheet: closing flushes the config form (repopulated by
+    // every configData poll) as a full saveConfig, which a closed sheet
+    // must not post.
+    if (settingsPanel && settingsPanel.classList.contains('open')) {
+      closeSettingsPanel();
+    }
     api.autocommitAction({
       tabId: commitTabId,
       workDir: workDirForTab(commitTabId),
@@ -19978,12 +20579,9 @@
     // readychat-coverage:start
     const chatTabId = chatTabIdForHost();
     const ready = {tabId: chatTabId, restoredTabs: collectRestoredTabs()};
-    // An editor-tab panel shows exactly one registry tab and drops the
-    // task_events of every other one (see the task_events handler), so
-    // it asks the daemon to replay only that tab instead of every
-    // bound tab's transcript.
-    const root = EDITOR_TAB_MODE ? editorRootTab() : null;
-    if (root) ready.singleTabId = root.id;
+    // A chatless panel's root tab is never bound to a chat, so naming
+    // it as the only tab to replay means the daemon replays nothing.
+    if (CHATLESS_PANEL) ready.singleTabId = activeTabId;
     api.ready(ready);
     readySentAt = Date.now();
     reportedChatTabId = chatTabId;
@@ -20015,14 +20613,7 @@
     setupEventListeners();
     initEditorTabsToggle();
     renderTabBar();
-    if (EDITOR_TAB_MODE) {
-      // Persist the root tab id right away: the panel serializer must
-      // be able to re-adopt this chat even if the window reloads
-      // before any tab activity (e.g. while the daemon is down).
-      persistTabState();
-    }
     // Show the composer draft adopted into the boot tab's inputValue —
-    // carried over from the opening panel (data-kiss-pending-text) or
     // persisted by the previous page instance (savedInputDrafts): the
     // boot tab is put on screen without restoreTab, so the textarea
     // must be seeded here.
@@ -20033,28 +20624,12 @@
       autosizeComposer();
     }
     sendReady();
-    if (EDITOR_TAB_MODE) {
-      // A panel opened from a history row resumes its chat as soon as
-      // the daemon knows about the tab (the `ready` just sent).
-      const ds = document.body.dataset;
-      if (ds.kissResumeChatId || ds.kissResumeTaskId) {
-        const rawTaskId = ds.kissResumeTaskId || '';
-        api.resumeSession({
-          id: ds.kissResumeChatId || undefined,
-          // History rows carry numeric task ids; the data attribute
-          // stringified it.
-          taskId:
-            rawTaskId === ''
-              ? undefined
-              : isNaN(Number(rawTaskId))
-                ? rawTaskId
-                : Number(rawTaskId),
-          tabId: activeTabId,
-        });
-      }
-    }
     api.getConfig();
     startSidebarPanels();
+    // The chat header's machine drop-down needs the list too on the
+    // one chat surface without the Machines subpanel (which asks for
+    // it): the editor-tab chat panel.
+    if (POST_META_UPDATES) api.getMachines();
   }
 
   function setupEventListeners() {
@@ -20202,7 +20777,7 @@
           const after = getTab(activeTabId);
           if (after && after.isContentTab) {
             // The owner is gone: there is no chat here to export.
-            addError('Share failed: this tab has no chat to share');
+            notifyShareFailed('this tab has no chat to share');
             flashShareBtn(false);
             return;
           }
@@ -20725,7 +21300,7 @@
     }
     // mobilescreens-coverage:end
     setupWorkspaceViews();
-    setupWorkDirPanel();
+    setupChatWorkDir();
     applyRemoteTheme(getSavedRemoteTheme());
     followVscodeTheme();
     if (SIDEBAR_CHAT_MODE) {
@@ -21122,36 +21697,42 @@
       hfRunning,
       hfErrors,
       hfCompleted,
-      hfWorkspace,
       hfFavorite,
       hfFrom,
       hfTo,
       hfSea,
       hfTag,
+      hfMachine,
+      hfWorkDir,
     } = getHistoryFilterEls();
     [
       hfRunning,
       hfErrors,
       hfCompleted,
-      hfWorkspace,
       hfFavorite,
       hfFrom,
       hfTo,
       hfSea,
       hfTag,
+      hfMachine,
+      hfWorkDir,
     ].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
-    if (hfTag) {
-      // The tag is applied by the daemon's SQL query (rare tags live
-      // beyond the loaded page), so a change is a fresh view: refetch
-      // page one, like a changed search text.
-      hfTag.addEventListener('change', () => {
+    // The tag, the machine and the WORKDIR are applied by the daemon
+    // (rare tags and a machine's or a directory's rows live beyond the
+    // loaded page), so a change is a fresh view: refetch page one, like
+    // a changed search text.  Only the tag is a search
+    // (historySearchActive): a machine or a directory scopes the list
+    // and leaves every chat as collapsed as it was.
+    [hfTag, hfMachine, hfWorkDir].forEach(el => {
+      if (!el) return;
+      el.addEventListener('change', () => {
         resetHistoryPagination();
-        reapplyAllHistoryGroupCollapse(true);
+        if (el === hfTag) reapplyAllHistoryGroupCollapse(true);
         requestHistory();
       });
-    }
+    });
     [hfFrom, hfTo].forEach(el => {
       if (el) {
         el.addEventListener('change', () => {
@@ -21232,7 +21813,7 @@
     });
     // A click on a file link of a transcript (a span promoteFileLink
     // stamped) opens the file.  Only those: the folder picker's rows
-    // and the "Working directory" panel's recent list carry their
+    // (its "Recently opened" section included) carry their
     // folder in data-path too, and have click handlers of their own.
     document.addEventListener('click', e => {
       const el = e.target.closest('.kiss-filelink[data-path]');
@@ -21813,6 +22394,21 @@
       if (!prompt) return;
     }
 
+    // A message added to a running task is text only (appendUserMessage
+    // carries no attachments), so a photo attached meanwhile cannot ride
+    // along.  Refuse and say why rather than send the text and drop the
+    // photo silently: the composer keeps both.
+    if (isRunning && attachments.length) {
+      showNotification({
+        id: 'append-attachments',
+        severity: 'warning',
+        message:
+          'A message added to a running task is text only: remove the ' +
+          'attachment to send it now, or wait for the task to finish.',
+      });
+      return;
+    }
+
     if (histCache[0] !== prompt) {
       histCache.unshift(prompt);
     }
@@ -21821,7 +22417,7 @@
     if (isRunning) {
       if (curTab) {
         curTab.unackedPrompt = prompt;
-        curTab.unackedAttachments = attachments;
+        curTab.unackedAttachments = [];
       }
       api.appendUserMessage({prompt: prompt, tabId: activeTabId});
       resetComposerAfterSend();
@@ -21833,14 +22429,16 @@
       prompt: prompt,
       model: selectedModel,
       tabId: activeTabId,
+      // The machine the tab's tasks run on (the chat header's
+      // drop-down); '' is this machine.  Sent: the daemon's binding
+      // is the pick from here on.
+      machine: tabMachine(activeTabId),
       attachments: attachments
         .filter(a => a.data)
         .map(a => {
           return {name: a.name, mimeType: a.type, data: a.data};
         }),
-      useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.checked),
       isParallel: true,
-      autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
     };
     // Only a KNOWN toggle state becomes a per-run override; otherwise
     // the field stays absent and the daemon falls back to the
@@ -21849,10 +22447,11 @@
       msg.useWebTools = !!webToolsToggleBtn.checked;
     }
     // No workDir: the daemon runs every task in its one global working
-    // directory (the "Working directory" panel's pick on any surface).
+    // directory (the chat header drop-down's pick on any surface).
     // The run's system prompt names the file open in the editor.
     Object.assign(msg, editorContext(false));
     api.send(msg);
+    tabMachinePicked.delete(activeTabId);
     t0 = Date.now();
     endTs = 0;
     if (curTab) {
@@ -22170,7 +22769,6 @@
     }
     refreshModelLabel();
     closeModelDD();
-    renderModelList('');
     api.selectModel({model: name, tabId: activeTabId});
   }
 
@@ -22427,6 +23025,122 @@
       .sort()
       .forEach(name => addOption(name, name));
     hfSea.value = selected;
+  }
+
+  // The machine <select>'s value for the local daemon's own rows.
+  const HF_MACHINE_LOCAL = '__local__';
+
+  /**
+   * Rebuild the machine filter from the daemon's `history` reply: All,
+   * this machine (named after its host) and every registered remote
+   * machine, in registration order.  The filter is hidden while no
+   * remote machine is registered.  The current selection survives a
+   * rebuild; a selection naming a machine that was removed falls back
+   * to All and refetches, since the daemon no longer answers for it.
+   */
+  function refreshHistoryMachineOptions(machines, localMachine) {
+    const hfMachine = document.getElementById('hf-machine');
+    if (!hfMachine) return;
+    const names = Array.isArray(machines)
+      ? machines.filter(m => typeof m === 'string' && m)
+      : [];
+    const selected = hfMachine.value;
+    hfMachine.innerHTML = '';
+    const addOption = (value, label) => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      hfMachine.appendChild(opt);
+    };
+    addOption('', 'All');
+    addOption(HF_MACHINE_LOCAL, (localMachine || 'local') + ' (this machine)');
+    names.forEach(name => addOption(name, name));
+    hfMachine.value =
+      selected === HF_MACHINE_LOCAL || names.includes(selected) ? selected : '';
+    hfMachine.parentElement.hidden = names.length === 0;
+    if (selected !== hfMachine.value) {
+      hfMachine.dispatchEvent(new Event('change', {bubbles: true}));
+    }
+  }
+
+  /**
+   * The label naming the remote machine a history row came from; null
+   * for the local daemon's own rows.  It links to the machine's web UI,
+   * where the chat can be opened (the link opens in the browser from
+   * both surfaces).
+   */
+  function makeTaskMachineLabel(session) {
+    const machine =
+      typeof session.machine === 'string' ? session.machine.trim() : '';
+    if (!machine) return null;
+    const link = document.createElement('a');
+    link.className = 'sidebar-item-machine';
+    link.textContent = machine;
+    link.title = 'On machine ' + machine + ' (opens its web UI)';
+    link.href =
+      typeof session.machine_url === 'string' ? session.machine_url : '#';
+    link.target = '_blank';
+    link.rel = 'noopener';
+    return link;
+  }
+
+  /**
+   * Open the web UI of the remote machine a history row came from, in
+   * the browser (an anchor click: both surfaces open it externally).
+   */
+  function openRemoteMachine(session) {
+    const link = makeTaskMachineLabel(session);
+    if (!link) return;
+    link.hidden = true;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  /** The machine chosen in the history panel's machine dropdown ('' = all). */
+  function historyMachineFilter() {
+    const sel = document.getElementById('hf-machine');
+    return sel && sel.value ? sel.value : '';
+  }
+
+  /**
+   * Rebuild the WORKDIR filter: All, then the chat header's working
+   * directories in order (the current one, then the ones adopted
+   * before, newest first).  Fed by the daemon's `history` reply
+   * (workDirs) and, between replies, by the client's own copy of the
+   * header's list (chatWorkDirList: a pick in the header or a fresh
+   * configData).  The current selection survives a rebuild; a
+   * selection naming a directory no longer listed falls back to All
+   * and refetches, since no row could match it any more.
+   *
+   * @param {string[]} workDirs The directories, the current one first.
+   */
+  function refreshHistoryWorkDirOptions(workDirs) {
+    const hfWorkDir = document.getElementById('hf-workdir');
+    if (!hfWorkDir || !Array.isArray(workDirs)) return;
+    const paths = workDirs.filter(p => typeof p === 'string' && p);
+    const selected = hfWorkDir.value;
+    hfWorkDir.innerHTML = '';
+    const addOption = (value, label) => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      opt.title = label;
+      hfWorkDir.appendChild(opt);
+    };
+    addOption('', 'All');
+    paths.forEach(p => addOption(p, p));
+    hfWorkDir.value = paths.includes(selected) ? selected : '';
+    hfWorkDir.parentElement.classList.toggle('active', !!hfWorkDir.value);
+    if (selected !== hfWorkDir.value) {
+      hfWorkDir.dispatchEvent(new Event('change', {bubbles: true}));
+    }
+  }
+
+  /** The directory chosen in the history panel's WORKDIR dropdown ('' = all). */
+  function historyWorkDirFilter() {
+    const sel = document.getElementById('hf-workdir');
+    return sel && sel.value ? sel.value : '';
   }
 
   // Keep every on-screen "... ago" launch-age label current: history
@@ -22696,7 +23410,9 @@
   /**
    * Whether a history search is being shown right now: a search text
    * or a tag filter, both of which narrow the list to matches that
-   * must not hide behind collapsed chat headers.
+   * must not hide behind collapsed chat headers.  The machine filter
+   * is not a search: it scopes the list to one machine's chats, which
+   * keep their collapsed state like the full list.
    */
   function historySearchActive() {
     return !!(
@@ -22864,15 +23580,54 @@
       group.dataset.statusTs === undefined
         ? NaN
         : Number(group.dataset.statusTs);
-    if (isFinite(known) && !(ms > known)) return;
-    group.dataset.statusTs = String(isFinite(ms) ? ms : 0);
-    group._kissLastSession = session;
-    const old = btn.querySelector(':scope > .history-chat-status');
-    if (old) old.remove();
-    const mark = historyStatusMark(session);
-    if (!mark) return;
-    mark.classList.add('history-chat-status');
-    btn.insertBefore(mark, btn.querySelector(':scope > .history-chat-title'));
+    // The newest task of the chat that ran on THIS daemon, which the
+    // header opens even when a remote copy of the chat is newer.
+    if (!(typeof session.machine === 'string' && session.machine.trim())) {
+      const knownLocal = Number(group.dataset.localStatusTs);
+      if (!isFinite(knownLocal) || ms > knownLocal) {
+        group.dataset.localStatusTs = String(isFinite(ms) ? ms : 0);
+        group._kissLastLocalSession = session;
+      }
+    }
+    if (!isFinite(known) || ms > known) {
+      group.dataset.statusTs = String(isFinite(ms) ? ms : 0);
+      group._kissLastSession = session;
+      const old = btn.querySelector(':scope > .history-chat-status');
+      if (old) old.remove();
+      const mark = historyStatusMark(session);
+      if (mark) {
+        mark.classList.add('history-chat-status');
+        btn.insertBefore(
+          mark,
+          btn.querySelector(':scope > .history-chat-title'),
+        );
+      }
+    }
+    syncHistoryGroupMachine(group);
+  }
+
+  /**
+   * Show the machine chip on the header of a chat that lives only on a
+   * remote machine (its rows are folded away by default, so the header
+   * is what says where the chat is); a chat with a task on this daemon
+   * carries no chip, as the header opens it here.
+   */
+  function syncHistoryGroupMachine(group) {
+    const actions = group.querySelector(
+      ':scope > .history-chat-header > .history-chat-actions',
+    );
+    const chip = actions.querySelector(':scope > .history-chat-machine');
+    const remote = group._kissLastLocalSession ? null : group._kissLastSession;
+    if (chip && (!remote || chip.textContent !== remote.machine.trim())) {
+      chip.remove();
+    }
+    if (remote && !actions.querySelector(':scope > .history-chat-machine')) {
+      const label = makeTaskMachineLabel(remote);
+      if (label) {
+        label.classList.add('history-chat-machine');
+        actions.appendChild(label);
+      }
+    }
   }
 
   /**
@@ -22890,15 +23645,20 @@
    *   chat on screen.
    */
   function openHistoryTask(s, wholeChat) {
+    // A task of a remote machine cannot be resumed on this daemon: it is
+    // opened on its own machine's web UI instead.
+    if (typeof s.machine === 'string' && s.machine.trim()) {
+      openRemoteMachine(s);
+      return;
+    }
     // The task text goes to the read-only task panel only.  #task-input
     // holds the user's own draft for the NEXT prompt and is never written.
     const taskText = s.preview || s.title || '';
     const existingChatTab = getTabByBackendChatId(s.id);
     const resumable = !!s.id && (s.has_events || s.is_running || !!wholeChat);
-    // Editor-tabs mode: a chat that is not THIS panel's belongs in
-    // its own editor tab. The host either reveals the panel already
-    // bound to the chat or opens a new one that resumes it.
-    if (EDITOR_TAB_MODE && !existingChatTab) {
+    // The primary-sidebar history panel runs no chats: the host opens
+    // the chat in the chat editor tab.
+    if (HISTORY_PANEL_MODE) {
       postToHost({
         type: 'openChatPanel',
         chatId: resumable ? s.id : undefined,
@@ -22910,25 +23670,8 @@
     }
     const left = getTab(activeTabId);
     if (existingChatTab) {
-      switchToTab(existingChatTab.id);
+      resumeExistingChatTab(existingChatTab, s.id, s.task_id);
       retireIdleChat(left, false);
-      // The tab may be parked on a different task of the same chat.
-      // Scroll the clicked task's region into view so the static
-      // task panel names it; when its events are not spliced into
-      // the transcript yet, replay the tab at that task instead.
-      if (
-        !existingChatTab.isContentTab &&
-        !scrollChatToTask(s.task_id) &&
-        s.task_id !== undefined &&
-        s.task_id !== null &&
-        s.task_id !== ''
-      ) {
-        api.resumeSession({
-          id: s.id,
-          taskId: s.task_id,
-          tabId: existingChatTab.id,
-        });
-      }
     } else if (resumable) {
       // A running task is resumable even before its first event is
       // persisted: the server reattaches the live chat on replay.
@@ -23010,8 +23753,11 @@
     header.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
-      if (!group._kissLastSession) return;
-      openHistoryTask(group._kissLastSession, true);
+      // A chat present on this daemon opens here even when its latest
+      // task ran on another machine (a database copied between them).
+      const session = group._kissLastLocalSession || group._kissLastSession;
+      if (!session) return;
+      openHistoryTask(session, true);
       closeSidebar();
     });
     return header;
@@ -23650,6 +24396,9 @@
       div.dataset.workDir = s.work_dir || '';
       div.dataset.sea = typeof s.sea === 'string' ? s.sea.trim() : '';
       div.dataset.tags = typeof s.tags === 'string' ? s.tags : '';
+      // '' for the local daemon's rows, else the remote machine's name.
+      div.dataset.machine =
+        typeof s.machine === 'string' ? s.machine.trim() : '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
 
@@ -23664,7 +24413,8 @@
       const actions = document.createElement('div');
       actions.className = 'sidebar-item-actions';
 
-      if (s.task_id) {
+      // A remote task's favourite flag lives on its own machine.
+      if (s.task_id && !div.dataset.machine) {
         const FAV_FILLED_SVG =
           '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
         const FAV_OUTLINE_SVG =
@@ -23711,7 +24461,8 @@
           api.setFavorite({taskId: s.task_id, isFavorite: next});
         });
         actions.appendChild(favBtn);
-
+      }
+      if (s.task_id) {
         const copyBtn = makeSidebarCopyButton(s.preview || itemText);
         actions.appendChild(copyBtn);
       }
@@ -23724,6 +24475,8 @@
       if (tagsLabel) actions.appendChild(tagsLabel);
       const seaLabel = makeTaskSeaLabel(s);
       if (seaLabel) actions.appendChild(seaLabel);
+      const machineLabel = makeTaskMachineLabel(s);
+      if (machineLabel) actions.appendChild(machineLabel);
       div.appendChild(actions);
 
       const info = document.createElement('div');
@@ -23741,10 +24494,8 @@
         parts.push(workDir);
       }
       if (modelName) {
-        const wtLabel = s.is_worktree ? 'wt' : 'no-wt';
         const parLabel = s.is_parallel ? 'parallel' : 'sequential';
-        const acLabel = s.auto_commit_mode ? 'auto-commit' : 'manual-commit';
-        parts.push(modelName, wtLabel, parLabel, acLabel);
+        parts.push(modelName, parLabel);
       }
       if (parts.length > 0) {
         const workspace = document.createElement('span');
@@ -23796,7 +24547,9 @@
 
       div.appendChild(info);
 
-      div.addEventListener('click', () => {
+      div.addEventListener('click', e => {
+        // The machine chip is a link that opens the machine itself.
+        if (e.target.closest('.sidebar-item-machine')) return;
         openHistoryTask(s);
         closeSidebar();
       });
@@ -24082,28 +24835,18 @@
     }, 0);
   }
 
-  function normalizeHistoryWorkDir(p) {
-    if (typeof p !== 'string' || p === '') return '';
-    const isWindowsPath = /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\');
-    let normalized = isWindowsPath ? p.replace(/\\/g, '/') : p;
-    const minLength = /^[A-Za-z]:\/$/.test(normalized) ? 3 : 1;
-    while (normalized.length > minLength && normalized.endsWith('/')) {
-      normalized = normalized.slice(0, -1);
-    }
-    return isWindowsPath ? normalized.toLowerCase() : normalized;
-  }
-
   function getHistoryFilterEls() {
     return {
       hfRunning: document.getElementById('hf-running'),
       hfErrors: document.getElementById('hf-errors'),
       hfCompleted: document.getElementById('hf-completed'),
-      hfWorkspace: document.getElementById('hf-workspace'),
       hfFavorite: document.getElementById('hf-favorite'),
       hfFrom: document.getElementById('hf-from'),
       hfTo: document.getElementById('hf-to'),
       hfSea: document.getElementById('hf-sea'),
       hfTag: document.getElementById('hf-tag'),
+      hfMachine: document.getElementById('hf-machine'),
+      hfWorkDir: document.getElementById('hf-workdir'),
     };
   }
 
@@ -24112,33 +24855,46 @@
       hfRunning,
       hfErrors,
       hfCompleted,
-      hfWorkspace,
       hfFavorite,
       hfFrom,
       hfTo,
       hfSea,
       hfTag,
+      hfMachine,
+      hfWorkDir,
     } = getHistoryFilterEls();
     if (!hfRunning || !hfErrors || !hfCompleted) return;
     const showRunning = hfRunning.checked;
     const showErrors = hfErrors.checked;
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
-    const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
     // '' = every SEA, HF_SEA_NONE = plain runs only, otherwise
     // the exact SEA name.
     const seaFilter = hfSea ? hfSea.value : '';
+    // '' = every directory, otherwise the exact work_dir string the
+    // daemon listed; like the tag, the rows are checked here too so
+    // the previous view's rows vanish before the refetch lands.
+    const workDirFilter = hfWorkDir ? hfWorkDir.value : '';
+    if (hfWorkDir) {
+      hfWorkDir.parentElement.classList.toggle('active', !!workDirFilter);
+    }
+    // A directory is a path on this machine, and the daemon answers a
+    // directory with its own rows only: while one is chosen the
+    // machine dropdown is reset to All and locked, so the rows the
+    // daemon sends are the ones shown (a remote machine selected
+    // alongside would hide every one of them).
+    if (hfMachine) {
+      if (workDirFilter) hfMachine.value = '';
+      hfMachine.disabled = !!workDirFilter;
+    }
+    // '' = every machine, HF_MACHINE_LOCAL = this daemon's own rows,
+    // otherwise the exact name of a registered remote machine.
+    const machineFilter = hfMachine ? hfMachine.value : '';
     // The daemon already filters each page by tag; checking the rows
     // too hides the stale rows of the previous view the instant the
     // dropdown changes, before the refetch lands.
     const onlyTag = hfTag && hfTag.value ? hfTag.value : '';
     if (hfTag) hfTag.parentElement.classList.toggle('active', !!onlyTag);
-    const normClientWorkDir = normalizeHistoryWorkDir(configWorkDir || '');
-    // "/Users/me/proj" -> "/Users/me/proj/", but "/" stays "/", so that
-    // subdirectory matching below never looks for a doubled separator.
-    const clientWorkDirPrefix = normClientWorkDir.endsWith('/')
-      ? normClientWorkDir
-      : normClientWorkDir + '/';
     let fromTs = -Infinity;
     let toTs = Infinity;
     if (hfFrom && hfFrom.value) {
@@ -24162,21 +24918,27 @@
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
       const tagOk =
         !onlyTag || (row.dataset.tags || '').split(',').includes(onlyTag);
-      const rowWorkDir = normalizeHistoryWorkDir(row.dataset.workDir || '');
-      // A task that ran in a git worktree (".kiss-worktrees/kiss_wt-...")
-      // or any other subdirectory still belongs to this workspace.
-      const wsOk =
-        !onlyWorkspace ||
-        cat === 'running' ||
-        rowWorkDir === '' ||
-        normClientWorkDir === '' ||
-        rowWorkDir === normClientWorkDir ||
-        rowWorkDir.startsWith(clientWorkDirPrefix);
       const rowSea = row.dataset.sea || '';
       const seaOk =
         seaFilter === '' ||
         (seaFilter === HF_SEA_NONE ? rowSea === '' : rowSea === seaFilter);
-      if (catOk && dateOk && favOk && tagOk && wsOk && seaOk) {
+      const rowMachine = row.dataset.machine || '';
+      const machineOk =
+        machineFilter === '' ||
+        (machineFilter === HF_MACHINE_LOCAL
+          ? rowMachine === ''
+          : rowMachine === machineFilter);
+      const workDirOk =
+        workDirFilter === '' || (row.dataset.workDir || '') === workDirFilter;
+      if (
+        catOk &&
+        dateOk &&
+        favOk &&
+        tagOk &&
+        seaOk &&
+        machineOk &&
+        workDirOk
+      ) {
         row.style.display = '';
         visible++;
       } else {
@@ -25030,12 +25792,6 @@
   }
 
   /**
-   * Send the boxes to the daemon: Add a new model, or Save an edit.
-   *
-   * The daemon writes ~/.kiss/MY_MODELS.json and answers every client
-   * with a fresh myModelsData, which repaints the list.
-   */
-  /**
    * Client-side mirror of the daemon's saveMyModel validation.
    *
    * Mirroring it here keeps a rejected Add/Save from optimistically
@@ -25067,6 +25823,12 @@
     return null;
   }
 
+  /**
+   * Send the boxes to the daemon: Add a new model, or Save an edit.
+   *
+   * The daemon writes ~/.kiss/MY_MODELS.json and answers every client
+   * with a fresh myModelsData, which repaints the list.
+   */
   function submitCustomModel() {
     const values = readCustomModelBoxes();
     const nameInp = document.getElementById('cfg-custom-model-name');
@@ -25220,14 +25982,16 @@
     };
     // The working directory is not a settings field: it is the daemon's
     // one global value (every task on every surface runs in it), chosen
-    // in the "Working directory" panel or the remote Explorer.  The
-    // config reply decides which history rows this client shows and
-    // what the Explorer browses.
+    // in the chat header's drop-down or the remote Explorer.  The
+    // config reply decides what the Explorer browses.  Only the
+    // Explorer / Source Control views are re-scoped: the tab bar and
+    // the CHATS list show the same registry tabs and history on every
+    // client, whatever folder each task runs in.
     const prevConfigWorkDir = configWorkDir;
     configWorkDir = cfg.work_dir || '';
     if (prevConfigWorkDir !== configWorkDir) {
-      applyWorkspaceScope();
-      renderCurrentWorkDir();
+      refreshSidebarDataViews(false);
+      renderChatWorkDir();
     }
     // The budget default belongs to Python (`config.DEFAULT_MAX_BUDGET`,
     // read by `vscode_config.DEFAULTS`), and `load_config()` seeds every
@@ -25245,8 +26009,6 @@
     // so a fresh session (VS Code webview or remote web client) reflects
     // the user's saved preference.  Missing keys default to true, the
     // same defaults as vscode_config.DEFAULTS.
-    setChecked(autocommitToggleBtn, cfg.auto_commit_mode !== false);
-    setChecked(worktreeToggleBtn, cfg.is_worktree !== false);
     setChecked(webToolsToggleBtn, cfg.use_web_browser !== false);
     // The toggle now mirrors the persisted setting (or a user edit that
     // setChecked preserved), so submits may carry it as the per-run
@@ -25281,18 +26043,6 @@
     });
   }
   /**
-   * Read the settings form into a `saveConfig` payload.
-   *
-   * @param {Set<string>} [onlyIds] When given, only these field ids are
-   *   read. The daemon MERGES what it is sent (see
-   *   ``vscode_config.save_config``), so a partial payload updates just
-   *   those fields and leaves the rest of config.json alone -- which is
-   *   what lets a panel closed before its `configData` reply arrived
-   *   save the edit instead of flushing a form full of blanks over the
-   *   stored settings.
-   * @returns {{config: object, apiKeys: object}} The payload.
-   */
-  /**
    * Tell the user, under the Max budget box, when what they typed is
    * not a number and so will be ignored (the saved budget stays).  The
    * note is created on first use and hidden again once the box parses.
@@ -25323,6 +26073,18 @@
     box.setAttribute('aria-invalid', bad ? 'true' : 'false');
   }
 
+  /**
+   * Read the settings form into a `saveConfig` payload.
+   *
+   * @param {Set<string>} [onlyIds] When given, only these field ids are
+   *   read. The daemon MERGES what it is sent (see
+   *   ``vscode_config.save_config``), so a partial payload updates just
+   *   those fields and leaves the rest of config.json alone -- which is
+   *   what lets a panel closed before its `configData` reply arrived
+   *   save the edit instead of flushing a form full of blanks over the
+   *   stored settings.
+   * @returns {{config: object, apiKeys: object}} The payload.
+   */
   function collectConfigForm(onlyIds) {
     const el = id => document.getElementById(id);
     const want = id => !onlyIds || onlyIds.has(id);
@@ -25337,14 +26099,6 @@
       const budget = parseFloat(el('cfg-max-budget').value);
       if (Number.isFinite(budget)) cfg.max_budget = budget;
       else if (settingsEditedFields.has('cfg-max-budget')) syncMaxBudgetNote();
-    }
-    if (want('cfg-auto-commit')) {
-      cfg.auto_commit_mode = !!(
-        autocommitToggleBtn && autocommitToggleBtn.checked
-      );
-    }
-    if (want('cfg-use-worktree')) {
-      cfg.is_worktree = !!(worktreeToggleBtn && worktreeToggleBtn.checked);
     }
     if (want('cfg-use-web-tools')) {
       cfg.use_web_browser = !!(webToolsToggleBtn && webToolsToggleBtn.checked);

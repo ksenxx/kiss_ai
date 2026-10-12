@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
 import time
 from typing import Any
 
@@ -248,13 +249,48 @@ class MattermostChannelBackend(ToolMethodBackend):
                 empty, it is derived from the stored config on :meth:`connect`.
             token: Optional personal access token for direct REST calls.
         """
-        self._driver: Any = None
+        self._driver_obj: Any = None
+        self._lazy_muse: bool = False
+        self._wire_lock = threading.Lock()
         self._last_post_time: int = 0
         self._connection_info: str = ""
         self._base_url: str = base_url.rstrip("/")
         self._token: str = token
         self._http: Any = requests
         self._muse: bool = False
+
+    def _wire_deferred(self) -> None:
+        """Run the Muse wiring :class:`MattermostAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of wiring at construction,
+        so building it for its tool list (``sea lint``, ``sea docs``,
+        run start) touches no daemon.  Concurrent first requests wait on
+        the lock and share the one surrogate; :meth:`_wire_muse`
+        publishes ``_driver`` last, so a request that sees it set sees
+        the boundary transport too.  Direct REST calls (typing) call
+        this before touching ``_http``.
+
+        Raises:
+            MuseAuthError: When no Mattermost credential can be wired,
+                so no request leaves on the direct transport without one.
+        """
+        if self._driver_obj is not None or not self._lazy_muse:
+            return
+        with self._wire_lock:
+            if self._driver_obj is None and not self._wire_muse():
+                from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+                raise MuseAuthError(self._connection_info)
+
+    @property
+    def _driver(self) -> Any:
+        """The Mattermost driver (wired on first use when deferred)."""
+        self._wire_deferred()
+        return self._driver_obj
+
+    @_driver.setter
+    def _driver(self, driver: Any) -> None:
+        self._driver_obj = driver
 
     def _wire_muse(self) -> bool:
         """Acquire a Mattermost surrogate and wire the boundary driver.
@@ -313,6 +349,7 @@ class MattermostChannelBackend(ToolMethodBackend):
         self._token = handle.token
         self._http = MuseBoundarySession("mattermost")
         self._muse = True
+        # Published last (see ``_wire_deferred``).
         self._driver = _MuseMattermostDriver(base, handle.token)
         return True
 
@@ -417,12 +454,17 @@ class MattermostChannelBackend(ToolMethodBackend):
             thread_ts: Root post ID when typing inside a thread; sent as
                 ``parent_id`` when non-empty.
         """
-        if not self._base_url or not channel_id:
+        if not channel_id:
             return
         body: dict[str, Any] = {"channel_id": channel_id}
         if thread_ts:
             body["parent_id"] = thread_ts
         try:
+            # A fresh agent learns its URL and surrogate from the
+            # deferred wiring, so wire before testing the URL.
+            self._wire_deferred()
+            if not self._base_url:
+                return
             # In Muse mode ``_token`` holds a surrogate and ``_http`` is
             # the boundary session (the daemon swaps in the real token
             # and classifies this ephemeral POST as a read).
@@ -758,18 +800,13 @@ class MattermostAgent(BaseChannelAgent):
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
-            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
-
-            # Muse-auth mode: wire a vault surrogate and the boundary
-            # driver (no network round trip); the real token never
-            # enters this process once migrated.  A daemon failure
-            # leaves the agent constructible (fail closed, tokenless)
-            # so its authenticate/clear tools stay available.
-            try:
-                self._backend._wire_muse()
-            except MuseAuthError as e:
-                self._backend._driver = None
-                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            # Muse-auth mode: the backend wires its vault surrogate and
+            # boundary driver on first use (see
+            # MattermostChannelBackend._driver), so building the tool
+            # list (``sea lint``, ``sea docs``, run start) touches no
+            # daemon; the real token never enters this process once
+            # migrated.
+            self._backend._lazy_muse = True
             return
         cfg = _config.load()
         if cfg:  # pragma: no branch
@@ -789,8 +826,18 @@ class MattermostAgent(BaseChannelAgent):
                 pass
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return self._backend._driver is not None
+        """Return True if a driver is built, or a server URL plus a vault/config token exist."""
+        backend = self._backend
+        if backend._driver_obj is not None:
+            return True
+        if not backend._lazy_muse:
+            return False
+        from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
+
+        cfg = _config.load_metadata() or {}
+        return bool(_base_url_from_config(cfg)) and (
+            vault_has_credentials("mattermost") or bool(cfg.get("token"))
+        )
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
@@ -802,7 +849,7 @@ class MattermostAgent(BaseChannelAgent):
             Returns:
                 Authentication status or instructions.
             """
-            if agent._backend._driver is None:  # pragma: no branch
+            if not agent._is_authenticated():  # pragma: no branch
                 return (
                     "Not authenticated with Mattermost. "
                     "Use authenticate_mattermost(url=..., token=...) to configure.\n"

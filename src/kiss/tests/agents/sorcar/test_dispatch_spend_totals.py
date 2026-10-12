@@ -343,7 +343,7 @@ def test_late_side_channel_spend_banked_on_the_caller_is_not_folded_twice(
     adds $0.50 to the child's row.  The caller must end at the child's
     row total, $2.25, not $3.00.
     """
-    from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
     from kiss.server import agent_state
     from kiss.server.agent_state import AgentState
     from kiss.server.task_update import charge_side_channel_usage
@@ -352,7 +352,7 @@ def test_late_side_channel_spend_banked_on_the_caller_is_not_folded_twice(
     root = _task(finished=False, cost=0.0)
     child = _task(finished=True, parent=root, cost=1.0)
     server, events = _server()  # before registering: it resets the registry
-    parent = WorktreeSorcarAgent("late-parent")
+    parent = ChatSorcarAgent("late-parent")
     state = AgentState(root, agent=parent, tab_id="tab-late-parent", server_owned=True)
     agent_state.register(state)
     try:

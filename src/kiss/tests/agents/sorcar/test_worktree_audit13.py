@@ -29,11 +29,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -99,7 +99,7 @@ class TestBug63DiscardLiesOnDeleteFailure:
             capture_output=True,
         )
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -138,7 +138,7 @@ class TestBug63DiscardLiesOnDeleteFailure:
             cwd=repo,
             capture_output=True,
         )
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -172,7 +172,7 @@ class TestBug63DiscardLiesOnDeleteFailure:
         assert GitWorktreeOps.create(repo, branch, wt_dir)
         GitWorktreeOps.save_original_branch(repo, branch, original)
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import socket
 import sys
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
@@ -30,7 +29,11 @@ from kiss.agents.third_party_agents.weixin.weixin_sea import (
     WeixinSea,
     _config,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingServer,
+    raw_post_status,
+    serve_recording,
+)
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
@@ -39,21 +42,6 @@ def _signed_params(ts: str = "1712345678", nonce: str = "n0nce") -> dict[str, st
     """Build valid signature query parameters for the 'cbtok' callback token."""
     sig = hashlib.sha1("".join(sorted(["cbtok", ts, nonce])).encode()).hexdigest()
     return {"signature": sig, "timestamp": ts, "nonce": nonce}
-
-
-def _raw_post_status(port: int, headers: str, path: str = "/") -> int:
-    """Send a raw HTTP POST with custom headers and return the status code."""
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-        request = f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Connection: close\r\n\r\n"
-        sock.sendall(request.encode())
-        sock.settimeout(10)
-        data = b""
-        while b"\r\n" not in data:
-            chunk = sock.recv(1024)
-            if not chunk:
-                break
-            data += chunk
-        return int(data.split(b" ")[1])
 
 
 class _WeixinApi(RecordingServer):
@@ -311,7 +299,7 @@ def test_callback_post_requires_signature_when_token_configured() -> None:
         # An unsigned probe with a thousands-of-digits Content-Length
         # must still get the 401 (not a raw connection close from an
         # unguarded int() past the integer-string conversion limit).
-        assert _raw_post_status(port, f"Content-Length: {'9' * 5000}\r\n") == 401
+        assert raw_post_status(port, f"Content-Length: {'9' * 5000}\r\n") == 401
         messages, _ = backend.poll_messages("", "0")
         assert messages == []
     finally:
@@ -338,14 +326,14 @@ def test_callback_post_bad_content_length() -> None:
     """Missing/negative/non-decimal Content-Length gets 400; oversized gets 413."""
     backend, port = _connected_backend(callback_token="")
     try:
-        assert _raw_post_status(port, "") == 400
-        assert _raw_post_status(port, "Content-Length: -5\r\n") == 400
-        assert _raw_post_status(port, "Content-Length: 12abc\r\n") == 400
+        assert raw_post_status(port, "") == 400
+        assert raw_post_status(port, "Content-Length: -5\r\n") == 400
+        assert raw_post_status(port, "Content-Length: 12abc\r\n") == 400
         # Thousands of digits: unguarded int() would raise past
         # Python's integer-string conversion limit (4300 digits) and
         # kill the handler with no response instead of a 400.
-        assert _raw_post_status(port, f"Content-Length: {'9' * 5000}\r\n") == 400
-        assert _raw_post_status(port, f"Content-Length: {2 * 1024 * 1024}\r\n") == 413
+        assert raw_post_status(port, f"Content-Length: {'9' * 5000}\r\n") == 400
+        assert raw_post_status(port, f"Content-Length: {2 * 1024 * 1024}\r\n") == 413
         messages, _ = backend.poll_messages("", "0")
         assert messages == []
     finally:

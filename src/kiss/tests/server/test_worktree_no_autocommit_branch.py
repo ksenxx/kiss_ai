@@ -2,40 +2,39 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression tests for worktree branch creation when autoCommit=False.
+"""Regression tests: a task's worktree branch survives the task.
 
 Bug report: "when use_worktree is set true, but autocommit is false, it
 seems that a worktree branch is not getting created."
 
 These tests drive ``VSCodeServer._run_task_inner`` with a real git repo
 and a stub agent (replaces the parent class' ``run`` with a deterministic
-implementation — not a mock).  Each test cleans up its temporary git
-repo and persistence database in ``tearDown`` to prevent state pollution
-across tests.
+implementation that calls the ``create_worktree`` tool like a real task
+would — not a mock).  Each test cleans up its temporary git repo and
+persistence database in ``tearDown`` to prevent state pollution across
+tests.
 
-The user-observed behavior is that the ``kiss/wt-{chat_id}-*`` branch
-appears to never exist in ``git branch --list``.  The root cause is in
+The user-observed behavior was that the ``kiss/wt-{chat_id}-*`` branch
+appeared to never exist in ``git branch --list``.  The root cause was in
 :meth:`_MergeFlowMixin._present_pending_worktree`: when the worktree's
-working tree has no detectable file changes after the task completes
-and no non-worktree task is running on the main tree, the branch is
-auto-discarded — even though the user explicitly disabled auto-commit
-and would expect the branch to be preserved for manual review.
+working tree had no detectable file changes after the task completed,
+the branch was auto-discarded — even though the user would expect the
+branch to be preserved for manual review.  The post-task path now
+passes ``discard_if_empty=False``.
 
 These tests:
 
-1. ``test_branch_created_with_changes_no_autocommit`` — confirms that
+1. ``test_branch_persists_after_task_with_changes`` — confirms that
    when the agent makes file changes, the branch survives the post-task
    path (sanity baseline).
-2. ``test_branch_created_no_changes_no_autocommit`` — reproduces the
-   bug: when the agent makes no file changes and auto-commit is off,
-   the branch is incorrectly auto-discarded.  After the fix, the branch
-   is preserved.
+2. ``test_branch_persists_after_task_with_no_changes`` — reproduces the
+   bug: when the agent makes no file changes the branch was incorrectly
+   auto-discarded.  After the fix, the branch is preserved.
 """
 
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,23 +43,7 @@ from typing import Any, cast
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server.server import VSCodeServer
-
-
-def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
-    )
-
-
-def _init_repo(repo: str) -> None:
-    """Create a fresh git repo with one seed commit so HEAD exists."""
-    _run_git(repo, "init", "-q")
-    _run_git(repo, "config", "user.email", "test@example.com")
-    _run_git(repo, "config", "user.name", "Test User")
-    _run_git(repo, "config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    _run_git(repo, "add", "seed.txt")
-    _run_git(repo, "commit", "-q", "-m", "seed")
+from kiss.tests.server.conftest import init_repo, run_git
 
 
 def _list_kiss_wt_branches(repo: str) -> list[str]:
@@ -68,7 +51,7 @@ def _list_kiss_wt_branches(repo: str) -> list[str]:
 
     Reflects only branches that still exist (i.e. not deleted).
     """
-    result = _run_git(repo, "branch", "--list", "kiss/wt-*")
+    result = run_git(repo, "branch", "--list", "kiss/wt-*")
     return [
         line.strip().lstrip("* ").strip()
         for line in result.stdout.splitlines()
@@ -76,14 +59,14 @@ def _list_kiss_wt_branches(repo: str) -> list[str]:
     ]
 
 
-class _WorktreeNoAutocommitBase(unittest.TestCase):
+class _WorktreeBranchBase(unittest.TestCase):
     """Shared setUp / tearDown — fresh git repo, isolated persistence DB."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-wt-test-")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo(self.repo)
+        init_repo(self.repo)
 
         self._saved_db = (
             _persistence._DB_PATH,
@@ -137,33 +120,34 @@ class _WorktreeNoAutocommitBase(unittest.TestCase):
 def _patch_parent_run_create_file(filename: str | None) -> Any:
     """Replace ``ChatSorcarAgent``'s parent ``run`` with a stub.
 
-    The stub creates *filename* inside the per-task work_dir when
-    *filename* is provided.  When *filename* is ``None`` it makes no
-    file changes — exercising the empty-worktree code path.
+    The stub does what a real task does: it resolves the task's
+    ``work_dir``, calls the ``create_worktree`` tool, and then creates
+    *filename* inside the worktree work dir when *filename* is
+    provided.  When *filename* is ``None`` it makes no file changes —
+    exercising the empty-worktree code path.
 
     Returns the original ``run`` for restoration in tearDown.
     """
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
-    def stub_run(self_agent: object, **kwargs: object) -> str:
+    def stub_run(self_agent: Any, **kwargs: object) -> str:
+        self_agent.work_dir = str(Path(str(kwargs.get("work_dir") or ".")).resolve())
+        assert "Created worktree" in self_agent.create_worktree()
         if filename is not None:
-            work_dir = kwargs.get("work_dir")
-            if isinstance(work_dir, str) and work_dir:
-                (Path(work_dir) / filename).write_text("agent output\n")
+            (Path(self_agent.work_dir) / filename).write_text("agent output\n")
         return "success: true\nsummary: stub\n"
 
     parent_class.run = stub_run
     return original
 
 
-class TestWorktreeBranchCreatedNoAutocommit(_WorktreeNoAutocommitBase):
-    """Validates that a ``kiss/wt-*`` branch is created and preserved
-    when ``use_worktree=True`` and ``autoCommit=False``."""
+class TestWorktreeBranchCreated(_WorktreeBranchBase):
+    """Validates that a ``kiss/wt-*`` branch created by the task is
+    preserved when the task does not call ``commit_and_merge``."""
 
     def test_worktree_created_event_broadcast(self) -> None:
-        """The agent always broadcasts ``worktree_created`` regardless
-        of the auto-commit setting.
+        """The agent broadcasts ``worktree_created`` from ``create_worktree``.
 
         This is the strongest assertion that a branch *was* created at
         some point during the run, even if a later code path might
@@ -174,8 +158,6 @@ class TestWorktreeBranchCreatedNoAutocommit(_WorktreeNoAutocommitBase):
             "prompt": "task with changes",
             "workDir": self.repo,
             "tabId": "0",
-            "useWorktree": True,
-            "autoCommit": False,
             "model": "",
         })
         wt_created = [e for e in self.events if e["type"] == "worktree_created"]
@@ -186,56 +168,45 @@ class TestWorktreeBranchCreatedNoAutocommit(_WorktreeNoAutocommitBase):
         assert branch.startswith("kiss/wt-"), branch
 
     def test_branch_persists_after_task_with_changes(self) -> None:
-        """When the agent modifies files in the worktree and
-        ``autoCommit=False``, the branch is preserved for manual
-        merge/discard."""
+        """When the agent modifies files in the worktree and never
+        merges, the branch is preserved for manual merge/discard."""
         self._original_run = _patch_parent_run_create_file("agent_out.txt")
         self.server._run_task_inner({
             "prompt": "task with changes",
             "workDir": self.repo,
             "tabId": "0",
-            "useWorktree": True,
-            "autoCommit": False,
             "model": "",
         })
         branches = _list_kiss_wt_branches(self.repo)
         assert len(branches) == 1, (
-            f"Expected exactly one kiss/wt-* branch after task with changes "
-            f"and autoCommit=False; got {branches}.  Events: {self._types()}"
+            f"Expected exactly one kiss/wt-* branch after task with changes; "
+            f"got {branches}.  Events: {self._types()}"
         )
 
-    def test_branch_persists_after_task_with_no_changes(self) -> None:
-        """REPRODUCES THE USER-REPORTED BUG.
-
-        When ``use_worktree=True`` and ``autoCommit=False``, and the
-        agent makes no file changes in the worktree, the branch should
-        still be preserved — the user explicitly opted out of
-        auto-commit and may want to inspect / continue work on the
-        branch manually.  Previously the branch was auto-discarded
-        when the worktree appeared empty, leading to the user-observed
-        symptom of "branch is not getting created."
-        """
+    def test_branch_is_dropped_after_task_with_no_changes(self) -> None:
+        """A worktree the agent left unmerged with no tracked changes has
+        nothing to review: the post-task path discards its branch and
+        reports the discard, instead of parking an empty branch."""
         self._original_run = _patch_parent_run_create_file(None)
         self.server._run_task_inner({
             "prompt": "task with no changes",
             "workDir": self.repo,
             "tabId": "0",
-            "useWorktree": True,
-            "autoCommit": False,
             "model": "",
         })
 
         assert "worktree_created" in self._types(), self._types()
 
         branches = _list_kiss_wt_branches(self.repo)
-        assert len(branches) == 1, (
-            f"BUG: when use_worktree=True and autoCommit=False, the "
-            f"kiss/wt-* branch is missing after the task.  "
+        assert branches == [], (
+            f"an empty kiss/wt-* branch survived the task.  "
             f"Branches: {branches}.  Events: {self._types()}"
         )
+        (result,) = [e for e in self.events if e["type"] == "worktree_result"]
+        assert (result["action"], result["success"]) == ("discard", True), result
 
 
-class TestWorktreeNestedWorkDirEvents(_WorktreeNoAutocommitBase):
+class TestWorktreeNestedWorkDirEvents(_WorktreeBranchBase):
     """Worktree events publish the task's cwd inside the worktree."""
 
     def test_worktree_events_publish_nested_work_dir(self) -> None:
@@ -255,8 +226,6 @@ class TestWorktreeNestedWorkDirEvents(_WorktreeNoAutocommitBase):
             "prompt": "task from nested dir",
             "workDir": str(nested),
             "tabId": "0",
-            "useWorktree": True,
-            "autoCommit": False,
             "model": "",
         })
 

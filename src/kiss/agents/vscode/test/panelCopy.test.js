@@ -88,12 +88,11 @@ async function run() {
     );
   });
 
-  test('getRawText skips copy-btn / chevron / collapse-preview chrome', () => {
+  test('getRawText skips copy-btn / collapse-preview chrome', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
     panel.innerHTML =
       '<button class="panel-copy-btn">copy</button>' +
-      '<span class="collapse-chv">\u25BE</span>' +
       '<span class="collapse-preview">preview</span>' +
       '<div>real content</div>';
     assert.strictEqual(PanelCopy.getRawText(panel), 'real content');

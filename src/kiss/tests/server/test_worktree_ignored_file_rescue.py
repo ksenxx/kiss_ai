@@ -12,7 +12,7 @@ capture them, and ``git worktree remove --force`` then deletes the
 directory.  Had the same task run without a worktree, those files
 would still be on disk.
 
-These tests drive the real ``WorktreeSorcarAgent`` against a real git
+These tests drive the real ``ChatSorcarAgent`` against a real git
 repository (the parent class' ``run`` is replaced with a deterministic
 stub that writes files — the same no-mock pattern the rest of the
 worktree suite uses) and assert the rescue behavior:

@@ -41,6 +41,7 @@ from kiss.agents.sorcar import agent_dispatch, channel_workspace, daemon_client,
 from kiss.agents.sorcar.agent_dispatch import resolve_agent
 from kiss.agents.sorcar.sea_apply import (
     CHANNEL_PREAMBLE,
+    SETTING_FIELDS,
     apply_sea,
     load_layers,
 )
@@ -180,7 +181,7 @@ def test_inherited_settings_fold_base_first_and_a_base_lays_its_defaults_under()
     }
     resolved = base_settings([_Budgeted()])
     assert resolved["use_web_tools"] is True and resolved["max_budget"] == 1.0
-    assert resolved["use_worktree"] is False  # the worker default
+    assert resolved["auto_classify"] is False  # the worker default
     # What a SEA is, is its class: a ``ChannelSea`` anywhere in the
     # chain makes the run a channel; it lays the channel scratch
     # directory under the subclass's keys.
@@ -236,7 +237,7 @@ def test_inheriting_by_command_name_and_by_path_chains_both_classes(registry: Pa
         base_module = sys.modules[type(layers[0]).__mro__[1].__module__]
         assert Path(base_module.__file__ or "") == base.resolve()
         settings = base_settings(layers)
-        assert settings["use_worktree"] is False  # the base's worker default
+        assert settings["auto_classify"] is False  # the base's worker default
         assert settings["use_web_tools"] is True and settings["max_budget"] == 2.0
         run = evaluate_sea(layers, "do it", task_id="T-1")
         assert run.prompt == "[derived] [base] do it BASE-ADD T-1 DERIVED-ADD"
@@ -467,9 +468,10 @@ class Sea(BaseSea):
     assert run.tools_hook([print, len]) == [print, len]
     cmd: dict[str, Any] = {"seaPath": str(sea), "prompt": "kept"}
     assert apply_sea(cmd) == set()
-    assert cmd.pop("_runConfig") == {
-        "sea": "noprompt", "channel": False, "pinned": {},
-    }
+    record = cmd.pop("_runConfig")
+    # Nothing on the command and nothing from the SEA: the daemon fills every setting.
+    assert record.pop("defaulted") == sorted(SETTING_FIELDS)
+    assert record == {"sea": "noprompt", "channel": False, "pinned": {}}
     # The four hooks are always staged; here they are all identities.
     messages = [{"role": "user", "content": "hi"}]
     assert cmd.pop("systemPromptHook")("S") == "S"
@@ -644,7 +646,7 @@ class SeaCompositionDaemonTest(DaemonRunApiHarness):
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)
         result = sorcar.run(
-            prompt, work_dir=self.repo, use_worktree=False, auto_commit=False,
+            prompt, work_dir=self.repo,
             endpoint_file=self.endpoint_file, timeout=60, **kwargs,
         )
         assert result.success is True, result
@@ -716,7 +718,7 @@ class Chan(ChannelSea):
             runs: list[dict[str, Any]] = []
             self._record_runs(runs)
             result = sorcar.run(
-                "hello", work_dir=self.repo, use_worktree=False, auto_commit=False,
+                "hello", work_dir=self.repo,
                 sea_path=str(chan), workspace="mine",
                 endpoint_file=self.endpoint_file, timeout=60,
             )

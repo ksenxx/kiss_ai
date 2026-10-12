@@ -120,10 +120,9 @@ before the first round; the writer and the reviewer run unattended and must not 
 Both agents run through `run_agent` with the absolute path of their SEA file:
 
 - writer: `run_agent(task=<writer_task output>, agent="{WRITE_PAPER_SEA}",
-  options='{{"use_worktree": false, "auto_commit": false}}',
   timeout="{WRITER_TIMEOUT_SECONDS}", max_budget=<share>)`;
 - reviewer: `run_agent(task=<reviewer_task output>, agent="{REVIEW_PAPER_SEA}",
-  options='{{"use_worktree": false, "auto_commit": false, "use_memory": false}}',
+  options='{{"use_memory": false}}',
   timeout="{REVIEWER_TIMEOUT_SECONDS}", max_budget=<share>)`.
 
 Pass `model` when the user names a writer or reviewer model; use model names
@@ -200,7 +199,7 @@ cost and time. Update `<work dir>/tmp/revise_review/PROGRESS.md` after each roun
 writer writes its own `./tmp/PROGRESS.md` in the shared work dir and overwrites yours).
 Git add the paper directory
 (`.tex`, `.bib`, figures, scripts, raw results, `.pdf`; never `.aux`, `.bbl`, `.blg`,
-`.log`, `.out`), the review files and the log; the children run with auto-commit off.
+`.log`, `.out`), the review files and the log; the children commit nothing themselves.
 
 Report back: the recommendation of every round, the final paper's `.tex` and `.pdf` paths
 and page count, every review path, the log path, the cost of each round and the total,

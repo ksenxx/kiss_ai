@@ -11,7 +11,7 @@ survives.  Neither ``_release_worktree`` (per-agent) nor
 ``sweep_orphaned_state`` (config-debris only) ever merges it, so the
 work is silently stranded.  The fix is
 :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`, wired into
-:meth:`WorktreeSorcarAgent._try_setup_worktree` right before
+:meth:`ChatSorcarAgent._try_setup_worktree` right before
 ``sweep_orphaned_state``.
 
 Each test creates a real git repo in a temp dir, plants one or more
@@ -29,18 +29,20 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.agents.sorcar.test_reclaim_orphaned_worktrees import (  # noqa: F401
     _make_repo,
-    _patch_super_run,
     _redirect_db,
     _restore_db,
+)
+from kiss.tests.agents.sorcar.test_worktree_extension_workflow import (
+    _patch_super_run,
     _unpatch_super_run,
 )
 
@@ -51,7 +53,7 @@ def _first_line_of_head(repo: Path) -> str:
 
 
 class TestReclaimWiredIntoWorktreeAgent:
-    """End-to-end via WorktreeSorcarAgent: next task adopts orphans."""
+    """End-to-end via ChatSorcarAgent: next task adopts orphans."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -65,8 +67,9 @@ class TestReclaimWiredIntoWorktreeAgent:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_agent_own_worktree_is_not_reclaimed(self) -> None:
-        # First agent creates a worktree and pauses (no release).
-        agent1 = WorktreeSorcarAgent("test1")
+        # First agent creates a worktree (its canned run calls
+        # ``create_worktree`` the way the model would) and pauses.
+        agent1 = ChatSorcarAgent("test1")
         agent1.run(prompt_template="task-a", work_dir=str(self.repo))
         own_wt = agent1._wt
         assert own_wt is not None
@@ -89,10 +92,10 @@ class TestReclaimWiredIntoWorktreeAgent:
         # runner passes it — as a ``run`` kwarg, never by pre-setting
         # ``agent2.printer``.  Pre-setting the attribute used to mask
         # a real bug: on a fresh agent ``self.printer`` is unset until
-        # ``super().run()``, so the reclaim inside worktree setup ran
-        # with an empty live-branch exclusion set and deleted a live
-        # sibling's worktree.
-        agent2 = WorktreeSorcarAgent("test2")
+        # ``run()`` binds it, so the reclaim inside the agent's
+        # ``create_worktree`` ran with an empty live-branch exclusion
+        # set and deleted a live sibling's worktree.
+        agent2 = ChatSorcarAgent("test2")
         try:
             agent2.run(
                 prompt_template="task-b",

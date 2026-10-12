@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import time
 import unittest
 from typing import Any
@@ -30,7 +29,10 @@ from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.server import _subagent_is_done
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
-from kiss.tests.server.test_subagent_tabs_all_surfaces import _JSDOM_PKG, SurfaceBridge
+from kiss.tests.server.test_subagent_tabs_all_surfaces import (
+    SurfaceBridge,
+    skip_unless_bridge_runs,
+)
 
 QUESTION = "Which colour should the child use? (zq7)"
 ANSWER = "teal zq7"
@@ -41,8 +43,6 @@ CHILD_TASK = (
 )
 DISPATCH_ARGS = {
     "task": CHILD_TASK,
-    "use_worktree": "false",
-    "auto_commit": "false",
     "auto_classify": "false",
     "use_memory": "false",
     "use_web_tools": "false",
@@ -65,16 +65,13 @@ class RunAgentChildAskAllSurfacesTest(DaemonLocalHarness):
         model = os.environ.get("KISS_LIVE_TEST_MODEL", "claude-fable-5-1")
         if model not in get_available_models():
             self.skipTest(f"live model {model} is not configured")
-        if shutil.which("node") is None or not _JSDOM_PKG.is_file():
-            self.skipTest("node and the extension's jsdom dependency are required")
+        skip_unless_bridge_runs(self)
         super().setUp()
         vscode_config.save_config({
             "last_model": model,
             "classify_tasks": False,
             "use_memory": False,
             "use_web_browser": False,
-            "is_worktree": False,
-            "auto_commit_mode": False,
         })
         self.server._vscode_server._refresh_default_model()
         # This is the daemon's normal dispatch destination, set at boot.
@@ -210,10 +207,9 @@ class RunAgentChildAskAllSurfacesTest(DaemonLocalHarness):
             self._assert_question_shown(name, child_tab)
 
         self.bridge.open("remote2", ' class="remote-chat"')
-        self.bridge.open(
-            "editor", ' class="editor-tab-mode"'
-            f' data-kiss-tab-id="{parent_tab}" data-kiss-in-registry="1"',
-        )
+        # The chat editor tab adopts the parent chat from the registry
+        # snapshot, like the sidebar view does.
+        self.bridge.open("editor", ' class="editor-tab-mode"')
         for name in SURFACES:
             self._wait_child_tab(name, child_tab)
             self._assert_question_shown(name, child_tab)

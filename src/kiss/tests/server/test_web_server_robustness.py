@@ -61,24 +61,7 @@ from kiss.server.web_server import (
     _generate_self_signed_cert,
 )
 from kiss.tests.conftest import posix_only
-
-
-def _find_free_port() -> int:
-    """Return a free TCP port on localhost."""
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 class _ConfigSnapshot:
@@ -108,7 +91,7 @@ class TestM1NoDeprecationWarning(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": ""})
-        self.port = _find_free_port()
+        self.port = find_free_port()
 
     async def asyncTearDown(self) -> None:
         self._snap.__exit__()
@@ -127,7 +110,7 @@ class TestM1NoDeprecationWarning(IsolatedAsyncioTestCase):
             await server.start_async()
             try:
                 async with connect(
-                    f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+                    f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
                 ) as ws:
                     await ws.send(
                         json.dumps({"type": "auth", "password": ""}),
@@ -167,7 +150,7 @@ class TestM2NoEnvMutation(unittest.TestCase):
         self.assertNotIn("KISS_WORKDIR", os.environ)
         server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             work_dir=wd,
         )
         self.assertEqual(server.work_dir, wd)
@@ -183,10 +166,10 @@ class TestM2NoEnvMutation(unittest.TestCase):
         a = tempfile.mkdtemp()
         b = tempfile.mkdtemp()
         s1 = RemoteAccessServer(
-            host="127.0.0.1", port=_find_free_port(), work_dir=a,
+            host="127.0.0.1", port=find_free_port(), work_dir=a,
         )
         s2 = RemoteAccessServer(
-            host="127.0.0.1", port=_find_free_port(), work_dir=b,
+            host="127.0.0.1", port=find_free_port(), work_dir=b,
         )
         self.assertEqual(s1.work_dir, a)
         self.assertEqual(s2.work_dir, b)
@@ -362,7 +345,7 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         os.chmod(cf, 0o755)
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self._tmpdir + ":/usr/bin:/bin"
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=self.port, use_tunnel=False,
             work_dir=tempfile.mkdtemp(),
@@ -415,7 +398,7 @@ class TestM7CapsRestoredTabs(IsolatedAsyncioTestCase):
         save_config({"remote_password": ""})
         self._old_cap = ws_mod._MAX_RESTORED_TABS
         ws_mod._MAX_RESTORED_TABS = 3
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=self.port, work_dir=tempfile.mkdtemp(),
         )
@@ -438,7 +421,7 @@ class TestM7CapsRestoredTabs(IsolatedAsyncioTestCase):
     async def test_restored_tabs_truncated_to_cap(self) -> None:
         """Sending 10 restored tabs invokes resumeSession at most cap times."""
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -471,7 +454,7 @@ class TestM7CapsAttachments(IsolatedAsyncioTestCase):
         save_config({"remote_password": ""})
         self._old_cap = ws_mod._MAX_ATTACHMENTS
         ws_mod._MAX_ATTACHMENTS = 4
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=self.port, work_dir=tempfile.mkdtemp(),
         )
@@ -506,7 +489,7 @@ class TestM7RefusesOversizePrompt(IsolatedAsyncioTestCase):
         save_config({"remote_password": ""})
         self._old_cap = ws_mod._MAX_PROMPT_BYTES
         ws_mod._MAX_PROMPT_BYTES = 100
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=self.port, work_dir=tempfile.mkdtemp(),
         )
@@ -607,7 +590,7 @@ class TestM10WelcomeInfoDoesNotBlockEventLoop(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": ""})
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=self.port, work_dir=tempfile.mkdtemp(),
         )

@@ -27,13 +27,18 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Iterable
+from itertools import chain
 from pathlib import Path
 
 from kiss.agents.sorcar.chat_summary import POLITENESS_FILLER, upsert_chat_summary
 
 #: Upper bound on the number of tags stored per task: the history panel
-#: shows them inline after the "... ago" launch-age label.
-MAX_TAGS = 6
+#: shows them inline after the "... ago" launch-age label.  The scope
+#: tag, ``secret`` and ``failed`` are never dropped by the cap; the
+#: optional tags (``chore``, ``question``, the activities, ``subagent``)
+#: fill the remaining slots in display order.
+MAX_TAGS = 3
 
 #: Rows written per transaction by :func:`backfill_task_metadata`.
 _BACKFILL_BATCH = 500
@@ -56,6 +61,134 @@ _SECRET = _rx(
     r"private keys?|ssh keys?|bank account|social security|ssn|credit card|otp|2fa|"
     r"confidential)\b|\.env\b"
 )
+#: The secret scanner works on UTF-8 bytes: ``bytes.lower()`` folds
+#: ASCII only and keeps every offset, so a match found on the
+#: lower-cased copy can be read back from the original bytes.  Every
+#: pattern starts with a literal (fast :mod:`re` prefix scan), has no
+#: unbounded lookahead and uses possessive quantifiers, so a scan is
+#: linear even on adversarial input (``"sk-" * 50_000``).  Group 1 of
+#: each pattern is the candidate value.
+#:
+#: Well-known key formats, matched case-sensitively on the original
+#: bytes: private-key blocks, OpenAI/Anthropic ``sk-`` keys, GitHub,
+#: AWS, Slack and Google tokens, JWTs.
+_SECRET_FORMATS: tuple[re.Pattern[bytes], ...] = tuple(
+    re.compile(p)
+    for p in (
+        rb"(-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----)",
+        rb"(sk-[A-Za-z0-9_-]{40,}+)",
+        rb"(gh[pousr]_[A-Za-z0-9]{36,}+)",
+        rb"(AKIA[0-9A-Z]{16})(?![0-9A-Za-z])",
+        rb"(xox[abprs]-\d{10,}+-[A-Za-z0-9-]{10,}+)",
+        rb"(AIza[0-9A-Za-z_-]{35})",
+        rb"(eyJ[A-Za-z0-9_-]{10,}+\.eyJ[A-Za-z0-9_-]{10,}+\.[A-Za-z0-9_-]{10,}+)",
+    )
+)
+#: Free-form credentials, matched on the lower-cased bytes: ``Bearer``
+#: headers, ``scheme://user:password@`` URLs and ``password = ...`` /
+#: ``"token": "..."`` / ``API_KEY=...`` assignments (a JSON key's closing
+#: quote and the ``\"`` escaping of ``events.event_json`` are tolerated).
+#: An assignment's value is either quoted (8+ characters, spaces
+#: allowed) or bare (7+ characters of a credential alphabet, not
+#: followed by ``(``, ``.`` or ``[`` so that ``token = getToken()`` and
+#: ``password = os.environ[...]`` do not count).
+_SECRET_ASSIGNMENTS: tuple[re.Pattern[bytes], ...] = (
+    re.compile(rb"bearer ([A-Za-z0-9._~+/=-]{20,}+)"),
+    re.compile(rb"://[A-Za-z0-9._%+-]{2,}+:([^\s/@\"'{}<>\\]{6,}+)@"),
+    *(
+        re.compile(
+            key + rb"\\?[\"']?\s*[:=]\s*+"
+            rb"(?:\\?[\"']([^\"'\\\n]{8,}+)\\?[\"']|([A-Za-z0-9_@#$%^&*!?+/=-]{7,}+)(?![(.\[]))"
+        )
+        for key in (rb"password", rb"passwd", rb"secret", rb"token", rb"api[_-]?key")
+    ),
+)
+#: A free-form value that is clearly not a credential (searched in the
+#: lower-cased value): a template (``<tok>``, ``${TOKEN}``, ``&lt;tok&gt;``),
+#: a redaction (``****``, ``xxxx``, ``...``), code or a shell command
+#: (brackets, ``;``), or a delimited word naming a fixture or the key
+#: itself (``fc-test-key``, ``race-password``, ``pypi-your-token-here``).
+_PLACEHOLDER = re.compile(
+    rb"[<>$*{}\[\];]|&[lg]t;|x{4,}|\.\.\.|change[_-]?me|"
+    rb"(?:^|[^a-z0-9])(?:test|fake|mock|sample|demo|dummy|invalid|example|placeholder|"
+    rb"redacted|your|here|none|null|true|false|required|string|pass(?:word)?|secret|"
+    rb"token|key|api)(?![a-z0-9])"
+)
+#: A free-form value whose segments (split on ``-``, ``_``, ``.``, ``/``,
+#: ``=`` and space) are each a plain word or a plain number is a name, a
+#: slug, a version, a date, a model id or a phrase (``get_token``,
+#: ``Cloudflare``, ``gemini-2.0-flash``, ``2026-09-16``,
+#: ``openrouter/anthropic/claude-opus-4-7``, ``not path safe``), not a
+#: credential; real ones mix letters and digits inside a segment or
+#: carry other symbols; a short letters-digits segment (``r1``, ``qwen3``,
+#: ``gpt5``, ``480b``, ``fp8``) is a version mark, not a mix.  (A pass-phrase of
+#: plain words is missed on purpose: prose after ``token:`` is far more
+#: common in a transcript.)
+_SLUG_SEGMENT = rb"(?:[a-z]+|\d+|[a-z]{0,5}\d{1,4}[a-z]{0,2})"
+_SLUG = re.compile(
+    rb"[-_. /=]*" + _SLUG_SEGMENT + rb"(?:[-_. /=]+" + _SLUG_SEGMENT + rb")*[-_. /=]*"
+)
+
+
+def _is_credential(raw: bytes, match: re.Match[bytes], free_form: bool) -> bool:
+    """Vet a candidate secret found by one of the scanner patterns.
+
+    Args:
+        raw: The original (case-preserved) bytes the match offsets refer to.
+        match: A match whose last group is the candidate value.
+        free_form: Whether the match is a :data:`_SECRET_ASSIGNMENTS`
+            value (checked against :data:`_PLACEHOLDER` and
+            :data:`_SLUG`) rather than a :data:`_SECRET_FORMATS` key.
+
+    Returns:
+        True unless the value is a placeholder or a slug, a documentation
+        example (``AKIAIOSFODNN7EXAMPLE``), or an ``sk-`` key without
+        both an upper-case letter and a digit (branch names such as
+        ``sk-cache-review-2026-09-16``).
+    """
+    group = match.lastindex or 1
+    value = raw[match.start(group) : match.end(group)]
+    lowered = value.lower()
+    if free_form:
+        return not (_PLACEHOLDER.search(lowered) or _SLUG.fullmatch(lowered))
+    has_digit = any(c in value for c in b"0123456789")
+    if value.startswith(b"sk-") and (value == lowered or not has_digit):
+        return False
+    return b"example" not in lowered
+
+
+def has_secret_value(texts: Iterable[str]) -> bool:
+    """Return whether any of *texts* contains a credential-shaped string.
+
+    Looks for private-key blocks, well-known API-token formats
+    (OpenAI/Anthropic, GitHub, AWS, Slack, Google), JWTs, ``Bearer``
+    headers, ``user:password@`` URLs and ``password=`` / ``token:`` /
+    ``api_key=`` assignments with a plausible value.  Templates,
+    redactions, test fixtures and names (``<your-key>``, ``***``,
+    ``fc-test-key``, ``changeme``, ``get_token``, ``claude-sonnet-5``)
+    are not secrets.
+
+    Args:
+        texts: Fragments of a trajectory: the task text, the JSON of
+            each persisted event, the result.  Scanned lazily and in
+            order; the first hit ends the scan.
+
+    Returns:
+        True when some fragment contains a secret.
+    """
+    for text in texts:
+        raw = text.encode("utf-8", "replace")
+        lowered = raw.lower()
+        for patterns, haystack, free_form in (
+            (_SECRET_FORMATS, raw, False),
+            (_SECRET_ASSIGNMENTS, lowered, True),
+        ):
+            for pattern in patterns:
+                if any(_is_credential(raw, m, free_form) for m in pattern.finditer(haystack)):
+                    return True
+    return False
+
+
 _CHORE = _rx(
     r"\b(git pull|pull the latest|merge|rebase|sync|install|reinstall|upgrade|"
     r"update (?:the )?dependenc(?:y|ies)|bump|rename|clean ?up|reformat|format the|"
@@ -160,24 +293,34 @@ ALL_TAGS: tuple[str, ...] = (
 )
 
 
-def classify_task_tags(task: str, *, is_subagent: bool = False, failed: bool = False) -> list[str]:
+def classify_task_tags(
+    task: str, *, is_subagent: bool = False, failed: bool = False, has_secret: bool = False
+) -> list[str]:
     """Classify a task's text into tags.
 
     The first tag is always ``personal`` or ``work`` (``work`` is the
     default: a task with no personal-life signal is treated as work).
-    ``secret`` marks tasks that handle credentials or private data,
-    ``chore`` routine maintenance and status queries, ``question`` a
-    request for information rather than an action; the activity tags
-    (``coding``, ``testing``, ``debugging``, ``review``, ``research``,
-    ``paper``, ``writing``, ``docs``, ``data``, ``devops``, ``messaging``,
+    ``secret`` marks tasks that handle credentials or private data:
+    the task text asks for them, or *has_secret* says the trajectory
+    contains one (see :func:`has_secret_value`).  ``chore`` marks routine
+    maintenance and status queries, ``question`` a request for
+    information rather than an action; the activity tags (``coding``,
+    ``testing``, ``debugging``, ``review``, ``research``, ``paper``,
+    ``writing``, ``docs``, ``data``, ``devops``, ``messaging``,
     ``browsing``, ``shopping``, ``finance``, ``scheduling``) follow.
-    ``subagent`` and ``failed`` record how the task ran.  At most
-    :data:`MAX_TAGS` tags are returned, in this order.
+    ``subagent`` and ``failed`` record how the task ran.
+
+    At most :data:`MAX_TAGS` tags are returned, in the order of
+    :data:`ALL_TAGS`.  The scope tag, ``secret`` and ``failed`` always
+    survive the cap; the other tags fill the remaining slots in that
+    order, so a secret-handling or failed task shows fewer activities.
 
     Args:
         task: The task text as typed or dispatched.
         is_subagent: Whether the task was a sub-agent of another task.
         failed: Whether the task's result records a failure.
+        has_secret: Whether the task's trajectory contains a
+            credential-shaped string.
 
     Returns:
         The tags, most significant first; never empty.
@@ -186,50 +329,45 @@ def classify_task_tags(task: str, *, is_subagent: bool = False, failed: bool = F
     intent = text[:_INTENT_HEAD]
     head = text[:_ACTIVITY_HEAD]
     tags = ["personal" if _PERSONAL.search(intent) else "work"]
-    if _SECRET.search(intent):
+    if has_secret or _SECRET.search(intent):
         tags.append("secret")
-    if _CHORE.search(intent):
-        tags.append("chore")
-    if _QUESTION.search(intent):
-        tags.append("question")
-    for tag, pattern in _ACTIVITY_RULES:
-        if pattern.search(head):
-            tags.append(tag)
-    if is_subagent:
-        tags.append("subagent")
     if failed:
         tags.append("failed")
-    return tags[:MAX_TAGS]
+    intent_rules = (("chore", _CHORE), ("question", _QUESTION))
+    optional = [tag for tag, pattern in intent_rules if pattern.search(intent)]
+    optional += [tag for tag, pattern in _ACTIVITY_RULES if pattern.search(head)]
+    if is_subagent:
+        optional.append("subagent")
+    tags += optional[: max(0, MAX_TAGS - len(tags))]
+    return sorted(tags, key=ALL_TAGS.index)
 
 
-def sea_name_of_agent(agent: str, channels: list[str]) -> str:
+def sea_name_of_agent(agent: str) -> str:
     """Return the canonical SEA name a ``run_agent(agent=...)`` argument resolves to.
 
-    Mirrors ``agent_dispatch._run_agent``: a path names the SEA file
-    (its stem), ``cron`` the bundled ``cron_agent``, a channel name its
-    ``<channel>_sea`` script, and an empty value the default
-    ``sorcar_sea``.  The same stem is what a live run records from its
-    ``seaPath``, so backfilled and live rows agree.
+    A path names the SEA file: its stem, whether or not the file still
+    exists (the backfill reads dispatches whose worktree may be gone).
+    Every other spelling goes through
+    :func:`~kiss.agents.sorcar.agent_dispatch.resolve_agent`, the
+    resolver a live dispatch uses, so backfilled and live rows agree:
+    empty or a generic label is ``sorcar_sea``, ``cron`` is
+    ``cron_agent``, and a registered slash command (a channel, a
+    bundled SEA such as ``write_paper``, a ``SEAS.md`` folder) is its
+    script's stem.
 
     Args:
         agent: The ``agent`` argument of the tool call.
-        channels: Installed channel names (``agent_dispatch.available_channels``).
 
     Returns:
         The SEA file stem, or ``""`` when *agent* names nothing known.
     """
+    from kiss.agents.sorcar.agent_dispatch import is_sea_path, resolve_agent
+
     requested = agent.strip()
-    if not requested:
-        return "sorcar_sea"
-    if requested.endswith(".py") or "/" in requested or "\\" in requested:
+    if is_sea_path(requested):
         return Path(requested).stem
-    squashed = re.sub(r"[\s\-_]+", "", requested.lower())
-    if squashed == "cron":
-        return "cron_agent"
-    for channel in channels:
-        if re.sub(r"[\s\-_]+", "", channel.lower()) == squashed:
-            return f"{channel}_sea"
-    return ""
+    resolved = resolve_agent(requested, "")
+    return Path(resolved[0]).stem if isinstance(resolved, tuple) else ""
 
 
 def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str, str]:
@@ -253,8 +391,6 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
     Returns:
         Mapping of child task id (``sea`` still empty) to SEA name.
     """
-    from kiss.agents.sorcar.agent_dispatch import available_channels
-
     calls = db.execute(
         "SELECT event_json FROM events WHERE task_id = ? "
         "AND event_json LIKE '%\"run_agent\"%' ORDER BY seq",
@@ -268,7 +404,6 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
     ).fetchall()
     if not children:
         return {}
-    channels = available_channels()
     child_keys = [(row[0], _dispatch_key(row[1] or ""), row[2] or "") for row in children]
     matched: set[str] = set()
     inferred: dict[str, str] = {}
@@ -281,7 +416,7 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
             continue
         extras = event.get("extras") or {}
         key = _dispatch_key(str(extras.get("task") or ""))
-        sea = sea_name_of_agent(str(extras.get("agent") or ""), channels)
+        sea = sea_name_of_agent(str(extras.get("agent") or ""))
         if not key or not sea:
             continue
         for child_id, child_key, child_sea in child_keys:
@@ -299,6 +434,32 @@ _PATH_TOKEN = re.compile(r"\S*[/\\]\S*")
 def _dispatch_key(text: str) -> str:
     """Return *text* without path-like tokens and with whitespace collapsed."""
     return " ".join(_PATH_TOKEN.sub("", text).split())
+
+
+def trajectory_has_secret(
+    db: sqlite3.Connection, task_id: str, task: object, result: object
+) -> bool:
+    """Return whether a task's trajectory contains a credential-shaped string.
+
+    Scans the task text, every persisted event of the task (tool
+    arguments and outputs included, as stored in ``events.event_json``)
+    and the result with :func:`has_secret_value`; events are streamed
+    from the database and the scan stops at the first hit.
+
+    Args:
+        db: Connection to ``history.db``.
+        task_id: The ``task_history`` row id.
+        task: The row's ``task`` column (``None`` tolerated).
+        result: The row's ``result`` column (``None`` tolerated).
+
+    Returns:
+        True when the trajectory contains a secret.
+    """
+    events = db.execute(
+        "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq, id", (task_id,)
+    )
+    texts = (str(ev[0] or "") for ev in events)
+    return has_secret_value(chain((str(task or ""), str(result or "")), texts))
 
 
 def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
@@ -330,6 +491,7 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
                     row["task"] or "",
                     is_subagent=bool(row["parent_task_id"]),
                     failed=_is_failed_result(row["result"] or ""),
+                    has_secret=trajectory_has_secret(db, row["id"], row["task"], row["result"]),
                 )
                 db.execute(
                     "UPDATE task_history SET tags = ? WHERE id = ?",

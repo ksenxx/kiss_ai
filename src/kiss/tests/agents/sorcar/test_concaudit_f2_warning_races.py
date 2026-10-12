@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Pending-warning races in ``WorktreeSorcarAgent`` (F2 findings 1 and 4).
+"""Pending-warning races in ``ChatSorcarAgent`` (F2 findings 1 and 4).
 
 Finding 1 — ``add_warning`` must combine with the pending merge warning
 under ONE hold of ``_warning_lock``.  The old inline code in
@@ -29,7 +29,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 
 class _RecordingPrinter:
@@ -64,7 +64,7 @@ class _BlockingBrokenPrinter:
 
 def test_add_warning_prepend_under_concurrent_flush_delivers_old_once() -> None:
     """The pending warning is broadcast exactly once around a prepend."""
-    agent = WorktreeSorcarAgent("f2-add-warning-race")
+    agent = ChatSorcarAgent("f2-add-warning-race")
     printer = _RecordingPrinter()
     stop = threading.Event()
 
@@ -105,7 +105,7 @@ def test_add_warning_prepend_under_concurrent_flush_delivers_old_once() -> None:
 
 def test_add_warning_never_loses_a_concurrent_set() -> None:
     """A ``_set_warnings`` racing ``add_warning`` is never overwritten."""
-    agent = WorktreeSorcarAgent("f2-add-warning-vs-set")
+    agent = ChatSorcarAgent("f2-add-warning-vs-set")
     printer = _RecordingPrinter()
     n = 500
     go = threading.Barrier(2)
@@ -135,7 +135,7 @@ def test_add_warning_never_loses_a_concurrent_set() -> None:
 
 def test_add_warning_on_empty_slot_sets_text() -> None:
     """With nothing pending, both orders store *text* alone."""
-    agent = WorktreeSorcarAgent("f2-add-warning-empty")
+    agent = ChatSorcarAgent("f2-add-warning-empty")
     agent.add_warning("A")
     assert agent._merge_conflict_warning == "A"
     agent._set_warnings(merge="")
@@ -146,7 +146,7 @@ def test_add_warning_on_empty_slot_sets_text() -> None:
 
 
 def _flush_fails_while_slot_is_rewritten(
-    agent: WorktreeSorcarAgent, slot: str, taken: str, concurrent: str,
+    agent: ChatSorcarAgent, slot: str, taken: str, concurrent: str,
 ) -> None:
     """Run a failing flush of *taken* while *concurrent* lands in *slot*."""
     agent._set_warnings(**{slot: taken})
@@ -165,7 +165,7 @@ def _flush_fails_while_slot_is_rewritten(
 
 def test_failed_merge_broadcast_keeps_both_old_and_concurrent_warning() -> None:
     """Finding 4, merge slot: the taken warning is prepended, not dropped."""
-    agent = WorktreeSorcarAgent("f2-flush-restore-merge")
+    agent = ChatSorcarAgent("f2-flush-restore-merge")
     _flush_fails_while_slot_is_rewritten(agent, "merge", "OLD-MERGE", "NEW-MERGE")
     assert agent._merge_conflict_warning == "OLD-MERGE\nNEW-MERGE"
     good = _RecordingPrinter()
@@ -175,7 +175,7 @@ def test_failed_merge_broadcast_keeps_both_old_and_concurrent_warning() -> None:
 
 def test_failed_stash_broadcast_keeps_both_old_and_concurrent_warning() -> None:
     """Finding 4, stash slot: the taken warning is prepended, not dropped."""
-    agent = WorktreeSorcarAgent("f2-flush-restore-stash")
+    agent = ChatSorcarAgent("f2-flush-restore-stash")
     _flush_fails_while_slot_is_rewritten(agent, "stash", "OLD-STASH", "NEW-STASH")
     assert agent._stash_pop_warning == "OLD-STASH\nNEW-STASH"
     good = _RecordingPrinter()
@@ -185,7 +185,7 @@ def test_failed_stash_broadcast_keeps_both_old_and_concurrent_warning() -> None:
 
 def test_failed_broadcast_with_empty_slot_restores_plain_warning() -> None:
     """Without a concurrent write, the failed warning is put back as is."""
-    agent = WorktreeSorcarAgent("f2-flush-restore-plain")
+    agent = ChatSorcarAgent("f2-flush-restore-plain")
     agent._set_warnings(stash="S", merge="M")
 
     class _Broken:

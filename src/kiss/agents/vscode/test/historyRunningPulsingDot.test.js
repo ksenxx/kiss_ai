@@ -73,6 +73,11 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+/** Let main.js's end-of-tick history refetch coalescing settle. */
+function tick() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
 function openSidebar(win) {
   const sidebar = win.document.getElementById('sidebar');
   if (sidebar && !sidebar.classList.contains('open')) {
@@ -80,17 +85,12 @@ function openSidebar(win) {
   }
 }
 
-function uncheckWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {
     type: 'configData',
     config: {work_dir: ''},
     apiKeys: {},
   });
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function makeRow(overrides) {
@@ -135,7 +135,7 @@ function dotOf(row) {
 function testDotRendersForRunningRow() {
   const {win} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
 
   const SESSIONS = [
     makeRow({task_id: 1, title: 'finished task', is_running: false}),
@@ -214,7 +214,7 @@ function testDotRendersForRunningRow() {
 function testDotAppearsLiveOnStatusRunningTrue() {
   const {win, posted} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
 
   const initial = [
     makeRow({task_id: 7, title: 'live task', is_running: false}),
@@ -273,10 +273,10 @@ function testDotAppearsLiveOnStatusRunningTrue() {
   console.log('  ok - dot appears live when status flips to running');
 }
 
-function testDotDisappearsLiveOnStatusRunningFalse() {
+async function testDotDisappearsLiveOnStatusRunningFalse() {
   const {win, posted} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
 
   const initial = [
     makeRow({task_id: 9, title: 'ending task', is_running: true, endTs: 0}),
@@ -286,10 +286,13 @@ function testDotDisappearsLiveOnStatusRunningFalse() {
   let rows = rowsByTaskId(win);
   assert.ok(dotOf(rows['ending task']), 'dot must be present initially');
 
-  // The tab's task is running; only a status that FLIPS the running
-  // state refetches history (a replayed status that changes nothing
-  // must not fan out a getHistory per tab).
+  // Every status refetches history (main.js `case 'status'` calls
+  // refreshHistory unconditionally); the one that matters here is the
+  // running:false that must drop the spinner.  A second refresh in the
+  // same tick folds into the end-of-tick refetch, so let that tick end
+  // before the status under test.
   send(win, {type: 'status', running: true, tabId: undefined});
+  await tick();
   posted.length = 0;
   send(win, {type: 'status', running: false, tabId: undefined});
   const sent = posted.find(m => m && m.type === 'getHistory');
@@ -326,11 +329,14 @@ function testDotDisappearsLiveOnStatusRunningFalse() {
   console.log('  ok - dot disappears live when status flips to not-running');
 }
 
-function main() {
+async function main() {
   testDotRendersForRunningRow();
   testDotAppearsLiveOnStatusRunningTrue();
-  testDotDisappearsLiveOnStatusRunningFalse();
+  await testDotDisappearsLiveOnStatusRunningFalse();
   console.log('historyRunningPulsingDot.test.js: all assertions passed.');
 }
 
-main();
+main().catch(e => {
+  console.error(e);
+  process.exit(1);
+});

@@ -25,7 +25,6 @@ import asyncio
 import concurrent.futures
 import json
 import os
-import ssl
 import tempfile
 import threading
 import time
@@ -46,7 +45,6 @@ from kiss.agents.sorcar.persistence import (
     _rw_lock,
 )
 from kiss.agents.sorcar.sorcar_agent import _agent_usage
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import agent_state, task_update
@@ -63,6 +61,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
 )
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -541,26 +540,11 @@ def test_run_task_update_sea_adds_its_spend_to_a_finished_parents_row(
     assert _agent_usage(parent)[0] == pytest.approx(budget_before)
 
 
-def _find_free_port() -> int:
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
     """``getTaskUpdate`` over a live WSS connection."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
         save_config({"remote_password": ""})
         self.server = RemoteAccessServer(
@@ -589,7 +573,7 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
         started *age_s* seconds ago; two minutes by default, past the
         runner's first-update delay.
         """
-        agent = WorktreeSorcarAgent(f"task-update-wss {tab_id}")
+        agent = ChatSorcarAgent(f"task-update-wss {tab_id}")
         task_id, chat_id = _add_task(
             f"prompt for {tab_id}",
             extra={"startTs": int((time.time() - age_s) * 1000)},
@@ -618,7 +602,7 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
         raise AssertionError("no taskUpdate reply received")
 
     async def _connect(self) -> Any:
-        ws = await connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl())
+        ws = await connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl())
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
         return ws

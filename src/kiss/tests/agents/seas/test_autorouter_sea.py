@@ -27,9 +27,9 @@ from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.autorouter.autorouter_sea import AutorouterSea
 from kiss.agents.seas.base.base_sea import BaseSea, WorkerSea
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
 from kiss.server import agent_state
 from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
@@ -92,9 +92,8 @@ def test_sea_methods_follow_the_contract() -> None:
         "max_budget": 3.0, **sea.settings({})
     }
     # A ``BaseSea`` (which lays no defaults): the resolved settings are the
-    # four keys above, so the caller's budget, worktree, auto-commit and
-    # tool profile win.  The protocol is ADDED to the default prompt,
-    # never a replacement.
+    # four keys above, so the caller's budget and tool profile win.  The
+    # protocol is ADDED to the default prompt, never a replacement.
     assert isinstance(sea, BaseSea) and not isinstance(sea, WorkerSea)
     assert sea_commands.base_settings([sea]) == resolve_settings(sea.settings({})) == (
         sea.settings({})
@@ -359,7 +358,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
         ),
         finish_body(f"<p>routed to {model}</p>", prompt_tokens=700),
     ]
-    agent = WorktreeSorcarAgent("autorouter-sea-test")
+    agent = ChatSorcarAgent("autorouter-sea-test")
     state = agent_state.AgentState(
         "autorouter-sea-test", agent=agent, task_thread=threading.current_thread()
     )
@@ -370,7 +369,6 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
                 prompt_template=run.prompt,
                 model_name=MODEL,
                 work_dir=str(tmp_path),
-                use_worktree=False,
                 max_steps=5,
                 max_budget=1.0,
                 model_config={"base_url": url, "api_key": "local"},
@@ -450,8 +448,8 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
     """The hook creates the job once, keeps an enabled one, and re-enables a paused one.
 
     The cron store is the real one under a temporary ``$KISS_HOME``; the
-    job is the relay pattern of the hand-scheduled weekly sweep: worktree
-    plus auto-commit in the checkout, a ``run_agent`` directive to the
+    job is the relay pattern of the hand-scheduled weekly sweep: a run
+    in the checkout, a ``run_agent`` directive to the
     checkout's rsi7d file whose task text starts with the ``autorouter``
     scope, and the child run's caps nested inside the job's.
     """
@@ -469,7 +467,6 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
     assert job["enabled"] is True
     assert job["schedule"] == autorouter_sea.RSI7D_JOB_SCHEDULE == "0 1 * * 6"
     assert job["work_dir"] == _OWNER
-    assert job["use_worktree"] is True and job["auto_commit"] is True
     assert job["max_budget"] == 30.0 and job["timeout"] == 7800.0
     assert job["model_name"] in (
         autorouter_sea.RSI7D_JOB_MODEL, autorouter_sea.orchestrator_model(),
@@ -481,7 +478,7 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
     assert f"task         = {autorouter_sea.RSI7D_TASK!r}" in prompt
     assert "timeout      = '7200'" in prompt and "max_budget   = '25.0'" in prompt
     assert f"model        = {job['model_name']!r}" in prompt
-    assert "options      = '{\"use_worktree\": false, \"auto_commit\": false}'" in prompt
+    assert "options" not in prompt
     assert "model_name" not in prompt
     scope = parse_scope(autorouter_sea.RSI7D_TASK)
     assert scope.names == ("autorouter",) and scope.error == ""
@@ -503,13 +500,13 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
 def test_picking_autorouter_outside_a_checkout_schedules_a_scratch_dir_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without a checkout: no work dir, no worktree, and a relay to the installed rsi7d file."""
+    """Without a checkout: no work dir and a relay to the installed rsi7d file."""
     from kiss.agents.sorcar.cron_agent import load_jobs
 
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "home"))
     assert AutorouterSea().on_picked_as_model(str(tmp_path)).startswith("created:")
     (job,) = load_jobs()
-    assert job["work_dir"] == "" and job["use_worktree"] is False and job["auto_commit"] is False
+    assert job["work_dir"] == ""
     installed = _SEA_PATH.parents[1] / "rsi7d" / "rsi7d_sea.py"
     assert installed.is_file()
     assert f"agent        = {str(installed)!r}" in job["prompt"]

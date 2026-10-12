@@ -220,6 +220,13 @@ function testNewChatRequestsWelcomeInfoOnly() {
   const welcome = win.document.getElementById('welcome');
   assert.ok(welcome.querySelector('#welcome-logo'), 'logo is in the webview');
 
+  // "+" keeps a chat that is still new; the daemon's task-text echo
+  // makes the boot chat "used" so "+" opens a new one.
+  win.dispatchEvent(
+    new win.MessageEvent('message', {
+      data: {type: 'setTaskText', text: 'first task'},
+    }),
+  );
   posted.length = 0;
   win.document
     .getElementById('new-chat-btn')

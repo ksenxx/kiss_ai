@@ -6,44 +6,33 @@
 
 User-reported bug ("the lost slides bug"):
 
-    The user ran a worktree task with ``autoCommit=True`` that was
-    asked to update a binary ``.pptx`` file in place.  Midway through
-    the task the user clicked "Stop".  The agent had already written
-    partial bytes to the ``.pptx`` inside the worktree.  Later, when
-    the user closed the chat tab (or VS Code reloaded), the partial
-    pptx was silently squash-merged into the main branch — destroying
-    the user's previous, complete deck.
+    The user ran a task that was asked to update a binary ``.pptx``
+    file in place.  The agent had created a worktree and already
+    written partial bytes to the ``.pptx`` inside it when the user
+    clicked "Stop".  Later, when the user closed the chat tab (or VS
+    Code reloaded), the partial pptx was silently squash-merged into
+    the main branch — destroying the user's previous, complete deck.
 
-Root cause (historical — described in terms of the since-removed
-interactive merge review):
+Root cause (historical):
 
-    On ``Stop`` with ``autoCommit=True``, ``task_runner._run_task_inner``
-    overrode ``effective_auto_commit = False`` and routed through the
-    merge-review presentation.  For binary files (``total_hunks == 0``)
-    the review never opened.  The partial work sat uncommitted in the
-    worktree.  (Today the same stop path broadcasts ``worktree_done``
-    with Merge / Discard buttons instead.)
-
-    Later, on tab close, ``_teardown_tab_resources`` calls
-    ``WorktreeSorcarAgent._release_worktree()`` which runs
-    ``_finalize_worktree`` (auto-commits the partial work) followed by
-    ``_do_merge`` (silent squash-merge into the original branch).  No
-    user confirmation.
+    On tab close, ``_teardown_tab_resources`` released the worktree by
+    auto-committing the partial work and silently squash-merging it
+    into the original branch.  No user confirmation.
 
 Fix:
 
-    When a worktree task ends in failure / user-stop, mark the agent
-    as ``pending_review``.  In ``_teardown_tab_resources`` (tab close),
-    if the agent is ``pending_review`` AND has a pending worktree,
-    commit the partial work onto the worktree branch but DO NOT merge
-    — the branch survives in ``git branch`` so the user can recover
-    via ``git checkout <branch>`` later, and the main branch is
-    untouched.
+    A worktree the agent never ``commit_and_merge``d is pending at task
+    end, and a tab close retires it by committing the partial work onto
+    the worktree branch but NOT merging — the branch survives in ``git
+    branch`` so the user can recover via ``git checkout <branch>``
+    later, and the main branch is untouched.
 
-This is an end-to-end test: it runs a real ``VSCodeServer._run_task_inner``
-against a real on-disk git repo, with a deterministic stub agent that
-writes partial pptx bytes then raises ``KeyboardInterrupt`` to simulate
-the user clicking Stop.  Then ``server._close_tab`` is called to simulate
+This is an end-to-end test: a real ``run`` command goes through
+``VSCodeServer._handle_command`` against a real on-disk git repo, the
+model is a local stand-in endpoint whose script calls the agent's own
+``create_worktree`` tool, writes partial pptx bytes with a real Bash
+call and then stops the task through the server's ``_stop_task`` (the
+user clicking Stop).  Then ``server._close_tab`` is called to simulate
 the user closing the chat tab.  Assertions are made on the git repo's
 on-disk state (branch list, file contents on main vs on the wt branch).
 No mocks or test doubles.
@@ -52,46 +41,43 @@ No mocks or test doubles.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
-import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-import kiss.agents.sorcar.persistence as _persistence
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import run_git
+from kiss.tests.server.parallel_agent_harness import (
+    STANDIN_MODEL,
+    CapturePrinter,
+    IsolatedKissHome,
+    OfflineFastModel,
+    StandInModelServer,
+    finish_response,
+    tool_call_response,
+)
 
 _GOOD_PPTX_BYTES: bytes = b"GOOD-DECK\x00" + os.urandom(8192)
-_PARTIAL_PPTX_BYTES: bytes = b"PARTIAL\x00" + os.urandom(4096)
+_PARTIAL_PREFIX: bytes = b"PARTIAL\x00"
+_PARTIAL_RANDOM_LEN = 4096
 
 
-def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
-    )
+def _seed_pptx(repo: str) -> None:
+    """Commit the binary "good" ``slides.pptx`` on the scratch repo.
 
-
-def _init_repo_with_pptx(repo: str) -> None:
-    """Create a fresh git repo with a committed binary ``slides.pptx``.
-
-    Mirrors the user's pre-Stop state: main branch has the "good"
-    pptx, and the workspace is clean.
+    Mirrors the user's pre-Stop state: the branch has the "good" pptx,
+    and the workspace is clean.
     """
-    _run_git(repo, "init", "-q", "-b", "main")
-    _run_git(repo, "config", "user.email", "test@example.com")
-    _run_git(repo, "config", "user.name", "Test User")
-    _run_git(repo, "config", "commit.gpgsign", "false")
     Path(repo, "slides.pptx").write_bytes(_GOOD_PPTX_BYTES)
-    _run_git(repo, "add", "slides.pptx")
-    _run_git(repo, "commit", "-q", "-m", "seed: add good slides.pptx")
+    run_git(repo, "add", "slides.pptx")
+    run_git(repo, "commit", "-q", "-m", "seed: add good slides.pptx")
 
 
 def _list_kiss_wt_branches(repo: str) -> list[str]:
     """Return all ``kiss/wt-*`` branches still present in *repo*."""
-    result = _run_git(repo, "branch", "--list", "kiss/wt-*")
+    result = run_git(repo, "branch", "--list", "kiss/wt-*")
     return [
         line.strip().lstrip("+* ").strip()
         for line in result.stdout.splitlines()
@@ -110,95 +96,68 @@ def _file_bytes_on_branch(repo: str, branch: str, path: str) -> bytes:
 
 
 class _WorktreeStopBase(unittest.TestCase):
-    """Fresh git repo + isolated persistence DB per test."""
+    """Fresh git repo + isolated KISS home + stand-in model per test."""
 
     def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp(prefix="kiss-wt-stop-test-")
-        self.repo = str(Path(self.tmpdir) / "repo")
-        Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo_with_pptx(self.repo)
-
-        self._saved_db = (
-            _persistence._DB_PATH,
-            _persistence._db_conn,
-            _persistence._KISS_DIR,
-        )
-        kiss_dir = Path(self.tmpdir) / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        _persistence._KISS_DIR = kiss_dir
-        _persistence._DB_PATH = kiss_dir / "history.db"
-        _persistence._db_conn = None
-
-        self.server = VSCodeServer()
+        self.home = IsolatedKissHome(prefix="kiss-wt-stop-test-")
+        self.repo = str(self.home.repo)
+        _seed_pptx(self.repo)
+        self.home.write_config(max_budget=5.0, use_web_browser=False)
+        self.offline = OfflineFastModel()
+        self.offline.__enter__()
+        self.standin = StandInModelServer(self._respond)
+        self.printer = CapturePrinter()
+        self.server = VSCodeServer(printer=self.printer)
         self.server.work_dir = self.repo
-        self.events: list[dict] = []
-
-        def capture(event: dict) -> None:
-            self.events.append(event)
-
-        self.server.printer.broadcast = capture  # type: ignore[assignment]
-
-        self._parent_class = cast(Any, SorcarAgent.__mro__[1])
-        self._original_run = self._parent_class.run
+        self.tab_id = "tab-stop-test"
+        self.model_calls = 0
 
     def tearDown(self) -> None:
-        self._parent_class.run = self._original_run
-
         for state in agent_state.snapshot():
             if state.agent is not None and state.agent._wt_pending:
                 try:
                     state.agent.discard()
                 except Exception:  # pragma: no cover — cleanup best-effort
                     pass
-        agent_state.agent_states.clear()
-
-        if _persistence._db_conn is not None:
-            _persistence._db_conn.close()
-        (
-            _persistence._DB_PATH,
-            _persistence._db_conn,
-            _persistence._KISS_DIR,
-        ) = self._saved_db
-
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.standin.stop()
+        self.offline.__exit__(None, None, None)
+        self.home.cleanup()
 
     def _types(self) -> list[str]:
-        return [e.get("type", "") for e in self.events]
+        with self.printer._capture_lock:
+            return [e.get("type", "") for e in self.printer.captured]
 
+    def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Script the agent: worktree, partial pptx write, then Stop.
 
-def _stub_run_partial_then_stop(filename: str, partial: bytes) -> Any:
-    """Replace ``ChatSorcarAgent``'s parent ``run`` with a "Stop" stub.
-
-    The stub writes *partial* bytes to *filename* inside the per-task
-    ``work_dir`` (simulating mid-task agent work on a binary file)
-    then raises ``KeyboardInterrupt`` (simulating the user clicking
-    Stop in the VS Code webview).
-
-    Returns the original ``run`` so the caller can restore it in
-    ``tearDown``.
-    """
-    parent_class = cast(Any, SorcarAgent.__mro__[1])
-    original = parent_class.run
-
-    def stub_run(self_agent: object, **kwargs: object) -> str:
-        work_dir = kwargs.get("work_dir")
-        if isinstance(work_dir, str) and work_dir:
-            (Path(work_dir) / filename).write_bytes(partial)
-        raise KeyboardInterrupt("Stopped by user (simulated)")
-
-    parent_class.run = stub_run
-    return original
+        The third model call arrives after the Bash tool has written
+        the partial bytes; the user clicks Stop at that moment, so the
+        answer the model gives is never acted on.
+        """
+        self.model_calls += 1
+        if self.model_calls == 1:
+            return tool_call_response("create_worktree", {})
+        if self.model_calls == 2:
+            return tool_call_response("Bash", {
+                "command": (
+                    "{ printf 'PARTIAL\\0'; head -c "
+                    f"{_PARTIAL_RANDOM_LEN} /dev/urandom; }} > slides.pptx"
+                ),
+                "description": "write partial slides.pptx",
+            })
+        self.server._stop_task(self.tab_id)
+        return finish_response("the deck is updated")
 
 
 
 class TestUserStopPreservesMainBranch(_WorktreeStopBase):
     """The "lost slides" bug: user-Stop must not silently overwrite main.
 
-    When the user clicks Stop on a worktree task with
-    ``autoCommit=True`` and later closes the chat tab, the main
-    branch's binary file must NOT have been silently overwritten by
-    the agent's partial work, and the partial work must remain
-    recoverable on the ``kiss/wt-*`` branch.
+    When the user clicks Stop on a task that is working in a worktree
+    and later closes the chat tab, the main branch's binary file must
+    NOT have been silently overwritten by the agent's partial work,
+    and the partial work must remain recoverable on the ``kiss/wt-*``
+    branch.
     """
 
     def test_close_tab_after_stop_does_not_overwrite_main_pptx(
@@ -208,14 +167,13 @@ class TestUserStopPreservesMainBranch(_WorktreeStopBase):
 
         Sequence:
             1. Real git repo with committed good ``slides.pptx``.
-            2. Agent stub writes partial bytes to ``slides.pptx`` then
-               raises ``KeyboardInterrupt`` (= user clicked Stop).
-            3. A real ``run`` command is driven through
-               ``_handle_command`` with ``useWorktree=True`` and
-               ``autoCommit=True`` — matching the user's exact
-               configuration in the lost-slides incident — and the
+            2. A real ``run`` command is driven through
+               ``_handle_command``; the scripted model calls
+               ``create_worktree``, writes partial bytes to
+               ``slides.pptx`` with Bash, and the user clicks Stop
+               (``_stop_task``) while the model answers next; the
                worker thread is joined.
-            4. ``server._close_tab(tab_id)`` simulates the user
+            3. ``server._close_tab(tab_id)`` simulates the user
                closing the chat tab afterward — the point where the
                buggy code silently squash-merged the partial work.
 
@@ -227,28 +185,34 @@ class TestUserStopPreservesMainBranch(_WorktreeStopBase):
               in-flight work via ``git checkout <branch>`` if they
               want it.
         """
-        self._original_run = _stub_run_partial_then_stop(
-            "slides.pptx", _PARTIAL_PPTX_BYTES,
-        )
-
-        tab_id = "tab-stop-test"
+        tab_id = self.tab_id
         self.server._handle_command({
             "type": "run",
             "prompt": "update the slides",
             "workDir": self.repo,
             "tabId": tab_id,
-            "useWorktree": True,
-            "autoCommit": True,
-            "model": "",
+            "model": STANDIN_MODEL,
+            "modelConfig": self.standin.model_config,
+            "isParallel": False,
+            "useWebTools": False,
+            "classifyTasks": False,
+            "maxBudget": 5.0,
         })
         state = agent_state.find_by_tab(tab_id)
-        assert state is not None and state.task_thread is not None
-        state.task_thread.join(timeout=60)
+        assert state is not None
+        thread = state.task_thread
+        assert thread is not None
+        thread.join(timeout=60)
+        assert not thread.is_alive(), "the task never finished"
 
         assert "task_stopped" in self._types() or (
             "task_interrupted" in self._types()
         ), (
             f"Expected task_stopped / task_interrupted; got: {self._types()}"
+        )
+        assert "worktree_created" in self._types(), self._types()
+        assert state.agent is not None and state.agent._wt_pending, (
+            "the stopped task must leave its worktree pending, not merged"
         )
 
         assert Path(self.repo, "slides.pptx").read_bytes() == _GOOD_PPTX_BYTES
@@ -262,7 +226,10 @@ class TestUserStopPreservesMainBranch(_WorktreeStopBase):
             "with the agent's partial work.  Expected the prior "
             "'good' bytes to remain on main; got "
             f"{len(main_pptx_now)} bytes "
-            f"(matches PARTIAL: {main_pptx_now == _PARTIAL_PPTX_BYTES})."
+            f"(partial: {main_pptx_now.startswith(_PARTIAL_PREFIX)})."
+        )
+        assert run_git(self.repo, "status", "--porcelain").stdout == "", (
+            "closing the tab left the main working tree dirty"
         )
 
         branches = _list_kiss_wt_branches(self.repo)
@@ -275,11 +242,15 @@ class TestUserStopPreservesMainBranch(_WorktreeStopBase):
         partial_on_branch = _file_bytes_on_branch(
             self.repo, branch, "slides.pptx",
         )
-        assert partial_on_branch == _PARTIAL_PPTX_BYTES, (
+        expected_len = len(_PARTIAL_PREFIX) + _PARTIAL_RANDOM_LEN
+        assert (
+            partial_on_branch.startswith(_PARTIAL_PREFIX)
+            and len(partial_on_branch) == expected_len
+        ), (
             f"Partial work on branch '{branch}' was lost.  Expected "
             f"the agent's partial bytes at its tip, but found "
             f"different content ({len(partial_on_branch)} bytes vs "
-            f"{len(_PARTIAL_PPTX_BYTES)} expected)."
+            f"{expected_len} expected)."
         )
 
 

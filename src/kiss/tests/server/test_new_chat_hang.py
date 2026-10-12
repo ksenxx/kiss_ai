@@ -17,49 +17,22 @@ after all cleanup (merge view, file cache, etc.) is complete.
 """
 
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import init_repo, redirect_persistence, restore_persistence
 
 
 def _tab_task_thread(tab_id: str) -> threading.Thread | None:
     state = agent_state.find_by_tab(tab_id)
     return state.task_thread if state is not None else None
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return old
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _init_git_repo(tmpdir: str) -> None:
-    subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmpdir, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir, capture_output=True)
-    Path(tmpdir, ".gitkeep").touch()
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True)
 
 
 def _make_server(tmpdir: str) -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
@@ -92,15 +65,15 @@ class TestTaskEndEventOrdering(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
         self.server, self.events, self.lock = _make_server(self.tmpdir)
         self.original_run = _patch_run()
 
     def tearDown(self) -> None:
         _unpatch_run(self.original_run)
         agent_state.agent_states.clear()
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _run_and_wait(self, prompt: str) -> None:
@@ -155,15 +128,15 @@ class TestTaskEndEventPersistence(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
         self.server, self.events, self.lock = _make_server(self.tmpdir)
         self.original_run = _patch_run()
 
     def tearDown(self) -> None:
         _unpatch_run(self.original_run)
         agent_state.agent_states.clear()
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_task_stopped_persisted_in_db(self) -> None:
@@ -206,8 +179,8 @@ class TestPeriodicEventFlush(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
         self.server = VSCodeServer()
         import io
         import sys
@@ -218,7 +191,7 @@ class TestPeriodicEventFlush(unittest.TestCase):
         import sys
         sys.stdout = self._real_stdout
         agent_state.agent_states.clear()
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_events_flushed_before_task_completes(self) -> None:

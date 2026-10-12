@@ -5,8 +5,8 @@
 """Task-runner mixin for the VS Code server.
 
 Implements the background-thread task lifecycle: ``_run_task`` (status
-broadcasts) and ``_run_task_inner`` (agent invocation, post-task
-autocommit / worktree finalization, persistence).  Also hosts the
+broadcasts) and ``_run_task_inner`` (agent invocation, presenting a
+worktree the agent left pending, persistence).  Also hosts the
 cooperative-stop machinery and the ``ask_user_question`` callback.
 
 Split out of ``server.py`` for organisation.
@@ -35,11 +35,9 @@ from kiss.agents.sorcar.channel_workspace import (
     exit_workspace,
     held_workspace,
 )
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.fanout_guard import is_review_task as _is_review_task
-from kiss.agents.sorcar.git_worktree import (
-    GitWorktreeOps,
-    strip_worktree_suffix,
-)
+from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
     TASK_USAGE_LOCK,
     _add_task,
@@ -48,7 +46,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
-from kiss.agents.sorcar.run_config import inherited_keys, is_explicit
+from kiss.agents.sorcar.run_config import inherited_keys
 from kiss.agents.sorcar.sea_apply import (
     NO_TOOLS_PROFILE,
     RUN_CONFIG_FIELD,
@@ -59,6 +57,7 @@ from kiss.agents.sorcar.sea_apply import (
 from kiss.agents.sorcar.sea_commands import (
     SeaError,
     base_settings,
+    get_command,
     help_text_if_command,
     model_sea,
     run_picked_hook,
@@ -67,10 +66,6 @@ from kiss.agents.sorcar.sea_commands import (
 )
 from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, canonical_tool_profile
 from kiss.agents.sorcar.task_classifier import classification_enabled
-from kiss.agents.sorcar.worktree_sorcar_agent import (
-    WorktreeSorcarAgent,
-    _WorktreeCleanupOutcome,
-)
 from kiss.core import tool_interrupt
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
@@ -305,8 +300,6 @@ def build_task_extra_payload(
     cost: float,
     steps: int,
     is_parallel: bool,
-    is_worktree: bool,
-    auto_commit_mode: bool,
     start_ms: int,
     end_ms: int,
 ) -> dict[str, object]:
@@ -326,8 +319,6 @@ def build_task_extra_payload(
         cost: Total budget consumed by the agent (USD).
         steps: Total agent steps taken.
         is_parallel: Whether parallel sub-agents were enabled.
-        is_worktree: Whether the task ran inside a worktree.
-        auto_commit_mode: Auto-commit toggle state at completion.
         start_ms: Agent start timestamp in milliseconds since epoch.
         end_ms: Agent end timestamp in milliseconds since epoch.
 
@@ -342,8 +333,6 @@ def build_task_extra_payload(
         "cost": cost,
         "steps": steps,
         "is_parallel": is_parallel,
-        "is_worktree": is_worktree,
-        "auto_commit_mode": auto_commit_mode,
         "startTs": start_ms,
         "endTs": end_ms,
     }
@@ -406,6 +395,57 @@ def _parent_extra_tools(parent_task_id: str) -> list[Callable[..., Any]]:
     if not isinstance(parent_tools, list):
         return []
     return [tool for tool in parent_tools if callable(tool)]
+
+
+def _parent_isolated_repos(parent_task_id: str) -> dict[Path, Path]:
+    """Repository root -> worktree directory of the calling task's worktrees.
+
+    A ``run_agent`` sub-task must not create a worktree for a
+    repository its calling task (or any ancestor: the parent's map
+    includes what it inherited) has already isolated; the child edits
+    the ancestor's worktree instead and the ancestor merges it
+    (:meth:`SorcarAgent.inherit_worktrees`).
+
+    Args:
+        parent_task_id: The calling task's id (wire field
+            ``parentTaskId``); empty or unknown yields nothing.
+
+    Returns:
+        The calling agent's :meth:`SorcarAgent.isolated_repos`,
+        or ``{}``.
+    """
+    parent_state = agent_state.get(parent_task_id)
+    isolated = getattr(getattr(parent_state, "agent", None), "isolated_repos", None)
+    if not callable(isolated):
+        return {}
+    repos = isolated()
+    return dict(repos) if isinstance(repos, dict) else {}
+
+
+def _inherited_isolated_repos(cmd: dict[str, Any], parent_task_id: str) -> dict[Path, Path]:
+    """The repositories a sub-task must not isolate again, from both sources.
+
+    The wire field ``isolatedRepos`` (``daemon_client.run``'s
+    ``isolated_repos``: the calling agent's map at dispatch time, the
+    only source for a caller running outside the daemon) merged with
+    the live map of the registered calling task, which may have
+    grown since the dispatch.
+
+    Args:
+        cmd: The ``run`` command.
+        parent_task_id: The calling task's id, or empty.
+
+    Returns:
+        Repository root -> worktree directory.
+    """
+    wire = cmd.get("isolatedRepos")
+    inherited: dict[Path, Path] = {}
+    if isinstance(wire, dict):
+        for repo, wt_dir in wire.items():
+            if isinstance(repo, str) and isinstance(wt_dir, str) and repo and wt_dir:
+                inherited[Path(repo)] = Path(wt_dir)
+    inherited.update(_parent_isolated_repos(parent_task_id))
+    return inherited
 
 
 def coerce_budget_override(raw: object) -> float | None:
@@ -534,132 +574,6 @@ def contains_task_tags(text: str) -> bool:
         blocks rather than falling back to the whole text.
     """
     return any(_task_tag_blocks(text))
-
-
-def _release_worktree_without_merging(
-    agent: Any, has_changes: bool,
-) -> None:
-    """Dispose of *agent*'s pending worktree without touching the main tree.
-
-    Used when a new task starts on a tab that still holds a pending
-    worktree while another tab runs a task directly on the main
-    working tree and has already changed tracked files there.
-    Auto-merging is unsafe then (it would stash, checkout and merge
-    the tree that other task is writing), but
-    simply dropping ``agent._wt`` is worse: that handle is the only
-    in-memory reference to the worktree, so the directory, the
-    ``kiss/wt-*`` branch and its ``branch.<name>.*`` config section
-    would leak forever with nothing left to retry the cleanup.
-
-    A change-free worktree is therefore discarded outright — removing
-    it touches neither the main working tree's files nor its HEAD.  A
-    worktree with real work is preserved as a *branch* the user can
-    recover with ``git checkout``, while its on-disk directory is
-    committed, removed and pruned.  Either way no artifact is
-    orphaned.
-
-    The recovery instructions are only correct when that commit
-    actually happened.  When it did not — ``--no-auto-commit``, or a
-    pre-commit hook rejecting the commit — the preserve step has
-    already recorded exactly where the work was left instead, so that
-    message is kept and merely prefixed with the reason no merge was
-    attempted.  Telling the user to ``git checkout`` a branch that
-    does not carry their work would send them looking in the wrong
-    place.
-
-    Which of the two happened is read from the outcome the preserve
-    step reports, never from the warning slot: a broadcast that failed
-    puts an older warning back there (``_flush_warnings``), and that
-    stale text describes a different worktree entirely.  For the same
-    reason a preserve that found nothing to do reports nothing at all.
-
-    Args:
-        agent: The tab's worktree agent, known to have ``_wt_pending``.
-        has_changes: Whether the worktree contains work worth keeping.
-    """
-    branch = agent._wt_branch
-    if not has_changes:
-        # Automatic path: rescue git-ignored task output the
-        # changed-files probe cannot see (see
-        # WorktreeSorcarAgent.discard).
-        msg = agent.discard(rescue_ignored=True)
-        if "Discard deferred" in msg:
-            # A live sub-agent (or a failed ignored-file rescue) kept
-            # the worktree.  It stays pending on the agent, so a later
-            # retire retries; surface why nothing was released.
-            agent._set_warnings(merge=msg)
-        return
-    if not agent._preserve_pending_worktree_for_review():
-        # No worktree was pending after all, so there is no branch to
-        # name and nothing was preserved.  Saying anything here would
-        # either invent a branch or recycle a warning left over from an
-        # older worktree.
-        return
-    reason = (
-        f"Could not auto-merge branch '{branch}' because another task "
-        "is running on the main working tree and has uncommitted "
-        "changes to tracked files."
-    )
-    if agent._last_preserve_outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED:
-        agent._set_warnings(merge=(
-            f"{reason} Your work is committed on that branch; recover "
-            f"it with: git checkout {branch}"
-        ))
-        return
-    # The preserve above may have left a warning saying where the
-    # work is (e.g. hook-refused commit); put the reason in front of it
-    # atomically, so a flush racing this call can neither re-deliver
-    # that warning nor have a concurrent write overwritten.
-    agent.add_warning(reason, prepend=True)
-
-
-def _wt_merge_on_repo(state: AgentState, repo: Path | None) -> bool:
-    """True when *state* is merging a worktree into *repo*'s main tree.
-
-    Used by the non-worktree task admission gate: starting a task
-    directly on a main working tree that a concurrent worktree merge
-    is stashing/checking-out/merging would interleave writes, so the
-    start is refused — but only when the two really share a main tree.
-    A merge in a *different* repository never touches *repo*.
-
-    Args:
-        state: The registered state of a potentially merging task.
-        repo: The main repository root the starting task will write,
-            or ``None`` when the task's ``work_dir`` is not in a git
-            repo (then no worktree merge can conflict with it).
-
-    Returns:
-        True when *state* holds a worktree merge whose repository is
-        *repo*, whose worktree directory itself is *repo* (the
-        starting task would run inside the directory the merge is
-        about to remove), or whose repository cannot be determined —
-        the conservative pre-repo-aware behavior.
-    """
-    if not (state.use_worktree and state.merge_in_progress()):
-        return False
-    if repo is None:
-        return False
-    agent = state.agent
-    merge_root = getattr(agent, "_repo_root", None) if agent is not None else None
-    if merge_root is None:
-        # The merging task's repository is unknown (e.g. its agent has
-        # already been disposed); keep the conservative refusal.
-        return True
-    try:
-        repo_resolved = repo.resolve()
-        if Path(merge_root).resolve() == repo_resolved:
-            return True
-        # A task starting INSIDE the very worktree being merged (its
-        # work_dir's toplevel is the linked worktree directory) must
-        # also be refused: the merge auto-commits and removes that
-        # directory out from under the task.
-        merge_wt_dir = getattr(agent, "_wt_dir", None)
-        return bool(
-            merge_wt_dir is not None
-            and Path(merge_wt_dir).resolve() == repo_resolved
-        )
-    except OSError:  # pragma: no cover — unresolvable path
-        return True
 
 
 def _zero_usage_counters(agent: Any) -> None:
@@ -792,51 +706,9 @@ class _TaskRunnerMixin:
             task_id: str | None = None,
             create: bool = False,
         ) -> int: ...
-        def _any_non_wt_running(
-            self,
-            repo_root: Path | None = None,
-            *,
-            exclude: AgentState | None = None,
-        ) -> bool: ...
-        def _main_tree_claim_reason(
-            self, repo_root: Path | None,
-        ) -> str | None: ...
-        def _main_tree_blocks_merge(self, repo_root: Path | None) -> bool: ...
-        def _claim_main_tree(
-            self, repo_root: Path, reason: str,
-            holder: list[Any] | None = None,
-        ) -> bool: ...
-        def _release_main_tree_claim(self, claim: Any) -> None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _cmd_run(self, cmd: dict[str, Any]) -> None: ...
         def _broadcast_run_notice(self, cmd: dict[str, Any], tab_id: str) -> None: ...
-        def _main_dirty_files(self, work_dir: str = "") -> list[str]: ...
-        def _autocommit_changes(
-            self,
-            tab_id: str = "",
-            *,
-            work_dir: str = "",
-            own_state: AgentState | None = None,
-        ) -> None: ...
-        def _autocommit_changed_repos(
-            self,
-            tab_id: str = "",
-            *,
-            work_dir: str = "",
-            task_id: str | None = None,
-            extra_paths: set[str] | None = None,
-            extra_task_ids: list[str] | None = None,
-            own_state: AgentState | None = None,
-        ) -> None: ...
-        def _handle_worktree_action(
-            self,
-            action: str,
-            tab_id: str = "",
-            *,
-            internal: bool = False,
-            already_claimed: bool = False,
-            resolve_conflicts: bool = False,
-        ) -> dict[str, Any]: ...
         def _present_pending_worktree(
             self,
             tab_id: str,
@@ -846,7 +718,6 @@ class _TaskRunnerMixin:
         def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
-        def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
 
     def _picker_sea(self, cmd: dict[str, Any]) -> tuple[str, Path] | None:
         """Return the model-picker SEA a run's model names, if any.
@@ -883,7 +754,11 @@ class _TaskRunnerMixin:
 
         The SEA pipeline of a run, in order: a ``/xxx text`` slash
         command becomes a run of the SEA ``xxx`` on ``text`` (the raw
-        prompt kept on ``displayPrompt``); the tab's model-picker SEA, if
+        prompt kept on ``displayPrompt``); a ``seaCommand`` (the name
+        of a registered command, sent by a daemon forwarding another
+        machine's ``run_agent`` dispatch, whose SEA paths are not this
+        machine's) becomes this daemon's copy of that SEA as the run's
+        ``seaPath``; the tab's model-picker SEA, if
         any, becomes the outermost layer (:meth:`_picker_sea`); the
         layers are executed once (:func:`load_layers`; the bare
         :class:`~kiss.agents.seas.base.base_sea.BaseSea` when the run
@@ -903,7 +778,8 @@ class _TaskRunnerMixin:
             tab's registry entry is re-pinned only for those.
 
         Raises:
-            SeaError: When a script is broken.
+            SeaError: When a script is broken, or ``seaCommand`` names
+                no command registered here.
         """
         overridden: set[str] = set()
         _slash = slash_command_task(cmd.get("prompt", ""))
@@ -912,6 +788,24 @@ class _TaskRunnerMixin:
             cmd["prompt"], cmd["seaPath"] = _slash[0], str(_slash[1])
         else:
             cmd.pop("displayPrompt", None)
+        sea_command = cmd.get("seaCommand")
+        if isinstance(sea_command, str) and sea_command:
+            command_path = get_command(sea_command)
+            if command_path is None:
+                raise SeaError(f"'{sea_command}' is not a registered command on this machine")
+            cmd["seaPath"] = str(command_path)
+        # The model the tab remembers from its picker is a persisted
+        # value of the tab, like the settings the tab sends as wire
+        # fields: it fills a missing ``model`` here, before the layers
+        # are applied, so a SEA's ``model`` still wins over it and the
+        # run's record counts it as the tab's, not as a daemon default.
+        # A tab that never picked (a dispatcher's fresh tab) keeps no
+        # model and ``_run_task`` falls back to the daemon default.
+        if not cmd.get("model"):
+            with self._state_lock:
+                remembered = self._tab_models.get(cmd.get("tabId", ""), "")
+            if remembered:
+                cmd["model"] = remembered
         picked = self._picker_sea(cmd)
         layers = load_layers(cmd, base=None if picked is None else picked[1])
         if picked is not None:
@@ -1012,14 +906,6 @@ class _TaskRunnerMixin:
                 overridden_fields = self._apply_sea(cmd)
             except SeaError as exc:
                 sea_error = exc
-            # A ``use_worktree`` a SEA pinned, or the calling
-            # tool passed explicitly, is a decision, not a default:
-            # ``_run_task_inner``'s classifier must not demote it (it
-            # still demotes a client/persisted default).
-            cmd["_worktreeDecided"] = (
-                "useWorktree" in overridden_fields
-                or is_explicit(cmd.get("provenance"), "use_worktree")
-            )
             client_task_id = _client_task_id_of(cmd)
             # Capture the state OBJECT up front: the printer bridge re-keys
             # it to the persisted task id mid-run, so a key lookup in the
@@ -1215,11 +1101,6 @@ class _TaskRunnerMixin:
                 # this run never reached.
                 with suppress(BaseException):
                     state = self._resolve_run_state(cmd)
-            # Main-tree occupancy ``_run_task_inner`` did not release
-            # itself (it crashed before its own cleanup); worktree
-            # merges it kept waiting are retried below.  ``None`` on
-            # every normal path, where the inner cleanup already ran.
-            stranded_repo: Path | None = None
             # Prompts typed into the tab after the agent's last step
             # (during result broadcast, persistence and worktree
             # merge, while ``task_thread`` was still installed): no
@@ -1259,24 +1140,16 @@ class _TaskRunnerMixin:
                     # not leak into a later run on the same tab.
                     state.queued_followup_tasks.clear()
                     state.is_task_active = False
-                    stranded_repo = state.non_wt_repo_root
-                    state.is_running_non_wt = False
-                    state.non_wt_repo_root = None
                     state.interrupted_by_shutdown = False
                     state.stop_acknowledged = False
                     task_id_for_end = state.task_id
                     # Ownership is decided by the agent alone: it is
-                    # kept exactly while it still holds a worktree.
-                    # Consulting the finished run's ``use_worktree``
-                    # here would drop the agent whenever THIS run was
-                    # a non-worktree one — and that agent may be the
-                    # only in-memory handle to a worktree carried over
-                    # from an earlier run on the same tab (R09-1).
+                    # kept exactly while it still holds a worktree —
+                    # the only in-memory handle to it (R09-1).
                     if state.agent is not None and not getattr(
                         state.agent, "_wt_pending", False,
                     ):
                         state.agent = None
-                        state.use_worktree = False
                 status_end: dict[str, Any] = {
                     "type": "status",
                     "running": False,
@@ -1304,11 +1177,6 @@ class _TaskRunnerMixin:
             # worktree merge is in progress".
             self.printer._thread_local.stop_event = None
             self._dispose_if_closed(tab_id)
-            if stranded_repo is not None:
-                try:
-                    self._merge_deferred_worktrees(stranded_repo)
-                except BaseException:  # pragma: no cover — merge error handler
-                    logger.debug("Deferred worktree merge error", exc_info=True)
             if redispatch:
                 self._redispatch_leftover_prompts(submitted_cmd, leftover)
 
@@ -1670,7 +1538,7 @@ class _TaskRunnerMixin:
 
         with self._state_lock:
             if state.agent is None:
-                state.agent = WorktreeSorcarAgent("Sorcar VS Code")
+                state.agent = ChatSorcarAgent("Sorcar VS Code")
             agent = state.agent
         agent._tab_id = tab_id
         agent._task_start_ms = start_ms
@@ -1817,12 +1685,9 @@ class _TaskRunnerMixin:
                     }
                 )
                 return
-            state.use_worktree = bool(cmd.get("useWorktree", True))
             state.use_parallel = bool(cmd.get("isParallel", True))
-            state.auto_commit_mode = bool(cmd.get("autoCommit", True))
             state.is_task_active = True
             stop_event = state.stop_event
-            use_worktree = state.use_worktree
         self.printer._thread_local.stop_event = stop_event
 
         self._broadcast_early_prompts(
@@ -1831,22 +1696,11 @@ class _TaskRunnerMixin:
         )
 
         # Pre-run task classification (kiss.agents.sorcar.task_classifier),
-        # resolved HERE — before the main-tree claim checks and worktree
-        # bookkeeping below — so this runner and the agent agree on ONE
-        # effective worktree mode for the whole submission: an
-        # ``is_development`` verdict decides worktree isolation, and the
-        # claims, merge presentation, auto-commit paths, and persistence
-        # all key off the same value.  The verdict only ever DEMOTES —
-        # a client that pinned ``useWorktree`` off keeps it off (a
-        # channel dispatch classifies for its system prompt while
-        # running in a scratch directory that must never get a
-        # worktree).  The verdict is pre-seeded into
-        # the agent (``classify_task_for_run``), which reuses it for its
-        # own worktree gating and system prompt selection instead of
-        # re-classifying inside the run.  Only this run's effective mode
-        # changes; the persisted ``is_worktree`` setting is never
-        # written.  A disabled or failed classification leaves
-        # ``use_worktree`` exactly as the client requested.
+        # resolved HERE so the "Classifying task…" phase is shown while
+        # the model round trip runs.  The verdict (is the task simple,
+        # which picks the lite system prompt) is pre-seeded into the
+        # agent (``classify_task_for_run``), which reuses it instead of
+        # re-classifying inside the run.
         # Per-run classification toggle: the ``classifyTasks`` wire
         # field (``auto_classify`` on ``kiss.server.sorcar.run``).
         # Absent or malformed means "no override" — the persisted
@@ -1856,18 +1710,13 @@ class _TaskRunnerMixin:
         _classify_enabled = (
             _raw_classify if isinstance(_raw_classify, bool) else None
         )
-        # No spare-worktree refill is started here: the pool is refilled
-        # when the daemon starts and when a worktree task ends
-        # (:mod:`kiss.agents.sorcar.worktree_pool`), so a checkout never
-        # competes with the launch it would run beside.
         _classify_task_text = prompt + append_to_prompt
-        repo = GitWorktreeOps.discover_repo(Path(work_dir))
         if classification_enabled(_classify_enabled):
             # The classifier is a blocking model round trip (seconds);
-            # tell the user what the wait is (cleared by the agent's
-            # first output, see ``WorktreeSorcarAgent.run``).
+            # tell the user what the wait is (cleared below, once the
+            # previous worktree is retired too).
             self.printer.broadcast_launch_phase("Classifying task…", tab_id=tab_id)
-        _classify_verdict = agent.classify_task_for_run(
+        agent.classify_task_for_run(
             model_name=model,
             task=_classify_task_text,
             model_config=(
@@ -1877,173 +1726,35 @@ class _TaskRunnerMixin:
             ),
             enabled=_classify_enabled,
         )
-        # The verdict only ever DEMOTES a default; a ``use_worktree`` the
-        # run's SEA pinned or the caller passed explicitly
-        # stands (``_run_task`` marks it), here and in ``agent.run``
-        # below.  A demotion is recorded for the run's ``ran:`` line.
-        worktree_pinned = bool(cmd.pop("_worktreeDecided", False))
-        classified: dict[str, list[Any]] = {}
-        if _classify_verdict is not None and not worktree_pinned:
-            if use_worktree and not _classify_verdict.is_development:
-                classified["use_worktree"] = [True, False]
-                use_worktree = False
-            with self._state_lock:
-                state.use_worktree = use_worktree
-
-        if not use_worktree:
-            with self._state_lock:
-                merging = [
-                    t for t in agent_state.agent_states.values()
-                    if _wt_merge_on_repo(t, repo)
-                ]
-                if merging:
-                    state.is_task_active = False
-                    logger.warning(
-                        "Refusing main-tree run on tab %s: worktree merge "
-                        "in progress on %s (tab %s, task %s)",
-                        tab_id, repo, merging[0].tab_id, merging[0].task_id,
-                    )
-                    self.printer.broadcast(
-                        {
-                            "type": "error",
-                            "text": "A worktree merge is in progress. "
-                            "Wait for it to finish before starting a task.",
-                            "tabId": tab_id,
-                        }
-                    )
-                    return
-                # A main-tree mutator (Discard, manual Git Commit)
-                # publishes a per-repo claim in the same locked
-                # section as its own busy check; admitting a direct
-                # task while the claim is held would let ``git reset
-                # --hard`` / ``git add -A`` run over this task's
-                # half-written files (gpt-5.6-sol review, findings
-                # 2 and 3).
-                claim = self._main_tree_claim_reason(repo)
-                if claim is not None:
-                    state.is_task_active = False
-                    logger.warning(
-                        "Refusing main-tree run on tab %s: %s in progress on %s",
-                        tab_id, claim, repo,
-                    )
-                    self.printer.broadcast(
-                        {
-                            "type": "error",
-                            "text": f"A {claim} is in progress on this "
-                            "repository. Wait for it to finish before "
-                            "starting a task.",
-                            "tabId": tab_id,
-                        }
-                    )
-                    return
-                state.is_running_non_wt = True
-                state.non_wt_repo_root = repo.resolve() if repo else None
-
         if getattr(agent, "_wt_pending", False):
-            # A worktree carried over from an earlier run on this tab
-            # cannot be auto-merged while the main working tree is
-            # busy — and a run that does NOT use a worktree makes it
-            # busy itself: it has just set ``is_running_non_wt`` above
-            # and is about to write the main tree.  Skipping the
-            # release for those runs orphaned the worktree with no
-            # owner and no preserve marker, which let a later reclaim
-            # sweep publish work the user declined to merge (R09-1).
-            # "Busy" blocks the merge only once the occupant has
-            # changed a tracked file of the main tree: an occupant
-            # that has left every tracked file untouched (this run
-            # itself, which has not started writing yet, or another
-            # tab's read-only task) does not stand in the way.
-            # Merging here rewrites the main tree without an
-            # ``is_merging`` flag (the tab's run is starting, not a
-            # merge_flow merge), so the merge publishes a main-tree
-            # claim in the same locked section as the check: direct-run
-            # admission on another tab refuses while it is held,
-            # instead of starting to write the tree mid-merge.  A
-            # worktree run retires here too, under the same claim —
-            # left to ``_try_setup_worktree`` the merge ran with no
-            # claim at all.
-            # A worktree run enters setup only when its work_dir is in
-            # a git repository — the same ``discover_repo`` condition
-            # ``WorktreeSorcarAgent.run`` applies; otherwise the agent
-            # runs the task directly outside any repository and the
-            # pending worktree stays pending, as it did before.
-            wt_setup = use_worktree and repo is not None
-            retires = wt_setup or not use_worktree
-            wt_repo_root = getattr(agent, "_repo_root", None)
-            retire_claims: list[Any] = []
+            # A worktree left pending by an earlier run on this tab
+            # (stopped, or never merged) is preserved on its own
+            # ``kiss/wt-*`` branch before this run starts: a new task
+            # must not inherit it, and it is never merged behind the
+            # user's back.  The retire rewrites ``.kiss-worktrees``
+            # and commits with an LLM-generated message, so it holds
+            # the merge claim exactly as a merge does:
+            # ``_state_owns_thread`` then refuses the Stop watchdog's
+            # asynchronous ``KeyboardInterrupt``, which would
+            # otherwise land mid-sequence.  A Stop pressed meanwhile
+            # is honoured right after.
+            with self._state_lock:
+                prev_merging = state.is_merging
+                prev_merge_thread = state.merge_thread
+                state.is_merging = True
+                state.merge_thread = threading.current_thread()
             try:
-                with self._state_lock:
-                    main_tree_busy = self._any_non_wt_running(wt_repo_root)
-                    wt_occupied = self._any_non_wt_running(
-                        getattr(agent, "_wt_dir", None),
-                    )
-                    merge_blocked = self._main_tree_blocks_merge(wt_repo_root)
-                    if (
-                        wt_repo_root is not None
-                        and (main_tree_busy or wt_setup) and retires
-                        and not wt_occupied and not merge_blocked
-                    ):
-                        merge_blocked = not self._claim_main_tree(
-                            wt_repo_root, "worktree merge",
-                            holder=retire_claims,
-                        )
-                if main_tree_busy and wt_occupied:
-                    # A task on another tab is running INSIDE the pending
-                    # worktree itself.  Every disposal — discard and the
-                    # commit-and-remove preserve alike — deletes that
-                    # directory out from under the running task, so leave
-                    # the worktree pending; a later retire retries.
-                    agent._set_warnings(merge=(
-                        f"Worktree '{agent._wt_branch}' was left pending: "
-                        "another tab is running a task inside it."
-                    ))
-                elif main_tree_busy or (wt_setup and not wt_occupied):
-                    # Retiring the previous worktree is an automatic path,
-                    # so it obeys the toggle as it stands NOW — the value
-                    # this run carried, not the one the run that created
-                    # the worktree carried.  ``agent.run`` binds the same
-                    # attribute for every cleanup that happens later, but
-                    # this release runs before it.
-                    agent.auto_commit_enabled = state.auto_commit_mode
-                    # The retire rewrites the user's main tree (stash,
-                    # checkout, squash merge, pop — or ``git worktree
-                    # remove``), so it holds the merge claim exactly as
-                    # the post-task merge does: ``_state_owns_thread``
-                    # then refuses the Stop watchdog's asynchronous
-                    # ``KeyboardInterrupt``, which would otherwise land
-                    # mid-sequence and leave the checkout half-merged
-                    # with the user's edits stranded in the stash.  A
-                    # Stop pressed meanwhile is honoured right after.
-                    with self._state_lock:
-                        prev_merging = state.is_merging
-                        prev_merge_thread = state.merge_thread
-                        state.is_merging = True
-                        state.merge_thread = threading.current_thread()
-                    try:
-                        if merge_blocked:
-                            _release_worktree_without_merging(
-                                agent, bool(self._get_worktree_changed_files(tab_id)),
-                            )
-                        elif retires:
-                            # The main tree is unoccupied, or occupied
-                            # but untouched, so the carried-over
-                            # worktree can still be merged — and it
-                            # must be merged NOW, under the claim,
-                            # before this run starts (a direct run
-                            # writes the tree next; a worktree run's
-                            # ``_try_setup_worktree`` then finds
-                            # nothing pending).
-                            agent._retire_previous_worktree()
-                    finally:
-                        with self._state_lock:
-                            state.is_merging = prev_merging
-                            state.merge_thread = prev_merge_thread
-                    if stop_event is not None and stop_event.is_set():
-                        raise KeyboardInterrupt("Stopped during worktree retire")
+                agent._retire_previous_worktree()
             finally:
-                for claim in retire_claims:
-                    with self._state_lock:
-                        self._release_main_tree_claim(claim)
+                with self._state_lock:
+                    state.is_merging = prev_merging
+                    state.merge_thread = prev_merge_thread
+            if stop_event is not None and stop_event.is_set():
+                raise KeyboardInterrupt("Stopped during worktree retire")
+        inherit_worktrees = getattr(agent, "inherit_worktrees", None)
+        if callable(inherit_worktrees):
+            inherit_worktrees(_inherited_isolated_repos(cmd, parent_task_id))
+        self.printer.broadcast_launch_phase("", tab_id=tab_id)
 
         with self._state_lock:
             opened_task_id = self._tab_opened_task_ids.pop(tab_id, "")
@@ -2051,12 +1762,7 @@ class _TaskRunnerMixin:
             agent.resume_from_task_id(opened_task_id)
 
         logger.info(
-            "Task started: tab_id=%s model=%s use_worktree=%s auto_commit=%s prompt=%r",
-            tab_id,
-            model,
-            use_worktree,
-            state.auto_commit_mode,
-            prompt[:200],
+            "Task started: tab_id=%s model=%s prompt=%r", tab_id, model, prompt[:200],
         )
         result_summary = "Agent Failed Abruptly"
         # The agent's own ``finish(suggested_next_task=...)`` proposal;
@@ -2068,13 +1774,6 @@ class _TaskRunnerMixin:
         # must not report the previous run's usage of a reused agent.
         _zero_usage_counters(agent)
         task_history_id: str | None = None
-        # Changed-path records (and history ids) of EARLIER sequential
-        # <task> runs of this submission, taken before their
-        # per-subtask cleanup frees them (see the pop above
-        # _persist_subtask_row).  The ids let the end-of-run cross-repo
-        # auto-commit collect those runs' sub-agent records too.
-        run_changed_paths: set[str] = set()
-        run_task_ids: list[str] = []
         try:
             subtasks = parse_task_tags(prompt)
             if _sea_run and isinstance(prompt, str):
@@ -2130,7 +1829,6 @@ class _TaskRunnerMixin:
                 "tool_profile": _tool_profile,
                 "timeout": _raw_timeout if isinstance(_raw_timeout, int | float) else None,
                 "inherited": inherited_keys(cmd.get("provenance")),
-                **({"classified": classified} if classified else {}),
             }
             # Docker image (or ``container:<id>``) the run's shell and
             # file tools execute in; absent or malformed means the host.
@@ -2222,21 +1920,6 @@ class _TaskRunnerMixin:
                         attachments=attachments,
                         ask_user_question_callback=self._ask_user_question,
                         is_parallel=state.use_parallel,
-                        use_worktree=use_worktree,
-                        worktree_pinned=worktree_pinned,
-                        # The per-run wire toggle WINS over the
-                        # persisted "Auto commit" setting, and both
-                        # sides of the run must read the same value:
-                        # this runner already decides its own
-                        # post-task merge with ``auto_commit_mode``,
-                        # while the agent decides the automatic
-                        # worktree cleanups (retiring the previous
-                        # run's branch, committing this run's) it
-                        # performs on the way.  Left unpassed, the
-                        # agent fell back to the persisted config and
-                        # published work the user had declined to
-                        # merge.
-                        auto_commit=state.auto_commit_mode,
                         max_budget=(_agent_budget if _agent_budget is not None else _cfg_budget),
                         web_tools=(_agent_web if _agent_web is not None else _cfg_web),
                         live_browser=self.browser_tabs,
@@ -2400,25 +2083,16 @@ class _TaskRunnerMixin:
                         ]
                     subtasks.extend(queued_followups)
                 if subtask_index < len(subtasks) - 1:
-                    # _persist_subtask_row's cleanup_task frees this
-                    # subtask's changed-path record; take it first so
-                    # the end-of-run cross-repo auto-commit still sees
-                    # the files EARLIER sequential <task> runs changed.
-                    if task_history_id is not None:
-                        run_changed_paths |= self.printer.pop_changed_paths(
-                            task_history_id,
+                    if task_history_id is not None and parent_task_id:
+                        # A multi-``<task>`` dispatch allocates one
+                        # child row (and broadcasts one ``new_tab``)
+                        # per subtask: complete each intermediate
+                        # row's sub-agent tab as its subtask ends —
+                        # the end-of-run signal below covers only
+                        # the LAST row.
+                        self._broadcast_dispatch_subagent_done(
+                            task_history_id, "", model,
                         )
-                        run_task_ids.append(str(task_history_id))
-                        if parent_task_id:
-                            # A multi-``<task>`` dispatch allocates one
-                            # child row (and broadcasts one ``new_tab``)
-                            # per subtask: complete each intermediate
-                            # row's sub-agent tab as its subtask ends —
-                            # the end-of-run signal below covers only
-                            # the LAST row.
-                            self._broadcast_dispatch_subagent_done(
-                                task_history_id, "", model,
-                            )
                     self._persist_subtask_row(
                         state,
                         task_id=task_history_id,
@@ -2431,8 +2105,8 @@ class _TaskRunnerMixin:
                         result_summary=result_summary,
                         model=model,
                         work_dir=work_dir,
-                        use_worktree=use_worktree,
                         sub_start_ms=sub_start_ms,
+                        end_event=task_end_event,
                     )
                 subtask_index += 1
         except BaseException as _outer_exc:
@@ -2502,15 +2176,10 @@ class _TaskRunnerMixin:
             # backstops it on exception paths so a watching sub-agent
             # tab can never keep spinning forever.
             subagent_done_sent = False
-            # Main-repo root this non-worktree task occupied.  Worktree
-            # merges the occupancy kept waiting run once the task is
-            # over and its changes are committed (mandatory finally).
-            freed_repo: Path | None = None
             try:
                 # Warnings left by the pre-run retirement of a
                 # carried-over worktree (``_retire_previous_worktree``
-                # / ``_release_worktree_without_merging`` above) are
-                # normally broadcast by ``agent.run``.  A failure
+                # above) are normally broadcast by ``agent.run``.  A failure
                 # BEFORE the first ``agent.run`` (tool profile, config,
                 # SEA) would otherwise swallow them and the user
                 # would never learn where that worktree's work went.
@@ -2521,75 +2190,14 @@ class _TaskRunnerMixin:
                 _flush_warnings = getattr(agent, "_flush_warnings", None)
                 if _flush_warnings is not None:
                     _flush_warnings(self.printer)
-                # ``task_end_event`` carries the last subtask's own
-                # ``success`` verdict (parsed from its result YAML in
-                # the loop above), or a failure type.
-                task_failed = bool(
-                    task_end_event
-                    and (
-                        task_end_event.get("type")
-                        in ("task_error", "task_stopped", "task_interrupted")
-                        or task_end_event.get("success") is False
-                    )
-                )
-                effective_auto_commit = state.auto_commit_mode and not task_failed
-                if not use_worktree:
-                    # With the interactive diff review gone, task
-                    # changes on the main tree are committed directly —
-                    # but only when this run asked for it and actually
-                    # succeeded, exactly like the worktree path below.
-                    # Committing regardless would make the visible
-                    # per-run checkbox meaningless and would bake a
-                    # failed run's half-finished edits into the user's
-                    # own checkout.  The dirty-files probe keeps clean
-                    # trees (and non-git folders) event-free.
-                    try:
-                        if effective_auto_commit and self._main_dirty_files(
-                            work_dir,
-                        ):
-                            # The whole-repo auto-commit is a main-tree
-                            # mutation: ``_autocommit_changes`` runs the
-                            # atomic busy-check + per-repo claim itself
-                            # (no ``claimed_repo`` passed), refusing to
-                            # ``git add -A`` while ANOTHER task occupies
-                            # the repository and blocking new admissions
-                            # for the commit's duration.  This task's
-                            # own ``is_running_non_wt`` admission is
-                            # still active here, so its state is passed
-                            # for exclusion (gpt-5.6-sol review 2,
-                            # missed wiring 2).
-                            self._autocommit_changes(
-                                tab_id, work_dir=work_dir, own_state=state,
-                            )
-                        if effective_auto_commit:
-                            # The action above commits the work_dir
-                            # repository only; files the task changed
-                            # in OTHER repositories would be silently
-                            # left uncommitted without this pass.
-                            self._autocommit_changed_repos(
-                                tab_id,
-                                work_dir=work_dir,
-                                task_id=task_history_id,
-                                extra_paths=run_changed_paths,
-                                extra_task_ids=run_task_ids,
-                                own_state=state,
-                            )
-                    except BaseException:  # pragma: no cover — autocommit error handler
-                        logger.debug("Post-task autocommit error", exc_info=True)
-                    finally:
-                        with self._state_lock:
-                            freed_repo = state.non_wt_repo_root
-                            state.is_running_non_wt = False
-                            state.non_wt_repo_root = None
                 assert task_end_event is not None
                 end_ms = int(time.time() * 1000)
                 # One shared persistence body with the per-subtask
                 # path (C-R2).  ``cleanup=False``: this finally
                 # releases the printer's persist-agent itself, below,
                 # after the terminal broadcast (S3-08).  A persistence
-                # failure is logged inside: the worktree presentation,
-                # ``main_tree_done`` and the file refresh below must
-                # still run.
+                # failure is logged inside: the worktree presentation
+                # and the file refresh below must still run.
                 self._persist_subtask_row(
                     state,
                     task_id=task_history_id,
@@ -2597,73 +2205,41 @@ class _TaskRunnerMixin:
                     result_summary=result_summary,
                     model=model,
                     work_dir=work_dir,
-                    use_worktree=use_worktree,
                     sub_start_ms=sub_start_ms,
                     end_event=task_end_event,
                     end_ms=end_ms,
                     cleanup=False,
                 )
-                if use_worktree and getattr(agent, "_wt_pending", False):
-                    if task_failed:
-                        agent._pending_review = True
+                if getattr(agent, "_wt_pending", False):
+                    # The agent did not ``commit_and_merge`` its
+                    # worktree (the task was stopped, failed, or
+                    # finished without merging): the work stays on its
+                    # branch for the user to Merge / Discard / keep,
+                    # never merged behind their back, and the next run
+                    # on this tab preserves it on its branch.  A
+                    # worktree without tracked changes has nothing to
+                    # review: its branch is dropped, after git-ignored
+                    # output (reports, data files) is rescued into the
+                    # checkout; a failed rescue is reported and leaves
+                    # the worktree pending (the next run preserves it).
                     try:
-                        if effective_auto_commit:
-                            if self._get_worktree_changed_files(tab_id):
-                                action = "merge"
-                            else:
-                                action = "discard"
-                            result = self._handle_worktree_action(
-                                action,
-                                tab_id,
-                                internal=True,
-                                resolve_conflicts=True,
-                            )
-                            self.printer.broadcast(
-                                {
-                                    "type": "worktree_result",
-                                    "tabId": tab_id,
-                                    **result,
-                                }
+                        if self._get_worktree_changed_files(tab_id):
+                            self._present_pending_worktree(
+                                tab_id, discard_if_empty=False,
                             )
                         else:
-                            self._present_pending_worktree(
-                                tab_id,
-                                discard_if_empty=False,
-                            )
+                            branch = agent._wt_branch
+                            message = agent.discard(rescue_ignored=True)
+                            self.printer.broadcast({
+                                "type": "worktree_result",
+                                "tabId": tab_id,
+                                "action": "discard",
+                                "branch": branch,
+                                "success": not agent._wt_pending,
+                                "message": message,
+                            })
                     except BaseException:
                         logger.debug("Worktree presentation error", exc_info=True)
-                elif not use_worktree:
-                    # Direct-checkout counterpart of the worktree
-                    # presentation above: when the task's edits are
-                    # left sitting uncommitted in the user's own
-                    # working tree, offer the explicit choice through
-                    # a ``main_tree_done`` action bar (Auto commit /
-                    # Discard / Do nothing).  Gated on the tree
-                    # actually being dirty rather than on
-                    # ``effective_auto_commit``: an auto-commit that
-                    # was attempted above but refused (a pre-commit
-                    # hook, say) leaves the checkout dirty all the
-                    # same, and suppressing the bar there would strand
-                    # the user with a failure line and no controls
-                    # (gpt-5.6-sol review finding).  A successful
-                    # auto-commit leaves the tree clean, so the
-                    # auto-commit fast path stays event-free — as do
-                    # clean trees and non-git folders.
-                    try:
-                        dirty = self._main_dirty_files(work_dir)
-                        if dirty:
-                            self.printer.broadcast(
-                                {
-                                    "type": "main_tree_done",
-                                    "tabId": tab_id,
-                                    "workDir": work_dir,
-                                    "changedFiles": dirty,
-                                }
-                            )
-                    except BaseException:
-                        logger.debug(
-                            "Main-tree presentation error", exc_info=True,
-                        )
                 with self._state_lock:
                     state.is_task_active = False
                 self.printer.broadcast(
@@ -2747,13 +2323,6 @@ class _TaskRunnerMixin:
                 # thread-local task id.
                 with self._state_lock:
                     state.is_task_active = False
-                    if not use_worktree:
-                        if state.non_wt_repo_root is not None:
-                            # The normal path did not get as far as
-                            # releasing the occupancy: release it here.
-                            freed_repo = state.non_wt_repo_root
-                        state.is_running_non_wt = False
-                        state.non_wt_repo_root = None
                 if task_history_id is not None:
                     if parent_task_id and not subagent_done_sent:
                         # The normal path above was interrupted (e.g.
@@ -2774,27 +2343,10 @@ class _TaskRunnerMixin:
                 tl = getattr(self.printer, "_thread_local", None)
                 if tl is not None:
                     tl.task_id = ""
-                # The main tree this task occupied is free again and,
-                # with auto-commit on, committed: merge the worktrees
-                # whose post-task merge the guard refused meanwhile
-                # (they used to wait for the user to open a new chat).
-                # Lives in the mandatory finally so an exception in the
-                # persistence/broadcast block above (after the commit)
-                # cannot strand the promised merge; runs after this
-                # task's own end event so the other tabs' merge results
-                # never interleave with it, and is a no-op while the
-                # tree is still dirty.  The run is over, so this
-                # thread's stop binding ends first: the merge's commit
-                # message is an LLM call, and with a stopped task's
-                # signal still bound the model layer would turn any
-                # request failure into the stop interrupt — silently
-                # losing the merge (``_run_task`` clears the binding
-                # again before the deferred tab disposal).
+                # The run is over, so this thread's stop binding ends
+                # (``_run_task`` clears it again before the deferred
+                # tab disposal).
                 self.printer._thread_local.stop_event = None
-                try:
-                    self._merge_deferred_worktrees(freed_repo)
-                except BaseException:  # pragma: no cover — merge error handler
-                    logger.debug("Deferred worktree merge error", exc_info=True)
 
     def _persist_subtask_row(
         self,
@@ -2805,7 +2357,6 @@ class _TaskRunnerMixin:
         result_summary: str,
         model: str,
         work_dir: str,
-        use_worktree: bool,
         sub_start_ms: int,
         end_event: dict[str, Any] | None = None,
         end_ms: int | None = None,
@@ -2827,8 +2378,7 @@ class _TaskRunnerMixin:
         persist-agent itself, after the terminal broadcast).  Failures
         are logged and swallowed: a persistence hiccup for one subtask
         must not abort the remaining subtasks, and one for the final
-        row must not skip the worktree presentation or the
-        ``main_tree_done`` bar.
+        row must not skip the worktree presentation.
 
         Args:
             state: The owning agent state.
@@ -2838,11 +2388,13 @@ class _TaskRunnerMixin:
             result_summary: The subtask's result summary.
             model: Model name used for the task.
             work_dir: Working directory the task ran from.
-            use_worktree: Whether the task ran inside a worktree.
             sub_start_ms: The subtask's start timestamp (ms epoch).
             end_event: The chat end event to append; defaults to
-                ``{"type": "task_done"}`` (a non-final subtask only
-                gets here when it succeeded).
+                ``{"type": "task_done"}``.  Its ``success`` key, when
+                the agent's result carried one, is the verdict the
+                row stores (``_save_task_result``), so the history
+                sidebar shows a ``finish(success=False)`` run as
+                failed just like the tab strip does.
             end_ms: End timestamp (ms epoch) for the ``extra``
                 payload; defaults to now.
             cleanup: Release the printer's per-task resources via
@@ -2852,15 +2404,15 @@ class _TaskRunnerMixin:
         try:
             from kiss.core._version import __version__
 
-            _append_chat_event(
-                end_event if end_event is not None else {"type": "task_done"},
-                task_id=task_id,
-                task=task_prompt,
-            )
+            if end_event is None:
+                end_event = {"type": "task_done"}
+            _append_chat_event(end_event, task_id=task_id, task=task_prompt)
+            verdict = end_event.get("success")
             _save_task_result(
                 result=result_summary,
                 task_id=task_id,
                 task=task_prompt,
+                success=verdict if isinstance(verdict, bool) else None,
             )
             # Read and saved under TASK_USAGE_LOCK, so a sub-task's late
             # charge either lands on the ledger before this read or
@@ -2878,8 +2430,6 @@ class _TaskRunnerMixin:
                         cost=round(cost, 6),
                         steps=steps,
                         is_parallel=state.use_parallel,
-                        is_worktree=use_worktree,
-                        auto_commit_mode=state.auto_commit_mode,
                         start_ms=sub_start_ms,
                         end_ms=(
                             end_ms if end_ms is not None
@@ -2951,8 +2501,6 @@ class _TaskRunnerMixin:
             cost=0.0,
             steps=0,
             is_parallel=state.use_parallel,
-            is_worktree=False,
-            auto_commit_mode=state.auto_commit_mode,
             start_ms=start_ms,
             end_ms=end_ms,
         )
@@ -2971,7 +2519,7 @@ class _TaskRunnerMixin:
             {"type": "task_done"} if success else {"type": "task_error"},
             task_id=task_id,
         )
-        _save_task_result(result=text, task_id=task_id, task=prompt)
+        _save_task_result(result=text, task_id=task_id, task=prompt, success=success)
         self.printer.cleanup_task(str(task_id))
 
     def _broadcast_failure_result(

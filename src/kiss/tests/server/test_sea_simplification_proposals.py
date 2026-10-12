@@ -7,9 +7,8 @@
 ``reports/archive/sea-run-agent-2026-10-04/sea-run-agent-semantics-assessment-2026-10-04.md``
 §3 proposed
 nine changes; each has a test here that drives the real code paths
-(the settings loader, the daemon-side ``apply_sea``, the
-dispatcher with a captured ``daemon_client.run`` and a real
-``VSCodeServer`` run for the classifier):
+(the settings loader, the daemon-side ``apply_sea`` and the
+dispatcher with a captured ``daemon_client.run``):
 
 * P1 — what a SEA is, is its base class (``BaseSea`` / ``WorkerSea`` /
   ``ChannelSea``): each lays a dict of defaults under the subclass's
@@ -19,7 +18,9 @@ dispatcher with a captured ``daemon_client.run`` and a real
   ``run_agent`` calls, so there is nothing a child cannot honour.
 * P3 — ``add_to_prompt`` is not a setting; ``{task_id}`` is
   substituted in what ``prompt(task)`` returns.
-* P4 — the classifier never demotes a ``use_worktree`` a script pinned.
+* P4 — gone with the worktree refactor: a worktree is no longer a
+  setting the classifier could demote; the agent's ``create_worktree``
+  tool makes one on demand.
 * P5 — ``run_agent`` and ``run_parallel`` share one argument order;
   ``workspace`` and ``tool_profile`` moved (into ``options`` / out of it).
 * P6 — ``cron`` is the registered command ``/cron``; ``agent`` resolves
@@ -34,11 +35,8 @@ from __future__ import annotations
 
 import inspect
 import json
-import os
 import re
 import threading
-import time
-import unittest
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -68,13 +66,8 @@ from kiss.agents.sorcar.sea_settings import (
     resolve_settings,
 )
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
-from kiss.agents.sorcar.task_classifier import clear_classification_cache
-from kiss.core import config as config_module
-from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
-    CapturePrinter,
     IsolatedKissHome,
     StandInModelServer,
     finish_response,
@@ -86,7 +79,7 @@ from kiss.tests.server.parallel_agent_harness import (
 @pytest.fixture
 def home() -> Iterator[IsolatedKissHome]:
     isolated = IsolatedKissHome(prefix="kiss-sea-proposals-")
-    isolated.write_config(is_worktree=False, auto_commit_mode=False, classify_tasks=False)
+    isolated.write_config(classify_tasks=False)
     try:
         yield isolated
     finally:
@@ -323,9 +316,11 @@ def test_run_agent_and_run_parallel_share_one_argument_order(home: IsolatedKissH
     run_parallel = list(inspect.signature(tools["run_parallel"]).parameters)
     assert run_agent == [
         "task", "agent", "model", "tool_profile", "max_budget", "timeout", "options", "wait",
+        "machine", "description",
     ]
     assert run_parallel == [
         "tasks", "agent", "model", "tool_profile", "max_budget", "timeout", "options",
+        "description",
     ]
     assert run_agent[1:6] == run_parallel[1:6]
     agent_job = list(inspect.signature(tools["agent_job"]).parameters)
@@ -480,7 +475,7 @@ class Sea(BaseSea):
     assert lines[1] == "classes: BaseSea > WorkerSea > Sea"
     settings = json.loads(lines[2].removeprefix("settings: "))
     assert settings["model"] == "m-1" and settings["timeout"] == 60
-    assert settings["use_worktree"] is False
+    assert settings["use_memory"] is False
     assert lines[3] == "model: m-1"
     assert lines[4] == "tools added: probe"
     assert lines[5] == "methods defined: system_prompt, prompt, tools"
@@ -662,8 +657,6 @@ def test_run_agent_wait_false_returns_a_job_the_parent_waits_on_or_kills(
             work_dir=str(home.repo),
             model=STANDIN_MODEL,
             model_config=model.model_config,
-            use_worktree=False,
-            auto_commit=False,
             endpoint_file=daemon.endpoint_file,
             timeout=300,
         )
@@ -724,124 +717,3 @@ def test_agent_job_validates_its_arguments_and_sees_only_its_owners_jobs() -> No
             del agent_dispatch._AGENT_JOBS[job.job_id]
     bad_wait = make_run_agent_tool("")("t", wait="maybe")
     assert bad_wait == "Error: wait must be true or false, got 'maybe'."
-
-
-# ---------------------------------------------------------------------------
-# P4 — the classifier never demotes a script-pinned worktree
-# ---------------------------------------------------------------------------
-
-_CLASSIFIER_MARKER = "You are a task classifier"
-_KEY_FIELDS = (
-    "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY",
-    "OPENROUTER_API_KEY", "ZAI_API_KEY", "MOONSHOT_API_KEY",
-)
-
-
-def _verdict_body(is_development: bool) -> dict[str, Any]:
-    return {
-        "id": "chatcmpl-kiss-classifier", "object": "chat.completion", "created": 0,
-        "model": STANDIN_MODEL,
-        "choices": [{
-            "index": 0, "finish_reason": "stop",
-            "message": {"role": "assistant", "content": json.dumps({
-                "is_simple": not is_development, "is_development": is_development,
-            })},
-        }],
-        "usage": {"prompt_tokens": 40, "completion_tokens": 12, "total_tokens": 52},
-    }
-
-
-class ClassifierNeverDemotesAPinnedWorktreeTest(unittest.TestCase):
-    """The same non-development verdict demotes a tab default but not a SEA's pin."""
-
-    def setUp(self) -> None:
-        from kiss.agents.sorcar import worktree_pool
-
-        self._saved_env = {
-            name: os.environ.get(name)
-            for name in (worktree_pool._DISABLE_ENV, "KISS_DISABLE_TASK_CLASSIFIER")
-        }
-        os.environ[worktree_pool._DISABLE_ENV] = "1"
-        os.environ["KISS_DISABLE_TASK_CLASSIFIER"] = "0"
-        self.home = IsolatedKissHome(prefix="kiss-sea-pinned-wt-")
-        self.home.write_config(
-            auto_commit_mode=False, is_worktree=True, max_budget=5.0,
-            use_web_browser=False, classify_tasks=True,
-        )
-        clear_classification_cache()
-        keys = config_module.DEFAULT_CONFIG
-        self._saved_keys = {name: getattr(keys, name) for name in _KEY_FIELDS}
-        for name in _KEY_FIELDS:
-            setattr(keys, name, "")
-        keys.OPENAI_API_KEY = "kiss-pinned-standin-key"
-        self.classifier_calls = 0
-        self.standin = StandInModelServer(self._respond)
-        self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
-        self.server.work_dir = str(self.home.repo)
-        self.pinned = _write(
-            self.home.repo / "pinned_sea.py",
-            """
-from kiss.agents.seas.base.base_sea import BaseSea
-
-class Sea(BaseSea):
-    def settings(self, settings):
-        return settings | {'use_worktree': True}
-""",
-        )
-
-    def tearDown(self) -> None:
-        with agent_state.STATE_LOCK:
-            states = list(agent_state.agent_states.values())
-        for state in states:
-            agent = state.agent
-            if agent is not None and getattr(agent, "_wt", None) is not None:
-                try:
-                    agent.discard()
-                except Exception:
-                    pass
-        self.standin.stop()
-        keys = config_module.DEFAULT_CONFIG
-        for name, value in self._saved_keys.items():
-            setattr(keys, name, value)
-        clear_classification_cache()
-        self.home.cleanup()
-        for name, value in self._saved_env.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-    def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
-        if _CLASSIFIER_MARKER in request_text(request):
-            self.classifier_calls += 1
-            return _verdict_body(is_development=False)
-        return finish_response("said hello")
-
-    def _run(self, tab_id: str, prompt: str, sea_path: str = "") -> None:
-        cmd: dict[str, Any] = {
-            "type": "run", "tabId": tab_id, "prompt": prompt, "model": STANDIN_MODEL,
-            "workDir": str(self.home.repo), "useWorktree": True, "isParallel": False,
-            "autoCommit": False, "useWebTools": False, "maxBudget": 5.0,
-            "modelConfig": self.standin.model_config,
-        }
-        if sea_path:
-            cmd["seaPath"] = sea_path
-        self.server._run_task(cmd)
-        deadline = time.time() + 60
-        while time.time() < deadline and not self.printer.events_of_type("result"):
-            time.sleep(0.05)
-
-    def test_tab_default_is_demoted_but_a_sea_pin_stands(self) -> None:
-        self._run("tab-default", "say hello")
-        self.assertEqual(self.classifier_calls, 1)
-        self.assertEqual(self.printer.events_of_type("worktree_created"), [])
-        with self.printer._capture_lock:
-            self.printer.captured.clear()
-        clear_classification_cache()
-        self._run("tab-pinned", "say hello again", sea_path=str(self.pinned))
-        self.assertEqual(self.classifier_calls, 2)
-        created = self.printer.events_of_type("worktree_created")
-        self.assertEqual(len(created), 1, self.printer.events_of_type("result"))
-        results = self.printer.events_of_type("result")
-        self.assertTrue(results and results[-1].get("success") is not False, results)

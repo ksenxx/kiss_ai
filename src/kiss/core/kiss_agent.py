@@ -144,7 +144,7 @@ def unknown_argument_hint(
     ``run_parallel`` tell an options key from a renamed, removed or
     misspelled one).  Otherwise a tool with an ``options`` parameter
     takes its run settings as one JSON object, so a setting passed as
-    a keyword (``use_worktree=False``) is pointed there; the agent
+    a keyword (``use_memory=False``) is pointed there; the agent
     cannot know the accepted keys, so that hint is conditional: the
     tool itself rejects a key that is not a setting.
 

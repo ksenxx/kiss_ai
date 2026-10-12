@@ -5,8 +5,8 @@
 """End-to-end tests for the manual Git Commit button flow.
 
 When the user presses the settings panel's Git Commit button, the
-daemon runs ``_cmd_autocommit_action`` → ``_autocommit_changes`` with
-``manual=True``.  A manual commit must:
+daemon runs ``_cmd_autocommit_action`` → ``_commit_main_tree``.  The
+commit must:
 
 - Generate the commit message from the staged diff ALONE: no
   ``User prompt:`` / ``Result:`` sections, even when the tab has a
@@ -19,10 +19,6 @@ daemon runs ``_cmd_autocommit_action`` → ``_autocommit_changes`` with
   transcript text (the webview suppresses it) while a FAILURE still
   shows its reason in the chat webview.
 
-The post-task autocommit path (``manual=False``) must keep its
-existing behavior: transcript progress events, prompt/result sections
-in the message, and no toast notifications.
-
 These tests drive the real ``VSCodeServer._cmd_autocommit_action``
 against on-disk git repositories; only the billed LLM call inside the
 commit-message helper is replaced by a module-level recording override
@@ -32,7 +28,6 @@ commit-message helper is replaced by a module-level recording override
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import time
 import unittest
@@ -41,23 +36,18 @@ from pathlib import Path
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
-    )
+from kiss.tests.server.conftest import run_git
 
 
 def _init_repo(repo: str) -> None:
     """Create a git repo with one committed file so HEAD exists."""
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Test User")
-    _git(repo, "config", "commit.gpgsign", "false")
+    run_git(repo, "init", "-q")
+    run_git(repo, "config", "user.email", "test@example.com")
+    run_git(repo, "config", "user.name", "Test User")
+    run_git(repo, "config", "commit.gpgsign", "false")
     Path(repo, "README.md").write_text("# Hello\n\nSome content\n")
-    _git(repo, "add", "README.md")
-    _git(repo, "commit", "-q", "-m", "initial commit")
+    run_git(repo, "add", "README.md")
+    run_git(repo, "commit", "-q", "-m", "initial commit")
 
 
 class _ManualCommitHarness(unittest.TestCase):
@@ -148,7 +138,7 @@ class TestManualCommitMessageIsDiffOnly(_ManualCommitHarness):
         assert self.gen_calls[0]["task_result"] is None
         assert "README.md" in self.gen_calls[0]["diff_text"]
 
-        body = _git(self.tmpdir, "log", "-1", "--pretty=%B").stdout
+        body = run_git(self.tmpdir, "log", "-1", "--pretty=%B").stdout
         assert "User prompt:" not in body
         assert "Result:" not in body
         assert body.strip() == "feat: update readme"
@@ -242,33 +232,6 @@ class TestManualCommitFailure(_ManualCommitHarness):
         errors = [n for n in self._notifications() if n["severity"] == "error"]
         assert len(errors) == 1
         assert errors[0]["message"] == done["message"]
-
-
-class TestPostTaskAutocommitUnchanged(_ManualCommitHarness):
-    """The post-task path (manual=False) keeps its existing behavior."""
-
-    def test_prompt_and_result_still_included(self) -> None:
-        """Direct _autocommit_changes keeps prompt/result and progress."""
-        tab_id = "tab-posttask"
-        self._register_tab_with_history(tab_id)
-        Path(self.tmpdir, "README.md").write_text("# Post task\n")
-
-        self.server._autocommit_changes(tab_id, work_dir=self.tmpdir)
-
-        types = [e.get("type") for e in self.events]
-        assert "autocommit_progress" in types, types
-        assert "notification" not in types, types
-        done = next(
-            e for e in self.events if e.get("type") == "autocommit_done"
-        )
-        assert done["success"] is True
-        assert "manual" not in done
-        assert len(self.gen_calls) == 1
-        assert self.gen_calls[0]["user_prompt"] == "please update the readme"
-        assert self.gen_calls[0]["task_result"] == "updated the readme"
-        body = _git(self.tmpdir, "log", "-1", "--pretty=%B").stdout
-        assert "User prompt:" in body
-        assert "Result:" in body
 
 
 if __name__ == "__main__":

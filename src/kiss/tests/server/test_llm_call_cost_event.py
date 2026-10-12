@@ -24,8 +24,7 @@ from kiss.agents.seas.autorouter.autorouter_sea import observed_call_costs
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model_info import calculate_cost
 from kiss.server.json_printer import JsonPrinter
-
-from .test_history_task_meta_server import _redirect, _restore
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class _ScriptedModel:
@@ -197,7 +196,7 @@ class TestObservedCallCosts:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.saved_home = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = str(th._KISS_DIR)
 
@@ -205,7 +204,7 @@ class TestObservedCallCosts:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         if self.saved_home is None:
             os.environ.pop("KISS_HOME", None)
         else:

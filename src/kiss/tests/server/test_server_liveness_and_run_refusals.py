@@ -52,8 +52,6 @@ import asyncio
 import json
 import os
 import shutil
-import socket
-import ssl
 import subprocess
 import tempfile
 import threading
@@ -75,6 +73,12 @@ from kiss.server.web_server import (
     _snapshot_active_tabs,
 )
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.server.conftest import (
+    find_free_port,
+    no_verify_ssl,
+    redirect_persistence,
+    restore_persistence,
+)
 
 _UNAVAILABLE_MODEL = "kiss-test-no-such-model"
 """Model name guaranteed to be absent from ``get_available_models()``.
@@ -82,38 +86,6 @@ _UNAVAILABLE_MODEL = "kiss-test-no-such-model"
 Makes the real worker thread hit ``task_runner``'s "No model
 available." guard and return before contacting any provider.
 """
-
-
-def _find_free_port() -> int:
-    """Return an available TCP port on the loopback interface."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return an SSL client context that skips certificate checks."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:
-    """Point the persistence layer at a scratch DB under *tmpdir*."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_persistence(saved: tuple[Any, Any, Any]) -> None:
-    """Undo :func:`_redirect_persistence`."""
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -132,11 +104,11 @@ class _ServerHarness(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.work_dir = Path(self.tmpdir) / "repo"
         self.work_dir.mkdir()
         self.server = RemoteAccessServer(
@@ -169,7 +141,7 @@ class _ServerHarness(IsolatedAsyncioTestCase):
             agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect(
@@ -500,7 +472,7 @@ class TestStartupWindowIsLive(_ServerHarness):
             title="starting task",
             create=True,
         )
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             auth = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
@@ -559,7 +531,7 @@ class TestSecondServerPreservesRegistry(_ServerHarness):
 
         RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             url_file=Path(self.tmpdir) / "remote-url-2.json",
             local_endpoint_file=Path(self.tmpdir) / "sorcar-local-2.json",
             work_dir=str(self.work_dir),

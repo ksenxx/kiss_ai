@@ -27,8 +27,8 @@ so a SEA defines only what it changes::
 
 What a SEA *is* is its base class: :class:`BaseSea` is an ordinary
 Sorcar session with the caller's or the user's settings;
-:class:`WorkerSea` a focused tool-bound run on the caller's tree (no
-worktree, no auto-commit, no classifier, no browser, no memory);
+:class:`WorkerSea` a focused tool-bound run on the caller's tree as it
+is (no worktree tools, no classifier, no browser, no memory);
 :class:`ChannelSea` a worker that serves an external service (Slack,
 email, cron) from a scratch directory, inherits nothing from the
 calling task and holds a channel workspace (every behaviour is listed
@@ -82,13 +82,14 @@ from kiss.core.tool_verdict import ALLOW, Verdict, refuse
 __all__ = ["ALLOW", "BaseSea", "ChannelSea", "Verdict", "WorkerSea", "refuse"]
 
 WORKER_DEFAULTS: dict[str, Any] = {
-    "use_worktree": False,
-    "auto_commit": False,
     "auto_classify": False,
     "use_web_tools": False,
     "use_memory": False,
 }
 """The settings :class:`WorkerSea` lays under its subclass's own."""
+
+WORKTREE_TOOL_NAMES: frozenset[str] = frozenset({"create_worktree", "commit_and_merge"})
+"""The tools :class:`WorkerSea` drops: a worker edits the caller's tree in place."""
 
 SUMMARY_EVERY_STEPS = 10
 """A run with the ``summary`` tool must call it at every step that is a multiple of this."""
@@ -257,15 +258,26 @@ class WorkerSea(BaseSea):
     """A focused tool-bound run on the caller's tree.
 
     Lays :data:`~kiss.agents.sorcar.sea_settings.WORKER_DEFAULTS` under
-    the subclass's own settings: no worktree, no auto-commit, no
-    classifier, no browser, no memory (``/sh``, ``/ask``, ``/merge``,
-    ``/remember``, ``/forget``, ``/task_update``).  A subclass that
-    writes one of those keys overrides the default, as with any base.
+    the subclass's own settings: no classifier, no browser, no memory
+    (``/sh``, ``/ask``, ``/merge``, ``/remember``, ``/forget``,
+    ``/task_update``).  A subclass that writes one of those keys
+    overrides the default, as with any base.  A worker edits the
+    caller's tree as it is: :meth:`tools` drops the ``create_worktree``
+    and ``commit_and_merge`` tools, so the run never moves into a git
+    worktree of its own (``/merge`` resolves conflicts in the checkout
+    that holds them).
     """
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Return *settings* with the worker defaults laid under the subclass's keys."""
         return settings | WORKER_DEFAULTS
+
+    def tools(self, tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:
+        """Return *tools* without the worktree tools (the worker edits the tree in place)."""
+        return [
+            tool for tool in tools
+            if getattr(tool, "__name__", "") not in WORKTREE_TOOL_NAMES
+        ]
 
 
 class ChannelSea(WorkerSea):

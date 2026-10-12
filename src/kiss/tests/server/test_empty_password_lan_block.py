@@ -55,7 +55,6 @@ import ipaddress
 import json
 import shutil
 import socket
-import ssl
 import subprocess
 import sys
 import tempfile
@@ -73,25 +72,11 @@ from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws_mod
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 _PASSWORD = "correct-horse-battery-staple"
 _PASSWORD2 = "a-different-password"
 _PASSWORD3 = "yet-another-password"
-
-
-def _pick_free_port() -> int:
-    """Return an OS-assigned free TCP port on this host."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("0.0.0.0", 0))
-        return int(sock.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Permissive SSL context for the dev self-signed cert."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
 
 
 def _lan_ip() -> str | None:
@@ -119,7 +104,7 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         """Start a real server on all interfaces with an EMPTY password."""
-        self._port = _pick_free_port()
+        self._port = find_free_port()
         self._orig_config: str | None = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -157,7 +142,7 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
         def fetch() -> int:
             try:
                 with urllib.request.urlopen(
-                    url, context=_no_verify_ssl(), timeout=10,
+                    url, context=no_verify_ssl(), timeout=10,
                 ) as resp:
                     return int(resp.status)
             except urllib.error.HTTPError as exc:
@@ -176,7 +161,7 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
 
         def probe() -> str:
             with socket.create_connection((host, self._port), 10) as raw:
-                with _no_verify_ssl().wrap_socket(
+                with no_verify_ssl().wrap_socket(
                     raw, server_hostname=host,
                 ) as tls:
                     tls.sendall(
@@ -190,7 +175,7 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
     async def _ws_connect(self, host: str) -> Any:
         """Open a WSS connection to /ws via *host*."""
         return await connect(
-            f"wss://{host}:{self._port}/ws", ssl=_no_verify_ssl(),
+            f"wss://{host}:{self._port}/ws", ssl=no_verify_ssl(),
         )
 
     async def _auth_reply(self, host: str, password: str) -> str | None:

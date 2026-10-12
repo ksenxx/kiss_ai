@@ -71,7 +71,7 @@ class BarePathAgentScriptRunTest(DaemonRunApiHarness):
         prompts: list[str] = []
         self._record_prompts(prompts)
         result = sorcar.run(
-            prompt, work_dir=self.repo, use_worktree=False, auto_commit=False,
+            prompt, work_dir=self.repo,
             endpoint_file=self.endpoint_file, timeout=60, **kwargs,
         )
         assert result.success is True, result
@@ -148,7 +148,7 @@ class Sea(BaseSea):
         self._record_prompts(prompts)
         result = sorcar.run(
             "<task>first thing</task><task>second thing</task>",
-            work_dir=self.repo, use_worktree=False, auto_commit=False,
+            work_dir=self.repo,
             endpoint_file=self.endpoint_file, timeout=60,
         )
         assert result.success is True, result

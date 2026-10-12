@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea
-from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT, sea_pinned
+from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT, defaulted_keys, sea_pinned
 from kiss.agents.sorcar.sea_commands import SeaRun, evaluate_sea, is_channel, sea_layers, sea_name
 from kiss.agents.sorcar.sea_settings import (
     DISPATCHER_SETTINGS,
@@ -96,7 +96,8 @@ RUN_CONFIG_FIELD = "_runConfig"
 """The daemon-side ``run`` command field :func:`apply_sea` leaves its provenance record in.
 
 ``{"sea": <SEA name, "" for a plain run>, "channel": <bool>,
-"pinned": {key: [before, pinned]}}``.
+"pinned": {key: [before, pinned]}, "defaulted": [keys the daemon fills from its
+defaults]}``.
 """
 
 
@@ -200,7 +201,9 @@ def apply_sea(cmd: dict[str, Any], seas: list[BaseSea] | None = None) -> set[str
     parent_task_id = cmd.get("parentTaskId")
     try:
         run = evaluate_sea(
-            seas, task, parent_task_id if isinstance(parent_task_id, str) else "",
+            seas,
+            task,
+            parent_task_id if isinstance(parent_task_id, str) else "",
         )
     except SeaError:
         logger.warning("SEA %s rejected", seas[-1].path, exc_info=True)
@@ -302,6 +305,7 @@ def apply_run(cmd: dict[str, Any], seas: list[BaseSea], run: SeaRun) -> set[str]
         "sea": sea_name(seas),
         "channel": channel,
         "pinned": sea_pinned(cmd, staged, SETTING_FIELDS),
+        "defaulted": defaulted_keys(cmd, staged, SETTING_FIELDS),
     }
     cmd.update(staged)
     return overridden

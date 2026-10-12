@@ -7,12 +7,12 @@
 Bug reproduced by these tests: when a Sorcar process is killed while a
 worktree task is pending, the ``kiss/wt-*`` worktree stays registered
 on disk with dirty uncommitted work but no in-memory ``self._wt`` state
-survives.  Neither ``_release_worktree`` (per-agent) nor
+survives.  Neither the agent's own ``commit_and_merge`` tool nor
 ``sweep_orphaned_state`` (config-debris only) ever merges it, so the
 work is silently stranded.  The fix is
 :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`, wired into
-:meth:`WorktreeSorcarAgent._try_setup_worktree` right before
-``sweep_orphaned_state``.
+:meth:`ChatSorcarAgent._try_setup_worktree` (the ``create_worktree``
+tool) right before ``sweep_orphaned_state``.
 
 Each test creates a real git repo in a temp dir, plants one or more
 ``kiss/wt-*`` worktrees with the same on-disk state a killed-mid-task
@@ -35,12 +35,12 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -88,7 +88,11 @@ def _patch_super_run(
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
-    def fake_run(self_agent: object, **kwargs: object) -> str:
+    def fake_run(self_agent: Any, **kwargs: object) -> str:
+        # What a real task does: resolve work_dir, then call the
+        # ``create_worktree`` tool before its first edit.
+        self_agent.work_dir = str(Path(str(kwargs.get("work_dir") or ".")).resolve())
+        self_agent.create_worktree()
         return return_value
 
     parent_class.run = fake_run
@@ -655,7 +659,7 @@ class TestBranchConfigLoaders:
 
 
 class TestReclaimWiredIntoWorktreeAgent:
-    """End-to-end via WorktreeSorcarAgent: next task adopts orphans."""
+    """End-to-end via ChatSorcarAgent: next task adopts orphans."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -679,9 +683,9 @@ class TestReclaimWiredIntoWorktreeAgent:
             self.repo, "kiss/wt-orphan-b", dirty_kind="untracked",
         )
 
-        # New agent runs a fresh task: this triggers _try_setup_worktree,
-        # which now calls reclaim before creating its own worktree.
-        agent = WorktreeSorcarAgent("test")
+        # New agent runs a fresh task whose ``create_worktree`` call
+        # reclaims orphans before creating its own worktree.
+        agent = ChatSorcarAgent("test")
         agent.run(prompt_template="task", work_dir=str(self.repo))
 
         # Orphans gone.

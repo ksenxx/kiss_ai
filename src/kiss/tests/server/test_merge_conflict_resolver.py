@@ -2,22 +2,23 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests of the merge SEA resolving an auto-commit merge conflict.
+"""End-to-end tests of the merge SEA resolving a ``commit_and_merge`` conflict.
 
 Two layers are exercised with real git repositories and no test
 doubles:
 
-* :func:`kiss.server.merge_conflict_resolver.resolve_merge_conflict`
-  through :meth:`WorktreeSorcarAgent.merge`, with the merge agent
+* :func:`kiss.agents.sorcar.merge_conflict_resolver.resolve_merge_conflict`
+  through :meth:`ChatSorcarAgent.merge`, with the merge agent
   replaced by plain Python runners that resolve, ignore, or fail —
   the runner is an injection point of the function under test, not a
   patch — and the message / branch / stash outcomes of each.
-* The whole auto-commit run through the real task runner: a stand-in
-  OpenAI endpoint scripts the task agent (edit a line in the
-  worktree), the test commits a competing edit on the user's branch
-  meanwhile, and the same endpoint then scripts the merge SEA (resolve
-  and ``git add``).  The task's persisted tokens / cost / steps must
-  include the merge agent's, and the tab must receive the new totals.
+* A whole run through the real task runner: a stand-in OpenAI endpoint
+  scripts the task agent (``create_worktree``, edit a line in the
+  worktree, ``commit_and_merge``), the test commits a competing edit
+  on the user's branch meanwhile, and the same endpoint then scripts
+  the merge SEA (resolve and ``git add``).  The task's persisted
+  tokens / cost / steps must include the merge agent's, and the tab
+  must receive the new totals.
 """
 
 from __future__ import annotations
@@ -36,15 +37,16 @@ import pytest
 from kiss.agents.seas.base.base_sea import WorkerSea
 from kiss.agents.seas.merge import merge_sea
 from kiss.agents.sorcar import persistence, sea_commands
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, MergeResult, _git
+from kiss.agents.sorcar.merge_conflict_resolver import resolve_merge_conflict
 from kiss.agents.sorcar.persistence import _add_task, _add_task_usage
 from kiss.agents.sorcar.sea_commands import base_settings
 from kiss.agents.sorcar.sea_settings import resolve_settings
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
-from kiss.server.merge_conflict_resolver import resolve_merge_conflict
 from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -52,7 +54,6 @@ from kiss.tests.server.parallel_agent_harness import (
     StandInModelServer,
     finish_response,
     request_text,
-    run_git,
     tool_call_response,
 )
 from kiss.tests.server.test_autocommit_wire_toggle import _FakeCredentials
@@ -117,13 +118,14 @@ def _rogue_committing_runner(parent_agent: Any, prompt: str, repo: Path) -> None
 
 
 class TestResolveMergeConflictThroughMerge:
-    """``WorktreeSorcarAgent.merge(conflict_resolver=...)`` with real git."""
+    """``ChatSorcarAgent.merge(conflict_resolver=...)`` with real git."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.repo = _make_repo(Path(self.tmpdir) / "repo")
-        self.agent = WorktreeSorcarAgent("test")
-        assert self.agent._try_setup_worktree(self.repo, None) is not None
+        self.agent = ChatSorcarAgent("test")
+        self.agent.work_dir = str(self.repo)
+        assert self.agent.create_worktree().startswith("Created worktree ")
         wt = self.agent._wt
         assert wt is not None
         self.wt = wt
@@ -283,7 +285,7 @@ class TestPersistMergeAgentUsage:
 
         task_id, _ = _add_task("task that conflicted", "")
         _save_task_extra({"tokens": 100, "cost": 0.5, "steps": 3}, task_id=task_id)
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._last_task_id = task_id
         flow = _Flow()
         before = _agent_usage(agent)
@@ -303,7 +305,7 @@ class TestPersistMergeAgentUsage:
     def test_no_spend_and_no_row_are_silent(self) -> None:
         from kiss.agents.sorcar.sorcar_agent import _agent_usage, _attribute_sub_usage
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         flow = _Flow()
         flow._persist_merge_agent_usage(agent, _agent_usage(agent), "tab")
         # Spend without a persisted row (an agent that never ran).
@@ -316,7 +318,7 @@ class TestPersistMergeAgentUsage:
         assert flow.capture.events_of_type("usage_info") == []
 
 
-class _StoppedDuringMergeAgent(WorktreeSorcarAgent):
+class _StoppedDuringMergeAgent(ChatSorcarAgent):
     """A worktree agent whose merge agent spends, then is stopped by the user."""
 
     repo_root: Path
@@ -362,13 +364,10 @@ class TestMergeUsagePersistsWhenTheMergeIsStopped:
             state = agent_state.AgentState(
                 task_id, tab_id=tab_id, server_owned=True, agent=agent,
             )
-            state.use_worktree = True
             agent_state.register(state)
 
         with pytest.raises(KeyboardInterrupt):
-            self.server._handle_worktree_action(
-                "merge", tab_id, internal=True, resolve_conflicts=True,
-            )
+            self.server._handle_worktree_action("merge", tab_id)
 
         (row,) = [r for r in _usage_rows() if r["id"] == task_id]
         assert (row["tokens"], row["cost"], row["steps"]) == (140, 0.75, 5)
@@ -379,8 +378,8 @@ class TestMergeUsagePersistsWhenTheMergeIsStopped:
 class TestMergeSea:
     def test_settings_follow_the_sea_contract(self) -> None:
         # ``settings()`` is the one configuration getter: a ``WorkerSea``
-        # (no web, memory, worktree, commits or classification — a merge
-        # runs on the real checkout) with the budget cap;
+        # (no web, memory or classification — a merge runs on the real
+        # checkout) with the budget cap;
         # ``system_prompt()`` supplies the base prompt.
         sea = merge_sea.MergeSea()
         assert isinstance(sea, WorkerSea)
@@ -389,12 +388,9 @@ class TestMergeSea:
         resolved = resolve_settings(base_settings([sea]))
         assert resolved["use_web_tools"] is False
         assert resolved["use_memory"] is False
-        assert resolved["use_worktree"] is False
-        assert resolved["auto_commit"] is False
         assert resolved["auto_classify"] is False
         assert resolved["max_budget"] == merge_sea.MAX_BUDGET_USD
-        for legacy in ("use_web_tools", "use_memory", "use_worktree",
-                       "auto_commit", "max_budget"):
+        for legacy in ("use_web_tools", "use_memory", "max_budget"):
             assert not hasattr(merge_sea, legacy), legacy
 
     def test_prompt_lists_files_and_task(self) -> None:
@@ -438,8 +434,8 @@ _TASK_MARKER = "MERGE-SEA-E2E-TASK"
 _MERGE_MARKER = "Incoming task branch (theirs)"
 
 
-class TestAutoCommitMergeConflictEndToEnd(unittest.TestCase):
-    """A real run whose auto-merge conflicts, fixed by the merge SEA."""
+class TestCommitAndMergeConflictEndToEnd(unittest.TestCase):
+    """A real run whose ``commit_and_merge`` conflicts, fixed by the merge SEA."""
 
     def setUp(self) -> None:
         self.home = IsolatedKissHome(prefix="kiss-merge-sea-e2e-")
@@ -447,9 +443,7 @@ class TestAutoCommitMergeConflictEndToEnd(unittest.TestCase):
         (self.repo / "f.txt").write_text("a\nb\nc\n")
         run_git(self.repo, "add", "f.txt")
         run_git(self.repo, "commit", "-qm", "add f")
-        self.home.write_config(
-            auto_commit_mode=True, is_worktree=True, max_budget=5.0, use_web_browser=False,
-        )
+        self.home.write_config(max_budget=5.0, use_web_browser=False)
         self.credentials = _FakeCredentials()
         self.calls: list[str] = []
         self._calls_lock = threading.Lock()
@@ -475,10 +469,11 @@ class TestAutoCommitMergeConflictEndToEnd(unittest.TestCase):
     def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
         """Script both agents from the one endpoint.
 
-        Task agent: edit line ``b`` in the worktree, then — while
-        finishing — the test commits a competing edit of the same line
-        on the user's branch so the auto-merge must conflict.  Merge
-        agent: write the resolution and stage it, then finish.
+        Task agent: ``create_worktree``, edit line ``b`` in the worktree,
+        then — just before its ``commit_and_merge`` — the test commits a
+        competing edit of the same line on the user's branch so the
+        merge must conflict.  Merge agent: write the resolution and
+        stage it, then finish.
         """
         text = request_text(request)
         with self._calls_lock:
@@ -496,6 +491,8 @@ class TestAutoCommitMergeConflictEndToEnd(unittest.TestCase):
                 )
             return finish_response("conflict resolved")
         if task_calls == 1:
+            return tool_call_response("create_worktree", {})
+        if task_calls == 2:
             return tool_call_response(
                 "Bash",
                 {
@@ -503,8 +500,10 @@ class TestAutoCommitMergeConflictEndToEnd(unittest.TestCase):
                     "description": "edit line b",
                 },
             )
-        (self.repo / "f.txt").write_text("a\nB-user\nc\n")
-        run_git(self.repo, "commit", "-qam", "user edits line b meanwhile")
+        if task_calls == 3:
+            (self.repo / "f.txt").write_text("a\nB-user\nc\n")
+            run_git(self.repo, "commit", "-qam", "user edits line b meanwhile")
+            return tool_call_response("commit_and_merge", {})
         return finish_response("task done")
 
     def test_merge_agent_completes_the_merge_and_is_charged_to_the_task(self) -> None:
@@ -515,9 +514,7 @@ class TestAutoCommitMergeConflictEndToEnd(unittest.TestCase):
                 "prompt": f"{_TASK_MARKER}: change line b of f.txt",
                 "model": STANDIN_MODEL,
                 "workDir": str(self.repo),
-                "useWorktree": True,
                 "isParallel": False,
-                "autoCommit": True,
                 "useWebTools": False,
                 "maxBudget": 5.0,
                 "modelConfig": self.standin.model_config,
@@ -541,16 +538,23 @@ class TestAutoCommitMergeConflictEndToEnd(unittest.TestCase):
             r for r in rows.values() if r.get("parent_task_id") == task_row["id"]
         ]
         assert merge_row["tokens"] > 0 and merge_row["steps"] > 0
-        result_events = [
-            e for e in self.printer.events_of_type("result")
-            if e.get("taskId") == task_row["id"] or "taskId" not in e
-        ]
-        own = result_events[0]
-        assert task_row["tokens"] == own["total_tokens"] + merge_row["tokens"]
-        assert task_row["steps"] == own["step_count"] + merge_row["steps"]
-        assert task_row["cost"] == pytest.approx(
-            float(own["cost"].lstrip("$")) + merge_row["cost"], abs=1e-4,
+        # The merge agent runs inside the task's ``commit_and_merge``
+        # call, so its result lands first and the task's own result
+        # already carries the merge agent's spend on top of the task
+        # agent's calls.
+        merge_result, task_result = self.printer.events_of_type("result")
+        assert (merge_result["total_tokens"], merge_result["step_count"]) == (
+            merge_row["tokens"], merge_row["steps"],
         )
+        # The merge SEA's prompt quotes the task, so its calls carry both markers.
+        task_calls = sum(1 for t in self.calls if _MERGE_MARKER not in t)
+        assert task_calls == 4, self.calls
+        assert task_row["steps"] == task_result["step_count"] == task_calls + merge_row["steps"]
+        assert task_row["tokens"] == task_result["total_tokens"] > merge_row["tokens"]
+        assert task_row["cost"] == pytest.approx(
+            float(task_result["cost"].lstrip("$")), abs=1e-4,
+        )
+        assert task_row["cost"] > merge_row["cost"]
         usage_events = [
             e for e in self.printer.events_of_type("usage_info")
             if e.get("total_tokens") == task_row["tokens"]

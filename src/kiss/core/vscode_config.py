@@ -80,13 +80,9 @@ DEFAULTS: dict[str, Any] = {
     "custom_headers": "",
     "use_web_browser": True,
     "remote_password": "",
-    "auto_commit_mode": True,
-    "is_worktree": True,
     # Pre-run task classification (kiss.agents.sorcar.task_classifier):
     # one model call (a decisions model, or a single-call KISSAgent on
-    # the run's model) decides is_simple (lite system prompt) and
-    # is_development (worktree on/off for that run only — this
-    # persisted is_worktree value is not touched).
+    # the run's model) decides is_simple (lite system prompt).
     "classify_tasks": True,
     # The one switch for OpenRouter's ~typesafe/jev-latest decisions
     # model (the settings panel's "Use Jev" checkbox; gate:
@@ -345,8 +341,11 @@ def recent_work_dirs() -> list[dict[str, Any]]:
 def record_recent_work_dir(path: str) -> None:
     """Move *path* to the front of the recently opened working directories.
 
-    No-op when *path* is not an existing directory.  The list is
-    capped at :data:`MAX_RECENT_WORK_DIRS` entries and persisted through
+    No-op when *path* is not an existing directory.  One row per
+    directory: an earlier spelling of the same directory (a trailing
+    separator, ``os.path.normpath`` equal) is replaced, the way the
+    clients tell directories apart.  The list is capped at
+    :data:`MAX_RECENT_WORK_DIRS` entries and persisted through
     :func:`save_config`, so the directories opened from any surface
     (VS Code windows, the remote webapp) share one history.
 
@@ -355,8 +354,11 @@ def record_recent_work_dir(path: str) -> None:
     """
     if not os.path.isdir(path):
         return
+    same = os.path.normpath(path)
     with _config_lock:
-        entries = [e for e in recent_work_dirs() if e["path"] != path]
+        entries = [
+            e for e in recent_work_dirs() if os.path.normpath(e["path"]) != same
+        ]
         entries.insert(0, {"path": path, "ts": time.time()})
         save_config({"recent_work_dirs": entries[:MAX_RECENT_WORK_DIRS]})
 

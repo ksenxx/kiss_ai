@@ -94,7 +94,10 @@ async function main() {
   view.dispose();
 
   let settled = false;
-  const timeout = new Promise(resolve => setTimeout(resolve, 500, 'timeout'));
+  let timer;
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(resolve, 500, 'timeout');
+  });
   const outcome = await Promise.race([
     Promise.all(waits).then(() => {
       settled = true;
@@ -102,6 +105,7 @@ async function main() {
     }),
     timeout,
   ]);
+  clearTimeout(timer);
   assert.strictEqual(outcome, 'settled', 'dispose() settles pending waits');
   assert.ok(settled);
   assert.deepStrictEqual(

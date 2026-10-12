@@ -5,16 +5,11 @@
 
 // End-to-end (JSDOM) tests: opening a NEW CHAT carries the composer
 // draft (the text sitting in the task textarea) into the new chat's
-// textarea on every surface (media/main.js):
-//  - editor-tabs mode: the + button / Cmd+T (host `clearChat`) post
-//    `openChatPanel` WITH `pendingText`, and a panel booted with the
-//    host-stamped `data-kiss-pending-text` seeds its textarea from it
-//    (multi-line drafts included — attribute newlines survive);
-//  - a panel booted WITHOUT the attribute starts with an empty
-//    textarea, and an empty draft still posts `pendingText: ''`;
-//  - sidebar / remote mode (no editor-tab-mode class): createNewTab
-//    copies the draft into the new internal tab's textarea, and the
-//    original tab keeps its own copy.
+// textarea on every surface (media/main.js): the + button and Cmd+T
+// (the host's `clearChat`) copy the draft into the new internal tab's
+// textarea, and no surface asks
+// the host for another editor tab — the chat editor tab of editor-tabs
+// mode opens its chats in place exactly like the sidebar view.
 //
 // Unreachable-branch note: init()'s `!inp.value` guard cannot be false
 // at boot (chat.html ships an empty textarea and nothing runs before
@@ -77,172 +72,95 @@ function byType(posted, type) {
   return posted.filter(m => m.type === type);
 }
 
-const ROOT = 'root-tab-0001';
+const SURFACES = [
+  ['editor tab', ' class="editor-tab-mode"'],
+  ['sidebar', ' class=""'],
+];
 
-function editorAttrs(extra) {
-  return (
-    ' class="editor-tab-mode"' +
-    ` data-kiss-tab-id="${ROOT}"` +
-    ' data-kiss-tab-title="My chat"' +
-    (extra || '')
-  );
-}
-
-// The + button in editor-tabs mode posts openChatPanel carrying the
-// composer draft; an untouched composer still sends pendingText ''.
-function testPlusButtonCarriesDraft() {
-  const {win, posted} = makeWebview(editorAttrs());
+// + on a chat that is still new keeps it; on a used chat it opens a
+// new internal tab that starts with the copied draft.
+function testPlusCopiesDraft(bodyAttrs) {
+  const {win, posted} = makeWebview(bodyAttrs);
   const inp = win.document.getElementById('task-input');
   const addBtn = win.document.getElementById('new-chat-btn');
+  const firstTab = win._testApi.getActiveTabId();
 
   addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  let opens = byType(posted, 'openChatPanel');
-  assert.strictEqual(opens.length, 1, 'the + posts openChatPanel');
   assert.strictEqual(
-    opens[0].pendingText,
-    '',
-    'an empty composer travels as an empty draft',
+    win._testApi.getActiveTabId(),
+    firstTab,
+    'the + on a new chat reuses it',
   );
 
+  // The daemon echo makes the chat used; now + opens a tab.
+  send(win, {type: 'setTaskText', text: 'first task'});
   inp.value = 'refactor the parser';
   addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  opens = byType(posted, 'openChatPanel');
-  assert.strictEqual(opens.length, 2);
-  assert.strictEqual(
-    opens[1].pendingText,
-    'refactor the parser',
-    'the + must carry the composer draft to the host',
-  );
-  assert.strictEqual(
-    inp.value,
-    'refactor the parser',
-    'the opening panel keeps its own draft',
-  );
-}
-
-// Cmd+T reaches an editor-tab panel as the host's `clearChat`; a used
-// tab takes the createNewTab path, which must carry the draft too.
-function testClearChatCarriesDraft() {
-  const {win, posted} = makeWebview(editorAttrs());
-  // A used tab (welcome hidden) so clearChat takes the createNewTab path.
-  win._testApi.hideWelcome();
-  const inp = win.document.getElementById('task-input');
-  inp.value = 'draft typed before Cmd+T';
-
-  send(win, {type: 'clearChat'});
-  const opens = byType(posted, 'openChatPanel');
-  assert.strictEqual(opens.length, 1, 'clearChat asks the host for a panel');
-  assert.strictEqual(
-    opens[0].pendingText,
-    'draft typed before Cmd+T',
-    'Cmd+T must carry the composer draft to the host',
-  );
-}
-
-// A panel booted with data-kiss-pending-text (the host stamped the
-// opener's draft) seeds its textarea from it — multi-line included.
-function testBootSeedsTextareaFromPendingText() {
-  const draft = 'line one\nline two';
-  const {win, posted} = makeWebview(
-    editorAttrs(' data-kiss-pending-text="line one\nline two"'),
-  );
-  const inp = win.document.getElementById('task-input');
-  assert.strictEqual(
-    inp.value,
-    draft,
-    'boot must seed the textarea from data-kiss-pending-text',
-  );
-  const readies = byType(posted, 'ready');
-  assert.strictEqual(readies.length, 1, 'seeding must not break ready');
-  assert.strictEqual(readies[0].tabId, ROOT);
-
-  // The draft survives a hop to another tab and back (it was adopted
-  // into the root tab's inputValue, not only painted into the DOM).
-  send(win, {
-    type: 'output',
-    tabId: ROOT,
-    data: {type: 'subagent_tab', tab_id: 'sub-1', parent_tab_id: ROOT},
-  });
-  win._testApi.endLaunch();
-  const subStrip = win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id="sub-1"]',
-  );
-  if (subStrip) {
-    subStrip.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-    assert.notStrictEqual(win._testApi.getActiveTabId(), ROOT);
-    const rootStrip = win.document.querySelector(
-      `#tab-list .chat-tab[data-tab-id="${ROOT}"]`,
-    );
-    rootStrip.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-    assert.strictEqual(
-      inp.value,
-      draft,
-      'the seeded draft must round-trip through a tab switch',
-    );
-  }
-}
-
-// Without the attribute the textarea starts empty (the pre-change
-// behavior is preserved for plain opens).
-function testBootWithoutPendingTextStaysEmpty() {
-  const {win} = makeWebview(editorAttrs());
-  assert.strictEqual(
-    win.document.getElementById('task-input').value,
-    '',
-    'no data-kiss-pending-text: the textarea starts empty',
-  );
-}
-
-// Sidebar / remote surface (no editor-tab-mode class): the in-webview
-// createNewTab already copies the draft into the new internal tab.
-// Guard that parity so "all surfaces" stays true.
-function testSidebarCreateNewTabCopiesDraft() {
-  const {win, posted} = makeWebview(' class=""');
-  const inp = win.document.getElementById('task-input');
-  const firstTab = win._testApi.getActiveTabId();
-  inp.value = 'sidebar draft';
-
-  win._testApi.createNewTab();
   const newTab = win._testApi.getActiveTabId();
   assert.notStrictEqual(newTab, firstTab, 'a new internal tab is active');
   assert.strictEqual(
     inp.value,
-    'sidebar draft',
+    'refactor the parser',
     'the new internal tab starts with the copied draft',
   );
   assert.strictEqual(
     byType(posted, 'openChatPanel').length,
     0,
-    'no editor tab is requested outside editor-tabs mode',
+    'no surface asks the host for another editor tab',
   );
 
-  // The originating tab kept its own copy (createNewTab alone retires
-  // nothing; going back to it is a Chats-panel pick).
+  // The idle chat left behind is retired (+ moves on from it; the
+  // Chats panel keeps it one click away).
   win._testApi.endLaunch();
   assert.ok(
-    win._testApi.openTabs().some(t => t.id === firstTab),
-    'the first tab is still open',
+    !win._testApi.openTabs().some(t => t.id === firstTab),
+    'the idle chat left behind is retired',
   );
-  win._testApi.switchToTab(firstTab);
-  assert.strictEqual(win._testApi.getActiveTabId(), firstTab);
+  win.close();
+}
+
+// Cmd+T reaches the webview as the host's `clearChat`; a used tab
+// takes the createNewTab path, which must carry the draft too.
+function testClearChatCopiesDraft(bodyAttrs) {
+  const {win, posted} = makeWebview(bodyAttrs);
+  send(win, {type: 'setTaskText', text: 'first task'});
+  const inp = win.document.getElementById('task-input');
+  const firstTab = win._testApi.getActiveTabId();
+  inp.value = 'draft typed before Cmd+T';
+
+  send(win, {type: 'clearChat'});
+  assert.notStrictEqual(win._testApi.getActiveTabId(), firstTab);
   assert.strictEqual(
     inp.value,
-    'sidebar draft',
-    'the originating tab keeps its draft',
+    'draft typed before Cmd+T',
+    'Cmd+T copies the composer draft into the new chat',
   );
+  assert.strictEqual(byType(posted, 'openChatPanel').length, 0);
+  win.close();
+}
+
+// A webview starts with an empty textarea.
+function testBootStartsEmpty(bodyAttrs) {
+  const {win} = makeWebview(bodyAttrs);
+  assert.strictEqual(
+    win.document.getElementById('task-input').value,
+    '',
+    'the textarea starts empty',
+  );
+  win.close();
 }
 
 function main() {
   const tests = [
-    testPlusButtonCarriesDraft,
-    testClearChatCarriesDraft,
-    testBootSeedsTextareaFromPendingText,
-    testBootWithoutPendingTextStaysEmpty,
-    testSidebarCreateNewTabCopiesDraft,
+    testPlusCopiesDraft,
+    testClearChatCopiesDraft,
+    testBootStartsEmpty,
   ];
-  for (const t of tests) {
-    t();
-    console.log(`  ok - ${t.name}`);
+  for (const [label, attrs] of SURFACES) {
+    for (const t of tests) {
+      t(attrs);
+      console.log(`  ok - ${label}: ${t.name}`);
+    }
   }
   console.log('newChatCopiesDraft.test.js: all tests passed');
 }

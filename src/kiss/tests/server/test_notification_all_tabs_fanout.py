@@ -9,8 +9,8 @@ Two notification paths used to target only the owning tab
 the task's event stream (``JsonPrinter._subscribers`` /
 ``_fanout_targets``):
 
-* the auto-commit lifecycle toasts emitted by
-  ``WorktreeSorcarAgent._broadcast_commit_notification``, and
+* the worktree commit lifecycle toasts emitted by
+  ``ChatSorcarAgent._broadcast_commit_notification``, and
 * the live model-picker override emitted by
   ``SorcarAgent._show_model_in_picker`` via
   ``JsonPrinter.broadcast_agent_model_pick`` (which must fan out even
@@ -18,7 +18,7 @@ the task's event stream (``JsonPrinter._subscribers`` /
   using the new explicit ``task_id`` fallback).
 
 All tests drive the real code paths — real on-disk git worktrees for
-the auto-commit toasts and a real :class:`JsonPrinter` subscriber map
+the commit toasts and a real :class:`JsonPrinter` subscriber map
 — with a capture printer that records ``broadcast`` payloads.
 
 Also covers the printer-side "transient, all-watching-tabs"
@@ -68,7 +68,7 @@ class _CapturePrinter(JsonPrinter):
 
 
 class TestAutoCommitToastReachesAllTabs:
-    """The auto-commit toasts fan out to every tab watching the task."""
+    """The worktree commit toasts fan out to every tab watching the task."""
 
     def setup_method(self) -> None:
         agent_state.agent_states.clear()
@@ -92,7 +92,7 @@ class TestAutoCommitToastReachesAllTabs:
             printer.subscribe_tab("4242", "tab-viewer-b")
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             notifs = printer.of_type("notification")
             expected_tabs = {"tab-owner", "tab-viewer-a", "tab-viewer-b"}
@@ -123,7 +123,7 @@ class TestAutoCommitToastReachesAllTabs:
             agent._last_task_id = "4343"
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             notifs = printer.of_type("notification")
             assert len(notifs) == 2
@@ -143,7 +143,7 @@ class TestAutoCommitToastReachesAllTabs:
             printer.subscribe_tab("4444", "tab-viewer")
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             notifs = printer.of_type("notification")
             assert len(notifs) == 2
@@ -293,7 +293,7 @@ class TestBroadcastTransientPrimitive:
 
 
 class TestTransientBroadcastNearTeardown:
-    """Auto-commit toasts and model-picker updates still reach every
+    """Worktree commit toasts and model-picker updates still reach every
     watching tab when the printer's thread-local ``task_id`` has been
     cleared near teardown (``cleanup_task`` already ran, subscriber set
     lingering) — the agent's explicit ``_last_task_id`` is the only
@@ -317,7 +317,7 @@ class TestTransientBroadcastNearTeardown:
         assert printer._task_key() == ""
         return printer
 
-    def test_autocommit_toasts_after_thread_local_cleared(self) -> None:
+    def test_commit_toasts_after_thread_local_cleared(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_str:
             agent, wt_dir = _setup_worktree_agent(Path(tmp_str), "teardown")
             (wt_dir / "new.txt").write_text("hello\n")
@@ -328,7 +328,7 @@ class TestTransientBroadcastNearTeardown:
             agent._last_task_id = "6161"
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             notifs = printer.of_type("notification")
             expected = {"tab-launch", "tab-viewer"}

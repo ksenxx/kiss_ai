@@ -56,24 +56,7 @@ from kiss.server.web_server import (
 )
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
-
-
-def _find_free_port() -> int:
-    """Return a free TCP port on localhost."""
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 class _ConfigSnapshot:
@@ -101,7 +84,7 @@ class TestH1NoTunnelWithoutPassword(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": ""})
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -154,7 +137,7 @@ class TestH1TunnelStartsWhenPasswordSet(IsolatedAsyncioTestCase):
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
 
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -207,7 +190,7 @@ class TestH2StdoutDevnull(IsolatedAsyncioTestCase):
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
 
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -272,7 +255,7 @@ class TestH3CompareDigestActuallyCalled(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": "right-password"})
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -298,7 +281,7 @@ class TestH3CompareDigestActuallyCalled(IsolatedAsyncioTestCase):
         secrets_mod.compare_digest = _spy  # type: ignore[assignment]
         try:
             async with connect(
-                f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+                f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
             ) as ws:
                 await ws.send(
                     json.dumps({"type": "auth", "password": "wrong-password"}),
@@ -333,7 +316,7 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
         ws_mod._AUTH_FAIL_WINDOW = 60.0
         ws_mod._AUTH_LOCKOUT = 60.0
 
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -352,7 +335,7 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
         """Attempt auth, return the response 'type' or 'closed'."""
         try:
             async with connect(
-                f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+                f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
                 close_timeout=2,
             ) as ws:
                 await ws.send(json.dumps({"type": "auth", "password": password}))

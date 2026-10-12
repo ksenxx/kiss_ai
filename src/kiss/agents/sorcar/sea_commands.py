@@ -88,6 +88,7 @@ from typing import Any, cast
 
 from kiss.agents.seas.base.base_sea import BaseSea, ChannelSea
 from kiss.agents.sorcar.sea_settings import (
+    SEA_BASES,
     SeaError,
     declared_bases,
     declares_hidden,
@@ -1026,10 +1027,6 @@ def run_picked_hook(
         )
 
 
-_PLAIN_BASES = frozenset({"BaseSea", "WorkerSea", "ChannelSea"})
-"""The base classes that register as no model; a class deriving from anything else may."""
-
-
 def _registers_as_model(sea_path: Path) -> bool:
     """Return whether the SEA at *sea_path* defines ``register_as_model()`` returning ``True``.
 
@@ -1056,7 +1053,7 @@ def _registers_as_model(sea_path: Path) -> bool:
         logger.warning("SEA %s: cannot be read", sea_path, exc_info=True)
         return False
     verdict = False
-    if "register_as_model" in source or declared_bases(sea_path) - _PLAIN_BASES:
+    if "register_as_model" in source or declared_bases(sea_path).difference(SEA_BASES):
         try:
             verdict = _call(_method(load_sea(sea_path), "register_as_model")) is True
         except SeaError:
@@ -1310,14 +1307,27 @@ def slash_command_task(prompt: str) -> tuple[str, Path] | None:
     run ``run_agent(agent="xxx", task=text)`` makes, with the SEA's
     ``settings()`` and getters applied by ``apply_sea``.
 
+    A bare ``/xxx`` runs the SEA on the empty task when its ``prompt()``
+    turns that into text (the SEA has a default task, as ``/sync`` has);
+    a SEA that passes the empty task through (the stock
+    :class:`BaseSea`) has nothing to run, so the bare command stays an
+    ordinary prompt.  A ``prompt()`` should append its default to the
+    task rather than substitute it for an empty one, so a caller that
+    prefixes text of its own (the cron preamble) keeps the default too.
+
     Args:
         prompt: The raw user prompt (as submitted by the client).
 
     Returns:
         ``(task_text, sea_path)`` when *prompt* starts with a registered
         command followed by non-empty text other than ``help`` or
-        ``check`` (which :func:`help_text_if_command` answers); else
-        ``None`` — the prompt runs as an ordinary task.
+        ``check`` (which :func:`help_text_if_command` answers), or by
+        nothing when the SEA has a default task; else ``None`` — the
+        prompt runs as an ordinary task.
+
+    Raises:
+        SeaError: Propagated from :func:`load_sea` / :func:`base_prompt`
+            when the SEA of a bare command is broken.
     """
     if not isinstance(prompt, str):
         return None
@@ -1325,10 +1335,12 @@ def slash_command_task(prompt: str) -> tuple[str, Path] | None:
     if parsed is None:
         return None
     command, task_text = parsed
-    if not task_text or task_text.lower() in RESERVED_SUBCOMMANDS:
+    if task_text.lower() in RESERVED_SUBCOMMANDS:
         return None
     sea_path = get_command(command)
     if sea_path is None:
+        return None
+    if not task_text and not base_prompt([load_sea(sea_path)], ""):
         return None
     return task_text, sea_path
 

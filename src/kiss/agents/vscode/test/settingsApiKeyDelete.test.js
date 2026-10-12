@@ -99,8 +99,6 @@ const STORED = {
   custom_api_key: '',
   custom_headers: '',
   remote_password: '',
-  auto_commit_mode: false,
-  is_worktree: false,
 };
 
 // A field the user deliberately cleared must reach the daemon as "",

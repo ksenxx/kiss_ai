@@ -8,7 +8,7 @@
 //
 // * a chat EDITOR PANEL (editor-tab-mode) posts coalesced `metaUpdate`
 //   host messages carrying its #meta-list display strings — tokens,
-//   cost, steps, time, machine, workdir, max budget — whenever they
+//   cost, steps, time, workdir, max budget — whenever they
 //   change, and polls getTaskUpdate (every 5 s) for the running task's
 //   task update, relaying the daemon's reply as the `taskUpdate` state
 //   object {content, running, updatedAt, cost, error} (null once the
@@ -209,10 +209,11 @@ async function main() {
     assert.strictEqual(upd.values.workdir, '/cfg/dir');
     assert.strictEqual(upd.values.maxBudget, '$42.00');
 
-    // The machine name (configData) is mirrored too.
+    // The machine name (configData) is NOT relayed: the Task Info
+    // list has no Machine row.
     send(win, {...CONFIG, machine: 'buildbox'});
     await sleep(300);
-    assert.strictEqual(lastMetaUpdate(wv).values.machine, 'buildbox');
+    assert.ok(!('machine' in lastMetaUpdate(wv).values));
 
     // The task's own settings rows ride along: date, base model, the
     // two modes, chat / task ids and (when the task has one) the parent.
@@ -224,7 +225,6 @@ async function main() {
       settings: {
         model: 'model-z',
         work_dir: '/task/dir',
-        is_worktree: false,
         is_parallel: true,
         max_budget: 9,
         start_ts: startTs,
@@ -247,8 +247,10 @@ async function main() {
       }),
     );
     assert.strictEqual(withSettings.model, 'model-z');
-    assert.strictEqual(withSettings.worktree, 'no worktree');
-    assert.strictEqual(withSettings.parallel, 'parallel');
+    assert.ok(
+      !('parallel' in withSettings),
+      'the relay carries no Parallel mode value: the row is gone',
+    );
     assert.strictEqual(withSettings.chatId, 'chat-9');
     assert.strictEqual(withSettings.taskId, 'task-77 (subagent)');
     assert.strictEqual(withSettings.parentTask, 'task-70');
@@ -671,13 +673,10 @@ async function main() {
           steps: '42',
           time: '3m 2.0s',
           timeColor: 'var(--red)',
-          machine: 'buildbox',
           workdir: '/task/dir',
           maxBudget: '$50.00',
           date: 'Sep 19, 2026, 05:40 PM',
           model: 'model-z',
-          worktree: 'worktree',
-          parallel: 'sequential',
           chatId: 'chat-9',
           taskId: 'task-77 (subagent)',
           parentTask: 'task-70',
@@ -693,8 +692,11 @@ async function main() {
       assert.strictEqual(rowText(win, 'meta-tokens'), '9.99K');
       assert.strictEqual(rowText(win, 'meta-date'), 'Sep 19, 2026, 05:40 PM');
       assert.strictEqual(rowText(win, 'meta-model'), 'model-z');
-      assert.strictEqual(rowText(win, 'meta-worktree'), 'worktree');
-      assert.strictEqual(rowText(win, 'meta-parallel'), 'sequential');
+      assert.strictEqual(
+        win.document.getElementById('meta-parallel'),
+        null,
+        'the Task Info view has no Parallel mode row',
+      );
       assert.strictEqual(rowText(win, 'meta-chat-id'), 'chat-9');
       assert.strictEqual(rowText(win, 'meta-task-id'), 'task-77 (subagent)');
       assert.strictEqual(rowText(win, 'meta-parent-id'), 'task-70');
@@ -710,7 +712,7 @@ async function main() {
         win.document.getElementById('meta-time').style.color,
         'var(--red)',
       );
-      assert.strictEqual(rowText(win, 'meta-machine'), 'buildbox');
+      assert.strictEqual(win.document.getElementById('meta-machine'), null);
       assert.strictEqual(rowText(win, 'meta-workdir'), '/task/dir');
       assert.strictEqual(rowText(win, 'meta-max-budget'), '$50.00');
       const info = win.document.getElementById('meta-info');
@@ -739,7 +741,6 @@ async function main() {
       await sleep(250);
       assert.strictEqual(rowText(win, 'meta-workdir'), '/task/dir');
       assert.strictEqual(rowText(win, 'meta-max-budget'), '$50.00');
-      assert.strictEqual(rowText(win, 'meta-machine'), 'buildbox');
 
       // No poll, even while a task is reported running somewhere.
       send(win, {type: 'status', running: true});

@@ -12,15 +12,15 @@ had resolved earlier.  A ``closeTab`` (or a new ``run``) landing in
 that window unregisters the state and releases / carries over the
 worktree agent, so the busy check then inspects an object nobody else
 can see, the claim lands on it, and ``wt.merge()`` runs concurrently
-with the close path's ``_release_worktree()`` on the SAME worktree.
+with the close path's ``retire_for_disposal()`` on the SAME worktree.
 
 The window is made deterministic here by a real
-:class:`WorktreeSorcarAgent` subclass whose ``_wt_pending`` property
+:class:`ChatSorcarAgent` subclass whose ``_wt_pending`` property
 blocks the merge thread the first time it is read; ``_close_tab``
 runs while it is blocked.  With the state resolved and claimed inside
 one locked section the close either waits for the claim (and is
 deferred because the tab is busy) or wins outright (and the action is
-refused), so exactly one of ``merge()`` / ``_release_worktree()``
+refused), so exactly one of ``merge()`` / ``retire_for_disposal()``
 ever runs.
 """
 
@@ -33,13 +33,13 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
-class _WindowAgent(WorktreeSorcarAgent):
+class _WindowAgent(ChatSorcarAgent):
     """Real agent that blocks in ``_wt_pending`` once and counts disposals."""
 
     def __init__(self, repo_root: Path) -> None:
@@ -83,11 +83,11 @@ class _WindowAgent(WorktreeSorcarAgent):
         self._wt = None
         return "Successfully merged worktree branch."
 
-    def _release_worktree(self) -> str | None:
+    def retire_for_disposal(self) -> bool:
         with self._counts:
             self.release_calls += 1
         self._wt = None
-        return None
+        return True
 
 
 class TestWorktreeActionStateToctou(unittest.TestCase):
@@ -118,7 +118,6 @@ class TestWorktreeActionStateToctou(unittest.TestCase):
                 f"task-for-{tab_id}", tab_id=tab_id,
                 server_owned=True, agent=agent,
             )
-            state.use_worktree = True
             agent_state.register(state)
         self.server.tab_registry.open_tab(tab_id, "audit")
 
@@ -171,19 +170,14 @@ class TestWorktreeActionStateToctou(unittest.TestCase):
         """Every pre-claim refusal still answers exactly as before."""
         act = self.server._handle_worktree_action
         assert act("merge", "no-such-tab")["message"] == (
-            "Worktree mode is not enabled"
+            "No pending worktree changes to act on"
         )
         tab_id = "audit0902-refusals"
         agent = _WindowAgent(Path(self.tmpdir))
         state = agent_state.AgentState(
             f"task-for-{tab_id}", tab_id=tab_id, server_owned=True,
         )
-        state.use_worktree = False
         agent_state.register(state)
-        assert act("merge", tab_id)["message"] == (
-            "Worktree mode is not enabled"
-        )
-        state.use_worktree = True
         assert act("merge", tab_id)["message"] == (
             "No pending worktree changes to act on"
         ), "agent-less state"
@@ -193,7 +187,7 @@ class TestWorktreeActionStateToctou(unittest.TestCase):
             "No pending worktree changes to act on"
         ), "agent without a pending worktree"
         agent._wt = GitWorktree(
-            repo_root=None,  # type: ignore[arg-type]
+            repo_root=Path(self.tmpdir),
             branch="kiss/wt-audit0902-b",
             original_branch="main",
             wt_dir=Path(self.tmpdir) / "wt",
@@ -201,7 +195,14 @@ class TestWorktreeActionStateToctou(unittest.TestCase):
         )
         assert act("bogus", tab_id)["message"] == (
             "Unknown action: bogus"
-        ), "the mode / pending checks come first, then the action"
+        ), "the pending checks come first, then the action"
+        agent._wt = GitWorktree(
+            repo_root=None,  # type: ignore[arg-type]
+            branch="kiss/wt-audit0902-b",
+            original_branch="main",
+            wt_dir=Path(self.tmpdir) / "wt",
+            baseline_commit=None,
+        )
         assert act("discard", tab_id)["message"] == (
             "No pending worktree changes to act on"
         ), "pending worktree with an unknown repository root"

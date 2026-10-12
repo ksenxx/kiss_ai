@@ -37,8 +37,6 @@ def test_task_runner_persists_start_end_ts_to_extra():
         cost=0.0,
         steps=0,
         is_parallel=False,
-        is_worktree=False,
-        auto_commit_mode=False,
         start_ms=123,
         end_ms=456,
     )

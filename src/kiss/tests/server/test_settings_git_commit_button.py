@@ -47,7 +47,6 @@ import unittest
 from pathlib import Path
 
 from kiss.server import agent_state
-from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 from kiss.server.sorcar import API
 
@@ -187,54 +186,6 @@ class TestGitCommitCommandEndToEnd(unittest.TestCase):
         self.assertFalse(done[0]["success"], done[0])
         self.assertFalse(done[0]["committed"], done[0])
         self.assertEqual(done[0]["message"], "Not a git repository.")
-
-    def _mark_running_non_wt_task(self, repo_root: Path | None) -> None:
-        """Register another tab running a non-worktree task.
-
-        Mirrors what ``_run_task_inner`` records for a running
-        non-worktree task: ``is_running_non_wt = True`` plus the
-        resolved repo root of its ``work_dir``.
-        """
-        with self.server._state_lock:
-            state = AgentState(
-                "other-task-key", tab_id="t-other", server_owned=True,
-            )
-            agent_state.register(state)
-            state.is_task_active = True
-            state.is_running_non_wt = True
-            state.non_wt_repo_root = (
-                repo_root.resolve() if repo_root else None
-            )
-
-    def test_running_task_in_same_repo_refuses_commit(self) -> None:
-        """A running non-worktree task blocks the manual commit: the
-        half-written agent state must not be snapshotted."""
-        (self.repo / "f.txt").write_text("half-written agent state\n")
-        self._mark_running_non_wt_task(self.repo)
-        before = _git(self.repo, "rev-parse", "HEAD").strip()
-
-        self._dispatch()
-        done = self._wait_done()
-
-        self.assertFalse(done[0]["success"], done[0])
-        self.assertFalse(done[0]["committed"], done[0])
-        self.assertIn("task is still running", done[0]["message"])
-        self.assertEqual(before, _git(self.repo, "rev-parse", "HEAD").strip())
-        status = _git(self.repo, "status", "--porcelain", "-uall")
-        self.assertNotEqual(status.strip(), "", "changes must stay dirty")
-
-    def test_running_task_in_other_repo_does_not_block(self) -> None:
-        """A task running in a different repository must not block."""
-        other = Path(self.tmpdir) / "other-repo"
-        _make_repo(other)
-        self._mark_running_non_wt_task(other)
-        (self.repo / "f.txt").write_text("one\ntwo\n")
-
-        self._dispatch()
-        done = self._wait_done()
-
-        self.assertTrue(done[0]["success"], done[0])
-        self.assertTrue(done[0]["committed"], done[0])
 
     def test_duplicate_clicks_are_dropped_while_in_flight(self) -> None:
         """A second click during an in-flight autocommit is ignored."""

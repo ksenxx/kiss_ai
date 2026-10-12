@@ -22,21 +22,14 @@ import docker.models.containers
 import pytest
 
 from kiss.agents.sorcar.docker_manager import ATTACH_PREFIX, DockerManager
+from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
 
 IMAGE = "python:3.11-slim"
 
 
-def _docker_available() -> bool:
-    try:
-        docker.from_env().ping()
-        return True
-    except Exception:
-        return False
-
-
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not _docker_available(), reason="Docker daemon is not running"),
+    pytest.mark.skipif(not is_docker_available(), reason="Docker daemon is not running"),
 ]
 
 

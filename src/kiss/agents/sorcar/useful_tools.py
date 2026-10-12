@@ -104,7 +104,7 @@ def _stale_worktree_fallback(resolved: Path) -> Path | None:
     directory, return the equivalent path with that worktree segment
     stripped (i.e. relative to the parent repo).
 
-    Worktrees are torn down on autocommit / success, so a model that
+    Worktrees are torn down by ``commit_and_merge``, so a model that
     remembers a worktree path from earlier in the task ends up with a
     dangling path.  Returning the equivalent in-repo path lets the
     subsequent read succeed transparently.
@@ -217,7 +217,10 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
     ):
         return None
     tail = res_parts[len(main_repo_parts):]
-    if tail and tail[0] == _WORKTREE_SUBDIR:
+    if (tail and tail[0] == _WORKTREE_SUBDIR) or _worktree_index(tail) is not None:
+        # Already inside a worktree: this one, or the worktree of a
+        # repository nested under the parent repo (isolated on its own
+        # by ``create_worktree(path)``).
         return None
     return Path(*wt_root_parts, *tail)
 
@@ -316,6 +319,10 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
                 end += 1
             hit = command[m.start():end]
             if Path(hit) == Path(wt_root) or Path(hit).is_relative_to(wt_root):
+                continue
+            if _worktree_index(Path(hit).parts[len(Path(main_repo).parts):]) is not None:
+                # The worktree of a repository nested under the parent
+                # repo, isolated on its own: not the user's checkout.
                 continue
             suggested = rewrite_parent_repo_paths(command, wt_root)
             return (
@@ -1481,6 +1488,7 @@ class UsefulTools:
         max_workers: int = 0,
         timeout_seconds: float = 1800,
         max_output_chars: int = 5000,
+        description: str = "",
     ) -> str:
         """Run several independent shell commands concurrently, with no LLM sub-agents.
 
@@ -1502,6 +1510,8 @@ class UsefulTools:
             timeout_seconds: Timeout in seconds applied to EACH command.
             max_output_chars: Maximum characters of each command's output
                 kept in the report (head and tail are kept when truncating).
+            description: A brief description of the commands, shown as
+                the title of this call in the chat.
 
         Returns:
             A report starting with a tally line
@@ -1510,6 +1520,7 @@ class UsefulTools:
             wall time and (truncated) output.  A string starting with
             ``Error:`` when the arguments were invalid.
         """
+        del description
         try:
             command_list = parse_tasks_json(commands, name="commands")
         except ValueError as e:

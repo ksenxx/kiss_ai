@@ -4,10 +4,9 @@
 // add your name here
 
 // End-to-end (JSDOM cascade) parity tests for the sibling side panels
-// of media/main.css: the four dimming overlays (history sidebar,
-// settings, tricks, working directory) and their `.open` state, the four
-// panel close buttons and their hover state, and the two scrolling
-// list panes.  main.css used to spell each of them out as its own copy
+// of media/main.css: the three dimming overlays (history sidebar,
+// settings, tricks) and their `.open` state, and the three panel close
+// buttons and their hover state.  main.css used to spell each of them out as its own copy
 // of the same declarations; they are grouped now, and this test pins
 // that every sibling still computes to the same style -- so a future
 // edit to one panel's look must be a deliberate un-grouping, not an
@@ -68,15 +67,12 @@ const OVERLAYS = [
   'sidebar-overlay',
   'settings-overlay',
   'tricks-overlay',
-  'workdir-overlay',
 ];
 const CLOSE_BTNS = [
   'sidebar-close',
   'settings-panel-close',
   'tricks-panel-close',
-  'workdir-panel-close',
 ];
-const LISTS = ['tricks-list', 'workdir-list'];
 
 function testOverlaysAgree() {
   const dom = makeDom();
@@ -108,7 +104,7 @@ function testOverlaysAgree() {
     'an open overlay is visible',
   );
   win.close();
-  console.log('  ok - the four overlays compute the same style');
+  console.log('  ok - the three overlays compute the same style');
 }
 
 function testCloseButtonsAgree() {
@@ -127,35 +123,21 @@ function testCloseButtonsAgree() {
     'border-radius',
   ];
   assertSiblingsAgree(win, CLOSE_BTNS, props, 'panel close buttons');
-  // The bottom sheets' close buttons sit above their own list pane.
-  for (const id of ['tricks-panel-close', 'workdir-panel-close']) {
-    assert.strictEqual(
-      styleOf(win, win.document.getElementById(id), ['z-index'])['z-index'],
-      '1',
-      `#${id} stacks above its list`,
-    );
-  }
-  win.close();
-  console.log('  ok - the four panel close buttons compute the same style');
-}
-
-function testListPanesAgree() {
-  const dom = makeDom();
-  const win = dom.window;
-  assertSiblingsAgree(
-    win,
-    LISTS,
-    ['flex', 'overflow-y', 'scrollbar-width', 'margin-top'],
-    'list panes',
+  // The bottom sheet's close button sits above its own list pane.
+  assert.strictEqual(
+    styleOf(win, win.document.getElementById('tricks-panel-close'), [
+      'z-index',
+    ])['z-index'],
+    '1',
+    '#tricks-panel-close stacks above its list',
   );
   win.close();
-  console.log('  ok - the two list panes compute the same style');
+  console.log('  ok - the three panel close buttons compute the same style');
 }
 
 function main() {
   testOverlaysAgree();
   testCloseButtonsAgree();
-  testListPanesAgree();
   console.log('all audit0902 css-parity tests passed');
 }
 

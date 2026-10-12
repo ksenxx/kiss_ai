@@ -103,15 +103,31 @@ def _open_page(browser, harness: ExplorerHarness):
 
 
 def _open_terminal(page) -> None:
-    """Open a terminal through the "..." menu and wait for its prompt."""
+    """Open a terminal through the "..." menu and wait for its prompt.
+
+    xterm.js is downloaded from jsDelivr when the first terminal opens
+    (15 s budget in ``terminalTab.js``); when that download fails the
+    tab shows ``.terminal-load-error`` instead of a terminal (full-suite
+    run of 2026-10-11, with twenty Chromiums fetching from the CDN at
+    once).  Such a tab is closed and the terminal opened again, three
+    attempts in all.
+    """
     before = page.locator(_XTERM).count()
-    page.click("#more-btn")
-    page.wait_for_selector("#terminal-btn", state="visible")
-    page.click("#terminal-btn")
-    page.wait_for_function(
-        f"document.querySelectorAll('{_XTERM}').length === {before + 1}",
-        timeout=60000,
-    )
+    for attempt in range(3):
+        page.click("#more-btn")
+        page.wait_for_selector("#terminal-btn", state="visible")
+        page.click("#terminal-btn")
+        page.wait_for_function(
+            f"document.querySelectorAll('{_XTERM}').length === {before + 1}"
+            " || !!document.querySelector('.terminal-load-error')",
+            timeout=60000,
+        )
+        if page.locator(_XTERM).count() == before + 1:
+            break
+        load_error = page.locator(".terminal-load-error").first.inner_text()
+        assert attempt < 2, f"xterm.js failed to download three times: {load_error}"
+        _close_active_tab(page)
+        page.wait_for_selector(".terminal-load-error", state="detached")
     # The shell's first prompt proves the pty round trip works.
     page.wait_for_function(f"({_SCREEN_TEXT}).includes('$')", timeout=30000)
 
@@ -202,8 +218,8 @@ def test_menu_item_opens_a_shell_in_the_work_dir(browser, harness):
 
 
 def test_shell_starts_in_the_workspace_the_page_browses(browser, harness):
-    """After the "Working directory" panel points the page at another
-    folder, a new terminal starts there (and the daemon's own folder is
+    """After the chat header's working directory drop-down points the
+    page at another folder, a new terminal starts there (and the daemon's own folder is
     restored afterwards for the module's other tests)."""
     context, page = _open_page(browser, harness)
     try:

@@ -23,6 +23,7 @@ from typing import Any
 
 from kiss.server.file_index import HOME_SLOTS, FileIndex, FileIndexRegistry, Picker
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import touch
 
 
 def _wait(pred: Callable[[], bool], timeout: float = 10.0) -> None:
@@ -32,13 +33,6 @@ def _wait(pred: Callable[[], bool], timeout: float = 10.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError("condition not met in time")
-
-
-def _touch(root: Path, *rel: str) -> None:
-    for r in rel:
-        p = root / r
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("")
 
 
 def _texts(items: list[dict[str, str]]) -> list[str]:
@@ -54,7 +48,7 @@ def _build(reg: FileIndexRegistry, work_dir: str) -> None:
 def _home(tmp_path: Path) -> tuple[Path, FileIndexRegistry]:
     """A home with a project, a sibling directory and a top-level note."""
     home = tmp_path / "home"
-    _touch(home, "notes.md", "proj/a.py", "proj/src/b.py", "Documents/notes.md", "other/c.py")
+    touch(home, "notes.md", "proj/a.py", "proj/src/b.py", "Documents/notes.md", "other/c.py")
     return home, FileIndexRegistry(home=str(home), cache_dir=tmp_path / "cache")
 
 
@@ -75,9 +69,9 @@ class TestComplementView:
 
     def test_complement_keeps_the_wide_boundary(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
-        _touch(home, "proj/a.py", "keep/k.py")
+        touch(home, "proj/a.py", "keep/k.py")
         for i in range(60):
-            _touch(home, f"runs/r{i}/out.py")
+            touch(home, f"runs/r{i}/out.py")
         index = FileIndex.scan(str(home))
         rest = index.view("proj/", complement=True)
         assert rest.paths[:rest.wide_from] and all(
@@ -90,7 +84,7 @@ class TestComplementView:
         _build(reg, str(home))
         assert reg.picker_for(str(home / "proj")) is not None
         time.sleep(0.02)
-        _touch(home, "other/d.py")
+        touch(home, "other/d.py")
         _build(reg, str(home / "proj"))
         index = reg._indexes[str(home)]
         assert ("proj/", True) in index.view_keys()
@@ -153,8 +147,8 @@ class TestPickerSearch:
         self, tmp_path: Path,
     ) -> None:
         home = tmp_path / "home"
-        _touch(home, *[f"proj/f{i:02d}.py" for i in range(30)])
-        _touch(home, *[f"elsewhere/f{i:02d}.py" for i in range(10)])
+        touch(home, *[f"proj/f{i:02d}.py" for i in range(30)])
+        touch(home, *[f"elsewhere/f{i:02d}.py" for i in range(10)])
         reg = FileIndexRegistry(home=str(home), cache_dir=tmp_path / "cache")
         _build(reg, str(home))
         picker = reg.picker_for(str(home / "proj"))
@@ -176,8 +170,8 @@ class TestPickerSearch:
         assert _texts(picker.search("f2", {}, limit=20)) == [f"./f2{i}.py" for i in range(10)]
         # Fewer home matches than slots: the work dir keeps the remainder.
         time.sleep(0.02)  # let the directory mtimes move past the first scan
-        _touch(home, *[f"proj/z{i:02d}.py" for i in range(30)])
-        _touch(home, "elsewhere/z1.py", "elsewhere/z2.py")
+        touch(home, *[f"proj/z{i:02d}.py" for i in range(30)])
+        touch(home, "elsewhere/z1.py", "elsewhere/z2.py")
         _build(reg, str(home))
         picker = reg.picker_for(str(home / "proj"))
         assert picker is not None
@@ -214,7 +208,7 @@ class TestPickerSearch:
     def test_work_dir_outside_home_gets_all_of_home(self, tmp_path: Path) -> None:
         home, reg = _home(tmp_path)
         outside = tmp_path / "outside"
-        _touch(outside, "x.py")
+        touch(outside, "x.py")
         _build(reg, str(outside))
         picker = reg.picker_for(str(outside))
         assert picker is not None
@@ -230,7 +224,7 @@ class TestPickerSearch:
 
     def test_work_dir_above_home_does_not_repeat_home(self, tmp_path: Path) -> None:
         home, reg = _home(tmp_path)
-        _touch(tmp_path, "sibling/s.py")
+        touch(tmp_path, "sibling/s.py")
         _build(reg, str(home))
         _build(reg, str(tmp_path))
         picker = reg.picker_for(str(tmp_path))

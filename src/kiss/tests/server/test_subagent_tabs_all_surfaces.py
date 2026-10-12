@@ -27,8 +27,9 @@ Checked, on every surface, from the rendered tab bar:
 1. While the leaves run: the two children AND the nested grandchild
    have a sub-agent tab (spinner, not done) on the surfaces that were
    connected when they spawned (live ``new_tab``) — sidebar and remote.
-2. A surface connecting MID-RUN — a second remote browser tab and an
-   editor-tab panel pinned to the parent chat — gets the same running
+2. A surface connecting MID-RUN — a second remote browser tab and the
+   chat editor tab, which adopts the parent chat from the registry —
+   gets the same running
    sub-agent tabs from its ``ready`` replay; every announcement of the
    grandchild names the nesting child's tab as its parent.
    A running child's tab the user closes by hand on one surface
@@ -62,6 +63,7 @@ Three daemon defects this test caught (all fixed):
 from __future__ import annotations
 
 import json
+import os
 import queue
 import shutil
 import subprocess
@@ -88,6 +90,31 @@ NEST_MARK = "NESTING"
 GRANDCHILD_MARK = "GRANDCHILD"
 WAVE2_MARK = "SECONDWAVE"
 
+# Put on the reply queue when the bridge's stdout closes (the process
+# exited), so a driver waiting for a reply fails at once with the reason.
+_BRIDGE_EXITED = {"op": "bridge_exited"}
+
+
+def skip_unless_bridge_runs(test: unittest.TestCase) -> None:
+    """Skip *test* when ``multiSurfaceBridge.js`` cannot start.
+
+    The bridge needs node, the extension's jsdom dependency and the
+    compiled ``out/wsClient.js``.  Agent worktrees check out tracked
+    files only and get ``node_modules`` linked in, but not ``out/``: a
+    bridge test run there before ``npm run compile`` would otherwise
+    start a node that dies at its first ``require`` and fail 30 s later
+    with no reply instead of skipping.
+
+    Args:
+        test: The test case to skip.
+    """
+    if shutil.which("node") is None:
+        test.skipTest("node is not available on PATH")
+    if not _JSDOM_PKG.is_file():
+        test.skipTest("jsdom is not installed under agents/vscode")
+    if not _WS_CLIENT.is_file():
+        test.skipTest("out/wsClient.js missing: run `npm run compile` in agents/vscode")
+
 
 class SurfaceBridge:
     """Drive ``multiSurfaceBridge.js``: real webviews on the daemon's local endpoint."""
@@ -102,7 +129,10 @@ class SurfaceBridge:
             bufsize=1,
         )
         self.replies: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.stderr: list[str] = []
         threading.Thread(target=self._pump, daemon=True).start()
+        self._stderr_thread = threading.Thread(target=self._pump_stderr, daemon=True)
+        self._stderr_thread.start()
 
     def _pump(self) -> None:
         assert self.proc.stdout is not None
@@ -110,13 +140,48 @@ class SurfaceBridge:
             line = line.strip()
             if line:
                 self.replies.put(json.loads(line))
+        self.replies.put(_BRIDGE_EXITED)
+
+    def _pump_stderr(self) -> None:
+        # Drained so a chatty bridge never blocks on a full pipe, and
+        # kept so a crash (node's stack trace) is in the failure message.
+        assert self.proc.stderr is not None
+        for line in self.proc.stderr:
+            self.stderr.append(line.rstrip("\n"))
+
+    def _send(self, command: dict[str, Any]) -> None:
+        # Straight to the pipe: a line the dead bridge never read must
+        # not linger in a Python buffer whose flush fails again at GC.
+        # A write to a pipe whose reader has exited is EPIPE on POSIX
+        # but EINVAL on Windows; both mean "the bridge is gone".
+        assert self.proc.stdin is not None
+        try:
+            os.write(self.proc.stdin.fileno(), (json.dumps(command) + "\n").encode())
+        except OSError as exc:
+            raise BrokenPipeError(str(exc)) from exc
 
     def call(self, op: str, **kw: Any) -> dict[str, Any]:
-        """Send one command and return the bridge's reply."""
-        assert self.proc.stdin is not None
-        self.proc.stdin.write(json.dumps({"op": op, **kw}) + "\n")
-        self.proc.stdin.flush()
-        return self.replies.get(timeout=30)
+        """Send one command and return the bridge's reply.
+
+        Fails with the bridge's exit code and stderr as soon as the
+        process exits, or after 30 s without a reply.
+        """
+        reply: dict[str, Any] | None
+        try:
+            self._send({"op": op, **kw})
+            reply = self.replies.get(timeout=30)
+        except (BrokenPipeError, queue.Empty) as exc:
+            reply = _BRIDGE_EXITED if isinstance(exc, BrokenPipeError) else None
+        if reply is _BRIDGE_EXITED:
+            self.proc.wait(timeout=5)
+            self._stderr_thread.join(timeout=5)
+        if reply is None or reply is _BRIDGE_EXITED:
+            what = "exited" if reply is _BRIDGE_EXITED else "gave no reply in 30 s"
+            raise AssertionError(
+                f"bridge {what} on {op!r} (exit code {self.proc.poll()}); stderr:\n"
+                + "\n".join(self.stderr[-40:])
+            )
+        return reply
 
     def tabs(self, name: str) -> list[dict[str, Any]]:
         """Rendered tab bar of surface *name*; fails on webview errors."""
@@ -154,14 +219,14 @@ class SurfaceBridge:
         ]
 
     def quit(self) -> None:
-        """Stop the bridge process."""
+        """Stop the bridge process (``quit`` has no reply; a dead bridge is fine)."""
         try:
-            self.call("quit")
-        except Exception:
+            self._send({"op": "quit"})
+        except BrokenPipeError:
             pass
         try:
             self.proc.wait(timeout=5)
-        except Exception:
+        except subprocess.TimeoutExpired:
             self.proc.kill()
 
 
@@ -188,12 +253,7 @@ class SubagentTabsAllSurfacesTest(DaemonLocalHarness):
     """Open-everywhere while running, closed-everywhere when done."""
 
     def setUp(self) -> None:
-        if shutil.which("node") is None:
-            self.skipTest("node is not available on PATH")
-        if not _JSDOM_PKG.is_file():
-            self.skipTest("jsdom is not installed under agents/vscode")
-        if not _WS_CLIENT.is_file():
-            self.skipTest("out/wsClient.js missing: run `npm run compile` in agents/vscode")
+        skip_unless_bridge_runs(self)
         super().setUp()
         # ``run_parallel`` children are dispatched to the daemon
         # hosting the parent; record this harness daemon's endpoint
@@ -405,15 +465,11 @@ class SubagentTabsAllSurfacesTest(DaemonLocalHarness):
                     assert not t["subagentDone"], (name, t)
 
             # 2. Surfaces connecting MID-RUN get the same tabs from
-            #    their ready replay: a second browser tab, and an
-            #    editor-tab panel pinned to the parent chat.
+            #    their ready replay: a second browser tab, and the chat
+            #    editor tab (which adopts the parent chat from the
+            #    registry snapshot, like the sidebar view).
             self.bridge.open("remote2", ' class="remote-chat"')
-            self.bridge.open(
-                "editor",
-                ' class="editor-tab-mode"'
-                f' data-kiss-tab-id="{parent_tab_id}"'
-                ' data-kiss-in-registry="1"',
-            )
+            self.bridge.open("editor", ' class="editor-tab-mode"')
             for name in ("remote2", "editor"):
                 subs = self._wait_sub_tabs(
                     name, running, "running sub-agent tabs (mid-run connect)",

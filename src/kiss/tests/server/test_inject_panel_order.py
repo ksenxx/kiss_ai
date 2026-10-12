@@ -46,14 +46,6 @@ from kiss.tests.conftest import is_root, posix_only
 
 
 @pytest.fixture
-def kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect ``KISS_HOME`` to a fresh ``tmp_path`` for each test."""
-    home = tmp_path / ".kiss"
-    monkeypatch.setenv("KISS_HOME", str(home))
-    return home
-
-
-@pytest.fixture
 def bundled_injections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> Path:

@@ -23,11 +23,8 @@ from pathlib import Path
 
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import goto_retrying_network_change
-from kiss.tests.server.test_voice_wake_word import (
-    HAVE_MAC_TTS,
-    _free_port,
-    _make_sorcar_wav,
-)
+from kiss.tests.server.conftest import find_free_port
+from kiss.tests.server.test_voice_wake_word import HAVE_MAC_TTS, _make_sorcar_wav
 
 
 @unittest.skipUnless(HAVE_MAC_TTS, "requires macOS `say` and `afconvert`")
@@ -39,7 +36,7 @@ class TestVoiceWakeWordMicBrowser(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp())
         self.wav = _make_sorcar_wav(self.tmpdir)
-        self.port = _free_port()
+        self.port = find_free_port()
 
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(

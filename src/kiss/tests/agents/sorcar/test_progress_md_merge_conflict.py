@@ -28,13 +28,13 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     MergeResult,
     _git,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 MAIN_LOG = "# Task: bug hunt iteration 7\n" + "- found bug\n" * 50
 BRANCH_LOG = "# Task: forensic analysis\n- daemon was killed by SIGTERM\n"
@@ -257,10 +257,13 @@ def _restore_db(saved: tuple[Any, Any, Any]) -> None:
 
 
 def _patch_super_run() -> Any:
+    """Replace the model-driven run with one that only calls ``create_worktree``."""
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
-    def fake_run(self_agent: object, **kwargs: object) -> str:
+    def fake_run(self_agent: Any, **kwargs: object) -> str:
+        self_agent.work_dir = kwargs["work_dir"]
+        self_agent.create_worktree()
         return "success: true\nsummary: test done\n"
 
     parent_class.run = fake_run
@@ -273,7 +276,7 @@ def _unpatch_super_run(original: Any) -> None:
 
 
 class TestAgentMergeWithDivergentProgress:
-    """End-to-end: WorktreeSorcarAgent.merge() survives PROGRESS.md drift."""
+    """End-to-end: ChatSorcarAgent.merge() survives PROGRESS.md drift."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -288,7 +291,7 @@ class TestAgentMergeWithDivergentProgress:
 
     def test_merge_succeeds_despite_divergent_progress_md(self) -> None:
         """The incident scenario through the real agent merge path."""
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
         wt_dir = agent._wt_dir
         assert wt_dir is not None

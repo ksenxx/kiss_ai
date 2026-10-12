@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -29,34 +28,12 @@ from typing import Any
 import kiss.agents.sorcar.persistence as persistence
 from kiss.core import vscode_config
 from kiss.server.json_printer import JsonPrinter
+from kiss.tests.server.conftest import init_repo
 
 # The stand-in server speaks the OpenAI chat-completions wire format,
 # so any OpenAI-family model name routes to it once ``model_config``
 # supplies ``base_url``.  No request ever leaves the machine.
 STANDIN_MODEL = "gpt-4o-mini"
-
-
-def run_git(cwd: str | Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run ``git *args`` in *cwd* and return the completed process."""
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-def init_repo(repo: str | Path) -> None:
-    """Initialise a git repo at *repo* with one seed commit."""
-    Path(repo).mkdir(parents=True, exist_ok=True)
-    run_git(repo, "init", "-q")
-    run_git(repo, "config", "user.email", "kiss-test@example.com")
-    run_git(repo, "config", "user.name", "Kiss Test")
-    run_git(repo, "config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n", encoding="utf-8")
-    run_git(repo, "add", "seed.txt")
-    run_git(repo, "commit", "-q", "-m", "seed")
 
 
 def tool_call_response(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -474,7 +451,7 @@ def history_rows() -> list[dict[str, Any]]:
     """Return every ``task_history`` row of the isolated DB as dicts."""
     conn = persistence._get_db()
     cursor = conn.execute(
-        "SELECT id, chat_id, parent_task_id, task, is_worktree, is_parallel "
+        "SELECT id, chat_id, parent_task_id, task, is_parallel "
         "FROM task_history ORDER BY timestamp"
     )
     return [
@@ -483,8 +460,7 @@ def history_rows() -> list[dict[str, Any]]:
             "chat_id": row[1],
             "parent_task_id": row[2],
             "task": row[3],
-            "is_worktree": bool(row[4]),
-            "is_parallel": bool(row[5]),
+            "is_parallel": bool(row[4]),
         }
         for row in cursor.fetchall()
     ]

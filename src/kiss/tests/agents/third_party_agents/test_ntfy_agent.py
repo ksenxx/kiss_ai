@@ -345,14 +345,3 @@ def test_make_backend_loads_config(emulator: _NtfyEmulator) -> None:
     backend = ntfy_agent_mod._make_backend()
     assert backend._topic == "ops"
     assert backend._server == emulator.url
-
-
-def test_main_exits_with_no_args() -> None:
-    """main() prints usage and exits when called without arguments."""
-    original_argv = sys.argv
-    sys.argv = ["kiss-ntfy"]
-    try:
-        with pytest.raises(SystemExit):
-            ntfy_agent_mod.main()
-    finally:
-        sys.argv = original_argv

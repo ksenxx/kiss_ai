@@ -15,7 +15,6 @@ Config state is isolated by the session-wide temp ``KISS_HOME`` set in
 from __future__ import annotations
 
 import json
-import socket
 import sys
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
@@ -30,7 +29,11 @@ from kiss.agents.third_party_agents.qq.qq_sea import (
     _config,
     _derive_signing_key,
 )
-from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingServer,
+    raw_post_status,
+    recording_server,
+)
 
 _SECRET = "kiss-qq-test-secret"
 
@@ -69,21 +72,6 @@ def _signed_headers(ts: str, raw: bytes) -> dict[str, str]:
         "X-Signature-Timestamp": ts,
         "Content-Type": "application/json",
     }
-
-
-def _raw_post_status(port: int, headers: str, path: str = "/") -> int:
-    """Send a raw HTTP POST with custom headers and return the status code."""
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-        request = f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Connection: close\r\n\r\n"
-        sock.sendall(request.encode())
-        sock.settimeout(10)
-        data = b""
-        while b"\r\n" not in data:
-            chunk = sock.recv(1024)
-            if not chunk:
-                break
-            data += chunk
-        return int(data.split(b" ")[1])
 
 
 _TOKEN_PATH = "/getAppAccessToken"
@@ -334,10 +322,10 @@ def test_webhook_bad_content_length() -> None:
     backend = QQChannelBackend()
     port = _connect_on_ephemeral_port(backend)
     try:
-        assert _raw_post_status(port, "") == 400
-        assert _raw_post_status(port, "Content-Length: -5\r\n") == 400
-        assert _raw_post_status(port, "Content-Length: 12abc\r\n") == 400
-        assert _raw_post_status(port, f"Content-Length: {2 * 1024 * 1024}\r\n") == 413
+        assert raw_post_status(port, "") == 400
+        assert raw_post_status(port, "Content-Length: -5\r\n") == 400
+        assert raw_post_status(port, "Content-Length: 12abc\r\n") == 400
+        assert raw_post_status(port, f"Content-Length: {2 * 1024 * 1024}\r\n") == 413
         messages, _ = backend.poll_messages("", "0")
         assert messages == []
     finally:

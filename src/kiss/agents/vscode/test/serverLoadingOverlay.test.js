@@ -7,7 +7,6 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
 const {PRODUCT_NAME} = require(require('path').join(__dirname, '..', 'out', 'brand.js'));
 const os = require('os');
 const path = require('path');

@@ -232,7 +232,9 @@ function writeControlledLaunchctl(dir) {
 dir="$(cd "$(dirname "$0")" && pwd)"
 case "$1" in
   print)
-    [ -f "$dir/hang" ] && sleep 30
+    # exec: the SIGTERM of execFile's timeout must reach the sleeper
+    # itself, or it outlives the suite as an orphan.
+    [ -f "$dir/hang" ] && exec sleep 30
     [ -f "$dir/present" ] && exit 0 || exit 113 ;;
   bootout) [ -f "$dir/bootout_removes" ] && rm -f "$dir/present"; exit 0 ;;
   bootstrap)

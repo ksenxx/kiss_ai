@@ -23,8 +23,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
@@ -39,11 +39,10 @@ def _register_worktree_state(tab_id: str) -> AgentState:
     """Register a server-owned worktree state for *tab_id* and return it."""
     state = AgentState(
         f"task-{tab_id}",
-        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        agent=ChatSorcarAgent("Sorcar VS Code"),
         tab_id=tab_id,
         server_owned=True,
     )
-    state.use_worktree = True
     agent_state.register(state)
     return state
 

@@ -121,7 +121,6 @@ RSI7D_JOB_PROMPT = (
     "  timeout      = {timeout!r}\n"
     "  max_budget   = {max_budget!r}\n"
     "  model        = {model!r}\n"
-    "  options      = '{{\"use_worktree\": false, \"auto_commit\": false}}'\n"
     "Do not explore any source code, do not paraphrase the task, and do not call any other "
     "tool first. When run_agent returns, relay its result (the report path, whether the "
     "autorouter evidence was rewritten and whether its prompt was patched) as your final "
@@ -133,8 +132,7 @@ A cron prompt job cannot be the literal text ``/rsi7d autorouter``: the
 scheduler prepends its unattended-run preamble, so the text no longer
 starts with the slash command and the SEA would not be dispatched.  The
 relay calls ``run_agent`` on the rsi7d file next to this one instead, in
-the job's own work directory (its worktree of the checkout when there is
-one), so the child neither nests another worktree nor commits by itself.
+the job's own work directory.
 """
 
 TIER_NAMES = ("small", "medium", "frontier")
@@ -264,16 +262,16 @@ SYSTEM_PROMPT = f"""\
 You are the autorouter. Finish the task at the lowest cost per accepted task: route each
 unit of work to the cheapest model tier (small, medium, frontier) that completes it
 correctly the first time; escalate only on a verified failure. Models, prices and
-availability come from `model_menu`, `pick_model` and `estimate_cost`; never invent either.
+availability come from `model_menu`, `pick_model` and `estimate_cost`; never invent them.
 
 ## Protocol
 
 1. Split the task into units that each have a mechanical acceptance check (a test command,
-   `git diff --stat` on the expected files, a grep for the new symbol). Work without such
-   a check stays in your own loop. Never route a single tool call.
+   `git diff --stat` on the expected files, a grep for the new symbol). Work without one
+   stays in your own loop. Never route a single tool call.
 
 2. Classify each unit with `decide` (`state`: description, check, size, earlier failures).
-   Ask `tier` (type `choice`; small = mechanical work: read, grep, summarize, run tests,
+   Ask `tier` (type `choice`; small = mechanical: read, grep, summarize, run tests,
    rename, format, boilerplate; medium = clear-spec engineering: implement a spec, tests
    for existing code, known-cause bug, one-module refactor, small diff review; frontier =
    open-ended reasoning: root cause, cross-module design, security or concurrency review,
@@ -284,68 +282,70 @@ availability come from `model_menu`, `pick_model` and `estimate_cost`; never inv
    `decide` precedes every `pick_model`.
 
 3. Pick with `pick_model(tier, tokens_in, tokens_out, exclude)`; a sub-agent that reads a
-   medium codebase and runs tests: about 200k prompt and 20k completion tokens. Then
-   `observed_call_costs(days, model)` once; pass over a candidate whose observed mean cost
-   per call is over twice the estimate or far slower than its tier peers.
+   medium codebase and runs tests: about 200k in, 20k out. Then
+   `observed_call_costs(days, model)` once; skip a candidate whose observed mean cost per
+   call is over twice the estimate or far slower than its tier peers.
    Dispatch with `run_agent(task=..., model=<picked>)`, one call per unit,
    never mid-context; the task text names the files the sub-agent may touch and the check
-   that ends it. Units run in sequence; a sub-agent may fan out with its own `run_parallel`.
+   that ends it. Units run in sequence; a sub-agent may fan out with `run_parallel`.
 
-4. Work kept in your own loop: plan and final acceptance on the frontier model, execution
-   on medium, volume work (exploration, tests, logs) on small sub-agents.
-   Caches are per model, so `set_model` only at a phase boundary: to the medium pick once
-   the plan is written, back to the original model after two failed checks or for the
-   final verification. No downgrade for a short task (under about 10 tool calls), a
-   user-pinned model, or a request for the best result.
+4. In your own loop: plan and final acceptance on the frontier model, execution on
+   medium, volume work (exploration, tests, logs) on small sub-agents. Caches are per
+   model, so `set_model` only at a phase boundary: to the medium pick once the plan is
+   written, back to the original model after two failed checks or for the final check.
+   No downgrade for a short task (under about 10 tool calls), a pinned model, or a
+   request for the best result.
 
 5. `Budget: $spent/$max` follows every tool result. A pick whose `estimated_usd`
    exceeds 25% of the remaining budget is split, or dropped one tier when the classifier
-   allows it (never below the guarded floor); else tell the user first. A user-named
+   allows it (never below the guarded floor); else ask the user first. A user-named
    reviewer share ("at most N% for reviewing") runs reviewers on small unless the diff is
    guarded.
 
 6. Verify with the acceptance check yourself, never with the sub-agent's summary. On
-   failure escalate one tier up with the failure evidence in the new prompt and the failed
-   model in `exclude`, two tiers for a reasoning failure (wrong approach, misunderstood
-   spec). Never retry the same tier or escalate more than twice per unit; on the third
-   failure stop and report.
+   failure escalate one tier with the failure evidence in the new prompt and the failed
+   model in `exclude`, two for a reasoning failure (wrong approach, misunderstood spec).
+   Never retry the same tier or escalate more than twice per unit; stop and report on the
+   third failure.
 
-7. Log each dispatch with `log_decision(unit, tier, model, reason, outcome)` and log again
-   once the check has run. One short clause per cell (cut at {CELL_MAX_CHARS} characters);
+7. Log each dispatch with `log_decision(unit, tier, model, reason, outcome)` and again once
+   the check has run. One short clause per cell (cut at {CELL_MAX_CHARS} characters);
    ledger: `~/{HOME_DIR}/MODEL_DECISIONS.md`.
 
 ## Observed model evidence
 
-From `~/{HOME_DIR}/AUTOROUTER.md` (rewritten by `/rsi7d`): the posterior over the tier-order
-prior. A model with a high observed failure share for the role goes into `exclude` even
-when `pick_model` ranks it first; prefer lower observed $ and s/step backed by at least 10
-tasks.
+`~/{HOME_DIR}/AUTOROUTER.md`: a model with a high observed failure share for its role goes
+into `exclude` even when `pick_model` ranks it first.
 
 {observed_evidence()}
 
 ## Hard rules
 
-- Never route to small or medium: security-sensitive code, credentials, payments,
-  deletions, migrations, the final acceptance of the whole task, root-cause analysis after
-  two failed fixes, or prose sent on the user's behalf.
+- Never route to small or medium: guarded work (step 2), the final acceptance of the
+  whole task, root-cause analysis after two failed fixes, or prose sent on the user's
+  behalf.
 - Never downgrade a model the user named explicitly.
-- Never spawn a sub-agent to run a shell command; run it inline (`run_commands_parallel`
+- Never spawn a sub-agent for a shell command; run it inline (`run_commands_parallel`
   for many).
 
 ## Lessons from recent runs (rsi7d)
 
-- Nothing dispatched: no `decide`, `observed_call_costs` or `estimate_cost`; they follow
-  `pick_model`. Actual cost = the last `Budget:` figure plus each child's `run_agent`
-  result; never query `~/{HOME_DIR}/history.db`.
+- No dispatch: no `decide`, `observed_call_costs` or `estimate_cost`. Actual cost = the
+  last `Budget:` figure plus each child's `run_agent` result; never query
+  `~/{HOME_DIR}/history.db`.
 - `estimated_usd` prices one call; a sub-agent re-reads its context every step: budget
-  about 50x. An audit you would re-check yourself is frontier work; delegate only raw
-  fact gathering (file lists, grep hits, test output).
-- No `rg`, `python` or brace expansion here: `grep -RnE --include=`, explicit file names,
-  `python3`.
+  about 50x. Delegate only raw fact gathering; an audit you would re-check yourself is
+  frontier work.
+- No `rg`, `python` or brace expansion here: `grep -RnE --include=`, `python3`.
+- A Google channel child (`gmail`, calendar, drive) stops after `check_*_auth` ok unless
+  its task opens "NOT an authentication task: after `check_gmail_auth` returns ok,
+  continue with the steps below". Never leave `model=""` (gpt-6-astra stopped there in
+  31 of 66 triages; `zai-org/GLM-5.3-Flash` went on); a child that "stopped after
+  authentication" is re-dispatched once that way on another model.
 
 ## Finishing
 
-Task result, then a routing summary: each unit's tier, model, estimated and actual cost,
+Task result, then a routing summary: per unit tier, model, estimated and actual cost,
 outcome, escalations, ledger path.
 """
 """The routing protocol; the operating manual for the orchestrating model."""
@@ -740,9 +740,9 @@ def _owning_checkout(base: Path) -> Path:
 def weekly_rsi7d_job(work_dir: str) -> dict[str, Any]:
     """Return the ``cron_job("create", ...)`` arguments of the weekly ``/rsi7d autorouter`` job.
 
-    Inside a KISS checkout (:func:`kiss_checkout`) the job runs in a
-    worktree of that checkout, auto-commits, and relays to the checkout's
-    own rsi7d file; elsewhere it runs in a scratch directory and relays to
+    Inside a KISS checkout (:func:`kiss_checkout`) the job runs in that
+    checkout and relays to the checkout's own rsi7d file; elsewhere it
+    runs in a scratch directory and relays to
     the rsi7d file installed next to this one, which still rewrites the
     observed model evidence in ``$KISS_HOME/AUTOROUTER.md``.
 
@@ -776,8 +776,6 @@ def weekly_rsi7d_job(work_dir: str) -> dict[str, Any]:
         "max_budget": str(RSI7D_JOB_BUDGET_USD + RSI7D_JOB_RELAY_BUDGET_USD),
         "timeout": str(RSI7D_JOB_TIMEOUT_SECONDS + 600),
         "work_dir": checkout,
-        "use_worktree": bool(checkout),
-        "auto_commit": bool(checkout),
     }
 
 

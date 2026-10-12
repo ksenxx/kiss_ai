@@ -42,48 +42,22 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 from typing import Any, cast
 
-import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import Payload, WebPrinter
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _init_git_repo(tmpdir: str) -> None:
-    subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmpdir,
-                   capture_output=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir,
-                   capture_output=True)
-    Path(tmpdir, ".gitkeep").touch()
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir,
-                   capture_output=True)
+from kiss.tests.server.conftest import (
+    init_repo,
+    redirect_persistence,
+    restore_persistence,
+    restore_sorcar_parent_run,
+)
 
 
 class _BlockingFakeAgentRun:
@@ -111,17 +85,13 @@ class _BlockingFakeAgentRun:
         return original
 
 
-def _uninstall_parent_run(original: Any) -> None:
-    cast(Any, SorcarAgent.__mro__[1]).run = original
-
-
 class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
     """Starting a task MUST queue a ``tasks_updated`` WS frame for delivery."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
 
         self.printer = WebPrinter()
         self.server = VSCodeServer(printer=self.printer)
@@ -147,9 +117,9 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
         state = agent_state.find_by_tab("tab-tx")
         if state is not None and state.task_thread is not None:
             state.task_thread.join(timeout=10)
-        _uninstall_parent_run(self.original_run)
+        restore_sorcar_parent_run(self.original_run)
         agent_state.agent_states.clear()
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _captured_events(self) -> list[dict[str, Any]]:
