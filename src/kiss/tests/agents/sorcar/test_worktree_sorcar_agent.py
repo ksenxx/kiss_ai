@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests for WorktreeSorcarAgent: worktree lifecycle, blocking, crash recovery."""
+"""Tests for ChatSorcarAgent: worktree lifecycle, blocking, crash recovery."""
 
 from __future__ import annotations
 
@@ -15,12 +15,12 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -63,11 +63,18 @@ def _make_repo(path: Path) -> Path:
 
 
 def _patch_super_run(return_value: str = "success: true\nsummary: test done\n") -> Any:
-    """Monkey-patch RelentlessAgent.run to skip the LLM call."""
+    """Monkey-patch RelentlessAgent.run to skip the LLM call.
+
+    The fake task does what a real one does: it resolves ``work_dir``
+    (``RelentlessAgent._reset``) and calls the agent's
+    ``create_worktree`` tool before its first edit.
+    """
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
-    def fake_run(self_agent: object, **kwargs: object) -> str:
+    def fake_run(self_agent: Any, **kwargs: object) -> str:
+        self_agent.work_dir = str(Path(str(kwargs.get("work_dir") or ".")).resolve())
+        self_agent.create_worktree()
         return return_value
 
     parent_class.run = fake_run
@@ -79,7 +86,7 @@ def _unpatch_super_run(original: Any) -> None:
     parent_class.run = original
 
 
-class TestWorktreeSorcarAgent:
+class TestChatSorcarAgent:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.db_saved = _redirect_db(self.tmpdir)
@@ -91,22 +98,29 @@ class TestWorktreeSorcarAgent:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _agent(self, chat_id: str | None = None) -> WorktreeSorcarAgent:
-        agent = WorktreeSorcarAgent("test")
+    def _agent(self, chat_id: str | None = None) -> ChatSorcarAgent:
+        agent = ChatSorcarAgent("test")
         if chat_id:
             agent.resume_chat_by_id(chat_id)
         return agent
 
 
     def test_consecutive_tasks_same_session(self) -> None:
+        """The next task retires a worktree still pending and gets a fresh one.
+
+        The retired worktree changed nothing, so its branch is cleaned
+        up rather than parked (a dirty one is committed and kept).
+        """
         agent = self._agent()
         agent.run(prompt_template="task1", work_dir=str(self.repo))
         first_branch = agent._wt_branch
         assert first_branch is not None
+        assert GitWorktreeOps.load_preserve_marker(self.repo, first_branch)
 
         result = agent.run(prompt_template="task2", work_dir=str(self.repo))
         assert "test done" in result
-        assert agent._wt_branch is not None
+        assert agent._wt_branch not in (None, first_branch)
+        assert not GitWorktreeOps.branch_exists(self.repo, first_branch)
         agent.discard()
 
 
@@ -136,16 +150,18 @@ class TestWorktreeSorcarAgent:
             agent.discard()
 
 
-    def test_auto_commit_no_wt_dir(self) -> None:
+    def test_commit_no_wt_dir(self) -> None:
         agent = self._agent()
-        assert not agent._auto_commit_worktree()
+        assert not agent._commit_worktree()
 
     def test_super_run_raises(self) -> None:
         _unpatch_super_run(self.original_run)
         parent_class = cast(Any, SorcarAgent.__mro__[1])
         orig = parent_class.run
 
-        def raising_run(self_agent: object, **kwargs: object) -> str:
+        def raising_run(self_agent: Any, **kwargs: object) -> str:
+            self_agent.work_dir = str(self.repo)
+            self_agent.create_worktree()
             raise RuntimeError("LLM crashed")
 
         parent_class.run = raising_run
@@ -227,12 +243,13 @@ class TestWorktreeSorcarAgent:
         assert check.returncode != 0
 
 
-    def test_new_chat_releases_pending_worktree(self) -> None:
-        """new_chat() auto-merges the pending worktree before resetting.
+    def test_new_chat_preserves_pending_worktree(self) -> None:
+        """new_chat() keeps the pending worktree's branch for review.
 
         Simulates the VS Code "New Chat" button being clicked while
-        worktree action buttons are visible.  The agent should auto-
-        commit, auto-merge, and clean up the old branch.
+        worktree action buttons are visible.  The agent commits the
+        work onto its ``kiss/wt-*`` branch, removes the directory and
+        never merges into the user's branch behind their back.
         """
         agent = self._agent()
 
@@ -252,16 +269,19 @@ class TestWorktreeSorcarAgent:
             "rev-parse", "--verify", f"refs/heads/{old_branch}",
             cwd=self.repo,
         )
-        assert check.returncode != 0, (
-            "Old branch should be deleted after auto-merge"
+        assert check.returncode == 0, (
+            "Old branch must be kept for review, never auto-merged"
         )
+        assert GitWorktreeOps.load_preserve_marker(self.repo, old_branch)
 
         agent.run(prompt_template="task2", work_dir=str(self.repo))
         assert agent._wt_branch is not None
+        assert agent._wt_branch != old_branch
         agent.discard()
 
-    def test_consecutive_run_releases_previous_worktree(self) -> None:
-        """Consecutive run() calls auto-merge the previous worktree."""
+    def test_retire_then_run_preserves_previous_worktree(self) -> None:
+        """A run() after the caller retired the pending worktree gets a
+        fresh branch; the old one is committed and kept, not merged."""
         agent = self._agent()
 
         agent.run(prompt_template="task1", work_dir=str(self.repo))
@@ -270,10 +290,13 @@ class TestWorktreeSorcarAgent:
         assert old_branch is not None
         assert old_wt_dir is not None
         assert old_wt_dir.exists()
+        (old_wt_dir / "new.txt").write_text("work\n")
 
         import time as t
         t.sleep(1.1)
 
+        agent._retire_previous_worktree()
+        assert agent._wt is None
         agent.run(prompt_template="task2", work_dir=str(self.repo))
         new_branch = agent._wt_branch
         assert new_branch is not None
@@ -284,7 +307,10 @@ class TestWorktreeSorcarAgent:
             "rev-parse", "--verify", f"refs/heads/{old_branch}",
             cwd=self.repo,
         )
-        assert check.returncode != 0
+        assert check.returncode == 0
+        shown = _git("show", f"{old_branch}:new.txt", cwd=self.repo)
+        assert shown.stdout == "work\n"
+        assert not (self.repo / "new.txt").exists()
 
         agent.discard()
 

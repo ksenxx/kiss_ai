@@ -92,8 +92,6 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
         "max_budget": 1.0,
         "use_web_tools": False,
         "use_memory": False,
-        "use_worktree": False,
-        "auto_commit": False,
         "auto_classify": False,
     }
     assert_no_removed_getters(sea)

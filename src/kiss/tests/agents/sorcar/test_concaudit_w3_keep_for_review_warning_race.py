@@ -4,7 +4,7 @@
 # add your name here
 """``_keep_for_review`` must append to the pending merge warning atomically.
 
-``WorktreeSorcarAgent._keep_for_review`` (worktree_sorcar_agent.py)
+``ChatSorcarAgent._keep_for_review`` (sorcar_agent.py)
 used to read ``_merge_conflict_warning`` under ``_warning_lock``,
 RELEASE the lock, and then write the concatenation back through
 ``_set_warnings`` — two separate lock holds around one
@@ -28,8 +28,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 class _RecordingPrinter:
@@ -71,7 +71,7 @@ def test_prior_warning_is_broadcast_exactly_once_under_concurrent_flush(
         baseline_commit=None,
         work_dir=None,
     )
-    agent = WorktreeSorcarAgent("keep-for-review-race")
+    agent = ChatSorcarAgent("keep-for-review-race")
     printer = _RecordingPrinter()
     prior = "PRIOR-WARNING"
     agent._set_warnings(merge=prior)
@@ -80,12 +80,8 @@ def test_prior_warning_is_broadcast_exactly_once_under_concurrent_flush(
     keep_result: list[bool] = []
 
     def flush_until_kept() -> None:
-        # ``_pending_review`` flips right after the marker write fails
-        # and right before the warning is appended, so flushing from
-        # that moment on overlaps the read-modify-write itself rather
-        # than the preceding ``git config`` call.
-        while not agent._pending_review and not keep_done.is_set():
-            pass
+        # Flushing for the whole keep overlaps the warning's
+        # read-modify-write as well as the preceding ``git config`` call.
         while not keep_done.is_set():
             agent._flush_warnings(printer)
 
@@ -110,4 +106,3 @@ def test_prior_warning_is_broadcast_exactly_once_under_concurrent_flush(
     joined = "\n".join(printer.messages)
     assert joined.count(prior) == 1, printer.messages
     assert "could not be recorded in git config" in joined
-    assert agent._pending_review is True

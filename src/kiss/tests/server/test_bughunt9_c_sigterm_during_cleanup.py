@@ -34,12 +34,7 @@ from pathlib import Path
 
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+from kiss.tests.server.conftest import find_free_port
 
 
 def _sigint_when_listening(port: int, pid: int) -> None:
@@ -65,7 +60,7 @@ class TestSigtermDuringSigintCleanup(unittest.TestCase):
             for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
         }
         signal.signal(signal.SIGINT, signal.default_int_handler)
-        port = _free_port()
+        port = find_free_port()
         with tempfile.TemporaryDirectory() as tmp:
             srv = RemoteAccessServer(
                 host="127.0.0.1",

@@ -2,35 +2,32 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The per-run Auto-commit toggle must reach the agent.
+"""A worktree a run left unmerged is parked, never published, by the next run.
 
-Two consolidation defects are pinned here, both reproduced end to end
-with a **real** :class:`~kiss.server.server.VSCodeServer`, a **real**
-:class:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent`,
-a **real** temporary git repository and a **real** local
-OpenAI-compatible SSE endpoint that the agent genuinely talks to.  No
-mock, patch, fake or test double is used, and no paid model call is
-ever made.
+Reproduced end to end with a **real** :class:`~kiss.server.server.VSCodeServer`,
+a **real** :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent`,
+a **real** temporary git repository and a **real** local OpenAI-compatible
+SSE endpoint that the agent genuinely talks to.  No mock, patch, fake or
+test double is used, and no paid model call is ever made.
 
-* **K2-1** — ``task_runner`` adopted the wire's ``autoCommit`` value
-  into ``state.auto_commit_mode`` and used it for its *own* post-task
-  decision, but never passed it to ``agent.run(...)``.  The agent
-  therefore fell back to the *persisted* ``auto_commit_mode`` config
-  value for every automatic worktree cleanup it performs.  With the
-  persisted value ``true`` and the wire value ``false``, a second run
-  on the same tab published the first run's work onto the user's
-  branch through ``_try_setup_worktree`` →
-  ``_retire_previous_worktree`` — exactly the "publish work I declined
-  to merge" failure the toggle exists to prevent.
+The agent decides about worktrees itself through its ``create_worktree``
+and ``commit_and_merge`` tools.  A run that calls ``create_worktree``,
+writes a file and finishes **without** ``commit_and_merge`` leaves the
+worktree pending on the tab (the server offers the Merge / Discard /
+Do-nothing bar).  Two things are pinned here:
 
-* **K2-2** — ``_release_worktree_without_merging`` records the recovery
-  instructions with ``agent._set_warnings(merge=...)``, and
-  ``WorktreeSorcarAgent.run`` flushed them *before* ``super().run()``,
-  i.e. before the run's ``task_history`` id existed and before the tab
-  was subscribed to it.  The resulting ``{"type": "warning"}`` event
-  carried no ``tabId``, so the printer's task fan-out had no targets
-  and the event was dropped: the user was never told that the work
-  they declined now lives only on a ``kiss/wt-*`` branch.
+* **K2-1** — the next run on the same tab must not publish that work
+  onto the user's branch: ``task_runner`` retires the pending worktree
+  through ``_retire_previous_worktree``, which commits it to its own
+  ``kiss/wt-*`` branch and removes the worktree directory, and never
+  squash-merges it.
+
+* **K2-2** — the "your work now lives only on ``kiss/wt-*``" warning the
+  retire records with ``agent._set_warnings(merge=...)`` must reach the
+  tab: ``ChatSorcarAgent.run`` flushes it before ``super().run()``,
+  i.e. before the run's ``task_history`` id exists, so the
+  ``{"type": "warning"}`` event has to be stamped with the tab id by
+  the agent's own routing or the printer's fan-out drops it.
 """
 
 from __future__ import annotations
@@ -42,6 +39,7 @@ from typing import Any
 from kiss.core import config as config_module
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -49,22 +47,25 @@ from kiss.tests.server.parallel_agent_harness import (
     StandInModelServer,
     finish_response,
     request_text,
-    run_git,
     tool_call_response,
-    wait_for,
 )
 
-#: Marker put in the first run's prompt so the stand-in can tell the
-#: two runs apart and script a different tool call for each.
+#: Marker put in a run's prompt so the stand-in scripts a worktree run:
+#: ``create_worktree`` → write a file → ``finish`` (never merged).
 _WRITE_MARKER = "K2-WRITE-A-FILE"
 
-#: File the first run creates inside its worktree.  Its presence on the
-#: user's branch is the observable symptom of K2-1.
+#: File the worktree run creates.  Its presence on the user's branch is
+#: the observable symptom of K2-1.
 _PUBLISHED_FILE = "k2-declined-work.txt"
 
 #: Marker that makes the stand-in end the run with ``success: false``,
 #: i.e. a genuinely failed task that still left changes behind.
 _FAIL_MARKER = "K2-FAIL-THE-TASK"
+
+#: Marker of a follow-up run that just finishes.
+_PLAIN_MARKER = "K2-PLAIN-RUN"
+
+_MARKERS = (_WRITE_MARKER, _PLAIN_MARKER)
 
 
 class _FakeCredentials:
@@ -110,23 +111,40 @@ class _FakeCredentials:
             setattr(keys, name, value)
 
 
+def _current_run_marker(request: dict[str, Any]) -> str:
+    """Return the marker of the run the *request* belongs to.
+
+    The chat keeps earlier runs' messages, so the marker is read from
+    the **last** user message that carries one, not from the whole
+    transcript.
+    """
+    for message in reversed(request.get("messages", [])):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(
+                block.get("text", "") for block in content if isinstance(block, dict)
+            )
+        if not isinstance(content, str):
+            continue
+        for marker in _MARKERS:
+            if marker in content:
+                return marker
+        if _FAIL_MARKER in content:
+            return _FAIL_MARKER
+    return ""
+
+
 class _WorktreeRunnerHarness(unittest.TestCase):
     """A real server + agent + git repo + local model endpoint."""
 
     def setUp(self) -> None:
         self.home = IsolatedKissHome(prefix="kiss-k2-")
         self.repo = self.home.repo
-        # The persisted setting is deliberately the OPPOSITE of the
-        # per-run wire toggle every test sends: that difference is the
-        # whole point of K2-1.
-        self.home.write_config(
-            auto_commit_mode=True,
-            is_worktree=True,
-            max_budget=5.0,
-            use_web_browser=False,
-        )
+        self.home.write_config(max_budget=5.0, use_web_browser=False)
         self.credentials = _FakeCredentials()
-        self.calls: list[str] = []
+        self.calls: list[tuple[str, str]] = []
         self._calls_lock = threading.Lock()
         self.standin = StandInModelServer(self._respond)
         self.printer = CapturePrinter()
@@ -148,17 +166,27 @@ class _WorktreeRunnerHarness(unittest.TestCase):
         self.home.cleanup()
 
     def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Script the agent: write a file on the first run, else finish."""
+        """Script the agent per run.
+
+        A write run (``_WRITE_MARKER``) calls ``create_worktree``, then
+        writes ``_PUBLISHED_FILE`` with ``Bash``, then ``finish``es
+        without ``commit_and_merge`` (the first ``finish`` is refused
+        once by the worktree gate, the second passes).  A plain run
+        just finishes.
+        """
         text = request_text(request)
+        marker = _current_run_marker(request)
         with self._calls_lock:
-            self.calls.append(text)
-            seen_write = sum(1 for t in self.calls if _WRITE_MARKER in t)
-        if _WRITE_MARKER in text and seen_write == 1:
+            self.calls.append((marker, text))
+            step = sum(1 for m, _ in self.calls if m == marker)
+        if marker == _WRITE_MARKER and step == 1:
+            return tool_call_response("create_worktree", {})
+        if marker == _WRITE_MARKER and step == 2:
             return tool_call_response(
                 "Bash",
                 {
                     "command": f"printf 'declined\\n' > {_PUBLISHED_FILE}",
-                    "description": "create the file the user declines to merge",
+                    "description": "create the file the user never merges",
                 },
             )
         if _FAIL_MARKER in text:
@@ -168,14 +196,7 @@ class _WorktreeRunnerHarness(unittest.TestCase):
             )
         return finish_response("k2 done")
 
-    def _run(
-        self,
-        prompt: str,
-        *,
-        tab_id: str = "k2-tab",
-        auto_commit: bool,
-        use_worktree: bool = True,
-    ) -> None:
+    def _run(self, prompt: str, *, tab_id: str = "k2-tab") -> None:
         """Drive one real run through the real task runner, and block."""
         self.server._run_task(
             {
@@ -184,9 +205,7 @@ class _WorktreeRunnerHarness(unittest.TestCase):
                 "prompt": prompt,
                 "model": STANDIN_MODEL,
                 "workDir": str(self.repo),
-                "useWorktree": use_worktree,
                 "isParallel": False,
-                "autoCommit": auto_commit,
                 "useWebTools": False,
                 "maxBudget": 5.0,
                 "modelConfig": self.standin.model_config,
@@ -200,201 +219,111 @@ class _WorktreeRunnerHarness(unittest.TestCase):
         assert state is not None, "the runner never registered a state"
         return state.agent
 
-    def _tracked_on_head(self, name: str) -> bool:
-        """True when *name* is committed on the repo's checked-out branch."""
-        return run_git(self.repo, "cat-file", "-e", f"HEAD:{name}").returncode == 0
+    def _tracked_on(self, ref: str, name: str) -> bool:
+        """True when *name* is committed on *ref* in the repo."""
+        return run_git(self.repo, "cat-file", "-e", f"{ref}:{name}").returncode == 0
 
+    def _leave_pending_worktree(self, prompt: str) -> tuple[Any, str, Any]:
+        """Run *prompt* and assert it left its worktree pending on the tab.
 
-class TestPerRunAutoCommitReachesAgent(_WorktreeRunnerHarness):
-    """K2-1: ``autoCommit: false`` on the wire must bind the agent."""
-
-    def test_declined_work_is_not_published_by_the_next_run(self) -> None:
-        """A second worktree run must not merge the first run's work."""
-        self._run(f"{_WRITE_MARKER}: create the file", auto_commit=False)
-        agent = self._tab_agent()
-        self.assertTrue(
-            getattr(agent, "_wt_pending", False),
-            "the first run should leave a worktree pending review",
-        )
-
-        self._run("second run, nothing to do", auto_commit=False)
-
-        self.assertFalse(
-            self._tracked_on_head(_PUBLISHED_FILE),
-            "the declined worktree work was published onto the user's "
-            "branch: the per-run autoCommit toggle never reached the "
-            "agent, so it used the persisted config value instead",
-        )
-
-    def test_agent_binds_the_wire_toggle_not_the_persisted_config(self) -> None:
-        """The agent's effective toggle is the one the run carried."""
-        self._run("plain run", auto_commit=False)
-        self.assertFalse(
-            self._tab_agent().auto_commit_enabled,
-            "agent.auto_commit_enabled ignored the run's autoCommit:false",
-        )
-
-    def test_wire_toggle_true_still_enables_auto_commit(self) -> None:
-        """``autoCommit: true`` keeps the merging behaviour intact.
-
-        The symmetric case: the persisted setting says *false* and the
-        wire says *true*, so the run's work must land on the user's
-        branch.  Asserted on git state rather than on the agent object
-        because a fully auto-committed run ends with its worktree
-        merged and its agent released.
+        Returns:
+            The agent, its ``kiss/wt-*`` branch and the worktree dir.
         """
-        self.home.write_config(auto_commit_mode=False)
-        self._run(f"{_WRITE_MARKER}: create the file", auto_commit=True)
-        self.assertTrue(
-            self._tracked_on_head(_PUBLISHED_FILE),
-            "the run's work never reached the user's branch: the "
-            "per-run autoCommit:true was ignored in favour of the "
-            "persisted auto_commit_mode:false",
-        )
-
-
-class TestMainTreeCommitObeysTheRunToggle(_WorktreeRunnerHarness):
-    """A run without a worktree commits only when it was asked to."""
-
-    def test_autocommit_off_leaves_the_users_checkout_uncommitted(self) -> None:
-        """``useWorktree:false, autoCommit:false`` must not commit."""
-        self._run(
-            f"{_WRITE_MARKER}: create the file",
-            auto_commit=False,
-            use_worktree=False,
-        )
-
-        self.assertTrue(
-            (self.repo / _PUBLISHED_FILE).is_file(),
-            "the run never produced the file it was asked to write",
-        )
-        self.assertFalse(
-            self._tracked_on_head(_PUBLISHED_FILE),
-            "the run committed in the user's own checkout even though "
-            "the run carried autoCommit:false",
-        )
-
-    def test_autocommit_on_commits_the_users_checkout(self) -> None:
-        """The symmetric case still commits, so the toggle is real."""
-        self.home.write_config(auto_commit_mode=False)
-        self._run(
-            f"{_WRITE_MARKER}: create the file",
-            auto_commit=True,
-            use_worktree=False,
-        )
-
-        self.assertTrue(
-            self._tracked_on_head(_PUBLISHED_FILE),
-            "autoCommit:true no longer commits a non-worktree run",
-        )
-
-    def test_failed_run_does_not_commit_partial_work(self) -> None:
-        """A task that reports failure leaves its half-done work alone."""
-        self._run(
-            f"{_WRITE_MARKER} {_FAIL_MARKER}: create the file, then fail",
-            auto_commit=True,
-            use_worktree=False,
-        )
-
-        self.assertTrue(
-            (self.repo / _PUBLISHED_FILE).is_file(),
-            "the run never produced the file it was asked to write",
-        )
-        self.assertFalse(
-            self._tracked_on_head(_PUBLISHED_FILE),
-            "a failed task's partial changes were committed to the "
-            "user's checkout",
-        )
-
-
-class TestPendingWorktreeRetirementObeysTheCurrentRun(_WorktreeRunnerHarness):
-    """Retiring a carried-over worktree uses THIS run's toggle."""
-
-    def _leave_pending_worktree(self, auto_commit: bool) -> Any:
-        """Run a failing worktree task, leaving its worktree pending."""
-        self._run(
-            f"{_WRITE_MARKER} {_FAIL_MARKER}: create the file, then fail",
-            auto_commit=auto_commit,
-        )
+        self._run(prompt)
         agent = self._tab_agent()
+        self.assertIsNotNone(agent, "the runner released the tab's agent")
         self.assertTrue(
             getattr(agent, "_wt_pending", False),
-            "the failed run should leave a worktree pending review",
+            "the run should leave a worktree pending review",
         )
-        return agent
-
-    def test_toggling_off_preserves_the_carried_over_worktree(self) -> None:
-        """Auto-commit off at run time must not commit the old worktree."""
-        agent = self._leave_pending_worktree(auto_commit=True)
-        wt_dir = agent._wt.wt_dir
         branch = agent._wt_branch
-        self.assertTrue((wt_dir / _PUBLISHED_FILE).is_file())
-
-        # The user switches Auto-commit off and starts a run directly
-        # on the main tree, which retires the pending worktree.
-        self._run("follow-up run", auto_commit=False, use_worktree=False)
-
-        committed = run_git(
-            self.repo, "cat-file", "-e", f"{branch}:{_PUBLISHED_FILE}",
-        )
-        self.assertNotEqual(
-            committed.returncode,
-            0,
-            "the pending worktree was committed even though the run "
-            "that retired it carried autoCommit:false",
-        )
+        wt_dir = agent._wt.wt_dir
+        self.assertTrue(branch, "the run should own a worktree branch")
         self.assertTrue(
             (wt_dir / _PUBLISHED_FILE).is_file(),
-            "the work was neither committed nor left on disk",
+            "the run never produced the file inside its worktree",
         )
-
-    def test_toggling_on_commits_the_carried_over_worktree(self) -> None:
-        """Auto-commit on at run time commits the old worktree's work."""
-        agent = self._leave_pending_worktree(auto_commit=False)
-        wt_dir = agent._wt.wt_dir
-        branch = agent._wt_branch
-
-        self._run("follow-up run", auto_commit=True, use_worktree=False)
-
-        committed = run_git(
-            self.repo, "cat-file", "-e", f"{branch}:{_PUBLISHED_FILE}",
+        self.assertFalse(
+            (self.repo / _PUBLISHED_FILE).exists(),
+            "the run wrote into the user's checkout instead of the worktree",
         )
+        return agent, branch, wt_dir
+
+
+class TestPendingWorktreeIsOfferedNotMerged(_WorktreeRunnerHarness):
+    """A run that never calls ``commit_and_merge`` leaves its work pending."""
+
+    def test_finished_run_leaves_worktree_pending_with_bar(self) -> None:
+        """The server offers the Merge / Discard bar instead of merging."""
+        _agent, branch, _wt_dir = self._leave_pending_worktree(
+            f"{_WRITE_MARKER}: create the file",
+        )
+        self.assertFalse(
+            self._tracked_on("HEAD", _PUBLISHED_FILE),
+            "the run's unmerged work was published onto the user's branch",
+        )
+        done = [
+            event
+            for event in self.printer.events_of_type("worktree_done")
+            if event.get("tabId") == "k2-tab"
+        ]
         self.assertEqual(
-            committed.returncode,
-            0,
-            "the run asked for auto-commit, but the retired worktree's "
-            f"work never landed on {branch}",
+            len(done), 1, f"expected one worktree_done bar for the tab, got {done}",
+        )
+        self.assertEqual(done[0].get("branch"), branch)
+        self.assertIn(_PUBLISHED_FILE, done[0].get("changedFiles", []))
+
+    def test_failed_run_leaves_worktree_pending(self) -> None:
+        """A task that reports failure keeps its half-done work pending."""
+        self._leave_pending_worktree(
+            f"{_WRITE_MARKER} {_FAIL_MARKER}: create the file, then fail",
+        )
+        self.assertFalse(
+            self._tracked_on("HEAD", _PUBLISHED_FILE),
+            "a failed task's partial changes were merged into the user's branch",
+        )
+
+
+class TestNextRunParksThePendingWorktree(_WorktreeRunnerHarness):
+    """K2-1: the next run retires the carried-over worktree without merging."""
+
+    def test_declined_work_is_not_published_by_the_next_run(self) -> None:
+        """The pending work is committed to its branch, never to the user's."""
+        agent, branch, wt_dir = self._leave_pending_worktree(
+            f"{_WRITE_MARKER}: create the file",
+        )
+
+        self._run(f"{_PLAIN_MARKER}: second run, nothing to do")
+
+        self.assertFalse(
+            self._tracked_on("HEAD", _PUBLISHED_FILE),
+            "the unmerged worktree work was published onto the user's "
+            "branch by the next run",
+        )
+        self.assertTrue(
+            self._tracked_on(branch, _PUBLISHED_FILE),
+            f"the retired worktree's work never landed on {branch}",
         )
         self.assertFalse(
             wt_dir.exists(),
-            "a committed worktree directory must be removed",
+            "a retired worktree directory must be removed",
+        )
+        self.assertFalse(
+            getattr(agent, "_wt_pending", False),
+            "the retired worktree is still pending on the agent",
         )
 
 
-class TestReleaseWarningReachesTheUser(_WorktreeRunnerHarness):
+class TestRetireWarningReachesTheUser(_WorktreeRunnerHarness):
     """K2-2: the "your work is only on kiss/wt-*" warning must arrive."""
 
-    def test_release_warning_is_broadcast_to_the_tab(self) -> None:
-        """Releasing a pending worktree must tell the user where it went."""
-        self._run(f"{_WRITE_MARKER}: create the file", auto_commit=False)
-        agent = self._tab_agent()
-        branch = agent._wt_branch
-        self.assertTrue(branch, "the first run should own a worktree branch")
+    def test_retire_warning_is_broadcast_to_the_tab(self) -> None:
+        """Retiring a pending worktree must tell the user where it went."""
+        _agent, branch, _wt_dir = self._leave_pending_worktree(
+            f"{_WRITE_MARKER}: create the file",
+        )
 
-        # A run on ANOTHER tab that writes the main working tree makes
-        # the pending worktree unmergeable, which is what triggers
-        # `_release_worktree_without_merging`.
-        holder = threading.Event()
-        released = threading.Event()
-        self._occupy_main_tree(holder, released)
-        try:
-            self._run(
-                "second run on the same tab",
-                auto_commit=False,
-            )
-        finally:
-            holder.set()
-            released.wait(timeout=30)
+        self._run(f"{_PLAIN_MARKER}: second run on the same tab")
 
         warnings = [
             event
@@ -403,45 +332,14 @@ class TestReleaseWarningReachesTheUser(_WorktreeRunnerHarness):
         ]
         self.assertTrue(
             warnings,
-            "the user was never told their declined work now lives only "
+            "the user was never told their unmerged work now lives only "
             f"on {branch}: the warning was flushed before the tab was "
             "subscribed and dropped by the printer fan-out",
         )
         self.assertTrue(
-            all(event.get("tabId") for event in warnings),
-            "a release warning without a tabId is dropped by every client",
+            all(event.get("tabId") == "k2-tab" for event in warnings),
+            f"a retire warning must be stamped with the tab id: {warnings}",
         )
-
-    def _occupy_main_tree(
-        self, holder: threading.Event, released: threading.Event,
-    ) -> None:
-        """Register a real non-worktree task holding the main tree."""
-        state = agent_state.AgentState(
-            "k2-main-tree-holder",
-            chat_id="k2-holder-chat",
-            tab_id="k2-other-tab",
-            server_owned=True,
-            stop_event=threading.Event(),
-        )
-        state.use_worktree = False
-        state.is_running_non_wt = True
-        state.is_task_active = True
-
-        def _worker() -> None:
-            holder.wait(timeout=60)
-            with agent_state.STATE_LOCK:
-                state.is_task_active = False
-                state.is_running_non_wt = False
-            released.set()
-
-        thread = threading.Thread(
-            target=_worker, name="k2-main-tree-holder", daemon=True,
-        )
-        state.task_thread = thread
-        agent_state.register(state)
-        thread.start()
-        self.addCleanup(holder.set)
-        self.addCleanup(lambda: wait_for(released.is_set, timeout=30))
 
 
 if __name__ == "__main__":  # pragma: no cover — manual runs

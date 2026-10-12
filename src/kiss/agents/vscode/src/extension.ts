@@ -43,10 +43,6 @@ let panelManager: SorcarPanelManager | undefined;
 let historyView: SorcarSidebarView | undefined;
 let metaView: SorcarSidebarView | undefined;
 
-// workspaceState key: root tab ids of the chat editor panels open at
-// the previous session's shutdown (see priorPanelTabIds in activate).
-const PANEL_TAB_IDS_KEY = 'kissSorcar.editorPanelTabIds';
-
 /** The `kissSorcar.checkForUpdates` setting (default true). */
 function updateChecksEnabled(): boolean {
   // Guarded like the other optional host APIs (test stubs may not
@@ -111,38 +107,7 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
 
-  // Root tab ids of the chat panels open when the previous session
-  // shut down — the registry tabs behind whatever serialized chat
-  // placeholders the workbench restores after a reload. Read BEFORE
-  // the manager can persist this session's first value; undefined
-  // until a session of this extension version has recorded one.
-  const priorPanelTabIds =
-    context.workspaceState.get<string[]>(PANEL_TAB_IDS_KEY);
-
-  // Fold one panel open/close into the persisted record. Per-tab
-  // deltas, not whole-set writes: see the manager's _recordPanelTab
-  // contract (a whole-set write mid-revival would replace the record
-  // with a partial one).
-  const recordPanelTab = (tabId: string, open: boolean): void => {
-    const stored = context.workspaceState.get<string[]>(PANEL_TAB_IDS_KEY);
-    const ids = stored ?? [];
-    const next = open
-      ? ids.includes(tabId)
-        ? ids
-        : [...ids, tabId]
-      : ids.filter(id => id !== tabId);
-    void context.workspaceState.update(PANEL_TAB_IDS_KEY, next);
-  };
-
-  // Panel closes retire their chat tabs through the sidebar
-  // controller's long-lived daemon client: a panel's own client dies
-  // with the panel, which could lose a closeTab queued while the
-  // daemon was briefly unreachable.
-  panelManager = new SorcarPanelManager(
-    context.extensionUri,
-    tabId => sidebarView?.closeChatTab(tabId),
-    recordPanelTab,
-  );
+  panelManager = new SorcarPanelManager(context.extensionUri);
   context.subscriptions.push(panelManager.registerSerializer());
 
   const editorTabsMode = () => SorcarPanelManager.modeEnabled();
@@ -150,15 +115,15 @@ export function activate(context: vscode.ExtensionContext): void {
   // The secondary-sidebar Task Info view (editor-tabs mode): the
   // remote webapp's rightmost desktop panel — live task metadata plus
   // the running task's task update — rendered by the same chat
-  // webview in meta-panel-mode. It mirrors the ACTIVE chat editor
-  // panel: the panel manager relays each active panel's metaUpdate
-  // reports into it through setMetaSink below.
+  // webview in meta-panel-mode. It mirrors the chat editor tab: the
+  // panel manager relays its metaUpdate reports into it through
+  // setMetaSink below.
   metaView = new SorcarSidebarView(context.extensionUri, {
     rootTabId: META_PANEL_TAB_ID,
     bodyAttrs: metaPanelBodyAttrs(),
     // The view owns no panel; its only chat-opening action is the Apps
-    // subpanel launching a "connect this app" task, which opens (and
-    // auto-submits) a fresh chat editor panel.
+    // subpanel launching a "connect this app" task, which the chat
+    // editor panel submits in a new chat.
     onEvent: event => {
       if (event.kind === 'openChat') panelManager?.openChat(event);
     },
@@ -173,9 +138,9 @@ export function activate(context: vscode.ExtensionContext): void {
   panelManager.setMetaSink((values, taskUpdate) => {
     metaView?.postMetaState(values, taskUpdate);
   });
-  // A task starting in the active chat editor panel brings the view
-  // up with its Task Info and Task update sections expanded and the
-  // rest collapsed.
+  // A task starting in the chat editor tab brings the view up with
+  // its Task Info and Task update sections expanded and the rest
+  // collapsed.
   panelManager.onTaskStarted = () => metaView?.postShowForRun();
   // The view's refresh button asks the /ask agent about the ACTIVE
   // chat editor panel's task now.
@@ -195,20 +160,21 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
-  // The chat surface commands act on: in editor-tabs mode the active
-  // chat panel (opening one when asked to), otherwise the sidebar view.
+  // The chat surface commands act on: in editor-tabs mode the chat
+  // editor panel (opening it when asked to), otherwise the sidebar view.
   const chatController = (createIfMissing: boolean) => {
     if (!editorTabsMode()) return sidebarView!;
-    if (createIfMissing) return panelManager!.revealActiveOrCreate();
-    return panelManager!.activeController();
+    if (createIfMissing) return panelManager!.open();
+    return panelManager!.controller();
   };
 
   // Switching the editor-tabs mode (from the settings UI toggle or
-  // settings.json): ON migrates the registry's chats into editor tabs (the sidebar view hides via its `when` clause)
-  // and KEEPS the secondary sidebar open, now showing the Task Info
-  // view — the remote webapp's rightmost desktop panel — in the spot
-  // the sidebar chat occupied;
-  // OFF closes the panels without retiring their chats and OPENS the
+  // settings.json): ON opens the chat editor tab, which adopts the
+  // registry's chats from its first `tabs_state` (the sidebar view
+  // hides via its `when` clause), and KEEPS the secondary sidebar
+  // open, now showing the Task Info view — the remote webapp's
+  // rightmost desktop panel — in the spot the sidebar chat occupied;
+  // OFF closes the panel without retiring its chats and OPENS the
   // secondary sidebar on the KISS Sorcar chat view, focusing its
   // composer — the chats moved there, so that is where the user must
   // land (the view re-adopts them from `tabs_state` as it resolves).
@@ -223,8 +189,8 @@ export function activate(context: vscode.ExtensionContext): void {
   let refocusChatAfterWiden = false;
   // The chat / task ids the sidebar chat view last reported showing
   // (see the activeTask wiring below): the OFF branch replays them
-  // into the history panel, whose highlight the closing editor panels
-  // would otherwise leave on the last ACTIVE panel's task.
+  // into the history panel, whose highlight the closing editor tab
+  // would otherwise leave on that tab's last task.
   let sidebarActiveTask = {chatId: '', taskId: ''};
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(
@@ -246,7 +212,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // bar, OFF restores the user's own actions location.
         void syncEditorActionsLocation(context, editorTabsMode());
         if (editorTabsMode()) {
-          panelManager!.enterMode(sidebarView!.getRegistryTabEntries());
+          panelManager!.open();
           // The secondary sidebar stays OPEN: the chat view it hosted
           // just hid (its `when` clause flipped false), and the Task
           // Info view takes its place. The reveal's focus then goes
@@ -262,10 +228,10 @@ export function activate(context: vscode.ExtensionContext): void {
             if (!editorTabsMode() || panelManager !== revealManager) {
               return undefined;
             }
-            return panelManager?.activeController()?.focusChatInput();
+            return panelManager?.controller()?.focusChatInput();
           });
         } else {
-          panelManager!.closeAll();
+          panelManager!.close();
           historyView?.postActiveTask(
             sidebarActiveTask.chatId,
             sidebarActiveTask.taskId,
@@ -308,7 +274,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!editorTabsMode() || panelManager !== revealManager) {
         return undefined;
       }
-      const active = panelManager?.activeController();
+      const active = panelManager?.controller();
       if (active) return active.focusChatInput();
       // Back to the group the user started in — not group 1, where
       // focusFirstEditorGroup would drag a user working in group 2/3.
@@ -318,78 +284,26 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   }
 
-  // The editor-tabs-mode invariant — at least one chat editor tab is
-  // always open, as the sidebar strip always keeps one chat tab. The
-  // panel manager re-establishes it after every panel close; this
-  // covers the two closes it cannot observe from a panel: a restored
-  // placeholder closed before revival (tabGroups backstop) and a window
-  // that starts with the mode on and no chat tab at all (restored
-  // placeholders count, so a reload never gets a duplicate). The
-  // activation open stays in the background — the user did not ask
-  // for a chat right now.
-  context.subscriptions.push(panelManager.watchEditorTabs());
-  panelManager.ensureChatOpen({preserveFocus: true});
+  // A window that starts in editor-tabs mode gets its chat tab (a
+  // reloaded window still holds the serialized one, which counts).
+  // The open stays in the background — the user did not ask for a
+  // chat right now.
+  panelManager.ensureOpen();
 
-  // A chat tab another client created — or first ran a task in — since
-  // the last registry snapshot (e.g. a task run in the remote web app)
-  // opens as an editor tab. Sidebar mode needs no host help: its
-  // webview adopts the tab from the same `tabs_state` snapshot. The
-  // long-lived sidebar controller is the listener because it is
-  // connected to the daemon from activation on, panels or not (and it
-  // requests a baseline snapshot on every daemon connect, so remote
-  // tabs created before activation or during an outage arrive too).
-  // The FIRST snapshot's tabs may be duplicated by this window's own
-  // chat editor tabs — serialized placeholders are invisible to the
-  // panel manager until the workbench revives them — so while any
-  // chat tab exists, only first-snapshot tabs the previous session
-  // verifiably did NOT hold (per the persisted panel tab ids) may
-  // open: exactly the tabs a remote client created in the meantime.
-  context.subscriptions.push(
-    sidebarView.onRegistryTabsState(delta => {
-      if (!editorTabsMode()) return;
-      let toAdopt = delta.added;
-      if (delta.firstSnapshot && panelManager!.hasChatEditorTab()) {
-        const tabCount = panelManager!.chatEditorTabCount();
-        if (tabCount >= 0 && tabCount === panelManager!.panelCount) {
-          // Every chat editor tab is a LIVE panel the manager already
-          // knows — no serialized placeholder is pending revival, so
-          // nothing a first-snapshot tab could duplicate exists;
-          // adoptRegistryTabs dedupes against the open panels by tab
-          // and chat id. (A window that opened a fresh chat while the
-          // daemon was down still adopts a remote tab from its late
-          // first snapshot this way.)
-        } else if (priorPanelTabIds) {
-          const prior = new Set(priorPanelTabIds);
-          toAdopt = delta.added.filter(e => !prior.has(e.tabId));
-        } else {
-          // Unrevived placeholders whose ids are unknowable (no
-          // persisted record — first session of this version): adopt
-          // nothing rather than risk duplicating them, but still let
-          // the snapshot sync the open panels' chat bindings below.
-          toAdopt = [];
-        }
-      }
-      panelManager!.adoptRegistryTabs(toAdopt, delta.listed);
-    }),
-  );
-
-  // A KS button brought the history panel on screen; an editor window
-  // with no chat tab at all also gets a fresh conversation (the
-  // invariant normally holds already — this is the user asking for
-  // the chat, so a fresh one takes the focus).
+  // A KS button brought the history panel on screen: an editor window
+  // with no chat tab at all gets one too.
   const openChatIfNoneOpen = (): void => {
     // Optional: a history-view visibility flip may land after
     // deactivation cleared the module slot.
-    panelManager?.ensureChatOpen();
+    panelManager?.ensureOpen();
   };
 
   // The primary-sidebar history panel (BOTH modes): the same chat
   // webview in history-only mode (see historyPanelBodyAttrs), so
   // search, filters, deletes and live refreshes all come from main.js
   // unchanged. Its history clicks arrive as `openChatPanel` messages;
-  // in editor-tabs mode they open editor tabs through the panel
-  // manager, in sidebar mode they open the chat in the secondary
-  // sidebar's chat view.
+  // in editor-tabs mode they open the chat in the chat editor tab, in
+  // sidebar mode in the secondary sidebar's chat view.
   historyView = new SorcarSidebarView(context.extensionUri, {
     rootTabId: HISTORY_PANEL_TAB_ID,
     bodyAttrs: historyPanelBodyAttrs(),
@@ -419,7 +333,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   // The history panel highlights (and scrolls to) the row of the task
   // the chat surface on screen shows: in editor-tabs mode the panel
-  // manager relays the ACTIVE editor panel's ids, in sidebar mode the
+  // manager relays the chat editor tab's ids, in sidebar mode the
   // secondary sidebar's chat view reports its own visible tab. Each
   // relay is gated on its mode so the hidden surface cannot override
   // the one the user is looking at.
@@ -460,23 +374,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.newConversation', async () => {
-      if (editorTabsMode()) {
-        // Every conversation is its own editor tab in this mode. Route
-        // through the active chat panel's webview when one exists: its
-        // createNewTab posts openChatPanel WITH the composer draft, so
-        // Cmd+T carries the drafted text into the new tab exactly like
-        // the sidebar path below does.
-        const active = panelManager!.activeController();
-        if (active) {
-          await active.focusChatInput();
-          active.newConversation();
-          return;
-        }
-        await panelManager!.openNewChat().focusChatInput();
-        return;
-      }
-      await sidebarView!.focusChatInput();
-      sidebarView!.newConversation();
+      const controller = chatController(true)!;
+      await controller.focusChatInput();
+      controller.newConversation();
     }),
   );
 

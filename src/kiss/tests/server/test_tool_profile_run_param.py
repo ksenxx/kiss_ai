@@ -24,8 +24,7 @@ runs with ``Bash`` + ``finish`` only, in the caller's work directory
 task before any executor session starts; a malformed wire value means
 "no profile"; the ``run_agent`` tool validates and forwards its
 ``tool_profile`` argument; and a ``/xxx`` command
-runs the SEA directly in the tab's own run, which honours the SEA's
-``use_worktree`` / ``auto_commit`` settings (a broken SEA fails that
+runs the SEA directly in the tab's own run (a broken SEA fails that
 run with the loader's diagnostic).
 """
 
@@ -115,14 +114,13 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             ["git", *args], cwd=self.repo, capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-    def test_slash_sh_relay_runs_without_worktree_or_auto_commit(self) -> None:
-        """The OUTER ``/sh`` run honours the SEA's no-worktree / no-auto-commit verdicts.
+    def test_slash_sh_relay_runs_in_the_checkout_without_committing(self) -> None:
+        """The OUTER ``/sh`` run stays in the real checkout and commits nothing.
 
         A ``/sh <command>`` prompt becomes a relay run whose agent calls
-        ``run_agent`` with its own work directory.  With the tab's
-        worktree and auto-commit toggles ON, the relay must still run
-        in the real checkout (or the SEA would inherit the relay's
-        worktree) and must not commit what the command left behind.
+        ``run_agent`` with its own work directory.  The relay must run
+        in the real checkout (no worktree is created behind the SEA's
+        back) and must not commit what the command left behind.
         """
         (Path(self.repo) / "sentinel.txt").write_text("left by the command\n")
         commits_before = self._git("rev-list", "--count", "HEAD")
@@ -131,8 +129,6 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         result = sorcar.run(
             "/sh printf hi",
             work_dir=self.repo,
-            use_worktree=True,
-            auto_commit=True,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -169,7 +165,6 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             result = sorcar.run(
                 "/boom anything",
                 work_dir=self.repo,
-                use_worktree=True,
                 endpoint_file=self.endpoint_file,
                 timeout=60,
             )
@@ -183,31 +178,12 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         assert "stopped" not in result.text.lower(), result
         assert calls == []
 
-    def test_plain_prompt_control_commits_the_dirty_tree(self) -> None:
-        """Control for the relay test: a plain direct run with auto-commit on commits."""
-        (Path(self.repo) / "sentinel.txt").write_text("left by the task\n")
-        commits_before = self._git("rev-list", "--count", "HEAD")
-        calls: list[dict[str, Any]] = []
-        self._install_recording_stub(calls)
-        result = sorcar.run(
-            "plain task on the main tree",
-            work_dir=self.repo,
-            use_worktree=False,
-            auto_commit=True,
-            endpoint_file=self.endpoint_file,
-            timeout=60,
-        )
-        assert result.success is True, result
-        assert self._git("status", "--porcelain") == ""
-        assert int(self._git("rev-list", "--count", "HEAD")) == int(commits_before) + 1
-
     def test_sh_sea_runs_bash_only_in_the_callers_directory(self) -> None:
         """The bundled ``/sh`` agent: Bash + finish, its own prompt, no worktree.
 
         The run is dispatched exactly as the ``/sh`` slash command
         dispatches it — the SEA path as ``sea_path`` with
-        the daemon defaults (``use_worktree=True``) that the script's
-        ``settings()`` must override.
+        the daemon defaults that the script's ``settings()`` override.
         """
         calls: list[dict[str, Any]] = []
         self._install_recording_stub(calls)
@@ -234,7 +210,6 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             "task with the shell profile",
             work_dir=self.repo,
             tool_profile="shell",
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -253,7 +228,6 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             "task with a composite profile",
             work_dir=self.repo,
             tool_profile="shell+edit+control",
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -261,7 +235,8 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         call = self._single_call(calls)
         assert set(call["tool_names"]) == {
             "finish", "Bash", "bash_job", "Read", "run_commands_parallel",
-            "Edit", "Write", "summary", "set_model",
+            "Edit", "Write", "create_worktree", "commit_and_merge",
+            "summary", "set_model",
         }, call
         assert "# Restricted tool profile: shell+edit+control" in call["system_prompt"]
         assert "Edit, Read, Write" in call["system_prompt"]
@@ -273,7 +248,6 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         result = sorcar.run(
             "task with the full toolset",
             work_dir=self.repo,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -289,7 +263,6 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             "task with a bogus profile",
             work_dir=self.repo,
             tool_profile="bogus",
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -323,7 +296,6 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             work_dir=self.repo,
             sea_path=sea_path,
             tool_profile="bash",
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -354,7 +326,6 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             "task with a broken profile setting",
             work_dir=self.repo,
             sea_path=sea_path,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -399,7 +370,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             tool = make_run_agent_tool(self.repo, None)
             text = tool(
                 "run with the bash profile", script, tool_profile="bash",
-                options='{"use_worktree": false}',
+                options='{"use_web_tools": false}',
             )
         finally:
             cron_agent._daemon_endpoint_file = saved_endpoint

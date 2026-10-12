@@ -16,7 +16,7 @@ explicitly refreshed — never more than one run per task at a time, and
 never for a task nobody is looking at (a poll is what triggers a run).
 
 :func:`run_task_update_sea` runs the agent in-process the way
-:func:`~kiss.server.merge_conflict_resolver.run_merge_sea` runs the merge
+:func:`~kiss.agents.sorcar.merge_conflict_resolver.run_merge_sea` runs the merge
 agent: as a sub-agent of the task, in the task's own chat, so it opens as
 a nested tab under the task's tab and its history row nests under the
 task's; its spend is attributed to the task.

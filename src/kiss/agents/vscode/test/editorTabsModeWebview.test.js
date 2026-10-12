@@ -4,32 +4,29 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for EDITOR-TABS MODE in the chat webview
-// (media/main.js): the webview is hosted in a VS Code editor tab
-// (WebviewPanel) pinned to a single root chat tab, marked by the
-// `editor-tab-mode` body class and `data-kiss-*` attributes the
-// extension host stamps on <body> (SorcarTab.editorTabBodyAttrs).
+// (media/main.js): the webview is hosted in the ONE chat editor tab
+// (WebviewPanel), marked by the `editor-tab-mode` body class the
+// extension host stamps on <body> (SorcarTab.EDITOR_TAB_BODY_ATTRS).
+// Its tab model is the sidebar view's: the daemon's whole tab registry
+// is mirrored, chats are switched in place, and only the surface
+// differs (the shown chat's title goes to the host for the editor tab).
 //
 // Covered behavior:
-//  - boot adopts the host-provided root tab id/title and announces it
-//    in `ready`;
-//  - the internal tab bar stays hidden for a single conversation, has
-//    no '+' / settings buttons, and appears only when a sub-agent tab
-//    joins the root tab;
-//  - the root tab's renames reach the host as `panelTitle` messages;
-//  - `tabs_state` reconciliation follows ONLY the root tab's entry
-//    (title/chat binding), never adopts other clients' tabs, and posts
-//    `closePanel` exactly once when the registered root tab vanishes
-//    from a later snapshot;
-//  - sub-agent announcements for foreign parents are ignored;
-//  - `clearChat` / createNewTab ask the host for a new editor tab
-//    (`openChatPanel`) instead of stacking an internal chat tab;
+//  - boot announces one new chat in `ready` (no `singleTabId`: the
+//    daemon replays every bound tab) and reports its title;
+//  - `tabs_state` reconciliation adopts every registry tab;
+//  - `panelTitle` follows the chat ON SCREEN: a switch, a rename and
+//    the task status all reach the host;
+//  - `clearChat` opens a new chat in place and never asks the host for
+//    another editor tab (`openChatPanel`);
+//  - the host's `openChatFromHistory` resumes a chat in place;
+//  - sub-agent tabs: an own chat's sub-agent gets an internal tab, a
+//    parentless spawn is adopted by the chat surface but ignored by the
+//    chatless history / Task Info panels, which also ignore
+//    `tabs_state` and name their root as the only tab to replay;
 //  - the host's `openSettings` message opens the settings panel;
 //  - the settings panel's editor-tabs toggle is visible, checked, and
-//    posts `setEditorTabsMode` on change;
-//  - the persisted webview state carries `editorRootTabId` for the
-//    panel serializer;
-//  - `data-kiss-resume-*` attributes trigger a resumeSession right
-//    after `ready`.
+//    posts `setEditorTabsMode` on change.
 
 'use strict';
 
@@ -92,233 +89,189 @@ function byType(posted, type) {
   return posted.filter(m => m.type === type);
 }
 
-function chatTabStrips(win) {
-  return win.document.querySelectorAll('#tab-list .chat-tab');
+const EDITOR = ' class="editor-tab-mode"';
+
+function lastTitle(posted) {
+  const titles = byType(posted, 'panelTitle');
+  return titles[titles.length - 1];
 }
 
-const ROOT = 'root-tab-0001';
-
-function editorAttrs(extra) {
-  return (
-    ' class="editor-tab-mode"' +
-    ` data-kiss-tab-id="${ROOT}"` +
-    ' data-kiss-tab-title="My chat"' +
-    (extra || '')
-  );
-}
-
-function testBootAdoptsRootTab() {
-  const {win, posted, getState} = makeWebview(editorAttrs());
+function testBootAnnouncesOneNewChat() {
+  const {win, posted} = makeWebview(EDITOR);
   const readies = byType(posted, 'ready');
   assert.strictEqual(readies.length, 1, 'exactly one ready');
+  assert.strictEqual(readies[0].tabId, win._testApi.getActiveTabId());
   assert.strictEqual(
-    readies[0].tabId,
-    ROOT,
-    'ready must announce the host-provided root tab id',
+    readies[0].singleTabId,
+    undefined,
+    'the chat editor tab mirrors the whole registry: no single tab',
   );
-
-  const bar = win.document.getElementById('tab-bar');
-  assert.strictEqual(
-    bar.style.display,
-    'none',
-    'single conversation: internal tab bar hidden',
-  );
-  // The + and settings controls live in the input footer on every
-  // surface now.  In editor-tabs mode the + must open a NEW EDITOR TAB
-  // (createNewTab posts openChatPanel) instead of stacking a second
-  // internal chat tab, and the "..." menu's settings item must open
-  // the settings sheet.
-  const addBtn = win.document.getElementById('new-chat-btn');
-  assert.ok(addBtn, 'footer + button must exist in editor-tabs mode');
-  const tabsBefore = chatTabStrips(win).length;
-  addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.strictEqual(
-    byType(posted, 'openChatPanel').length,
-    1,
-    'the + button must ask the host for a new editor tab',
-  );
-  assert.strictEqual(
-    chatTabStrips(win).length,
-    tabsBefore,
-    'the + button must not create an internal chat tab in editor-tabs mode',
-  );
-  const settingsBtn = win.document.getElementById('settings-btn');
-  assert.ok(settingsBtn, 'footer settings button must exist');
-  settingsBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.ok(
-    win.document
-      .getElementById('settings-panel')
-      .classList.contains('open'),
-    'the settings menu item must open the settings sheet',
-  );
-
-  const titles = byType(posted, 'panelTitle');
-  assert.ok(titles.length >= 1, 'boot reports the panel title');
-  assert.strictEqual(titles[titles.length - 1].title, 'My chat');
-  assert.strictEqual(titles[titles.length - 1].tabId, ROOT);
-
-  assert.ok(getState(), 'boot must persist webview state immediately');
-  assert.strictEqual(
-    getState().editorRootTabId,
-    ROOT,
-    'the serializer can re-adopt the chat even after an instant reload',
-  );
-  return {win, posted, getState};
+  assert.strictEqual(win._testApi.openTabs().length, 1);
+  assert.strictEqual(lastTitle(posted).title, 'new chat');
+  assert.strictEqual(lastTitle(posted).state, '');
+  win.close();
 }
 
-function testReconcileFollowsOwnEntryOnly(win, posted, getState) {
+function testReconcileAdoptsEveryRegistryTab() {
+  const {win, posted} = makeWebview(EDITOR);
+  const boot = win._testApi.getActiveTabId();
   send(win, {
     type: 'tabs_state',
     tabs: [
-      {tabId: ROOT, chatId: 'chat-1', title: 'Renamed chat', workDir: ''},
+      {tabId: boot, chatId: 'chat-1', title: 'Renamed chat', workDir: ''},
       {tabId: 'other-tab', chatId: 'chat-2', title: 'Other', workDir: ''},
     ],
   });
+  const ids = win._testApi.openTabs().map(t => String(t.id));
   assert.strictEqual(
-    chatTabStrips(win).length,
-    1,
-    'another client tab must NOT be adopted into this panel',
+    ids.sort().join(','),
+    [boot, 'other-tab'].sort().join(','),
+    "another client's tab is adopted, like the sidebar view does",
   );
-  const titles = byType(posted, 'panelTitle');
   assert.strictEqual(
-    titles[titles.length - 1].title,
+    lastTitle(posted).title,
     'Renamed chat',
-    'root entry title must be followed and reported to the host',
+    'the registry title of the chat on screen reaches the host',
   );
+
+  // The panel title follows the chat ON SCREEN.
+  win._testApi.switchToTab('other-tab');
+  assert.strictEqual(lastTitle(posted).title, 'Other');
+  send(win, {type: 'status', running: true, tabId: 'other-tab', taskId: 7});
+  assert.strictEqual(lastTitle(posted).state, 'running');
+  win._testApi.switchToTab(boot);
+  assert.strictEqual(lastTitle(posted).title, 'Renamed chat');
+  assert.notStrictEqual(lastTitle(posted).state, 'running');
+
+  // A snapshot without the other tab drops it (closed elsewhere); the
+  // chat on screen stays.
+  send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId: boot, chatId: 'chat-1', title: 'Renamed chat', workDir: ''}],
+  });
   assert.strictEqual(
-    byType(posted, 'closePanel').length,
-    0,
-    'no closePanel while the root tab is listed',
+    win._testApi.openTabs().map(t => String(t.id)).join(','),
+    boot,
   );
-  assert.ok(getState(), 'webview state persisted');
-  assert.strictEqual(
-    getState().editorRootTabId,
-    ROOT,
-    'persisted state must carry the root tab id for the serializer',
-  );
+  assert.strictEqual(byType(posted, 'closePanel').length, 0);
+  win.close();
 }
 
-function testClosePanelOnceWhenRootVanishes(win, posted) {
-  send(win, {type: 'tabs_state', tabs: []});
-  assert.strictEqual(
-    byType(posted, 'closePanel').length,
-    1,
-    'registered root tab vanished: exactly one closePanel',
+function testClearChatOpensAChatInPlace() {
+  const {win, posted} = makeWebview(EDITOR);
+  const boot = win._testApi.getActiveTabId();
+  send(win, {type: 'setTaskText', text: 'first task'});
+  send(win, {type: 'clearChat'});
+  assert.notStrictEqual(
+    win._testApi.getActiveTabId(),
+    boot,
+    'Cmd+T on a used chat opens a new chat in this webview',
   );
-  send(win, {type: 'tabs_state', tabs: []});
   assert.strictEqual(
-    byType(posted, 'closePanel').length,
-    1,
-    'a snapshot storm must not repeat closePanel',
+    byType(posted, 'openChatPanel').length,
+    0,
+    'the chat editor tab never asks the host for another editor tab',
   );
+  assert.strictEqual(lastTitle(posted).title, 'new chat');
+  win.close();
+}
+
+function testOpenChatFromHistoryResumesInPlace() {
+  const {win, posted} = makeWebview(EDITOR);
+  send(win, {
+    type: 'openChatFromHistory',
+    chatId: 'chat-far',
+    taskId: 7,
+    title: 'an older task',
+  });
+  const resumes = byType(posted, 'resumeSession');
+  assert.strictEqual(resumes.length, 1, 'the history click resumes the chat');
+  assert.strictEqual(resumes[0].id, 'chat-far');
+  assert.strictEqual(resumes[0].taskId, 7);
+  assert.strictEqual(
+    resumes[0].tabId,
+    win._testApi.getActiveTabId(),
+    'in the tab now on screen',
+  );
+  assert.strictEqual(byType(posted, 'openChatPanel').length, 0);
+  win.close();
 }
 
 function testSubagentTabs() {
-  const {win, posted} = makeWebview(editorAttrs());
+  const {win, posted} = makeWebview(EDITOR);
+  const boot = win._testApi.getActiveTabId();
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-1',
-    parent_tab_id: 'not-in-this-panel',
+    parent_tab_id: 'not-in-this-webview',
     description: 'foreign sub-agent',
     task_id: 'task-x',
   });
   assert.strictEqual(
-    chatTabStrips(win).length,
+    win._testApi.openTabs().length,
     1,
-    "another chat's sub-agent must be ignored",
+    "an unknown chat's sub-agent is ignored",
   );
-
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-2',
-    parent_tab_id: ROOT,
+    parent_tab_id: boot,
     description: 'own sub-agent',
     task_id: 'task-y',
   });
   assert.strictEqual(
-    chatTabStrips(win).length,
-    2,
-    "the root chat's sub-agent gets an internal tab",
+    win._testApi.openTabs().filter(t => t.isSubagentTab).length,
+    1,
+    "the chat's sub-agent gets an internal tab",
   );
   assert.strictEqual(
     win.document.getElementById('tab-bar').style.display,
     '',
-    'tab bar appears when a sub-agent tab joins the root tab',
+    'tab bar appears when a sub-agent tab joins the chat',
   );
-
-  // Closing the ROOT strip closes the whole panel (retiring the chat)
-  // instead of stacking a replacement chat — a running sub-agent does
-  // not stop the user from closing the chat's tab.
-  const rootClose = win.document.querySelector(
-    '#tab-list .chat-tab .chat-tab-close',
-  );
-  assert.ok(rootClose, 'root strip has a close control');
-  rootClose.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
-  );
-  const closes = byType(posted, 'closePanel');
-  assert.strictEqual(closes.length, 1, 'root close asks the host to close');
-  assert.strictEqual(closes[0].retire, true, 'user close retires the chat');
-  assert.strictEqual(
-    byType(posted, 'openChatPanel').length,
-    0,
-    'root close must NOT open a replacement panel',
-  );
-  assert.strictEqual(
-    byType(posted, 'closeTab').filter(m => m.tabId === ROOT).length,
-    0,
-    'the retire travels via closePanel, not a doomed queued closeTab',
-  );
-}
-
-function testParentlessNewTabIgnored() {
-  const {win, posted} = makeWebview(editorAttrs());
+  // A parentless spawn (a run_agent sub-task) is the chat surface's
+  // to adopt.
   send(win, {type: 'new_tab', task_id: 'task-orphan', parent_tab_id: ''});
   assert.strictEqual(
-    chatTabStrips(win).length,
-    1,
-    'a parentless spawn broadcast must not be adopted by a panel',
+    win._testApi.openTabs().filter(t => t.isSubagentTab).length,
+    2,
+    'the chat surface adopts a parentless spawn',
   );
-  assert.strictEqual(
-    byType(posted, 'resumeSession').length,
-    0,
-    'no duplicate resumeSession for the orphan spawn',
-  );
+  assert.ok(byType(posted, 'resumeSession').length >= 1);
+  win.close();
 }
 
-function testRegistryBornPanelClosesOnFirstEmptySnapshot() {
-  const {win, posted} = makeWebview(editorAttrs(' data-kiss-in-registry="1"'));
-  send(win, {type: 'tabs_state', tabs: []});
-  assert.strictEqual(
-    byType(posted, 'closePanel').length,
-    1,
-    'a registry-born panel whose tab is gone from the FIRST snapshot ' +
-      'must close',
-  );
-  assert.notStrictEqual(
-    byType(posted, 'closePanel')[0].retire,
-    true,
-    'the registry already dropped the tab: no re-retire',
-  );
-}
-
-function testClearChatAsksHostForNewPanel() {
-  const {win, posted} = makeWebview(editorAttrs());
-  // A used tab (welcome hidden) so clearChat takes the createNewTab path.
-  win._testApi.hideWelcome();
-  send(win, {type: 'clearChat'});
-  const opens = byType(posted, 'openChatPanel');
-  assert.strictEqual(opens.length, 1, 'clearChat asks the host for a panel');
-  assert.strictEqual(opens[0].chatId, undefined, 'fresh chat: no chatId');
-  assert.strictEqual(
-    chatTabStrips(win).length,
-    1,
-    'no internal chat tab may be stacked in editor-tabs mode',
-  );
+function testChatlessPanelsStayOutOfTheRegistry() {
+  for (const mode of ['history-panel-mode', 'meta-panel-mode']) {
+    const root = mode + '-root';
+    const {win, posted} = makeWebview(
+      ` class="editor-tab-mode ${mode}" data-kiss-tab-id="${root}"`,
+    );
+    const ready = byType(posted, 'ready');
+    assert.strictEqual(ready[0].tabId, root, 'boots on the stamped root');
+    assert.strictEqual(ready[0].singleTabId, root, 'nothing to replay');
+    send(win, {
+      type: 'tabs_state',
+      tabs: [{tabId: 'other-tab', chatId: 'chat-2', title: 'Other', workDir: ''}],
+    });
+    assert.strictEqual(
+      win._testApi.openTabs().map(t => String(t.id)).join(','),
+      root,
+      mode + ' adopts no registry tab',
+    );
+    send(win, {type: 'new_tab', task_id: 'task-orphan', parent_tab_id: ''});
+    assert.strictEqual(
+      win._testApi.openTabs().length,
+      1,
+      mode + ' adopts no parentless spawn',
+    );
+    assert.strictEqual(byType(posted, 'resumeSession').length, 0);
+    win.close();
+  }
 }
 
 function testOpenSettingsMessage() {
-  const {win} = makeWebview(editorAttrs());
+  const {win} = makeWebview(EDITOR);
   const panel = win.document.getElementById('settings-panel');
   assert.ok(!panel.classList.contains('open'));
   send(win, {type: 'openSettings'});
@@ -326,10 +279,11 @@ function testOpenSettingsMessage() {
     panel.classList.contains('open'),
     "the host's openSettings message opens the settings panel",
   );
+  win.close();
 }
 
 function testSettingsToggle() {
-  const {win, posted} = makeWebview(editorAttrs());
+  const {win, posted} = makeWebview(EDITOR);
   const label = win.document.getElementById('cfg-editor-tabs-mode-label');
   const box = win.document.getElementById('cfg-editor-tabs-mode');
   assert.strictEqual(
@@ -343,68 +297,24 @@ function testSettingsToggle() {
   const msgs = byType(posted, 'setEditorTabsMode');
   assert.strictEqual(msgs.length, 1);
   assert.strictEqual(msgs[0].enabled, false);
-}
-
-function testResumeOnBoot() {
-  const {posted} = makeWebview(
-    editorAttrs(
-      ' data-kiss-resume-chat-id="chat-77" data-kiss-resume-task-id="42"',
-    ),
-  );
-  const readies = byType(posted, 'ready');
-  const resumes = byType(posted, 'resumeSession');
-  assert.strictEqual(resumes.length, 1, 'one resumeSession on boot');
-  assert.strictEqual(resumes[0].id, 'chat-77');
-  assert.strictEqual(resumes[0].taskId, 42, 'numeric task id restored');
-  assert.strictEqual(resumes[0].tabId, ROOT);
-  assert.ok(
-    posted.indexOf(readies[0]) < posted.indexOf(resumes[0]),
-    'resume must follow ready',
-  );
-}
-
-function testShowTaskMessage() {
-  const {win, posted} = makeWebview(editorAttrs());
-  // Bind the root tab to a backend chat, like a real panel would be.
-  send(win, {
-    type: 'tabs_state',
-    tabs: [{tabId: ROOT, chatId: 'chat-9', title: 'My chat', workDir: ''}],
-  });
-  // The clicked task has no rendered transcript region in this fresh
-  // panel, so the webview must replay the chat at that task.
-  send(win, {type: 'showTask', taskId: 7});
-  const resumes = byType(posted, 'resumeSession');
-  assert.strictEqual(
-    resumes.length,
-    1,
-    "the host's showTask must replay the task when it is not on screen",
-  );
-  assert.strictEqual(resumes[0].id, 'chat-9');
-  assert.strictEqual(resumes[0].taskId, 7);
-  assert.strictEqual(resumes[0].tabId, ROOT);
-
-  // Without a chat binding there is nothing to replay: no resume.
-  const bare = makeWebview(editorAttrs());
-  send(bare.win, {type: 'showTask', taskId: 3});
-  assert.strictEqual(
-    byType(bare.posted, 'resumeSession').length,
-    0,
-    'showTask on an unbound panel must not post a bogus resume',
-  );
+  win.close();
 }
 
 function main() {
-  const {win, posted, getState} = testBootAdoptsRootTab();
-  testReconcileFollowsOwnEntryOnly(win, posted, getState);
-  testClosePanelOnceWhenRootVanishes(win, posted);
-  testSubagentTabs();
-  testParentlessNewTabIgnored();
-  testRegistryBornPanelClosesOnFirstEmptySnapshot();
-  testClearChatAsksHostForNewPanel();
-  testOpenSettingsMessage();
-  testSettingsToggle();
-  testResumeOnBoot();
-  testShowTaskMessage();
+  const tests = [
+    testBootAnnouncesOneNewChat,
+    testReconcileAdoptsEveryRegistryTab,
+    testClearChatOpensAChatInPlace,
+    testOpenChatFromHistoryResumesInPlace,
+    testSubagentTabs,
+    testChatlessPanelsStayOutOfTheRegistry,
+    testOpenSettingsMessage,
+    testSettingsToggle,
+  ];
+  for (const t of tests) {
+    t();
+    console.log(`  ok - ${t.name}`);
+  }
   console.log('editorTabsModeWebview: all tests passed');
 }
 

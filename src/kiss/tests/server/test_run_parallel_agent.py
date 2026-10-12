@@ -79,7 +79,7 @@ def _system_text(request: dict[str, Any]) -> str:
 @pytest.fixture
 def env() -> Iterator[IsolatedKissHome]:
     home = IsolatedKissHome(prefix="kiss-run-parallel-agent-")
-    home.write_config(is_worktree=False, auto_commit_mode=False, classify_tasks=False)
+    home.write_config(classify_tasks=False)
     try:
         yield home
     finally:
@@ -145,8 +145,6 @@ def test_run_parallel_children_run_as_the_named_agent_script(
             work_dir=str(repo),
             model=STANDIN_MODEL,
             model_config=model.model_config,
-            use_worktree=False,
-            auto_commit=False,
             add_to_system_prompt="PARENT-SUFFIX-TEXT",
             endpoint_file=daemon,
             timeout=300,
@@ -241,8 +239,6 @@ def test_run_parallel_children_inherit_the_parent_and_a_broken_child_fails_alone
             model=STANDIN_MODEL,
             model_config=parent_model.model_config,
             sea_path=str(repo / "parent_sea.py"),
-            use_worktree=False,
-            auto_commit=False,
             add_to_prompt="PARENT-PROMPT-SUFFIX",
             endpoint_file=daemon,
             timeout=300,

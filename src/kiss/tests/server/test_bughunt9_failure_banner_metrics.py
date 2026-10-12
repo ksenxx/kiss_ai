@@ -22,7 +22,7 @@ same task's ``task_history.extra`` row and rendered in the history
 sidebar.
 
 This test drives the real ``VSCodeServer._run_task`` end-to-end with a
-real ``WorktreeSorcarAgent`` whose counters start non-zero (simulating
+real ``ChatSorcarAgent`` whose counters start non-zero (simulating
 the preserved-agent reuse) and whose ``run`` consumes a small known
 delta before failing.  The broadcast ``result`` event must carry the
 delta, not the cumulative total.
@@ -36,7 +36,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
@@ -73,7 +73,7 @@ class TestFailureBannerMetricsAreDeltas(unittest.TestCase):
         # Simulate the preserved-agent reuse: the tab's previous task
         # ended with a pending worktree, so its agent (and cumulative
         # counters) carry over into the next run's state.
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         state = agent_state.AgentState(
             "task-metrics-tab",
             agent=agent,

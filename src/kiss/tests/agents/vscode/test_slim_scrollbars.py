@@ -31,9 +31,9 @@ from kiss.tests.agents.vscode.test_history_panel_tints import (
 _GUTTER = 6
 _THUMB = 4
 
-# Elements that scroll their own content.  The bottom-sheet lists are
-# hidden until their sheet opens, so each is shown and overfilled.
-_SCROLLERS = ["#history-list", "#tricks-list", "#workdir-list"]
+# Elements that scroll their own content.  The bottom-sheet list is
+# hidden until its sheet opens, so each is shown and overfilled.
+_SCROLLERS = ["#history-list", "#tricks-list"]
 
 
 @pytest.fixture(scope="module")

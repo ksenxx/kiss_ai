@@ -11,7 +11,7 @@ returning ``{"success": False, "message": "Not a git repository"}``.
 Root cause (historical, pre task-keyed registry): ``_run_task``'s finally
 block cleared the state's ``agent``, destroying the in-memory worktree
 state.  A later ``worktreeAction`` lazily created a fresh
-``WorktreeSorcarAgent`` — that agent had ``_wt = None`` and
+``ChatSorcarAgent`` — that agent had ``_wt = None`` and
 ``_repo_root = None``, leading to the misleading error.
 
 Fix:
@@ -24,7 +24,6 @@ Fix:
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,22 +33,7 @@ import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
-    )
-
-
-def _init_repo(repo: str) -> None:
-    _run_git(repo, "init", "-q")
-    _run_git(repo, "config", "user.email", "test@example.com")
-    _run_git(repo, "config", "user.name", "Test User")
-    _run_git(repo, "config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    _run_git(repo, "add", "seed.txt")
-    _run_git(repo, "commit", "-q", "-m", "seed")
+from kiss.tests.server.conftest import init_repo
 
 
 class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
@@ -59,7 +43,7 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-wt-err-test-")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo(self.repo)
+        init_repo(self.repo)
 
         self._saved_db = (
             _persistence._DB_PATH,
@@ -84,7 +68,9 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
 
-        def stub_run(self_agent: object, **kwargs: object) -> str:
+        def stub_run(self_agent: Any, **kwargs: object) -> str:
+            self_agent.work_dir = str(Path(str(kwargs.get("work_dir") or ".")).resolve())
+            assert "Created worktree" in self_agent.create_worktree()
             return "success: true\nsummary: no changes\n"
 
         self._parent_class.run = stub_run
@@ -117,8 +103,6 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
             "prompt": "task with no changes",
             "workDir": self.repo,
             "tabId": tab_id,
-            "useWorktree": True,
-            "autoCommit": False,
             "model": "",
         })
 
@@ -137,8 +121,6 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
             "prompt": "task with no changes",
             "workDir": self.repo,
             "tabId": tab_id,
-            "useWorktree": True,
-            "autoCommit": False,
             "model": "",
         })
 
@@ -154,10 +136,10 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
         should succeed (agent preserved)."""
         tab_id = "t-with-changes"
 
-        def stub_with_file(self_agent: object, **kwargs: object) -> str:
-            work_dir = kwargs.get("work_dir")
-            if isinstance(work_dir, str) and work_dir:
-                (Path(work_dir) / "output.txt").write_text("agent output\n")
+        def stub_with_file(self_agent: Any, **kwargs: object) -> str:
+            self_agent.work_dir = str(Path(str(kwargs.get("work_dir") or ".")).resolve())
+            assert "Created worktree" in self_agent.create_worktree()
+            (Path(self_agent.work_dir) / "output.txt").write_text("agent output\n")
             return "success: true\nsummary: created file\n"
 
         self._parent_class.run = stub_with_file
@@ -166,8 +148,6 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
             "prompt": "task with changes",
             "workDir": self.repo,
             "tabId": tab_id,
-            "useWorktree": True,
-            "autoCommit": False,
             "model": "",
         })
 

@@ -6,7 +6,7 @@
 "Filters" panel — in the remote web view AND the extension webview.
 
 The task-status filter chips (Running / Errored / Succeeded /
-Workspace / Favorites) and the From/To date range must sit under a
+Favorites) and the From/To date range must sit under a
 collapsible panel titled "Filters" that starts COLLAPSED by default.
 The filter buttons and dates MUST be visible whenever that panel is
 uncollapsed, and hidden while it is collapsed.
@@ -61,7 +61,6 @@ FILTER_CONTROL_IDS = [
     "hf-running",
     "hf-errors",
     "hf-completed",
-    "hf-workspace",
     "hf-favorite",
     "hf-from",
     "hf-from-btn",

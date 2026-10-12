@@ -20,7 +20,7 @@ import threading
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
@@ -58,36 +58,39 @@ class TestUnknownCommandErrorRouted(unittest.TestCase):
 
 class TestWorktreeProgressRouted(unittest.TestCase):
     def test_worktree_progress_carries_tab_id(self) -> None:
+        import subprocess
         import tempfile
         from pathlib import Path as _Path
 
-        from kiss.agents.sorcar.git_worktree import GitWorktree
-
         server, events = _make_server()
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         state = agent_state.AgentState(
             "routing-t13", agent=agent, tab_id="t-13", server_owned=True,
         )
-        state.use_worktree = True
         agent_state.register(state)
         try:
             with tempfile.TemporaryDirectory() as td:
-                agent._wt = GitWorktree(
-                    repo_root=_Path(td),
-                    branch="kiss/wt-x",
-                    original_branch="main",
-                    wt_dir=_Path(td) / ".kiss-worktrees" / "kiss_wt-x",
-                )
-
-                def fake_merge() -> str:
-                    return "Successfully merged"
-
-                agent.merge = fake_merge  # type: ignore[assignment]
+                repo = _Path(td)
+                for cmd in (
+                    ["init", "-b", "main"],
+                    ["config", "user.email", "t@t.com"],
+                    ["config", "user.name", "T"],
+                    ["commit", "--allow-empty", "-m", "init"],
+                ):
+                    subprocess.run(
+                        ["git", "-C", td, *cmd], check=True, capture_output=True,
+                    )
+                agent.work_dir = td
+                assert "Created worktree" in agent.create_worktree()
+                wt_work_dir = agent._wt_work_dir
+                assert wt_work_dir is not None
+                (wt_work_dir / "f.txt").write_text("work\n")
 
                 result = server._handle_worktree_action(
                     "merge", tab_id="t-13",
                 )
                 assert result["success"] is True
+                assert (repo / "f.txt").read_text() == "work\n"
         finally:
             agent_state.agent_states.clear()
 

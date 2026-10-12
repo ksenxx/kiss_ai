@@ -5,7 +5,7 @@
 """Bug-hunt 4: backend ``warning`` events must survive recording/replay.
 
 Iteration 3 made the live frontend render backend ``warning`` events
-(``WorktreeSorcarAgent._flush_warnings`` broadcasts
+(``ChatSorcarAgent._flush_warnings`` broadcasts
 ``{type: 'warning', message: ...}``; main.js renders an amber banner and
 types.ts declares the event).  But ``warning`` was never added to
 ``_DISPLAY_EVENT_TYPES`` in ``json_printer.py``, so:

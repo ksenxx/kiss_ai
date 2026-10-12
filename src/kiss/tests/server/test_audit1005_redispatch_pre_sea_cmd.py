@@ -43,6 +43,7 @@ from kiss.agents.sorcar import sea_commands
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import clear_tab_states
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 _UNKNOWN_MODEL = "audit1005-redispatch-no-such-model"
@@ -64,7 +65,7 @@ class Sea(BaseSea):
         return "appends a line to the marker file each time it is executed"
 
     def settings(self, settings):
-        return settings | {{"use_worktree": False, "auto_commit": False}}
+        return settings | {{"use_memory": False}}
 """
 
 
@@ -112,19 +113,12 @@ def _isolate(tmp_path: Path) -> Iterator[Path]:
         sea_commands._reset_for_tests()
         sea_commands.refresh_registry()
         assert sea_commands.get_command(_COMMAND) is not None
-        _clear_tab_states()
+        clear_tab_states(_TAB)
         yield marker
     finally:
-        _clear_tab_states()
+        clear_tab_states(_TAB)
         sea_commands._reset_for_tests()
         home.cleanup()
-
-
-def _clear_tab_states() -> None:
-    with agent_state.STATE_LOCK:
-        for st in agent_state.snapshot():
-            if st.tab_id == _TAB:
-                agent_state.unregister(st.task_id, st)
 
 
 def _wait_idle() -> None:
@@ -164,8 +158,6 @@ def test_followup_after_slash_run_is_a_plain_run(
         "prompt": f"/{_COMMAND} do the thing",
         "workDir": str(work_dir),
         "model": _UNKNOWN_MODEL,
-        "useWorktree": False,
-        "autoCommit": False,
         "classifyTasks": False,
     })
     _wait_idle()

@@ -112,6 +112,7 @@ from kiss.agents.sorcar.sea_commands import (
 from kiss.agents.sorcar.sea_settings import (
     META_SETTINGS,
     RENAMED_SETTINGS,
+    SEA_BASES,
     SeaError,
     declares_hidden,
     settings_functions,
@@ -610,9 +611,6 @@ _BASE_CLASS_OF: dict[str, dict[object, str]] = {
 _DROPPED_KEYS = ("allow_fan_out", "is_parallel")
 """Removed ``settings()`` keys with no replacement."""
 
-_SEA_BASES = ("BaseSea", "WorkerSea", "ChannelSea")
-"""The base classes a SEA derives from, least to most specific."""
-
 
 @dataclass(frozen=True)
 class _RemovedEntry:
@@ -713,13 +711,13 @@ def _removed_lock_names(tree: ast.Module) -> dict[ast.List, set[int]]:
 
 
 def _sea_base_name(tree: ast.Module, base: ast.expr) -> str:
-    """Return the :data:`_SEA_BASES` entry the class base *base* names, or ``""``.
+    """Return the :data:`SEA_BASES` entry the class base *base* names, or ``""``.
 
     The base may be named directly, through an ``import ... as`` alias
     of the ``base_sea`` import, or as an attribute (``base_sea.BaseSea``).
     """
     if isinstance(base, ast.Attribute):
-        return base.attr if base.attr in _SEA_BASES else ""
+        return base.attr if base.attr in SEA_BASES else ""
     if not isinstance(base, ast.Name):
         return ""
     return next(
@@ -728,14 +726,14 @@ def _sea_base_name(tree: ast.Module, base: ast.expr) -> str:
             for imp in tree.body if isinstance(imp, ast.ImportFrom)
             and imp.module == "kiss.agents.seas.base.base_sea"
             for alias in imp.names
-            if alias.name in _SEA_BASES and (alias.asname or alias.name) == base.id
+            if alias.name in SEA_BASES and (alias.asname or alias.name) == base.id
         ),
         "",
     )
 
 
 def _sea_class_found(tree: ast.Module) -> bool:
-    """Return whether a class of the script derives from a :data:`_SEA_BASES` entry."""
+    """Return whether a class of the script derives from a :data:`SEA_BASES` entry."""
     return any(
         _sea_base_name(tree, base)
         for node in tree.body if isinstance(node, ast.ClassDef)
@@ -747,7 +745,7 @@ def _base_rewrites(
     tree: ast.Module, base: str, offsets: list[int], data: bytes, needed: set[str],
 ) -> tuple[list[tuple[int, int, str, str]], bool]:
     """Return the edits that make the script's SEA class derive from *base*, and whether
-    a class deriving from a :data:`_SEA_BASES` entry was found at all (:func:`_sea_base_name`).
+    a class deriving from a :data:`SEA_BASES` entry was found at all (:func:`_sea_base_name`).
 
     A base already as specific as *base* needs no edit.  A direct name
     is rewritten in place together with its import unless the old name
@@ -762,7 +760,7 @@ def _base_rewrites(
             name = _sea_base_name(tree, old)
             if not name:
                 continue
-            if _SEA_BASES.index(name) >= _SEA_BASES.index(base):
+            if SEA_BASES.index(name) >= SEA_BASES.index(base):
                 return edits, True
             start, end = _span(old, offsets)
             note = f"class base {name} -> {base}"
@@ -837,7 +835,7 @@ def _rewrites(tree: ast.Module, data: bytes) -> list[tuple[int, int, str, str]]:
                           f"{key.value!r} -> {new!r}"))
     needed: set[str] = set()
     entries = [entry for entry in _removed_entries(tree) if entry.base is not None]
-    base = max((entry.base for entry in entries if entry.base), key=_SEA_BASES.index, default="")
+    base = max((entry.base for entry in entries if entry.base), key=SEA_BASES.index, default="")
     found = True
     if base:
         base_edits, found = _base_rewrites(tree, base, offsets, data, needed)

@@ -31,6 +31,7 @@ import re
 from collections import Counter
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from kiss.tests.agents.vscode.test_workspace_sections import (
@@ -74,17 +75,20 @@ def _click_root_button(page, root: str, action: str) -> None:
     The buttons are shown by the row's ``:hover`` rule.  A tree
     re-render after the hover (a late explorer refresh from the daemon)
     replaces the row and the mouse, not having moved, leaves the new
-    row un-hovered, so the hover is repeated until the button of the
-    current row is visible.
+    row un-hovered -- also between a successful visibility check and
+    the click -- so hover and click are retried together until the
+    click lands on the button of the current row.
     """
     _show_panel(page)
     row = page.locator(_row_at(root, ".is-root"))
     button = page.locator(f"{_row_at(root, '.is-root')} .explorer-root-{action}")
     for _ in range(50):
         row.hover()
-        if button.is_visible():
-            break
-        page.wait_for_timeout(100)
+        try:
+            button.click(timeout=500)
+            return
+        except PlaywrightTimeoutError:
+            page.wait_for_timeout(100)
     button.click()
 
 
@@ -2311,7 +2315,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         assert (harness.plain_dir / "added.txt").is_file()
         (harness.plain_dir / "added.txt").unlink()
         # Set as Working Directory (the buttons show on hover) is the
-        # "..." > Working directory flow for that folder: the daemon
+        # chat header drop-down's flow for that folder: the daemon
         # lists it first (the 'workdir:' listDir check), then setWorkDir
         # makes it the global working directory (the daemon persists it;
         # no saveConfig), and the old working directory stays listed as

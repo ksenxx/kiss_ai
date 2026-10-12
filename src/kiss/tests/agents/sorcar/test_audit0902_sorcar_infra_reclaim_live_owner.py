@@ -12,14 +12,14 @@ repository).  It protects live worktrees of *other* processes only via
 the ``branch.<name>.kiss-owner-pid`` config — but
 
 * ``GitWorktreeOps.create`` never recorded that owner pid: it was
-  written later by ``WorktreeSorcarAgent._try_setup_worktree``, so a
+  written later by ``ChatSorcarAgent._try_setup_worktree``, so a
   worktree that another process had just created (and was about to
   run a task in) looked like a legacy orphan and was squash-merged
   (a no-op) and DELETED under its owner;
-* pooled spares (``worktree_pool.prewarm``) never got an owner pid at
-  all, and the reclaim's spare-marker branch ran BEFORE the owner
-  check, so another process discarded a spare that this process's
-  pool was still holding and about to hand to a task.
+* the owner check must run BEFORE every destructive branch, so a
+  worktree whose recorded owner is another LIVE process is skipped
+  until that process exits (and a recycled pid is not mistaken for
+  the owner).
 
 Every test drives real git repositories and a real second Python
 process; nothing is mocked.
@@ -39,7 +39,6 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import worktree_pool
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SUBDIR,
     GitWorktreeOps,
@@ -93,7 +92,7 @@ class TestCreateRecordsOwner:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_create_stamps_this_process_as_owner(self) -> None:
-        branch = worktree_pool.new_task_branch(self.repo)
+        branch = GitWorktreeOps.new_task_branch(self.repo)
         wt_dir = self.repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
         assert GitWorktreeOps.create(self.repo, branch, wt_dir)
         assert GitWorktreeOps.load_owner_pid(self.repo, branch) == os.getpid()
@@ -111,7 +110,7 @@ class TestCreateRecordsOwner:
         """The window between ``create`` and the agent's own owner-pid
         write must not let a second process merge-and-delete the
         worktree the first process is about to run a task in."""
-        branch = worktree_pool.new_task_branch(self.repo)
+        branch = GitWorktreeOps.new_task_branch(self.repo)
         wt_dir = self.repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
         assert GitWorktreeOps.create(self.repo, branch, wt_dir)
 
@@ -143,7 +142,7 @@ class TestCreateRecordsOwner:
             assert holder.stdout is not None
             assert holder.stdout.readline().strip() == "held"
             started = time.monotonic()
-            branch = worktree_pool.new_task_branch(self.repo)
+            branch = GitWorktreeOps.new_task_branch(self.repo)
             wt_dir = self.repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
             assert GitWorktreeOps.create(self.repo, branch, wt_dir)
             elapsed = time.monotonic() - started
@@ -152,47 +151,47 @@ class TestCreateRecordsOwner:
         assert elapsed >= hold_s * 0.8, elapsed
 
 
-class TestSpareOwnerLiveness:
+class TestOwnerLiveness:
     def setup_method(self) -> None:
         self.tmp = tempfile.mkdtemp()
         self.repo = _make_repo(Path(self.tmp) / "repo")
-        worktree_pool.discard_all()
 
     def teardown_method(self) -> None:
-        worktree_pool.discard_all()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_other_process_keeps_live_spare(self) -> None:
-        """A spare held by THIS process's pool survives another
+    def _create_worktree(self) -> tuple[str, Path]:
+        branch = GitWorktreeOps.new_task_branch(self.repo)
+        wt_dir = self.repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
+        assert GitWorktreeOps.create(self.repo, branch, wt_dir)
+        return branch, wt_dir
+
+    def test_other_process_keeps_live_worktree(self) -> None:
+        """A worktree owned by THIS live process survives another
         process's reclaim pass."""
-        assert worktree_pool.prewarm(self.repo)
-        spare_branch, spare_dir = worktree_pool._spares[
-            worktree_pool._repo_key(self.repo)
-        ]
-        assert GitWorktreeOps.load_owner_pid(self.repo, spare_branch) == os.getpid()
+        branch, wt_dir = self._create_worktree()
+        assert GitWorktreeOps.load_owner_pid(self.repo, branch) == os.getpid()
 
         proc = _run_in_other_process(
             _RECLAIM_IN_OTHER_PROCESS.format(repo=str(self.repo)), self.repo,
         )
 
         assert proc.stdout.strip() == "0", proc.stdout + proc.stderr
-        assert spare_dir.is_dir()
-        assert GitWorktreeOps.branch_exists(self.repo, spare_branch)
-        assert worktree_pool.take_spare(self.repo) == (spare_branch, spare_dir)
+        assert wt_dir.is_dir()
+        assert GitWorktreeOps.branch_exists(self.repo, branch)
 
-    def test_spare_of_dead_process_is_discarded(
+    def test_worktree_of_dead_process_is_reclaimed(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A spare whose owning process has exited is plumbing debris and
-        is still discarded by the next reclaim pass."""
+        """A worktree whose owning process has exited is an orphan and
+        is reclaimed by the next pass."""
         proc = _run_in_other_process(
             f"""
             from pathlib import Path
-            from kiss.agents.sorcar import worktree_pool
-            assert worktree_pool.prewarm(Path({str(self.repo)!r}))
-            branch, wt_dir = worktree_pool._spares[
-                worktree_pool._repo_key(Path({str(self.repo)!r}))
-            ]
+            from kiss.agents.sorcar.git_worktree import _WORKTREE_SUBDIR, GitWorktreeOps
+            repo = Path({str(self.repo)!r})
+            branch = GitWorktreeOps.new_task_branch(repo)
+            wt_dir = repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
+            assert GitWorktreeOps.create(repo, branch, wt_dir)
             print(branch)
             print(wt_dir)
             """,
@@ -201,7 +200,6 @@ class TestSpareOwnerLiveness:
         branch, wt_dir_s = proc.stdout.strip().splitlines()[-2:]
         wt_dir = Path(wt_dir_s)
         assert wt_dir.is_dir()
-        assert GitWorktreeOps.load_spare_marker(self.repo, branch)
         dead_pid = GitWorktreeOps.load_owner_pid(self.repo, branch)
         assert dead_pid is not None and dead_pid != os.getpid()
         assert not GitWorktreeOps._pid_alive(dead_pid)
@@ -209,51 +207,45 @@ class TestSpareOwnerLiveness:
         with caplog.at_level(logging.INFO, logger="kiss.agents.sorcar.git_worktree"):
             reclaimed = GitWorktreeOps.reclaim_orphaned_worktrees(self.repo)
         assert reclaimed == 1, (
-            f"reclaim skipped the dead owner's spare; main status="
-            f"{GitWorktreeOps.status_porcelain(self.repo)!r} spare status="
+            f"reclaim skipped the dead owner's worktree; main status="
+            f"{GitWorktreeOps.status_porcelain(self.repo)!r} worktree status="
             f"{GitWorktreeOps.status_porcelain(wt_dir)!r} log="
             f"{[r.getMessage() for r in caplog.records]}"
         )
         assert not wt_dir.exists()
         assert not GitWorktreeOps.branch_exists(self.repo, branch)
 
-    def test_spare_owned_by_live_foreign_pid_is_skipped_until_it_dies(self) -> None:
-        """In-process view of the same rule: a spare whose recorded owner
-        is another LIVE process is skipped; once that process exits the
-        very same spare is discarded."""
-        assert worktree_pool.prewarm(self.repo)
-        spare_branch, spare_dir = worktree_pool._spares.pop(
-            worktree_pool._repo_key(self.repo)
-        )
+    def test_worktree_owned_by_live_foreign_pid_is_skipped_until_it_dies(self) -> None:
+        """In-process view of the same rule: a worktree whose recorded
+        owner is another LIVE process is skipped; once that process
+        exits the very same worktree is reclaimed."""
+        branch, wt_dir = self._create_worktree()
         owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
             subprocess.run(
                 ["git", "-C", str(self.repo), "config",
-                 f"branch.{spare_branch}.kiss-owner-pid", str(owner.pid)],
+                 f"branch.{branch}.kiss-owner-pid", str(owner.pid)],
                 capture_output=True, check=True,
             )
             assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
-            assert spare_dir.is_dir()
-            assert GitWorktreeOps.branch_exists(self.repo, spare_branch)
+            assert wt_dir.is_dir()
+            assert GitWorktreeOps.branch_exists(self.repo, branch)
         finally:
             owner.kill()
             owner.wait(timeout=30)
         assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
-        assert not spare_dir.exists()
-        assert not GitWorktreeOps.branch_exists(self.repo, spare_branch)
+        assert not wt_dir.exists()
+        assert not GitWorktreeOps.branch_exists(self.repo, branch)
 
     def test_recycled_owner_pid_is_not_mistaken_for_the_owner(self) -> None:
         """A live pid whose process is NOT the stamping process is a
-        recycled pid: the spare's owner is dead and it is discarded.
+        recycled pid: the worktree's owner is dead and it is reclaimed.
 
         The OS recycling of a dead owner's pid cannot be forced, so the
         stamp is built the way a recycled pid presents itself: the pid of
         a live stranger, with the identity of the real (other) owner.
         """
-        assert worktree_pool.prewarm(self.repo)
-        spare_branch, spare_dir = worktree_pool._spares.pop(
-            worktree_pool._repo_key(self.repo)
-        )
+        branch, wt_dir = self._create_worktree()
         stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
             real_owner_identity = process_identity(os.getpid())
@@ -265,23 +257,21 @@ class TestSpareOwnerLiveness:
             ):
                 subprocess.run(
                     ["git", "-C", str(self.repo), "config",
-                     f"branch.{spare_branch}.{key}", value],
+                     f"branch.{branch}.{key}", value],
                     capture_output=True, check=True,
                 )
             assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
-            assert not spare_dir.exists()
-            assert not GitWorktreeOps.branch_exists(self.repo, spare_branch)
+            assert not wt_dir.exists()
+            assert not GitWorktreeOps.branch_exists(self.repo, branch)
         finally:
             stranger.kill()
             stranger.wait(timeout=30)
 
-    def test_matching_owner_identity_keeps_the_spare(self) -> None:
+    def test_matching_owner_identity_keeps_the_worktree(self) -> None:
         """The stamp written by ``save_owner_pid`` (pid + identity of the
-        live stamping process) protects the spare while that process runs."""
-        assert worktree_pool.prewarm(self.repo)
-        spare_branch, spare_dir = worktree_pool._spares.pop(
-            worktree_pool._repo_key(self.repo)
-        )
+        live stamping process) protects the worktree while that process
+        runs."""
+        branch, wt_dir = self._create_worktree()
         owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
             identity = process_identity(owner.pid)
@@ -292,24 +282,21 @@ class TestSpareOwnerLiveness:
             ):
                 subprocess.run(
                     ["git", "-C", str(self.repo), "config",
-                     f"branch.{spare_branch}.{key}", value],
+                     f"branch.{branch}.{key}", value],
                     capture_output=True, check=True,
                 )
             assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
-            assert spare_dir.is_dir()
+            assert wt_dir.is_dir()
         finally:
             owner.kill()
             owner.wait(timeout=30)
         assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
 
-    def test_own_spare_without_exclusion_is_still_discarded(self) -> None:
-        """Within one process the exclusion set is authoritative: a spare
-        this process created but no longer tracks (pool state dropped)
-        is discarded by its own reclaim pass, exactly as before."""
-        assert worktree_pool.prewarm(self.repo)
-        spare_branch, spare_dir = worktree_pool._spares.pop(
-            worktree_pool._repo_key(self.repo)
-        )
+    def test_own_worktree_without_exclusion_is_still_reclaimed(self) -> None:
+        """Within one process the exclusion set is authoritative: a
+        worktree this process created but no longer tracks (agent state
+        dropped) is reclaimed by its own reclaim pass."""
+        branch, wt_dir = self._create_worktree()
         assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
-        assert not spare_dir.exists()
-        assert not GitWorktreeOps.branch_exists(self.repo, spare_branch)
+        assert not wt_dir.exists()
+        assert not GitWorktreeOps.branch_exists(self.repo, branch)

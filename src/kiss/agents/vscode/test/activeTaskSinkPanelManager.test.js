@@ -8,10 +8,9 @@
 // out/SorcarSidebarView.js) against a REAL local-WSS daemon
 // stub:
 //  - setActiveTaskSink pushes the current state right away ('' ids
-//    when no panel reported yet);
-//  - a panel webview's `activeTask` reaches the sink while that panel
-//    is active, is cached while it is not, and the cache repaints the
-//    sink on panel activation and on the active panel's close;
+//    when no panel exists or none reported yet);
+//  - the chat panel webview's `activeTask` reaches the sink, and the
+//    sink falls back to '' ids when the panel closes;
 //  - SorcarSidebarView.onActiveTask fires for a plain (sidebar) view's
 //    `activeTask` message;
 //  - SorcarSidebarView.postActiveTask before the webview resolves is
@@ -154,10 +153,8 @@ process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
 const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
-const serverSockets = [];
 const daemonCommands = [];
 const server = createFakeDaemon(sock => {
-  serverSockets.push(sock);
   let buf = '';
   sock.on('data', chunk => {
     buf += chunk.toString('utf8');
@@ -171,14 +168,6 @@ const server = createFakeDaemon(sock => {
   sock.on('error', () => {});
 });
 
-function daemonBroadcast(msg) {
-  const line = JSON.stringify(msg) + '\n';
-  for (const sock of serverSockets) {
-    if (!sock.destroyed) sock.write(line);
-  }
-  return new Promise(r => setTimeout(r, 80));
-}
-
 async function waitFor(predicate, message) {
   for (let i = 0; i < 150; i++) {
     if (predicate()) return;
@@ -191,12 +180,6 @@ const {SorcarPanelManager} = require(
   path.join(OUT_DIR, 'SorcarPanelManager.js'),
 );
 const {SorcarSidebarView} = require(path.join(OUT_DIR, 'SorcarSidebarView.js'));
-
-function tabIdOf(panel) {
-  const m = /data-kiss-tab-id="([^"]+)"/.exec(panel.webview.html);
-  assert.ok(m, 'panel html must carry data-kiss-tab-id');
-  return m[1];
-}
 
 async function runTest() {
   server.listen(endpointPath);
@@ -213,64 +196,50 @@ async function runTest() {
     'no panels: the sink starts empty',
   );
 
-  // --- the active panel's activeTask reaches the sink -------------------
-  manager.openNewChat();
-  const panelA = createdPanels[0];
+  // --- the panel's activeTask reaches the sink --------------------------
+  const controller = manager.open();
+  assert.strictEqual(createdPanels.length, 1, 'open() creates the panel');
+  assert.strictEqual(manager.controller(), controller);
+  const panel = createdPanels[0];
   assert.deepStrictEqual(
     sinkCalls[sinkCalls.length - 1],
     {chatId: '', taskId: ''},
-    'a fresh active panel has reported nothing yet',
+    'a fresh panel has reported nothing yet',
   );
-  panelA._recv.fire({type: 'activeTask', chatId: 'chat-a', taskId: 'task-1'});
+  panel._recv.fire({type: 'activeTask', chatId: 'chat-a', taskId: 'task-1'});
   await waitFor(
     () => sinkCalls[sinkCalls.length - 1].chatId === 'chat-a',
-    'the active panel activeTask must reach the sink',
+    'the panel activeTask must reach the sink',
   );
   assert.deepStrictEqual(sinkCalls[sinkCalls.length - 1], {
     chatId: 'chat-a',
     taskId: 'task-1',
   });
 
-  // --- a second (active) panel repaints the sink; a BACKGROUND panel's
-  // report is cached without repainting --------------------------------
-  manager.openNewChat();
-  const panelB = createdPanels[1];
-  panelA.active = false;
-  assert.deepStrictEqual(
-    sinkCalls[sinkCalls.length - 1],
-    {chatId: '', taskId: ''},
-    'activating an unreported panel clears the highlight',
-  );
-  panelB._recv.fire({type: 'activeTask', chatId: 'chat-b', taskId: 'task-2'});
+  // The webview switched chats in place: the sink follows.
+  panel._recv.fire({type: 'activeTask', chatId: 'chat-b', taskId: 'task-2'});
   await waitFor(
     () => sinkCalls[sinkCalls.length - 1].chatId === 'chat-b',
-    'the new active panel activeTask must reach the sink',
-  );
-  const sinkLenAfterB = sinkCalls.length;
-  panelA._recv.fire({type: 'activeTask', chatId: 'chat-a', taskId: 'task-3'});
-  await new Promise(r => setTimeout(r, 200));
-  assert.strictEqual(
-    sinkCalls.length,
-    sinkLenAfterB,
-    'a background panel report must not repaint the sink',
-  );
-
-  // --- switching back to panel A pushes its cached ids ------------------
-  panelB.active = false;
-  panelA.active = true;
-  panelA._viewState.fire({webviewPanel: panelA});
-  assert.deepStrictEqual(sinkCalls[sinkCalls.length - 1], {
-    chatId: 'chat-a',
-    taskId: 'task-3',
-  });
-
-  // --- closing the active panel repaints from the remaining one ---------
-  panelA.dispose();
-  await waitFor(
-    () => sinkCalls[sinkCalls.length - 1].chatId === 'chat-b',
-    'closing the active panel must fall back to the remaining panel',
+    'a later activeTask must repaint the sink',
   );
   assert.strictEqual(sinkCalls[sinkCalls.length - 1].taskId, 'task-2');
+
+  // A sink registered later starts from the panel's current ids.
+  const lateCalls = [];
+  manager.setActiveTaskSink((chatId, taskId) =>
+    lateCalls.push({chatId, taskId}),
+  );
+  assert.deepStrictEqual(lateCalls, [{chatId: 'chat-b', taskId: 'task-2'}]);
+
+  // --- closing the panel clears the highlight ---------------------------
+  panel.dispose();
+  await waitFor(
+    () =>
+      lateCalls[lateCalls.length - 1].chatId === '' &&
+      lateCalls[lateCalls.length - 1].taskId === '',
+    'closing the panel must clear the sink',
+  );
+  assert.strictEqual(manager.controller(), undefined, 'no controller left');
 
   // --- a plain (sidebar) view fires onActiveTask --------------------------
   const sidebar = new SorcarSidebarView(vscodeStub.Uri.file(EXT_ROOT));

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -382,12 +383,47 @@ class TelegramChannelBackend(ToolMethodBackend):
     """
 
     def __init__(self) -> None:
-        self._bot: Any = None
+        self._bot_obj: Any = None
+        self._lazy_muse: bool = False
+        self._wire_lock = threading.Lock()
         self._last_update_id: int = -1
         self._connection_info: str = ""
         self._api_base: str = _DEFAULT_API_BASE
         self._http: Any = requests
         self._muse: bool = False
+
+    def _wire_deferred(self) -> None:
+        """Run the Muse wiring :class:`TelegramAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of wiring at construction,
+        so building it for its tool list (``sea lint``, ``sea docs``,
+        run start) touches no daemon.  Concurrent first requests wait on
+        the lock and share the one surrogate; :meth:`_wire_muse`
+        publishes ``_bot`` last, so a request that sees it set sees the
+        boundary transport too.  Direct Bot API calls (poll, typing)
+        call this before touching ``_http``.
+
+        Raises:
+            MuseAuthError: When no Telegram credential can be wired, so
+                no request leaves on the direct transport without one.
+        """
+        if self._bot_obj is not None or not self._lazy_muse:
+            return
+        with self._wire_lock:
+            if self._bot_obj is None and not self._wire_muse():
+                from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+                raise MuseAuthError(self._connection_info)
+
+    @property
+    def _bot(self) -> Any:
+        """The Bot API adapter (wired on first use when deferred)."""
+        self._wire_deferred()
+        return self._bot_obj
+
+    @_bot.setter
+    def _bot(self, bot: Any) -> None:
+        self._bot_obj = bot
 
     def _request_headers(self) -> dict[str, str]:
         """Return headers for direct Bot API calls (poll/typing).
@@ -448,9 +484,10 @@ class TelegramChannelBackend(ToolMethodBackend):
             # migrated, so a newer token a concurrent writer placed in
             # config between the store and here is not deleted.
             _scrub_config_token(expected=token)
-        self._bot = _TelegramBot(self, handle.token)
         self._http = MuseBoundarySession("telegram")
         self._muse = True
+        # Published last (see ``_wire_deferred``).
+        self._bot = _TelegramBot(self, handle.token)
         return True
 
     def _bot_token(self) -> str:
@@ -543,6 +580,7 @@ class TelegramChannelBackend(ToolMethodBackend):
             keys, new cursor string).
         """
         try:
+            self._wire_deferred()
             legacy = self._last_update_id + 1 if self._last_update_id >= 0 else None
             requested = int(oldest) if oldest.isdigit() and int(oldest) > 0 else None
             candidates = [c for c in (legacy, requested) if c is not None]
@@ -613,6 +651,7 @@ class TelegramChannelBackend(ToolMethodBackend):
         """
         del thread_ts
         try:
+            self._wire_deferred()
             token = self._bot_token()
             if not token:
                 return
@@ -1128,26 +1167,27 @@ class TelegramAgent(BaseChannelAgent):
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
-            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
-
-            # Muse-auth mode: wire a vault surrogate and the boundary
-            # adapter (no network round trip); the real token never
-            # enters this process once migrated.  A daemon failure
-            # leaves the agent constructible (fail closed, tokenless)
-            # so its authenticate/clear tools stay available.
-            try:
-                self._backend._wire_muse()
-            except MuseAuthError as e:
-                self._backend._bot = None
-                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            # Muse-auth mode: the backend wires its vault surrogate and
+            # boundary adapter on first use (see
+            # TelegramChannelBackend._bot), so building the tool list
+            # (``sea lint``, ``sea docs``, run start) touches no daemon;
+            # the real token never enters this process once migrated.
+            self._backend._lazy_muse = True
             return
         cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._bot = _TelegramBot(self._backend, cfg["bot_token"], requests.Session())
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return self._backend._bot is not None
+        """Return True if a Bot API adapter is built, or a token is in the vault or config."""
+        if self._backend._bot_obj is not None:
+            return True
+        if not self._backend._lazy_muse:
+            return False
+        from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
+
+        token = _raw_config().get("bot_token")
+        return vault_has_credentials("telegram") or (isinstance(token, str) and bool(token))
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
@@ -1159,7 +1199,7 @@ class TelegramAgent(BaseChannelAgent):
             Returns:
                 Authentication status or instructions for how to authenticate.
             """
-            if agent._backend._bot is None:  # pragma: no branch
+            if not agent._is_authenticated():  # pragma: no branch
                 return (
                     "Not authenticated with Telegram. Use authenticate_telegram(bot_token=...) "
                     "to configure. Get a token by messaging @BotFather on Telegram: "

@@ -368,8 +368,12 @@ _CLOSES_STDIN_WITHOUT_READING = """
 """
 
 
-def _grandchild_holds_stderr(pid_file: Path) -> str:
-    """Stand-in body: spawn a grandchild that inherits only stderr, reply, exit."""
+def _grandchild_holds_stderr(pid_file: Path, escapes_group: bool) -> str:
+    """Stand-in body: spawn a grandchild that inherits only stderr, reply, exit.
+
+    With *escapes_group* the grandchild starts its own session, so the
+    process-group signals of ``close()`` do not reach it.
+    """
     return f"""
     import json
     import subprocess
@@ -379,6 +383,7 @@ def _grandchild_holds_stderr(pid_file: Path) -> str:
         [sys.executable, "-c", "import time; time.sleep({_GRANDCHILD_LIFETIME})"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
+        start_new_session={escapes_group!r},
     )
     with open({str(pid_file)!r}, "w") as f:
         f.write(str(grandchild.pid))
@@ -423,15 +428,22 @@ class TestNonBlockingWriterDeliversThePrompt:
         assert content == "DONE"
         assert not _writer_threads()
 
+    @pytest.mark.parametrize("escapes_group", [False, True], ids=["in-group", "own-session"])
     def test_reader_held_by_a_grandchild_is_reported_and_left_attached(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, escapes_group: bool
     ) -> None:
         """Only the prompt pipe is unconditionally reclaimed: a grandchild
         holding stderr keeps that reader parked, which ``close()`` logs and
-        tolerates, while stdin and stdout are closed."""
+        tolerates, while stdin and stdout are closed.
+
+        That is the fate of a grandchild that left the child's process
+        group (``own-session``); one still in the group is killed with it
+        after the child exited (review 2026-10-12), so its reader drains
+        to EOF and stderr is closed like the other pipes.
+        """
         pid_file = tmp_path / "grandchild.pid"
         script = tmp_path / "child.py"
-        script.write_text(textwrap.dedent(_grandchild_holds_stderr(pid_file)))
+        script.write_text(textwrap.dedent(_grandchild_holds_stderr(pid_file, escapes_group)))
         try:
             with caplog.at_level("WARNING", logger="kiss.core.models.model"):
                 with _CLIProcess([sys.executable, str(script)], "probe", _TURN_TIMEOUT) as proc:
@@ -440,8 +452,14 @@ class TestNonBlockingWriterDeliversThePrompt:
                     proc.raise_for_exit()
             assert proc._proc.stdin is not None and proc._proc.stdin.closed
             assert proc._proc.stdout is not None and proc._proc.stdout.closed
-            assert proc._proc.stderr is not None and not proc._proc.stderr.closed
-            assert proc._readers[1].is_alive()
-            assert "left cli-stderr-drain attached to its pipe" in caplog.text
+            assert proc._proc.stderr is not None
+            if escapes_group:
+                assert not proc._proc.stderr.closed
+                assert proc._readers[1].is_alive()
+                assert "left cli-stderr-drain attached to its pipe" in caplog.text
+            else:
+                assert proc._proc.stderr.closed
+                assert not proc._readers[1].is_alive()
+                assert "attached to its pipe" not in caplog.text
         finally:
             _kill(pid_file)

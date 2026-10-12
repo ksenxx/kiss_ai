@@ -28,7 +28,7 @@ S3-08  The follow-up suggestion (the agent's own
        tab still receives a stamped copy.
 
 S3-09  ``_subagent_is_done`` must agree with
-       ``_reattach_running_chat``: both consult the same live-state
+       ``_attach_viewer_to_running_chat``: both consult the same live-state
        predicate on the task-keyed registry, so replay can never
        reattach a task as running while stamping its tab
        ``isDone=True``.
@@ -50,7 +50,6 @@ from __future__ import annotations
 import random
 import shutil
 import sqlite3
-import subprocess
 import tempfile
 import threading
 import time
@@ -63,46 +62,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer, _subagent_is_done
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    """Point the persistence layer at a fresh DB under *tmpdir*."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_db(saved: tuple) -> None:
-    """Restore the persistence layer redirected by :func:`_redirect_db`.
-
-    ``_close_db`` drains and stops the event-writer thread before the
-    connection goes away.  Closing ``th._db_conn`` directly while that
-    thread is still flushing a finished task's events is a
-    use-after-close inside the sqlite3 C module (seen as a SIGSEGV of
-    the whole pytest process), not a Python exception.
-    """
-    th._close_db()
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _init_git_repo(tmpdir: str) -> None:
-    """Create a minimal committed git repo in *tmpdir*."""
-    subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "t@t"], cwd=tmpdir, capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "T"], cwd=tmpdir, capture_output=True,
-    )
-    Path(tmpdir, ".gitkeep").touch()
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True,
-    )
+from kiss.tests.server.conftest import init_repo, redirect_persistence, restore_persistence
 
 
 def _count_followup_rows(task_id: str) -> int:
@@ -131,7 +91,7 @@ class TestStartupWindowInput(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.server = VSCodeServer()
         self.tab_id = "s305-tab"
         self.release = threading.Event()
@@ -155,7 +115,7 @@ class TestStartupWindowInput(unittest.TestCase):
         if self.state.task_thread is not None:
             self.state.task_thread.join(timeout=5)
         agent_state.agent_states.clear()
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_second_run_during_startup_window_is_queued(self) -> None:
@@ -221,7 +181,7 @@ class TestSubagentDoneConsistency(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.server = VSCodeServer()
         self.task_id = "s309-task-row-id"
         self.release = threading.Event()
@@ -229,7 +189,7 @@ class TestSubagentDoneConsistency(unittest.TestCase):
     def tearDown(self) -> None:
         self.release.set()
         agent_state.agent_states.clear()
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _install_state(self, *, active: bool, thread_alive: bool) -> None:
@@ -309,7 +269,7 @@ class TestFollowupSinglePersistence(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.server = VSCodeServer()
         self.printer = self.server.printer
         self.delivered: list[dict[str, object]] = []
@@ -337,7 +297,7 @@ class TestFollowupSinglePersistence(unittest.TestCase):
         agent_state.agent_states.clear()
         with self.printer._lock:
             self.printer._subscribers.pop(self.task_id, None)
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _event(self, text: str) -> dict[str, object]:
@@ -418,8 +378,8 @@ class TestCleanupExceptionSafety(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
         self.server = VSCodeServer()
         self.blocker = _CompletingParentRun()
         self.original_run = self.blocker.install()
@@ -433,7 +393,7 @@ class TestCleanupExceptionSafety(unittest.TestCase):
             state.task_thread.join(timeout=15)
         cast(Any, SorcarAgent.__mro__[1]).run = self.original_run
         agent_state.agent_states.clear()
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_state_sheds_activity_when_persistence_crashes(self) -> None:
@@ -458,7 +418,7 @@ class TestCleanupExceptionSafety(unittest.TestCase):
         history_task_id = str(rows[0]["id"])
 
         # Sabotage the DB while the agent is still "running": stop the
-        # event writer and close the connection (see ``_restore_db`` for
+        # event writer and close the connection (see ``restore_persistence`` for
         # why the writer must be stopped first), then turn the DB path
         # into a directory so every subsequent persistence call raises
         # for real.
@@ -478,11 +438,6 @@ class TestCleanupExceptionSafety(unittest.TestCase):
         self.assertFalse(
             state.is_task_active,
             "the state must not stay flagged active after cleanup crashed",
-        )
-        self.assertFalse(
-            state.is_running_non_wt,
-            "the non-worktree running flag must be lowered even when "
-            "cleanup persistence crashed",
         )
         with self.server.printer._lock:
             self.assertNotIn(

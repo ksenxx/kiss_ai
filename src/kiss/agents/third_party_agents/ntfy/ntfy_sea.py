@@ -166,8 +166,36 @@ class NtfyChannelBackend(ToolMethodBackend):
         self._http: Any = requests
         self._muse: bool = False
         self._muse_error: str = ""
+        self._lazy_muse: bool = False
+        self._explicit_tokenless: bool = False
+        self._wire_lock = threading.Lock()
         self._send_lock = threading.Lock()
         self._connection_info: str = ""
+
+    def _wire_deferred(self) -> None:
+        """Run the Muse wiring :class:`NtfyAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of wiring at construction,
+        so building it for its tool list (``sea lint``, ``sea docs``, run
+        start) touches no daemon.  Concurrent first requests wait on the
+        lock and share the one surrogate: ``_lazy_muse`` is cleared only
+        after the wiring (which replaces the configured token and the
+        transport) has finished, so no request ever sees the real token
+        on the direct transport.  A remembered wiring failure keeps
+        raising, so a retry never slips out tokenless either.
+
+        Raises:
+            MuseAuthError: When the Muse wiring failed (now or earlier).
+        """
+        if self._lazy_muse:
+            with self._wire_lock:
+                if self._lazy_muse:
+                    self._wire_muse_or_fail_closed()
+                    self._lazy_muse = False
+        if self._muse_error:
+            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+            raise MuseAuthError(self._muse_error)
 
     def connect(self) -> bool:
         """Load the ntfy config and mark the backend as connected."""
@@ -204,26 +232,32 @@ class NtfyChannelBackend(ToolMethodBackend):
         self._muse_error = ""
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
-        if muse_auth_enabled():
-            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+        # An explicit ``token: ""`` in config.json (a tokenless
+        # rotation done while Muse was off) is authoritative user
+        # intent: it overrides any stale vault entry.  A scrubbed
+        # Muse config has NO token key, so this only fires for a
+        # deliberately-removed token.
+        self._explicit_tokenless = "token" in cfg and not cfg["token"]
+        if muse_auth_enabled() and not self._lazy_muse:
+            self._wire_muse_or_fail_closed()
 
-            # An explicit ``token: ""`` in config.json (a tokenless
-            # rotation done while Muse was off) is authoritative user
-            # intent: it overrides any stale vault entry.  A scrubbed
-            # Muse config has NO token key, so this only fires for a
-            # deliberately-removed token.
-            explicit_tokenless = "token" in cfg and not cfg["token"]
-            try:
-                self._wire_muse(explicit_tokenless=explicit_tokenless)
-            except MuseAuthError as e:
-                # Fail closed: in Muse mode the real token must never
-                # be used on the direct path, so a failed wiring leaves
-                # the backend tokenless rather than falling back to it.
-                # The recorded error keeps connect() and the check tool
-                # honest about the broken credential.
-                self._token = ""
-                self._muse_error = f"ntfy Muse-auth wiring failed: {e}"
-                self._connection_info = self._muse_error
+    def _wire_muse_or_fail_closed(self) -> None:
+        """Wire the Muse boundary for the applied config; a failure leaves the backend tokenless.
+
+        Fail closed: in Muse mode the real token must never be used on
+        the direct path, so a failed wiring leaves the backend tokenless
+        rather than falling back to it.  The recorded ``_muse_error``
+        keeps connect() and the check tool honest about the broken
+        credential and hides the backend tools.
+        """
+        from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+        try:
+            self._wire_muse(explicit_tokenless=self._explicit_tokenless)
+        except MuseAuthError as e:
+            self._token = ""
+            self._muse_error = f"ntfy Muse-auth wiring failed: {e}"
+            self._connection_info = self._muse_error
 
     def _wire_muse(self, explicit_tokenless: bool = False) -> None:
         """Enroll/mint the ntfy token surrogate and wire the boundary session.
@@ -316,6 +350,7 @@ class NtfyChannelBackend(ToolMethodBackend):
             RuntimeError: If the poll request returns a non-200 status.
             requests.RequestException: If the HTTP request itself fails.
         """
+        self._wire_deferred()
         resp = self._http.get(
             f"{self._server}/{topic}/json",
             params={"poll": "1", "since": oldest or "all"},
@@ -397,6 +432,7 @@ class NtfyChannelBackend(ToolMethodBackend):
         Raises:
             RuntimeError: If the publish request returns a non-2xx status.
         """
+        self._wire_deferred()
         topic = self._topic or channel_id
         headers = self._auth_headers()
         headers["X-Tags"] = ",".join(self._echo_tags())
@@ -443,6 +479,7 @@ class NtfyChannelBackend(ToolMethodBackend):
             JSON string with ok status and the published message id.
         """
         try:
+            self._wire_deferred()
             all_tags = [t.strip() for t in tags.split(",") if t.strip()]
             all_tags.extend(self._echo_tags())
             headers = self._auth_headers()
@@ -514,6 +551,12 @@ class NtfyAgent(BaseChannelAgent):
     def __init__(self) -> None:
         super().__init__("Ntfy Agent")
         self._backend = NtfyChannelBackend()
+        from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+        # Muse-auth mode: the backend wires the boundary on first use
+        # (see NtfyChannelBackend._wire_deferred), so building the tool list
+        # (``sea lint``, ``sea docs``, run start) touches no daemon.
+        self._backend._lazy_muse = muse_auth_enabled()
         cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._apply_config(cfg)

@@ -81,8 +81,12 @@ def count_words(text: str) -> str:
 
 
 @pytest.fixture
-def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A fake KISS checkout whose ``seas/`` folder holds the editable ``demo`` SEA."""
+def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: None) -> Path:
+    """A fake KISS checkout whose ``seas/`` folder holds the editable ``demo`` SEA.
+
+    ``export_sea_evals`` and the acceptance test read every persisted
+    ``tunedemo`` run, so the test starts with none (``empty_history``).
+    """
     seas = tmp_path / "src" / "kiss" / "agents" / "seas"
     (seas / "tunedemo").mkdir(parents=True)
     (seas / "tunedemo" / "tunedemo_sea.py").write_text(DEMO_SEA, encoding="utf-8")
@@ -800,7 +804,6 @@ def test_improve_and_revert_sea_code_snapshot_and_gate(
         assert "add an extra() helper" in command["prompt"] and str(path) in command["prompt"]
         # A plain Sorcar run (no SEA) in the SEA's git checkout.
         assert command["seaPath"] == "" and command["workDir"] == str(root.resolve())
-        assert command["useWorktree"] is False and command["autoCommit"] is False
         assert "error" not in report and "def extra" in path.read_text()
         assert report["other_changes"] == []
         snapshot = Path(report["snapshot"])
@@ -956,11 +959,11 @@ def test_own_task_id_reads_the_persisted_id() -> None:
     (``last_task_id``), found through ``current_agent`` on the task thread."""
     import threading
 
-    from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
     from kiss.server import agent_state
 
     assert sea._own_task_id() == ""
-    agent = WorktreeSorcarAgent("rsi7d-tuning-test")
+    agent = ChatSorcarAgent("rsi7d-tuning-test")
     agent._last_task_id = "persisted-rsi7d-task"
     state = agent_state.AgentState(
         "rsi7d-tuning-test", agent=agent, task_thread=threading.current_thread(),

@@ -16,7 +16,6 @@ import os
 import platform
 import shutil
 import socket
-import ssl
 import subprocess
 import sys
 import tempfile
@@ -35,6 +34,7 @@ from kiss.core.brand import PRODUCT_NAME
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.sorcar import translate_webview_command
 from kiss.server.web_server import (
+    _MAX_LINE_BYTES,
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,
     _URL_FILE,
     TUNNEL_CHECK_INTERVAL,
@@ -55,6 +55,7 @@ from kiss.server.web_server import (
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._blocking_start import close_leaked_listeners
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 class TestBuildHtml(unittest.TestCase):
@@ -317,22 +318,17 @@ class TestWebPrinter(unittest.TestCase):
         self.assertTrue(any(e.get("taskId") == "t1" for e in captured))
 
 
-def _find_free_port() -> int:
-    """Find an available TCP port."""
-    import socket
+def _connect_live_task(port: int) -> Any:
+    """Connect to the server's websocket for a test that submits a live task.
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return an SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+    The task runs a real model whose tool output streams back verbatim
+    (a ``ps aux`` on a loaded test host ran to 2.6 MB in one
+    ``system_output`` frame), so the client takes frames as large as the
+    daemon's own clients do instead of the websockets default of 1 MiB.
+    """
+    return connect(
+        f"wss://127.0.0.1:{port}/ws", ssl=no_verify_ssl(), max_size=_MAX_LINE_BYTES
+    )
 
 
 async def _recv_reply(ws: Any, timeout: float = 5) -> dict[str, Any]:
@@ -352,7 +348,7 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
     """Test HTTPS serving of HTML and static assets."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -378,7 +374,7 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
         import urllib.request
 
         url = f"https://127.0.0.1:{self.port}{path}"
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
 
         def _fetch() -> tuple[int, str]:
             try:
@@ -412,7 +408,7 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
         import http.client
 
         def _head() -> int:
-            ctx = _no_verify_ssl()
+            ctx = no_verify_ssl()
             conn = http.client.HTTPSConnection(
                 "127.0.0.1",
                 self.port,
@@ -463,7 +459,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         _persistence._DB_PATH = self._persistence_dir / "history.db"
         _persistence._db_conn = None
 
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -493,14 +489,14 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_auth_no_password(self) -> None:
         """WebSocket connection with empty password succeeds immediately."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
 
     async def test_ws_get_models(self) -> None:
         """getModels command returns a models event over WebSocket."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
@@ -513,7 +509,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_get_history(self) -> None:
         """getHistory command returns a history event."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -524,7 +520,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_get_config(self) -> None:
         """getConfig command returns configuration data."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -535,7 +531,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_vscode_only_commands_ignored(self) -> None:
         """VS Code-only commands are silently ignored (no error broadcast)."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -546,7 +542,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_unknown_command_returns_error(self) -> None:
         """Unknown commands produce an error event."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -557,7 +553,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_new_chat_and_close_tab(self) -> None:
         """newChat and closeTab commands work over WebSocket."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -574,7 +570,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_select_model(self) -> None:
         """selectModel command updates the selected model."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -595,7 +591,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
     async def test_ws_ready_command(self) -> None:
         """The 'ready' command returns models, inputHistory, configData, focusInput.
         """
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
@@ -624,7 +620,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_ready_does_not_produce_unknown_error(self) -> None:
         """The 'ready' command must NOT produce an 'Unknown command' error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -646,7 +642,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_submit_does_not_produce_unknown_error(self) -> None:
         """The 'submit' command must NOT produce an 'Unknown command' error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with _connect_live_task(self.port) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -685,7 +681,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
     async def test_ws_user_action_done_is_unknown_command(self) -> None:
         """userActionDone has no producer; the dead rewrite was removed
         so it now surfaces as an Unknown command error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -696,7 +692,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_resume_session_translates_id(self) -> None:
         """resumeSession translates the webview 'id' field to 'chatId'."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -730,7 +726,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_get_welcome_info(self) -> None:
         """getWelcomeInfo broadcasts the remote_url info."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -748,7 +744,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         """remote_url event uses in-memory _active_url even when URL file is missing."""
         self.server._active_url = "https://test-dynamic.trycloudflare.com"
         _remove_url_file(_URL_FILE)
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -769,7 +765,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         """ready command broadcasts remote_url when _active_url is set."""
         self.server._active_url = "https://ready-test.trycloudflare.com"
         _remove_url_file(_URL_FILE)
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -802,7 +798,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_get_files(self) -> None:
         """getFiles command returns a files event."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -813,7 +809,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_get_adjacent_task(self) -> None:
         """getAdjacentTask returns an adjacent_task_events event."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -832,7 +828,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_save_config(self) -> None:
         """saveConfig command updates config and returns configData."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -864,7 +860,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         silence is what made a mis-targeted click look like a dead button
         (``reports/stop_button_delay_2026-08-05.html``).
         """
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -886,7 +882,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_record_file_usage(self) -> None:
         """recordFileUsage command does not produce an error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -918,7 +914,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         missing = str(Path(work_dir) / "missing.txt")
         too_long = "/" + "x" * 5000  # resolve() raises OSError
 
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -970,7 +966,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         real = Path(work_dir) / "fallback.txt"
         real.write_text("hi\n")
 
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1000,7 +996,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_check_paths_malformed_paths_yields_empty(self) -> None:
         """checkPaths with a non-list paths field replies with no results."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1065,7 +1061,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     return ev
             raise AssertionError(f"no {wanted} reply received")
 
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1166,7 +1162,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     return ev
             raise AssertionError(f"no {wanted} reply received")
 
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1260,7 +1256,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     return ev
             raise AssertionError(f"no {wanted} reply received")
 
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
             await ws.send(
@@ -1333,7 +1329,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             str(wt_dir),
         )
 
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1377,7 +1373,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_generate_commit_message(self) -> None:
         """generateCommitMessage command does not produce Unknown command error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1400,7 +1396,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_user_answer(self) -> None:
         """userAnswer command does not produce an error (drops silently w/o task)."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1419,7 +1415,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_complete(self) -> None:
         """complete command does not produce an error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1442,7 +1438,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_worktree_action(self) -> None:
         """worktreeAction command does not produce Unknown command error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1473,7 +1469,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_all_webview_commands_no_unknown_error(self) -> None:
         """All FromWebviewMessage types produce no 'Unknown command' error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with _connect_live_task(self.port) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1543,7 +1539,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
     @pytest.mark.slow
     async def test_ws_submit_emits_task_text_and_status(self) -> None:
         """The 'submit' command emits setTaskText and status running=True."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with _connect_live_task(self.port) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -1585,7 +1581,7 @@ class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
     """Test WebSocket password authentication."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -1607,14 +1603,14 @@ class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
 
     async def test_auth_correct_password(self) -> None:
         """Correct password authenticates successfully."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "test-secret-123"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
 
     async def test_auth_wrong_password_then_correct(self) -> None:
         """Wrong password prompts auth_required, then correct password works."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_required")
@@ -1625,7 +1621,7 @@ class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
 
     async def test_auth_wrong_password_twice_disconnects(self) -> None:
         """Two wrong passwords result in connection close."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_required")
@@ -1641,7 +1637,7 @@ class TestRemoteAccessServerMultiClient(IsolatedAsyncioTestCase):
     """Test broadcasting events to multiple WebSocket clients."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -1664,8 +1660,8 @@ class TestRemoteAccessServerMultiClient(IsolatedAsyncioTestCase):
     async def test_broadcast_reaches_all_clients(self) -> None:
         """Events broadcast by the server reach all connected clients."""
         async with (
-            connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws1,
-            connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws2,
+            connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws1,
+            connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws2,
         ):
             for ws in [ws1, ws2]:
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
@@ -1687,8 +1683,8 @@ class TestRemoteAccessServerTask(IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
-        self.model_port = _find_free_port()
+        self.port = find_free_port()
+        self.model_port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -1724,7 +1720,7 @@ class TestRemoteAccessServerTask(IsolatedAsyncioTestCase):
 
     async def test_run_task_receives_events(self) -> None:
         """Sending a 'run' command produces task events over WebSocket."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
@@ -1901,7 +1897,7 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
     """Test HTTPS/WSS with explicit certificate files."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -1962,7 +1958,7 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
     """Test the tunnel watchdog that restarts dead tunnel processes."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -2154,7 +2150,7 @@ class TestStartQuickTunnelUrlParsing(IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -2302,7 +2298,7 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
     """Test the IP address change watchdog."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -2406,7 +2402,7 @@ class TestWebPrinterBroadcastEdgeCases(IsolatedAsyncioTestCase):
 
     async def test_broadcast_handles_ws_send_failure(self) -> None:
         """broadcast() handles exceptions when sending to a closed WS client."""
-        port = _find_free_port()
+        port = find_free_port()
         if CONFIG_PATH.exists():
             orig_config = CONFIG_PATH.read_text()
         else:
@@ -2422,7 +2418,7 @@ class TestWebPrinterBroadcastEdgeCases(IsolatedAsyncioTestCase):
             try:
                 ws = await connect(
                     f"wss://127.0.0.1:{port}/ws",
-                    ssl=_no_verify_ssl(),
+                    ssl=no_verify_ssl(),
                 )
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
                 await asyncio.wait_for(ws.recv(), timeout=5)
@@ -2441,7 +2437,7 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
     """Test WebSocket authentication edge cases."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -2465,7 +2461,7 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
         """Wrong password prompts auth_required, correct on retry succeeds."""
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -2478,7 +2474,7 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
         """Wrong password twice disconnects the client."""
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -2493,7 +2489,7 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
         """Sending a non-auth message first closes the connection."""
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "getModels"}))
             with self.assertRaises(Exception):
@@ -2504,7 +2500,7 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
     """Test _handle_ready with restoredTabs."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -2528,7 +2524,7 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
         """ready command with restoredTabs triggers resumeSession for each."""
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -2571,7 +2567,7 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
         """
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -2606,11 +2602,11 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
         async with (
             connect(
                 f"wss://127.0.0.1:{self.port}/ws",
-                ssl=_no_verify_ssl(),
+                ssl=no_verify_ssl(),
             ) as ws_ready,
             connect(
                 f"wss://127.0.0.1:{self.port}/ws",
-                ssl=_no_verify_ssl(),
+                ssl=no_verify_ssl(),
             ) as ws_other,
         ):
             for ws in (ws_ready, ws_other):
@@ -2648,7 +2644,7 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
         """ready command with empty restoredTabs doesn't crash."""
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -2694,7 +2690,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
     """Test _send_welcome_info URL fallback paths."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -2733,7 +2729,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
 
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -2786,7 +2782,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
 
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -2812,7 +2808,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
 
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -2840,7 +2836,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
 
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -2862,7 +2858,7 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
     """Test named tunnel start logic."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -2991,7 +2987,7 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
     """Test _watchdog method branches for coverage."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3026,7 +3022,7 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
 
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
@@ -3106,7 +3102,7 @@ class TestCheckAndRestartTunnel(IsolatedAsyncioTestCase):
     """Test _check_and_restart_tunnel restart path."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3158,7 +3154,7 @@ class TestStopAsyncTimeout(IsolatedAsyncioTestCase):
 
     async def test_stop_async_cleans_up(self) -> None:
         """stop_async completes even if ws server is slow to close."""
-        port = _find_free_port()
+        port = find_free_port()
         if CONFIG_PATH.exists():
             orig_config = CONFIG_PATH.read_text()
         else:
@@ -3184,7 +3180,7 @@ class TestWSHandlerInvalidJson(IsolatedAsyncioTestCase):
     """Test WS handler with invalid JSON input."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3207,7 +3203,7 @@ class TestWSHandlerInvalidJson(IsolatedAsyncioTestCase):
         """Sending invalid JSON doesn't crash the handler; next commands work."""
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -3222,7 +3218,7 @@ class TestPingOneWs(IsolatedAsyncioTestCase):
     """Test _ping_one_ws with stale connections."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3245,7 +3241,7 @@ class TestPingOneWs(IsolatedAsyncioTestCase):
         """_ping_one_ws succeeds for a live client."""
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
@@ -3261,7 +3257,7 @@ class TestPingOneWs(IsolatedAsyncioTestCase):
         """_ping_one_ws closes a stale connection without raising."""
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
@@ -3281,7 +3277,7 @@ class TestStopTunnel(IsolatedAsyncioTestCase):
     """Test _stop_tunnel including the kill path."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3348,7 +3344,7 @@ class TestStartNamedTunnel(IsolatedAsyncioTestCase):
     """Test _start_named_tunnel with a fake cloudflared on PATH."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3471,7 +3467,7 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         import kiss.server.web_server as ws_mod
 
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3546,7 +3542,7 @@ class TestServeAsyncPrinting(IsolatedAsyncioTestCase):
     """Test _serve_async and start() lifecycle."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3664,7 +3660,7 @@ class TestWSHandlerConnectionClosed(IsolatedAsyncioTestCase):
     """Test WS handler handles abrupt connection close."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3687,7 +3683,7 @@ class TestWSHandlerConnectionClosed(IsolatedAsyncioTestCase):
         """Abruptly closing a WS connection doesn't crash the server."""
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
@@ -3697,7 +3693,7 @@ class TestWSHandlerConnectionClosed(IsolatedAsyncioTestCase):
 
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         ) as ws2:
             await ws2.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws2.recv(), timeout=5))
@@ -3708,7 +3704,7 @@ class TestAuthTimeout(IsolatedAsyncioTestCase):
     """Test authentication timeout path."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3731,7 +3727,7 @@ class TestAuthTimeout(IsolatedAsyncioTestCase):
         """Connecting but not sending auth within timeout closes connection."""
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         )
         try:
             await ws.send(b"\x00\x01\x02")
@@ -3746,7 +3742,7 @@ class TestStartTunnelFileNotFound(IsolatedAsyncioTestCase):
     """Test _start_tunnel when cloudflared is not found on PATH."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3790,7 +3786,7 @@ class TestCheckAndRestartTunnelFailedRestart(IsolatedAsyncioTestCase):
     """Test _check_and_restart_tunnel when restart fails."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3840,7 +3836,7 @@ class TestWatchdogWSPingException(IsolatedAsyncioTestCase):
     """Test watchdog handles WS ping exceptions gracefully."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3866,7 +3862,7 @@ class TestWatchdogWSPingException(IsolatedAsyncioTestCase):
 
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
+            ssl=no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
@@ -3899,7 +3895,7 @@ class TestWatchdogIPChangeDetection(IsolatedAsyncioTestCase):
     """Test watchdog IP change detection with exception handling."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3944,7 +3940,7 @@ class TestHeadPartialBuffer(IsolatedAsyncioTestCase):
     """Test _HeadAwareServerConnection with partial data (line 130)."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -3975,7 +3971,7 @@ class TestHeadPartialBuffer(IsolatedAsyncioTestCase):
 
     async def test_partial_head_request_buffered(self) -> None:
         """Sending partial HEAD data is buffered until \\r\\n is seen."""
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
         reader, writer = await asyncio.open_connection(
             "127.0.0.1", self.port, ssl=ctx, limit=16 * 1024 * 1024,
         )
@@ -4037,7 +4033,7 @@ class TestReadyRestoredTabEmptyChatId(IsolatedAsyncioTestCase):
     """Test _handle_ready with restored tab that has empty chatId (1309)."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -4069,7 +4065,7 @@ class TestReadyRestoredTabEmptyChatId(IsolatedAsyncioTestCase):
     async def test_restored_tab_empty_chat_id_skipped(self) -> None:
         """Restored tab with empty chatId does not send resumeSession."""
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -4096,7 +4092,7 @@ class TestNoWorkDir(IsolatedAsyncioTestCase):
     """Test RemoteAccessServer with work_dir=None (branch 1113->1116)."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -4129,7 +4125,7 @@ class TestNoWorkDir(IsolatedAsyncioTestCase):
         )
         await server.start_async()
         try:
-            ctx = _no_verify_ssl()
+            ctx = no_verify_ssl()
             async with connect(
                 f"wss://127.0.0.1:{self.port}/ws", ssl=ctx,
             ) as ws:
@@ -4146,7 +4142,7 @@ class TestStopTunnelKillPath(IsolatedAsyncioTestCase):
     """Test _stop_tunnel actually hits the kill path (lines 1680-1681)."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -4204,7 +4200,7 @@ class TestStartMethodLifecycle(unittest.TestCase):
 
     def test_start_interrupted_by_keyboard(self) -> None:
         """start() can be interrupted by KeyboardInterrupt."""
-        port = _find_free_port()
+        port = find_free_port()
         orig_config = None
         if CONFIG_PATH.exists():
             orig_config = CONFIG_PATH.read_text()
@@ -4264,7 +4260,7 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
     """Test _serve_async printing branches (lines 1727-1733)."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -4373,7 +4369,7 @@ class TestBroadcastWsSendException(IsolatedAsyncioTestCase):
     """Test broadcast when WS send fails (lines 567-568)."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -4405,7 +4401,7 @@ class TestBroadcastWsSendException(IsolatedAsyncioTestCase):
     async def test_broadcast_after_client_abruptly_closes(self) -> None:
         """Broadcast handles exception when client connection is dead."""
         ws = await connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
@@ -4422,7 +4418,7 @@ class TestStopAsyncWaitTimeout(IsolatedAsyncioTestCase):
     """Test stop_async when wait_closed times out (lines 1768-1769)."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -4454,7 +4450,7 @@ class TestStopAsyncWaitTimeout(IsolatedAsyncioTestCase):
         self.assertIsNotNone(server._ws_server)
 
         ws = await connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
@@ -4467,7 +4463,7 @@ class TestWatchdogWSPingWithConnections(IsolatedAsyncioTestCase):
     """Test watchdog WS ping with actual connections (lines 1664-1665)."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -4499,7 +4495,7 @@ class TestWatchdogWSPingWithConnections(IsolatedAsyncioTestCase):
     async def test_watchdog_pings_active_connections(self) -> None:
         """Watchdog successfully pings connected WS clients."""
         ws = await connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
@@ -4535,7 +4531,7 @@ class TestFocusInputSendFails(IsolatedAsyncioTestCase):
     """Test focusInput send failure during _handle_ready (lines 1305-1306)."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -4567,7 +4563,7 @@ class TestFocusInputSendFails(IsolatedAsyncioTestCase):
     async def test_ready_handles_send_failure(self) -> None:
         """ready command handles focusInput send failure gracefully."""
         ws = await connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
@@ -4672,7 +4668,7 @@ class TestStartTunnelGenericException(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        self.port = _find_free_port()
+        self.port = find_free_port()
         save_config({"remote_password": ""})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -4704,7 +4700,7 @@ class TestQuickTunnelUrlFromStderr(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        self.port = _find_free_port()
+        self.port = find_free_port()
         save_config({"remote_password": ""})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -4759,7 +4755,7 @@ class TestNamedTunnelProcessDies(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        self.port = _find_free_port()
+        self.port = find_free_port()
         save_config({"remote_password": ""})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -4801,7 +4797,7 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        self.port = _find_free_port()
+        self.port = find_free_port()
         save_config({"remote_password": "test-pw"})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -4857,7 +4853,7 @@ class TestWatchdogExceptionPaths(IsolatedAsyncioTestCase):
     """Test watchdog exception handling paths."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         save_config({"remote_password": ""})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -4886,7 +4882,7 @@ class TestHeadTransportNone(IsolatedAsyncioTestCase):
     """Test _HeadAwareServerConnection when transport is None during HEAD."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         save_config({"remote_password": ""})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -4900,7 +4896,7 @@ class TestHeadTransportNone(IsolatedAsyncioTestCase):
 
     async def test_head_with_no_transport(self) -> None:
         """HEAD request when transport already closed doesn't crash."""
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
         reader, writer = await asyncio.open_connection(
             "127.0.0.1", self.port, ssl=ctx, limit=16 * 1024 * 1024,
         )
@@ -4915,7 +4911,7 @@ class TestWSHandlerGenericException(IsolatedAsyncioTestCase):
     """Test _ws_handler when a non-ConnectionClosed exception occurs."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         save_config({"remote_password": ""})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -4937,7 +4933,7 @@ class TestWSHandlerGenericException(IsolatedAsyncioTestCase):
 
     async def test_generic_exception_handled(self) -> None:
         """Non-ConnectionClosed exception caught (lines 1244-1245)."""
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             _ = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -4949,7 +4945,7 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
     """Test _send_welcome_info when URL is discovered from metrics."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         save_config({"remote_password": ""})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -4957,7 +4953,7 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
             use_tunnel=False,
         )
         await self.server.start_async()
-        self._metrics_port = _find_free_port()
+        self._metrics_port = find_free_port()
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
@@ -4970,7 +4966,7 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
         )
         self.server._active_url = None
 
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             _ = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -5016,7 +5012,7 @@ class TestStartWithTunnel(unittest.TestCase):
         save_config({"remote_password": "test-secret"})
         server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             use_tunnel=True,
             ntfy_base_url=unroutable_base_url(),
         )
@@ -5077,7 +5073,7 @@ class TestStopAsyncWaitClosedTimeout(IsolatedAsyncioTestCase):
 
     async def test_timeout_during_wait_closed(self) -> None:
         """stop_async handles TimeoutError from wait_closed (1768-1769)."""
-        port = _find_free_port()
+        port = find_free_port()
         save_config({"remote_password": ""})
         server = RemoteAccessServer(
             host="127.0.0.1",
@@ -5086,7 +5082,7 @@ class TestStopAsyncWaitClosedTimeout(IsolatedAsyncioTestCase):
         )
         await server.start_async()
 
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
         ws = await connect(f"wss://127.0.0.1:{port}/ws", ssl=ctx).__aenter__()
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         _ = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -5105,7 +5101,7 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        self.port = _find_free_port()
+        self.port = find_free_port()
         save_config({"remote_password": ""})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -5113,7 +5109,7 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
             use_tunnel=False,
         )
         self._old_path = os.environ.get("PATH", "")
-        self._metrics_port = _find_free_port()
+        self._metrics_port = find_free_port()
 
         class _MetricsHandler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
@@ -5203,7 +5199,7 @@ class TestQuickTunnelProcessPoll(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        self.port = _find_free_port()
+        self.port = find_free_port()
         save_config({"remote_password": ""})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -5417,7 +5413,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -5526,7 +5522,7 @@ class TestDeadProcessClearsMetricsState(IsolatedAsyncioTestCase):
     """When the subprocess dies, the watchdog must reset metrics state."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -5600,7 +5596,7 @@ class TestDiscoverTunnelUrlFromMetricsFiltersApi(unittest.TestCase):
 
     def _serve_hostname(self, hostname: str) -> tuple[HTTPServer, int]:
         """Start a local /quicktunnel endpoint reporting *hostname*."""
-        port = _find_free_port()
+        port = find_free_port()
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:

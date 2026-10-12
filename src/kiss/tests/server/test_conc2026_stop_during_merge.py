@@ -32,25 +32,12 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterator
-
-import pytest
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 from kiss.server.task_runner import _state_owns_thread
 from kiss.tests.server._memory_printer import MemoryPrinter
-
-
-@pytest.fixture
-def clean_registry() -> Iterator[None]:
-    """Run with an empty agent-state registry and leave it empty."""
-    agent_state.agent_states.clear()
-    try:
-        yield
-    finally:
-        agent_state.agent_states.clear()
 
 
 class _Worker:

@@ -5,7 +5,7 @@
 """Bug-hunt 4: regressions found by the sorcar agent-core audit (findings-1).
 
 End-to-end reproductions for the confirmed findings in
-``sorcar_agent.py``, ``worktree_sorcar_agent.py``,
+``sorcar_agent.py``, ``sorcar_agent.py``,
 ``chat_sorcar_agent.py`` and the server's task-keyed registry
 (``kiss.server.agent_state``):
 
@@ -40,7 +40,6 @@ from __future__ import annotations
 import functools
 import random
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -51,36 +50,24 @@ import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.git_worktree import GitWorktree, MergeResult
+from kiss.agents.sorcar.git_worktree import GitWorktree, MergeResult, _merge_fix_steps
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, auto_commit_changes
-from kiss.agents.sorcar.worktree_sorcar_agent import (
-    WorktreeSorcarAgent,
-    _merge_fix_steps,
-)
 from kiss.core.models.model_info import model as _model_factory
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-
-
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+from kiss.tests.server.conftest import run_git
 
 
 def _make_repo(base: Path, name: str) -> Path:
     repo = base / name
     repo.mkdir(parents=True)
-    _git(repo, "init", "-b", "main")
-    _git(repo, "config", "user.email", "t@t.t")
-    _git(repo, "config", "user.name", "t")
-    _git(repo, "config", "commit.gpgsign", "false")
+    run_git(repo, "init", "-b", "main")
+    run_git(repo, "config", "user.email", "t@t.t")
+    run_git(repo, "config", "user.name", "t")
+    run_git(repo, "config", "commit.gpgsign", "false")
     (repo / "README.md").write_text("hello\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "init")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-m", "init")
     return repo
 
 
@@ -258,7 +245,7 @@ class TestF04CommitFailureNotification(_TempDbTestBase):
         hook.chmod(0o755)
         (repo / "work.txt").write_text("agent output\n")
 
-        agent: Any = WorktreeSorcarAgent("f04")
+        agent: Any = ChatSorcarAgent("f04")
         collecting = _CollectingPrinter()
         agent.printer = collecting
         agent._tab_id = "tab-f04"
@@ -369,17 +356,17 @@ class TestF10CrossRepoDeadlock(_TempDbTestBase):
         repo_a = _make_repo(base, "repo_a")
         repo_b = _make_repo(base, "repo_b")
 
-        agent1 = WorktreeSorcarAgent("f10-1")
-        agent2 = WorktreeSorcarAgent("f10-2")
-        assert agent1._try_setup_worktree(repo_a, None) is not None
-        assert agent2._try_setup_worktree(repo_b, None) is not None
+        agent1 = ChatSorcarAgent("f10-1")
+        agent2 = ChatSorcarAgent("f10-2")
+        assert agent1._try_setup_worktree(repo_a, str(repo_a)) is not None
+        assert agent2._try_setup_worktree(repo_b, str(repo_b)) is not None
 
         errors: list[BaseException] = []
 
-        def _switch(agent: WorktreeSorcarAgent, repo: Path) -> None:
+        def _switch(agent: ChatSorcarAgent, repo: Path) -> None:
             try:
                 time.sleep(random.random() * 0.05)
-                agent._try_setup_worktree(repo, None)
+                agent._try_setup_worktree(repo, str(repo))
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
 
@@ -400,7 +387,7 @@ class TestF11FlushWarningsRobustness(_TempDbTestBase):
     """A raising broadcast must neither lose warnings nor abort run()."""
 
     def test_warnings_survive_broken_printer(self) -> None:
-        agent = WorktreeSorcarAgent("f11")
+        agent = ChatSorcarAgent("f11")
         agent._set_warnings(
             stash="stash pop failed; run 'git stash pop'",
             merge="merge conflict; resolve manually",
@@ -424,16 +411,16 @@ class TestF12DeleteBranchFailureSurfaced(_TempDbTestBase):
 
     def test_undeletable_branch_sets_warning(self) -> None:
         repo = _make_repo(Path(self.tmpdir), "repo")
-        _git(repo, "branch", "kiss/wt-test")
+        run_git(repo, "branch", "kiss/wt-test")
         # Check the branch out in a second worktree so both `git branch -d`
         # and `-D` fail with "used by worktree".
         holder = Path(self.tmpdir) / "holder"
-        _git(repo, "worktree", "add", str(holder), "kiss/wt-test")
+        run_git(repo, "worktree", "add", str(holder), "kiss/wt-test")
         (holder / "feature.txt").write_text("new work\n")
-        _git(holder, "add", "-A")
-        _git(holder, "commit", "-m", "agent work")
+        run_git(holder, "add", "-A")
+        run_git(holder, "commit", "-m", "agent work")
 
-        agent = WorktreeSorcarAgent("f12")
+        agent = ChatSorcarAgent("f12")
         wt = GitWorktree(
             repo_root=repo,
             branch="kiss/wt-test",
@@ -451,14 +438,14 @@ class TestF12DeleteBranchFailureSurfaced(_TempDbTestBase):
     def test_merge_response_mentions_undeleted_branch(self) -> None:
         """merge() must not report an unqualified success (review-1 #10)."""
         repo = _make_repo(Path(self.tmpdir), "repo2")
-        _git(repo, "branch", "kiss/wt-test2")
+        run_git(repo, "branch", "kiss/wt-test2")
         holder = Path(self.tmpdir) / "holder2"
-        _git(repo, "worktree", "add", str(holder), "kiss/wt-test2")
+        run_git(repo, "worktree", "add", str(holder), "kiss/wt-test2")
         (holder / "feature.txt").write_text("new work\n")
-        _git(holder, "add", "-A")
-        _git(holder, "commit", "-m", "agent work")
+        run_git(holder, "add", "-A")
+        run_git(holder, "commit", "-m", "agent work")
 
-        agent: Any = WorktreeSorcarAgent("f12b")
+        agent: Any = ChatSorcarAgent("f12b")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch="kiss/wt-test2",

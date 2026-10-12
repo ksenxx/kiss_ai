@@ -50,9 +50,8 @@ def test_bx_handles_falsy_string_literals_during_migration(
 ) -> None:
     """Legacy JSON-extra payloads sometimes encode boolean flags as
     string literals.  ``bool("false") == True`` in vanilla Python
-    would silently flip every ``is_parallel`` / ``is_worktree`` /
-    ``auto_commit_mode`` flag during migration.  Verify the fixed
-    coercion handles all common false-y string forms.
+    would silently flip every ``is_parallel`` flag during migration.
+    Verify the fixed coercion handles all common false-y string forms.
     """
     import json
     import sqlite3
@@ -75,9 +74,12 @@ def test_bx_handles_falsy_string_literals_during_migration(
             ")"
         )
         for label, flags in [
-            ("falsy_string_false", {"is_parallel": "false", "is_worktree": "0"}),
-            ("falsy_string_no", {"is_parallel": "no", "is_worktree": ""}),
-            ("truthy_string_true", {"is_parallel": "true", "is_worktree": "1"}),
+            ("falsy_string_false", {"is_parallel": "false"}),
+            ("falsy_string_no", {"is_parallel": "no"}),
+            ("falsy_string_zero", {"is_parallel": "0"}),
+            ("falsy_string_empty", {"is_parallel": ""}),
+            ("truthy_string_true", {"is_parallel": "true"}),
+            ("truthy_string_one", {"is_parallel": "1"}),
         ]:
             conn.execute(
                 "INSERT INTO task_history "
@@ -93,17 +95,26 @@ def test_bx_handles_falsy_string_literals_during_migration(
     db = P._get_db()
     try:
         rows = list(db.execute(
-            "SELECT task, is_parallel, is_worktree FROM task_history",
+            "SELECT task, is_parallel FROM task_history",
         ))
-        result = {r["task"]: (r["is_parallel"], r["is_worktree"]) for r in rows}
-        assert result["falsy_string_false"] == (0, 0), (
-            f"'false'/'0' must coerce to 0, got {result['falsy_string_false']}"
+        result = {r["task"]: r["is_parallel"] for r in rows}
+        assert result["falsy_string_false"] == 0, (
+            f"'false' must coerce to 0, got {result['falsy_string_false']}"
         )
-        assert result["falsy_string_no"] == (0, 0), (
-            f"'no'/'' must coerce to 0, got {result['falsy_string_no']}"
+        assert result["falsy_string_no"] == 0, (
+            f"'no' must coerce to 0, got {result['falsy_string_no']}"
         )
-        assert result["truthy_string_true"] == (1, 1), (
-            f"'true'/'1' must coerce to 1, got {result['truthy_string_true']}"
+        assert result["falsy_string_zero"] == 0, (
+            f"'0' must coerce to 0, got {result['falsy_string_zero']}"
+        )
+        assert result["falsy_string_empty"] == 0, (
+            f"'' must coerce to 0, got {result['falsy_string_empty']}"
+        )
+        assert result["truthy_string_true"] == 1, (
+            f"'true' must coerce to 1, got {result['truthy_string_true']}"
+        )
+        assert result["truthy_string_one"] == 1, (
+            f"'1' must coerce to 1, got {result['truthy_string_one']}"
         )
     finally:
         P._close_db()

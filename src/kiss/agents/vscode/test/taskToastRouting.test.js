@@ -5,18 +5,26 @@
 
 // A task's outcome toast belongs to the task's chat, never to another one.
 //
-// The extension host turns the daemon's `autocommit_done`, `worktree_result`
-// and `main_tree_result` events into webview toasts. Those events carry the
-// task's tab id, but the toasts used to be posted untagged to whichever chat
-// panel was active, so task A's commit message popped over task B's chat.
+// The extension host turns the daemon's `worktree_result` events into
+// webview toasts. Those events carry the task's tab id; the toasts used
+// to be posted untagged, so task A's merge message popped over task B's
+// chat.
+//
+// Editor-tabs mode runs ONE chat editor tab whose webview mirrors the
+// whole registry, so the host no longer routes toasts between panels:
+// the panel's poster posts every toast to that webview, tag intact, and
+// media/main.js shows a tagged toast only over its own chat.
 //
 // This file pins down, end to end through the compiled extension and the
 // real media/main.js:
 //  - the host stamps each such toast with the originating tab id;
-//  - in editor-tabs mode the toast is posted to the panel that owns the
-//    tab, not the active panel, and is dropped when no panel owns it;
-//  - a window-level (untagged) toast still goes to the active panel;
-//  - in the sidebar webview the tagged toast shows over its own tab only.
+//  - every toast (tagged or window-level) reaches the panel webview, none
+//    falls back to a native VS Code notification;
+//  - a merge's progress toast carries its tab from open to close, and a
+//    dropped submit warns tagged with the tab that submitted;
+//  - the poster is released when the panel closes and installed again
+//    when it reopens;
+//  - in the webview a tagged toast shows over its own tab only.
 
 'use strict';
 
@@ -196,12 +204,6 @@ async function waitFor(predicate, message) {
   throw new Error(message || 'waitFor timed out');
 }
 
-function tabIdOf(panel) {
-  const m = /data-kiss-tab-id="([^"]+)"/.exec(panel.webview.html);
-  assert.ok(m, 'panel html must carry data-kiss-tab-id');
-  return m[1];
-}
-
 function toastsOf(panel) {
   return panel._posted.filter(m => m.type === 'notification');
 }
@@ -225,7 +227,11 @@ function makeDomWebview() {
     return 0;
   };
   win.acquireVsCodeApi = function () {
-    return {postMessage: () => {}, getState: () => undefined, setState: () => {}};
+    return {
+      postMessage: () => {},
+      getState: () => undefined,
+      setState: () => {},
+    };
   };
   for (const file of ['panelCopy.js', 'api.js', 'main.js']) {
     vm.runInContext(
@@ -249,80 +255,72 @@ async function runTest() {
   await new Promise((res, rej) =>
     server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
-  const {SorcarPanelManager} = require(path.join(OUT_DIR, 'SorcarPanelManager.js'));
+  const {SorcarPanelManager} = require(
+    path.join(OUT_DIR, 'SorcarPanelManager.js'),
+  );
   const notifications = require(path.join(OUT_DIR, 'WebviewNotifications.js'));
   const manager = new SorcarPanelManager(vscodeStub.Uri.file(EXT_ROOT));
 
-  // Two chat panels for two different tasks; B is the one the user is on.
-  manager.openNewChat();
-  manager.openNewChat();
-  assert.strictEqual(createdPanels.length, 2);
-  const [panelA, panelB] = createdPanels;
-  const tabA = tabIdOf(panelA);
-  const tabB = tabIdOf(panelB);
-  assert.notStrictEqual(tabA, tabB);
+  // One chat panel holding two chats, A and B; B is the one on screen.
+  // The webview reports each chat it shows (activeTabChanged), which
+  // is how the host learns the tabs this surface holds.
+  manager.open();
+  assert.strictEqual(createdPanels.length, 1);
+  const panel = createdPanels[0];
+  const tabA = 'tab-a';
+  const tabB = 'tab-b';
   await waitFor(
-    () => serverSockets.length >= 2,
-    'both panel controllers must connect to the daemon',
+    () => serverSockets.length >= 1,
+    'the panel controller must connect to the daemon',
   );
-  panelA.active = false;
-  panelB._viewState.fire({webviewPanel: panelB});
+  panel._recv.fire({type: 'activeTabChanged', tabId: tabA});
+  panel._recv.fire({type: 'activeTabChanged', tabId: tabB});
 
-  // --- task A's auto-commit toast lands in A's panel, not the active B ---
+  // --- task A's merge toast reaches the panel, tagged with A's tab --------
+  // (The agent's commit_and_merge tool reports through worktree_result
+  // while the task still runs; the event carries the task's tab.)
   await daemonBroadcast({
-    type: 'autocommit_done',
+    type: 'worktree_result',
+    action: 'merge',
+    branch: 'kiss/wt-a',
     success: true,
-    message: 'Committed task A: TOAST_A_COMMIT',
+    message: 'Merged task A: TOAST_A_COMMIT',
     tabId: tabA,
   });
-  let aToasts = toastsOf(panelA);
-  assert.strictEqual(aToasts.length, 1, 'A must get exactly one toast');
-  assert.strictEqual(aToasts[0].message, 'Committed task A: TOAST_A_COMMIT');
-  assert.strictEqual(aToasts[0].tabId, tabA, 'the toast names its tab');
-  assert.strictEqual(
-    toastsOf(panelB).length,
-    0,
-    "task A's commit outcome must not be posted to task B's chat panel",
-  );
+  let toasts = toastsOf(panel);
+  assert.strictEqual(toasts.length, 1, 'the panel must get exactly one toast');
+  assert.strictEqual(toasts[0].message, 'Merged task A: TOAST_A_COMMIT');
+  assert.strictEqual(toasts[0].tabId, tabA, 'the toast names its tab');
 
-  // --- worktree_result and main_tree_result follow the same rule ---------
+  // --- a failed worktree_result follows the same rule ---------------------
   await daemonBroadcast({
     type: 'worktree_result',
     success: false,
     message: 'Merge of task A failed: TOAST_A_MERGE',
     tabId: tabA,
   });
-  await daemonBroadcast({
-    type: 'main_tree_result',
-    success: true,
-    message: 'Main tree of task A: TOAST_A_MAIN',
-    tabId: tabA,
-  });
-  aToasts = toastsOf(panelA);
+  toasts = toastsOf(panel);
   assert.deepStrictEqual(
-    aToasts.map(t => [t.message, t.tabId, t.severity]),
+    toasts.map(t => [t.message, t.tabId, t.severity]),
     [
-      ['Committed task A: TOAST_A_COMMIT', tabA, 'info'],
+      ['Merged task A: TOAST_A_COMMIT', tabA, 'info'],
       ['Merge of task A failed: TOAST_A_MERGE', tabA, 'error'],
-      ['Main tree of task A: TOAST_A_MAIN', tabA, 'info'],
     ],
   );
-  assert.strictEqual(toastsOf(panelB).length, 0);
 
-  // --- B's own outcome reaches B --------------------------------------------
+  // --- B's own outcome reaches the panel tagged with B --------------------
   await daemonBroadcast({
-    type: 'autocommit_done',
+    type: 'worktree_result',
     success: false,
-    message: 'Commit of task B failed: TOAST_B_COMMIT',
+    message: 'Merge of task B failed: TOAST_B_MERGE',
     tabId: tabB,
   });
-  const bToasts = toastsOf(panelB);
-  assert.strictEqual(bToasts.length, 1);
-  assert.strictEqual(bToasts[0].tabId, tabB);
-  assert.strictEqual(bToasts[0].severity, 'error');
-  assert.strictEqual(toastsOf(panelA).length, 3, 'A gets nothing of B');
+  toasts = toastsOf(panel);
+  assert.strictEqual(toasts.length, 3);
+  assert.strictEqual(toasts[2].tabId, tabB);
+  assert.strictEqual(toasts[2].severity, 'error');
 
-  // --- a manual commit is toasted by the daemon itself, not the host ------
+  // --- a manual Git Commit is toasted by the daemon itself, not the host --
   await daemonBroadcast({
     type: 'autocommit_done',
     success: true,
@@ -330,48 +328,51 @@ async function runTest() {
     message: 'manual commit',
     tabId: tabA,
   });
-  assert.strictEqual(toastsOf(panelA).length, 3);
+  assert.strictEqual(toastsOf(panel).length, 3);
 
-  // --- an untagged, window-level toast still goes to the active panel ------
+  // --- an untagged, window-level toast reaches the panel untagged ---------
   notifications.showInformationNotification('TOAST_WINDOW_LEVEL');
-  const windowToast = toastsOf(panelB).find(
+  const windowToast = toastsOf(panel).find(
     t => t.message === 'TOAST_WINDOW_LEVEL',
   );
-  assert.ok(windowToast, 'a window-level toast goes to the active panel');
+  assert.ok(windowToast, 'a window-level toast goes to the panel');
   assert.strictEqual(windowToast.tabId, undefined);
-  assert.ok(!toastsOf(panelA).some(t => t.message === 'TOAST_WINDOW_LEVEL'));
 
-  // --- a toast for a tab no panel holds is dropped, not shown elsewhere ----
-  notifications.showErrorNotification('TOAST_ORPHAN', {tabId: 'tab-gone'});
-  assert.ok(!toastsOf(panelA).some(t => t.message === 'TOAST_ORPHAN'));
-  assert.ok(!toastsOf(panelB).some(t => t.message === 'TOAST_ORPHAN'));
+  // --- a toast for a tab the webview does not show is still posted -------
+  // The host does no per-tab routing any more: the webview holds the
+  // whole registry and gates the toast by its tag (see the webview part
+  // below). Nothing falls back to a native notification.
+  notifications.showErrorNotification('TOAST_OTHER_TAB', {tabId: 'tab-gone'});
+  const otherToast = toastsOf(panel).find(t => t.message === 'TOAST_OTHER_TAB');
+  assert.ok(otherToast, 'a tagged toast is posted to the one panel');
+  assert.strictEqual(otherToast.tabId, 'tab-gone', 'the tag is kept');
   assert.strictEqual(
     nativeNotificationCount,
     0,
     'no toast may fall back to a native VS Code notification',
   );
 
-  // --- a merge's progress toast lives in A's panel from open to close ---
-  // The webview of panel A asks for the merge; B stays the active panel.
-  panelA._recv.fire({type: 'worktreeAction', action: 'merge', tabId: tabA});
+  // --- a merge's progress toast carries A's tab from open to close -------
+  // The webview asks for the merge of A's worktree while B is on screen.
+  panel._recv.fire({type: 'worktreeAction', action: 'merge', tabId: tabA});
   await waitFor(
-    () => toastsOf(panelA).some(t => t.progress && t.tabId === tabA),
-    "the merge progress toast must open in A's panel",
+    () => toastsOf(panel).some(t => t.progress && t.tabId === tabA),
+    'the merge progress toast must open tagged with A',
   );
-  const progressToast = toastsOf(panelA).find(t => t.progress);
+  const progressToast = toastsOf(panel).find(t => t.progress);
   await daemonBroadcast({
     type: 'worktree_progress',
     message: 'TOAST_A_PROGRESS',
     tabId: tabA,
   });
   assert.ok(
-    toastsOf(panelA).some(
+    toastsOf(panel).some(
       t =>
         t.id === progressToast.id &&
         t.tabId === tabA &&
         t.progressMessage === 'TOAST_A_PROGRESS',
     ),
-    "a progress update must reach A's panel, tagged with A",
+    'a progress update must reach the panel, tagged with A',
   );
   await daemonBroadcast({
     type: 'worktree_result',
@@ -381,46 +382,77 @@ async function runTest() {
   });
   await waitFor(
     () =>
-      toastsOf(panelA).some(
+      toastsOf(panel).some(
         t => t.id === progressToast.id && t.close && t.tabId === tabA,
       ),
-    "the terminal result must close the progress toast in A's panel",
+    'the terminal result must close the progress toast, tagged with A',
   );
   assert.ok(
-    !toastsOf(panelB).some(t => t.progress || t.close),
-    "nothing of A's merge progress may be posted to B's panel",
+    !toastsOf(panel).some(t => (t.progress || t.close) && t.tabId !== tabA),
+    "every post of A's merge progress carries A's tab",
   );
 
-  // --- a dropped submit warns the tab that submitted ---------------------
-  const controllerA = manager._panels.get(tabA).controller;
-  controllerA._handleDroppedCommand(
-    {type: 'submit', tabId: tabA, prompt: 'x'},
-    'expired',
-  );
-  const droppedToast = toastsOf(panelA).find(
+  // --- a dropped submit warns tagged with the tab that submitted ---------
+  manager
+    .controller()
+    ._handleDroppedCommand(
+      {type: 'submit', tabId: tabA, prompt: 'x'},
+      'expired',
+    );
+  const droppedToast = toastsOf(panel).find(
     t => t.severity === 'warning' && /not started/.test(t.message || ''),
   );
-  assert.ok(droppedToast, "the dropped-submit warning goes to A's panel");
+  assert.ok(droppedToast, 'the dropped-submit warning goes to the panel');
   assert.strictEqual(droppedToast.tabId, tabA);
-  assert.ok(
-    !toastsOf(panelB).some(t => /not started/.test(t.message || '')),
-    "a dropped submit of A must not warn in B's chat",
+
+  // --- the poster is released when the panel closes ----------------------
+  const postedBeforeClose = panel._posted.length;
+  panel.dispose();
+  assert.strictEqual(manager.controller(), undefined);
+  notifications.showInformationNotification('TOAST_AFTER_CLOSE');
+  assert.strictEqual(
+    nativeNotificationCount,
+    1,
+    'with no panel the toast falls back to a native notification',
+  );
+  assert.strictEqual(
+    panel._posted.length,
+    postedBeforeClose,
+    'nothing is posted to a closed panel',
   );
 
+  // --- ... and installed again when the panel reopens --------------------
+  manager.open();
+  assert.strictEqual(createdPanels.length, 2);
+  const reopened = createdPanels[1];
+  notifications.showInformationNotification('TOAST_AFTER_REOPEN');
+  assert.ok(
+    toastsOf(reopened).some(t => t.message === 'TOAST_AFTER_REOPEN'),
+    'the reopened panel receives the toasts',
+  );
+  assert.strictEqual(nativeNotificationCount, 1);
+
   // --- the webview honours the tag: the toast shows over its own tab only -
-  // The sidebar runs ONE webview holding both tabs; the host posts the
-  // tagged toast there and media/main.js decides whether to show it.
+  // The chat webview (sidebar view or editor tab alike) holds both tabs;
+  // the host posts the tagged toast there and media/main.js decides
+  // whether to show it.
   const win = makeDomWebview();
   const api = win._testApi;
   const first = api.getActiveTabId();
   api.createNewTab();
   const second = api.getActiveTabId();
   assert.notStrictEqual(first, second);
-  const hostToast = {...aToasts[0], tabId: first};
+  const hostToast = {...toasts[0], tabId: first};
   send(win, hostToast);
   assert.ok(
     !toastText(win).includes('TOAST_A_COMMIT'),
     "a background tab's commit toast must not show over the tab on screen",
+  );
+  // A toast for a tab this webview does not hold at all shows nowhere.
+  send(win, {...otherToast, id: otherToast.id + '-webview'});
+  assert.ok(
+    !toastText(win).includes('TOAST_OTHER_TAB'),
+    'a toast tagged with an unknown tab is dropped by the webview',
   );
   // Chats have no tab row of their own any more: switch as a Chats-panel
   // pick would.
@@ -434,6 +466,12 @@ async function runTest() {
   assert.ok(
     toastText(win).includes('TOAST_A_COMMIT'),
     'the same toast shows once its own tab is on screen',
+  );
+  // A window-level toast shows whichever tab is on screen.
+  send(win, {...windowToast, id: windowToast.id + '-webview'});
+  assert.ok(
+    toastText(win).includes('TOAST_WINDOW_LEVEL'),
+    'an untagged toast is window-level and always shows',
   );
 
   // A sticky progress toast opened while its tab was on screen must still
@@ -451,7 +489,12 @@ async function runTest() {
   assert.ok(toastText(win).includes('TOAST_FIRST_PROGRESS'));
   api.switchToTab(second);
   assert.strictEqual(api.getActiveTabId(), second);
-  send(win, {type: 'notification', id: 'progress-first', tabId: first, close: true});
+  send(win, {
+    type: 'notification',
+    id: 'progress-first',
+    tabId: first,
+    close: true,
+  });
   assert.ok(
     !toastText(win).includes('TOAST_FIRST_PROGRESS'),
     'a tagged close must retire the toast even while another tab is active',

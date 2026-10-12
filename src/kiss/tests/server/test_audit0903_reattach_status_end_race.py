@@ -5,7 +5,7 @@
 """Audit 2026-09-03 (server-core): history-resume racing the task's end.
 
 ``_replay_session`` resolves the chat's live task under
-``_state_lock`` (``_reattach_running_chat``), releases the lock,
+``_state_lock`` (``_attach_viewer_to_running_chat``), releases the lock,
 subscribes the viewer tab to the task's stream, and broadcasts
 ``status running=true`` to the viewer.  The task can finish inside
 that window: the end-of-run fan-out

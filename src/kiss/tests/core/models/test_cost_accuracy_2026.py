@@ -339,6 +339,23 @@ class TestDirectCatalogPricesMatchProviderPages:
             (1_000_000 * 0.75 + 100_000 * 3.75 + 500_000 * 0.075) / 1e6
         )
 
+    def test_deprecated_gemini_flash_names_bill_at_the_routed_model_rate(self):
+        """ai.google.dev changelog 2026-10-08: every ``gemini-3.5-flash`` request is
+        routed to ``gemini-3.6-flash`` and every ``gemini-3.7-flash`` request to
+        ``gemini-3.8-flash``; the pricing page no longer carries the old 3.5 Flash
+        rate ($1.50 / $9.00), so the deprecated names must cost what the model that
+        actually serves them costs.  The catalog had kept $1.50 / $9.00 for 3.5 Flash
+        and over-reported every call by 2x (input) / 2.4x (output).
+        """
+        routed = {"gemini-3.5-flash": "gemini-3.6-flash", "gemini-3.7-flash": "gemini-3.8-flash"}
+        for old, new in routed.items():
+            assert calculate_cost(old, 1_000_000, 100_000, 500_000, 0) == pytest.approx(
+                calculate_cost(new, 1_000_000, 100_000, 500_000, 0)
+            ), old
+        assert calculate_cost("gemini-3.5-flash", 1_000_000, 100_000, 500_000, 0) == pytest.approx(
+            (1_000_000 * 0.75 + 100_000 * 3.75 + 500_000 * 0.075) / 1e6
+        )
+
     def test_gemini_tts_and_embedding_2_are_not_free(self):
         """ai.google.dev pricing 2026-10: 3.1 Flash TTS $1 / $20, Embedding 2 $0.20 input.
 

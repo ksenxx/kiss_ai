@@ -60,7 +60,6 @@ from kiss.tests.agents.sorcar.local_model_server import (
 from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 _SEA_PATH = Path(sea.__file__).resolve()
-_TESTS = Path(__file__).parent
 
 BANK_PY = '''"""Ledger of bank accounts."""
 import os
@@ -139,13 +138,13 @@ def _keys(hits: list[Any]) -> list[str]:
 
 
 def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
-    """The settings pin the run: full tools + knowledge tools, no worktree, no web, no memory."""
+    """The settings pin the run: full tools + knowledge tools, no web, no memory."""
     agent = GitExtractKnowledgeSea()
     assert isinstance(agent, WorkerSea)
     assert agent.settings({}) == {"tool_profile": "full"}
     assert agent.settings({"model": "m"})["model"] == "m"
-    # ``WorkerSea`` turns worktree, auto-commit, classifier, browser and
-    # memory off; ``run_parallel`` is always available for the
+    # ``WorkerSea`` turns the classifier, browser and memory off;
+    # ``run_parallel`` is always available for the
     # per-repository indexing sub-agents.  ``system_prompt`` is a hook
     # the daemon applies (checked below through ``apply_sea``), not a
     # settings key.
@@ -153,8 +152,6 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
         {**WORKER_DEFAULTS, **agent.settings({})}
     ) == {
         "tool_profile": "full",
-        "use_worktree": False,
-        "auto_commit": False,
         "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,
@@ -179,17 +176,13 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     # as the daemon-side hooks (written on every run, so not listed in the
     # returned set) and the settings on their wire fields.
     cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "workDir": str(tmp_path)}
-    assert apply_sea(cmd) == {
-        "toolProfile", "useWorktree",
-        "autoCommit", "classifyTasks", "useWebTools", "useMemory",
-    }
+    assert apply_sea(cmd) == {"toolProfile", "classifyTasks", "useWebTools", "useMemory"}
     assert [tool.__name__ for tool in cmd["toolsHook"]([])] == names
     assert all(callable(tool) for tool in cmd["toolsHook"]([]))
     for field in ("tools", "toolsFile", "appendBasicTools", "systemPrompt", "prompt"):
         assert field not in cmd, field
     assert cmd["toolProfile"] == "full"
     assert "isParallel" not in cmd
-    assert cmd["useWorktree"] is False and cmd["autoCommit"] is False
     assert cmd["classifyTasks"] is False and cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
     assert cmd["systemPromptHook"]("ASSEMBLED") == prompt

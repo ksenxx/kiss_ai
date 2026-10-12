@@ -9,8 +9,8 @@ Three notification paths used to target only the owning tab
 the task's event stream (``JsonPrinter._subscribers`` /
 ``_fanout_targets``):
 
-* the auto-commit lifecycle toasts emitted by
-  ``WorktreeSorcarAgent._broadcast_commit_notification``,
+* the worktree commit lifecycle toasts emitted by
+  ``ChatSorcarAgent._broadcast_commit_notification``,
 * the live model-picker override emitted by
   ``SorcarAgent._show_model_in_picker`` via
   ``JsonPrinter.broadcast_agent_model_pick`` (which must fan out even
@@ -18,7 +18,7 @@ the task's event stream (``JsonPrinter._subscribers`` /
   using the new explicit ``task_id`` fallback).
 
 All tests drive the real code paths — real on-disk git worktrees for
-the auto-commit toasts and a real :class:`JsonPrinter` subscriber map
+the commit toasts and a real :class:`JsonPrinter` subscriber map
 — with a capture printer that records ``broadcast`` payloads.
 
 Also covers the printer-side "transient, all-watching-tabs"
@@ -37,8 +37,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(path: Path) -> Path:
@@ -92,11 +92,11 @@ class _LLMUnavailable:
 
 def _setup_worktree_agent(
     tmp: Path, branch_slug: str,
-) -> tuple[WorktreeSorcarAgent, Path]:
-    """Build a real on-disk worktree backed by a ``WorktreeSorcarAgent``.
+) -> tuple[ChatSorcarAgent, Path]:
+    """Build a real on-disk worktree backed by a ``ChatSorcarAgent``.
 
     Returns ``(agent, wt_dir)`` with ``agent._wt`` populated so
-    ``_auto_commit_worktree`` runs end-to-end.
+    ``_commit_worktree`` runs end-to-end.
     """
     repo = _make_repo(tmp / "repo")
     branch = f"kiss/wt-fanout-{branch_slug}"
@@ -110,7 +110,7 @@ def _setup_worktree_agent(
         ["git", "-C", str(wt_dir), "config", "user.name", "T"],
         check=True,
     )
-    agent = WorktreeSorcarAgent("test")
+    agent = ChatSorcarAgent("test")
     agent._wt = GitWorktree(
         repo_root=repo,
         branch=branch,
@@ -147,7 +147,7 @@ class TestPrimitiveLessPrinterDegradation:
             agent._last_task_id = "7171"
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             notifs = [
                 e for e in printer.events if e.get("type") == "notification"

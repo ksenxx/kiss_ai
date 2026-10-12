@@ -264,11 +264,38 @@ class LineChannelBackend(ToolMethodBackend):
     """
 
     def __init__(self) -> None:
-        self._api: Any = None
+        self._api_obj: Any = None
+        self._lazy_muse: bool = False
+        self._wire_lock = threading.Lock()
         self._message_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self._webhook_server: ThreadedHTTPServer | None = None
         self._webhook_thread: threading.Thread | None = None
         self._connection_info: str = ""
+
+    def _wire_deferred(self) -> None:
+        """Run the Muse wiring :class:`LineAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of wiring at construction,
+        so building it for its tool list (``sea lint``, ``sea docs``,
+        run start) touches no daemon.  Concurrent first requests wait on
+        the lock and share the one surrogate; with no credential the
+        adapter stays None and no request leaves.
+        """
+        if self._api_obj is not None or not self._lazy_muse:
+            return
+        with self._wire_lock:
+            if self._api_obj is None:
+                self._wire_muse()
+
+    @property
+    def _api(self) -> Any:
+        """The Messaging API adapter, wired on first use when deferred (None if no credential)."""
+        self._wire_deferred()
+        return self._api_obj
+
+    @_api.setter
+    def _api(self, api: Any) -> None:
+        self._api_obj = api
 
     def _wire_muse(self) -> bool:
         """Acquire a LINE surrogate and wire the boundary adapter.
@@ -560,18 +587,12 @@ class LineAgent(BaseChannelAgent):
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
-            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
-
-            # Muse-auth mode: wire a vault surrogate and the boundary
-            # adapter (no network round trip); the real token never
-            # enters this process once migrated.  A daemon failure
-            # leaves the agent constructible (fail closed, tokenless)
-            # so its authenticate/clear tools stay available.
-            try:
-                self._backend._wire_muse()
-            except MuseAuthError as e:
-                self._backend._api = None
-                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            # Muse-auth mode: the backend wires its vault surrogate and
+            # boundary adapter on first use (see LineChannelBackend._api),
+            # so building the tool list (``sea lint``, ``sea docs``, run
+            # start) touches no daemon; the real token never enters this
+            # process once migrated.
+            self._backend._lazy_muse = True
             return
         cfg = _config.load()
         if cfg:  # pragma: no branch
@@ -581,8 +602,16 @@ class LineAgent(BaseChannelAgent):
                 pass
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return self._backend._api is not None
+        """Return True if a LINE adapter is built, or a token is in the vault or config."""
+        if self._backend._api_obj is not None:
+            return True
+        if not self._backend._lazy_muse:
+            return False
+        from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
+
+        return vault_has_credentials("line") or bool(
+            (_config.load_metadata() or {}).get("channel_access_token")
+        )
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""

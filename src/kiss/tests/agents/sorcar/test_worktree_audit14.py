@@ -4,13 +4,13 @@
 # add your name here
 """Audit 14: Integration tests for bugs/redundancies found in audit round 14.
 
-BUG-64: ``WorktreeSorcarAgent.run()`` silently drops
+BUG-64: ``ChatSorcarAgent.run()`` silently drops
     ``_stash_pop_warning`` and ``_merge_conflict_warning`` when the
     call falls back to direct (non-worktree) execution — the warnings
-    are only broadcast on the success path.  The three fallback
-    points are:
+    are only broadcast on the success path.  The fallback points
+    (the ``use_worktree=False`` kwarg of the time is gone with the
+    automatic worktree) are:
 
-      A. ``use_worktree=False`` kwarg
       B. ``work_dir`` is not inside a git repo
       C. ``_try_setup_worktree`` returns ``None`` (detached HEAD or
          any setup failure after ``_release_worktree`` has already
@@ -46,11 +46,11 @@ from typing import Any, cast
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 class _RecordingPrinter:
@@ -112,7 +112,7 @@ def _unpatch_super_run(original: Any) -> None:
 
 
 class TestBug64WarningsDroppedOnFallback:
-    """``WorktreeSorcarAgent.run()`` must flush pending warnings to
+    """``ChatSorcarAgent.run()`` must flush pending warnings to
     the printer on *every* fallback path, not only the success path.
 
     Without the fix, a warning set by ``_release_worktree`` or by the
@@ -126,38 +126,12 @@ class TestBug64WarningsDroppedOnFallback:
     def teardown_method(self) -> None:
         _unpatch_super_run(self.orig)
 
-    def test_warning_flushed_when_use_worktree_false(
-        self, tmp_path: Path,
-    ) -> None:
-        """Fallback A: ``use_worktree=False`` kwarg must still
-        broadcast a pending warning."""
-        agent = WorktreeSorcarAgent("t")
-        agent._merge_conflict_warning = "A pending branch needs attention."
-        printer = _RecordingPrinter()
-
-        agent.run(
-            prompt_template="x",
-            work_dir=str(tmp_path),
-            printer=printer,
-            use_worktree=False,
-        )
-
-        warnings = [e for e in printer.events if e.get("type") == "warning"]
-        assert any(
-            "A pending branch needs attention." in e.get("message", "")
-            for e in warnings
-        ), (
-            "BUG-64: warning not broadcast on use_worktree=False "
-            f"fallback.  Events were: {printer.events}"
-        )
-        assert agent._merge_conflict_warning is None
-
     def test_warning_flushed_when_not_a_git_repo(
         self, tmp_path: Path,
     ) -> None:
         """Fallback B: ``discover_repo`` returns None — warning
         must still be broadcast."""
-        agent = WorktreeSorcarAgent("t")
+        agent = ChatSorcarAgent("t")
         agent._stash_pop_warning = "Stash pop failed — run git stash pop."
         printer = _RecordingPrinter()
 
@@ -189,7 +163,7 @@ class TestBug64WarningsDroppedOnFallback:
             capture_output=True, check=True,
         )
 
-        agent = WorktreeSorcarAgent("t")
+        agent = ChatSorcarAgent("t")
         agent._merge_conflict_warning = "Prior wt branch unresolved."
         printer = _RecordingPrinter()
 
@@ -215,7 +189,7 @@ class TestBug64WarningsDroppedOnFallback:
         """Regression: the existing success-path broadcast must keep
         working identically."""
         repo = _make_repo(tmp_path / "repo")
-        agent = WorktreeSorcarAgent("t")
+        agent = ChatSorcarAgent("t")
         agent._stash_pop_warning = "success-path warning"
         printer = _RecordingPrinter()
         try:

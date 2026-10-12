@@ -969,6 +969,7 @@ class TestPerTabT0(unittest.TestCase):
             function setRunningState(r) {
                 isRunning = r;
                 if (r) timerRunning = true;
+                else { stopTimer(); removeSpinner(); }
             }
             function stopTimer() { timerRunning = false; }
             function removeSpinner() {}
@@ -982,6 +983,9 @@ class TestPerTabT0(unittest.TestCase):
             // Both tabs belong to the current workspace, so neither is
             // hidden (isTabHidden only hides other-workspace tabs).
             function isTabHidden() { return false; }
+            // activateAdjacentTab asks the daemon for a transcript it
+            // withheld on reconnect; neither tab here has one pending.
+            function requestDeferredReplay() {}
             """
             + switch_src
             + "\n"
@@ -1038,7 +1042,12 @@ class TestPerTabT0(unittest.TestCase):
             }
             var timerRunning = true;
             var isRunning = true;
-            function setRunningState(r) { isRunning = r; }
+            // Mirrors main.js: setRunningState(false) is what stops the
+            // timer and removes the spinner; setReady relies on it.
+            function setRunningState(r) {
+                isRunning = r;
+                if (!r) { stopTimer(); removeSpinner(); }
+            }
             function stopTimer() { timerRunning = false; }
             function removeSpinner() {}
             function renderTabBar() {}

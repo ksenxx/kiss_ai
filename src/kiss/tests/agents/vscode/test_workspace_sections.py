@@ -191,7 +191,7 @@ def _fold_section(page, section_id: str) -> None:
 
 def test_workspace_sections_sit_in_the_task_info_panel(browser, harness):
     """The task-info panel stacks Task Info, (Task update,) Explorer,
-    Source Control, Schedule, Apps and Spend; the history panel on the
+    Source Control, Schedule, Machines, Apps and Spend; the history panel on the
     left holds the Chats view alone, with no activity bar."""
     context, page, _ = _open_page(browser, harness)
     try:
@@ -202,11 +202,15 @@ def test_workspace_sections_sit_in_the_task_info_panel(browser, harness):
         )
         assert ids == [
             "meta-section-info", "meta-info", "meta-explorer", "meta-scm",
-            "meta-schedule", "meta-apps", "meta-spend",
+            "meta-schedule", "meta-machines", "meta-apps", "meta-spend",
+            "meta-recommendations",
         ]
+        # The label span only: the Source Control toggle also carries
+        # the uncommitted-file count (#scm-hdr-count) once the git
+        # status arrives, which this harness's repo has.
         labels = page.eval_on_selector_all(
             "#meta-explorer .meta-section-toggle, #meta-scm .meta-section-toggle",
-            "els => els.map(e => e.textContent.trim())",
+            "els => els.map(e => e.querySelector('span').textContent.trim())",
         )
         assert labels == ["Explorer", "Source Control"]
         assert page.locator("#meta-explorer").is_visible()
@@ -564,7 +568,12 @@ def test_refresh_relists_folders_keeping_them_expanded(browser, harness):
         assert _explorer_row(page, "dir").get_attribute("aria-expanded") == "true"
         assert _explorer_row(page, "dir/nested.py").is_visible()
         # Source Control picks the new file up as untracked on refresh.
+        # Its own refresh: the Explorer's button reloads only the tree,
+        # and the daemon's task-news broadcasts refresh the view at
+        # times of their own (one that ran git before the file existed
+        # would leave the count at 4 for good).
         _show_section(page, "meta-scm")
+        page.click("#scm-refresh")
         page.wait_for_function(
             "document.getElementById('scm-changes-count').textContent === '5'",
             timeout=15000,
@@ -905,17 +914,17 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
 
 
 def _set_work_dir(page, harness: ExplorerHarness, work_dir: str) -> None:
-    """Change the workspace through the "Working directory" panel of the
-    "..." menu and wait for the docked task-info panel to show it."""
-    page.click("#more-btn")
-    page.click("#workdir-btn")
-    page.wait_for_selector("#workdir-panel.open", timeout=15000)
-    page.fill("#workdir-input", work_dir)
-    # The top-right notification container may cover the panel's
+    """Change the workspace through the chat header's working directory
+    drop-down ("Choose ..." opens the folder picker, whose path box takes
+    the directory) and wait for the docked task-info panel to show it."""
+    page.select_option("#chat-workdir", label="Choose ...")
+    page.wait_for_selector("#folder-picker:not([hidden])", timeout=15000)
+    page.fill("#folder-picker .folder-picker-input", work_dir)
+    # The top-right notification container may cover the picker's
     # controls when the daemon's PyPI check has raised an update toast.
     _dismiss_update_toast(page, harness)
-    page.click("#workdir-open-btn")
-    page.wait_for_selector("#workdir-panel:not(.open)", timeout=15000)
+    page.click("#folder-picker .folder-picker-select")
+    page.wait_for_selector("#folder-picker", state="hidden", timeout=15000)
     page.wait_for_function(
         "wd => document.getElementById('meta-workdir').textContent === wd",
         arg=work_dir,

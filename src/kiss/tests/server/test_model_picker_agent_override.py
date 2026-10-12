@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import queue
 import shutil
-import subprocess
 import tempfile
 import threading
 import unittest
@@ -32,14 +31,15 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vscode_config
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.sorcar_agent import _broadcast_subagent_done
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.core.models.model_info import model as model_factory
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.tests.server._memory_printer import MemoryPrinter
+from kiss.tests.server.conftest import init_repo
 
 
 def _model_picks(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -47,23 +47,7 @@ def _model_picks(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [e for e in events if e.get("type") == "modelPick"]
 
 
-def _init_git_repo(tmpdir: str) -> None:
-    """Create a git repo with one commit at *tmpdir*."""
-    subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "t@t"], cwd=tmpdir, capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "T"], cwd=tmpdir, capture_output=True,
-    )
-    Path(tmpdir, ".gitkeep").touch()
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True,
-    )
-
-
-class _SwitchingAgent(WorktreeSorcarAgent):
+class _SwitchingAgent(ChatSorcarAgent):
     """Real agent whose task body is one real ``set_model`` call.
 
     Only ``perform_task`` — the agentic loop — is replaced, so
@@ -102,7 +86,7 @@ class _SwitchingAgent(WorktreeSorcarAgent):
         raise KeyboardInterrupt("stopped by test")
 
 
-class _QuietAgent(WorktreeSorcarAgent):
+class _QuietAgent(ChatSorcarAgent):
     """Real agent that runs a task without ever touching the picker."""
 
     def __init__(self) -> None:
@@ -316,7 +300,7 @@ class _ServerTestCase(unittest.TestCase):
         )
         vscode_config.CONFIG_DIR = kiss_dir
         vscode_config.CONFIG_PATH = kiss_dir / "config.json"
-        _init_git_repo(self.tmpdir)
+        init_repo(self.tmpdir)
         self.server = VSCodeServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
@@ -363,7 +347,7 @@ class TestAgentOverrideAndRestore(_ServerTestCase):
         )
 
     def _start_task(
-        self, tab_id: str, agent: WorktreeSorcarAgent,
+        self, tab_id: str, agent: ChatSorcarAgent,
     ) -> threading.Thread:
         """Start a real task for *agent* in *tab_id* and return its worker."""
         state = agent_state.AgentState(

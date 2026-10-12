@@ -220,7 +220,6 @@ async function runTests() {
       prompt,
       model: UNAVAILABLE_MODEL,
       attachments: [],
-      useWorktree: false,
       workDir: ws,
       tabId,
     });

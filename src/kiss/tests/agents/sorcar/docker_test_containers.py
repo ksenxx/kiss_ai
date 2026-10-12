@@ -31,6 +31,15 @@ from kiss.agents.sorcar.docker_manager import OWNER_LABEL, owner_label_value
 IMAGE = "python:3.11-slim"
 
 
+def is_docker_available() -> bool:
+    """Return True when a Docker daemon answers a ping, for skip markers."""
+    try:
+        docker.from_env().ping()
+        return True
+    except Exception:
+        return False
+
+
 def image_container_ids(client: docker.DockerClient) -> set[str]:
     """Return the ids of every container, running or not, this process started.
 

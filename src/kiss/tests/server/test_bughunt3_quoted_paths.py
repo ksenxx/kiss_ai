@@ -11,8 +11,8 @@ headers, ``--name-only`` output, ``ls-files --others`` output, and
 
 * ``merge_flow._capture_untracked``: returned the quoted string, which
   does not exist on disk, making the file invisible to callers.
-* ``merge_flow._main_dirty_files``: ``.strip('"')`` removed the quotes
-  but never unescaped ``\\"`` / ``\\\\``.
+* the dirty-main side of ``_check_merge_conflict``: ``.strip('"')``
+  removed the quotes but never unescaped ``\\"`` / ``\\\\``.
 * ``merge_flow._get_worktree_changed_files`` and
   ``_check_merge_conflict``: ``--name-only`` parse sites kept the
   quoted form, so changedFiles showed bogus names and the conflict
@@ -30,7 +30,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.merge_flow import _capture_untracked
 from kiss.server.server import VSCodeServer
@@ -82,14 +82,6 @@ class TestQuotedPathParsing(unittest.TestCase):
         untracked = _capture_untracked(self.repo)
         self.assertIn('new"file.txt', untracked, f"got: {untracked}")
 
-    def test_main_dirty_files_unquotes(self) -> None:
-        """_main_dirty_files must unescape git's C-quoted porcelain paths."""
-        Path(self.repo, QUOTED_NAME).write_text("alpha\nBRAVO\ncharlie\n")
-        server = VSCodeServer()
-        server.work_dir = self.repo
-        dirty = server._main_dirty_files(self.repo)
-        self.assertIn(QUOTED_NAME, dirty, f"got: {dirty}")
-
 
 class TestWorktreeQuotedPaths(unittest.TestCase):
     """merge_flow worktree queries must survive quoted file names."""
@@ -108,14 +100,13 @@ class TestWorktreeQuotedPaths(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
         self.tab_id = "t-wt-quoted"
-        self.agent = WorktreeSorcarAgent("wt-quoted-test")
+        self.agent = ChatSorcarAgent("wt-quoted-test")
         self.state = agent_state.AgentState(
             "task-wt-quoted",
             agent=self.agent,
             tab_id=self.tab_id,
             server_owned=True,
         )
-        self.state.use_worktree = True
         agent_state.register(self.state)
         wt_work_dir = self.agent._try_setup_worktree(Path(self.repo), self.repo)
         assert wt_work_dir is not None

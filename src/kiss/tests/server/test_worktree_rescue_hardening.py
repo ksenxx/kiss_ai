@@ -15,13 +15,11 @@ rescue implementation:
   drop the worktree's version — it lands under a
   ``<name>.kiss-rescued-<ns>`` sibling;
 * an identical existing destination is already safe (no duplicate);
-* a deferred discard keeps ``_pending_review`` so a tab close cannot
-  auto-merge work the user asked to throw away;
+* a deferred discard keeps the worktree pending (its directory and
+  the unrescued output survive);
 * ``reclaim_orphaned_worktrees`` skips a worktree whose recorded
   owner process is still alive (cross-process live-worktree adoption)
-  and still reclaims one whose owner is dead;
-* ``take_spare`` refuses a spare contaminated by an external writer
-  instead of destroying the content on consume.
+  and still reclaims one whose owner is dead.
 
 All tests use real git repositories, real worktrees, real processes;
 no mocks.
@@ -35,17 +33,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, cast
 
-from kiss.agents.sorcar import worktree_pool
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.tests.server.test_worktree_ignored_file_rescue import (
     _make_repo,
     _redirect_db,
     _restore_db,
-    _stub_parent_run,
 )
 
 
@@ -110,16 +104,29 @@ class TestRescueHardening:
         assert rescued == 0
         assert list(self.repo.glob(".env.kiss-rescued-*")) == []
 
+    def _agent_with_worktree(
+        self, name: str, files: dict[str, str],
+    ) -> ChatSorcarAgent:
+        """An agent whose ``create_worktree`` ran and wrote *files*."""
+        agent = ChatSorcarAgent(name)
+        agent.work_dir = str(self.repo)
+        assert "Created worktree" in agent.create_worktree()
+        wt_work_dir = agent._wt_work_dir
+        assert wt_work_dir is not None
+        for rel, content in files.items():
+            target = wt_work_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        return agent
+
     def test_merge_preserves_worktree_when_rescue_fails(self) -> None:
         """Fail closed end to end: teardown keeps the only copy."""
         saved = _redirect_db(self.tmpdir)
-        original_run = _stub_parent_run({
-            "tracked.txt": "work\n",
-            "data/out.csv": "secret\n",
-        })
         try:
-            agent = WorktreeSorcarAgent("rescue-fail-test")
-            agent.run("task", work_dir=str(self.repo), auto_commit=True)
+            agent = self._agent_with_worktree("rescue-fail-test", {
+                "tracked.txt": "work\n",
+                "data/out.csv": "secret\n",
+            })
             assert agent._wt_pending
             # The hostile ancestor appears only AFTER the worktree got
             # its real data/ directory, so the rescue at merge time is
@@ -135,27 +142,24 @@ class TestRescueHardening:
             )
             assert (wt_dir / "data" / "out.csv").is_file()
         finally:
-            cast(Any, SorcarAgent.__mro__[1]).run = original_run
             _restore_db(saved)
 
-    def test_deferred_discard_keeps_pending_review(self) -> None:
-        """A deferred discard must not drop the pending-review guard."""
+    def test_deferred_discard_keeps_worktree_pending(self) -> None:
+        """A deferred discard keeps the claim, the directory and the output."""
         saved = _redirect_db(self.tmpdir)
-        original_run = _stub_parent_run({"data/out.csv": "secret\n"})
         try:
-            agent = WorktreeSorcarAgent("discard-defer-test")
-            agent.run("task", work_dir=str(self.repo), auto_commit=True)
+            agent = self._agent_with_worktree(
+                "discard-defer-test", {"data/out.csv": "secret\n"},
+            )
             assert agent._wt_pending
             os.symlink(self.outside, self.repo / "data")
-            agent._pending_review = True
             msg = agent.discard(rescue_ignored=True)
             assert "Discard deferred" in msg, msg
             assert agent._wt_pending
-            assert agent._pending_review is True, (
-                "deferral must keep the never-auto-merge protection"
+            assert agent._wt is not None and agent._wt.wt_dir.exists(), (
+                "deferral must keep the only copy of the output"
             )
         finally:
-            cast(Any, SorcarAgent.__mro__[1]).run = original_run
             _restore_db(saved)
 
 
@@ -210,38 +214,3 @@ class TestReclaimOwnerPidGuard:
         assert reclaimed == 1
         assert not self.wt_dir.exists()
         assert (self.repo / "work.txt").is_file()
-
-
-class TestTakeSpareContaminationGuard:
-    """take_spare preserves externally contaminated spares."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp(prefix="kiss-spare-guard-")
-        self.repo = _make_repo(Path(self.tmpdir) / "repo")
-
-    def teardown_method(self) -> None:
-        worktree_pool.discard_all()
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_contaminated_spare_refused_and_preserved(self) -> None:
-        """An untracked external file blocks consumption."""
-        assert worktree_pool.prewarm(self.repo)
-        with worktree_pool._pool_lock:
-            branch, wt_dir = worktree_pool._spares[
-                worktree_pool._repo_key(self.repo)
-            ]
-        (wt_dir / "external.txt").write_text("do not destroy\n")
-        assert worktree_pool.take_spare(self.repo) is None
-        assert (wt_dir / "external.txt").is_file(), (
-            "take_spare destroyed external content on consume"
-        )
-        assert GitWorktreeOps.branch_exists(self.repo, branch)
-
-    def test_clean_spare_is_consumed(self) -> None:
-        """A pristine spare is still handed out (fast path intact)."""
-        assert worktree_pool.prewarm(self.repo)
-        spare = worktree_pool.take_spare(self.repo)
-        assert spare is not None
-        branch, wt_dir = spare
-        assert wt_dir.is_dir()
-        GitWorktreeOps.cleanup_partial(self.repo, branch, wt_dir)

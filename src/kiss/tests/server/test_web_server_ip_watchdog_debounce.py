@@ -40,7 +40,6 @@ monkey-patched to return controlled sequences.
 from __future__ import annotations
 
 import asyncio
-import socket
 import tempfile
 from unittest import IsolatedAsyncioTestCase
 
@@ -48,13 +47,7 @@ import kiss.server.web_server as ws_mod
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
-
-
-def _find_free_port() -> int:
-    """Find an available TCP port for the test server."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return int(s.getsockname()[1])
+from kiss.tests.server.conftest import find_free_port
 
 
 class _IpSequence:
@@ -100,7 +93,7 @@ class _IpWatchdogTestBase(IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()

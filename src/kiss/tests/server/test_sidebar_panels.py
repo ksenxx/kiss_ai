@@ -14,8 +14,9 @@
   app "connected", every other app stays "not connected".
 * :func:`kiss.server.sidebar_panels.apps_status` runs the probe
   subprocess and caches its answer.
-* ``getCronJobs`` / ``getAppsStatus`` / ``getSpendReport`` are
-  answered over the local connection of a real :class:`RemoteAccessServer`.
+* ``getCronJobs`` / ``getAppsStatus`` / ``getSpendReport`` /
+  ``getRecommendations`` are answered over the local connection of a
+  real :class:`RemoteAccessServer`.
 
 Not covered in-process: the probe-failure branch of ``_probe_apps``
 (the subprocess crashing, timing out or printing no JSON) cannot be
@@ -460,6 +461,31 @@ class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
             },
         })
 
+
+    def test_get_recommendations(self) -> None:
+        """The reply is the stored file's content (empty before the first run)."""
+        from kiss.agents.seas.recommendations import recommendations_sea
+
+        path = recommendations_sea.recommendations_file()
+        saved = path.read_text() if path.exists() else None
+        try:
+            path.unlink(missing_ok=True)
+            (empty,) = self._ask({"type": "getRecommendations"})
+            five = [f"Task {i}" for i in range(5)]
+            assert recommendations_sea.save_recommendations(five) == "Saved 5 recommendations."
+            generated = json.loads(path.read_text())["generatedAt"]
+            (event,) = self._ask({"type": "getRecommendations"})
+        finally:
+            if saved is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(saved)
+        self.assertEqual(empty, {"type": "recommendations", "generatedAt": 0, "tasks": []})
+        self.assertEqual(event, {
+            "type": "recommendations",
+            "generatedAt": int(generated * 1000),
+            "tasks": five,
+        })
 
     def test_an_apps_probe_does_not_hold_up_later_commands(self) -> None:
         """The probe runs in the background: a command sent right after

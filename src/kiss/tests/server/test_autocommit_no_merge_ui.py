@@ -2,40 +2,32 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""With auto-commit ON, resuming a chat must never prompt the user.
+"""Resuming a chat or starting the next task never publishes work.
 
-The user-observed defect (from the era of the interactive diff/merge
-review, since removed) was that clicking a task-history row popped a
-review even though the auto-commit toggle was on.  The session-resume
-path (:meth:`_ServerCommandsMixin._replay_session` →
-:meth:`_MergeFlowMixin._emit_pending_worktree`) still decides between
-silently finalizing a pending worktree and presenting it, so the
-policy remains load-bearing after the review's removal — presentation
-now means the ``worktree_done`` Merge / Discard buttons.
+A task isolates its edits with the ``create_worktree`` tool and
+publishes them with ``commit_and_merge``.  A task that finished without
+the latter — or that failed or was stopped — leaves a pending
+``kiss/wt-*`` worktree.  Two daemon paths then touch that worktree
+without the user having decided anything about it:
 
-Expected behaviour
-------------------
+* the session-resume path (:meth:`_ServerCommandsMixin._replay_session`
+  → :meth:`_MergeFlowMixin._emit_pending_worktree`), which presents it
+  as the ``worktree_done`` Merge / Discard buttons;
+* the retire path (:meth:`ChatSorcarAgent._retire_previous_worktree`,
+  run before a new task, a new chat or a tab close), which commits the
+  work to its own branch and keeps it for review.
 
-Auto-commit means "do not ask me".  On resume the pending worktree of an
-auto-commit tab must be finalized silently (merged, or discarded when it
-holds nothing) rather than presented.  With auto-commit OFF the
-``worktree_done`` Merge / Discard prompt must still appear — that is
-the whole point of the setting — so both directions are asserted here.
-
-One deliberate exception is asserted too: work from a task that failed
-or was stopped (``_pending_review``) is still shown, because
-auto-commit means "do not interrupt me", not "publish work that never
-finished".
-
-Every test drives the real :class:`VSCodeServer` command handlers
-against a real git repository.  Only the LLM call is replaced by a
-deterministic stub, exactly as the sibling auto-commit tests do.
+Neither may merge the work into the user's branch behind their back,
+destroy it, present a live task's half-written tree, or leave a stale
+ownership claim on the tab.  Every test drives the real
+:class:`VSCodeServer` command handlers against a real git repository;
+only the LLM call is replaced by a deterministic stub that creates the
+worktree exactly as the real agent's tool call would.
 """
 
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import threading
 import unittest
@@ -43,57 +35,28 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as _persistence
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.server.task_runner import _release_worktree_without_merging
+from kiss.tests.server.conftest import init_repo, kiss_wt_branches, run_git
 
-#: Events that make the hunk-by-hunk diff/merge UI appear.
+#: Events of the removed hunk-by-hunk diff/merge UI; must never reappear.
 MERGE_UI_EVENTS = ("merge_data", "merge_started")
 
 #: Event that makes the worktree merge/discard prompt appear.
 WORKTREE_PROMPT_EVENT = "worktree_done"
 
 
-def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
-    )
-
-
-def _init_repo(repo: str) -> None:
-    _run_git(repo, "init", "-q")
-    _run_git(repo, "config", "user.email", "test@example.com")
-    _run_git(repo, "config", "user.name", "Test User")
-    _run_git(repo, "config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    _run_git(repo, "add", "seed.txt")
-    _run_git(repo, "commit", "-q", "-m", "seed")
-
-
-def _kiss_wt_branches(repo: str) -> list[str]:
-    """Names of the ``kiss/wt-*`` branches present in *repo*.
-
-    ``git branch`` prefixes the current branch with ``*`` and a branch
-    checked out in a linked worktree with ``+``; both markers are
-    stripped so callers compare plain names.
-    """
-    out = _run_git(repo, "branch", "--list", "kiss/wt-*").stdout
-    return [
-        line.strip().lstrip("*+ ").strip()
-        for line in out.splitlines()
-        if line.strip()
-    ]
-
-
 class _Base(unittest.TestCase):
     """A real git repo, an isolated persistence DB and a real server."""
 
     def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp(prefix="kiss-autocommit-ui-")
+        self.tmpdir = tempfile.mkdtemp(prefix="kiss-resume-retire-")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo(self.repo)
+        init_repo(self.repo)
 
         self._saved_db = (
             _persistence._DB_PATH,
@@ -152,12 +115,16 @@ class _Base(unittest.TestCase):
     # -- helpers ---------------------------------------------------
 
     def _patch_run(self, filename: str | None = "agent_out.txt") -> None:
-        """Make the agent write *filename* into its work dir and succeed."""
+        """Make the agent isolate itself in a worktree, write *filename*
+        there and succeed without ``commit_and_merge``."""
 
         def stub_run(_agent: object, **kwargs: object) -> str:
-            work_dir = kwargs.get("work_dir")
-            if filename is not None and isinstance(work_dir, str) and work_dir:
-                (Path(work_dir) / filename).write_text("agent output\n")
+            agent = cast(ChatSorcarAgent, _agent)
+            agent._enter_work_dir(str(kwargs.get("work_dir") or ""))
+            message = agent.create_worktree()
+            assert agent._wt_pending, message
+            if filename is not None:
+                (Path(agent.work_dir) / filename).write_text("agent output\n")
             return "success: true\nsummary: stub\n"
 
         self._parent_class.run = stub_run
@@ -168,13 +135,11 @@ class _Base(unittest.TestCase):
         assert state is not None, f"no agent state registered for {tab_id!r}"
         return state
 
-    def _run_task(self, tab_id: str, *, auto_commit: bool) -> None:
+    def _run_task(self, tab_id: str) -> None:
         self.server._run_task({
             "prompt": "make a change",
             "workDir": self.repo,
             "tabId": tab_id,
-            "useWorktree": True,
-            "autoCommit": auto_commit,
             "model": "",
         })
         # In production the run's worker thread dies when `_run_task`
@@ -205,205 +170,69 @@ class _Base(unittest.TestCase):
             "tabId": tab_id,
         })
 
-    def _assert_resume_reaches_the_decision(self, tab_id: str) -> None:
-        """Fail loudly unless the next resume exercises the fixed code.
 
-        ``_emit_pending_worktree`` returns early for a tab that is
-        merging, running a task, not in worktree mode or holding no
-        pending worktree.  A fixture that trips any of those makes the
-        "no merge UI appeared" assertions pass for the wrong reason —
-        they would hold with the fix reverted too.  Asserting the
-        preconditions keeps the regression honest.
+class TestResumePresentsThePendingWorktree(_Base):
+    """A history click offers an unmerged worktree to the user."""
+
+    def test_resume_presents_the_merge_discard_prompt(self) -> None:
+        """A task that never merged leaves the decision to the user.
+
+        The pending worktree must be presented on resume — suppressing
+        it would strand the work with no way to act on it.
         """
+        tab_id = "tab-unmerged"
+        self._patch_run()
+        self._run_task(tab_id)
+
         tab = self._tab(tab_id)
-        assert tab.use_worktree, "the tab must be in worktree mode"
-        assert not tab.is_merging, (
-            "a review already owns the worktree; resume is a deliberate "
-            "no-op in that state and would prove nothing"
-        )
-        assert not tab.is_task_active, "no task may be running on the tab"
         agent = tab.agent
         assert agent is not None and agent._wt_pending, (
-            "the resume must find a pending worktree to act on"
+            "a task that never called commit_and_merge must leave its "
+            "worktree pending for review"
         )
-        assert not agent._pending_review, (
-            "the task succeeded, so its work is complete and eligible "
-            "for the silent finalize"
-        )
-
-
-class TestAutoCommitSuppressesMergeUIOnResume(_Base):
-    """Resuming an auto-commit chat must not open a hunk review."""
-
-    def test_resume_with_autocommit_on_does_not_open_merge_ui(self) -> None:
-        """The reported defect, end to end.
-
-        The fixture reproduces the *state* the defect needs, not the
-        route the user took to it: a worktree task runs, and the tab is
-        then left holding a pending branch with the auto-commit toggle
-        ON — exactly what a post-task auto-merge that could not complete
-        leaves behind.  Driving a real failing merge would need a git
-        conflict the stub agent cannot produce, and the resume path
-        cannot tell the two apart: it reads ``_wt_pending`` and
-        ``auto_commit_mode``, nothing else.  Clicking the task in the
-        history panel must then finalize the branch silently instead of
-        popping the diff/merge UI.
-
-        "No merge UI appeared" alone is too weak to be a regression:
-        the buggy code reached the same silence by a different route,
-        because the reset it performed cleared ``use_worktree`` and
-        :meth:`_present_pending_worktree` returns immediately for a tab
-        that is not in worktree mode.  The branch must therefore also
-        be shown to have been *finalized* — silence plus a merged,
-        cleaned-up branch is a state only the fixed code produces.
-        """
-        tab_id = "tab-ac-on"
-        self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
 
         row = self._latest_row()
-        chat_id, task_id = str(row["chat_id"]), str(row["id"])
-
-        # The state a failing post-task auto-merge leaves behind: the
-        # branch is still pending and the toolbar toggle is on.
-        tab = self._tab(tab_id)
-        tab.auto_commit_mode = True
-        self._assert_resume_reaches_the_decision(tab_id)
-
         self.events.clear()
-        self._resume(tab_id, chat_id, task_id)
+        self._resume(tab_id, str(row["chat_id"]), str(row["id"]))
 
         types = self._types()
+        assert WORKTREE_PROMPT_EVENT in types, (
+            f"resuming must present the pending worktree; got: {types}"
+        )
         for ui_event in MERGE_UI_EVENTS:
             assert ui_event not in types, (
-                f"auto-commit is ON, yet resuming the chat broadcast "
-                f"{ui_event!r}: {types}"
+                f"the removed diff/merge review reappeared ({ui_event!r}): "
+                f"{types}"
             )
-        assert WORKTREE_PROMPT_EVENT not in types, (
-            f"auto-commit is ON, yet resuming the chat asked the user to "
-            f"merge or discard: {types}"
-        )
-        assert _kiss_wt_branches(self.repo) == [], (
-            "the pending branch was neither reviewed nor finalized; the "
-            f"work is stranded: {_kiss_wt_branches(self.repo)}"
-        )
-        assert Path(self.repo, "agent_out.txt").exists(), (
-            "the branch's work never reached the main working tree"
-        )
-
-    def test_resume_preserves_the_tabs_autocommit_preference(self) -> None:
-        """A history click must not silently switch auto-commit off.
-
-        ``_replay_session`` used to reset ``tab.auto_commit_mode`` to
-        ``False`` for every idle tab, so the very next task submitted
-        from that tab ran without auto-commit even though the toolbar
-        toggle was still on.
-        """
-        tab_id = "tab-pref"
-        self._patch_run()
-        self._run_task(tab_id, auto_commit=True)
-
-        row = self._latest_row()
-        self._resume(tab_id, str(row["chat_id"]), str(row["id"]))
-
-        tab = self._tab(tab_id)
-        assert tab.auto_commit_mode is True, (
-            "resuming a chat must not turn the tab's auto-commit off"
-        )
-
-    def test_resume_with_autocommit_off_still_opens_the_review(self) -> None:
-        """Regression guard for the opposite direction.
-
-        With auto-commit OFF the pending worktree must still be
-        presented to the user — suppressing it would destroy the manual
-        review workflow.
-        """
-        tab_id = "tab-ac-off"
-        self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
-
-        tab = self._tab(tab_id)
-        agent = tab.agent
-        assert agent is not None and agent._wt_pending, (
-            "auto-commit OFF must leave the worktree pending for review"
-        )
-
-        row = self._latest_row()
-        self.events.clear()
-        self._resume(tab_id, str(row["chat_id"]), str(row["id"]))
-
-        types = self._types()
-        assert any(t in types for t in (*MERGE_UI_EVENTS, WORKTREE_PROMPT_EVENT)), (
-            f"auto-commit is OFF, so resuming must still present the "
-            f"pending worktree; got: {types}"
-        )
 
 
-class TestAutoCommitFinalizesPendingWorktreeOnResume(_Base):
-    """The silent finalization must actually finalize."""
+class TestResumeRefusesUnsafeState(_Base):
+    """A resume must never act on work that is not finished."""
 
-    def test_resume_merges_the_pending_branch(self) -> None:
-        """Auto-commit + a pending worktree with changes → merged.
+    def test_failed_task_work_is_presented_not_merged(self) -> None:
+        """A stopped or failed task keeps its branch.
 
-        Silence alone is not enough: the branch must land on the
-        original branch and be cleaned up, otherwise the work is lost
-        and the worktree leaks.
-        """
-        tab_id = "tab-finalize"
-        self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
-
-        tab = self._tab(tab_id)
-        agent = tab.agent
-        assert agent is not None and agent._wt_pending
-        assert _kiss_wt_branches(self.repo), "a task branch should exist"
-
-        row = self._latest_row()
-        tab.auto_commit_mode = True
-        tab.use_worktree = True
-        self.events.clear()
-        self._resume(tab_id, str(row["chat_id"]), str(row["id"]))
-
-        assert _kiss_wt_branches(self.repo) == [], (
-            "auto-commit resume must merge and clean up the task branch; "
-            f"left over: {_kiss_wt_branches(self.repo)}"
-        )
-        assert Path(self.repo, "agent_out.txt").exists(), (
-            "the agent's work must be merged into the main working tree"
-        )
-
-
-class TestSilentFinalizeRefusesUnsafeState(_Base):
-    """Auto-commit must never merge work that is not finished."""
-
-    def test_failed_task_work_is_reviewed_not_silently_merged(self) -> None:
-        """A stopped or failed task keeps its branch, auto-commit or not.
-
-        ``_run_task_inner`` raises ``agent._pending_review`` when the
-        task failed or was stopped, and
-        :meth:`WorktreeSorcarAgent._preserve_pending_worktree_for_review`
+        A task that failed or was stopped leaves its worktree pending, and
+        :meth:`ChatSorcarAgent._preserve_pending_worktree_for_review`
         states the contract: incomplete, unverified work stays on its
         ``kiss/wt-*`` branch and is never merged into the user's branch
-        behind their back.  Auto-commit means "do not interrupt me", not
-        "publish half-written work" — so the history click must present
-        the branch rather than finalize it.
+        behind their back — so the history click must present the
+        branch rather than finalize it.
         """
         tab_id = "tab-failed"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         # Exactly what a failed/stopped task leaves behind.
-        agent._pending_review = True
-        tab.auto_commit_mode = True
 
         row = self._latest_row()
         self.events.clear()
         self._resume(tab_id, str(row["chat_id"]), str(row["id"]))
 
-        assert _kiss_wt_branches(self.repo), (
+        assert kiss_wt_branches(self.repo), (
             "the unfinished task's branch was destroyed; its work is "
             "unrecoverable"
         )
@@ -418,30 +247,28 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         )
 
     def test_running_task_worktree_is_left_alone(self) -> None:
-        """A history click must not finalize a live task's worktree.
+        """A history click must not touch a live task's worktree.
 
-        The post-task finalize may bypass the busy guard because it runs
-        on the very thread that owns ``is_task_active``.  A resume runs
-        on an unrelated thread, so the same bypass would let it merge —
-        or, with no changes yet, *delete* — the worktree the agent is
-        still writing into.
+        The post-task presentation may bypass the busy guard because it
+        runs on the very thread that owns ``is_task_active``.  A resume
+        runs on an unrelated thread, so the same bypass would let it
+        present — or, with no changes yet, *delete* — the worktree the
+        agent is still writing into.
 
-        Presenting the review instead is just as wrong, so the resume
-        must be a complete no-op: no branch change, no merge UI, no
-        merge/discard prompt, and no claim on ``is_merging`` that would
-        make the task's own post-run finalize refuse.
+        The resume must be a complete no-op: no branch change, no merge
+        UI, no merge/discard prompt, and no claim on ``is_merging`` that
+        would make the task's own post-run presentation refuse.
         """
         tab_id = "tab-live"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
-        branches_before = _kiss_wt_branches(self.repo)
+        branches_before = kiss_wt_branches(self.repo)
         assert branches_before, "a task branch should exist"
 
-        tab.auto_commit_mode = True
         tab.is_task_active = True
         row = self._latest_row()
         self.events.clear()
@@ -450,9 +277,9 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         finally:
             tab.is_task_active = False
 
-        assert _kiss_wt_branches(self.repo) == branches_before, (
+        assert kiss_wt_branches(self.repo) == branches_before, (
             "a resume finalized the worktree of a task that is still "
-            f"running: {branches_before} -> {_kiss_wt_branches(self.repo)}"
+            f"running: {branches_before} -> {kiss_wt_branches(self.repo)}"
         )
         assert not Path(self.repo, "agent_out.txt").exists(), (
             "a running task's in-progress work was merged into the main "
@@ -477,15 +304,14 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         """The live-task no-op must also cover the discard path.
 
         A task that has not written anything yet has an EMPTY worktree,
-        and every fallback for an empty branch destroys it: the silent
-        finalize would discard it, and ``_present_pending_worktree``
-        auto-discards it too (``discard_if_empty`` defaults to True).
-        Whichever route a resume takes, the agent would find its branch
-        deleted underneath it mid-task.  Only a complete no-op is safe.
+        and ``_present_pending_worktree`` auto-discards an empty branch
+        (``discard_if_empty`` defaults to True), so a resume that got
+        that far would delete the branch underneath the agent mid-task.
+        Only a complete no-op is safe.
         """
         tab_id = "tab-live-empty"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -503,10 +329,9 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
             "this test needs an empty worktree to exercise the discard "
             "path"
         )
-        branches_before = _kiss_wt_branches(self.repo)
+        branches_before = kiss_wt_branches(self.repo)
         assert branches_before, "a task branch should exist"
 
-        tab.auto_commit_mode = True
         tab.is_task_active = True
         row = self._latest_row()
         self.events.clear()
@@ -515,9 +340,9 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         finally:
             tab.is_task_active = False
 
-        assert _kiss_wt_branches(self.repo) == branches_before, (
+        assert kiss_wt_branches(self.repo) == branches_before, (
             "a resume discarded the empty worktree of a running task: "
-            f"{branches_before} -> {_kiss_wt_branches(self.repo)}"
+            f"{branches_before} -> {kiss_wt_branches(self.repo)}"
         )
         assert agent._wt_pending, (
             "the running task's worktree registration was cleared"
@@ -548,17 +373,16 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         """
         tab_id = "tab-submitting"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
-        branches_before = _kiss_wt_branches(self.repo)
+        branches_before = kiss_wt_branches(self.repo)
         assert branches_before, "a task branch should exist"
 
         # Exactly the state `_cmd_run` leaves behind between installing
         # the worker thread and starting it.
-        tab.auto_commit_mode = True
         tab.task_thread = threading.Thread(target=lambda: None)
         assert not tab.is_task_active and not tab.is_merging, (
             "this test must reproduce the window in which BOTH flags "
@@ -578,9 +402,9 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
             "a resume claimed the tab while a task was starting; the "
             "worker will now refuse the run the user just submitted"
         )
-        assert _kiss_wt_branches(self.repo) == branches_before, (
+        assert kiss_wt_branches(self.repo) == branches_before, (
             "a resume finalized the worktree of a task that was still "
-            f"starting: {branches_before} -> {_kiss_wt_branches(self.repo)}"
+            f"starting: {branches_before} -> {kiss_wt_branches(self.repo)}"
         )
         assert agent._wt_pending, (
             "the starting task lost its worktree registration"
@@ -599,35 +423,33 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
     def test_new_task_preserves_a_failed_tasks_branch(self) -> None:
         """A stopped task's work stays on its branch across a new task.
 
-        ``_try_setup_worktree`` has to retire the previous worktree
-        before minting a new one, and it used to do that by calling
-        ``_release_worktree`` unconditionally — which squash-merges.
-        So the same unverified work that
-        :meth:`WorktreeSorcarAgent._preserve_pending_worktree_for_review`
+        ``run`` has to retire the previous worktree before the new
+        task can mint its own, and it used to do that by squash-merging
+        unconditionally.  So the same unverified work that
+        :meth:`ChatSorcarAgent._preserve_pending_worktree_for_review`
         refuses to publish when a tab closes got published anyway the
         moment the user typed a second prompt.  Typing a new prompt is
         not a decision about the old task's work.
         """
         tab_id = "tab-next-task"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         # Exactly what a failed or stopped task leaves behind.
-        agent._pending_review = True
-        parked = list(_kiss_wt_branches(self.repo))
+        parked = list(kiss_wt_branches(self.repo))
         assert parked, "the stopped task should have left a branch"
 
         self._patch_run(filename="second_out.txt")
-        self._run_task(tab_id, auto_commit=True)
+        self._run_task(tab_id)
 
         assert not Path(self.repo, "agent_out.txt").exists(), (
             "starting a new task published the previous task's "
             "unverified work into the main working tree"
         )
-        surviving = _kiss_wt_branches(self.repo)
+        surviving = kiss_wt_branches(self.repo)
         for branch in parked:
             assert branch in surviving, (
                 f"the parked branch {branch!r} was destroyed by the next "
@@ -637,20 +459,19 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
     def test_new_chat_preserves_a_failed_tasks_branch(self) -> None:
         """The same policy governs the other retire entry point.
 
-        :meth:`WorktreeSorcarAgent.new_chat` also has to retire the
+        :meth:`ChatSorcarAgent.new_chat` also has to retire the
         previous worktree, and it used to squash-merge unconditionally
         too — so a user who abandoned a failed task by starting a fresh
         chat published its half-written work just the same.
         """
         tab_id = "tab-new-chat"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
-        agent._pending_review = True
-        parked = list(_kiss_wt_branches(self.repo))
+        parked = list(kiss_wt_branches(self.repo))
         assert parked, "the stopped task should have left a branch"
 
         agent.new_chat()
@@ -659,7 +480,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
             "starting a new chat published the previous task's "
             "unverified work into the main working tree"
         )
-        surviving = _kiss_wt_branches(self.repo)
+        surviving = kiss_wt_branches(self.repo)
         for branch in parked:
             assert branch in surviving, (
                 f"the parked branch {branch!r} was destroyed by the new "
@@ -674,25 +495,23 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         When the commit inside a preserved worktree is refused — a
         pre-commit hook is the usual culprit — the directory is kept so
         nothing is lost, but the user is the only one who can act on
-        it.  Writing that to the log alone strands the work invisibly:
-        the release path already surfaces its failures through the
-        ``warning`` event, and the preserve path must do the same.
+        it.  Writing that to the log alone strands the work invisibly;
+        the preserve path must surface it through the ``warning`` event.
         """
         tab_id = "tab-stranded"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
-        agent._pending_review = True
 
         # A change the worktree cannot commit: `commit_all` is refused
         # exactly as a rejecting pre-commit hook would refuse it.
         wt_dir = agent._wt_dir
         assert wt_dir is not None
         (wt_dir / "uncommittable.txt").write_text("rejected by the hook\n")
-        _run_git(str(wt_dir), "config", "core.hooksPath", str(self.hooks))
+        run_git(str(wt_dir), "config", "core.hooksPath", str(self.hooks))
 
         self.events.clear()
         agent.printer = self.server.printer  # type: ignore[attr-defined]
@@ -717,7 +536,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         """Park a pending worktree holding work that cannot be committed.
 
         Reproduces the real shape of the problem: the task was stopped
-        or failed (``_pending_review``), it left a change behind, and a
+        or failed, it left a change behind, and a
         pre-commit hook refuses to commit it.  Whatever retires the
         worktree from here can only keep the directory and tell the
         user where it is.
@@ -729,14 +548,13 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
             The worktree directory that must survive and be named.
         """
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
         agent = self._tab(tab_id).agent
         assert agent is not None and agent._wt_pending
-        agent._pending_review = True
         wt_dir = agent._wt_dir
         assert wt_dir is not None
         (wt_dir / "uncommittable.txt").write_text("rejected by the hook\n")
-        _run_git(str(wt_dir), "config", "core.hooksPath", str(self.hooks))
+        run_git(str(wt_dir), "config", "core.hooksPath", str(self.hooks))
         return wt_dir
 
     def _warnings(self) -> list[str]:
@@ -779,27 +597,26 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
     def test_uncommittable_work_is_not_reported_as_committed(self) -> None:
         """Recovery instructions must match what actually happened.
 
-        When another task holds the main tree, the pending worktree is
-        preserved instead of merged and the user is told to recover it
-        with ``git checkout <branch>``.  That is only true when the
-        commit succeeded.  With a hook refusing it the work is in the
-        worktree directory and *not* on the branch, so the stock
+        When the retire preserves a pending worktree, the user is told
+        the work was committed to its branch.  That is only true when
+        the commit succeeded.  With a hook refusing it the work is in
+        the worktree directory and *not* on the branch, so the stock
         message sends the user to an empty branch and the note saying
         where the work really is gets overwritten.
         """
-        tab_id = "tab-blocked-main"
+        tab_id = "tab-hook-refused"
         wt_dir = self._strand_the_worktree(tab_id)
         agent = self._tab(tab_id).agent
         assert agent is not None
         branch = agent._wt_branch
 
         self.events.clear()
-        _release_worktree_without_merging(agent, True)
+        agent._retire_previous_worktree()
         agent._flush_warnings(self.server.printer)
 
         warnings = self._warnings()
-        assert warnings, "the blocked auto-merge was never reported"
-        assert not any("committed on that branch" in w for w in warnings), (
+        assert warnings, "the refused commit was never reported"
+        assert not any("was committed to branch" in w for w in warnings), (
             f"the user was told the work is committed on {branch!r}, but "
             f"the commit was refused and the branch does not carry it: "
             f"{warnings}"
@@ -808,9 +625,8 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
             f"the warning must still name the directory holding the "
             f"work: {warnings}"
         )
-        assert any("another task is running" in w for w in warnings), (
-            f"the user must also learn why no merge was attempted: "
-            f"{warnings}"
+        assert wt_dir.exists(), (
+            "the directory named in the warning must still hold the work"
         )
 
     def test_a_stale_warning_does_not_hide_the_recovery_command(
@@ -819,27 +635,18 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         """The other direction: a commit that worked must say so.
 
         The warning slot is not a record of what the current preserve
-        did.  :meth:`WorktreeSorcarAgent._flush_warnings` deliberately
+        did.  :meth:`ChatSorcarAgent._flush_warnings` deliberately
         puts a warning *back* when its broadcast raises, so text from
         an earlier worktree can still be sitting there.  Deciding "the
         commit must have failed" from a non-empty slot therefore
-        swallows the ``git checkout`` recovery command for a branch
-        that really does carry the work, and replaces it with a
-        directory path that no longer exists.
+        swallows the branch the work really is on and replaces it with
+        a directory path that no longer exists.
         """
         tab_id = "tab-stale-warning"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
         agent = self._tab(tab_id).agent
         assert agent is not None and agent._wt_pending
-        agent._pending_review = True
-        # The user switched Auto-commit back ON before the next task —
-        # the agent re-reads the toggle on every run, and this case is
-        # about the branch that DOES carry the work, so the preserve
-        # step has to be allowed to commit it.  (With the toggle still
-        # off it keeps the worktree directory instead, a different
-        # outcome covered by the sibling cases.)
-        agent.auto_commit_enabled = True
 
         # A previous worktree's warning that a failing broadcast put
         # back into the slot — exactly what `_flush_warnings` does.
@@ -862,15 +669,14 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         # This worktree's own commit succeeds: no hook is installed.
         branch = agent._wt_branch
         self.events.clear()
-        _release_worktree_without_merging(agent, True)
+        agent._retire_previous_worktree()
         agent._flush_warnings(self.server.printer)
 
         warnings = self._warnings()
-        assert warnings, "the blocked auto-merge was never reported"
-        assert any(f"git checkout {branch}" in w for w in warnings), (
+        assert warnings, "the preserved work was never reported"
+        assert any(f"committed to branch '{branch}'" in w for w in warnings), (
             f"the commit onto {branch!r} succeeded, but the stale "
-            f"warning suppressed the recovery command the user needs: "
-            f"{warnings}"
+            f"warning suppressed the branch the user needs: {warnings}"
         )
         assert not any(str(stale_dir) in w for w in warnings), (
             f"a directory from an older worktree was reported as the "
@@ -889,7 +695,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         """
         tab_id = "tab-nothing-pending"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
         agent = self._tab(tab_id).agent
         assert agent is not None
 
@@ -903,12 +709,12 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         assert not agent._wt_pending, "the fixture must leave nothing pending"
 
         self.events.clear()
-        _release_worktree_without_merging(agent, True)
+        agent._retire_previous_worktree()
         agent._flush_warnings(self.server.printer)
 
         warnings = self._warnings()
-        assert not any("Could not auto-merge" in w for w in warnings), (
-            f"a worktree that was never there was reported as blocked: "
+        assert not any("previous task" in w for w in warnings), (
+            f"a worktree that was never there was reported as preserved: "
             f"{warnings}"
         )
         # The stale warning is still owed to the user, so flushing it is
@@ -919,31 +725,42 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
             f"nothing to report: {warnings}"
         )
 
-    def test_new_task_still_merges_a_finished_tasks_branch(self) -> None:
-        """The opposite direction: completed work is still published.
+    def test_new_task_preserves_a_finished_tasks_branch(self) -> None:
+        """Finished-but-unmerged work is held back just the same.
 
-        Only ``_pending_review`` work is held back.  A task that ran to
-        completion must keep being squash-merged when the next task
-        starts, or auto-commit mode would silently stop delivering
-        anything.
+        Only ``commit_and_merge`` or the user's Merge button publishes a
+        worktree.  A task that ran to completion without merging left
+        the decision to the user, so the next task must park its branch
+        rather than squash-merge it.
         """
         tab_id = "tab-next-task-ok"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
-        assert not agent._pending_review, (
-            "the task succeeded, so its work is complete"
+        assert agent._wt_branch is not None
+        assert GitWorktreeOps.load_preserve_marker(Path(self.repo), agent._wt_branch), (
+            "the post-run path must mark an unmerged worktree as preserved "
+            "even though the task succeeded"
         )
+        parked = list(kiss_wt_branches(self.repo))
+        assert parked, "the finished task should have left a branch"
 
         self._patch_run(filename="second_out.txt")
-        self._run_task(tab_id, auto_commit=True)
+        self._run_task(tab_id)
 
-        assert Path(self.repo, "agent_out.txt").exists(), (
-            "the previous task's finished work was never merged"
+        assert not Path(self.repo, "agent_out.txt").exists(), (
+            "starting a new task published the previous task's unmerged "
+            "work into the main working tree"
         )
+        surviving = kiss_wt_branches(self.repo)
+        for branch in parked:
+            assert branch in surviving, (
+                f"the parked branch {branch!r} was destroyed by the next "
+                f"task: {surviving}"
+            )
 
 
 class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
@@ -987,10 +804,10 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
     def test_two_manual_resumes_keep_the_branch_and_release_the_tab(
         self,
     ) -> None:
-        """Auto-commit OFF: concurrent resumes present, never finalize.
+        """Concurrent resumes present, never finalize.
 
         The presentation claim (``is_merging``, taken atomically inside
-        :meth:`_finalize_pending_worktree`) exists so two simultaneous
+        :meth:`_emit_pending_worktree`) exists so two simultaneous
         resumes cannot race each other into the presentation's
         empty-branch auto-discard (F4-20).  Whatever interleaving the
         scheduler picks, the outcome must be: the ``worktree_done``
@@ -1000,13 +817,13 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
         """
         tab_id = "tab-race-review"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         assert not tab.is_merging, "the fixture must start with a free worktree"
-        branches_before = _kiss_wt_branches(self.repo)
+        branches_before = kiss_wt_branches(self.repo)
         assert branches_before, "a task branch should exist"
 
         row = self._latest_row()
@@ -1015,16 +832,16 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
 
         types = self._types()
         assert WORKTREE_PROMPT_EVENT in types, (
-            f"auto-commit is OFF, so one of the resumes must still "
-            f"present the pending worktree; got: {types}"
+            f"one of the resumes must present the pending worktree; "
+            f"got: {types}"
         )
         assert "worktree_result" not in types, (
             f"a resume finalized a worktree the user never decided on: "
             f"{types}"
         )
-        assert _kiss_wt_branches(self.repo) == branches_before, (
+        assert kiss_wt_branches(self.repo) == branches_before, (
             "concurrent resumes destroyed the pending branch: "
-            f"{branches_before} -> {_kiss_wt_branches(self.repo)}"
+            f"{branches_before} -> {kiss_wt_branches(self.repo)}"
         )
         assert agent._wt_pending, (
             "a resume cleared the worktree registration without the "
@@ -1048,7 +865,7 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
         """
         tab_id = "tab-review-fallback"
         self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
+        self._run_task(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -1080,99 +897,6 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
         assert agent._wt_pending, (
             "the failed presentation must leave the worktree pending"
         )
-
-    def test_two_autocommit_resumes_finalize_the_branch_once(self) -> None:
-        """Auto-commit ON: one probe, one action, claim never dropped.
-
-        The claim used to be released as soon as the changed-files probe
-        returned and re-taken inside
-        :meth:`_handle_worktree_action`.  A second resume slipping into
-        that window probes a worktree the first one is about to merge
-        and then acts on the stale answer — merging twice, or discarding
-        a branch whose files were already taken.
-
-        A sleep cannot demonstrate that gap reliably: it is microseconds
-        wide and the loser has to hit it exactly.  The invariant is
-        observed directly instead.  The probe and the action are the two
-        ends of the window, so both are instrumented to record whether
-        the tab was claimed at that moment.  ``is_merging`` must read
-        ``True`` at *both* ends, which is only possible if the claim was
-        never dropped in between — the released-and-reacquired shape
-        enters :meth:`_handle_worktree_action` with the flag clear.
-
-        The instrumentation only observes; both wrappers forward to the
-        real implementation and return its result unchanged.
-        """
-        tab_id = "tab-race-finalize"
-        self._patch_run()
-        self._run_task(tab_id, auto_commit=False)
-
-        tab = self._tab(tab_id)
-        agent = tab.agent
-        assert agent is not None and agent._wt_pending
-        tab.auto_commit_mode = True
-
-        real_probe = self.server._get_worktree_changed_files
-        real_action = self.server._handle_worktree_action
-        probes: list[bool] = []
-        actions: list[bool] = []
-
-        def instrumented_probe(probe_tab_id: str = "") -> list[str]:
-            """Record the claim at the opening edge of the window."""
-            probes.append(self._tab(tab_id).is_merging)
-            return real_probe(probe_tab_id)
-
-        def instrumented_action(
-            action: str, action_tab_id: str = "", **kwargs: Any,
-        ) -> dict[str, Any]:
-            """Record the claim at the closing edge of the window."""
-            actions.append(self._tab(tab_id).is_merging)
-            return real_action(action, action_tab_id, **kwargs)
-
-        self.server._get_worktree_changed_files = instrumented_probe  # type: ignore[assignment,method-assign]
-        self.server._handle_worktree_action = instrumented_action  # type: ignore[assignment,method-assign]
-        try:
-            row = self._latest_row()
-            self.events.clear()
-            self._resume_twice(tab_id, str(row["chat_id"]), str(row["id"]))
-        finally:
-            self.server._get_worktree_changed_files = real_probe  # type: ignore[method-assign]
-            self.server._handle_worktree_action = real_action  # type: ignore[method-assign]
-
-        assert len(probes) == 1, (
-            f"the worktree was probed {len(probes)} times; the second "
-            f"resume entered the claim window and acted on an answer "
-            f"the first one was already invalidating"
-        )
-        assert len(actions) == 1, (
-            f"the worktree was acted on {len(actions)} times: {actions}"
-        )
-        assert probes == [True], (
-            "the changed-files probe ran without the tab claimed as "
-            "merging, so any concurrent caller was free to walk in"
-        )
-        assert actions == [True], (
-            "the claim was released between the changed-files probe and "
-            "the merge it selected; a resume arriving in that window "
-            "acts on an answer that is already stale"
-        )
-        types = self._types()
-        for ui_event in MERGE_UI_EVENTS:
-            assert ui_event not in types, (
-                f"auto-commit is ON, yet a concurrent resume broadcast "
-                f"{ui_event!r}: {types}"
-            )
-        assert types.count("worktree_result") == 1, (
-            f"the branch must be finalized exactly once; got "
-            f"{types.count('worktree_result')} results: {types}"
-        )
-        assert _kiss_wt_branches(self.repo) == [], (
-            "the task branch must be merged and cleaned up"
-        )
-        assert Path(self.repo, "agent_out.txt").exists(), (
-            "the agent's work must be merged into the main working tree"
-        )
-
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -10,7 +10,8 @@ and task-info panel.
 * With no file, browser or terminal tab open there is no content pane:
   the chat fills the window between the history panel and the docked
   task-info panel, and never runs under the panel.
-* The machine name sits in bold green at the top centre of the chat.
+* The machine drop-down (this machine's name until a pick is made)
+  sits in bold green at the top centre of the chat.
 * A file opened from the Explorer opens the content pane, which runs
   under the task-info panel, and slides the panel off the right edge
   (animated), leaving a drawer tab there; the tab brings the panel back
@@ -131,8 +132,15 @@ def test_machine_name_sits_in_bold_green_at_the_top_centre_of_the_chat(browser, 
             "document.getElementById('chat-machine').textContent.length > 0",
             timeout=15000,
         )
-        name = page.locator("#chat-machine").inner_text()
-        assert name == page.locator("#meta-machine").inner_text()
+        # The drop-down's selected entry (its inner_text would be every
+        # option, registered machines included), the same daemon-stamped
+        # name as the (hidden) status-bar span; the Task Info list has no
+        # Machine row.
+        name = page.locator("#chat-machine").evaluate(
+            "el => el.options[el.selectedIndex].textContent"
+        )
+        assert name == page.locator("#status-machine").text_content()
+        assert page.locator("#meta-machine").count() == 0
         style = page.evaluate(
             """() => {
               const el = document.getElementById('chat-machine');
@@ -150,19 +158,27 @@ def test_machine_name_sits_in_bold_green_at_the_top_centre_of_the_chat(browser, 
         assert style["color"] == style["green"]
         assert style["weight"] in ("700", "bold")
         assert style["align"] == "center"
-        # Top centre of the chat pane: above the transcript, centred on it.
-        machine = _rect(page, "#chat-machine")
+        # The header strip ("machine: directory") sits at the top centre
+        # of the chat pane: above the transcript, centred on it, the
+        # machine name left of the ":" and the directory right of it.
+        header = _rect(page, "#chat-header")
         output = _rect(page, "#output")
-        assert machine["bottom"] <= output["top"] + 1
-        mid_machine = machine["left"] + machine["width"] / 2
+        assert header["bottom"] <= output["top"] + 1
+        mid_header = header["left"] + header["width"] / 2
         mid_output = output["left"] + output["width"] / 2
-        assert mid_machine == pytest.approx(mid_output, abs=2)
+        assert mid_header == pytest.approx(mid_output, abs=2)
+        machine = _rect(page, "#chat-machine")
+        sep = _rect(page, "#chat-header-sep")
+        workdir = _rect(page, "#chat-workdir")
+        assert page.locator("#chat-header-sep").inner_text() == ":"
+        assert machine["right"] <= sep["left"] + 1 <= workdir["left"]
+        assert page.locator("#chat-workdir").input_value() == str(harness.work_dir)
         # With a file open the strip stays over the chat, not the pane.
         _open_file(page)
-        machine = _rect(page, "#chat-machine")
+        header = _rect(page, "#chat-header")
         output = _rect(page, "#output")
-        assert machine["right"] <= output["right"] + 1
-        assert machine["left"] + machine["width"] / 2 == pytest.approx(
+        assert header["right"] <= output["right"] + 1
+        assert header["left"] + header["width"] / 2 == pytest.approx(
             output["left"] + output["width"] / 2, abs=2,
         )
     finally:
@@ -187,37 +203,40 @@ def test_machine_name_is_parted_from_the_chat_by_the_same_hairline_as_the_tab_ro
             "document.getElementById('chat-machine').textContent.length > 0",
             timeout=15000,
         )
-        border = page.evaluate(_BORDER_JS, "#chat-machine")
+        border = page.evaluate(_BORDER_JS, "#chat-header")
         assert border[0] == "1px" and border[1] == "solid"
         # The chat alone: the hairline is the only thing between the
         # name and the transcript.
-        machine = _rect(page, "#chat-machine")
+        header = _rect(page, "#chat-header")
         output = _rect(page, "#output")
-        assert machine["bottom"] == pytest.approx(output["top"], abs=1)
+        assert header["bottom"] == pytest.approx(output["top"], abs=1)
 
         _open_file(page)
         assert page.evaluate(_BORDER_JS, "#content-tab-bar") == border
-        machine = _rect(page, "#chat-machine")
+        header = _rect(page, "#chat-header")
         tabs = _rect(page, "#content-tab-bar")
-        assert machine["top"] == pytest.approx(tabs["top"], abs=1)
-        assert machine["bottom"] == pytest.approx(tabs["bottom"], abs=1)
-        # The name sits at the shared row's vertical centre, in one
-        # line that still ellipsizes (a flex or grid strip would not).
-        text = page.evaluate(
+        assert header["top"] == pytest.approx(tabs["top"], abs=1)
+        assert header["bottom"] == pytest.approx(tabs["bottom"], abs=1)
+        # The strip is a one-line drop-down (no list box) showing this
+        # machine's name, centred and still ellipsizing: the row stays
+        # exactly as tall as the tab row beside it.
+        select = page.evaluate(
             """() => {
               const el = document.getElementById('chat-machine');
-              const r = document.createRange();
-              r.selectNodeContents(el);
-              const t = r.getBoundingClientRect();
-              const b = el.getBoundingClientRect();
-              return {mid: (t.top + t.bottom) / 2 - (b.top + b.bottom) / 2,
-                      display: getComputedStyle(el).display,
-                      overflow: getComputedStyle(el).textOverflow};
+              const cs = getComputedStyle(el);
+              return {tag: el.tagName, multiple: el.multiple, size: el.size,
+                      value: el.value,
+                      label: el.options[el.selectedIndex].text,
+                      whiteSpace: cs.whiteSpace, overflow: cs.textOverflow,
+                      align: cs.textAlignLast};
             }"""
         )
-        assert abs(text["mid"]) <= 2
-        assert text["display"] == "block"
-        assert text["overflow"] == "ellipsis"
+        assert select["tag"] == "SELECT"
+        assert not select["multiple"] and select["size"] <= 1
+        assert select["value"] == "" and select["label"].strip()
+        assert select["whiteSpace"] == "nowrap"
+        assert select["overflow"] == "ellipsis"
+        assert select["align"] == "center"
     finally:
         context.close()
 

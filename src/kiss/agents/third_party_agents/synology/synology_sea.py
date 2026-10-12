@@ -127,14 +127,48 @@ class SynologyChatChannelBackend(ToolMethodBackend):
     def __init__(self) -> None:
         self._webhook_url: str = ""
         self._token: str = ""
-        self._http: Any = requests
+        self._http_obj: Any = requests
         self._muse: bool = False
+        self._lazy_muse: bool = False
+        self._wire_lock = threading.Lock()
         self._surrogate: str = ""
         self._message_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self._webhook_server: ThreadedHTTPServer | None = None
         self._webhook_thread: threading.Thread | None = None
         self._send_lock = threading.Lock()
         self._connection_info: str = ""
+
+    def _wire_deferred(self) -> None:
+        """Run the wiring :class:`SynologyChatAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of wiring at construction,
+        so building it for its tool list (``sea lint``, ``sea docs``,
+        run start) touches no daemon.  Concurrent first requests wait on
+        the lock and share the one surrogate; :meth:`_wire_muse`
+        publishes ``_webhook_url`` last, so a request that sees it set
+        sees the whole wired state (boundary or tokenless-direct).
+
+        Raises:
+            MuseAuthError: When the webhook cannot be wired, so no
+                request leaves on a half-wired transport.
+        """
+        if not self._lazy_muse or self._webhook_url:
+            return
+        with self._wire_lock:
+            if not self._webhook_url and not self._wire_muse():
+                from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+                raise MuseAuthError(self._connection_info)
+
+    @property
+    def _http(self) -> Any:
+        """The HTTP session: ``requests`` or the Muse boundary session (wired on first use)."""
+        self._wire_deferred()
+        return self._http_obj
+
+    @_http.setter
+    def _http(self, http: Any) -> None:
+        self._http_obj = http
 
     def _headers(self) -> dict[str, str]:
         """Return per-request headers: the surrogate bearer in Muse mode.
@@ -158,10 +192,11 @@ class SynologyChatChannelBackend(ToolMethodBackend):
         Args:
             webhook_url: The tokenless incoming webhook URL to use.
         """
-        self._webhook_url = webhook_url
         self._muse = False
         self._surrogate = ""
         self._http = requests
+        # Published last (see ``_wire_deferred``).
+        self._webhook_url = webhook_url
 
     def _wire_muse(self) -> bool:
         """Wire the Muse boundary for the configured incoming webhook.
@@ -233,10 +268,11 @@ class SynologyChatChannelBackend(ToolMethodBackend):
             self._wire_direct(webhook_url)
             return True
         _scrub_config_webhook_token()
-        self._webhook_url = strip_url_query_param(webhook_url, "token")
         self._surrogate = handle.token
         self._http = MuseBoundarySession("synology")
         self._muse = True
+        # Published last (see ``_wire_deferred``).
+        self._webhook_url = strip_url_query_param(webhook_url, "token")
         return True
 
     def connect(self) -> bool:
@@ -507,18 +543,12 @@ class SynologyChatAgent(BaseChannelAgent):
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
-            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
-
-            # Muse-auth mode: wire a vault surrogate and the boundary
-            # session (no network round trip); the webhook secret never
-            # enters this process once migrated.  A daemon failure
-            # leaves the agent constructible (fail closed) so its
-            # authenticate/clear tools stay available.
-            try:
-                self._backend._wire_muse()
-            except MuseAuthError as e:
-                self._backend._webhook_url = ""
-                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            # Muse-auth mode: the backend wires the webhook on first use
+            # (see SynologyChatChannelBackend._http), so building the
+            # tool list (``sea lint``, ``sea docs``, run start) touches
+            # no daemon; the webhook secret never enters this process
+            # once migrated.
+            self._backend._lazy_muse = True
             return
         cfg = _config.load()
         if cfg:  # pragma: no branch
@@ -526,8 +556,14 @@ class SynologyChatAgent(BaseChannelAgent):
             self._backend._token = cfg.get("token", "")
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return bool(self._backend._webhook_url)
+        """Return True if the backend is wired or a valid webhook URL is configured."""
+        if self._backend._webhook_url:
+            return True
+        if not self._backend._lazy_muse:
+            return False
+        from kiss.agents.third_party_agents.muse_auth._common import valid_http_url
+
+        return valid_http_url(str((_config.load_metadata() or {}).get("webhook_url") or ""))
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
@@ -539,18 +575,20 @@ class SynologyChatAgent(BaseChannelAgent):
             Returns:
                 Configuration status or instructions.
             """
-            if not agent._backend._webhook_url:  # pragma: no branch
+            if not agent._is_authenticated():  # pragma: no branch
                 return (
                     "Not configured for Synology Chat. Use authenticate_synology() to configure.\n"
                     "You need the incoming webhook URL from Synology Chat > "
                     "Integration > Incoming Webhooks > Create."
                 )
-            return json.dumps(
-                {
-                    "ok": True,
-                    "webhook_url": agent._backend._webhook_url[:50] + "...",
-                }
+            # Before the first send the backend is not wired yet: show
+            # the configured URL without any embedded token.
+            from kiss.agents.third_party_agents.muse_auth._common import strip_url_query_param
+
+            webhook_url = agent._backend._webhook_url or strip_url_query_param(
+                str((_config.load_metadata() or {}).get("webhook_url") or ""), "token"
             )
+            return json.dumps({"ok": True, "webhook_url": webhook_url[:50] + "..."})
 
         def authenticate_synology(webhook_url: str, token: str = "") -> str:
             """Configure Synology Chat webhook.

@@ -114,8 +114,6 @@ const STORED = {
   custom_api_key: '',
   custom_headers: '',
   remote_password: '',
-  auto_commit_mode: true,
-  is_worktree: true,
 };
 
 // Nothing may appear in the box before the daemon has said anything:

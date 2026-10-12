@@ -29,18 +29,16 @@ Contract locked in here:
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
 import re
 import tempfile
 import unittest
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from kiss.server import web_server
 from kiss.server.tips import read_tips, tips_disabled
+from kiss.tests.server.conftest import environ
 
 
 class TestReadTips(unittest.TestCase):
@@ -98,21 +96,6 @@ class TestReadTips(unittest.TestCase):
                 os.environ["KISS_TIPS_PATH"] = prev
 
 
-@contextlib.contextmanager
-def _environ(**values: str) -> Iterator[None]:
-    """Set environment variables for the block, then restore them."""
-    saved = {k: os.environ.get(k) for k in values}
-    os.environ.update(values)
-    try:
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
-
 class TestTipsInRemoteHtml(unittest.TestCase):
     """``web_server._build_html`` wires the tips surface into the page."""
 
@@ -127,7 +110,7 @@ class TestTipsInRemoteHtml(unittest.TestCase):
             home.mkdir()
             if opted_out:
                 (home / "TIPS_DISABLED").write_text("2026-10-01T00:00:00\n")
-            with _environ(KISS_TIPS_PATH=str(tips_file), KISS_HOME=str(home)):
+            with environ(KISS_TIPS_PATH=str(tips_file), KISS_HOME=str(home)):
                 html = web_server._build_html()  # type: ignore[attr-defined]
         m = re.search(r"window\.__TIPS__\s*=\s*(\{.*?\});</script>", html)
         assert m is not None, "window.__TIPS__ must be assigned a JSON object literal"
@@ -171,7 +154,7 @@ class TestTipsInRemoteHtml(unittest.TestCase):
 
     def test_tips_disabled_follows_the_marker(self) -> None:
         with tempfile.TemporaryDirectory() as home:
-            with _environ(KISS_HOME=home):
+            with environ(KISS_HOME=home):
                 self.assertFalse(tips_disabled())
                 (Path(home) / "TIPS_DISABLED").write_text("x\n")
                 self.assertTrue(tips_disabled())

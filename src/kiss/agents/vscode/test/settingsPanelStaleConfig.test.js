@@ -106,8 +106,6 @@ const STORED = {
   custom_api_key: 'old-custom',
   custom_headers: '',
   remote_password: 'old-password',
-  auto_commit_mode: true,
-  is_worktree: true,
 };
 
 function testLateConfigDataDoesNotClobberTypedKey() {
@@ -222,20 +220,20 @@ function testUntouchedPanelStillSavesNothing() {
 // toggles for a fresh session.
 function testClosedPanelIsStillRepainted() {
   const {win} = makeWebview();
-  win.document.getElementById('cfg-auto-commit').checked = true;
-  win.document.getElementById('cfg-use-worktree').checked = true;
+  win.document.getElementById('cfg-use-web-tools').checked = true;
+  win.document.getElementById('cfg-classify-tasks').checked = true;
   send(win, {
     type: 'configData',
-    config: {...STORED, auto_commit_mode: false, is_worktree: false},
+    config: {...STORED, use_web_browser: false, classify_tasks: false},
     apiKeys: {ANTHROPIC_API_KEY: 'sk-seeded'},
   });
   assert.strictEqual(
-    win.document.getElementById('cfg-auto-commit').checked,
+    win.document.getElementById('cfg-use-web-tools').checked,
     false,
     'with the panel closed configData must still seed the run toggles',
   );
   assert.strictEqual(
-    win.document.getElementById('cfg-use-worktree').checked,
+    win.document.getElementById('cfg-classify-tasks').checked,
     false,
     'with the panel closed configData must still seed the run toggles',
   );

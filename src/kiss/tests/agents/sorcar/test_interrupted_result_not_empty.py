@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+import yaml
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -69,8 +70,15 @@ def _run_interrupted_and_get_persisted_result(
     parent_class.run = raising_run
     try:
         agent = ChatSorcarAgent("interrupted-result")
-        with pytest.raises(type(exc)):
-            agent.run(prompt_template="my task")
+        if isinstance(exc, Exception):
+            # ``SorcarAgent.run`` turns an ordinary exception into a
+            # ``success: false`` result; only a stop-class
+            # ``BaseException`` unwinds through ``ChatSorcarAgent.run``.
+            result = agent.run(prompt_template="my task")
+            assert yaml.safe_load(result)["success"] is False
+        else:
+            with pytest.raises(type(exc)):
+                agent.run(prompt_template="my task")
         context = _load_chat_context(agent.chat_id)
         assert context, "task was not persisted at all"
         return str(context[-1].get("result") or "")
@@ -102,8 +110,13 @@ def test_system_exit_persists_explicit_marker(tmp_path: Path) -> None:
 
 
 def test_plain_exception_still_persists_task_failed(tmp_path: Path) -> None:
-    """Regression guard: ordinary exceptions keep the 'Task failed' label."""
+    """Regression guard: ordinary exceptions keep a 'Task failed' label.
+
+    ``SorcarAgent.run`` wraps them into a ``success: false`` result
+    whose summary names the error, and that summary is what the row
+    keeps: never empty, never the orphan-sweep sentinel.
+    """
     persisted = _run_interrupted_and_get_persisted_result(
         tmp_path, RuntimeError("boom"),
     )
-    assert persisted == "Task failed"
+    assert persisted == "Task failed with error: boom"

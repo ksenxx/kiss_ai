@@ -19,8 +19,8 @@ from pathlib import Path
 
 from kiss.core.vscode_config import save_config
 from kiss.tests.server._blocking_start import close_leaked_listeners
+from kiss.tests.server.conftest import find_free_port
 from kiss.tests.server.test_blocking_start_releases_port import (
-    _free_port,
     _make_server,
     _start_on_thread,
     _stop_thread,
@@ -34,7 +34,7 @@ def _watchdog_threads() -> list[threading.Thread]:
 def test_stopped_start_leaves_no_watchdog_thread(tmp_path: Path) -> None:
     save_config({"remote_password": ""})
     before = _watchdog_threads()
-    server = _make_server(tmp_path, "watched", _free_port())
+    server = _make_server(tmp_path, "watched", find_free_port())
     thread = _start_on_thread(server)
     try:
         armed = [t for t in _watchdog_threads() if t not in before]

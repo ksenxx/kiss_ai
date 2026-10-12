@@ -76,13 +76,13 @@ from kiss.server import agent_state, talk_player
 from kiss.server.agent_state import AgentState
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
-from kiss.tests.server.test_talk_endpoint_muting import (
-    _find_free_port,
-    _redirect_persistence,
-    _restore_persistence,
-    _talk_event,
-    _write_player,
+from kiss.tests.server.conftest import (
+    find_free_port,
+    redirect_persistence,
+    restore_persistence,
+    write_fake_player,
 )
+from kiss.tests.server.test_talk_endpoint_muting import _talk_event
 
 
 def _encode(cmd: dict[str, Any]) -> bytes:
@@ -142,9 +142,9 @@ class TestLocalInterestRaces(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.marker_dir = Path(self.tmpdir) / "markers"
-        player = _write_player(Path(self.tmpdir), self.marker_dir)
+        player = write_fake_player(Path(self.tmpdir), self.marker_dir)
         self.saved_play_cmd = os.environ.get("KISS_SORCAR_PLAY_CMD")
         os.environ["KISS_SORCAR_PLAY_CMD"] = (
             f"{shlex.quote(sys.executable)} {shlex.quote(str(player))}"
@@ -157,7 +157,7 @@ class TestLocalInterestRaces(IsolatedAsyncioTestCase):
         _generate_self_signed_cert(certfile, keyfile)
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
@@ -186,7 +186,7 @@ class TestLocalInterestRaces(IsolatedAsyncioTestCase):
         talk_player.reset_shared_player_for_tests()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     # ----------------------------------------------------------- helpers

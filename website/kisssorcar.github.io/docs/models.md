@@ -1,6 +1,6 @@
 # Models Supported by KISS Sorcar
 
-> KISS Sorcar ships a catalog of **695 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`).
+> KISS Sorcar ships a catalog of **761 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`).
 
 The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
@@ -8,22 +8,22 @@ The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`]
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 106 |
-| Anthropic | 16 |
+| OpenAI | 111 |
+| Anthropic | 76 |
 | Gemini | 20 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 407 |
-| Claude Code CLI (`cc/*`) | 16 |
-| Codex CLI (`codex/*`) | 9 |
+| OpenRouter | 406 |
+| Claude Code CLI (`cc/*`) | 17 |
+| Codex CLI (`codex/*`) | 10 |
 
 ## Capability Totals
 
-- **676** generation-capable models
-- **509** function-calling-capable models
+- **736** generation-capable models
+- **578** function-calling-capable models
 - **7** embedding models
-- **4** decision models
+- **11** decision models
 
 ## Configuring Model Access
 
@@ -44,7 +44,7 @@ Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom
 ## Model Namespaces
 
 - Plain names (e.g. `claude-sonnet-4-6`, `gpt-4.1`) map to the native provider APIs.
-- `openrouter/...` routes through OpenRouter (407 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
+- `openrouter/...` routes through OpenRouter (406 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
 - `cc/haiku`, `cc/sonnet`, `cc/opus` run on top of the Claude Code CLI.
 - `codex/...` (e.g. `codex/gpt-5.6-sol`) run on top of the Codex CLI.
 

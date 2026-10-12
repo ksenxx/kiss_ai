@@ -34,11 +34,11 @@ from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.core import vscode_config
+from kiss.tests.server.conftest import run_git
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     StandInModelServer,
     finish_response,
-    run_git,
     tool_call_response,
 )
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
@@ -80,8 +80,6 @@ class ReplayInCloneTest(DaemonLocalHarness):
                 "custom_api_key": "kiss-test-key",
                 "use_web_browser": False,
                 "auto_classify": False,
-                "auto_commit_mode": False,
-                "is_worktree": False,
             }),
             encoding="utf-8",
         )
@@ -153,7 +151,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         row = sea._task_row(out["replay_task_id"])
         assert row is not None, out
         assert row["task"] == out["task"] and row["work_dir"] == str(clone)
-        assert row["model"] == STANDIN_MODEL and not row["is_worktree"]
+        assert row["model"] == STANDIN_MODEL
         assert row["cost"] > 0 and row["steps"] == result["steps"]
         agentic = [r for r in self.requests if r.get("tools")]
         assert len(agentic) == 2, [list(r) for r in self.requests]
@@ -236,7 +234,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         row = sea._task_row(out["replay_task_id"])
         assert row is not None, out
         assert row["task"] == task and row["work_dir"] == str(self.checkout)
-        assert row["model"] == STANDIN_MODEL and not row["is_worktree"]
+        assert row["model"] == STANDIN_MODEL
         agentic = [r for r in self.requests if r.get("tools")]
         assert len(agentic) == 2, [list(r) for r in self.requests]
         system = next(m for m in agentic[0]["messages"] if m["role"] == "system")

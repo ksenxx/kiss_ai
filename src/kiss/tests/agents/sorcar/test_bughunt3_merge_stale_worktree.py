@@ -10,7 +10,7 @@ cleanup, manual ``rm -rf``, host reboot wiping a tmpfs) but the
 worktree is still REGISTERED in git's bookkeeping, ``git branch -d/-D``
 refuses to delete the branch ("used by worktree at ...").
 
-``WorktreeSorcarAgent.merge()`` skipped ``_finalize_worktree()`` (the
+``ChatSorcarAgent.merge()`` skipped ``_finalize_worktree()`` (the
 only step that runs ``git worktree prune``) whenever ``wt_dir`` did not
 exist, so a successful squash-merge silently left the ``kiss/wt-*``
 branch behind forever: ``_do_merge`` ignores the ``delete_branch``
@@ -26,8 +26,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, _git
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(path: Path) -> Path:
@@ -91,7 +91,7 @@ class TestMergeWithStaleWorktreeRegistration:
             shutil.rmtree(wt_dir)
             assert _is_registered_worktree(repo, wt_dir)
 
-            agent = WorktreeSorcarAgent("bh3-stale")
+            agent = ChatSorcarAgent("bh3-stale")
             agent._wt = GitWorktree(
                 repo_root=repo,
                 branch=branch,
@@ -129,7 +129,7 @@ class TestMergeWithStaleWorktreeRegistration:
             shutil.rmtree(wt_dir)
             assert _is_registered_worktree(repo, wt_dir)
 
-            agent = WorktreeSorcarAgent("bh3-stale-baseline")
+            agent = ChatSorcarAgent("bh3-stale-baseline")
             agent._wt = GitWorktree(
                 repo_root=repo,
                 branch=branch,

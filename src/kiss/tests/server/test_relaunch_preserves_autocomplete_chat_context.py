@@ -60,7 +60,6 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _flush_chat_events,
@@ -70,26 +69,9 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 _MARKER = "zephyrIdentifierMarker"
-
-
-def _redirect_persistence(tmpdir: str) -> tuple:
-    """Point the persistence module at an isolated .kiss dir inside tmpdir."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_persistence(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
 def _wait_for_event(
@@ -117,11 +99,11 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         self._saved_kiss_home = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = str(Path(self._tmpdir) / ".kiss")
-        self._saved_persistence = _redirect_persistence(self._tmpdir)
+        self._saved_persistence = redirect_persistence(self._tmpdir)
         agent_state.agent_states.clear()
 
     def tearDown(self) -> None:
-        _restore_persistence(self._saved_persistence)
+        restore_persistence(self._saved_persistence)
         if self._saved_kiss_home is None:
             os.environ.pop("KISS_HOME", None)
         else:

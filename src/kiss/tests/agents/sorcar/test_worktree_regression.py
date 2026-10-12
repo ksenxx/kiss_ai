@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression tests for WorktreeSorcarAgent refactoring.
+"""Regression tests for ChatSorcarAgent refactoring.
 
 These tests capture current PUBLIC API behavior that must be preserved
 when executing PLAN.md.  They focus on contract boundaries, edge cases
@@ -23,9 +23,10 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import _git
+from kiss.agents.sorcar.relentless_agent import resolve_work_dir
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_error import KISSError
 
 
@@ -71,10 +72,13 @@ def _make_repo(path: Path) -> Path:
 def _patch_super_run(
     return_value: str = "success: true\nsummary: test done\n",
 ) -> Any:
+    """Stub the parent ``run``: enter the work dir and call ``create_worktree``."""
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
-    def fake_run(self_agent: object, **kwargs: object) -> str:
+    def fake_run(self_agent: Any, **kwargs: Any) -> str:
+        self_agent.work_dir = resolve_work_dir(kwargs.get("work_dir"))
+        self_agent.create_worktree()
         return return_value
 
     parent_class.run = fake_run
@@ -87,7 +91,7 @@ def _unpatch_super_run(original: Any) -> None:
 
 
 class TestWorktreeRegression:
-    """Regression tests for WorktreeSorcarAgent refactoring safety."""
+    """Regression tests for ChatSorcarAgent refactoring safety."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -100,8 +104,8 @@ class TestWorktreeRegression:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _agent(self, chat_id: str | None = None) -> WorktreeSorcarAgent:
-        agent = WorktreeSorcarAgent("test")
+    def _agent(self, chat_id: str | None = None) -> ChatSorcarAgent:
+        agent = ChatSorcarAgent("test")
         if chat_id:
             agent.resume_chat_by_id(chat_id)
         return agent
@@ -113,7 +117,9 @@ class TestWorktreeRegression:
         parent_class = cast(Any, SorcarAgent.__mro__[1])
         orig = parent_class.run
 
-        def raising_run(self_agent: object, **kwargs: object) -> str:
+        def raising_run(self_agent: Any, **kwargs: Any) -> str:
+            self_agent.work_dir = resolve_work_dir(kwargs.get("work_dir"))
+            self_agent.create_worktree()
             raise KISSError("budget exceeded")
 
         parent_class.run = raising_run

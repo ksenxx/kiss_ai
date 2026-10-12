@@ -108,6 +108,33 @@ def _daemon_running() -> bool:
         probe.close()
 
 
+def _connect_daemon(sock: socket.socket) -> None:
+    """Connect *sock* to the daemon socket, waiting out a momentarily full accept backlog.
+
+    A socket with a timeout is non-blocking underneath, and Linux answers
+    a non-blocking connect to a Unix listener whose backlog is full with
+    ``EAGAIN`` instead of queueing it.  A burst of concurrent clients (the
+    first requests of many agent threads) hits that while the daemon's
+    accept loop is still handing earlier connections to worker threads,
+    so retry until the socket's own timeout elapses.
+
+    Args:
+        sock: An unconnected Unix-domain socket with a timeout set.
+
+    Raises:
+        OSError: When the daemon does not accept within the timeout.
+    """
+    deadline = time.monotonic() + (sock.gettimeout() or 0.0)
+    while True:
+        try:
+            sock.connect(str(socket_path()))
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.005)
+
+
 def _raw_op(payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any] | None:
     """Send one frame to an already-running daemon without auto-spawn.
 
@@ -124,7 +151,7 @@ def _raw_op(payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any] | 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
-        sock.connect(str(socket_path()))
+        _connect_daemon(sock)
         send_frame(sock, payload)
         return recv_frame(sock)
     except (OSError, ValueError):
@@ -281,7 +308,7 @@ def _op(payload: dict[str, Any], timeout: float = _DEFAULT_TIMEOUT) -> dict[str,
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout + 30.0)
     try:
-        sock.connect(str(socket_path()))
+        _connect_daemon(sock)
         send_frame(sock, payload)
         return recv_frame(sock)
     except (OSError, ValueError) as e:
@@ -356,24 +383,36 @@ def store_credentials(
 def vault_has_credentials(service: str) -> bool:
     """Return whether the daemon vault holds a credential for *service*.
 
+    A plain check of the vault file on disk (``<muse_auth>/vault/<service>.json``,
+    see :meth:`~kiss.agents.third_party_agents.muse_auth.vault.CredentialVault._entry_path`),
+    so it starts no daemon: channel agents call it to decide whether to
+    expose their backend tools before anything has connected.
+
     Args:
         service: Connector service name.
 
     Returns:
         True when the service is enrolled.
     """
-    return service in enrolled_services()
+    return (muse_auth_dir() / "vault" / f"{service}.json").is_file()
 
 
 def enrolled_services() -> list[str]:
     """Return every service enrolled in the daemon vault.
 
-    Includes workspace-keyed names such as ``slack-<slug>-<hash>``.
+    Includes workspace-keyed names such as ``slack-<slug>-<hash>``.  The
+    answer is the same disk listing the daemon's ``status`` op returns
+    (``<muse_auth>/vault/*.json`` stems), read here directly so that a
+    status probe (sidebar channel status, ``auth_status.vault_services``)
+    never spawns a daemon as a side effect.
 
     Returns:
         Sorted service names.
     """
-    return [str(s) for s in _checked({"op": "status"}).get("services", [])]
+    vault_dir = muse_auth_dir() / "vault"
+    if not vault_dir.is_dir():
+        return []
+    return sorted(p.stem for p in vault_dir.glob("*.json"))
 
 
 def mint_surrogate(service: str) -> SurrogateCredentials | None:

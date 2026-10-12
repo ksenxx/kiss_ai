@@ -6,7 +6,7 @@
 
 Every surface (VS Code windows, the remote webapp) shares the daemon's
 single working directory: ``setWorkDir`` from any connection -- the
-"Working directory" panel, the remote Explorer's check mark -- adopts
+chat-header work-dir drop-down, the remote Explorer's check mark -- adopts
 it for every task of every connection, persists it as ``config.json``
 ``work_dir`` and broadcasts ``workDirChanged`` to every client.  A
 command carrying its own ``workDir`` (the Python API's ``work_dir=``)
@@ -36,31 +36,7 @@ import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
-
-
-def _file_names(event: dict[str, Any]) -> list[str]:
-    """Extract the file-name strings from a ``files`` event."""
-    names: list[str] = []
-    for entry in event.get("files", []):
-        if isinstance(entry, dict):
-            names.append(str(entry.get("text", "")))
-        else:
-            names.append(str(entry))
-    return names
+from kiss.tests.server.conftest import file_names, redirect_persistence, restore_persistence
 
 
 class TestGlobalWorkDir(IsolatedAsyncioTestCase):
@@ -68,7 +44,7 @@ class TestGlobalWorkDir(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
         self.dir_a = Path(self.tmpdir) / "ws_a"
         self.dir_b = Path(self.tmpdir) / "ws_b"
@@ -103,7 +79,7 @@ class TestGlobalWorkDir(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect(
@@ -153,7 +129,7 @@ class TestGlobalWorkDir(IsolatedAsyncioTestCase):
             return (
                 msg.get("type") == "files"
                 and not msg.get("loading")
-                and name in _file_names(msg)
+                and name in file_names(msg)
             )
         return _pred
 
@@ -181,7 +157,7 @@ class TestGlobalWorkDir(IsolatedAsyncioTestCase):
         ev_a = await self._drain_until(
             reader_a, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("./alpha.txt", _file_names(ev_a))
+        self.assertNotIn("./alpha.txt", file_names(ev_a))
 
         await self._send(
             writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
@@ -190,7 +166,7 @@ class TestGlobalWorkDir(IsolatedAsyncioTestCase):
         ev_b = await self._drain_until(
             reader_b, self._files_event_with("./alpha.txt"),
         )
-        self.assertNotIn("./beta.txt", _file_names(ev_b))
+        self.assertNotIn("./beta.txt", file_names(ev_b))
 
     async def test_set_work_dir_persists_and_broadcasts(self) -> None:
         """``setWorkDir`` persists ``config.json`` ``work_dir`` (a daemon
@@ -252,7 +228,7 @@ class TestGlobalWorkDir(IsolatedAsyncioTestCase):
         ev_b = await self._drain_until(
             reader_b, self._files_event_with("./alpha.txt"),
         )
-        self.assertNotIn("./beta.txt", _file_names(ev_b))
+        self.assertNotIn("./beta.txt", file_names(ev_b))
         self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_a))
 
     async def test_explicit_work_dir_wins_over_global_work_dir(
@@ -272,7 +248,7 @@ class TestGlobalWorkDir(IsolatedAsyncioTestCase):
         ev = await self._drain_until(
             reader_a, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("./alpha.txt", _file_names(ev))
+        self.assertNotIn("./alpha.txt", file_names(ev))
 
     async def test_empty_set_work_dir_keeps_global_work_dir(self) -> None:
         """An empty ``setWorkDir`` must not clear the global value."""
@@ -285,7 +261,7 @@ class TestGlobalWorkDir(IsolatedAsyncioTestCase):
         ev = await self._drain_until(
             reader_a, self._files_event_with("./alpha.txt"),
         )
-        self.assertNotIn("./beta.txt", _file_names(ev))
+        self.assertNotIn("./beta.txt", file_names(ev))
 
     async def test_concurrent_adoptions_end_in_one_consistent_state(
         self,

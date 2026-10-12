@@ -6,7 +6,7 @@
 
 Production log evidence (``~/.kiss/kiss-web-stderr.log``)::
 
-    2026-06-26 07:23:14,148 WARNING kiss.agents.sorcar.worktree_sorcar_agent:
+    2026-06-26 07:23:14,148 WARNING kiss.agents.sorcar.sorcar_agent:
         Worktree has uncommitted changes after auto-commit
         (pre-commit hook may have rejected); preserving:
         /Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1782483430-cb03445c

@@ -51,7 +51,7 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 
@@ -95,7 +95,7 @@ def _drive_run_task_with_base_exception(
 
     server.printer.broadcast = capture  # type: ignore[assignment]
 
-    agent = WorktreeSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar VS Code")
     state = AgentState(
         f"state-{tab_id}",
         agent=agent,

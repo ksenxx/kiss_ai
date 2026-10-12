@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir, socket_path
-from kiss.agents.third_party_agents.muse_auth.client import enrolled_services, ensure_daemon
+from kiss.agents.third_party_agents.muse_auth.client import ensure_daemon, revoke
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     _daemon_pid,
     _process_running,
@@ -84,7 +84,9 @@ def test_client_recovers_right_after_home_is_recreated(
         for _ in range(5):
             shutil.rmtree(isolated_kiss_home)
             isolated_kiss_home.mkdir()
-            assert enrolled_services() == []
+            # A real daemon op (enrolled_services() answers from disk and
+            # never touches the daemon).
+            assert revoke("nothing-enrolled") == 0
             assert muse_auth_dir().is_dir(), "ensure_daemon did not restore the state dir"
     finally:
         teardown_muse_env()

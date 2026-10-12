@@ -25,7 +25,7 @@ import time
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 
 
@@ -55,7 +55,7 @@ def _start_source_task(
     Returns the registered state, the started task thread, and an
     event set once the stubbed run is executing.
     """
-    agent = WorktreeSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar VS Code")
     state = agent_state.AgentState(
         task_id,
         agent=agent,

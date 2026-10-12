@@ -35,7 +35,6 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
@@ -43,6 +42,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 def _finish_response(model: str = "gpt-4o-mini") -> dict:
@@ -103,21 +103,6 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-def _redirect(tmpdir: str) -> tuple:
-    """Point the persistence module at a temp directory."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return old
-
-
-def _restore(saved: tuple) -> None:
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
 class _RecordingPrinter(JsonPrinter):
     """Captures every broadcast event AFTER ``_inject_task_id`` runs.
 
@@ -151,7 +136,7 @@ class TestNewTabStaleTaskId:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.srv, self.url = _start_server()
         agent_state.agent_states.clear()
 
@@ -160,7 +145,7 @@ class TestNewTabStaleTaskId:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         agent_state.agent_states.clear()
 

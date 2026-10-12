@@ -27,7 +27,7 @@ Covers:
   and leftovers never leak into a later run on the same tab.
 
 Drives the real ``VSCodeServer._run_task`` lifecycle with a real
-``WorktreeSorcarAgent`` subclass whose ``run`` returns a scripted
+``ChatSorcarAgent`` subclass whose ``run`` returns a scripted
 ``finish()`` result (the same harness as
 ``test_suggested_next_task_e2e.py``).  No mocks or patches.
 """
@@ -40,8 +40,8 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.core.utils import finish
 from kiss.server import agent_state
@@ -201,7 +201,7 @@ class TestSteeringMessageRouting:
         assert st.pending_user_messages == ["<task>too late</task>"]
 
 
-class _QueueScriptedAgent(WorktreeSorcarAgent):
+class _QueueScriptedAgent(ChatSorcarAgent):
     """Real agent subclass whose ``run`` returns a scripted ``finish()``.
 
     Records every prompt it is run with.  During its FIRST run it can

@@ -29,9 +29,9 @@ from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import _file_version
 from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_content_tab_file_links import (
     _PY_SOURCE,
-    _no_verify_ssl,
     _ServerHarness,
     harness,  # noqa: F401  (module fixture used by param name)
 )
@@ -42,7 +42,7 @@ async def _ws_request(
 ) -> list[dict]:
     """Authenticate over wss://, send every payload on ONE connection,
     return the *reply_type* replies in order (one per payload)."""
-    async with connect(harness.ws_url, ssl=_no_verify_ssl()) as ws:
+    async with connect(harness.ws_url, ssl=no_verify_ssl()) as ws:
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         while True:
             msg = json.loads(await asyncio.wait_for(ws.recv(), 30))
@@ -265,7 +265,7 @@ class TestSaveFile:
         target.write_text("z\n")
 
         async def _probe() -> list[dict]:
-            async with connect(harness.ws_url, ssl=_no_verify_ssl()) as ws:
+            async with connect(harness.ws_url, ssl=no_verify_ssl()) as ws:
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
                 while True:
                     msg = json.loads(await asyncio.wait_for(ws.recv(), 30))

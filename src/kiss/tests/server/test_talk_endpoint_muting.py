@@ -53,8 +53,6 @@ import json
 import os
 import shlex
 import shutil
-import socket
-import ssl
 import sys
 import tempfile
 import time
@@ -69,62 +67,16 @@ import kiss.agents.sorcar.persistence as th
 from kiss.server import talk_player
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import (
+    find_free_port,
+    no_verify_ssl,
+    redirect_persistence,
+    restore_persistence,
+    write_fake_player,
+)
 
 MP3_BYTES = b"ID3\x03\x00fake-mp3-frames-" + bytes(range(64))
 MP3_B64 = base64.b64encode(MP3_BYTES).decode("ascii")
-
-
-def _find_free_port() -> int:
-    """Find an available TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return an SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
-
-
-def _write_player(tmp_path: Path, marker_dir: Path) -> Path:
-    """Write a python script standing in for the daemon's audio player.
-
-    The script receives the audio file path as its LAST argument and
-    writes one unique JSON marker file into *marker_dir* recording the
-    audio bytes (base64) it read.
-    """
-    marker_dir.mkdir(parents=True, exist_ok=True)
-    script = tmp_path / "fake_player.py"
-    script.write_text(
-        "import base64, json, os, sys, uuid\n"
-        f"marker_dir = {str(marker_dir)!r}\n"
-        "path = sys.argv[-1]\n"
-        "with open(path, 'rb') as fh:\n"
-        "    data = fh.read()\n"
-        "marker = os.path.join(marker_dir, uuid.uuid4().hex + '.json')\n"
-        "with open(marker, 'w') as fh:\n"
-        "    json.dump({'audio_b64':"
-        " base64.b64encode(data).decode('ascii')}, fh)\n"
-    )
-    return script
 
 
 def _talk_event(task_id: str, talk_id: str) -> dict[str, object]:
@@ -146,9 +98,9 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.marker_dir = Path(self.tmpdir) / "markers"
-        player = _write_player(Path(self.tmpdir), self.marker_dir)
+        player = write_fake_player(Path(self.tmpdir), self.marker_dir)
         self.saved_play_cmd = os.environ.get("KISS_SORCAR_PLAY_CMD")
         os.environ["KISS_SORCAR_PLAY_CMD"] = (
             f"{shlex.quote(sys.executable)} {shlex.quote(str(player))}"
@@ -159,7 +111,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
 
         _generate_self_signed_cert(certfile, keyfile)
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -187,7 +139,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         talk_player.reset_shared_player_for_tests()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect_local(
@@ -305,7 +257,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         )
         local_reader, _local_writer = await self._connect_local(tab_id)
         url = f"wss://127.0.0.1:{self.port}/ws"
-        async with connect(url, ssl=_no_verify_ssl()) as ws:
+        async with connect(url, ssl=no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")

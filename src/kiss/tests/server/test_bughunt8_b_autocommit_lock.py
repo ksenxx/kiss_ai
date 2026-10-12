@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt 8 (group B): autocommit misreports a failed ``git add``.
 
-``_MergeFlowMixin._autocommit_changes`` (né ``_handle_autocommit_action``)
+``_MergeFlowMixin._commit_main_tree`` (né ``_handle_autocommit_action``)
 ignored the exit status
 of ``git add -A``.  When staging fails — e.g. ``.git/index.lock`` is
 held by another git process (editor, GUI client, crashed git) — the
@@ -69,7 +69,7 @@ class TestAutocommitStagingFailure(unittest.TestCase):
         (self.repo / "f.txt").write_text("one\ntwo\n")
         (self.repo / ".git" / "index.lock").write_text("")
         try:
-            self.server._autocommit_changes(
+            self.server._commit_main_tree(
                 self.tab_id, work_dir=str(self.repo),
             )
         finally:

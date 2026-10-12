@@ -2,67 +2,46 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for Issue 1: all channel backends use ToolMethodBackend mixin.
+"""Every channel backend uses the ToolMethodBackend mixin.
 
-Verifies that every channel backend inherits from ToolMethodBackend, that
-get_tool_methods() returns only callable methods, and that protocol methods
-are properly excluded.
+The backends are discovered from every ``*_sea`` module under
+``kiss.agents.third_party_agents`` (classes named ``*ChannelBackend``), so a
+new channel is covered without editing this file.
 """
 
 from __future__ import annotations
 
+import importlib
+import inspect
+import pkgutil
+
 import pytest
 
+import kiss.agents.third_party_agents as _agents_pkg
 from kiss.agents.third_party_agents._channel_agent_utils import ToolMethodBackend
-from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import BlueBubblesChannelBackend
-from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend
-from kiss.agents.third_party_agents.feishu.feishu_sea import FeishuChannelBackend
-from kiss.agents.third_party_agents.gmail.gmail_sea import GmailChannelBackend
-from kiss.agents.third_party_agents.googlechat.googlechat_sea import GoogleChatChannelBackend
-from kiss.agents.third_party_agents.imessage.imessage_sea import IMessageChannelBackend
-from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend
-from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
-from kiss.agents.third_party_agents.matrix.matrix_sea import MatrixChannelBackend
-from kiss.agents.third_party_agents.mattermost.mattermost_sea import MattermostChannelBackend
-from kiss.agents.third_party_agents.msteams.msteams_sea import MSTeamsChannelBackend
-from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalkChannelBackend
-from kiss.agents.third_party_agents.nostr.nostr_sea import NostrChannelBackend
-from kiss.agents.third_party_agents.phone.phone_sea import PhoneControlChannelBackend
-from kiss.agents.third_party_agents.signal.signal_sea import SignalChannelBackend
-from kiss.agents.third_party_agents.slack.slack_sea import SlackChannelBackend
-from kiss.agents.third_party_agents.sms.sms_sea import SMSChannelBackend
-from kiss.agents.third_party_agents.synology.synology_sea import SynologyChatChannelBackend
-from kiss.agents.third_party_agents.telegram.telegram_sea import TelegramChannelBackend
-from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
-from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchChannelBackend
-from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import WhatsAppChannelBackend
-from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
 
-ALL_BACKENDS = [
-    BlueBubblesChannelBackend,
-    DiscordChannelBackend,
-    FeishuChannelBackend,
-    GmailChannelBackend,
-    GoogleChatChannelBackend,
-    IMessageChannelBackend,
-    IRCChannelBackend,
-    LineChannelBackend,
-    MatrixChannelBackend,
-    MattermostChannelBackend,
-    MSTeamsChannelBackend,
-    NextcloudTalkChannelBackend,
-    NostrChannelBackend,
-    PhoneControlChannelBackend,
-    SignalChannelBackend,
-    SlackChannelBackend,
-    SMSChannelBackend,
-    SynologyChatChannelBackend,
-    TelegramChannelBackend,
-    TlonChannelBackend,
-    TwitchChannelBackend,
-    WhatsAppChannelBackend,
-    ZaloChannelBackend,
-]
+
+def _all_channel_backends() -> list[type]:
+    """Return every ``*ChannelBackend`` class defined in a ``*_sea`` module."""
+    classes: list[type] = []
+    for info in pkgutil.walk_packages(_agents_pkg.__path__, _agents_pkg.__name__ + "."):
+        if not info.name.endswith("_sea"):
+            continue
+        module = importlib.import_module(info.name)
+        for name, cls in inspect.getmembers(module, inspect.isclass):
+            if name.endswith("ChannelBackend") and cls.__module__ == module.__name__:
+                classes.append(cls)
+    return sorted(classes, key=lambda c: c.__name__)
+
+
+ALL_BACKENDS = _all_channel_backends()
+
+
+def test_backends_were_discovered() -> None:
+    """Discovery finds the known channel backends (guards against a silent empty list)."""
+    names = {cls.__name__ for cls in ALL_BACKENDS}
+    assert {"SlackChannelBackend", "TelegramChannelBackend", "DiscordChannelBackend"} <= names
+    assert len(ALL_BACKENDS) >= 40
 
 
 @pytest.mark.parametrize("cls", ALL_BACKENDS, ids=lambda c: c.__name__)

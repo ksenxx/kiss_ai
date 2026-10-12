@@ -27,13 +27,7 @@ from kiss.agents.sorcar import local_endpoint
 from kiss.core.vscode_config import save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server._blocking_start import close_leaked_listeners
-
-
-def _free_port() -> int:
-    """Return a TCP port that is free right now."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+from kiss.tests.server.conftest import find_free_port
 
 
 def _make_server(tmp_path: Path, name: str, port: int) -> RemoteAccessServer:
@@ -108,7 +102,7 @@ async def _bind_successor(successor: RemoteAccessServer) -> tuple[str, float]:
 
 def test_stopped_blocking_start_releases_port_for_successor(tmp_path: Path) -> None:
     save_config({"remote_password": ""})
-    port = _free_port()
+    port = find_free_port()
     server = _make_server(tmp_path, "first", port)
     thread = _start_on_thread(server)
     try:

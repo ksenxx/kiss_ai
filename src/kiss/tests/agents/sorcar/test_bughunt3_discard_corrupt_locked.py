@@ -27,8 +27,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, _git
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(path: Path) -> Path:
@@ -61,13 +61,13 @@ def _make_repo(path: Path) -> Path:
     return path
 
 
-def _setup_pending_agent(repo: Path, branch: str) -> tuple[WorktreeSorcarAgent, Path]:
+def _setup_pending_agent(repo: Path, branch: str) -> tuple[ChatSorcarAgent, Path]:
     """Create a worktree and an agent with that worktree pending."""
     GitWorktreeOps.ensure_excluded(repo)
     slug = branch.replace("/", "_")
     wt_dir = repo / ".kiss-worktrees" / slug
     assert GitWorktreeOps.create(repo, branch, wt_dir)
-    agent = WorktreeSorcarAgent("bh3-discard")
+    agent = ChatSorcarAgent("bh3-discard")
     agent._wt = GitWorktree(
         repo_root=repo,
         branch=branch,

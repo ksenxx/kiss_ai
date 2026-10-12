@@ -9,7 +9,10 @@ BUG 2: copy_dirty_state doesn't delete old file on rename
 BUG 3: stash pop failure silently loses user's dirty edits
 BUG 4 (obsolete): covered _parse_diff_hunks/_prepare_merge_view of the
     interactive merge review, removed with the diff/merge workflow
-BUG 5: _release_worktree returns misleading branch on checkout failure
+BUG 5 (obsolete): covered ``_release_worktree``'s branch fallback on
+    checkout failure, removed with the automatic post-task merge (a
+    pending worktree is now merged only by ``commit_and_merge`` or the
+    user's Merge button)
 """
 
 from __future__ import annotations
@@ -148,11 +151,9 @@ class TestBug3StashPopWarning:
             th._DB_PATH = kiss_dir / "history.db"
             th._db_conn = None
             try:
-                from kiss.agents.sorcar.worktree_sorcar_agent import (
-                    WorktreeSorcarAgent,
-                )
+                from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-                agent = WorktreeSorcarAgent("test")
+                agent = ChatSorcarAgent("test")
                 agent._wt = GitWorktree(
                     repo_root=repo,
                     branch=branch,
@@ -167,52 +168,6 @@ class TestBug3StashPopWarning:
                     pass
                 else:
                     assert "Successfully merged" in result
-            finally:
-                if th._db_conn is not None:
-                    th._db_conn.close()
-                    th._db_conn = None
-                th._DB_PATH, th._db_conn, th._KISS_DIR = old_db
-
-    def test_release_sets_stash_pop_warning(self) -> None:
-        """_release_worktree sets _stash_pop_warning on stash pop failure."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-            branch = "kiss/wt-stash-2"
-            wt_dir = _create_worktree(repo, branch)
-            GitWorktreeOps.save_original_branch(repo, branch, "main")
-
-            (wt_dir / "README.md").write_text("# Agent version\n")
-            GitWorktreeOps.commit_all(wt_dir, "agent change")
-
-            GitWorktreeOps.remove(repo, wt_dir)
-            GitWorktreeOps.prune(repo)
-            _git("checkout", "main", cwd=repo)
-
-            (repo / "README.md").write_text("<<<conflict-marker>>>\n")
-
-            import kiss.agents.sorcar.persistence as th
-            old_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-            kiss_dir = Path(tmp) / ".kiss"
-            kiss_dir.mkdir(parents=True, exist_ok=True)
-            th._KISS_DIR = kiss_dir
-            th._DB_PATH = kiss_dir / "history.db"
-            th._db_conn = None
-            try:
-                from kiss.agents.sorcar.worktree_sorcar_agent import (
-                    WorktreeSorcarAgent,
-                )
-
-                agent = WorktreeSorcarAgent("test")
-                agent._wt = GitWorktree(
-                    repo_root=repo,
-                    branch=branch,
-                    original_branch="main",
-                    wt_dir=wt_dir,
-                )
-
-                agent._release_worktree()
-                if agent._stash_pop_warning:
-                    assert "git stash pop" in agent._stash_pop_warning
             finally:
                 if th._db_conn is not None:
                     th._db_conn.close()
@@ -244,11 +199,9 @@ class TestBug3StashPopWarning:
             th._DB_PATH = kiss_dir / "history.db"
             th._db_conn = None
             try:
-                from kiss.agents.sorcar.worktree_sorcar_agent import (
-                    WorktreeSorcarAgent,
-                )
+                from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-                agent = WorktreeSorcarAgent("test")
+                agent = ChatSorcarAgent("test")
                 agent._wt = GitWorktree(
                     repo_root=repo,
                     branch=branch,
@@ -259,87 +212,6 @@ class TestBug3StashPopWarning:
                 result = agent.merge()
                 assert "Successfully merged" in result
                 assert "git stash pop" not in result
-            finally:
-                if th._db_conn is not None:
-                    th._db_conn.close()
-                    th._db_conn = None
-                th._DB_PATH, th._db_conn, th._KISS_DIR = old_db
-
-
-class TestBug5ReleaseWorktreeCheckoutFailure:
-    """_release_worktree returns None when checkout fails."""
-
-    def test_checkout_failure_returns_none(self) -> None:
-        """When checkout fails, return None so caller uses current_branch()."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-            branch = "kiss/wt-co-fail"
-            wt_dir = _create_worktree(repo, branch)
-            GitWorktreeOps.save_original_branch(repo, branch, "nonexistent")
-
-            import kiss.agents.sorcar.persistence as th
-            old_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-            kiss_dir = Path(tmp) / ".kiss"
-            kiss_dir.mkdir(parents=True, exist_ok=True)
-            th._KISS_DIR = kiss_dir
-            th._DB_PATH = kiss_dir / "history.db"
-            th._db_conn = None
-            try:
-                from kiss.agents.sorcar.worktree_sorcar_agent import (
-                    WorktreeSorcarAgent,
-                )
-
-                agent = WorktreeSorcarAgent("test")
-                agent._wt = GitWorktree(
-                    repo_root=repo,
-                    branch=branch,
-                    original_branch="nonexistent",
-                    wt_dir=wt_dir,
-                )
-
-                result = agent._release_worktree()
-                assert result is None
-                assert agent._wt is None
-            finally:
-                if th._db_conn is not None:
-                    th._db_conn.close()
-                    th._db_conn = None
-                th._DB_PATH, th._db_conn, th._KISS_DIR = old_db
-
-    def test_try_setup_uses_current_branch_on_failure(self) -> None:
-        """After checkout failure, _try_setup_worktree falls back to current_branch."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-
-            old_branch = "kiss/wt-old-fail"
-            old_wt_dir = _create_worktree(repo, old_branch)
-            GitWorktreeOps.save_original_branch(repo, old_branch, "nonexistent")
-
-            import kiss.agents.sorcar.persistence as th
-            old_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-            kiss_dir = Path(tmp) / ".kiss"
-            kiss_dir.mkdir(parents=True, exist_ok=True)
-            th._KISS_DIR = kiss_dir
-            th._DB_PATH = kiss_dir / "history.db"
-            th._db_conn = None
-            try:
-                from kiss.agents.sorcar.worktree_sorcar_agent import (
-                    WorktreeSorcarAgent,
-                )
-
-                agent = WorktreeSorcarAgent("test")
-                agent._chat_id = "testchat"
-                agent._wt = GitWorktree(
-                    repo_root=repo,
-                    branch=old_branch,
-                    original_branch="nonexistent",
-                    wt_dir=old_wt_dir,
-                )
-
-                wt_work_dir = agent._try_setup_worktree(repo, str(repo))
-                if wt_work_dir is not None:
-                    assert agent._wt is not None
-                    assert agent._wt.original_branch == "main"
             finally:
                 if th._db_conn is not None:
                     th._db_conn.close()

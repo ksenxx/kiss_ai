@@ -114,7 +114,7 @@ def test_events_journalled_against_the_old_path_are_replayed(kiss_dir: Path) -> 
     ).fetchall()
     assert [json.loads(row["event_json"])["text"] for row in events] == ["kept"]
     assert th._load_final_results(th._final_results_path(str(th._DB_PATH))) == {
-        task_id: "<p>kept</p>",
+        task_id: {"result": "<p>kept</p>", "success": None},
     }
 
 

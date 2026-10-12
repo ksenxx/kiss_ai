@@ -23,8 +23,6 @@ import asyncio
 import json
 import os
 import shutil
-import socket
-import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -40,19 +38,7 @@ from kiss.server.web_server import (
     _generate_self_signed_cert,
 )
 from kiss.tests.conftest import is_root, posix_only
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 class TestDirectoryFileLinks(IsolatedAsyncioTestCase):
@@ -69,7 +55,7 @@ class TestDirectoryFileLinks(IsolatedAsyncioTestCase):
         self.work_dir.mkdir()
         certfile, keyfile = self.tmpdir / "cert.pem", self.tmpdir / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.port = _free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -94,7 +80,7 @@ class TestDirectoryFileLinks(IsolatedAsyncioTestCase):
     async def _open(self, path: str) -> dict[str, Any]:
         """Authenticate, send ``openFile`` for *path*, return the reply."""
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             while True:
