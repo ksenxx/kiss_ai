@@ -143,7 +143,7 @@ def _tool_names(request: dict[str, Any]) -> list[str]:
 def env(monkeypatch: pytest.MonkeyPatch) -> Iterator[IsolatedKissHome]:
     """An isolated KISS home whose config disables worktrees and auto-commit."""
     home = IsolatedKissHome(prefix="kiss-inherit-tools-")
-    home.write_config(is_worktree=False, auto_commit_mode=False, classify_tasks=False)
+    home.write_config(classify_tasks=False)
     try:
         yield home
     finally:
@@ -217,8 +217,6 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
             sea_path=str(repo / "parent_sea.py"),
             model=STANDIN_MODEL,
             model_config=model.model_config,
-            use_worktree=False,
-            auto_commit=False,
             is_parallel=False,
             add_to_prompt=parent_suffix,
             endpoint_file=daemon,

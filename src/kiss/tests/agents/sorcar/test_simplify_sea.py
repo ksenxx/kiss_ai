@@ -223,7 +223,7 @@ class Sea(BaseSea):
 
     def settings(self, settings):
         _count("settings")
-        return settings | {{"use_worktree": False}}
+        return settings | {{"use_memory": False}}
 
     def tools(self, tools):
         _count("tools")
@@ -255,7 +255,7 @@ def test_check_report_and_lint_run_settings_and_tools_once_per_evaluation(
     assert isinstance(check, sea_commands.SeaCheck)
     assert check.seas[-1].path == sea and check.cmd["prompt"] == sea_commands.CHECK_SAMPLE_TASK
     assert check.description == "counts how often its methods run"
-    assert check.settings["use_worktree"] is False and check.tools == []
+    assert check.settings["use_memory"] is False and check.tools == []
     assert _counts(log) == {"settings": 2, "tools": 1}
 
     log.unlink()
@@ -376,7 +376,7 @@ def test_wire_field_keeps_its_aliases_and_camel_case() -> None:
     assert wire_field("auto_classify") == "classifyTasks"
     assert wire_field("use_web_tools") == "useWebTools"
     assert wire_field("model") == "model"
-    assert WORKER_DEFAULTS["use_worktree"] is False
+    assert WORKER_DEFAULTS["use_memory"] is False
 
 
 _REJECTED_SEA = """\
@@ -410,8 +410,8 @@ def test_apply_sea_evaluates_then_applies_the_run(tmp_path: Path) -> None:
     run = sea_commands.evaluate_sea(seas, "do it", "t1")
     direct: dict[str, object] = {"seaPath": str(counting), "prompt": "do it"}
     via_apply = dict(direct)
-    assert apply_run(direct, seas, run) == apply_sea(via_apply, seas) == {"useWorktree"}
-    assert direct["useWorktree"] is False and via_apply["useWorktree"] is False
+    assert apply_run(direct, seas, run) == apply_sea(via_apply, seas) == {"useMemory"}
+    assert direct["useMemory"] is False and via_apply["useMemory"] is False
 
 
 def test_sea_lint_fix_without_paths_rewrites_nothing_in_a_clean_checkout() -> None:

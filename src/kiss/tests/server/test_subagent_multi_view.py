@@ -12,7 +12,7 @@ task, keyed by the sub-agent's own ``task_history`` row id, with
 ``parent_task_id`` set (which makes ``is_subagent`` True) and
 ``chat_id`` mirroring the parent's chat (sub-agents share the
 parent's session).  This makes the sub-agent discoverable to
-:meth:`VSCodeServer._reattach_running_chat` via the ``task_id``
+:meth:`VSCodeServer._attach_viewer_to_running_chat` via the ``task_id``
 disambiguator, so clicking the sub-agent row in the history sidebar
 subscribes the freshly-opened tab to the live event stream without
 stealing the parent's tab.
@@ -26,30 +26,16 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class TestReattachRunningChatTaskIdDisambiguation:
-    """``_reattach_running_chat`` with ``task_id`` must match the
+    """``_attach_viewer_to_running_chat`` with ``task_id`` must match the
     sub-agent's state — not the parent's — even though they share
     ``chat_id``."""
 
@@ -174,7 +160,7 @@ class TestReplaySessionSubscribesRunningSubagent:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
@@ -182,7 +168,7 @@ class TestReplaySessionSubscribesRunningSubagent:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_history_click_subscribes_subagent_stream(self) -> None:

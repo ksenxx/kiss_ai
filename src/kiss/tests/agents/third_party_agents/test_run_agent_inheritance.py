@@ -10,16 +10,15 @@ calling agent the way a ``run_parallel`` child's are
 (:func:`kiss.agents.sorcar.agent_dispatch.inherit_from_parent`): model,
 same-model model configuration, half of the remaining budget, chat id,
 the run's replacement system prompt, appended system-prompt text and
-appended prompt text, web-tools and memory settings, the live Docker
-container, and the
-effective worktree / auto-commit choices.  Channel and cron sub-tasks and
-explicit programmatic callers (``inherit=False``) inherit nothing.
+appended prompt text, web-tools and memory settings, and the live Docker
+container.  Channel and cron sub-tasks and explicit programmatic callers
+(``inherit=False``) inherit nothing.
 
 Every test runs the real dispatch path over the wire to a
 :class:`~kiss.tests.agents.third_party_agents.recording_daemon.RecordingDaemon`,
 which records the ``run`` command ``daemon_client.run`` sends and answers
 it with a scripted success; the tests assert on that command's wire
-fields.  The full-run tests drive a real ``WorktreeSorcarAgent.run``
+fields.  The full-run tests drive a real ``ChatSorcarAgent.run``
 against a scripted local model endpoint whose first answer is the
 ``run_agent`` tool call.  The module lives in this
 directory for the same reason as ``test_agent_dispatch.py``: the tool
@@ -41,7 +40,6 @@ from kiss.agents.sorcar.agent_dispatch import RunOptions, dispatch_result, make_
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cron_agent import UNATTENDED_CHILD_PREAMBLE, unattended_child_suffix
 from kiss.agents.sorcar.sea_apply import CHANNEL_PREAMBLE, apply_sea
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 from kiss.tests.server.parallel_agent_harness import (
@@ -96,14 +94,14 @@ def _sent(daemon: RecordingDaemon) -> dict[str, Any]:
     return dict(daemon.run_commands[-1])
 
 
-def _parent_after_a_run(repo: Path, auto_commit: bool, use_worktree: bool) -> WorktreeSorcarAgent:
-    """A ``WorktreeSorcarAgent`` carrying the state a real ``run`` leaves behind.
+def _parent_after_a_run(repo: Path) -> ChatSorcarAgent:
+    """A ``ChatSorcarAgent`` carrying the state a real ``run`` leaves behind.
 
     The values are the public per-run attributes ``run`` assigns (the
     full-run tests below check that assignment end to end); setting them
     directly keeps these tests independent of a model endpoint.
     """
-    parent = WorktreeSorcarAgent("inherit-parent")
+    parent = ChatSorcarAgent("inherit-parent")
     parent.model_name = PARENT_MODEL
     parent._launch_model_name = PARENT_MODEL
     parent.model_config = dict(PARENT_CONFIG)
@@ -115,8 +113,6 @@ def _parent_after_a_run(repo: Path, auto_commit: bool, use_worktree: bool) -> Wo
     parent._prompt_suffix = PARENT_PROMPT_SUFFIX
     parent._use_web_tools = False
     parent._use_memory_override = True
-    parent.auto_commit_enabled = auto_commit
-    parent.use_worktree_enabled = use_worktree
     parent.work_dir = str(repo)
     return parent
 
@@ -143,9 +139,8 @@ class TestDispatchResultInheritance:
     def test_empty_arguments_come_from_the_parent(
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
     ) -> None:
-        """Model, same-model config, budget share, chat, web, memory, worktree, auto-commit."""
-        env.write_config(is_worktree=True, auto_commit_mode=True)
-        parent = _parent_after_a_run(env.repo, auto_commit=False, use_worktree=False)
+        """Model, same-model config, budget share, chat, web, memory."""
+        parent = _parent_after_a_run(env.repo)
         _dispatch(parent)
         (call,) = daemon.run_commands
         assert call["model"] == PARENT_MODEL
@@ -162,9 +157,6 @@ class TestDispatchResultInheritance:
         # The caller's ``tools()`` tools are resolved on the
         # daemon (callables cannot travel the wire): the flag asks for them.
         assert call["inheritTools"] is True
-        # The parent's EFFECTIVE choices beat the persisted settings.
-        assert call["useWorktree"] is False
-        assert call["autoCommit"] is False
 
     def test_script_prompt_getters_win_over_the_inherited_prompts(
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
@@ -190,7 +182,7 @@ class Sea(BaseSea):
         return task + ' script prompt suffix'
 """
         )
-        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        parent = _parent_after_a_run(env.repo)
         result = dispatch_result(
             "prompts", "say hi", str(script), str(env.repo), "", None, 30.0,
             parent_agent=parent, inherit=True,
@@ -217,26 +209,16 @@ class Sea(BaseSea):
         assert cmd["prompt"] == "say hi script prompt suffix"
         assert cmd["appendToPrompt"] == PARENT_PROMPT_SUFFIX
 
-    def test_parent_worktree_and_auto_commit_on_are_inherited_over_config_off(
-        self, env: IsolatedKissHome, daemon: RecordingDaemon,
-    ) -> None:
-        """A parent running in a worktree with auto-commit passes both on."""
-        env.write_config(is_worktree=False, auto_commit_mode=False)
-        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
-        _dispatch(parent)
-        assert _sent(daemon)["useWorktree"] is True
-        assert _sent(daemon)["autoCommit"] is True
-
     def test_explicit_arguments_win(
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
     ) -> None:
         """Every explicitly passed value is kept, nothing is overwritten."""
-        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        parent = _parent_after_a_run(env.repo)
         options = RunOptions(
             chat_id="chat-explicit", model_config={"base_url": "http://x/v1"},
             system_prompt="explicit base", add_to_system_prompt="explicit suffix",
             add_to_prompt="explicit prompt suffix",
-            use_worktree=False, auto_commit=False, use_web_tools=True, use_memory=False,
+            use_web_tools=True, use_memory=False,
         )
         _dispatch(parent, model_name=PARENT_MODEL, budget=0.5, options=options)
         (call,) = daemon.run_commands
@@ -249,14 +231,12 @@ class Sea(BaseSea):
         assert call["appendToPrompt"] == "explicit prompt suffix"
         assert call["useWebTools"] is True
         assert call["useMemory"] is False
-        assert call["useWorktree"] is False
-        assert call["autoCommit"] is False
 
     def test_a_different_model_drops_the_parent_model_config(
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
     ) -> None:
         """The parent's endpoint and key belong to its model only."""
-        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        parent = _parent_after_a_run(env.repo)
         _dispatch(parent, model_name="claude-sonnet-4-5")
         assert _sent(daemon)["model"] == "claude-sonnet-4-5"
         assert _sent(daemon)["modelConfig"] is None
@@ -276,7 +256,7 @@ class Sea(BaseSea):
         function now); a script whose settings cannot be evaluated is
         an error before any dispatch.
         """
-        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        parent = _parent_after_a_run(env.repo)
         run_agent = make_run_agent_tool(str(env.repo), parent)
         scripts = env.repo / "scripts"
         scripts.mkdir()
@@ -447,7 +427,7 @@ class Sea(BaseSea):
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
     ) -> None:
         """``{}`` means "no configuration": the daemon default applies."""
-        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        parent = _parent_after_a_run(env.repo)
         parent.model_config = {}
         _dispatch(parent)
         assert _sent(daemon)["modelConfig"] is None
@@ -462,7 +442,7 @@ class Sea(BaseSea):
         an empty ``model_name`` inherits the new model WITHOUT that
         endpoint, and asking for the launch model by name gets it back.
         """
-        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        parent = _parent_after_a_run(env.repo)
         parent.model_name = "claude-sonnet-4-5"  # what set_model leaves behind
         _dispatch(parent)
         assert _sent(daemon)["model"] == "claude-sonnet-4-5"
@@ -474,8 +454,7 @@ class Sea(BaseSea):
     def test_a_parent_without_a_run_inherits_only_its_defaults(
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
     ) -> None:
-        """A never-run ``ChatSorcarAgent`` has no budget, chat, or worktree choice yet."""
-        env.write_config(is_worktree=False, auto_commit_mode=True)
+        """A never-run ``ChatSorcarAgent`` has no budget or chat yet."""
         parent = ChatSorcarAgent("fresh-parent")
         parent.work_dir = str(env.repo)
         _dispatch(parent)
@@ -488,17 +467,12 @@ class Sea(BaseSea):
         assert call["appendToSystemPrompt"] == ""
         assert call["useWebTools"] is True  # the agent's initial per-run value
         assert call["useMemory"] is None
-        # No ``use_worktree_enabled`` / ``auto_commit_enabled`` on a
-        # ChatSorcarAgent: the persisted settings decide, as before.
-        assert call["useWorktree"] is False
-        assert call["autoCommit"] is True
 
     def test_inherit_false_keeps_the_old_defaults(
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
     ) -> None:
         """Programmatic callers that pass values explicitly are unaffected."""
-        env.write_config(is_worktree=True, auto_commit_mode=True)
-        parent = _parent_after_a_run(env.repo, auto_commit=False, use_worktree=False)
+        parent = _parent_after_a_run(env.repo)
         _dispatch(parent, inherit=False)
         (call,) = daemon.run_commands
         assert call["model"] == ""
@@ -511,8 +485,6 @@ class Sea(BaseSea):
         assert call["useWebTools"] is None
         assert call["useMemory"] is None
         assert call["inheritTools"] is False
-        assert call["useWorktree"] is True
-        assert call["autoCommit"] is True
 
     def test_unattended_preamble_follows_the_inherited_prompt_suffix(
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
@@ -523,7 +495,7 @@ class Sea(BaseSea):
         the preamble in its suffix; the child's suffix is then the
         caller's, not the preamble twice.
         """
-        parent = _parent_after_a_run(env.repo, auto_commit=False, use_worktree=False)
+        parent = _parent_after_a_run(env.repo)
         parent.task_description = "nightly chores" + unattended_child_suffix("")
         _dispatch(parent)
         assert _sent(daemon)["appendToPrompt"] == (
@@ -537,7 +509,7 @@ class Sea(BaseSea):
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
     ) -> None:
         """Nothing left to split: the fan-out signal propagates, no dispatch happens."""
-        parent = _parent_after_a_run(env.repo, auto_commit=False, use_worktree=False)
+        parent = _parent_after_a_run(env.repo)
         parent.budget_used = 4.0
         with pytest.raises(BudgetExceededError):
             _dispatch(parent)
@@ -558,8 +530,7 @@ class Sea(BaseSea):
         """
         from kiss.agents.third_party_agents.slack import slack_sea
 
-        env.write_config(is_worktree=True, auto_commit_mode=True)
-        parent = _parent_after_a_run(env.repo, auto_commit=False, use_worktree=False)
+        parent = _parent_after_a_run(env.repo)
         run_agent = make_run_agent_tool(str(env.repo), parent)
         text = run_agent(task="list channels", agent="slack", timeout="30")
         assert yaml.safe_load(text)["success"] is True, text
@@ -579,14 +550,9 @@ class Sea(BaseSea):
         assert call["useMemory"] is None
         assert call["dockerImage"] == ""
         assert call["inheritTools"] is False
-        # The persisted settings, not the parent's (opposite) choices.
-        assert call["useWorktree"] is True
-        assert call["autoCommit"] is True
         # The daemon applies the channel script to the command as sent.
         cmd = dict(call)
         apply_sea(cmd)
-        assert cmd["useWorktree"] is False
-        assert cmd["autoCommit"] is False
         assert cmd["appendToSystemPrompt"] == CHANNEL_PREAMBLE.format(name="slack")
         assert cmd["systemPromptHook"]("ASSEMBLED").endswith(
             "ASSEMBLED\n\n" + slack_sea.SlackAgent.channel_system_prompt,
@@ -594,10 +560,10 @@ class Sea(BaseSea):
 
 
 def _run_parent(
-    env: IsolatedKissHome, server: StandInModelServer, *, use_worktree: bool, **kwargs: Any,
-) -> WorktreeSorcarAgent:
-    """Run a ``WorktreeSorcarAgent`` whose scripted model calls ``run_agent`` once."""
-    parent = WorktreeSorcarAgent("inherit-e2e-parent")
+    env: IsolatedKissHome, server: StandInModelServer, **kwargs: Any,
+) -> ChatSorcarAgent:
+    """Run a ``ChatSorcarAgent`` whose scripted model calls ``run_agent`` once."""
+    parent = ChatSorcarAgent("inherit-e2e-parent")
     result = parent.run(
         prompt_template="delegate to the sorcar agent",
         model_name=STANDIN_MODEL,
@@ -608,8 +574,6 @@ def _run_parent(
         use_memory=True,
         is_parallel=False,
         verbose=False,
-        use_worktree=use_worktree,
-        auto_commit=False,
         **kwargs,
     )
     assert yaml.safe_load(result)["success"] is True, result
@@ -619,35 +583,40 @@ def _run_parent(
 class _DelegatingModel:
     """Scripted model: first ``run_agent(sorcar_sea.py)``, then ``finish``.
 
-    Keeps the text of every request so a test can check what system
-    prompt the parent itself ran with.
+    With ``in_worktree=True`` the parent calls ``create_worktree`` first,
+    the way a real task does before its first edit.  Keeps the text of
+    every request so a test can check what system prompt the parent
+    itself ran with.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, in_worktree: bool = False) -> None:
         self.turns = 0
         self.requests: list[str] = []
+        self.script = (["create_worktree"] if in_worktree else []) + ["run_agent"]
 
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         self.turns += 1
         self.requests.append(request_text(request))
-        if self.turns == 1:
-            return tool_call_response(
-                "run_agent", {"task": "say hi", "agent": DUMMY_SEA, "timeout": "30"},
-            )
-        return finish_response("delegated")
+        if self.turns > len(self.script):
+            return finish_response("delegated")
+        if self.script[self.turns - 1] == "create_worktree":
+            return tool_call_response("create_worktree", {})
+        return tool_call_response(
+            "run_agent", {"task": "say hi", "agent": DUMMY_SEA, "timeout": "30"},
+        )
 
 
 class TestFullRunInheritance:
-    """A real ``WorktreeSorcarAgent.run`` → ``run_agent`` → recorded ``run`` command."""
+    """A real ``ChatSorcarAgent.run`` → ``run_agent`` → recorded ``run`` command."""
 
     def test_direct_run_passes_its_live_state_to_the_sub_task(
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
     ) -> None:
-        """Model, config, budget share, chat, web/memory, worktree=False, auto-commit=False."""
-        env.write_config(classify_tasks=False, is_worktree=True, auto_commit_mode=True)
+        """Model, config, budget share, chat, web/memory, the run's work dir."""
+        env.write_config(classify_tasks=False)
         server = StandInModelServer(_DelegatingModel())
         try:
-            parent = _run_parent(env, server, use_worktree=False)
+            parent = _run_parent(env, server)
         finally:
             server.stop()
         (call,) = daemon.run_commands
@@ -666,10 +635,7 @@ class TestFullRunInheritance:
         # ``run`` normalises its work_dir with ``Path.resolve()`` (macOS tmp
         # dirs are ``/var`` -> ``/private/var`` symlinks).
         assert call["workDir"] == str(env.repo.resolve())
-        # The run's effective choices, not the (opposite) persisted settings.
-        assert parent.use_worktree_enabled is False
-        assert call["useWorktree"] is False
-        assert call["autoCommit"] is False
+        assert parent._wt is None
         # The sub-task's spend folded into the parent's accounting.
         assert parent.budget_used >= 0.25
 
@@ -682,12 +648,12 @@ class TestFullRunInheritance:
         request carried both, and the ``run_agent`` dispatch sends them
         as the sub-task's ``system_prompt`` / ``append_to_system_prompt``.
         """
-        env.write_config(classify_tasks=False, is_worktree=False, auto_commit_mode=False)
+        env.write_config(classify_tasks=False)
         model = _DelegatingModel()
         server = StandInModelServer(model)
         try:
             parent = _run_parent(
-                env, server, use_worktree=False,
+                env, server,
                 base_system_prompt=PARENT_BASE_PROMPT, system_prompt=PARENT_SUFFIX,
             )
         finally:
@@ -709,12 +675,10 @@ class TestFullRunInheritance:
         it to ``run(prompt_suffix=...)`` for the record; the dispatch
         sends it as the sub-task's ``append_to_prompt``.
         """
-        env.write_config(classify_tasks=False, is_worktree=False, auto_commit_mode=False)
+        env.write_config(classify_tasks=False)
         server = StandInModelServer(_DelegatingModel())
         try:
-            parent = _run_parent(
-                env, server, use_worktree=False, prompt_suffix=PARENT_PROMPT_SUFFIX,
-            )
+            parent = _run_parent(env, server, prompt_suffix=PARENT_PROMPT_SUFFIX)
         finally:
             server.stop()
         assert parent._prompt_suffix == PARENT_PROMPT_SUFFIX
@@ -723,20 +687,20 @@ class TestFullRunInheritance:
     def test_worktree_run_passes_its_worktree_and_its_directory(
         self, env: IsolatedKissHome, daemon: RecordingDaemon,
     ) -> None:
-        """A parent that got a worktree hands the sub-task that worktree and ``use_worktree``."""
-        env.write_config(classify_tasks=False, is_worktree=False, auto_commit_mode=False)
-        server = StandInModelServer(_DelegatingModel())
+        """A parent that created a worktree hands the sub-task that worktree's directory."""
+        env.write_config(classify_tasks=False)
+        server = StandInModelServer(_DelegatingModel(in_worktree=True))
         try:
-            parent = _run_parent(env, server, use_worktree=True)
+            parent = _run_parent(env, server)
         finally:
             server.stop()
         (call,) = daemon.run_commands
-        assert parent.use_worktree_enabled is True
-        assert call["useWorktree"] is True
-        assert call["autoCommit"] is False
+        assert parent._wt_work_dir is not None
         worktree_dir = Path(call["workDir"])
+        assert worktree_dir == parent._wt_work_dir
         assert worktree_dir != env.repo.resolve() and worktree_dir != env.repo
         assert ".kiss-worktrees" in worktree_dir.parts
+        parent.discard()
 
 
 def _docker_available() -> bool:
@@ -757,10 +721,8 @@ def test_parent_container_is_attached_by_the_sub_task(
     """A parent inside a Docker container sends the sub-task into the same container.
 
     An attached ``DockerManager`` works in the container's working
-    directory — the parent's mounted tree — so the sub-task gets no
-    worktree and no auto-commit of its own even though the parent runs
-    with both: it works in the parent's tree like a ``run_parallel``
-    child.  An explicit ``use_worktree`` still wins, as everywhere.
+    directory — the parent's mounted tree — so the sub-task works in the
+    parent's tree like a ``run_parallel`` child.
     """
     import docker
 
@@ -773,25 +735,16 @@ def test_parent_container_is_attached_by_the_sub_task(
     )
     container_id = str(container.id)
     try:
-        env.write_config(is_worktree=True, auto_commit_mode=True)
-        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        parent = _parent_after_a_run(env.repo)
         with DockerManager(ATTACH_PREFIX + container_id) as manager:
             parent.docker_manager = manager
             assert manager.container is not None
             _dispatch(parent)
             assert _sent(daemon)["dockerImage"] == ATTACH_PREFIX + container_id
-            assert _sent(daemon)["useWorktree"] is False
-            assert _sent(daemon)["autoCommit"] is False
-            _dispatch(parent, options=RunOptions(use_worktree=True))
-            assert _sent(daemon)["useWorktree"] is True
-            assert _sent(daemon)["autoCommit"] is False
         # Explicit ``docker_image`` is not a tool argument: the only way a
-        # sub-task reaches a container is through its parent; outside one
-        # the parent's own worktree / auto-commit choices apply again.
+        # sub-task reaches a container is through its parent.
         parent.docker_manager = None
         _dispatch(parent)
         assert _sent(daemon)["dockerImage"] == ""
-        assert _sent(daemon)["useWorktree"] is True
-        assert _sent(daemon)["autoCommit"] is True
     finally:
         container.remove(force=True)

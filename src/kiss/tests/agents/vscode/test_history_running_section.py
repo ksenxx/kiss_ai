@@ -110,8 +110,6 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
         chat_id="running-section-chat",
         model="gpt-5.4-mini",
         work_dir=str(harness.work_dir),
-        use_worktree=False,
-        auto_commit=False,
         auto_classify=False,
         use_memory=False,
         use_web_tools=False,
@@ -145,11 +143,6 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
             page.on("pageerror", partial(_record_error, errors))
             try:
                 # Wait for the task runner's actual persisted history row.
-                # This test covers all history, not the current workspace filter.
-                page.click("#history-filters-toggle")
-                page.locator("label:has(#hf-workspace)").click()
-                expect(page.locator("#hf-workspace")).not_to_be_checked()
-                page.click("#history-filters-toggle")
                 live = page.locator("#history-list .sidebar-item").filter(has_text=prompt)
                 expect(live).to_have_count(1, timeout=60000)
                 live_id = next(

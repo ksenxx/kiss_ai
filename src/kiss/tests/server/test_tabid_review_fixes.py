@@ -34,13 +34,13 @@ import json
 import shutil
 import tempfile
 import threading
-from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.web_server import Payload, WebPrinter
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class _WireCapturingWebPrinter(WebPrinter):
@@ -77,21 +77,6 @@ class _AgentStub:
         return self._last_task_id or ""
 
 
-def _redirect(tmpdir: str):
-    """Redirect the DB to a temp dir and reset the singleton connection."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return old
-
-
-def _restore(saved):
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
 class _PersistenceHarness:
     """Shared temp-DB setup/teardown for both printer test classes.
 
@@ -106,7 +91,7 @@ class _PersistenceHarness:
         self.tmpdir = tempfile.mkdtemp()
         self._registered_task_ids: list[str] = []
         th._flush_chat_events()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self):
         th._flush_chat_events()
@@ -115,7 +100,7 @@ class _PersistenceHarness:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _register_task(self, task: str) -> str:

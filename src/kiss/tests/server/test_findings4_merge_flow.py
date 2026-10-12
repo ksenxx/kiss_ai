@@ -4,11 +4,9 @@
 # add your name here
 """FINDINGS-4 regression tests for merge_flow.py.
 
-Covers (real :class:`VSCodeServer`, real :class:`WorktreeSorcarAgent`,
+Covers (real :class:`VSCodeServer`, real :class:`ChatSorcarAgent`,
 real on-disk git repos and worktrees — no mocks):
 
-- F4-19: ``_handle_worktree_action(..., internal=True)`` must still
-  refuse while a non-worktree task is running on the main tree.
 - F4-20: a session replay (``_emit_pending_worktree``) while a merge
   or discard owns the tab must not re-present the worktree.
 - F4-21: when the recorded original branch no longer resolves, a
@@ -24,18 +22,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import run_git
 
 from ._memory_printer import MemoryPrinter
-
-
-def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, check=False,
-    )
 
 
 def _make_repo(path: Path) -> Path:
@@ -44,19 +36,19 @@ def _make_repo(path: Path) -> Path:
         ["git", "init", "-b", "main", str(path)],
         capture_output=True, check=True,
     )
-    _run_git(path, "config", "user.email", "t@t.com")
-    _run_git(path, "config", "user.name", "T")
+    run_git(path, "config", "user.email", "t@t.com")
+    run_git(path, "config", "user.name", "T")
     (path / "README.md").write_text("# Test\n")
-    _run_git(path, "add", ".")
-    _run_git(path, "commit", "-m", "initial")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-m", "initial")
     return path
 
 
 def _setup_wt_tab(
     server: VSCodeServer, repo: Path, tab_id: str,
-) -> tuple[Any, WorktreeSorcarAgent, Path]:
+) -> tuple[Any, ChatSorcarAgent, Path]:
     """Create a worktree agent and register its tab's agent state."""
-    wt_agent = WorktreeSorcarAgent("wt")
+    wt_agent = ChatSorcarAgent("wt")
     wt_agent._chat_id = tab_id
     wt_work = wt_agent._try_setup_worktree(repo, str(repo))
     assert wt_work is not None
@@ -66,102 +58,20 @@ def _setup_wt_tab(
         tab_id=tab_id,
         server_owned=True,
     )
-    state.use_worktree = True
     agent_state.register(state)
     return state, wt_agent, Path(wt_work)
 
 
 def _commit_in_worktree(wt_dir: Path, fname: str, content: str) -> None:
     (wt_dir / fname).write_text(content)
-    add = _run_git(wt_dir, "add", ".")
+    add = run_git(wt_dir, "add", ".")
     assert add.returncode == 0, add.stderr
-    commit = _run_git(wt_dir, "commit", "-m", f"agent: add {fname}")
+    commit = run_git(wt_dir, "commit", "-m", f"agent: add {fname}")
     assert commit.returncode == 0, commit.stderr
-    status = _run_git(wt_dir, "status", "--porcelain")
+    status = run_git(wt_dir, "status", "--porcelain")
     assert status.stdout.strip() == "", (
         f"worktree not clean after commit: {status.stdout!r}"
     )
-
-
-class TestF419InternalStillGuardsMainTree:
-    """internal=True must not bypass the live-main-tree-task guard."""
-
-    def test_internal_merge_refused_when_non_wt_running(
-        self, tmp_path: Path,
-    ) -> None:
-        repo = _make_repo(tmp_path / "repo")
-        server = VSCodeServer(printer=MemoryPrinter())
-        server.work_dir = str(repo)
-
-        tab, wt_agent, wt_dir = _setup_wt_tab(server, repo, "wt-419")
-        _commit_in_worktree(wt_dir, "work.txt", "agent work\n")
-        # The direct task has edited a tracked file of the main tree.
-        (repo / "README.md").write_text("# Test\nedited by the direct task\n")
-
-        non_wt_state = agent_state.AgentState(
-            "direct-419-key", tab_id="direct-419", server_owned=True,
-        )
-        non_wt_state.is_running_non_wt = True
-        # Mirror _run_task_inner: a running non-wt task records the
-        # resolved main-repo root of its work_dir on its state.
-        non_wt_state.non_wt_repo_root = repo.resolve()
-        agent_state.register(non_wt_state)
-        try:
-            result = server._handle_worktree_action(
-                "merge", "wt-419", internal=True,
-            )
-            assert result["success"] is False, (
-                "internal=True bypassed the main-tree guard and "
-                "merged while a direct task was running"
-            )
-            assert "main working tree" in result["message"]
-            assert not (repo / "work.txt").exists(), (
-                "the worktree branch was merged into the main tree "
-                "despite the live direct task"
-            )
-        finally:
-            non_wt_state.is_running_non_wt = False
-            non_wt_state.non_wt_repo_root = None
-            wt_agent.discard()
-            agent_state.agent_states.clear()
-
-    def test_internal_merge_proceeds_when_non_wt_left_tracked_files_alone(
-        self, tmp_path: Path,
-    ) -> None:
-        """A direct task that has not changed any tracked file of the
-        main tree (it only reads the repo, or wrote an untracked
-        scratch file) does not block the post-task auto-merge."""
-        repo = _make_repo(tmp_path / "repo")
-        server = VSCodeServer(printer=MemoryPrinter())
-        server.work_dir = str(repo)
-
-        tab, wt_agent, wt_dir = _setup_wt_tab(server, repo, "wt-419b")
-        _commit_in_worktree(wt_dir, "work.txt", "agent work\n")
-        (repo / "scratch.txt").write_text("untracked scratch\n")
-
-        non_wt_state = agent_state.AgentState(
-            "direct-419b-key", tab_id="direct-419b", server_owned=True,
-        )
-        non_wt_state.is_running_non_wt = True
-        non_wt_state.non_wt_repo_root = repo.resolve()
-        agent_state.register(non_wt_state)
-        try:
-            result = server._handle_worktree_action(
-                "merge", "wt-419b", internal=True,
-            )
-            assert result["success"] is True, result
-            assert (repo / "work.txt").exists(), (
-                "the worktree branch must be merged into the main tree"
-            )
-            assert (repo / "scratch.txt").read_text() == "untracked scratch\n", (
-                "the direct task's untracked file must survive the merge"
-            )
-        finally:
-            non_wt_state.is_running_non_wt = False
-            non_wt_state.non_wt_repo_root = None
-            if wt_agent._wt_pending:
-                wt_agent.discard()
-            agent_state.agent_states.clear()
 
 
 class TestF420ReplayDoesNotResetActiveReview:
@@ -210,7 +120,7 @@ class TestF421GitFailureNotMistakenForClean:
 
         # The user renames the original branch while the task runs;
         # the recorded original branch name no longer resolves.
-        rename = _run_git(repo, "branch", "-m", "main", "renamed")
+        rename = run_git(repo, "branch", "-m", "main", "renamed")
         assert rename.returncode == 0, rename.stderr
         try:
             changed = server._get_worktree_changed_files("wt-421")
@@ -220,7 +130,7 @@ class TestF421GitFailureNotMistakenForClean:
                 "discard the branch and delete the work"
             )
         finally:
-            _run_git(repo, "branch", "-m", "renamed", "main")
+            run_git(repo, "branch", "-m", "renamed", "main")
             wt_agent.discard()
             agent_state.agent_states.clear()
 

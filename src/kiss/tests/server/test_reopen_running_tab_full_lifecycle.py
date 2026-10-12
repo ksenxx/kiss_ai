@@ -19,7 +19,7 @@ the lifecycle in each phase deterministically.  No mocks of routing /
 state machinery.  Then verify EVERY layer the bug touches:
 
 * ``resumeSession`` for the re-opened tab broadcasts
-  ``status running:true`` and routes through ``_reattach_running_chat``.
+  ``status running:true`` and routes through ``_attach_viewer_to_running_chat``.
 * ``appendUserMessage`` during the task injects into
   ``pending_user_messages`` (does NOT drop with "no live task").
 * A second ``run`` while busy is injected (matches existing fix).

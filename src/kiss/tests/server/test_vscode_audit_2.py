@@ -135,7 +135,7 @@ class TestTabIdTypeConsistency(unittest.TestCase):
         methods_with_defaults: dict[str, typing.Any] = {}
         for name, method in [
             ("_handle_worktree_action", _MergeFlowMixin._handle_worktree_action),
-            ("_autocommit_changes", _MergeFlowMixin._autocommit_changes),
+            ("_commit_main_tree", _MergeFlowMixin._commit_main_tree),
             ("_stop_task", _TaskRunnerMixin._stop_task),
         ]:
             sig = inspect.signature(method)  # type: ignore[arg-type]

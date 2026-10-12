@@ -48,6 +48,7 @@ from kiss.server.web_server import (
     _generate_self_signed_cert,
 )
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import find_free_port
 
 #: A real MCP server: it records its pid, then serves the stdio
 #: transport for real.  Used to prove the daemon reaps its children.
@@ -71,14 +72,6 @@ def ping() -> str:
 
 server.run()
 """
-
-
-def _find_free_port() -> int:
-    """Return an available TCP port on the loopback interface."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("", 0))
-        port: int = sock.getsockname()[1]
-        return port
 
 
 def _wait_pid_dead(pid: int, timeout: float) -> bool:
@@ -128,7 +121,7 @@ class _DaemonHarness(IsolatedAsyncioTestCase):
         _generate_self_signed_cert(certfile, keyfile)
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=self.tmpdir / "remote-url.json",
@@ -206,7 +199,7 @@ class TestStartupAppliesPersistedConfig(_DaemonHarness):
         await self._stop()
         restarted = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             certfile=str(self.tmpdir / "cert.pem"),
             keyfile=str(self.tmpdir / "key.pem"),
             url_file=self.tmpdir / "remote-url-2.json",

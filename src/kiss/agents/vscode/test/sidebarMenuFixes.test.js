@@ -758,7 +758,7 @@ async function main() {
     assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
   });
 
-  await test('Working directory panel: a folder opened there re-roots the views past a content tab', async () => {
+  await test('Chat header drop-down: a folder picked there re-roots the views past a content tab', async () => {
     const {win, posted} = makeWebview();
     pinWorkspace(win);
     send(win, {
@@ -780,15 +780,17 @@ async function main() {
     // The global working directory is browsed past the content tab and
     // its owner chat alike (the owner's task folder is not a scope).
     assert.strictEqual(list[list.length - 1].path, WD);
-    // The "Working directory" panel: type a new work dir and open it;
-    // the daemon's listing confirms the folder and the client hands it
-    // to the daemon as the global working directory.
-    click(win, byId(win, 'more-btn'));
-    click(win, byId(win, 'workdir-btn'));
-    const wd = byId(win, 'workdir-input');
+    // The chat header's working directory drop-down: pick another
+    // directory; the daemon's listing confirms the folder and the
+    // client hands it to the daemon as the global working directory.
+    send(win, {
+      type: 'configData',
+      config: {work_dir: WD, recent_work_dirs: [{path: '/parent', ts: 1}]},
+    });
+    const wd = byId(win, 'chat-workdir');
     wd.value = '/parent';
-    wd.dispatchEvent(new win.Event('input', {bubbles: true}));
-    click(win, byId(win, 'workdir-open-btn'));
+    assert.strictEqual(wd.value, '/parent', 'the folder is listed');
+    wd.dispatchEvent(new win.Event('change', {bubbles: true}));
     const checks = ofType(posted, 'listDir').filter(m =>
       String(m.token).startsWith('workdir:'),
     );
@@ -803,10 +805,7 @@ async function main() {
     assert.strictEqual(adopted.length, 1);
     assert.strictEqual(adopted[0].workDir, '/parent');
     assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
-    assert.ok(
-      !byId(win, 'workdir-panel').classList.contains('open'),
-      'the panel closes once the folder is adopted',
-    );
+    assert.strictEqual(wd.value, '/parent', 'the drop-down shows the folder');
     list = ofType(posted, 'listDir').filter(
       m => !String(m.token).startsWith('picker:'),
     );

@@ -8,14 +8,14 @@ A local ``http.server`` plays discord.com: the OAuth token endpoint
 (``/api/oauth2/token``), the REST API (``/api/v10``) and the incoming
 webhook the token answer hands out.  ``DISCORD_OAUTH_BASE`` and
 ``DISCORD_API_BASE`` point the agent at it.  The tests play the
-browser by issuing a real GET to the loopback callback on the fixed
-redirect port 53682 (Discord matches redirect URIs exactly, so the
-port cannot vary; tests in one process never overlap because a new
-session cancels the previous owner of the port, and ``discord_server``
-reserves the port across pytest processes).
+browser by issuing a real GET to the loopback callback.  The product
+binds the fixed redirect port 53682 (Discord matches redirect URIs
+exactly), but the emulator accepts any redirect URI, so
+``discord_server`` moves the listener to an ephemeral port and tests
+in concurrent pytest processes never collide on it.
 
-Unreachable without test doubles: the ``OSError`` branch when port
-53682 is held by another process, and transport failures of the
+Unreachable without test doubles: the ``OSError`` branch when the
+redirect port is held by another process, and transport failures of the
 ``/users/@me`` probe (``requests.RequestException``) other than a
 refused connection, which ``test_finish_reports_unreachable_api``
 covers.
@@ -36,9 +36,9 @@ from urllib.parse import parse_qs, parse_qsl, urlsplit
 import pytest
 import requests
 
+from kiss.agents.third_party_agents import _oauth_apps
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents._device_auth import ConsentSession
-from kiss.agents.third_party_agents._oauth_apps import LOOPBACK_PORT, LOOPBACK_REDIRECT_URI
 from kiss.agents.third_party_agents.discord.discord_sea import (
     DiscordAgent,
     _config,
@@ -51,7 +51,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
-from kiss.tests.conftest import IS_WINDOWS, hold_loopback_port
+from kiss.tests.conftest import IS_WINDOWS
 
 _USER_TOKEN = "user-access-token"
 _BOT_TOKEN = "bot-secret-token"
@@ -135,12 +135,11 @@ class _DiscordServer(ThreadedHTTPServer):
 
 @pytest.fixture()
 def discord_server(
-    isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_kiss_home: Path, loopback_redirect_port: int, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[_DiscordServer]:
     """Run the emulator and point the agent at it (legacy, non-Muse mode).
 
-    Reserves the fixed redirect port across pytest processes for the
-    test's duration.
+    The redirect listener runs on the test's own ephemeral port.
     """
     server = _DiscordServer()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -150,31 +149,14 @@ def discord_server(
     monkeypatch.setenv("KISS_DISCORD_CLIENT_ID", "kiss-discord-app")
     monkeypatch.setenv("KISS_HEADLESS", "1")
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
-    with hold_loopback_port(LOOPBACK_PORT):
-        yield server
-        ConsentSession.cancel_active("discord")
+    yield server
+    ConsentSession.cancel_active("discord")
     stop_http_server(server, thread)
 
 
 def _start(tools: dict[str, Any]) -> str:
-    """Call authenticate_discord(), waiting while a foreign process holds port 53682.
-
-    ``discord_server`` already serialises the port across pytest
-    processes; the retry covers a non-test owner (a real Discord sign-in
-    on this machine), which the file lock cannot see.
-
-    Args:
-        tools: The agent's auth tools.
-
-    Returns:
-        The authenticate_discord() answer.
-    """
-    deadline = time.monotonic() + 120
-    answer = str(tools["authenticate_discord"]())
-    while "Address already in use" in answer and time.monotonic() < deadline:
-        time.sleep(0.5)
-        answer = str(tools["authenticate_discord"]())
-    return answer
+    """Call authenticate_discord() and return its answer."""
+    return str(tools["authenticate_discord"]())
 
 
 def _approve(answer: str, code: str = "the-code") -> dict[str, Any]:
@@ -191,7 +173,9 @@ def _approve(answer: str, code: str = "the-code") -> dict[str, Any]:
     assert started.get("status") == "consent_required", started
     query = {k: v[0] for k, v in parse_qs(urlsplit(started["verification_uri"]).query).items()}
     resp = requests.get(
-        LOOPBACK_REDIRECT_URI, params={"code": code, "state": query["state"]}, timeout=10
+        _oauth_apps.LOOPBACK_REDIRECT_URI,
+        params={"code": code, "state": query["state"]},
+        timeout=10,
     )
     assert resp.status_code == 200
     return query
@@ -206,7 +190,7 @@ def test_sign_in_stores_token_and_webhook(discord_server: _DiscordServer) -> Non
     assert "authenticate_discord()" in tools["check_discord_auth"]()
 
     query = _approve(_start(tools))
-    assert urlsplit(query["redirect_uri"]).port == 53682
+    assert urlsplit(query["redirect_uri"]).port == _oauth_apps.LOOPBACK_PORT
     assert query["client_id"] == "kiss-discord-app"
     assert query["scope"] == "identify guilds webhook.incoming"
     assert query["code_challenge_method"] == "S256"
@@ -293,7 +277,9 @@ def test_finish_pending_denied_and_rejected(discord_server: _DiscordServer) -> N
     assert json.loads(tools["finish_discord_auth"]())["status"] == "pending"
     state = parse_qs(urlsplit(started["verification_uri"]).query)["state"][0]
     requests.get(
-        LOOPBACK_REDIRECT_URI, params={"error": "access_denied", "state": state}, timeout=10
+        _oauth_apps.LOOPBACK_REDIRECT_URI,
+        params={"error": "access_denied", "state": state},
+        timeout=10,
     )
     denied = json.loads(tools["finish_discord_auth"]())
     assert denied["ok"] is False and "access_denied" in denied["error"]
@@ -523,11 +509,26 @@ def test_muse_sign_in_uses_vault(
         },
     )
     try:
-        # A legacy user sign-in migrates into the vault as a bearer.
+        # A legacy user sign-in migrates into the vault as a bearer on
+        # first use: building the agent exposes the tools but wires
+        # nothing (no daemon round trip).
         _config.save({"auth_mode": "user", "access_token": _USER_TOKEN})
         migrated = DiscordAgent()
-        assert migrated._backend._user_auth and vault_has_credentials("discord")
+        assert migrated._backend._user_auth and migrated._is_authenticated()
+        assert not migrated._backend._muse and not vault_has_credentials("discord")
+        # The status tool is the first use: it reports the signed-in
+        # account (wiring the surrogate) instead of asking to sign in.
+        status = json.loads(auth_tools(migrated)["check_discord_auth"]())
+        assert status["ok"] is True and status["auth"] == "user", status
+        assert migrated._backend._muse and vault_has_credentials("discord")
         assert json.loads(_config.path.read_text()) == {"auth_mode": "user"}
+        # Cached tools keep working on retries with the one surrogate.
+        list_guilds = {t.__name__: t for t in migrated._get_tools()}["list_guilds"]
+        surrogate = migrated._backend._token
+        for _ in range(2):
+            assert json.loads(list_guilds())["ok"] is True
+            assert discord_server.auth_headers[-1] == f"Bearer {_USER_TOKEN}"
+        assert migrated._backend._token == surrogate
 
         agent = DiscordAgent()
         tools = auth_tools(agent)
@@ -543,7 +544,9 @@ def test_muse_sign_in_uses_vault(
         assert discord_server.auth_headers[-1] == f"Bearer {_USER_TOKEN}"
 
         rewired = DiscordAgent()
-        assert rewired._backend._user_auth and rewired._backend._muse
+        assert rewired._backend._user_auth and rewired._is_authenticated()
+        assert json.loads(rewired._backend.list_guilds())["ok"] is True
+        assert rewired._backend._muse
 
         assert tools["clear_discord_auth"]() == "Discord authentication cleared."
         assert not vault_has_credentials("discord")
@@ -578,7 +581,13 @@ def test_muse_migrates_refreshable_legacy_sign_in(
             }
         )
         agent = DiscordAgent()
-        assert agent._backend._muse and agent._backend._user_auth
+        assert agent._backend._user_auth and agent._is_authenticated()
+        # The migration runs on the first request, which the daemon
+        # serves by spending the migrated access token for the surrogate.
+        assert not agent._backend._muse
+        assert json.loads(agent._backend.list_guilds())["ok"] is True
+        assert agent._backend._muse
+        assert discord_server.auth_headers[-1] == f"Bearer {_USER_TOKEN}"
         stored = json.loads((muse_auth_dir() / "vault" / "discord.json").read_text())
         info = stored["authorized_user_info"]
         assert info["kind"] == "oauth2_refresh_token"

@@ -5,8 +5,8 @@
 """U2–U5 of the second SEA / run_agent reassessment
 (``reports/sea-run-agent-semantics-reassessment-2-2026-10-05.html``).
 
-U2: an explicit ``use_worktree`` beats the pre-run classifier, and a
-demotion of a default is written into the run record as ``classified``.
+U2: ``is_explicit`` reads a run command's ``provenance`` field (the
+explicit-beats-classifier rule itself went with the worktree setting).
 U3: a relative ``work_dir`` in a SEA's ``settings()`` is relative to the
 SEA's own folder.
 U4: the inferred ``review`` profile is marked on the ``ran:`` line and
@@ -18,9 +18,6 @@ removed option keys, and tool-provided hints for stray keywords.
 from __future__ import annotations
 
 import json
-import os
-import time
-import unittest
 from pathlib import Path
 from typing import Any
 
@@ -59,26 +56,9 @@ from kiss.agents.sorcar.sorcar_agent import (
     canonical_tool_profile,
     resolve_tool_profile,
 )
-from kiss.agents.sorcar.task_classifier import clear_classification_cache
-from kiss.core import config as config_module
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
-from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
 from kiss.tests.agents.sorcar.test_tool_profiles import _bare_agent
-from kiss.tests.server.parallel_agent_harness import (
-    STANDIN_MODEL,
-    CapturePrinter,
-    IsolatedKissHome,
-    StandInModelServer,
-    finish_response,
-    request_text,
-)
-from kiss.tests.server.test_sea_simplification_proposals import (
-    _CLASSIFIER_MARKER,
-    _KEY_FIELDS,
-    _verdict_body,
-)
 
 
 def _write(path: Path, text: str) -> Path:
@@ -100,115 +80,12 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     return calls
 
 
-# --- U2: an explicit use_worktree beats the classifier; a demotion is recorded ---------
-
-
-class ExplicitWorktreeBeatsTheClassifierTest(unittest.TestCase):
-    """The same non-development verdict demotes a tab default but not an explicit value."""
-
-    def setUp(self) -> None:
-        from kiss.agents.sorcar import worktree_pool
-
-        self._saved_env = {
-            name: os.environ.get(name)
-            for name in (worktree_pool._DISABLE_ENV, "KISS_DISABLE_TASK_CLASSIFIER")
-        }
-        os.environ[worktree_pool._DISABLE_ENV] = "1"
-        os.environ["KISS_DISABLE_TASK_CLASSIFIER"] = "0"
-        self.home = IsolatedKissHome(prefix="kiss-sea-explicit-wt-")
-        self.home.write_config(
-            auto_commit_mode=False, is_worktree=True, max_budget=5.0,
-            use_web_browser=False, classify_tasks=True,
-        )
-        clear_classification_cache()
-        keys = config_module.DEFAULT_CONFIG
-        self._saved_keys = {name: getattr(keys, name) for name in _KEY_FIELDS}
-        for name in _KEY_FIELDS:
-            setattr(keys, name, "")
-        keys.OPENAI_API_KEY = "kiss-explicit-standin-key"
-        self.standin = StandInModelServer(self._respond)
-        self.printer = CapturePrinter()
-        self.server = VSCodeServer(printer=self.printer)
-        self.server.work_dir = str(self.home.repo)
-
-    def tearDown(self) -> None:
-        with agent_state.STATE_LOCK:
-            states = list(agent_state.agent_states.values())
-        for state in states:
-            agent = state.agent
-            if agent is not None and getattr(agent, "_wt", None) is not None:
-                try:
-                    agent.discard()
-                except Exception:
-                    pass
-        self.standin.stop()
-        keys = config_module.DEFAULT_CONFIG
-        for name, value in self._saved_keys.items():
-            setattr(keys, name, value)
-        clear_classification_cache()
-        self.home.cleanup()
-        for name, value in self._saved_env.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-    def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
-        if _CLASSIFIER_MARKER in request_text(request):
-            return _verdict_body(is_development=False)
-        return finish_response("said hello")
-
-    def _run(self, tab_id: str, prompt: str, **extra: Any) -> dict[str, Any]:
-        cmd: dict[str, Any] = {
-            "type": "run", "tabId": tab_id, "prompt": prompt, "model": STANDIN_MODEL,
-            "workDir": str(self.home.repo), "useWorktree": True, "isParallel": False,
-            "autoCommit": False, "useWebTools": False, "maxBudget": 5.0,
-            "modelConfig": self.standin.model_config, **extra,
-        }
-        with self.printer._capture_lock:
-            self.printer.captured.clear()
-        clear_classification_cache()
-        self.server._run_task(cmd)
-        deadline = time.time() + 60
-        while time.time() < deadline and not self.printer.events_of_type("result"):
-            time.sleep(0.05)
-        results = self.printer.events_of_type("result")
-        self.assertTrue(results and results[-1].get("success") is not False, results)
-        settings = [e["settings"] for e in self.printer.events_of_type("task_settings")]
-        self.assertEqual(len(settings), 1, settings)
-        return dict(settings[0])
-
-    def test_default_is_demoted_and_recorded_but_an_explicit_value_stands(self) -> None:
-        # A tab default: demoted, and the record says so.
-        settings = self._run("tab-default", "say hello")
-        self.assertEqual(self.printer.events_of_type("worktree_created"), [])
-        self.assertEqual(settings["classified"], {"use_worktree": [True, False]})
-        self.assertTrue(
-            run_config_line(settings).endswith("pinned=none classified=use_worktree(True->False)"),
-            run_config_line(settings),
-        )
-        # The same value marked explicit (what ``run_agent(options=
-        # '{"use_worktree": true}')`` sends): kept, nothing to record.
-        settings = self._run(
-            "tab-explicit", "say hello again", provenance={"use_worktree": "explicit"},
-        )
-        self.assertEqual(len(self.printer.events_of_type("worktree_created")), 1)
-        self.assertNotIn("classified", settings)
-        self.assertNotIn("classified=", run_config_line(settings))
-        # An inherited value is a default of the calling task, still demotable.
-        settings = self._run(
-            "tab-inherited", "say hello once more", provenance={"use_worktree": "inherited"},
-        )
-        self.assertEqual(self.printer.events_of_type("worktree_created"), [])
-        self.assertEqual(settings["classified"], {"use_worktree": [True, False]})
-
-
 def test_is_explicit_reads_the_provenance_field() -> None:
-    assert is_explicit({"use_worktree": "explicit"}, "use_worktree")
-    assert not is_explicit({"use_worktree": "inherited"}, "use_worktree")
-    assert not is_explicit({"model": "explicit"}, "use_worktree")
-    assert not is_explicit(None, "use_worktree") and not is_explicit("explicit", "use_worktree")
-    assert "classified" in RUN_CONFIG_KEYS and "tool_profile_inferred" in RUN_CONFIG_KEYS
+    assert is_explicit({"max_budget": "explicit"}, "max_budget")
+    assert not is_explicit({"max_budget": "inherited"}, "max_budget")
+    assert not is_explicit({"model": "explicit"}, "max_budget")
+    assert not is_explicit(None, "max_budget") and not is_explicit("explicit", "max_budget")
+    assert "tool_profile_inferred" in RUN_CONFIG_KEYS
 
 
 # --- U3: a relative work_dir is a path under the calling task's directory ------------
@@ -329,7 +206,7 @@ def test_reviewer_sub_agent_payload_marks_the_inferred_profile(tmp_path: Path) -
 
         def payload(agent: ChatSorcarAgent, task: str) -> dict[str, object]:
             return agent._task_settings_payload(
-                model="m", work_dir=str(tmp_path), is_parallel=False, is_worktree=False,
+                model="m", work_dir=str(tmp_path), is_parallel=False,
                 max_budget=None, start_ts=0, task_id="x", tool_profile=agent._tool_profile(task),
             )
 
@@ -361,10 +238,9 @@ def test_reviewer_names_are_refused_with_the_spelling_that_means_them() -> None:
     assert agent_dispatch._REVIEWER_NAMES.isdisjoint(agent_dispatch._GENERIC_AGENT_NAMES)
 
 
-def test_run_agent_docstring_states_the_inferred_profile_and_the_classified_entry() -> None:
+def test_run_agent_docstring_states_the_inferred_profile() -> None:
     doc = make_run_agent_tool("").__doc__ or ""
     assert "tools=review(inferred)" in doc
-    assert "classified=use_worktree(True->False)" in doc
     assert "``work_dir`` (relative to this task's, as is a SEA's" in doc
     assert "SEA's folder" not in doc
     assert '``"reviewer"`` is not an agent' in doc
@@ -444,9 +320,13 @@ def test_unknown_option_keys_name_their_new_name_or_the_closest_key() -> None:
         "Error: options key 'append_basic_tools' was removed: "
         f"{REMOVED_SETTINGS['append_basic_tools']}."
     )
-    out = run_agent("hi", options='{"use_worktre": false}')
-    assert out.startswith("Error: options has an unknown key 'use_worktre'; known keys: ")
-    assert out.endswith("Did you mean 'use_worktree'?")
+    assert run_agent("hi", options='{"use_worktree": false}') == (
+        "Error: options key 'use_worktree' was removed: "
+        f"{REMOVED_SETTINGS['use_worktree']}."
+    )
+    out = run_agent("hi", options='{"use_web_tool": false}')
+    assert out.startswith("Error: options has an unknown key 'use_web_tool'; known keys: ")
+    assert out.endswith("Did you mean 'use_web_tools'?")
     out = run_agent("hi", options='{"colour": 1}')
     assert out.startswith("Error: options has an unknown key 'colour'") and "mean" not in out
     # The same names are refused in a script's settings(), with the same new name.
@@ -464,19 +344,21 @@ def test_stray_keywords_get_the_tools_own_hint(tmp_path: Path) -> None:
     _, out = agent._execute_tool({
         "name": "run_agent",
         "arguments": {
-            "task": "hi", "use_worktree": False, "max_budget": "1", "model_name": "m",
-            "append_basic_tools": False, "use_worktre": True, "zzz": 1,
+            "task": "hi", "use_memory": False, "max_budget": "1", "model_name": "m",
+            "append_basic_tools": False, "use_worktree": False, "use_web_tool": True,
+            "zzz": 1,
         },
     })
     assert out.startswith("Failed to call run_agent with ")
     lines = out.rstrip().split("\n")
-    assert lines[-5:] == [
-        "use_worktree is a run setting, not an argument; pass it in the `options` JSON "
-        "object: options='{\"use_worktree\": false}'.",
+    assert lines[-6:] == [
+        "use_memory is a run setting, not an argument; pass it in the `options` JSON "
+        "object: options='{\"use_memory\": false}'.",
         'model_name was renamed to model; pass model="m".',
         f"append_basic_tools was removed: {REMOVED_SETTINGS['append_basic_tools']}.",
-        "use_worktre is neither an argument nor an options key. Did you mean the option "
-        "'use_worktree'?",
+        f"use_worktree was removed: {REMOVED_SETTINGS['use_worktree']}.",
+        "use_web_tool is neither an argument nor an options key. Did you mean the option "
+        "'use_web_tools'?",
         "zzz is neither an argument nor an options key.",
     ], out
     # ``run_parallel`` carries the same hint; a tool without one keeps the generic text.

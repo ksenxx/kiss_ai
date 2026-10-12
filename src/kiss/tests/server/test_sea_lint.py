@@ -110,8 +110,6 @@ def test_renamed_and_removed_keys_are_fixable_and_fix_rewrites_them(tmp_path: Pa
     assert codes(lint_all([path])) == ["redundant-key"]
     assert fix_sea(path) == []
     assert sea_settings_of(path) == {
-        "use_worktree": False,
-        "auto_commit": False,
         "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,
@@ -230,8 +228,8 @@ def test_channel_kind_is_fixable_and_fix_rewrites_the_base_class(tmp_path: Path)
     assert lint_all([path]) == [] and fix_sea(path) == []
     assert declares_channel(path)
     settings = sea_settings_of(path)
-    assert settings["tool_profile"] == "bash" and settings["use_worktree"] is False
-    assert {"tool_profile", "use_worktree"} <= set(settings["locked"])
+    assert settings["tool_profile"] == "bash" and settings["use_memory"] is False
+    assert {"tool_profile", "use_memory"} <= set(settings["locked"])
 
 
 def test_channel_flag_is_fixable_and_fix_rewrites_the_base_class(tmp_path: Path) -> None:
@@ -297,7 +295,7 @@ class Sea(B):
     assert "return settings | {**EXTRA}" in text
     assert lint_all([aliased]) == []
     assert sea_settings_of(aliased)["timeout"] == 5
-    assert sea_settings_of(aliased)["use_worktree"] is False
+    assert sea_settings_of(aliased)["use_memory"] is False
 
     adjacent = write_sea(tmp_path, DESCRIPTION + """
     def settings(self, settings):
@@ -321,7 +319,7 @@ class Sea(Chan):
         return "aliased channel"
 """, "aliasedchannel")
     assert declares_channel(aliased)
-    assert sea_settings_of(aliased)["use_worktree"] is False
+    assert sea_settings_of(aliased)["use_memory"] is False
     plain = write_sea(tmp_path, """from kiss.agents.seas.base.base_sea import WorkerSea as Chan
 
 
@@ -443,14 +441,14 @@ class Sea(WorkerSea):
         return "a test SEA"
 
     def settings(self, settings):
-        return settings | {'use_worktree': False, 'tool_profile': 'bash'}
+        return settings | {'use_memory': False, 'tool_profile': 'bash'}
 """,
     )
     findings = lint_all([path])
     assert codes(findings) == ["redundant-key"]
     assert (
         findings[0].message
-        == "settings()['use_worktree'] = False repeats what the base classes lay"
+        == "settings()['use_memory'] = False repeats what the base classes lay"
     )
     assert not findings[0].fixable
 

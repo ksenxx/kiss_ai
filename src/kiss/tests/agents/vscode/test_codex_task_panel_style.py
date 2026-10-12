@@ -24,11 +24,11 @@ Features on the remote webapp (served by ``RemoteAccessServer``):
    on the list background (a tint only under the pointer), show one
    line of text and carry no tooltip.
 3. ALL task metadata (steps, tok, cost, duration, time, work dir,
-   model, wt, parallel, auto-commit, chat id, task id) renders as ONE
-   wrapping line instead of three separately-clipped lines.  Field
-   AVAILABILITY is unchanged: legacy rows whose persisted ``extra``
-   JSON predates the run-mode metadata still omit the model/wt/
-   parallel/auto-commit group (the span-omission contract pinned by
+   model, parallel, chat id, task id) renders as ONE wrapping line
+   instead of three separately-clipped lines.  Field AVAILABILITY is
+   unchanged: legacy rows whose persisted ``extra`` JSON predates the
+   run-mode metadata still omit the model/parallel group (the
+   span-omission contract pinned by
    ``historyTaskMeta.test.js`` / ``historyTaskIds.test.js``); every
    row persisted by the current backend carries all fields, and the
    live test below renders a fully-populated row.
@@ -392,13 +392,8 @@ _INJECT_PAGE_JS = r"""
 _INJECT_HISTORY_JS = r"""
 (() => {
   // Lay the sidebar out (the desktop remote page auto-docks it, but
-  // be explicit) and turn the Workspace filter off (it now defaults
-  // to on): when on it would display:none a row whose work_dir differs
-  // from the client's workspace — the wrap-geometry probes need the
-  // row rendered.
+  // be explicit).
   document.getElementById('sidebar').classList.add('open');
-  const wsChk = document.getElementById('hf-workspace');
-  if (wsChk) wsChk.checked = false;
   // Neutralize the date-range filter too: the page's boot getHistory
   // response autofills #hf-from/#hf-to from the REAL task database's
   // dateRange, and when the oldest listed task is newer than this
@@ -427,9 +422,7 @@ _INJECT_HISTORY_JS = r"""
     endTs: 1700000061000,
     work_dir: '/tmp/w',
     model: 'gpt-x',
-    is_worktree: true,
     is_parallel: true,
-    auto_commit_mode: true,
     is_running: false,
     failed: false,
     has_events: true,
@@ -1079,10 +1072,7 @@ def test_live_task_panel_typography_and_history_rows(
     assert "$0.50" in probes["metricsText"], probes
     assert "00:01:01" in probes["metricsText"], probes
     assert re.search(r"Nov 1[45], 2023, \d{1,2}:\d{2}\s?[AP]M", probes["metricsText"]), probes
-    assert (
-        probes["workspaceText"]
-        == "/tmp/w \u2022 gpt-x \u2022 wt \u2022 parallel \u2022 auto-commit"
-    ), probes
+    assert probes["workspaceText"] == "/tmp/w \u2022 gpt-x \u2022 parallel", probes
     assert "chat chat-abc123" in probes["idsText"], probes
     assert "task 42" in probes["idsText"], probes
 

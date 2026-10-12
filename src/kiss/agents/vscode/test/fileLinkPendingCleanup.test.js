@@ -81,10 +81,13 @@ function clickTab(win, tabId) {
 }
 
 // Without a row of chat tabs there is no close button for a chat; an
-// idle chat is closed by leaving it. Pressing "+" opens a fresh chat and
-// retires the one on screen (no task running, no question, no draft).
+// idle chat is closed by leaving it. Pressing "+" moves to a fresh chat and
+// retires the one on screen (no task running, no question, no draft);
+// "+" on a chat that is still new only focuses the composer, so the
+// daemon's task-text echo makes the chat "used" first.
 function leaveAndRetire(win, tabId) {
   assert.strictEqual(win._testApi.getActiveTabId(), tabId);
+  send(win, {type: 'setTaskText', text: 'first task', tabId});
   win.document.getElementById('new-chat-btn').click();
   assert.notStrictEqual(win._testApi.getActiveTabId(), tabId);
   assert.ok(!isOpen(win, tabId), `tab ${tabId} must have been retired`);

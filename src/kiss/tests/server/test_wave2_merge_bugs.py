@@ -32,7 +32,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state, file_index
 from kiss.server.agent_state import AgentState
 from kiss.server.file_index import _SCAN_FILES_CAP, FileIndex
@@ -87,8 +87,8 @@ class _RecordingPrinter(JsonPrinter):
 class _Host(_MergeFlowMixin):
     """Concrete merge-flow host with the server state the mixin expects.
 
-    Implements the same ``_any_non_wt_running`` / ``_dispose_if_closed``
-    contracts as ``VSCodeServer`` against the real task-keyed
+    Implements the same ``_dispose_if_closed`` contract as
+    ``VSCodeServer`` against the real task-keyed
     ``kiss.server.agent_state`` registry.
     """
 
@@ -96,19 +96,6 @@ class _Host(_MergeFlowMixin):
         self.work_dir = work_dir
         self._state_lock = threading.RLock()
         self.printer = printer or _RecordingPrinter()
-
-    def _any_non_wt_running(
-        self,
-        repo_root: Path | None = None,
-        *,
-        exclude: AgentState | None = None,
-    ) -> bool:
-        """True if any state runs a non-worktree task (conservative semantics).
-
-        The harness ignores *repo_root*: every simulated non-worktree
-        task in these tests runs on the same main tree as the merge.
-        """
-        return any(st.is_running_non_wt for st in agent_state.snapshot())
 
     def _dispose_if_closed(self, tab_id: str) -> None:
         """Mirror the server: unregister only closed, fully-idle states."""
@@ -120,7 +107,7 @@ class _Host(_MergeFlowMixin):
                 agent_state.unregister(state.task_id, state)
 
 
-class _MergingFlagRecordingAgent(WorktreeSorcarAgent):
+class _MergingFlagRecordingAgent(ChatSorcarAgent):
     """Real agent subclass recording ``state.is_merging`` at ``discard()`` time.
 
     The F1 contract is that the tab is CLAIMED (``is_merging`` set,

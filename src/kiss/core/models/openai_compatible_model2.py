@@ -37,15 +37,12 @@ from kiss.core.models.model import (
     Attachment,
     ThinkingCallback,
     TokenCallback,
-    _audio_mime_to_format,
     _build_text_based_tools_prompt,
     _get_attr_or_key,
     _parse_text_based_tool_calls,
     accepted_request_params,
 )
 from kiss.core.models.openai_compatible_model import (
-    OPENAI_INPUT_AUDIO_FORMATS,
-    OPENAI_INPUT_IMAGE_MIME_TYPES,
     OpenAICompatibleBase,
     OpenAICompatibleModel,
     _extract_deepseek_reasoning,
@@ -205,75 +202,48 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         Args:
             att: The attachment to convert.
 
+        The accepted formats are exactly the Chat Completions transport's
+        (:meth:`OpenAICompatibleModel._attachment_to_content_part`, which
+        logs the warning for a rejected one); its part is then mapped to
+        the Responses shape by the same converter the delegated tool
+        turns use, so both transports carry an attachment identically.
+
         Returns:
             A Responses-API content part dict (``input_image`` /
-            ``input_file``) or ``None`` if the MIME type is unsupported by
-            the Responses API (e.g. video).
+            ``input_file`` / ``input_audio``) or ``None`` if OpenAI does
+            not accept the MIME type (e.g. video).
         """
-        if att.mime_type.startswith("image/"):
-            if att.mime_type not in OPENAI_INPUT_IMAGE_MIME_TYPES:
-                logger.warning(
-                    "OpenAI Responses API does not support %s image "
-                    "attachments; dropping.",
-                    att.mime_type,
-                )
-                return None
-            return {
-                "type": "input_image",
-                "image_url": att.to_data_url(),
-                "detail": "auto",
-            }
-        if att.mime_type == "application/pdf":
-            return {
-                "type": "input_file",
-                "filename": "attachment.pdf",
-                "file_data": att.to_data_url(),
-            }
-        if att.mime_type.startswith("audio/"):
-            fmt = _audio_mime_to_format(att.mime_type)
-            if fmt not in OPENAI_INPUT_AUDIO_FORMATS:
-                logger.warning(
-                    "OpenAI Responses API does not accept %s audio "
-                    "(supported: %s); skipping attachment.",
-                    att.mime_type,
-                    sorted(OPENAI_INPUT_AUDIO_FORMATS),
-                )
-                return None
-            return {
-                "type": "input_audio",
-                "input_audio": {"data": att.to_base64(), "format": fmt},
-            }
-        logger.warning(
-            "OpenAI Responses API does not support %s attachments; skipping.",
-            att.mime_type,
-        )
-        return None
+        chat_part = OpenAICompatibleModel._attachment_to_content_part(att)
+        if chat_part is None:
+            return None
+        return OpenAICompatibleModel._chat_parts_to_responses_parts([chat_part])[0]
 
     def _consume_pending_call_id(
         self,
         func_name: str,
-        i: int,
-        trailing: list[tuple[str, str]],
-        fallback_unanswered: list[dict[str, str]] | None = None,
+        fallback_unanswered: list[dict[str, str]] | None,
     ) -> str:
-        """Return the next call_id matching ``func_name`` from pending state.
+        """Return the call_id of the pending ``function_call`` named ``func_name``.
 
         Prefers the FIFO ``self._pending_function_calls`` queue (which
-        survives incremental result submissions).  Matches by name first
-        — falls back to popping the head of the queue if no name matches
-        — finally falls back to the contiguous trailing run, and last
-        resort to a synthesised id.
+        survives incremental result submissions).  When that queue is
+        empty — a conversation restored without its per-turn state — the
+        caller passes ``fallback_unanswered``, the conversation's
+        unanswered ``function_call`` items, and the match is made there
+        instead.  Either way the matched entry is consumed.
 
         Args:
             func_name: Name of the function whose result is being added.
-            i: Index of this result in the current
-                ``function_results`` batch.
-            trailing: Snapshot of the contiguous trailing
-                ``function_call`` items.
+            fallback_unanswered: The unanswered function calls to match
+                when the pending queue is empty, or ``None`` when the
+                queue was populated.
 
         Returns:
-            The model's original ``call_id`` if known, otherwise a
-            synthesised fallback ``f"call_{func_name}_{i}"``.
+            The model's original ``call_id``.
+
+        Raises:
+            KISSError: When no pending (or unanswered) function_call
+                carries ``func_name``.
         """
         if self._pending_function_calls:
             for j, pending in enumerate(self._pending_function_calls):
@@ -295,9 +265,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if fallback_unanswered is not None:
             for j, pending in enumerate(fallback_unanswered):
                 if pending.get("name") == func_name:
-                    call_id = fallback_unanswered.pop(j).get("call_id", "")
-                    if call_id:
-                        return call_id
+                    return fallback_unanswered.pop(j)["call_id"]
             if fallback_unanswered:
                 fallback_names = [
                     p.get("name", "") for p in fallback_unanswered
@@ -306,40 +274,10 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     f"No unanswered function_call named {func_name!r}; "
                     f"unanswered calls are {fallback_names!r}"
                 )
-        if i < len(trailing) and trailing[i][1]:
-            trailing_name, call_id = trailing[i]
-            if trailing_name and trailing_name != func_name:
-                raise KISSError(
-                    f"Trailing function_call mismatch for result "
-                    f"{func_name!r}; trailing call at index {i} is "
-                    f"{trailing_name!r} with call_id {call_id!r}."
-                )
-            return call_id
         raise KISSError(
             f"No prior function_call found for tool result {func_name!r}; "
             "cannot append function_call_output without a matching call_id."
         )
-
-    def _trailing_function_call_ids(self) -> list[tuple[str, str]]:
-        """Return ``(name, call_id)`` pairs for the trailing function_call run.
-
-        Walks the conversation from the end backwards, collecting every
-        contiguous ``function_call`` item.  Stops at the first item that is
-        not a ``function_call`` (typically the assistant text message or a
-        user message).  Returns the calls in original (forward) order so
-        callers can match them by index against ``function_results``.
-
-        Returns:
-            A list of ``(name, call_id)`` tuples, possibly empty.
-        """
-        collected: list[tuple[str, str]] = []
-        for item in reversed(self.conversation):
-            if isinstance(item, dict) and item.get("type") == "function_call":
-                collected.append((item.get("name", ""), item.get("call_id", "")))
-                continue
-            break
-        collected.reverse()
-        return collected
 
     @staticmethod
     def _flatten_tools_schema(
@@ -2270,13 +2208,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
         """Inner mutating implementation guarded by atomic snapshots."""
-        trailing = self._trailing_function_call_ids()
         fallback_unanswered = (
             self._unanswered_function_calls_from_conversation_with_names()
             if not self._pending_function_calls
             else None
         )
-        for i, (func_name, result_dict) in enumerate(function_results):
+        for func_name, result_dict in function_results:
             result_content, attachments = self.tool_result_text_and_attachments(
                 result_dict
             )
@@ -2284,7 +2221,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             # that guards the next turn stays correct even when the caller
             # names the id itself.
             matched_call_id = self._consume_pending_call_id(
-                func_name, i, trailing, fallback_unanswered
+                func_name, fallback_unanswered
             )
             explicit_call_id = result_dict.get("tool_use_id")
             call_id = str(explicit_call_id) if explicit_call_id else matched_call_id

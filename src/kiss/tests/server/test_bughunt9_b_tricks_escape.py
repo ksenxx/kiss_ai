@@ -19,39 +19,24 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import ssl
 import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 _TRICK_WITH_SCRIPT = 'Add </script><b>pwned</b> to the page. Then fix it.'
 
 _FAKE_INJECTIONS = "## Trick\n\n" + _TRICK_WITH_SCRIPT + "\n"
 
 
-def _find_free_port() -> int:
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 class TestTricksJsonEscaped(IsolatedAsyncioTestCase):
     """Serve ``/`` with a ``</script>`` trick and inspect the inline JSON."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -94,7 +79,7 @@ class TestTricksJsonEscaped(IsolatedAsyncioTestCase):
         import urllib.request
 
         url = f"https://127.0.0.1:{self.port}{path}"
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
 
         def _fetch() -> tuple[int, str]:
             try:

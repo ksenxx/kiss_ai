@@ -29,8 +29,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(path: Path) -> Path:
@@ -135,9 +135,9 @@ class TestGitEnvLeak:
             repo_b = _make_repo(Path(tmp) / "B")
             (repo_b / "README.md").write_text("# Test\nuser edit in B\n")
 
-            agent = WorktreeSorcarAgent("bh5-env-leak")
+            agent = ChatSorcarAgent("bh5-env-leak")
             with _hook_env(repo_a):
-                wt_work_dir = agent._try_setup_worktree(repo_b, None)
+                wt_work_dir = agent._try_setup_worktree(repo_b, str(repo_b))
 
             assert wt_work_dir is not None, (
                 "worktree setup failed under hook env"

@@ -82,9 +82,7 @@ const ROOT = 'root-tab-0001';
 
 function editorAttrs() {
   return (
-    ' class="editor-tab-mode"' +
-    ` data-kiss-tab-id="${ROOT}"` +
-    ' data-kiss-tab-title="My chat"'
+    ' class="editor-tab-mode"' + ` data-kiss-tab-id="${ROOT}"`
   );
 }
 
@@ -142,7 +140,6 @@ function testStatusStatesReachTheHost() {
     'running',
     'a running task must report state "running"',
   );
-  assert.strictEqual(lastTitle(posted).tabId, ROOT);
 
   endTask(win, ROOT, 'task-1', true);
   assert.strictEqual(
@@ -315,25 +312,28 @@ function testReplayedTaskRestoresState() {
 function testChatBindingRestoresRunState() {
   const {win, posted} = makeWebview(editorAttrs());
 
-  // A revived panel whose chat already exists (chat ids are allocated
+  // A registry tab adopted with a chat binding (chat ids are allocated
   // by the first run) must show a circle even before any replay
-  // arrives: the registry snapshot's chat binding proves a task ran.
+  // arrives: the snapshot's chat binding proves a task ran. The editor
+  // tab reports it as soon as that chat is on screen.
   send(win, {
     type: 'tabs_state',
     tabs: [
       {
-        tabId: ROOT,
+        tabId: 'bound-tab',
         chatId: 'chat-bound-1',
-        title: 'My chat',
+        title: 'Bound chat',
         workDir: '',
         scopeWorkDir: '',
       },
     ],
   });
+  win._testApi.switchToTab('bound-tab');
+  assert.strictEqual(lastTitle(posted).title, 'Bound chat');
   assert.strictEqual(
     lastTitle(posted).state,
     'ok',
-    'a chat-bound root tab must report a run state after reconcile',
+    'a chat-bound tab must report a run state once on screen',
   );
 
   win.close();

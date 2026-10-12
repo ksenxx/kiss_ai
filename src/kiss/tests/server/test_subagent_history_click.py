@@ -41,28 +41,13 @@ from __future__ import annotations
 import shutil
 import tempfile
 import threading
-from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
-
-
-def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
-    """Redirect the persistence DB to a temp dir; return saved state."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -122,13 +107,13 @@ class TestHistorySurfacesSubagentMetadata:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_subagent_row_is_excluded_from_history_listing(self) -> None:
@@ -170,13 +155,13 @@ class TestReplaySessionOpensSubagentTab:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_replay_subagent_row_emits_open_subagent_then_events(
@@ -235,7 +220,7 @@ class TestReplaySessionOpensSubagentTab:
         )
         server, _events = _make_server()
 
-        parent_agent = WorktreeSorcarAgent("Sorcar VS Code")
+        parent_agent = ChatSorcarAgent("Sorcar VS Code")
         parent_agent._chat_id = chat_id
         parent_state = agent_state.AgentState(
             str(parent_id),

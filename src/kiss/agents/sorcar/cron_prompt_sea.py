@@ -6,9 +6,9 @@
 
 :func:`kiss.agents.sorcar.cron_agent._run_prompt_job` runs every LLM
 cron job through ``run_agent(agent=<this file>, task=<preamble + job
-prompt>, ...)``: the job's model, budget, work directory, worktree and
-auto-commit choices travel as the tool's arguments and ``options``,
-the task text is the prompt.  This file only pins what every
+prompt>, ...)``: the job's model, budget and timeout travel as the
+tool's arguments, its work directory as ``options``, and the task
+text is the prompt.  This file only pins what every
 unattended run needs: no task classification (an unattended run must
 not stall on it).  It is not registered as a slash command.
 """

@@ -61,13 +61,14 @@ so every run observes the file's current contents.
 from __future__ import annotations
 
 import ast
+import contextlib
 import hashlib
 import logging
 import math
 import sys
 import threading
 import types
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -94,8 +95,6 @@ SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
     "work_dir": str,
     "model": str,
     "chat_id": str,
-    "use_worktree": bool,
-    "auto_commit": bool,
     "max_budget": (int, float),
     "model_config": dict,
     "use_web_tools": bool,
@@ -118,18 +117,12 @@ SETTING_DOCS: dict[str, str] = {
     "chat_id": "The chat the run's events go to; default under `run_agent`: the calling "
                "task's chat, or a new chat when nothing is inherited (a channel, an "
                "`inherit: false` call); a `/<name>` run keeps the tab's chat.",
-    "use_worktree": "Run in a git worktree of the project; default: the calling task's "
-                    "effective choice, else the persisted setting (an inherited or default "
-                    "`True` is demoted by the classifier for non-implementation tasks, an "
-                    "explicit `True` is kept).",
-    "auto_commit": "Commit the run's changes when it ends; default: the calling task's "
-                   "effective choice, else the persisted setting.",
     "max_budget": "USD budget of the run, a finite number; default: the caller's share or the "
                   "daemon's default.",
     "model_config": "Model configuration dict passed to the LLM (temperature, base URL, ...).",
     "use_web_tools": "Give the run the browser tools (daemon default: on).",
-    "auto_classify": "Let the pre-run classifier decide the worktree mode and lite prompt "
-                     "(daemon default: the persisted setting).",
+    "auto_classify": "Let the pre-run classifier decide whether the task is simple (lite "
+                     "prompt) (daemon default: the persisted setting).",
     "use_memory": "Give the run the `memory_*` tools (daemon default: the persisted setting).",
     "tool_profile": "The run's toolset: `review`, `bash`, `shell+edit`, ... (default: the full "
                     "toolset).",
@@ -168,8 +161,8 @@ RENAMED_SETTINGS = {
 }
 """Former settings keys and their current names.
 
-``auto_classify`` says whether the daemon's classifier decides the
-run's worktree mode (the wire field ``classifyTasks``); ``model_name``
+``auto_classify`` says whether the daemon's classifier decides whether
+the task is simple (the wire field ``classifyTasks``); ``model_name``
 is the ``SorcarAgent.run`` parameter callers keep reaching for in
 place of the settings key ``model``.  The old names are refused — in
 a script's ``settings()`` and in a ``run_agent`` / ``run_parallel``
@@ -230,6 +223,12 @@ _SYSTEM_PROMPT_SUFFIX_REMOVED = (
     "`add_to_system_prompt` is a `run_agent` option, not a setting"
 )
 
+_WORKTREE_TOOLS_REMOVED = (
+    "the agent isolates its own edits: it calls `create_worktree` before its first change "
+    "to a tracked file and `commit_and_merge` when done (a `WorkerSea` has neither tool and "
+    "edits the tree in place)"
+)
+
 _BASE_CLASS_REMOVED = (
     "what a SEA is became its base class: derive from `WorkerSea` (a tool-bound run on the "
     "caller's tree) or `ChannelSea` (an external-service agent) instead of `BaseSea` "
@@ -255,16 +254,18 @@ REMOVED_SETTINGS = {
                           "run no built-in tools)",
     "extends": "a SEA extends another by Python inheritance: derive the SEA class from the "
                "base's class (import it, or `sea_class(\"name\")`)",
+    "use_worktree": _WORKTREE_TOOLS_REMOVED,
+    "auto_commit": _WORKTREE_TOOLS_REMOVED,
 }
 """Former settings keys with no replacement, and why; refused with the explanation."""
 
 BASE_CLASS_DOCS: dict[str, str] = {
     "BaseSea": "The default: an ordinary Sorcar session with the caller's or the user's "
                "settings (`/write`, `/write_paper`, `bestrouter`).",
-    "WorkerSea": "A focused tool-bound run on the caller's tree: lays the worker defaults "
-                 "(no worktree, no auto-commit, no classifier, no browser, no memory) under "
-                 "the SEA's own keys (`/sh`, `/ask`, `/merge`, `/remember`, `/forget`, "
-                 "`/task_update`).",
+    "WorkerSea": "A focused tool-bound run on the caller's tree as it is: lays the worker "
+                 "defaults (no classifier, no browser, no memory) under the SEA's own keys "
+                 "and drops the `create_worktree` / `commit_and_merge` tools (`/sh`, `/ask`, "
+                 "`/merge`, `/remember`, `/forget`, `/task_update`).",
     "ChannelSea": "A worker that serves an external service (Slack, email, cron), not the "
                   "caller's project; every behaviour this adds is listed in the channel "
                   "table. The command registry reads the base name from the source, so a "
@@ -291,8 +292,8 @@ def base_class_defaults() -> dict[str, dict[str, Any]]:
 
 CHANNEL_BEHAVIOURS: tuple[tuple[str, str], ...] = (
     ("worker",
-     "It is a `WorkerSea`, and the worker keys are locked, so no call may give it a "
-     "worktree, auto-commit, the classifier, the browser or memory (`resolve_settings`)."),
+     "It is a `WorkerSea`, and the worker keys are locked, so no call may give it "
+     "the classifier, the browser or memory (`resolve_settings`)."),
     ("scratch directory",
      "It runs in the shared `<home>/channel_work` scratch directory unless its own "
      "`work_dir` says otherwise (`/cron` runs in `<home>/cron_work`); `work_dir` is locked, "
@@ -389,12 +390,97 @@ def safe_message(exc: BaseException) -> str:
         return name
 
 
-_EXECUTE_LOCK = threading.RLock()
-"""Serialises :func:`execute_python_file`'s ``sys.modules`` swap and the execution it brackets.
+_EXECUTING = threading.Condition()
+"""Guards the two maps below and wakes the threads waiting for a file."""
 
-Re-entrant: a SEA that loads another SEA at import time executes it on
-the same thread.
-"""
+_EXECUTING_OWNER: dict[str, tuple[threading.Thread, int]] = {}
+"""Module name -> (the thread executing it, re-entry depth)."""
+
+_EXECUTING_WAIT: dict[threading.Thread, str] = {}
+"""Thread -> module name it waits to execute."""
+
+_EXECUTING_RECHECK_SECONDS = 1.0
+"""How often a thread waiting for a file re-checks that the thread executing it is alive."""
+
+
+def _executing_owner(module_name: str) -> tuple[threading.Thread, int] | None:
+    """Return the record of the thread executing *module_name*, or ``None``.
+
+    Called under :data:`_EXECUTING`.  A record whose thread has exited
+    is dropped: the daemon stops a task by injecting
+    ``KeyboardInterrupt`` at an arbitrary bytecode boundary
+    (``PyThreadState_SetAsyncExc``), and one landing in
+    :func:`_executing` after the record is written but before its
+    ``try`` is entered (or inside its ``finally``) leaves the record
+    behind, with no code of the stopped thread left to remove it.
+    The maps hold the thread, not its ident, which the next thread
+    started may reuse.
+    """
+    owner = _EXECUTING_OWNER.get(module_name)
+    if owner is not None and not owner[0].is_alive():
+        del _EXECUTING_OWNER[module_name]
+        return None
+    return owner
+
+
+def _waits_on_thread(module_name: str, me: threading.Thread) -> bool:
+    """Whether the thread executing *module_name* is (transitively) waiting on thread *me*.
+
+    Called under :data:`_EXECUTING`: follows the owner-waits-for-module
+    chain so a circular load across threads is reported, not deadlocked.
+    """
+    seen: set[threading.Thread] = set()
+    owner = _EXECUTING_OWNER.get(module_name)
+    while owner is not None and owner[0] not in seen:
+        if owner[0] is me:
+            return True
+        seen.add(owner[0])
+        waited = _EXECUTING_WAIT.get(owner[0])
+        owner = _EXECUTING_OWNER.get(waited) if waited is not None else None
+    return False
+
+
+@contextlib.contextmanager
+def _executing(module_name: str, raw_path: str) -> Iterator[None]:
+    """Serialise executions of the file named *module_name*.
+
+    Per file, not global: a script's import-time code runs while it is
+    held, and one task's slow SEA import (heavy dependencies, a script
+    that blocks) must not stall every other loader in the daemon — the
+    ``ready`` fan-out's model-picker probe, the slash-command registry,
+    another task's SEA.  Re-entrant: a SEA that loads itself at import
+    time executes on the same thread.  Two threads loading files that
+    load each other at import time would wait for each other forever;
+    that cycle raises :class:`SeaError` in the thread that closes it.
+    A record left behind by a stopped thread (see
+    :func:`_executing_owner`) is dropped by the next thread that waits
+    for the file, which re-checks every
+    :data:`_EXECUTING_RECHECK_SECONDS`.
+    """
+    me = threading.current_thread()
+    with _EXECUTING:
+        while (owner := _executing_owner(module_name)) is not None and owner[0] is not me:
+            if _waits_on_thread(module_name, me):
+                raise SeaError(
+                    f"SEA {raw_path!r} is being imported by another thread that is "
+                    "waiting for a SEA this thread is importing (circular SEA imports)"
+                )
+            _EXECUTING_WAIT[me] = module_name
+            try:
+                _EXECUTING.wait(_EXECUTING_RECHECK_SECONDS)
+            finally:
+                del _EXECUTING_WAIT[me]
+        depth = owner[1] if owner is not None else 0
+        _EXECUTING_OWNER[module_name] = (me, depth + 1)
+    try:
+        yield
+    finally:
+        with _EXECUTING:
+            if depth:
+                _EXECUTING_OWNER[module_name] = (me, depth)
+            else:
+                del _EXECUTING_OWNER[module_name]
+                _EXECUTING.notify_all()
 
 
 def execute_python_file(raw_path: Any) -> dict[str, Any]:
@@ -416,10 +502,13 @@ def execute_python_file(raw_path: Any) -> dict[str, Any]:
     not one per run, and an earlier execution's classes resolve their
     annotations through the latest execution of the same source; two
     files with the same stem in different folders get different names.
-    Executions are serialised (:data:`_EXECUTE_LOCK`): task threads
-    evaluate SEAs concurrently, and a failed execution in one thread
-    must restore the entry that is current when it fails, not the one
-    it saw before another thread replaced it.
+    Executions of the SAME file are serialised (:func:`_executing`):
+    task threads evaluate SEAs concurrently, and a failed execution in
+    one thread must restore the entry that is current when it fails,
+    not the one it saw before another thread replaced it.  Different
+    files execute concurrently: one script's slow import-time code
+    does not block the loaders of every other script, and a circular
+    load across threads is reported as a :class:`SeaError`.
 
     Args:
         raw_path: The path of the file — expected to be an absolute path
@@ -453,7 +542,7 @@ def execute_python_file(raw_path: Any) -> dict[str, Any]:
     module_name = f"_kiss_sea_{path.stem}_{hashlib.sha1(str(path).encode()).hexdigest()[:12]}"
     module = types.ModuleType(module_name)
     module.__file__ = str(path)
-    with _EXECUTE_LOCK:
+    with _executing(module_name, raw_path):
         # A failed re-execution must not unregister the module of an
         # earlier, successful execution of the same file whose classes
         # still resolve their annotations through this name: the previous
@@ -521,6 +610,14 @@ def declares_channel(path: Path) -> bool:
     (``isinstance``), but is not listed.
     """
     return "ChannelSea" in declared_bases(path)
+
+
+SEA_BASES = ("BaseSea", "WorkerSea", "ChannelSea")
+"""The base classes a SEA derives from, least to most specific.
+
+A class deriving from one of these alone registers as no model; one
+deriving from anything else may (:func:`declared_bases`).
+"""
 
 
 def declared_bases(path: Path) -> set[str]:

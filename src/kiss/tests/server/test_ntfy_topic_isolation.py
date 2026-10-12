@@ -30,7 +30,6 @@ import hashlib
 import os
 import platform
 import shutil
-import socket
 import subprocess
 import tempfile
 import unittest
@@ -42,6 +41,7 @@ from kiss.core.vscode_config import save_config
 from kiss.server.web_server import RemoteAccessServer, _get_machine_topic
 from kiss.tests.conftest import posix_only
 from kiss.tests.server._ntfy_emulator import NtfyServerContext
+from kiss.tests.server.conftest import find_free_port
 
 
 def _production_default_home_topic() -> str:
@@ -52,13 +52,6 @@ def _production_default_home_topic() -> str:
     """
     identity = f"{platform.node()}:{uuid.getnode()}"
     return "kiss-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port: int = s.getsockname()[1]
-        return port
 
 
 class TestTopicIsolationPerKissHome(unittest.TestCase):
@@ -139,7 +132,7 @@ class TestTunnelRestartPostsToInjectedEndpoint(IsolatedAsyncioTestCase):
         self._old_path = os.environ.get("PATH", "")
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             use_tunnel=False,
             ntfy_base_url=self.ntfy.base_url,
         )

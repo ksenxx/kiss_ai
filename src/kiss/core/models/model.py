@@ -22,6 +22,8 @@ import mimetypes
 import os
 import queue
 import re
+import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -46,7 +48,7 @@ from kiss.core.models.stream_abort import (
     stop_aware_events,
     stop_error,
 )
-from kiss.core.processes import IS_WINDOWS, kill_process_group
+from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -1807,6 +1809,59 @@ class _StreamReadTimeoutError(Exception):
     """Internal sentinel: the CLI stdout stream stalled past the deadline."""
 
 
+# The launch line of the ``<name>.cmd`` shim npm writes for a package's
+# ``bin`` entry on Windows (the cmd-shim package): the target relative to
+# the shim's directory, run directly or through ``node`` (``%_prog%``,
+# followed by the flags of a ``#!/usr/bin/env -S node <flags>`` shebang).
+_NPM_CMD_SHIM_TARGET = re.compile(
+    r'(?:"%_prog%"((?:\s+-[^\s"]+)*)\s+)?"%dp0%\\([^"]+)"\s+%\*'
+)
+
+
+def _unwrap_npm_cmd_shim(args: list[str]) -> list[str]:
+    """Replace an npm ``.cmd`` shim at ``args[0]`` with the program it runs.
+
+    On Windows ``shutil.which("claude")`` / ``("codex")`` find the batch
+    shims npm installs, and ``Popen`` runs a batch file through
+    ``cmd.exe``, which re-parses the argument list by its own rules: every
+    argument is cut at its first newline (so ``--append-system-prompt``
+    kept only the first line of the system prompt and the arguments after
+    it were dropped) and ``%VAR%`` references are expanded.  The shim's
+    launch line names the real target, so start that instead and leave
+    ``cmd.exe`` out of the picture.  Anything that is not such a shim is
+    returned unchanged.
+
+    Args:
+        args: The command line to run.
+
+    Returns:
+        *args* with the shim replaced by ``[target]`` or
+        ``[node, <flags>..., target]``.
+    """
+    exe = args[0]
+    if not exe.lower().endswith((".cmd", ".bat")):
+        return args
+    try:
+        match = _NPM_CMD_SHIM_TARGET.search(Path(exe).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return args
+    if match is None:
+        return args
+    shim_dir = os.path.dirname(exe)
+    target = os.path.join(shim_dir, match.group(2).replace("\\", os.sep))
+    if not os.path.isfile(target):
+        return args
+    if match.group(1) is None:
+        return [target, *args[1:]]
+    # The shim prefers the node.exe installed beside it (a Node bundled
+    # with npm) over the one on PATH.
+    sibling = os.path.join(shim_dir, "node.exe")
+    node = sibling if os.path.isfile(sibling) else shutil.which("node")
+    if node is None:
+        return args
+    return [node, *match.group(1).split(), target, *args[1:]]
+
+
 class _CLIProcess:
     """A CLI child process whose whole lifetime is bounded by a ``with`` block.
 
@@ -1873,8 +1928,11 @@ class _CLIProcess:
             # blocks in write(2) once the pipe is full and the turn is
             # killed as a stall; on stdout everything after the byte is
             # silently dropped and a truncated answer reported as done.
-            self._proc = subprocess.Popen(
-                args,
+            # Its own process group (job object on Windows), so that
+            # _signal_tree can take down the tool commands the CLI runs
+            # as grandchildren together with it.
+            self._proc = popen_process_group(
+                _unwrap_npm_cmd_shim(args),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1922,7 +1980,7 @@ class _CLIProcess:
         Args:
             readers: The reader threads that did start, stdout's first.
         """
-        self._proc.kill()
+        self._signal_tree(SIGKILL)
         self._proc.wait()
         for thread in readers:
             thread.join(timeout=_REAP_GRACE_SECONDS)
@@ -2102,6 +2160,29 @@ class _CLIProcess:
             self._deadline = time.monotonic() + self._timeout
             yield line
 
+    def _signal_tree(self, sig: int) -> None:
+        """Send *sig* to the child and to every process it started.
+
+        The child may be a launcher (``node codex.js``, or the ``cmd.exe``
+        behind a shim :func:`_unwrap_npm_cmd_shim` did not recognise)
+        whose grandchild is the real CLI, and the CLI runs its tool
+        commands (shells, tests, servers) as grandchildren.  Signalling
+        the child alone would leave those running with no owner, holding
+        the pipes: the whole process group (job object on Windows) is
+        signalled instead, falling back to the child alone when the OS
+        could not deliver to the group.
+
+        Args:
+            sig: The signal to send (ignored on Windows, which has no
+                signals: the tree is terminated outright).
+        """
+        try:
+            kill_process_group(self._proc.pid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            self._proc.send_signal(sig)
+
     def _reap(self, grace: float) -> int | None:
         """Wait up to *grace* seconds for the child to exit, never raising.
 
@@ -2187,27 +2268,21 @@ class _CLIProcess:
         buffer's lock — closing the pipe from here would then block this
         thread forever, so such a pipe is left to the abandoned daemon
         thread until the grandchild exits.
+
+        The whole group is signalled whatever the child's own state: a
+        grandchild may outlive a child that exited on its own or on the
+        SIGTERM, and it may ignore SIGTERM, so the grace period is always
+        followed by a SIGKILL of the group (a group that is already gone
+        only raises ``ProcessLookupError``, which :meth:`_signal_tree`
+        swallows).
         """
         proc = self._proc
+        self._signal_tree(signal.SIGTERM)
         if proc.poll() is None:
-            if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-                # ``claude`` / ``codex`` on PATH are the ``.cmd`` shims npm
-                # installs, so the child is a ``cmd.exe`` whose grandchild
-                # is the real CLI.  ``terminate()`` would kill only the
-                # shim, leaving the CLI running and holding every pipe:
-                # take the whole tree down instead.
-                try:
-                    kill_process_group(proc.pid)
-                except ProcessLookupError:
-                    pass
-                except OSError:
-                    proc.kill()
-                self._reap(_REAP_GRACE_SECONDS)
-            else:
-                proc.terminate()
-                if self._reap(_REAP_GRACE_SECONDS) is None:
-                    proc.kill()
-                    self._reap(_REAP_GRACE_SECONDS)
+            self._reap(_REAP_GRACE_SECONDS)
+        self._signal_tree(SIGKILL)
+        if proc.poll() is None:
+            self._reap(_REAP_GRACE_SECONDS)
         self._writer_cancel.set()
         if self._writer is not None:
             self._writer.join()

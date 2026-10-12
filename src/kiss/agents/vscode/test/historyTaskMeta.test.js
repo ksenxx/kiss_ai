@@ -44,8 +44,7 @@ function makeWebview() {
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(
-fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -74,9 +73,7 @@ const SESSIONS_FIXTURE = [
     is_favorite: false,
     work_dir: WS_A,
     model: 'gpt-5',
-    is_worktree: true,
     is_parallel: true,
-    auto_commit_mode: true,
     startTs: 1_700_000_000_000,
     endTs: 1_700_000_010_000,
   },
@@ -95,9 +92,7 @@ const SESSIONS_FIXTURE = [
     is_favorite: false,
     work_dir: WS_B,
     model: 'claude-3.7-sonnet',
-    is_worktree: false,
     is_parallel: false,
-    auto_commit_mode: false,
     startTs: 1_700_000_100_000,
     endTs: 1_700_000_165_000,
   },
@@ -116,9 +111,7 @@ const SESSIONS_FIXTURE = [
     is_favorite: false,
     work_dir: '',
     model: 'gpt-5-mini',
-    is_worktree: true,
     is_parallel: false,
-    auto_commit_mode: true,
     startTs: 1_700_000_200_000,
     endTs: 1_700_000_201_000,
   },
@@ -188,17 +181,12 @@ function rowsByTitle(win) {
   return map;
 }
 
-function disableWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {
     type: 'configData',
     config: {work_dir: ''},
     apiKeys: {},
   });
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function workspaceSpan(row) {
@@ -211,7 +199,7 @@ function metricsSpan(row) {
 
 function testWorkspaceLineMergesMetadata() {
   const {win} = makeWebview();
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
 
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
 
@@ -253,17 +241,17 @@ function testWorkspaceLineMergesMetadata() {
 
   assert.strictEqual(
     aWs.textContent,
-    WS_A + ' • gpt-5 • wt • parallel • auto-commit',
+    WS_A + ' • gpt-5 • parallel',
     `row A workspace+meta text mismatch; got: ${aWs.textContent}`,
   );
   assert.strictEqual(
     bWs.textContent,
-    WS_B + ' • claude-3.7-sonnet • no-wt • sequential • manual-commit',
+    WS_B + ' • claude-3.7-sonnet • sequential',
     `row B workspace+meta text mismatch; got: ${bWs.textContent}`,
   );
   assert.strictEqual(
     cWs.textContent,
-    'gpt-5-mini • wt • sequential • auto-commit',
+    'gpt-5-mini • sequential',
     `row C workspace+meta text mismatch; got: ${cWs.textContent}`,
   );
   assert.strictEqual(
@@ -273,7 +261,7 @@ function testWorkspaceLineMergesMetadata() {
   );
   assert.strictEqual(
     eWs.textContent,
-    'legacy-model • no-wt • sequential • manual-commit',
+    'legacy-model • sequential',
     `row E workspace+meta text (default flags) mismatch; got: ${eWs.textContent}`,
   );
 

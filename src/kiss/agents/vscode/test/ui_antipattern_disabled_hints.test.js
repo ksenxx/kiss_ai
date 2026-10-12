@@ -34,18 +34,6 @@ async function main() {
     win.close();
   });
 
-  await test('the disabled working-directory Open button explains itself', () => {
-    const {win} = h.makeWebview();
-    h.click(win, h.byId(win, 'workdir-btn'));
-    const btn = h.byId(win, 'workdir-open-btn');
-    assert.ok(btn.disabled);
-    assert.strictEqual(btn.title, 'Pick or type a folder first');
-    typeInto(win, h.byId(win, 'workdir-input'), '/tmp/x');
-    assert.ok(!btn.disabled);
-    assert.ok(!btn.hasAttribute('title'));
-    win.close();
-  });
-
   await test('Git Commit reads "Committing…" with a reason while disabled', () => {
     const {win, posted} = h.makeWebview();
     win._testApi.endLaunch();

@@ -56,7 +56,12 @@ function close(server) {
 }
 
 // The daemon is down for the whole window: every attempt is refused, so
-// the gaps between attempts are exactly the client's retry schedule.
+// the gaps between attempts are the client's retry schedule (plus
+// whatever the event loop adds under load).  The schedule doubles
+// from `reconnectBaseMs` with jitter in [capped / 2, capped), so the
+// i-th gap is never shorter than base * 2^i / 2: timers do not fire
+// early, however loaded the machine is.  Waiting for a fixed number
+// of attempts (not a fixed time) keeps the check off the wall clock.
 async function testReconnectBacksOff() {
   const endpointPath = tmpSock('storm.json');
   const attempts = [];
@@ -66,25 +71,37 @@ async function testReconnectBacksOff() {
   });
   await listen(server, endpointPath);
 
-  const client = new AgentClient(endpointPath);
+  const base = 250;
+  const client = new AgentClient(endpointPath, {reconnectBaseMs: base});
   client.connect();
-  await delay(3000);
+  // Six attempts: the two longest gaps must each clear their bound, so
+  // one event-loop stall landing in one of them cannot pass off a
+  // fixed retry as exponential.
+  const attemptsWanted = 6;
+  const deadline = Date.now() + 30000;
+  while (attempts.length < attemptsWanted && Date.now() < deadline) {
+    await delay(50);
+  }
   client.dispose();
   await close(server);
 
-  assert.ok(attempts.length >= 3, 'the client must keep trying');
-  assert.ok(
-    attempts.length <= 8,
-    `a 3s outage must not cost ~${attempts.length} connect attempts; a ` +
-      'fixed retry is a connect storm once several windows are open',
-  );
+  assert.ok(attempts.length >= attemptsWanted, 'the client must keep trying');
   const gaps = [];
-  for (let i = 1; i < attempts.length; i += 1) {
+  for (let i = 1; i < attemptsWanted; i += 1) {
     gaps.push(attempts[i] - attempts[i - 1]);
   }
-  assert.ok(gaps.length >= 2, 'need at least two gaps to compare');
+  gaps.forEach((gap, i) => {
+    assert.ok(
+      gap >= (base * 2 ** i) / 2 - 5,
+      `attempt ${i + 1} came too soon (${gap}ms): a fixed retry is a ` +
+        'connect storm once several windows are open; gaps were ' +
+        JSON.stringify(gaps),
+    );
+  });
+  // Growth is measured against the shorter of the first two gaps: an
+  // event-loop stall can inflate any one gap.
   assert.ok(
-    gaps[gaps.length - 1] > gaps[0] * 1.4,
+    gaps[gaps.length - 1] > Math.min(gaps[0], gaps[1]) * 1.4,
     `the retry delay must grow: gaps were ${JSON.stringify(gaps)}`,
   );
   console.log('ok - reconnects back off instead of hammering the socket');

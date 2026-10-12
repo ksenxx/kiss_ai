@@ -30,7 +30,6 @@ import os
 import secrets
 import ssl
 import threading
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -41,7 +40,7 @@ from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as _ws_connect
 
 from kiss.core.config import kiss_home
-from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.file_lock import exclusive_file_lock
 
 logger = logging.getLogger(__name__)
 
@@ -104,18 +103,8 @@ def _endpoint_lock(path: Path) -> Iterator[None]:
     Raises:
         TimeoutError: When the lock is not free within the deadline.
     """
-    lock_path = _lock_path(path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+b") as lock_file:
-        deadline = time.monotonic() + _LOCK_TIMEOUT
-        while not lock_exclusive(lock_file, blocking=False):
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"endpoint lock {lock_path} held for over {_LOCK_TIMEOUT:g}s")
-            time.sleep(0.01)
-        try:
-            yield
-        finally:
-            unlock(lock_file)
+    with exclusive_file_lock(_lock_path(path), timeout=_LOCK_TIMEOUT):
+        yield
 
 
 def write_endpoint(path: Path, endpoint: LocalEndpoint) -> None:

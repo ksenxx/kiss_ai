@@ -129,12 +129,6 @@ const CHIP_SPEC = [
     lead: '.hf-chip-dot',
   },
   {
-    id: 'hf-workspace',
-    label: 'Workspace',
-    checked: true,
-    lead: '.hf-chip-icon',
-  },
-  {
     id: 'hf-favorite',
     label: 'Favorites',
     checked: false,
@@ -192,21 +186,25 @@ function testChipMarkup() {
     );
   }
 
-  ['hf-workspace', 'hf-favorite'].forEach(id => {
-    const chip = doc.getElementById(id).parentElement;
-    assert.ok(
-      chip.querySelector('svg.hf-chip-icon'),
-      `#${id} chip's leading icon must be an inline <svg>`,
-    );
-  });
+  const favChip = doc.getElementById('hf-favorite').parentElement;
+  assert.ok(
+    favChip.querySelector('svg.hf-chip-icon'),
+    "#hf-favorite chip's leading icon must be an inline <svg>",
+  );
 
   const ids = Array.from(
     bar.querySelectorAll('input[type="checkbox"]'),
   ).map(i => i.id);
   assert.strictEqual(
+    ids.indexOf('hf-workspace'),
+    -1,
+    'the Workspace chip is gone from the CHATS filter bar — got ' +
+      JSON.stringify(ids),
+  );
+  assert.strictEqual(
     ids.indexOf('hf-favorite'),
-    ids.indexOf('hf-workspace') + 1,
-    'Workspace chip must sit immediately before Favorites — got ' +
+    ids.indexOf('hf-completed') + 1,
+    'Favorites chip must sit immediately after Succeeded — got ' +
       JSON.stringify(ids),
   );
 

@@ -209,10 +209,10 @@ def test_concurrent_reader_never_sees_tokens_without_cost() -> None:
     """A reader polling mid-update sees all-or-nothing, at every boundary.
 
     The round-4 review also demonstrated the tear WITHOUT interruption:
-    ``_executor_usage`` (polled by ``_LiveUsageMonitor``,
-    unfinished-usage collection, and abandoned-child reclaims on other
-    threads) observed ``(0.0, 100, 1)`` between the token store and the
-    cost store.  Here the run thread is parked at EVERY opcode boundary
+    ``_executor_usage`` (read on other threads by the daemon's live
+    usage readers, ``_live_agent_usage`` in server.py and
+    task_update.py) observed ``(0.0, 100, 1)`` between the token store
+    and the cost store.  Here the run thread is parked at EVERY opcode boundary
     of the real accounting path in turn, and a reader thread reads the
     executor through the production reader (``_executor_usage`` via one
     ``usage_snapshot()``): every observation must be one of the two

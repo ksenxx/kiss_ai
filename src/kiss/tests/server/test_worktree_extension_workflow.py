@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for WorktreeSorcarAgent ↔ VSCode extension workflow.
+"""Integration tests for ChatSorcarAgent ↔ VSCode extension workflow.
 
 Validates the full commit-and-merge / discard workflow as exercised by
 the extension: task execution → worktree_done broadcast → user action
@@ -21,22 +21,48 @@ from typing import Any, cast
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.tests.agents.sorcar.test_worktree_extension_workflow import (  # noqa: F401
+from kiss.tests.agents.sorcar.test_worktree_extension_workflow import (
     _file_in_repo,
     _make_repo,
-    _patch_super_run,
     _redirect_db,
     _restore_db,
     _unpatch_super_run,
 )
 
 
-def _agent(server: VSCodeServer, tab_id: str = "0") -> WorktreeSorcarAgent:
+def _patch_super_run(
+    return_value: str = "success: true\nsummary: test done\n",
+    raise_exc: BaseException | None = None,
+) -> Any:
+    """Patch SorcarAgent's parent ``run()`` with a worktree-creating stub.
+
+    The stub does what the model does first in a run that edits tracked
+    files: it calls the ``create_worktree`` tool.  It then returns
+    *return_value*, or raises *raise_exc* when set.
+
+    Returns:
+        The original ``run`` for restoration in teardown.
+    """
+    parent_class = cast(Any, SorcarAgent.__mro__[1])
+    original = parent_class.run
+
+    def fake_run(self_agent: Any, **kwargs: object) -> str:
+        self_agent.work_dir = kwargs["work_dir"]
+        self_agent.create_worktree()
+        if raise_exc is not None:
+            raise raise_exc
+        return return_value
+
+    parent_class.run = fake_run
+    return original
+
+
+def _agent(server: VSCodeServer, tab_id: str = "0") -> ChatSorcarAgent:
     """Return the tab's registered agent, asserting it exists for mypy."""
     state = agent_state.find_by_tab(tab_id)
     assert state is not None and state.agent is not None
@@ -48,11 +74,10 @@ def _make_server(repo: Path) -> tuple[VSCodeServer, list[dict]]:
     server.work_dir = str(repo)
     state = agent_state.AgentState(
         "task-0",
-        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        agent=ChatSorcarAgent("Sorcar VS Code"),
         tab_id="0",
         server_owned=True,
     )
-    state.use_worktree = True
     agent_state.register(state)
     events: list[dict] = []
 
@@ -106,7 +131,7 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         branch = self._setup_pending_worktree(server)
 
-        _agent(server)._auto_commit_worktree()
+        _agent(server)._commit_worktree()
         changed = server._get_worktree_changed_files("0")
         assert len(changed) > 0
 
@@ -211,7 +236,7 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server, with_changes=False)
 
-        _agent(server)._auto_commit_worktree()
+        _agent(server)._commit_worktree()
         changed = server._get_worktree_changed_files("0")
         assert len(changed) == 0
 
@@ -348,11 +373,11 @@ class TestServerWorktreeWorkflow:
 
         _agent(server).discard()
 
-    def test_run_task_inner_does_not_auto_commit(self) -> None:
-        """_run_task_inner must NOT call _auto_commit_worktree().
+    def test_run_task_inner_does_not_commit(self) -> None:
+        """A finished task must NOT commit the worktree on its own.
 
-        The auto-commit should only happen when the user clicks
-        'Commit and Merge', not when the task finishes.
+        The commit happens when the agent calls ``commit_and_merge`` or
+        the user clicks 'Commit and Merge', not when the task finishes.
         """
         server, events = _make_server(self.repo)
         _agent(server).run(
@@ -382,20 +407,17 @@ class TestServerWorktreeWorkflow:
     def test_worktree_no_changes_preserved_on_failure(self) -> None:
         """Worktree branch is preserved when agent fails with no file changes.
 
-        The user explicitly enabled the worktree workflow (and left
-        auto-commit off), so the branch must remain in git for manual
-        inspection / merge / discard even when the task failed before
-        making any file changes.  Previously this path auto-discarded
-        the branch, which surfaced as the "worktree branch is not
-        getting created" symptom in the
-        ``use_worktree=True`` + ``autoCommit=False`` mode.
+        The agent created the worktree, so the branch must remain in
+        git for manual inspection / merge / discard even when the task
+        failed before making any file changes.  Previously this path
+        auto-discarded the branch, which surfaced as the "worktree
+        branch is not getting created" symptom.
 
-        The branch is preserved (``_wt_pending`` stays True) but the
+        The empty worktree is discarded (``worktree_result``) and the
         ``worktree_done`` event — which the frontend renders as the
-        "Auto-commit and merge or Discard?" prompt — must NOT be
-        broadcast when there are no changes to merge.  Showing that
-        prompt for an empty worktree is meaningless and was the user-
-        reported bug.
+        "Merge or Discard?" prompt — must NOT be broadcast when there
+        are no changes to merge.  Showing that prompt for an empty
+        worktree is meaningless and was the user-reported bug.
         """
         _unpatch_super_run(self.original_run)
         self.original_run = _patch_super_run(raise_exc=RuntimeError("boom"))
@@ -405,7 +427,6 @@ class TestServerWorktreeWorkflow:
             "prompt": "failing task",
             "workDir": str(self.repo),
             "tabId": "0",
-            "useWorktree": True,
             "model": "",
         })
 
@@ -413,14 +434,15 @@ class TestServerWorktreeWorkflow:
         assert wt_events == []
         done_events = [e for e in events if e["type"] == "task_done"]
         assert len(done_events) == 1
-        assert _agent(server)._wt_pending
+        (result,) = [e for e in events if e["type"] == "worktree_result"]
+        assert (result["action"], result["success"]) == ("discard", True), result
+        assert not _agent(server)._wt_pending
 
     def test_worktree_no_changes_preserved_on_stop(self) -> None:
-        """Worktree branch is preserved when user stops with no file changes.
+        """An empty worktree is discarded when the user stops the task.
 
-        ``_wt_pending`` stays True so the branch survives, but no
-        ``worktree_done`` is broadcast — there is nothing to merge or
-        discard, so the frontend prompt would be meaningless.
+        No ``worktree_done`` is broadcast — there is nothing to merge
+        or discard, so the frontend prompt would be meaningless.
         """
         _unpatch_super_run(self.original_run)
         self.original_run = _patch_super_run(raise_exc=KeyboardInterrupt("stopped"))
@@ -430,13 +452,12 @@ class TestServerWorktreeWorkflow:
             "prompt": "stopped task",
             "workDir": str(self.repo),
             "tabId": "0",
-            "useWorktree": True,
             "model": "",
         })
 
         stopped_events = [e for e in events if e["type"] == "task_stopped"]
         assert len(stopped_events) == 1
-        assert _agent(server)._wt_pending
+        assert not _agent(server)._wt_pending
         wt_events = [e for e in events if e["type"] == "worktree_done"]
         assert wt_events == []
 
@@ -452,14 +473,12 @@ class TestServerWorktreeWorkflow:
         parent_class = cast(Any, SorcarAgent.__mro__[1])
         original_parent_run = parent_class.run
 
-        def fake_run_with_changes(self_agent: object, **kwargs: object) -> str:
-            wt_dir = getattr(self_agent, "_wt_dir", None)
-            if wt_dir is not None:
-                (Path(wt_dir) / "agent_output.txt").write_text("partial work")
-            else:
-                work_dir = kwargs.get("work_dir", "")
-                if work_dir:
-                    Path(str(work_dir), "agent_output.txt").write_text("partial work")
+        def fake_run_with_changes(self_agent: Any, **kwargs: object) -> str:
+            self_agent.work_dir = kwargs["work_dir"]
+            self_agent.create_worktree()
+            wt_dir = self_agent._wt_dir
+            assert wt_dir is not None
+            (Path(wt_dir) / "agent_output.txt").write_text("partial work")
             raise RuntimeError("task crashed after writing files")
 
         parent_class.run = fake_run_with_changes
@@ -470,7 +489,6 @@ class TestServerWorktreeWorkflow:
             "prompt": "crashing task",
             "workDir": str(self.repo),
             "tabId": "0",
-            "useWorktree": True,
             "model": "",
         })
 
@@ -492,14 +510,12 @@ class TestServerWorktreeWorkflow:
         parent_class = cast(Any, SorcarAgent.__mro__[1])
         original_parent_run = parent_class.run
 
-        def fake_run_with_changes(self_agent: object, **kwargs: object) -> str:
-            wt_dir = getattr(self_agent, "_wt_dir", None)
-            if wt_dir is not None:
-                (Path(wt_dir) / "agent_output.txt").write_text("partial work")
-            else:
-                work_dir = kwargs.get("work_dir", "")
-                if work_dir:
-                    Path(str(work_dir), "agent_output.txt").write_text("partial work")
+        def fake_run_with_changes(self_agent: Any, **kwargs: object) -> str:
+            self_agent.work_dir = kwargs["work_dir"]
+            self_agent.create_worktree()
+            wt_dir = self_agent._wt_dir
+            assert wt_dir is not None
+            (Path(wt_dir) / "agent_output.txt").write_text("partial work")
             raise KeyboardInterrupt("stopped after writing files")
 
         parent_class.run = fake_run_with_changes
@@ -510,7 +526,6 @@ class TestServerWorktreeWorkflow:
             "prompt": "stopped task",
             "workDir": str(self.repo),
             "tabId": "0",
-            "useWorktree": True,
             "model": "",
         })
 

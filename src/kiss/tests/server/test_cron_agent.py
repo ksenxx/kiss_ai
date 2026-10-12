@@ -71,8 +71,8 @@ def test_agent_script_loaded_run_now_uses_daemon_endpoint_file(
         _stop_scheduler(stop_event)
 
 def test_kiss_web_daemon_runs_scheduler_thread(tmp_path: Path) -> None:
-    """The kiss-web daemon starts the cron thread, the thread executes a
-    due job, and shutdown stops the thread."""
+    """The kiss-web daemon seeds the default jobs, starts the cron thread,
+    the thread executes a due job, and shutdown stops the thread."""
     import asyncio
 
     from kiss.server.web_server import RemoteAccessServer
@@ -106,6 +106,12 @@ def test_kiss_web_daemon_runs_scheduler_thread(tmp_path: Path) -> None:
                 await asyncio.sleep(0.05)
             assert _cron_thread() is not None, "cron scheduler thread not started"
             assert load_jobs()[0]["last_summary"] == "ran inside daemon"
+            # The daemon start installed the default jobs after the user's.
+            assert [j["name"] for j in load_jobs()[1:]] == [
+                spec["name"] for spec in cron_agent.DEFAULT_JOBS
+            ]
+            assert load_jobs()[1]["prompt"] == "/recommendations now"
+            assert load_jobs()[1]["schedule"] == "0 */6 * * *"
         finally:
             for _ in range(200):
                 if server._shutdown_future is not None:

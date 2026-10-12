@@ -22,14 +22,14 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
 def _register_wt_state(
-    tab_id: str, agent: WorktreeSorcarAgent,
+    tab_id: str, agent: ChatSorcarAgent,
 ) -> agent_state.AgentState:
     """Register a worktree-task agent state for *tab_id*."""
     state = agent_state.AgentState(
@@ -38,7 +38,6 @@ def _register_wt_state(
         tab_id=tab_id,
         server_owned=True,
     )
-    state.use_worktree = True
     agent_state.register(state)
     return state
 
@@ -148,7 +147,7 @@ class TestBug56ConflictCheckBaselineValidation:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -192,7 +191,7 @@ class TestBug56ConflictCheckBaselineValidation:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -222,7 +221,7 @@ class TestBug56ConflictCheckBaselineValidation:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,

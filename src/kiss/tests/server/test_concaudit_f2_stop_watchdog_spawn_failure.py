@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterator
 
 import pytest
 
@@ -38,16 +37,6 @@ from kiss.tests.conftest import (
     thread_start_can_be_starved,
 )
 from kiss.tests.server._memory_printer import MemoryPrinter
-
-
-@pytest.fixture
-def clean_registry() -> Iterator[None]:
-    """Run with an empty agent-state registry and leave it empty."""
-    agent_state.agent_states.clear()
-    try:
-        yield
-    finally:
-        agent_state.agent_states.clear()
 
 
 class _StubbornWorker:

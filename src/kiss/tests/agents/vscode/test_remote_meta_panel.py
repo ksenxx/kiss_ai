@@ -6,8 +6,8 @@
 
 Desktop mode (viewport >= 900px) docks a task-info panel on the RIGHT
 of the chat: the twin of the left task-history panel.  It lists the
-task meta information — tokens, cost, steps, time, machine name,
-workdir, max budget — as a bulleted list and REPLACES the
+task meta information — tokens, cost, steps, time, workdir, max
+budget — as a bulleted list and REPLACES the
 ``#tab-status-bar`` strip that used to render those values at the top
 of the chat panel.
 
@@ -23,13 +23,14 @@ Covered behavior:
   browser window, and ``#app`` clears it.
 * The meta values render as bullet items (a real ``<ul>`` with
   ``list-style-type: disc``): the live status values (Tokens / Cost /
-  Steps / Time / Machine / Workdir / Max budget) followed by the
-  task's own settings (Date / Base model / Worktree mode / Parallel
-  mode / Chat id / Task id / Parent task, the last hidden until a
-  parent id arrives).
+  Steps / Time / Workdir / Max budget) followed by the task's own
+  settings (Date / Base model / Chat id / Task id / Parent task, the
+  last hidden until a parent id arrives).  Neither the machine name
+  nor the parallel mode is a row: the machine name sits in the chat
+  header's machine drop-down instead.
 * Whatever the app writes into the status-bar spans (tokens, cost,
-  steps, the running timer text and its color, the machine name) is
-  mirrored live into the panel.
+  steps, the running timer text and its color) is mirrored live into
+  the panel.
 * The top status bar is hidden at EVERY width — below the 900px
   breakpoint the panel becomes a right-slide drawer toggled by a
   composer footer icon (``#meta-drawer-btn`` in ``#footer-tools``,
@@ -135,7 +136,8 @@ _READ_MIRROR_JS = """
   timeColor: getComputedStyle(
     document.getElementById('meta-time'),
   ).color,
-  machine: document.getElementById('meta-machine').textContent,
+  machineRow: document.getElementById('meta-machine'),
+  listText: document.getElementById('meta-list').textContent,
 })
 """
 
@@ -233,12 +235,12 @@ def test_meta_values_render_as_a_bulleted_list(
     browser: Browser,
     remote_url: str,
 ) -> None:
-    """The panel lists the machine name first, in bold, then the live
-    status values (Tokens / Cost / Steps / Time / Workdir / Max budget)
-    followed by the task's own settings (Date / Base model / Worktree
-    mode / Parallel mode / Chat id / Task id / Parent task / Agent) as
-    real ``<ul>`` bullet items.  The Parent-task row starts hidden until
-    a parent id arrives; the Agent row stays hidden for a plain run."""
+    """The panel lists the live status values (Tokens / Cost / Steps /
+    Time / Workdir / Max budget) followed by the task's own settings
+    (Date / Base model / Chat id / Task id / Parent task / Agent) as
+    real ``<ul>`` bullet items, with neither a Machine nor a Parallel
+    mode row.  The Parent-task row starts hidden until a parent id
+    arrives; the Agent row stays hidden for a plain run."""
     page = _open_desktop_page(browser, remote_url, 1280)
     try:
         listing = page.evaluate(_META_LIST_JS)
@@ -249,9 +251,8 @@ def test_meta_values_render_as_a_bulleted_list(
         )
         # Every row bar the initially-hidden Parent-task and Agent rows
         # renders as a bullet; the hidden rows collapse to display:none.
-        assert listing["displays"] == ["list-item"] * 13 + ["none"] * 2, listing
+        assert listing["displays"] == ["list-item"] * 10 + ["none"] * 2, listing
         assert listing["labels"] == [
-            "Machine:",
             "Tokens:",
             "Cost:",
             "Steps:",
@@ -260,21 +261,17 @@ def test_meta_values_render_as_a_bulleted_list(
             "Max budget:",
             "Date:",
             "Base model:",
-            "Worktree mode:",
-            "Parallel mode:",
             "Chat id:",
             "Task id:",
             "Parent task:",
             "Agent:",
         ], listing
-        # Before any task ran the machine and numeric values show the
-        # em-dash placeholder and the time mirrors the "Ready" status.
-        assert listing["values"][:4] == ["\u2014"] * 4, listing
-        assert listing["values"][4] == "Ready", listing
-        # Only the machine name is bold; every other value keeps the
-        # list's normal weight.
-        assert listing["weights"][0] == "700", listing
-        assert set(listing["weights"][1:]) == {"400"}, listing
+        # Before any task ran the numeric values show the em-dash
+        # placeholder and the time mirrors the "Ready" status.
+        assert listing["values"][:3] == ["\u2014"] * 3, listing
+        assert listing["values"][3] == "Ready", listing
+        # No value is bold: the bold Machine row is gone.
+        assert set(listing["weights"]) == {"400"}, listing
     finally:
         page.close()
 
@@ -285,7 +282,8 @@ def test_status_values_mirror_live_into_the_panel(
 ) -> None:
     """Writes to the status-bar spans (as the app does while a task
     runs) appear in the panel's bullets, with labels stripped and the
-    timer color carried over."""
+    timer color carried over.  The status bar's machine name is NOT
+    mirrored: the panel has no Machine row."""
     page = _open_desktop_page(browser, remote_url, 1280)
     try:
         page.evaluate(_WRITE_STATUS_JS)
@@ -302,7 +300,8 @@ def test_status_values_mirror_live_into_the_panel(
             "the running/done color of the timer must carry over: "
             f"{mirrored}"
         )
-        assert mirrored["machine"] == "build-host-42", mirrored
+        assert mirrored["machineRow"] is None, mirrored
+        assert "build-host-42" not in mirrored["listText"], mirrored
     finally:
         page.close()
 

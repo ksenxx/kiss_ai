@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import subprocess
 import tempfile
 import textwrap
 import threading
@@ -33,6 +32,7 @@ from kiss.core import vscode_config
 from kiss.core.models.model_info import get_available_models
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.server.conftest import init_repo
 
 
 def _task_chat_id(task_id: str) -> str:
@@ -41,22 +41,6 @@ def _task_chat_id(task_id: str) -> str:
         if row["id"] == task_id:
             return str(row["chat_id"] or "")
     return ""
-
-
-def _init_repo(repo: str) -> None:
-    def git(*args: str) -> None:
-        subprocess.run(
-            ["git", *args], cwd=repo, capture_output=True, text=True,
-            check=False,
-        )
-
-    git("init", "-q")
-    git("config", "user.email", "test@example.com")
-    git("config", "user.name", "Test User")
-    git("config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    git("add", "seed.txt")
-    git("commit", "-q", "-m", "seed")
 
 
 class AgentPathApiTest(unittest.TestCase):
@@ -70,7 +54,7 @@ class AgentPathApiTest(unittest.TestCase):
         self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo(self.repo)
+        init_repo(self.repo)
 
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -198,9 +182,6 @@ class AgentPathApiTest(unittest.TestCase):
             seen["_base_system_prompt_attr"] = getattr(
                 self_agent, "_base_system_prompt", None,
             )
-            seen["_auto_commit_attr"] = getattr(
-                self_agent, "auto_commit_enabled", None,
-            )
             seen["_append_basic_tools_attr"] = getattr(
                 self_agent, "_append_basic_tools", None,
             )
@@ -236,7 +217,7 @@ class AgentPathApiTest(unittest.TestCase):
         script_model = available[-1]
         repo2 = str(Path(self.tmpdir) / "repo2")
         Path(repo2).mkdir(parents=True, exist_ok=True)
-        _init_repo(repo2)
+        init_repo(repo2)
         sea_path = self._write_py(
             "my_agent.py",
             f'''
@@ -262,8 +243,6 @@ class AgentPathApiTest(unittest.TestCase):
                     return settings | {{
                         "work_dir": {repo2!r},
                         "model": {script_model!r},
-                        "use_worktree": False,
-                        "auto_commit": False,
                         "max_budget": 1.25,
                         "model_config": {{"base_url": "http://localhost:1234/v1"}},
                         # The script's False values must win over the
@@ -290,8 +269,6 @@ class AgentPathApiTest(unittest.TestCase):
             model=available[0],
             system_prompt="client system prompt",
             sea_path=sea_path,
-            use_worktree=True,
-            auto_commit=True,
             max_budget=9.5,
             model_config={"base_url": "http://client:1/v1"},
             use_web_tools=True,
@@ -303,16 +280,13 @@ class AgentPathApiTest(unittest.TestCase):
         assert result.text == "agent ok"
         assert "scripted prompt marker" in str(seen["prompt_template"])
         assert "client prompt" not in str(seen["prompt_template"])
-        # ``use_worktree: False`` took effect: the agent runs in the
-        # scripted work dir ITSELF, not in a worktree carved under the
-        # client-passed repo.
+        # The scripted ``work_dir`` wins over the client-passed repo.
         assert seen["work_dir"] == repo2
         assert seen["model_name"] == script_model
         # The script's ``system_prompt()`` return is this run's prompt; a
         # sub-agent inherits the caller's base prompt, as with ``prompt()``.
         assert seen["_base_system_prompt_attr"] == "client system prompt"
         assert str(seen["system_prompt"]).startswith("scripted system prompt")
-        assert seen["_auto_commit_attr"] is False
         assert seen["max_budget"] == 1.25
         assert seen["model_config"] == {"base_url": "http://localhost:1234/v1"}
         # The script's ``use_web_tools`` / ``use_memory`` False values
@@ -337,8 +311,7 @@ class AgentPathApiTest(unittest.TestCase):
         The script's ``settings()`` sets only ``prompt``; every other
         parameter must arrive exactly as passed to :func:`sorcar.run`
         — and parameters the caller did not pass must keep their
-        defaults (``use_worktree=True``, ``is_parallel=True``,
-        daemon-config budget).
+        defaults (``is_parallel=True``, daemon-config budget).
         """
         sea_path = self._write_py(
             "prompt_only_agent.py",
@@ -368,11 +341,10 @@ class AgentPathApiTest(unittest.TestCase):
         )
         assert result.success is True
         assert "prompt from script" in str(seen["prompt_template"])
-        # Default ``use_worktree=True`` kept: the agent runs in a
-        # worktree carved under the passed repo, not in the repo itself.
-        assert seen["work_dir"] != self.repo
-        assert ".kiss-worktrees" in str(seen["work_dir"])
-        assert str(seen["work_dir"]).startswith(self.repo)
+        # No worktree is created before the run: the agent starts in
+        # the passed repo itself (it calls ``create_worktree`` itself
+        # when it needs one).
+        assert seen["work_dir"] == self.repo
         assert seen["_base_system_prompt_attr"] == "kept system prompt"
         assert seen["max_budget"] == 3.5
         assert seen["_is_parallel_attr"] is True
@@ -747,7 +719,7 @@ class Sea(BaseSea):
 
         ``apply_sea`` is the daemon-side loader; drive it
         directly with a real script whose ``settings()`` succeeds (a
-        ``chat_id`` and ``use_worktree`` override) and whose LATER
+        ``chat_id`` and ``max_budget`` override) and whose LATER
         ``prompt()`` raises: the command must come out exactly as it
         went in — a direct ``_run_task`` caller seeds its run state
         from the command, so a partial override surviving the failure
@@ -768,7 +740,7 @@ class Sea(BaseSea):
 
             class Sea(BaseSea):
                 def settings(self, settings):
-                    return settings | {"chat_id": "hijacked-chat", "use_worktree": False}
+                    return settings | {"chat_id": "hijacked-chat", "max_budget": 0.5}
 
                 def prompt(self, task):
                     raise RuntimeError("late failure")
@@ -778,7 +750,7 @@ class Sea(BaseSea):
             "type": "run",
             "prompt": "hi",
             "chatId": "original-chat",
-            "useWorktree": True,
+            "maxBudget": 9.0,
             "seaPath": sea_path,
         }
         original = dict(cmd)

@@ -65,15 +65,13 @@ def test_sea_methods_follow_the_user_contract() -> None:
         "locked": ["tool_profile"],
     }
     assert TOOL_PROFILES["bash"] == frozenset({"Bash"})
-    # ``WorkerSea`` turns worktree, auto-commit, classifier, browser and
-    # memory off under the class's own keys; ``system_prompt`` is a hook
+    # ``WorkerSea`` turns classifier, browser and memory off under the
+    # class's own keys; ``system_prompt`` is a hook
     # the daemon applies, so the resolved settings do not carry its text.
     assert resolve_settings(sea.settings({})) == sea.settings({})
     assert sea_commands.base_settings([sea]) == {
         "tool_profile": "bash",
         "locked": ["tool_profile"],
-        "use_worktree": False,
-        "auto_commit": False,
         "auto_classify": False,
         "use_web_tools": False,
         "use_memory": False,

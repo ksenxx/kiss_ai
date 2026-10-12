@@ -33,7 +33,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -46,6 +45,7 @@ import pytest
 from websockets.exceptions import ConnectionClosed
 
 from kiss.agents.sorcar import local_endpoint
+from kiss.tests.server.conftest import find_free_port
 
 _CHILD_SCRIPT = r"""
 import os
@@ -76,7 +76,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 certfile = tmp / "cert.pem"
 keyfile = tmp / "key.pem"
@@ -96,7 +96,7 @@ from kiss.server import agent_state
 
 vscode = server._vscode_server
 tab_id = "reset-e2e-tab"
-agent = WorktreeSorcarAgent("Sorcar VS Code")
+agent = ChatSorcarAgent("Sorcar VS Code")
 agent_state.register(
     agent_state.AgentState(
         "reset-e2e-prekey",
@@ -203,14 +203,6 @@ server.start()
 """
 
 
-def _find_free_port() -> int:
-    """Find an available TCP port for the child daemon's WSS listener."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
 class TestServerResetStopsRunningAgents(TestCase):
     """The reset must stop in-flight agents before the daemon exits."""
 
@@ -247,7 +239,7 @@ class TestServerResetStopsRunningAgents(TestCase):
                 CancelledError), reproducing the busy-daemon state in
                 which the production reset failed to stop agents.
         """
-        port = _find_free_port()
+        port = find_free_port()
         argv = [
             sys.executable, str(self.child_script), str(self.tmpdir), str(port),
         ]

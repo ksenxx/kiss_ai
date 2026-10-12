@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.server.merge_conflict_resolver import run_merge_sea
+from kiss.agents.sorcar.merge_conflict_resolver import run_merge_sea
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,

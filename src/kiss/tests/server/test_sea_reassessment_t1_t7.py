@@ -127,14 +127,14 @@ def test_a_setting_passed_as_a_tool_keyword_is_pointed_at_options() -> None:
     agent = KISSAgent("t1-kwarg")
     agent.function_map = {"run_agent": make_run_agent_tool("/tmp")}
     _, out = agent._execute_tool(
-        {"name": "run_agent", "arguments": {"task": "hi", "use_worktree": False, "model": "m"}}
+        {"name": "run_agent", "arguments": {"task": "hi", "use_memory": False, "model": "m"}}
     )
     assert out.startswith("Failed to call run_agent with ")
     assert "Expected signature: run_agent(task: 'str', agent: 'str' = ''" in out
     # The tool knows its vocabulary: the hint is definite, not conditional.
     assert out.rstrip().endswith(
-        "use_worktree is a run setting, not an argument; pass it in the `options` JSON "
-        "object: options='{\"use_worktree\": false}'."
+        "use_memory is a run setting, not an argument; pass it in the `options` JSON "
+        "object: options='{\"use_memory\": false}'."
     )
     # A tool without an ``options`` parameter keeps the plain signature message.
     agent.function_map = {"echo": lambda text="": text}
@@ -190,7 +190,7 @@ def test_the_plain_sub_agent_sea_is_named_sorcar() -> None:
         'read-only toolset: leave agent empty and pass tool_profile="review".'
     )
     assert sea_commands.get_command("sorcar") is None  # hidden: no /sorcar command
-    assert sea_name_of_agent("", []) == "sorcar_sea"
+    assert sea_name_of_agent("") == "sorcar_sea"
     for rel in ("src/kiss/server/README.md", "src/kiss/agents/third_party_agents/README.md"):
         text = (REPO_ROOT / rel).read_text("utf-8")
         assert "dummy_sea" not in text and "seas/dummy" not in text, rel

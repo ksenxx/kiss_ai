@@ -42,8 +42,6 @@ import asyncio
 import json
 import os
 import shutil
-import socket
-import ssl
 import tempfile
 import time
 from collections.abc import Callable
@@ -57,40 +55,16 @@ import kiss.agents.sorcar.persistence as th
 from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import open_local_connection
-
-
-def _find_free_port() -> int:
-    """Find an available TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return an SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import (
+    find_free_port,
+    no_verify_ssl,
+    redirect_persistence,
+    restore_persistence,
+)
 
 _REPLY_TYPES = frozenset({
     "files", "ghost", "models", "history", "inputHistory", "configData",
 })
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
 def _has_type(reply_type: str) -> Callable[[dict[str, Any]], bool]:
@@ -107,14 +81,14 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -136,7 +110,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect(
@@ -402,7 +376,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         broadcast to everyone.
         """
         url = f"wss://127.0.0.1:{self.port}/ws"
-        ctx = _no_verify_ssl()
+        ctx = no_verify_ssl()
         reader_c, writer_c = await self._connect()
         async with connect(url, ssl=ctx) as ws_a, connect(url, ssl=ctx) as ws_b:
             for ws in (ws_a, ws_b):

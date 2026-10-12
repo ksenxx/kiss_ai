@@ -33,12 +33,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
     MergeResult,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -224,7 +224,7 @@ class TestBug60DoMergeTypeGuard:
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -263,7 +263,7 @@ class TestBug60DoMergeTypeGuard:
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,

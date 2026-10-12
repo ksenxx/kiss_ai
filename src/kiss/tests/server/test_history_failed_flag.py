@@ -14,6 +14,7 @@ session entry in ``main.js`` ``renderHistory`` and renders a red dot
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -117,6 +118,71 @@ class TestHistoryFailedFlag(unittest.TestCase):
         self.assertTrue(by_task["killed task"]["failed"])
         self.assertTrue(by_task["recovered task"]["failed"])
         del recovered_id
+
+    def test_failed_flag_for_agent_verdict(self) -> None:
+        """A ``finish(success=False)`` run keeps its HTML summary as the
+        result text (no ``Task failed`` marker), so only the stored
+        verdict can tell the history it failed: ``success=False`` must
+        give ``failed=True`` (and the derived ``failed`` tag), while
+        ``success=True`` and a verdict-less row stay successful.
+        """
+        summary = "<p>Expected <code>add &lt;name&gt; &lt;address&gt;</code>.</p>"
+        verdict_fail_id, _ = th._add_task("/machine add ksen@host")
+        th._save_task_result(result=summary, task_id=verdict_fail_id, success=False)
+        th._save_task_extra({"endTs": 1.0}, task_id=verdict_fail_id)
+
+        verdict_ok_id, _ = th._add_task("verdict ok task")
+        th._save_task_result(result=summary, task_id=verdict_ok_id, success=True)
+        th._save_task_extra({"endTs": 1.0}, task_id=verdict_ok_id)
+
+        no_verdict_id, _ = th._add_task("no verdict task")
+        th._save_task_result(result=summary, task_id=no_verdict_id)
+        th._save_task_extra({"endTs": 1.0}, task_id=no_verdict_id)
+
+        self.server._handle_command({"type": "getHistory"})
+        by_task = {s["preview"]: s for s in self._sessions()}
+
+        self.assertTrue(by_task["/machine add ksen@host"]["failed"])
+        self.assertIn("failed", by_task["/machine add ksen@host"]["tags"])
+        self.assertFalse(by_task["verdict ok task"]["failed"])
+        self.assertNotIn("failed", by_task["verdict ok task"]["tags"])
+        self.assertFalse(by_task["no verdict task"]["failed"])
+        self.assertNotIn("failed", by_task["no verdict task"]["tags"])
+
+    def test_success_column_added_to_existing_database(self) -> None:
+        """A database created before the ``success`` column existed gets
+        it on open, and its legacy rows (NULL verdict) are not failed.
+        """
+        th._close_db()
+        db_path = Path(self._tmp) / "legacy.db"
+        th._DB_PATH = db_path  # type: ignore[attr-defined]
+        with sqlite3.connect(str(db_path)) as legacy:
+            legacy.execute(
+                "CREATE TABLE task_history ("
+                "id TEXT PRIMARY KEY, timestamp REAL NOT NULL, task TEXT NOT NULL,"
+                " has_events INTEGER DEFAULT 0, result TEXT DEFAULT '',"
+                " chat_id CHAR(32) DEFAULT '', model TEXT DEFAULT '',"
+                " work_dir TEXT DEFAULT '', version TEXT DEFAULT '',"
+                " tokens INTEGER DEFAULT 0, cost REAL DEFAULT 0.0,"
+                " steps INTEGER DEFAULT 0, is_parallel INTEGER DEFAULT 1,"
+                " start_ts INTEGER DEFAULT 0, end_ts INTEGER DEFAULT 0,"
+                " is_favorite INTEGER DEFAULT 0, parent_task_id TEXT DEFAULT '')"
+            )
+        columns = {
+            r[1]
+            for r in th._get_db().execute("PRAGMA table_info(task_history)").fetchall()
+        }
+        self.assertIn("success", columns)
+
+        legacy_id, _ = th._add_task("legacy task")
+        th._save_task_result(result="all good", task_id=legacy_id)
+        verdict_id, _ = th._add_task("verdict task")
+        th._save_task_result(result="<p>no</p>", task_id=verdict_id, success=False)
+
+        self.server._handle_command({"type": "getHistory"})
+        by_task = {s["preview"]: s for s in self._sessions()}
+        self.assertFalse(by_task["legacy task"]["failed"])
+        self.assertTrue(by_task["verdict task"]["failed"])
 
 
 if __name__ == "__main__":  # pragma: no cover

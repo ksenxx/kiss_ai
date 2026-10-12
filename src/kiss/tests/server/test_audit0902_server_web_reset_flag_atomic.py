@@ -20,7 +20,6 @@ instances (real threads, one shared directory).
 from __future__ import annotations
 
 import json
-import socket
 import tempfile
 import threading
 import time
@@ -30,18 +29,13 @@ import pytest
 
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import HOT_READER_PAUSE
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+from kiss.tests.server.conftest import find_free_port
 
 
 def _server(url_dir: Path) -> RemoteAccessServer:
     return RemoteAccessServer(
         host="127.0.0.1",
-        port=_free_port(),
+        port=find_free_port(),
         work_dir=tempfile.mkdtemp(prefix="kiss_reset_flag_wd_"),
         url_file=url_dir / "remote-url.json",
     )

@@ -27,15 +27,11 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
-
-
-def _clear_registry() -> None:
-    with agent_state.STATE_LOCK:
-        agent_state.agent_states.clear()
+from kiss.tests.server.conftest import clear_agent_states
 
 
 class _RecordingPrinter(JsonPrinter):
@@ -69,10 +65,10 @@ class _DbRedirectBase:
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
-        _clear_registry()
+        clear_agent_states()
 
     def teardown_method(self) -> None:
-        _clear_registry()
+        clear_agent_states()
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
@@ -107,14 +103,14 @@ class TestPersistedReopenSubscribesRunningSubagent(_DbRedirectBase):
         Returns ``(parent, sub)``."""
         parent = agent_state.AgentState(
             parent_id,
-            agent=WorktreeSorcarAgent("parent"),
+            agent=ChatSorcarAgent("parent"),
             chat_id=chat_id,
             tab_id="tab-parent",
             stop_event=threading.Event(),
             is_task_active=True,
         )
         agent_state.register(parent)
-        agent = WorktreeSorcarAgent("sub")
+        agent = ChatSorcarAgent("sub")
         agent._last_task_id = sub_id
         backend_tab_id = f"task-{parent_id}__sub_0"
         state = agent_state.AgentState(

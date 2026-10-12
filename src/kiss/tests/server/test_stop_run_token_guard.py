@@ -23,30 +23,9 @@ import shutil
 import tempfile
 import threading
 
-import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    """Point the persistence layer at a scratch DB inside *tmpdir*."""
-    from pathlib import Path
-
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return old
-
-
-def _restore_db(saved: tuple) -> None:
-    """Undo :func:`_redirect_db`."""
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class TestStopRunTokenGuard:
@@ -54,11 +33,11 @@ class TestStopRunTokenGuard:
 
     def setup_method(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        self._saved = _redirect_db(self._tmpdir)
+        self._saved = redirect_persistence(self._tmpdir)
         self.server = VSCodeServer()
 
     def teardown_method(self) -> None:
-        _restore_db(self._saved)
+        restore_persistence(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _register(self, task_id: str, tab_id: str, token: str) -> agent_state.AgentState:

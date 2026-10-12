@@ -25,56 +25,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
-import ssl
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
-import yaml
 from websockets.asyncio.client import connect
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server
 from kiss.server.sorcar import ServerApi, passwords_equal
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl, write_trajectory
 
 _PASSWORD = "webapp-api-test-password"
-
-
-def _pick_free_port() -> int:
-    """Return an OS-assigned free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Permissive SSL context for the dev self-signed cert."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
-def _write_trajectory(jobs_root: Path, job: str, name: str) -> None:
-    """Create a minimal trajectory YAML under ``<jobs_root>/<job>``."""
-    traj_dir = jobs_root / job / "trajectories"
-    traj_dir.mkdir(parents=True, exist_ok=True)
-    data = {
-        "name": name,
-        "id": 1,
-        "run_start_timestamp": 100,
-        "run_end_timestamp": 200,
-        "model": "test-model",
-        "command": "do something",
-        "step_count": 3,
-        "max_steps": 10,
-        "messages": [{"role": "user", "content": "hi"}],
-    }
-    (traj_dir / "trajectory_0.yaml").write_text(yaml.safe_dump(data))
 
 
 class TestPasswordsEqual(unittest.TestCase):
@@ -107,7 +72,7 @@ class TestTrajectoryApiMethods(unittest.TestCase):
             Path(tempfile.mkdtemp(prefix="kiss_api_traj_")) / "jobs"
         )
         self._jobs_root.mkdir(parents=True)
-        _write_trajectory(
+        write_trajectory(
             self._jobs_root, "job_2024_01_01_00_00_00_1", "Agent A",
         )
         self._orig_get_jobs_root = web_server.get_jobs_root
@@ -166,7 +131,7 @@ class TestRemoteWebappThroughApi(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         """Start a real ``RemoteAccessServer`` with a known password."""
-        self._port = _pick_free_port()
+        self._port = find_free_port()
         self._orig_config: str | None = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -190,7 +155,7 @@ class TestRemoteWebappThroughApi(IsolatedAsyncioTestCase):
     async def _ws_connect(self) -> Any:
         """Open a fresh WSS connection to /ws on the test server."""
         return await connect(
-            f"wss://127.0.0.1:{self._port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self._port}/ws", ssl=no_verify_ssl(),
         )
 
     async def _recv_type(self, ws: Any, expected: str) -> dict[str, Any]:

@@ -77,7 +77,6 @@ const FILTER_CONTROL_IDS = [
   'hf-running',
   'hf-errors',
   'hf-completed',
-  'hf-workspace',
   'hf-favorite',
   'hf-from',
   'hf-from-btn',

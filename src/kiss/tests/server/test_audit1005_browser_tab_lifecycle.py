@@ -91,7 +91,13 @@ def test_a_failed_launch_stops_the_playwright_driver(
 def test_a_shutdown_during_the_launch_keeps_the_launch_error(
     daemon: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The teardown takes the driver first; the launch's own error is still reported."""
+    """A teardown during the launch waits for it; the launch's own error is reported.
+
+    Launch and teardown share the lifecycle lock (audit 2026-10-12), so
+    the teardown runs once the launch has failed and finds nothing to
+    stop; before, it stopped the driver under the launch and the error
+    said "closed".
+    """
     server, printer = daemon
     service = server.browser_tabs
     slow = tmp_path / "slow-browser"
@@ -104,7 +110,7 @@ def test_a_shutdown_during_the_launch_keeps_the_launch_error(
     assert service._loop is not None
     asyncio.run_coroutine_threadsafe(service._teardown(announce=True), service._loop).result(30)
     err = _wait(lambda: _events(printer, "browserError", connId="c1"), "launch error")[0]
-    assert "closed" in err["text"] and "NoneType" not in err["text"]
+    assert "launch" in err["text"] and "NoneType" not in err["text"]
     assert service._playwright is None
     _wait(lambda: _driver_processes() in (None, 0), "driver exit")
 

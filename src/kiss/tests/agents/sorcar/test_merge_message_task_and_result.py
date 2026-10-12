@@ -20,7 +20,7 @@ commit (which does not).  Duplicate blocks must not be appended when
 the HEAD message already carries them.
 
 These tests drive the real :mod:`kiss.agents.sorcar.git_worktree`
-operations and the real :class:`WorktreeSorcarAgent` merge path against
+operations and the real :class:`ChatSorcarAgent` merge path against
 actual on-disk git repositories (no mocks).
 """
 
@@ -351,18 +351,16 @@ class TestMergeCommitMessageHelper:
 
 
 class TestAgentMergeCarriesPromptAndResult:
-    """End-to-end through WorktreeSorcarAgent.merge(): the merge commit
+    """End-to-end through ChatSorcarAgent.merge(): the merge commit
     on the original branch carries the recorded task prompt and result
     even when the agent committed its own work manually.
     """
 
     def _make_agent(self, repo: Path, branch: str, wt_dir: Path):  # noqa: ANN202
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
         from kiss.agents.sorcar.git_worktree import GitWorktree
-        from kiss.agents.sorcar.worktree_sorcar_agent import (
-            WorktreeSorcarAgent,
-        )
 
-        agent = WorktreeSorcarAgent("wt-merge-msg-test")
+        agent = ChatSorcarAgent("wt-merge-msg-test")
         baseline = GitWorktreeOps.head_sha(wt_dir)
         agent._wt = GitWorktree(
             repo_root=repo,
@@ -383,7 +381,7 @@ class TestAgentMergeCarriesPromptAndResult:
             agent._last_user_prompt = PROMPT
             agent._last_result_summary = RESULT
             head_before = GitWorktreeOps.head_sha(wt_dir)
-            assert agent._auto_commit_worktree() is False
+            assert agent._commit_worktree() is False
             assert GitWorktreeOps.head_sha(wt_dir) == head_before
 
             out = agent.merge()

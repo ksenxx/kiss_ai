@@ -21,7 +21,7 @@ D4  ``JsonPrinter._handle_message`` (message-object path) emitted
     ``print(type="tool_result")`` path.
 
 No mocks/patches/fakes: real :class:`JsonPrinter` /
-:class:`VSCodeServer` / :class:`WorktreeSorcarAgent` /
+:class:`VSCodeServer` / :class:`ChatSorcarAgent` /
 :class:`AgentState` subclasses (the same technique the wave-2
 regression tests use), real threads, real git repos, and the real
 sqlite persistence layer.
@@ -38,8 +38,8 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import persistence
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -104,7 +104,7 @@ def _pop_states(*task_ids: str) -> None:
 
 
 
-class _ScriptedAgent(WorktreeSorcarAgent):
+class _ScriptedAgent(ChatSorcarAgent):
     """Real agent subclass whose ``run`` allocates a real task row.
 
     Mirrors what the task_runner relies on from

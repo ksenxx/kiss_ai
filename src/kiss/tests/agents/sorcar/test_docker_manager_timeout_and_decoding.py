@@ -22,20 +22,8 @@ mocks, patches or doubles.
 import time
 import unittest
 
-import docker
-
 from kiss.agents.sorcar.docker_manager import DockerManager
-
-
-def is_docker_available() -> bool:
-    """Return True when a docker daemon is reachable."""
-    try:
-        client = docker.from_env()
-        client.ping()
-        return True
-    except Exception:
-        return False
-
+from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
 
 #: Python source that emits the two bytes of "é" in two separate writes,
 #: each flushed and separated by a sleep, so the docker exec stream

@@ -29,23 +29,9 @@ from kiss.agents.third_party_agents.email.email_sea import (
     _store_result,
     _truncate_text,
 )
+from kiss.tests.agents.third_party_agents.test_email_agent import _raw_plain
 
 pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
-
-
-def _raw_plain(**overrides: str) -> bytes:
-    """Build a plain-text RFC822 message, allowing header overrides."""
-    headers = {
-        "From": "Alice Example <alice@example.com>",
-        "To": "bot@example.com",
-        "Subject": "Hello there",
-        "Date": "Mon, 01 Jan 2024 12:00:00 +0000",
-        "Message-ID": "<abc123@example.com>",
-        "Content-Type": 'text/plain; charset="utf-8"',
-    }
-    headers.update(overrides)
-    lines = [f"{k}: {v}" for k, v in headers.items() if v]
-    return ("\r\n".join(lines) + "\r\n\r\nHi bot, please help.\r\n").encode("utf-8")
 
 
 _RAW_HTML_ONLY_MULTIPART = b"""\

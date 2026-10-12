@@ -295,12 +295,27 @@ def test_background_summary_does_not_leak_panels(chat_page: Page) -> None:
     # tab is registered (the "+" button registers the tab it opens).
     # A bare ``status`` event does not register a tab (only a run
     # does), so the hidden chat must be a tab opened through "+".
+    # "+" keeps a chat that is still new, so the placeholder gets a
+    # task first (the daemon's setTaskText echo).
     placeholder = page.evaluate("window._testApi.getActiveTabId()")
+    _send(page, [{"type": "setTaskText", "text": "placeholder task"}])
     page.locator("#new-chat-btn").click()
     first = page.evaluate("window._testApi.getActiveTabId()")
     assert first != placeholder
     expect(page.locator(f'.chat-tab[data-tab-id="{placeholder}"]')).to_have_count(0)
-    _send(page, [{"type": "clear"}, {"type": "status", "running": True}])
+    # The daemon answers the "+" (its ``newChat``) with a ``showWelcome``
+    # that resets the tab unless the tab already has a task.  A run
+    # always opens with the daemon's setTaskText echo, so the hidden
+    # chat gets one too: without it, a daemon slowed by load delivers
+    # that reset after the transcript below is in place and blanks it.
+    _send(
+        page,
+        [
+            {"type": "setTaskText", "text": "hidden task"},
+            {"type": "clear"},
+            {"type": "status", "running": True},
+        ],
+    )
     page.locator("#new-chat-btn").click()
     second = page.evaluate("window._testApi.getActiveTabId()")
     assert first != second
@@ -308,11 +323,16 @@ def test_background_summary_does_not_leak_panels(chat_page: Page) -> None:
     # retired when the user leaves it.
     assert first in {t["id"] for t in page.evaluate("window._testApi.openTabs()")}
     _send(page, _events(), tab=first)
+    # The daemon's ``showWelcome`` reply to the first "+" can land this
+    # late under load (observed on a 49-split run); it must leave the
+    # running hidden chat alone, and the one shown again as well.
+    _send(page, [{"type": "showWelcome", "model": "m"}], tab=first)
     expect(
         page.locator("#output .tc-summary, #output .tc-question, #output .tc-question-answer")
     ).to_have_count(0)
     # Chats have no tab row: the Chats-panel pick is switchToTab.
     page.evaluate("id => window._testApi.switchToTab(id)", first)
+    _send(page, [{"type": "showWelcome", "model": "m"}], tab=first)
     _assert_preserved(page)
     page.evaluate("id => window._testApi.switchToTab(id)", second)
     expect(

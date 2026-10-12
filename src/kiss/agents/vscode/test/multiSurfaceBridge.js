@@ -169,8 +169,11 @@ function makeWebview(bodyAttrs, initialState, onPost, errors) {
 
 // One daemon connection for `surface`: the webview's posts go out as
 // JSON frames once the local token is accepted, the daemon's event
-// frames come back as `message` events.
-function connectSocket(surface, onConnect) {
+// frames come back as `message` events.  `onFail(reason)` answers a
+// connection that drops before the daemon accepted the token (connect
+// timeout, TLS or auth failure), so the driver gets the reason at once
+// instead of waiting out its reply timeout.
+function connectSocket(surface, onConnect, onFail) {
   const endpoint = readEndpoint();
   const socket = new WsClient({
     url: endpoint.url,
@@ -179,6 +182,9 @@ function connectSocket(surface, onConnect) {
   });
   const pending = [];
   let authenticated = false;
+  socket.on('close', () => {
+    if (!authenticated) onFail(surface.errors.slice(-3).join('; '));
+  });
   socket.on('open', () => {
     socket.send(JSON.stringify({type: 'auth', token: endpoint.token}));
   });
@@ -263,10 +269,14 @@ function openSurface(cmd) {
   // Like the shim after `auth_ok` (and the VS Code host on connect):
   // tell the app the daemon is up, so a later drop counts as an
   // outage whose reconnect re-sends `ready`.
-  connectSocket(surface, () => {
-    dispatchToWebview(surface, {type: 'daemonStatus', connected: true});
-    out({op: 'opened', name: cmd.name});
-  });
+  connectSocket(
+    surface,
+    () => {
+      dispatchToWebview(surface, {type: 'daemonStatus', connected: true});
+      out({op: 'opened', name: cmd.name});
+    },
+    reason => out({op: 'error', name: cmd.name, error: 'connect: ' + reason}),
+  );
 }
 
 // The remote webapp's shim keeps the page up while its WebSocket is
@@ -286,10 +296,14 @@ function disconnectSurface(cmd, surface) {
 }
 
 function reconnectSurface(cmd, surface) {
-  connectSocket(surface, () => {
-    dispatchToWebview(surface, {type: 'daemonStatus', connected: true});
-    out({op: 'reconnected', name: cmd.name});
-  });
+  connectSocket(
+    surface,
+    () => {
+      dispatchToWebview(surface, {type: 'daemonStatus', connected: true});
+      out({op: 'reconnected', name: cmd.name});
+    },
+    reason => out({op: 'error', name: cmd.name, error: 'reconnect: ' + reason}),
+  );
 }
 
 // The streamed browser tab `tabId` as the webview shows it: tab-strip
@@ -337,19 +351,6 @@ function shownBrowserScreen(surface) {
 // sub-agents are open but not rendered, so the webview's own tab records
 // (_testApi.openTabs) are the list of open tabs and the rows supply what
 // the user sees of each.
-function allTabEls(doc) {
-  const seen = new Set();
-  return Array.from(
-    doc.querySelectorAll(
-      '#tab-list [data-tab-id], #content-tab-list [data-tab-id]',
-    ),
-  ).filter(el => {
-    if (seen.has(el.dataset.tabId)) return false;
-    seen.add(el.dataset.tabId);
-    return true;
-  });
-}
-
 function renderedTabEl(doc, tabId) {
   return (
     doc.querySelector(`#tab-list [data-tab-id="${tabId}"]`) ||

@@ -7,15 +7,14 @@
 ``_handle_worktree_action`` guards a worktree merge/discard with
 ``_check_worktree_busy`` and then sets ``tab.is_merging = True`` under
 ``_state_lock``.  But the busy check inspects only
-``tab.is_task_active`` and ``_any_non_wt_running()`` — it never checks
+``tab.is_task_active`` — it never checks
 ``tab.is_merging`` itself.  So a second ``worktreeAction`` command that
 arrives while the first merge is still in flight (a double click on the
 Merge button, or one click from each of two connected clients) passes
 the guard, queues behind ``repo_lock``, and re-runs ``wt.merge()`` /
 ``wt.discard()`` on the already-merged worktree.  Additionally,
 whichever thread finishes first clears ``is_merging`` in its ``finally``
-while the other thread is still merging, reopening the window for a
-non-worktree task to start writing to the main tree mid-merge.
+while the other thread is still merging.
 
 The test makes the race deterministic by blocking the agent's
 ``merge()`` until the second command has been issued.
@@ -30,13 +29,13 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
-class _BlockingMergeAgent(WorktreeSorcarAgent):
+class _BlockingMergeAgent(ChatSorcarAgent):
     """Real agent whose merge() blocks until released and counts calls."""
 
     def __init__(self, repo_root: Path) -> None:
@@ -84,7 +83,7 @@ class TestDoubleMergeClick(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _register_tab_state(
-        self, tab_id: str, agent: WorktreeSorcarAgent,
+        self, tab_id: str, agent: ChatSorcarAgent,
     ) -> agent_state.AgentState:
         """Register a server-owned worktree state for *tab_id*."""
         with self.server._state_lock:
@@ -94,7 +93,6 @@ class TestDoubleMergeClick(unittest.TestCase):
                 server_owned=True,
                 agent=agent,
             )
-            state.use_worktree = True
             agent_state.register(state)
         return state
 

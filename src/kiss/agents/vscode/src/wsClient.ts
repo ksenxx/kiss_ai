@@ -17,7 +17,8 @@
  * loopback and costs daemon CPU), so RSV bits must be zero.
  *
  * `wss://` connections verify the server against the CA passed in
- * `ca` (the daemon's local CA from `~/.kiss/tls/ca.pem`); `ws://` is
+ * `ca` (the daemon's local CA, read from the endpoint file's `ca` field
+ * by AgentClient; it lives at `<brand home>/tls/ca.pem`); `ws://` is
  * accepted for tests.
  */
 

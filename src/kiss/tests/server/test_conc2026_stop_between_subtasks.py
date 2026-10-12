@@ -47,7 +47,7 @@ from typing import Any, cast
 from unittest import TestCase
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 
@@ -92,7 +92,7 @@ class TestStopBetweenSubtasks(TestCase):
         remote = _make_remote_server()
         vscode = remote._vscode_server
         tab_id = "between-subtasks-1"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         state = AgentState(
             f"pre-{tab_id}",
             agent=agent,

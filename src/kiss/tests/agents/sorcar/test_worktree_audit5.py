@@ -6,7 +6,7 @@
 
 BUG-19: discard() now acquires repo_lock — checkout serialized with
         merge/release from other tabs.
-BUG-20: _release_worktree checkout failure now sets _merge_conflict_warning.
+BUG-20: merge() reports a checkout failure instead of silently failing.
 BUG-21: checkout_error() removed — checkout() returns (bool, stderr).
 BUG-22: _check_merge_conflict misses staged files — KNOWN LIMITATION.
 BUG-23: _try_setup_worktree now checks commit_staged return value and
@@ -25,13 +25,13 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
     _git,
     repo_lock,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -87,7 +87,7 @@ class TestBug19DiscardRepoLock:
         try:
             repo = _make_repo(Path(tmpdir) / "repo")
 
-            agent = WorktreeSorcarAgent("tab-a")
+            agent = ChatSorcarAgent("tab-a")
             agent._chat_id = "a"
             wt_work = agent._try_setup_worktree(repo, str(repo))
             assert wt_work is not None
@@ -119,13 +119,13 @@ class TestBug19DiscardRepoLock:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class TestBug20ReleaseCheckoutWarning:
-    """BUG-20 FIX: checkout failure in _release_worktree now sets
-    _merge_conflict_warning so the user is notified.
+class TestBug20MergeCheckoutWarning:
+    """BUG-20 FIX: a checkout failure during merge() is reported to the
+    user and the task branch is kept.
     """
 
-    def test_checkout_failure_sets_warning(self) -> None:
-        """_release_worktree sets _merge_conflict_warning on checkout failure."""
+    def test_checkout_failure_is_reported(self) -> None:
+        """merge() names the branch it could not check out."""
         tmpdir = tempfile.mkdtemp()
         saved = _redirect_db(tmpdir)
         try:
@@ -137,7 +137,7 @@ class TestBug20ReleaseCheckoutWarning:
             _git("commit", "-m", "feature change", cwd=repo)
             _git("checkout", "main", cwd=repo)
 
-            agent = WorktreeSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             agent._chat_id = "test20"
 
             wt_work = agent._try_setup_worktree(repo, str(repo))
@@ -160,10 +160,12 @@ class TestBug20ReleaseCheckoutWarning:
                 baseline_commit=wt.baseline_commit,
             )
 
-            result = agent._release_worktree()
-            assert result is None, "Expected None on checkout failure"
-            assert agent._merge_conflict_warning is not None, (
-                "Warning must be set on checkout failure"
+            result = agent.merge()
+            assert "Cannot checkout 'no-such-branch'" in result
+            assert agent._wt is not None, "branch must stay pending"
+            assert GitWorktreeOps.branch_exists(repo, wt.branch)
+            assert (repo / "README.md").read_text() == "dirty local change\n", (
+                "the user's stashed edit must be restored"
             )
 
         finally:
@@ -227,7 +229,7 @@ class TestBug23BaselineCommitFixed:
             hook.write_text("#!/bin/sh\nexit 1\n")
             hook.chmod(0o755)
 
-            agent = WorktreeSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             agent._chat_id = "test23"
 
             wt_work = agent._try_setup_worktree(repo, str(repo))

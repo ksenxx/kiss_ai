@@ -14,7 +14,7 @@ running in a chat, the ONE tab currently showing that chat must see
 the events streaming from the running task.
 
 Tabs that open the chat WHILE the task is already running are covered
-by ``_replay_session`` → ``_reattach_running_chat`` (tested in
+by ``_replay_session`` → ``_attach_viewer_to_running_chat`` (tested in
 ``test_detach_tab_and_reattach.py``).  These tests cover tabs that
 opened the chat BEFORE the task started:
 
@@ -34,7 +34,7 @@ opened the chat BEFORE the task started:
 4. A tab that navigated away (``newChat``) or closed (``closeTab``)
    must STOP receiving streams for chats it no longer displays.
 
-The agent stack is real (``WorktreeSorcarAgent.run`` →
+The agent stack is real (``ChatSorcarAgent.run`` →
 ``ChatSorcarAgent.run`` → task-id allocation → printer subscription);
 only the innermost LLM-driven ``run`` (the grandparent of
 ``SorcarAgent``) is replaced so no model call happens.  The captured
@@ -46,11 +46,9 @@ once per subscribed tab, each copy stamped with the viewer's tab id.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import threading
 import unittest
-from pathlib import Path
 from typing import Any, cast
 
 import yaml
@@ -60,37 +58,14 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import (
+    init_repo,
+    redirect_persistence,
+    restore_persistence,
+    restore_sorcar_parent_run,
+)
 
 _LIVE_TEXT = "live-follow-up-delta"
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _init_git_repo(tmpdir: str) -> None:
-    subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmpdir,
-                   capture_output=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir,
-                   capture_output=True)
-    Path(tmpdir, ".gitkeep").touch()
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir,
-                   capture_output=True)
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
@@ -131,7 +106,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
 def _patch_grandparent_run() -> Any:
     """Replace the LLM-driven grandparent ``run`` with a stub.
 
-    ``WorktreeSorcarAgent.run`` and ``ChatSorcarAgent.run`` (which owns
+    ``ChatSorcarAgent.run`` and ``ChatSorcarAgent.run`` (which owns
     task-id allocation and printer subscription — the code under test)
     stay REAL; only the innermost agent loop is stubbed.  The stub
     broadcasts one ``text_delta`` so the tests can observe exactly
@@ -150,10 +125,6 @@ def _patch_grandparent_run() -> Any:
     return original
 
 
-def _unpatch_grandparent_run(original: Any) -> None:
-    cast(Any, SorcarAgent.__mro__[1]).run = original
-
-
 class TestChatViewerLiveStream(unittest.TestCase):
     """Tabs that opened a chat must receive later tasks' live streams."""
 
@@ -163,15 +134,15 @@ class TestChatViewerLiveStream(unittest.TestCase):
             self.skipTest("no model API key configured")
         self.model = models[0]
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
         self.server, self.events, self.lock = _make_server()
         self.original_run = _patch_grandparent_run()
 
     def tearDown(self) -> None:
-        _unpatch_grandparent_run(self.original_run)
+        restore_sorcar_parent_run(self.original_run)
         agent_state.agent_states.clear()
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _tab_state(self, tab_id: str) -> agent_state.AgentState:

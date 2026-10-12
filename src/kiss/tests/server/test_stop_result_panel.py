@@ -24,7 +24,7 @@ import uuid
 from typing import Any
 from unittest import TestCase
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 
 
@@ -36,7 +36,7 @@ def _make_server() -> Any:
 
 
 def _register_state(
-    agent: WorktreeSorcarAgent, tab_id: str,
+    agent: ChatSorcarAgent, tab_id: str,
 ) -> agent_state.AgentState:
     """Pre-register a server-owned AgentState the way ``_cmd_run`` does.
 
@@ -80,7 +80,7 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "stop-test-1"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:
@@ -145,7 +145,7 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "error-test-1"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:
@@ -199,7 +199,7 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "success-test-1"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:
@@ -264,7 +264,7 @@ class TestBudgetExceededResultPanel(TestCase):
         server.printer.broadcast = capture  # type: ignore[assignment]
 
         tab_id = "budget-test-1"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _register_state(agent, tab_id)
 
         def fake_run(**kwargs: Any) -> None:

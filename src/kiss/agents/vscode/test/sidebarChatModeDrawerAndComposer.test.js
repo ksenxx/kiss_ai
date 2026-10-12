@@ -19,7 +19,8 @@
 // * the host's `openChatFromHistory` message (a primary-sidebar
 //   history click in sidebar mode) mirrors the in-page history rows:
 //   switch to the chat's tab, resume the chat in a fresh tab, or show
-//   the task text read-only — and is ignored by editor-tab webviews;
+//   the task text read-only — in the sidebar view and the chat editor
+//   tab alike;
 // * body.content-tab-open (a file/webview tab in front) keeps the
 //   composer's button row (+ and ...) while hiding the text box and
 //   the chat-only controls (Inject promptlet, model picker, Send).
@@ -133,10 +134,6 @@ function injectMainCss(win) {
 
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function click(win, id) {
@@ -537,22 +534,22 @@ async function main() {
     },
   );
 
-  await test('editor-tab webviews ignore openChatFromHistory', () => {
-    const {win, posted} = makeWebview(
-      ' class="editor-tab-mode" data-kiss-tab-id="root-1"',
-    );
+  await test('the chat editor tab resumes openChatFromHistory in place', () => {
+    const {win, posted} = makeWebview(' class="editor-tab-mode"');
     const resumesBefore = posted.filter(m => m.type === 'resumeSession').length;
     send(win, {
       type: 'openChatFromHistory',
       chatId: 'chat-far',
       taskId: 7,
-      title: 'not for this surface',
+      title: 'from the history panel',
     });
+    const resumes = posted.filter(m => m.type === 'resumeSession');
     assert.strictEqual(
-      posted.filter(m => m.type === 'resumeSession').length,
-      resumesBefore,
-      'the host routes editor-tab opens through the panel manager instead',
+      resumes.length,
+      resumesBefore + 1,
+      'editor-tabs mode shows every chat in the one chat editor tab',
     );
+    assert.strictEqual(resumes[resumes.length - 1].id, 'chat-far');
   });
 
   await test(

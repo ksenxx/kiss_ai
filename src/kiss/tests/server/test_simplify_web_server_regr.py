@@ -116,20 +116,7 @@ class TestTunnelStateReset(unittest.TestCase):
 
 
 import kiss.agents.sorcar.persistence as th  # noqa: E402
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_persistence(saved: tuple[Any, Any, Any]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence  # noqa: E402
 
 
 class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
@@ -138,7 +125,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-simp-live-")
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
@@ -153,7 +140,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

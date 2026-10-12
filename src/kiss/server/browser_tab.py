@@ -64,6 +64,9 @@ _CALL_TIMEOUT = 30.0
 _HEADLESS_UA_TOKEN = "HeadlessChrome"
 # After terminating a hung script, how long the page gets to answer a probe.
 _INTERRUPT_PROBE_TIMEOUT = 3.0
+# How long ``page.close()`` gets before the page is closed through
+# DevTools instead (a normal close takes milliseconds; see _close_page).
+_CLOSE_TIMEOUT = 2.0
 
 _MODIFIER_BITS = {"alt": 1, "ctrl": 2, "meta": 4, "shift": 8}
 _KEY_TEXT = {"Enter": "\r"}
@@ -169,12 +172,15 @@ class BrowserTabService:
         self._by_page: dict[int, _PageRecord] = {}
         self._next_id = 1
         self._closed = False
+        # Serialises every browser lifecycle step on the private loop:
+        # launching, creating a page, closing a page and tearing the
+        # browser down.  Two opens racing must not start two browsers;
+        # a launch on a profile whose previous browser is still exiting
+        # fails; and whether the last close empties the browser is only
+        # known once the page creation racing it has reserved its page.
         self._launch_lock = asyncio.Lock()
-        # Pages being created by _open (not popups) - see _on_page.  The
-        # event is set while none is: a close waits for it (_close_page).
+        # Pages being created by _open (not popups) - see _on_page.
         self._creating = 0
-        self._not_creating = asyncio.Event()
-        self._not_creating.set()
 
     # ------------------------------------------------------------------
     # Thread-safe public API
@@ -368,13 +374,11 @@ class BrowserTabService:
     async def _launch(self) -> BrowserContext:
         """Launch the resolved browser with the persistent profile, once.
 
-        Serialised: two opens racing (a double-click on "Browser") must
-        not start two browsers on one profile.
+        The caller holds ``_launch_lock``.
         """
-        async with self._launch_lock:
-            if self._context is None:
-                self._context = await self._launch_new()
-            return self._context
+        if self._context is None:
+            self._context = await self._launch_new()
+        return self._context
 
     async def _launch_new(self) -> BrowserContext:
         # Heavy import, deferred until the first browser tab opens.
@@ -386,16 +390,21 @@ class BrowserTabService:
         self._playwright = playwright
         try:
             context = await self._launch_browser(playwright)
+            # Still inside the try: the mask's own awaits are the last
+            # points where an abandoned open's cancellation can land, and
+            # the launched browser would then hold the profile with no
+            # ``_context`` to tear it down.
+            await self._mask_headless_user_agent(context)
         except (Exception, asyncio.CancelledError):
             # The driver (a node process) must not outlive the failed
-            # (or, past ``_OPEN_TIMEOUT``, abandoned) launch: the next
-            # open starts a fresh one.  A shutdown that ran meanwhile
-            # has already taken and stopped it.
+            # (or, past ``_OPEN_TIMEOUT``, abandoned) launch: stopping it
+            # also closes a browser it already launched, so the next open
+            # starts a fresh one on a free profile.  A shutdown that ran
+            # meanwhile has already taken and stopped it.
             if self._playwright is playwright:
                 self._playwright = None
                 await playwright.stop()
             raise
-        await self._mask_headless_user_agent(context)
         context.on("page", self._on_page)
         context.on("close", self._on_context_close)
         return context
@@ -519,16 +528,20 @@ class BrowserTabService:
             raise
 
     async def _new_tab(self) -> _PageRecord:
-        """Launch the browser if needed, create a page and announce it unfocused."""
-        context = await self._launch()
-        self._creating += 1
-        self._not_creating.clear()
-        try:
-            page = await context.new_page()
-        finally:
-            self._creating -= 1
-            if self._creating == 0:
-                self._not_creating.set()
+        """Launch the browser if needed, create a page and announce it unfocused.
+
+        Under ``_launch_lock``: a close of the last tab that is still in
+        flight finishes first (its teardown included, so the launch below
+        finds a free profile), and the page is created before any later
+        close or teardown runs.
+        """
+        async with self._launch_lock:
+            context = await self._launch()
+            self._creating += 1
+            try:
+                page = await context.new_page()
+            finally:
+                self._creating -= 1
         rec = await self._register(page, popup=False)
         if rec is None:
             raise RuntimeError("The browser closed the new page before it could be attached.")
@@ -587,9 +600,7 @@ class BrowserTabService:
             self._by_page[id(page)] = rec
             return rec, True
 
-    def _open_event(
-        self, rec: _PageRecord, focus: bool, popup: bool = False
-    ) -> dict[str, Any]:
+    def _open_event(self, rec: _PageRecord, focus: bool, popup: bool = False) -> dict[str, Any]:
         """The ``openBrowserTab`` announcement of *rec*.
 
         ``focus`` asks the receiving surface to switch to the tab;
@@ -622,9 +633,15 @@ class BrowserTabService:
         """
         self._schedule(self._register(page, popup=self._creating == 0))
 
-    def _on_context_close(self, _context: BrowserContext) -> None:
-        """The browser exited (headed window closed, crash): drop every tab."""
-        self._schedule(self._teardown(announce=True))
+    def _on_context_close(self, context: BrowserContext) -> None:
+        """The browser exited (headed window closed, crash): drop every tab.
+
+        A context the service closed itself was taken out of ``_context``
+        before its close, so its event is stale: acting on it would tear
+        down the browser launched since.
+        """
+        if context is self._context:
+            self._schedule(self._teardown(announce=True))
 
     async def _on_page_closed(self, rec: _PageRecord) -> None:
         with self._lock:
@@ -634,14 +651,22 @@ class BrowserTabService:
         if rec.flush_handle is not None:
             rec.flush_handle.cancel()
         self._emit({"type": "closeBrowserTab", "tab_id": rec.tab_id})
-        # The last tab closes the browser, unless a page is being created
-        # right now (the user closed one tab while opening another): a
-        # teardown under ``new_page()`` would fail that open.
-        if remaining == 0 and self._creating == 0:
-            await self._teardown(announce=False)
+        if remaining:
+            return
+        # The last tab closes the browser.  Decided under the lock: a
+        # page being created meanwhile (the user closed one tab while
+        # opening another) has been reserved by the time it is free.
+        async with self._launch_lock:
+            if not self._pages:
+                await self._teardown_locked(announce=False)
 
     async def _teardown(self, announce: bool) -> None:
         """Close the browser and forget every page."""
+        async with self._launch_lock:
+            await self._teardown_locked(announce)
+
+    async def _teardown_locked(self, announce: bool) -> None:
+        """Close the browser and forget every page (caller holds ``_launch_lock``)."""
         with self._lock:
             records = list(self._pages.values())
             self._pages.clear()
@@ -675,17 +700,34 @@ class BrowserTabService:
             await self._close_page(rec)
 
     async def _close_page(self, rec: _PageRecord) -> None:
-        """Close *rec*'s page once no other tab is being created.
+        """Close *rec*'s page (under ``_launch_lock``, like every lifecycle step).
 
-        Headed Chromium drops the close of a window's only tab sent
-        while another tab is being created, and ``page.close()`` never
-        returns.  The wait is re-checked because a new creation may
-        start between the event firing and this coroutine resuming.
+        Chromium now and then swallows the close of a page whose
+        navigation is committing (a tab closed right after it opened):
+        ``page.close()`` then never returns, and neither does a second
+        one, which only re-awaits the same closed promise.  The page
+        would live on with no surface showing it, keeping the browser
+        alive.  The DevTools ``Page.close`` command still closes such a
+        page, so it is sent when the close is overdue.
+
+        Every step is bounded: a browser that stops answering (and may
+        exit meanwhile, which leaves Playwright's request pending for
+        good) must not keep the lock, or its own close events and every
+        later open would queue behind this close forever.
         """
         rec.closing = True
-        while self._creating:
-            await self._not_creating.wait()
-        await rec.page.close()
+        async with self._launch_lock:
+            try:
+                await asyncio.wait_for(rec.page.close(), _CLOSE_TIMEOUT)
+                return
+            except TimeoutError:
+                logger.info("browser tab: %s: close swallowed; closing via DevTools", rec.tab_id)
+            try:
+                if rec.cdp is not None:
+                    await asyncio.wait_for(rec.cdp.send("Page.close"), _CLOSE_TIMEOUT)
+                await asyncio.wait_for(rec.page.close(), _CLOSE_TIMEOUT)
+            except Exception as exc:  # noqa: BLE001 — the tab stays; the user can close it again
+                logger.warning("browser tab: %s did not close: %s", rec.tab_id, exc)
 
     async def _interrupt(self, tab_id: str) -> None:
         rec = self._record(tab_id)
@@ -696,7 +738,7 @@ class BrowserTabService:
             await asyncio.wait_for(rec.page.evaluate("1"), _INTERRUPT_PROBE_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — still wedged: the tab is lost
             logger.warning("browser tab: %s does not answer, closing it: %s", tab_id, exc)
-            await rec.page.close()
+            await self._close_page(rec)
 
     async def _navigate(self, tab_id: str, action: str, url: str) -> None:
         rec = self._record(tab_id)

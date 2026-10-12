@@ -20,7 +20,7 @@ Harness: an isolated ``KISS_HOME`` whose ``MY_MODELS.json`` points a
 bundled model name at a local stand-in OpenAI-compatible endpoint
 (``StandInModelServer``) that records every request; a real
 ``VSCodeServer`` runs the task through ``_cmd_run`` with the real
-``WorktreeSorcarAgent`` the server creates.  The stand-in answers the
+``ChatSorcarAgent`` the server creates.  The stand-in answers the
 classifier's request (no ``tools``) with a verdict and the agent's
 first request (``tools`` attached) with a ``finish`` call, so the
 test sees BOTH model calls of the run arrive at the custom endpoint.
@@ -44,6 +44,7 @@ from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import clear_tab_states
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,
@@ -124,11 +125,11 @@ def home() -> Iterator[IsolatedKissHome]:
     saved_my_models = model_info.USER_MY_MODELS_PATH
     model_info.USER_MY_MODELS_PATH = isolated.kiss_home / "MY_MODELS.json"
     clear_classification_cache()
-    _clear_tab_states()
+    clear_tab_states(_TAB)
     try:
         yield isolated
     finally:
-        _clear_tab_states()
+        clear_tab_states(_TAB)
         clear_classification_cache()
         model_info.USER_MY_MODELS_PATH = saved_my_models
         if saved is None:
@@ -136,13 +137,6 @@ def home() -> Iterator[IsolatedKissHome]:
         else:
             os.environ[_DISABLE_ENV] = saved
         isolated.cleanup()
-
-
-def _clear_tab_states() -> None:
-    with agent_state.STATE_LOCK:
-        for st in agent_state.snapshot():
-            if st.tab_id == _TAB:
-                agent_state.unregister(st.task_id, st)
 
 
 def _wait_idle() -> None:

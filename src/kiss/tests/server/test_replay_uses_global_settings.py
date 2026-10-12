@@ -8,16 +8,15 @@ with the loaded task's per-task snapshot of global settings.
 Spec
 ----
 1. A first task T1 runs in chat X with the global settings at the time
-   it was launched (``is_worktree=True``, ``is_parallel=True``,
-   ``auto_commit_mode=True``, ``model="claude-opus-4-6"``).  The
+   it was launched (``is_parallel=True``, ``model="claude-opus-4-6"``).  The
    :meth:`_TaskRunnerMixin._run_task_inner` cleanup persists this
    snapshot into the ``task_history.extra`` JSON column.
 
 2. The user changes their GLOBAL settings — typically by clicking the
-   worktree/parallel/auto-commit toggles in the toolbar — to a new
-   configuration (``is_worktree=False``, etc.).  The toggle state
+   parallel toggle in the toolbar or picking another model — to a new
+   configuration (``is_parallel=False``, etc.).  The toggle state
    in the webview is the source of truth for the next task's
-   ``useWorktree`` / ``isParallel`` / ``autoCommit`` flags.
+   ``isParallel`` flag.
 
 3. The user clicks the history row for T1.  The frontend issues
    ``newChat`` then ``resumeSession`` for chat X into a fresh tab Y.
@@ -25,16 +24,15 @@ Spec
    ``task_events`` event whose ``extra`` payload is the persisted
    ``task_history.extra`` JSON of T1.
 
-4. PRIOR BEHAVIOR (the bug): ``extra`` carried ``is_worktree``,
-   ``is_parallel``, ``auto_commit_mode`` and ``model`` keys.  The
-   frontend's ``task_events`` handler used those values to overwrite
-   the live toggle UI and ``selectedModel``.  The next ``submit`` in
-   tab Y then sent those STALE values as ``useWorktree`` /
-   ``isParallel`` / ``autoCommit`` / ``model`` — silently making
-   the follow-up task run with T1's old settings instead of the
-   user's CURRENT global settings.
+4. PRIOR BEHAVIOR (the bug): ``extra`` carried ``is_parallel`` and
+   ``model`` keys.  The frontend's ``task_events`` handler used those
+   values to overwrite the live toggle UI and ``selectedModel``.  The
+   next ``submit`` in tab Y then sent those STALE values as
+   ``isParallel`` / ``model`` — silently making the follow-up task run
+   with T1's old settings instead of the user's CURRENT global
+   settings.
 
-5. FIXED BEHAVIOR: the backend strips the four global-setting keys
+5. FIXED BEHAVIOR: the backend strips the global-setting keys
    from the broadcast ``extra`` (see ``_extra_for_replay`` in
    ``kiss/server/server.py``).  The webview's live toggles
    stay at the user's current global settings, and the follow-up
@@ -50,64 +48,21 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import tempfile
-import threading
 import unittest
-from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _init_git_repo(tmpdir: str) -> None:
-    subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmpdir,
-                   capture_output=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir,
-                   capture_output=True)
-    Path(tmpdir, ".gitkeep").touch()
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir,
-                   capture_output=True)
-
-
-def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
-    server = VSCodeServer()
-    events: list[dict[str, Any]] = []
-    lock = threading.Lock()
-    printer = server.printer
-
-    def capture(event: dict[str, Any]) -> None:
-        ev = printer._inject_task_id(event)
-        with printer._lock:
-            printer._record_event(ev)
-        printer._persist_event(ev)
-        with lock:
-            events.append(ev)
-
-    printer.broadcast = capture  # type: ignore[assignment]
-    return server, events, lock
+from kiss.tests.server.conftest import (
+    init_repo,
+    make_recording_server,
+    patch_sorcar_parent_run,
+    redirect_persistence,
+    restore_persistence,
+    restore_sorcar_parent_run,
+)
 
 
 class _RunCapture:
@@ -131,21 +86,6 @@ class _RunCapture:
         return f"success: true\nsummary: {summary}\n"
 
 
-def _patch_parent_run(capture: _RunCapture) -> Any:
-    parent = cast(Any, SorcarAgent.__mro__[1])
-    original = parent.run
-
-    def _run_proxy(self_agent: object, **kwargs: object) -> str:
-        return capture.fake_run(self_agent, **kwargs)
-
-    parent.run = _run_proxy
-    return original
-
-
-def _unpatch_parent_run(original: Any) -> None:
-    cast(Any, SorcarAgent.__mro__[1]).run = original
-
-
 def _run_and_wait(
     server: VSCodeServer,
     *,
@@ -153,9 +93,7 @@ def _run_and_wait(
     prompt: str,
     work_dir: str,
     model: str,
-    use_worktree: bool,
     use_parallel: bool,
-    auto_commit: bool,
 ) -> None:
     server._handle_command({
         "type": "run",
@@ -163,18 +101,15 @@ def _run_and_wait(
         "model": model,
         "workDir": work_dir,
         "tabId": tab_id,
-        "useWorktree": use_worktree,
         "isParallel": use_parallel,
-        "autoCommit": auto_commit,
     })
     state = agent_state.find_by_tab(tab_id)
     assert state is not None, f"no agent state registered for tab {tab_id}"
     t = state.task_thread
     assert t is not None
-    # A hang guard, not a latency bound: even with the agent faked, the
-    # run spawns ~60 git processes (worktree create, baseline commit,
-    # discard) -- ~0.3 s on Linux, ~3 s on an idle Windows VM and
-    # 15-30 s there with a dozen other test processes running.
+    # A hang guard, not a latency bound: ~0.3 s on Linux, seconds on
+    # an idle Windows VM and far more there with a dozen other test
+    # processes running.
     t.join(timeout=60)
     assert not t.is_alive()
 
@@ -187,15 +122,15 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
     def setUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
-        self.server, self.events, self.lock = _make_server()
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
+        self.server, self.events, self.lock = make_recording_server()
         self.capture = _RunCapture()
-        self.original_run = _patch_parent_run(self.capture)
+        self.original_run = patch_sorcar_parent_run(self.capture.fake_run)
 
     def tearDown(self) -> None:
-        _unpatch_parent_run(self.original_run)
-        _restore_db(self.saved)
+        restore_sorcar_parent_run(self.original_run)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         agent_state.agent_states.clear()
 
@@ -228,9 +163,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             prompt="remember the magic word: banana",
             work_dir=self.tmpdir,
             model="claude-opus-4-6",
-            use_worktree=True,
             use_parallel=True,
-            auto_commit=True,
         )
         first_row = th._load_history(limit=10)[0]
         chat_id = str(first_row["chat_id"])
@@ -238,9 +171,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         assert chat_id, "first task should have a chat id"
 
         persisted = self._persisted_extra_for(first_task_id)
-        assert persisted.get("is_worktree") is True, persisted
         assert persisted.get("is_parallel") is True, persisted
-        assert persisted.get("auto_commit_mode") is True, persisted
         assert persisted.get("model") == "claude-opus-4-6", persisted
 
         with self.lock:
@@ -263,9 +194,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         assert extra_str, "task_events.extra should not be empty"
         extra_json = json.loads(extra_str)
         assert isinstance(extra_json, dict), extra_json
-        for stripped in (
-            "is_worktree", "is_parallel", "auto_commit_mode", "model",
-        ):
+        for stripped in ("is_parallel", "model"):
             assert stripped not in extra_json, (
                 f"replay broadcast leaked stripped key {stripped!r}: "
                 f"{extra_json!r}"
@@ -282,9 +211,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             prompt="task 1: remember the magic word: banana",
             work_dir=self.tmpdir,
             model="claude-opus-4-6",
-            use_worktree=True,
             use_parallel=True,
-            auto_commit=True,
         )
         first_row = th._load_history(limit=10)[0]
         chat_id = str(first_row["chat_id"])
@@ -307,9 +234,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             prompt="task 2: what was the magic word?",
             work_dir=self.tmpdir,
             model="claude-sonnet-4-5",
-            use_worktree=False,
             use_parallel=False,
-            auto_commit=False,
         )
 
         rows = th._load_history(limit=10)
@@ -317,9 +242,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         second_task_id = cast(str, rows[0]["id"])
         assert second_task_id != first_task_id
         second_extra = self._persisted_extra_for(second_task_id)
-        assert second_extra.get("is_worktree") is False, second_extra
         assert second_extra.get("is_parallel") is False, second_extra
-        assert second_extra.get("auto_commit_mode") is False, second_extra
         assert second_extra.get("model") == "claude-sonnet-4-5", second_extra
 
     def test_history_load_preserves_tab_model_pick(self) -> None:
@@ -336,9 +259,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             prompt="task to create a chat",
             work_dir=self.tmpdir,
             model=self.server._default_model,
-            use_worktree=False,
             use_parallel=False,
-            auto_commit=False,
         )
         first_row = th._load_history(limit=10)[0]
         chat_id = str(first_row["chat_id"])
@@ -375,18 +296,14 @@ class TestExtraForReplayUnit(unittest.TestCase):
         from kiss.server.server import _extra_for_replay
         payload = json.dumps({
             "model": "claude-opus-4-6",
-            "is_worktree": True,
             "is_parallel": True,
-            "auto_commit_mode": True,
             "work_dir": "/tmp/x",
             "startTs": 1, "endTs": 2,
         })
         out = _extra_for_replay(payload)
         parsed = json.loads(out)
         assert "model" not in parsed
-        assert "is_worktree" not in parsed
         assert "is_parallel" not in parsed
-        assert "auto_commit_mode" not in parsed
         assert parsed["work_dir"] == "/tmp/x"
         assert parsed["startTs"] == 1
         assert parsed["endTs"] == 2
@@ -421,10 +338,10 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
     def setUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def tearDown(self) -> None:
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         agent_state.agent_states.clear()
 
@@ -443,8 +360,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
                 "tokens": 0,
                 "cost": 0.0,
                 "is_parallel": True,
-                "is_worktree": True,
-                "auto_commit_mode": True,
                 "startTs": 1000,
                 "endTs": 2000,
             },
@@ -465,8 +380,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
                     "tokens": 0,
                     "cost": 0.0,
                     "is_parallel": False,
-                    "is_worktree": True,
-                    "auto_commit_mode": False,
                     "startTs": 1100 + i,
                     "endTs": 1900 + i,
                     "subagent": {"parent_task_id": parent_id},
@@ -475,7 +388,7 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
             )
             sub_ids.append(sub_id)
 
-        server, events, lock = _make_server()
+        server, events, lock = make_recording_server()
         parent_tab = "tab-parent"
         server._replay_session(
             chat_id=chat_id, tab_id=parent_tab, task_id=parent_id,
@@ -495,9 +408,7 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
             assert extra_str, f"sub-tab task_events.extra empty: {te}"
             extra_json = json.loads(extra_str)
             assert isinstance(extra_json, dict), extra_json
-            for stripped in (
-                "is_worktree", "is_parallel", "auto_commit_mode", "model",
-            ):
+            for stripped in ("is_parallel", "model"):
                 assert stripped not in extra_json, (
                     f"sub-agent replay broadcast leaked stripped key "
                     f"{stripped!r}: {extra_json!r}"

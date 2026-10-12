@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
-import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -34,19 +32,7 @@ from websockets.asyncio.client import connect
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
@@ -67,7 +53,7 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
         _persistence._DB_PATH = self._persistence_dir / "history.db"
         _persistence._db_conn = None
 
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -146,7 +132,7 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
     ) -> list[dict[str, Any]]:
         """Auth, send *ready_cmd*, and drain the server's replies."""
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -192,16 +178,28 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
             [t["title"] for t in tabs],
             ["newest running task", "oldest running task"],
         )
-        replay_tabs = {
-            e.get("tabId")
-            for e in events
-            if e.get("type") == "task_events"
-        }
-        self.assertLessEqual(
-            {"tab-new", "tab-old"}, replay_tabs,
-            "every chat-bound registry tab must be replayed so the "
-            f"connecting client gets its transcript; got {replay_tabs}",
+        # The ready names a tab that is not one of these, so neither
+        # transcript is sent: each tab is offered (replay_deferred) and
+        # reported running, so the client shows its spinner and fetches
+        # the transcript when the user opens it.
+        self.assertEqual(
+            [e.get("tabId") for e in events if e.get("type") == "task_events"],
+            [],
+            "a tab the client is not looking at must not be replayed",
         )
+        self.assertEqual(
+            sorted(
+                str(e.get("tabId")) for e in events
+                if e.get("type") == "replay_deferred"
+            ),
+            ["tab-new", "tab-old"],
+            "every other chat-bound registry tab must be offered",
+        )
+        running_tabs = {
+            e.get("tabId") for e in events
+            if e.get("type") == "status" and e.get("running")
+        }
+        self.assertLessEqual({"tab-new", "tab-old"}, running_tabs)
 
     async def test_ready_without_running_tasks_sends_nothing(self) -> None:
         """No registered tabs -> an empty snapshot, no replays."""

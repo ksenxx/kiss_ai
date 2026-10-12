@@ -2,56 +2,40 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression test: auto-commit resolves a cleaned-up worktree path.
+"""Regression test: the Git Commit button resolves a cleaned-up worktree path.
 
-After a worktree task finishes, cleanup removes its directory under
-``<repo>/.kiss-worktrees/kiss_wt-*``.  A delayed automatic commit may
-still carry that now-stale worktree path.  Passing it directly to
-``git -C`` would report "Not a git repository" even though the parent
-repository has changes waiting to be committed.
+After a worktree task merges or is discarded, cleanup removes its
+directory under ``<repo>/.kiss-worktrees/kiss_wt-*``.  A tab whose
+working directory still carries that now-stale worktree path may press
+Git Commit (``merge_flow._commit_main_tree``).  Passing the path
+directly to ``git -C`` would report "Not a git repository" even though
+the parent repository has changes waiting to be committed.
 
 When ``work_dir`` points under a removed ``.kiss-worktrees/kiss_wt-*``
-segment (or one without a valid ``.git`` link), the server must strip
-that segment and act on the corresponding parent-repository path via
-``_stale_worktree_fallback`` in ``useful_tools.py``.
+segment, the server must strip that segment and act on the
+corresponding parent-repository path (``remap_vanished_worktree``).
 """
 
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import init_repo, run_git
 
 
-def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
-    )
-
-
-def _init_repo(repo: str) -> None:
-    _run_git(repo, "init", "-q")
-    _run_git(repo, "config", "user.email", "test@example.com")
-    _run_git(repo, "config", "user.name", "Test User")
-    _run_git(repo, "config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    _run_git(repo, "add", "seed.txt")
-    _run_git(repo, "commit", "-q", "-m", "seed")
-
-
-class TestAutoCommitAfterWorktreeCleanup(unittest.TestCase):
-    """Automatic commit must recover from a stale worktree path."""
+class TestManualCommitAfterWorktreeCleanup(unittest.TestCase):
+    """The manual Git Commit must recover from a stale worktree path."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-stale-wt-")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo(self.repo)
+        init_repo(self.repo)
 
         self.stale_wt_dir = str(
             Path(self.repo) / ".kiss-worktrees" / "kiss_wt-1781574606-49147541",
@@ -79,29 +63,31 @@ class TestAutoCommitAfterWorktreeCleanup(unittest.TestCase):
             f"No autocommit_done event captured. Events: {self.events}",
         )
 
-    def test_autocommit_via_stale_worktree_path_uses_parent_repo(self) -> None:
+    def test_commit_via_stale_worktree_path_uses_parent_repo(self) -> None:
         """A stale path below ``.kiss-worktrees/kiss_wt-…``
         must commit the dirty files in the parent repo, not
         report "Not a git repository."."""
-        before_head = _run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        before_head = run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
 
-        self.server._autocommit_changes(
+        self.server._commit_main_tree(
             "t-stale", work_dir=self.stale_wt_dir,
         )
 
         done = self._last_done_event()
+        assert done.get("manual") is True, f"Git Commit must be flagged manual: {done}"
+        assert done.get("tabId") == "t-stale", f"wrong tab: {done}"
         assert "Not a git repository" not in done.get("message", ""), (
             f"BUG: stale worktree path reported 'Not a git repository': {done}"
         )
         assert done.get("success") is True, f"commit should succeed: {done}"
         assert done.get("committed") is True, f"should have committed: {done}"
 
-        after_head = _run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        after_head = run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
         assert after_head != before_head, (
             f"HEAD did not advance: before={before_head} after={after_head}"
         )
 
-        status = _run_git(self.repo, "status", "--porcelain")
+        status = run_git(self.repo, "status", "--porcelain")
         assert status.stdout.strip() == "", (
             f"working tree still dirty: {status.stdout!r}"
         )

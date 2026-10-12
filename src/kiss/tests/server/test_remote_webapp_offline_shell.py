@@ -37,7 +37,6 @@ import asyncio
 import http.client
 import json
 import re
-import socket
 import ssl
 import threading
 import time
@@ -51,15 +50,9 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from kiss.core.brand import PRODUCT_NAME
 from kiss.tests.conftest import goto_retrying_network_change
+from kiss.tests.server.conftest import find_free_port
 
 MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")
-
-
-def _free_port() -> int:
-    """Return a TCP port that is free right now."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 class _LiveServer:
@@ -192,7 +185,7 @@ class _LiveServer:
 @pytest.fixture
 def live_server(tmp_path: Path) -> Iterator[_LiveServer]:
     """A running ``_LiveServer``; stopped at teardown if still up."""
-    server = _LiveServer(tmp_path, _free_port())
+    server = _LiveServer(tmp_path, find_free_port())
     server.start()
     yield server
     if server._thread is not None:

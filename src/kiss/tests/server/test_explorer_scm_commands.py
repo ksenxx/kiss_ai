@@ -20,7 +20,6 @@ import asyncio
 import json
 import os
 import shutil
-import ssl
 import subprocess
 import tempfile
 import threading
@@ -49,24 +48,7 @@ from kiss.server.web_server import (
 )
 from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.local_ws import open_local_connection
-
-
-def _find_free_port() -> int:
-    """Find an available TCP port."""
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    """Return an SSL client context that skips certificate verification."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -198,7 +180,7 @@ class ExplorerHarness:
         certfile = tmp / "cert.pem"
         keyfile = tmp / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.base_url = f"https://127.0.0.1:{self.port}"
         self.ws_url = f"wss://127.0.0.1:{self.port}/ws"
         self.server = RemoteAccessServer(
@@ -297,7 +279,7 @@ async def _ws_request(
 ) -> dict:
     """Authenticate over wss://, send *payload*, return the first
     *reply_type* event."""
-    async with connect(harness.ws_url, ssl=_no_verify_ssl()) as ws:
+    async with connect(harness.ws_url, ssl=no_verify_ssl()) as ws:
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         while True:
             msg = json.loads(await asyncio.wait_for(ws.recv(), 30))

@@ -439,7 +439,27 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
   asks for, and cite that entry; when the replay never reached the situation (a clause
   about children's task text while the children received a task file), write "not
   exercised".
-- Call `summary` every 10 steps; two sweeps ran 45 and 74 steps without one.
+- When the `Steps:` footer of a tool result ends in 9, make your next call `summary`: the
+  10th, 20th, ... call is refused otherwise and has to be repeated (9 refusals in one
+  114-step sweep); two earlier sweeps ran 45 and 74 steps without a summary.
+- `old` / `new` of `patch_sea_prompt` must lie inside the prompt literal: never include
+  the closing `\"\"\"`, an f-string seam (`\"\"\" \"\"\"\\`) or code lines, or the patch is
+  refused as "changes code outside the SYSTEM_PROMPT constant" (four such refusals in two
+  sweeps).
+- When a SEA test caps the prompt length (`test_autorouter_sea.py`: 5,000 chars), `Write`
+  the whole intended prompt to `tmp/rsi7d/<name>-prompt.txt`, measure it once, then apply
+  the edits in one pass; one sweep made 49 `patch_sea_prompt` calls and 5 measure runs.
+- Copy the numbers you need from each `sea_findings`, `run_overview`, `model_scorecard`
+  and `sea_prompt` result into the findings file right after the call; never call one of
+  them twice with the same arguments (one sweep re-fetched three `sea_findings` and read
+  one `run_overview` three times).
+- Outside a worktree `Write` refuses `reports/...` (tracked, not git-ignored): `Write`
+  the report to `tmp/rsi7d/report.md`, then `cp` it into `reports/` and `git add` it in
+  one Bash call.
+- A run attributed to a SEA by prompt signature (a `bestrouter` run has `sea=''` in
+  `task_history`) replays on plain `SYSTEM.md` as `sorcar` unless you pass
+  `name="bestrouter"` to `replay_in_clone` / `replay_in_place`; check the `sea` field of
+  the returned JSON before judging the replay (one $35.93 replay verified nothing).
 """
 
 
@@ -1239,6 +1259,7 @@ def _prompt_constant(source: str) -> tuple[str, str]:
             # ``system_prompt + "\n\n" + CONSTANT``: the constant is the right operand
             while isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
                 value = value.right
+            value = _unwrap_prompt_call(value)
             if isinstance(value, ast.Name):
                 try:
                     _prompt_node(tree, value.id)
@@ -1247,6 +1268,24 @@ def _prompt_constant(source: str) -> tuple[str, str]:
                 return node.name, value.id
             return node.name, ""
     return "", ""
+
+
+def _unwrap_prompt_call(value: ast.expr | None) -> ast.expr | None:
+    """Return the constant a ``render_brand(NAME)`` / ``NAME.replace(...)`` return wraps.
+
+    ``render_brand(SYSTEM_PROMPT)`` and ``SYSTEM_PROMPT.replace(a, b).replace(c, d)``
+    (value-preserving rewrites of the constant at run time) yield the ``ast.Name``
+    node of the constant; any other expression is returned unchanged.
+    """
+    while isinstance(value, ast.Call):
+        func = value.func
+        if isinstance(func, ast.Name) and func.id == "render_brand" and len(value.args) == 1:
+            value = value.args[0]
+        elif isinstance(func, ast.Attribute) and func.attr == "replace":
+            value = func.value
+        else:
+            break
+    return value
 
 
 def _prompt_node(tree: ast.Module, name: str) -> ast.Constant | ast.JoinedStr:
@@ -2636,8 +2675,6 @@ def _dispatch_replay(
         "work_dir": work_dir, "model_name": model, "budget": max_budget,
         "timeout": timeout, "parent_agent": owner, "scope_work_dir": str(_work_root()),
         "options": agent_dispatch.RunOptions(
-            use_worktree=False,
-            auto_commit=False,
             system_prompt=_sorcar_system_prompt() if plain else "",
         ),
     }, owner)

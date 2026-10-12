@@ -79,8 +79,6 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
             cost=0.01,
             steps=3,
             is_parallel=False,
-            is_worktree=True,
-            auto_commit_mode=False,
             start_ms=1,
             end_ms=2,
         )
@@ -90,7 +88,7 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
         assert stored["work_dir"] == "/repo", (
             f"task_runner persisted raw worktree path: {stored['work_dir']!r}"
         )
-        assert stored["is_worktree"] is True
+        assert "is_worktree" not in stored
         assert stored["model"] == "claude-opus-4-7"
 
 

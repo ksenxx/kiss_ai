@@ -7,7 +7,7 @@
 ``kiss.agents.sorcar.task_classifier.classify_task`` asks OpenRouter's
 ``~typesafe/jev-latest`` decisions model one ``choice`` question through
 the ``decide`` tool and maps the chosen kind of task to the
-``{is_simple, is_development}`` verdict.  When that route is switched off
+``is_simple`` verdict.  When that route is switched off
 (``classify_with_decisions`` config key), unavailable (no
 ``OPENROUTER_API_KEY``) or fails (HTTP error, unreachable endpoint,
 unusable answer), the LLM classifier on the run's own model takes over.
@@ -216,10 +216,7 @@ def test_each_kind_maps_to_its_verdict(env: IsolatedKissHome, kind: str) -> None
     """Every option of the ``kind`` question yields its documented verdict, catalog-priced."""
     task = f"kind:{kind} classify me"
     outcome = classify_task(task=task, model_name="claude-haiku-4-5")
-    expected_simple, expected_development = _KIND_VERDICTS[kind]
-    assert outcome.classification == TaskClassification(
-        is_simple=expected_simple, is_development=expected_development
-    )
+    assert outcome.classification == TaskClassification(is_simple=_KIND_VERDICTS[kind])
     assert outcome.budget_used == pytest.approx(_expected_cost())
     assert outcome.tokens_used == INPUT_TOKENS + OUTPUT_TOKENS
     assert outcome.steps == 0  # not an LLM step
@@ -236,7 +233,7 @@ def test_verdict_is_memoised_separately_from_the_llm_memo(env: IsolatedKissHome)
     task = "kind:development add a flag"
     assert _cached_decision(task) is None
     first = classify_task(task=task, model_name="claude-haiku-4-5")
-    assert first.classification == TaskClassification(is_simple=False, is_development=True)
+    assert first.classification == TaskClassification(is_simple=False)
     assert _cached_decision(task) is not None
     second = classify_task(task=task, model_name="gpt-5.6-sol")  # any run model shares it
     assert second.classification == first.classification
@@ -264,7 +261,7 @@ def test_run_to_completion_models_are_classified_by_decisions(env: IsolatedKissH
     """``cc/*`` and ``codex/*`` runs, skipped by the LLM classifier, get a Jev verdict."""
     task = "kind:git_only push the branch"
     outcome = classify_task(task=task, model_name="cc/claude-fable-5")
-    assert outcome.classification == TaskClassification(is_simple=True, is_development=False)
+    assert outcome.classification == TaskClassification(is_simple=True)
     assert len(_JevHandler.requests) == 1
 
 
@@ -281,7 +278,7 @@ def test_task_is_truncated_before_it_is_sent(env: IsolatedKissHome) -> None:
 def test_response_without_usage_still_yields_a_verdict(env: IsolatedKissHome) -> None:
     """A usage-less response is a verdict at zero recorded spend."""
     outcome = classify_task(task="no-usage build it", model_name="claude-haiku-4-5")
-    assert outcome.classification == TaskClassification(is_simple=False, is_development=True)
+    assert outcome.classification == TaskClassification(is_simple=False)
     assert (outcome.budget_used, outcome.tokens_used, outcome.steps) == (0.0, 0, 0)
 
 
@@ -308,7 +305,7 @@ def test_low_confidence_choice_gets_the_conservative_verdict(env: IsolatedKissHo
     answers = _choice_answer("simple")
     answers["kind"]["probabilities"]["simple"] = CLASSIFIER_DECISIONS_MIN_PROBABILITY - 0.01
     outcome = classify_task(task=_answers_state(answers), model_name="claude-haiku-4-5")
-    assert outcome.classification == TaskClassification(is_simple=False, is_development=True)
+    assert outcome.classification == TaskClassification(is_simple=False)
     assert outcome.budget_used == pytest.approx(_expected_cost())
 
 
@@ -322,7 +319,7 @@ def test_probability_floor_applies_only_below_it(env: IsolatedKissHome) -> None:
     odd["kind"]["probabilities"] = {"git_only": "high"}
     for answers in (at_floor, without, odd):
         outcome = classify_task(task=_answers_state(answers), model_name="claude-haiku-4-5")
-        assert outcome.classification == TaskClassification(is_simple=True, is_development=False)
+        assert outcome.classification == TaskClassification(is_simple=True)
     assert len(_JevHandler.requests) == 3
 
 
@@ -346,12 +343,12 @@ def test_probability_floor_applies_only_below_it(env: IsolatedKissHome) -> None:
 )
 def test_decisions_failure_falls_back_to_the_llm(env: IsolatedKissHome, state: str) -> None:
     """An HTTP error or an unusable answer hands the task to the LLM classifier."""
-    llm = StandInModelServer(_llm_responder('{"is_simple": true, "is_development": false}'))
+    llm = StandInModelServer(_llm_responder('{"is_simple": true}'))
     try:
         outcome = classify_task(task=state, model_name=STANDIN_MODEL, model_config=llm.model_config)
     finally:
         llm.stop()
-    assert outcome.classification == TaskClassification(is_simple=True, is_development=False)
+    assert outcome.classification == TaskClassification(is_simple=True)
     assert outcome.steps == 1  # the LLM generation
     assert len(_JevHandler.requests) == 1
     # A failed decisions attempt costs nothing on HTTP 400; a 200 with an
@@ -379,14 +376,14 @@ def test_unreachable_decisions_endpoint_falls_back(
     port = closed.server_port
     closed.server_close()
     monkeypatch.setenv(_BASE_URL_ENV, f"http://127.0.0.1:{port}/api")
-    llm = StandInModelServer(_llm_responder('{"is_simple": false, "is_development": true}'))
+    llm = StandInModelServer(_llm_responder('{"is_simple": false}'))
     try:
         outcome = classify_task(
             task="anything", model_name=STANDIN_MODEL, model_config=llm.model_config
         )
     finally:
         llm.stop()
-    assert outcome.classification == TaskClassification(is_simple=False, is_development=True)
+    assert outcome.classification == TaskClassification(is_simple=False)
     assert outcome.steps == 1
     assert _JevHandler.requests == []
 
@@ -423,14 +420,14 @@ def test_without_openrouter_key_the_llm_classifies(
     """No ``OPENROUTER_API_KEY`` means the decide tool is never called."""
     monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "")
     assert decisions_tool_available() is False
-    llm = StandInModelServer(_llm_responder('{"is_simple": true, "is_development": false}'))
+    llm = StandInModelServer(_llm_responder('{"is_simple": true}'))
     try:
         outcome = classify_task(
             task="kind:development t", model_name=STANDIN_MODEL, model_config=llm.model_config
         )
     finally:
         llm.stop()
-    assert outcome.classification == TaskClassification(is_simple=True, is_development=False)
+    assert outcome.classification == TaskClassification(is_simple=True)
     assert outcome.steps == 1
     assert _JevHandler.requests == []
 
@@ -440,14 +437,14 @@ def test_config_key_off_uses_the_llm(env: IsolatedKissHome) -> None:
     assert decisions_tool_available() is True
     env.write_config(classify_with_decisions=False)
     assert decisions_tool_available() is False
-    llm = StandInModelServer(_llm_responder('{"is_simple": false, "is_development": false}'))
+    llm = StandInModelServer(_llm_responder('{"is_simple": false}'))
     try:
         outcome = classify_task(
             task="kind:simple t", model_name=STANDIN_MODEL, model_config=llm.model_config
         )
     finally:
         llm.stop()
-    assert outcome.classification == TaskClassification(is_simple=False, is_development=False)
+    assert outcome.classification == TaskClassification(is_simple=False)
     assert _JevHandler.requests == []
 
 
@@ -462,7 +459,7 @@ def test_sorcar_agent_banks_the_decisions_spend(env: IsolatedKissHome) -> None:
     verdict = agent._classify_task_once(
         "claude-haiku-4-5", "kind:internet what is the weather", None, enabled_override=True
     )
-    assert verdict == TaskClassification(is_simple=False, is_development=False)
+    assert verdict == TaskClassification(is_simple=False)
     spend = agent._classifier_spend
     assert spend is not None
     assert spend.budget == pytest.approx(_expected_cost())
@@ -487,23 +484,23 @@ def test_sorcar_agent_banks_the_decisions_spend(env: IsolatedKissHome) -> None:
         # A pure-arithmetic question is simple and not development.
         (
             "What is 2 + 2? Answer in text only.",
-            TaskClassification(is_simple=True, is_development=False),
+            TaskClassification(is_simple=True),
         ),
         # Any file write in the repo is development even without a
         # software-development flavour.
         (
             "Run the benchmark script and save its output to results.csv",
-            TaskClassification(is_simple=False, is_development=True),
+            TaskClassification(is_simple=False),
         ),
         # Git bundled with a file change is development; only a purely
         # git task is exempt.
         (
             "Update the README with the new install instructions, then commit and push",
-            TaskClassification(is_simple=False, is_development=True),
+            TaskClassification(is_simple=False),
         ),
         (
             "Squash-merge branch kiss/wt-42 into main, resolve any merge conflicts, and push",
-            TaskClassification(is_simple=True, is_development=False),
+            TaskClassification(is_simple=True),
         ),
     ],
 )

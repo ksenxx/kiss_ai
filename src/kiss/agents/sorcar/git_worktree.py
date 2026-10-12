@@ -17,13 +17,15 @@ import fnmatch
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import weakref
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,7 +95,7 @@ def _held_reclaim_locks() -> dict[str, weakref.ref[_ReclaimLockToken]]:
     Backs :func:`_reclaim_process_lock`'s re-entrancy: ``flock(2)`` is
     exclusive between open file descriptions, so a thread that already
     holds the flock and re-enters through a nested taker (e.g.
-    ``WorktreeSorcarAgent._try_setup_worktree`` wrapping the reclaim /
+    ``SorcarAgent._try_setup_worktree`` wrapping the reclaim /
     sweep / create helpers, which each take the flock themselves)
     would self-deadlock on a fresh descriptor of the same file.
     Thread-local is sufficient: every production taker acquires
@@ -127,7 +129,7 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
     :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`,
     :meth:`GitWorktreeOps.sweep_orphaned_state`,
     :meth:`GitWorktreeOps.create`, and the normal merge and discard
-    paths (``WorktreeSorcarAgent._do_merge`` / ``discard``, whose
+    paths (``SorcarAgent._do_merge`` / ``discard``, whose
     failure paths run the very same ``git reset --hard``)
     (mirroring ``persistence._journal_file_lock``); the kernel
     releases it if the holder dies.  Takers that also hold
@@ -136,7 +138,7 @@ def _reclaim_process_lock(repo: Path) -> Iterator[None]:
 
     Re-entrant per thread (see :func:`_held_reclaim_locks`): a nested
     take of a lock file this thread already holds yields immediately,
-    which lets ``WorktreeSorcarAgent._try_setup_worktree`` hold the
+    which lets ``SorcarAgent._try_setup_worktree`` hold the
     flock across its whole main-tree baseline snapshot (branch read +
     dirty-state copy) while still calling the reclaim / sweep / create
     helpers that take the flock internally.
@@ -919,23 +921,13 @@ class GitWorktreeOps:
         return branch
 
     @staticmethod
-    def create(repo: Path, branch: str, wt_dir: Path, *, checkout: bool = True) -> bool:
+    def create(repo: Path, branch: str, wt_dir: Path) -> bool:
         """Create a new worktree with a new branch.
 
         Args:
             repo: Git repo root path.
             branch: New branch name to create.
             wt_dir: Directory for the new worktree.
-            checkout: ``False`` registers the worktree with
-                ``--no-checkout`` — milliseconds instead of the full
-                checkout, which on a large repository takes many
-                seconds under both locks below — and leaves populating
-                it to the caller (``reset_worktree_to(wt_dir,
-                "HEAD")``), which can then run without holding any
-                lock.  Until that reset completes the worktree's index
-                is empty, so every file shows as deleted: callers must
-                keep such a worktree out of the orphan reclaim's reach
-                (see :mod:`kiss.agents.sorcar.worktree_pool`).
 
         The new worktree is registered with ``git worktree add`` and
         stamped with this process's pid (:meth:`save_owner_pid`) under
@@ -946,8 +938,8 @@ class GitWorktreeOps:
         used to find a registered ``kiss/wt-*`` worktree with no owner
         and no ``kiss-original`` config, treat it as a legacy orphan,
         and squash-merge (a no-op) and DELETE it under the process
-        that was about to run a task — or hand a pool spare to a task
-        — in it.  Holding the reclaim lock across both steps means a
+        that was about to run a task in it.  Holding the reclaim lock
+        across both steps means a
         concurrent reclaim either finishes before the worktree exists
         or sees it already owned by a live pid and skips it.
 
@@ -972,9 +964,8 @@ class GitWorktreeOps:
         # ``sweep_orphaned_state`` (repo_lock -> flock) and deadlock.
         # ``repo_lock`` is an RLock, so callers already holding it are
         # unaffected.
-        add_args = ["worktree", "add"] + ([] if checkout else ["--no-checkout"])
         with repo_lock(repo), _reclaim_process_lock(repo):
-            result = _git(*add_args, "-b", branch, str(wt_dir), cwd=repo)
+            result = _git("worktree", "add", "-b", branch, str(wt_dir), cwd=repo)
             if result.returncode != 0:
                 logger.warning(
                     "Failed to create worktree: %s", result.stderr.strip(),
@@ -992,36 +983,32 @@ class GitWorktreeOps:
         return True
 
     @staticmethod
-    def reset_worktree_to(wt_dir: Path, ref: str) -> bool:
-        """Hard-reset *wt_dir*'s checked-out branch onto *ref*.
+    def reattach(repo: Path, branch: str, wt_dir: Path) -> bool:
+        """Check the existing *branch* out again as the worktree *wt_dir*.
 
-        Used when a pre-created spare worktree (see
-        :mod:`kiss.agents.sorcar.worktree_pool`) is consumed for a new
-        task: the spare's branch was created from whatever HEAD the
-        repository had at refill time, so it must be moved to the tip
-        of the task's original branch.  ``git reset --hard`` updates
-        the branch ref, the index, and only the working-tree files
-        that differ — a near-instant operation compared to the full
-        checkout of ``git worktree add``.
+        Used after a merge failed once the worktree directory was
+        already removed (its commits are safe on *branch*): the task
+        gets its working copy back and can fix the problem and retry.
+        Registered and owner-stamped like :meth:`create`, under the
+        same locks.
 
         Args:
-            wt_dir: Worktree directory whose branch to move.
-            ref: Commit-ish (normally the original branch name) to
-                reset onto.
+            repo: Git repo root path.
+            branch: The existing ``kiss/wt-*`` branch.
+            wt_dir: Directory for the worktree.
 
         Returns:
-            True on success, False when the reset failed (caller
-            should discard the spare and create a worktree inline).
+            True when the worktree exists and is stamped, False
+            otherwise (nothing is left on disk).
         """
-        result = _git("reset", "--hard", ref, cwd=wt_dir)
-        if result.returncode != 0:
-            logger.warning(
-                "Failed to reset spare worktree %s to %s: %s",
-                wt_dir,
-                ref,
-                result.stderr.strip(),
-            )
-            return False
+        with repo_lock(repo), _reclaim_process_lock(repo):
+            result = _git("worktree", "add", str(wt_dir), branch, cwd=repo)
+            if result.returncode != 0:
+                logger.warning("Failed to reattach worktree: %s", result.stderr.strip())
+                return False
+            if not GitWorktreeOps.save_owner_pid(repo, branch):
+                _git("worktree", "remove", "--force", str(wt_dir), cwd=repo)
+                return False
         return True
 
     @staticmethod
@@ -1206,7 +1193,7 @@ class GitWorktreeOps:
         """Return the raw ``git status --porcelain`` output.
 
         Used by failure-path warnings (e.g.
-        :meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._finalize_worktree`)
+        :meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._finalize_worktree`)
         to embed the exact leftover files in the log so an operator
         can tell a real pre-commit-hook rejection apart from a race
         leftover or a corrupt index without having to ssh in and
@@ -1585,6 +1572,40 @@ class GitWorktreeOps:
         return result.returncode == 0
 
     @staticmethod
+    def new_task_branch(repo: Path) -> str:
+        """Mint a unique ``kiss/wt-*`` branch name for *repo*.
+
+        ``kiss/wt-<epoch>-<uuid8>``, with a numeric suffix appended in
+        the (practically impossible) case of a collision.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            A branch name that does not currently exist in *repo*.
+        """
+        branch = f"{_WORKTREE_BRANCH_PREFIX}{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        base_branch = branch
+        suffix = 1
+        while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
+            branch = f"{base_branch}-{suffix}"
+            suffix += 1
+        return branch
+
+    @staticmethod
+    def is_ignored(repo: Path, path: Path) -> bool:
+        """Whether *path* (existing or not) is git-ignored in *repo*.
+
+        Args:
+            repo: Git repo root path.
+            path: Absolute path inside *repo*.
+
+        Returns:
+            True when a ``.gitignore`` / exclude rule matches *path*.
+        """
+        return _git("check-ignore", "-q", "--", str(path), cwd=repo).returncode == 0
+
+    @staticmethod
     def _append_info_line(repo: Path, filename: str, entry: str) -> None:
         """Append *entry* to ``<git_common_dir>/info/<filename>`` once.
 
@@ -1893,11 +1914,9 @@ class GitWorktreeOps:
     def save_preserve_marker(repo: Path, branch: str) -> bool:
         """Mark *branch* as intentionally preserved for manual review.
 
-        Persistent counterpart of the in-memory ``_pending_review``
-        flag on :class:`WorktreeSorcarAgent`.  When
-        :meth:`WorktreeSorcarAgent._preserve_pending_worktree_for_review`
-        deliberately leaves a worktree on disk (task stopped,
-        pre-commit hook rejection, or ``--no-auto-commit``), the
+        When :meth:`SorcarAgent._preserve_pending_worktree_for_review`
+        deliberately leaves a worktree on disk (task stopped, pre-commit
+        hook rejection, or a task that never merged), the
         original agent process may die before the user chooses
         merge/discard.  Reclaim on next startup must NOT silently
         publish that preserved work — the persisted marker makes
@@ -2037,65 +2056,16 @@ class GitWorktreeOps:
         return process_identity(owner_pid) == stamped[len(prefix):]
 
     @staticmethod
-    def save_spare_marker(repo: Path, branch: str) -> bool:
-        """Mark *branch* as a pool-owned spare worktree.
-
-        Written at spare creation time (see
-        :mod:`kiss.agents.sorcar.worktree_pool`) and cleared the moment
-        a task consumes the spare.  :meth:`reclaim_orphaned_worktrees`
-        treats a marked branch as contentless plumbing that is
-        discarded, never squash-merged: without the marker, a spare
-        orphaned by a daemon crash carries no ``kiss-original`` config
-        and the reclaim fallback would squash-merge the spare's branch
-        snapshot into whatever branch the user has since checked out.
-
-        Args:
-            repo: Git repo root path.
-            branch: The spare worktree's branch name.
-
-        Returns:
-            True if the marker was saved successfully.
-        """
-        return GitWorktreeOps._save_branch_config(
-            repo, branch, "kiss-spare", "1", "spare-worktree marker",
-        )
-
-    @staticmethod
     def load_spare_marker(repo: Path, branch: str) -> bool:
-        """Return True when *branch* carries a spare-worktree marker."""
+        """Return True when *branch* carries a spare-worktree marker.
+
+        Older releases pre-created spare worktrees (a pool) and marked
+        their branches ``kiss-spare``; the orphan reclaim still
+        recognises a leftover spare so it is discarded, never merged.
+        """
         return GitWorktreeOps._load_branch_config(
             repo, branch, "kiss-spare",
         ) == "1"
-
-    @staticmethod
-    def clear_spare_marker(repo: Path, branch: str) -> bool:
-        """Remove *branch*'s spare-worktree marker.
-
-        Called when a task consumes a pooled spare: from that moment
-        the worktree carries real work, and a crash must route it
-        through the normal orphan reclaim (merge into its saved
-        original branch) rather than the spare-discard path.
-
-        Args:
-            repo: Git repo root path.
-            branch: The consumed spare's branch name.
-
-        Returns:
-            True when the marker is gone (removed now or already
-            absent — ``git config --unset`` exits 5 for a missing
-            key), False on any other git failure.
-        """
-        result = _git(
-            "config", "--unset", f"branch.{branch}.kiss-spare", cwd=repo,
-        )
-        if result.returncode in (0, 5):
-            return True
-        logger.warning(
-            "Failed to clear spare marker of '%s': %s",
-            branch,
-            result.stderr.strip(),
-        )
-        return False
 
     @staticmethod
     def list_ignored_files(wt_dir: Path) -> list[str] | None:
@@ -2129,14 +2099,12 @@ class GitWorktreeOps:
 
     @staticmethod
     def spare_has_content(repo: Path, branch: str, wt_dir: Path) -> bool:
-        """Whether a pool spare worktree holds anything worth preserving.
+        """Whether a leftover spare worktree holds anything worth preserving.
 
-        The framework never writes into a spare (see
-        :mod:`kiss.agents.sorcar.worktree_pool`), so content in one
-        means an external writer put it there — and every path that
-        would destroy a spare (consuming it, discarding the pool,
-        reclaiming an orphaned spare) must apply the SAME probe and
-        preserve it instead.  The probe is one ``git status --porcelain
+        The framework never wrote into a spare, so content in one
+        means an external writer put it there — and the reclaim of an
+        orphaned spare must preserve it instead of destroying it.
+        The probe is one ``git status --porcelain
         --ignored`` walk: it reports staged, unstaged and untracked
         changes AND ignored files, which plain porcelain status omits
         — a fresh spare checkout has none, so any present were written
@@ -2146,10 +2114,9 @@ class GitWorktreeOps:
         preserved, never destroyed.
 
         One state the status walk cannot be trusted on: a spare whose
-        gitdir has no ``index`` file.  The pool registers a spare with
-        ``--no-checkout`` and populates it with ``reset --hard`` (see
-        :func:`kiss.agents.sorcar.worktree_pool.prewarm`); a process
-        killed during that reset leaves the files partially written and
+        gitdir has no ``index`` file.  The pool registered a spare with
+        ``--no-checkout`` and populated it with ``reset --hard``; a
+        process killed during that reset left the files partially written and
         the index never created, so status lists every tracked file as
         a staged deletion and the written ones as untracked.  That is
         checkout debris, not external content — treating it as content
@@ -2562,35 +2529,6 @@ class GitWorktreeOps:
             f"{dst.name.removesuffix(dst.suffix)}"
             f".kiss-rescued-{time.time_ns()}{dst.suffix}"
         )
-
-    @staticmethod
-    def clean_untracked(wt_dir: Path) -> bool:
-        """Remove untracked files and directories from *wt_dir*.
-
-        Used when a pooled spare worktree is consumed for a task: the
-        spare sat idle on disk for an unbounded time, so an external
-        writer (build hook, file watcher, stray command) may have
-        dropped untracked files into it that ``git reset --hard``
-        deliberately keeps — and the task's auto-commit would then
-        publish them as task output.  Ignored files are kept: they
-        never enter commits, and sweeping them (e.g. a ``.venv``)
-        would be pointlessly slow.
-
-        Args:
-            wt_dir: The agent-owned worktree directory to clean.
-
-        Returns:
-            True on success, False when ``git clean`` failed.
-        """
-        result = _git("clean", "-fdq", cwd=wt_dir)
-        if result.returncode != 0:
-            logger.warning(
-                "Failed to clean untracked files in %s: %s",
-                wt_dir,
-                result.stderr.strip(),
-            )
-            return False
-        return True
 
     @staticmethod
     def _remove_path(path: Path) -> None:
@@ -3510,8 +3448,8 @@ class GitWorktreeOps:
                     )
                     continue
                 if GitWorktreeOps.load_spare_marker(repo, branch):
-                    # A pool spare (created by worktree_pool, never
-                    # yet given to a task) is contentless plumbing:
+                    # A pool spare of an older release (never given
+                    # to a task) is contentless plumbing:
                     # discard it, never merge.  Its branch snapshots
                     # whatever branch was checked out at refill time,
                     # so the no-config merge fallback below would
@@ -3653,3 +3591,160 @@ class GitWorktreeOps:
                 GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
                 reclaimed += 1
         return reclaimed
+
+
+MergeConflictResolver = Callable[[Any, GitWorktree, str | None, str | None], MergeResult]
+"""``(agent, wt, user_prompt, task_result) -> MergeResult``: completes a
+conflicted merge of ``wt.branch`` into the clean, checked-out original
+branch (see :meth:`SorcarAgent._do_merge`)."""
+
+
+class _WorktreeCleanupOutcome(enum.Enum):
+    """Outcome of :meth:`SorcarAgent._commit_and_clean_worktree`."""
+
+    COMMITTED_AND_REMOVED = "committed_and_removed"
+    PRESERVED_COMMIT_FAILED = "preserved_commit_failed"
+    PRESERVED_RESCUE_FAILED = "preserved_rescue_failed"
+
+
+_PRECOMMIT_FIX_LINES = (
+    "    # fix pre-commit issues, then:\n"
+    "    git commit --no-verify\n"
+)
+
+# Attempts to write the end-of-run preserve marker and the pause between
+# them (``.git/config.lock`` of a concurrent git command is short-lived).
+_PRESERVE_MARKER_ATTEMPTS = 3
+_PRESERVE_MARKER_RETRY_DELAY = 0.2
+
+
+def inside_kiss_worktree(path: Path | str) -> bool:
+    """Whether *path* lies inside a ``<repo>/.kiss-worktrees/kiss_wt-*`` worktree.
+
+    Args:
+        path: A filesystem path (need not exist).
+
+    Returns:
+        True when a worktree segment is part of the path.
+    """
+    text = str(path)
+    return strip_worktree_suffix(text) != text
+
+
+def kiss_worktree_root(path: Path | str) -> Path | None:
+    """The ``<repo>/.kiss-worktrees/kiss_wt-*`` directory *path* lies in.
+
+    Args:
+        path: A filesystem path (need not exist).
+
+    Returns:
+        The worktree directory, or ``None`` when *path* is not inside a
+        KISS worktree.
+    """
+    parts = Path(path).parts
+    for i in range(len(parts) - 1):
+        if parts[i] == _WORKTREE_SUBDIR and parts[i + 1].startswith(_WORKTREE_SLUG_PREFIX):
+            return Path(*parts[: i + 2])
+    return None
+
+
+def _path_inside(path: Path, root: Path) -> Path | None:
+    """*path* relative to *root*, or ``None`` when it is not under *root*.
+
+    Args:
+        path: A resolved absolute path.
+        root: A directory, resolved here.
+    """
+    try:
+        return path.relative_to(root.resolve())
+    except ValueError:
+        return None
+
+
+def _repo_key(wt: GitWorktree) -> Path:
+    """The key of *wt* in ``SorcarAgent._wts``: its resolved repository root."""
+    return Path(wt.repo_root or ".").resolve()
+
+
+def _manual_merge_cmd(wt: GitWorktree) -> str:
+    """Return the correct manual merge command for a worktree.
+
+    When a baseline commit exists, the auto-merge uses
+    ``cherry-pick --no-commit baseline..branch`` to replay only agent
+    commits.  ``git merge --squash`` would incorrectly include the
+    baseline's dirty-state snapshot.
+
+    Args:
+        wt: The worktree state.
+
+    Returns:
+        A shell command string for manual merge.
+    """
+    if wt.baseline_commit:
+        rev_range = shlex.quote(f"{wt.baseline_commit}..{wt.branch}")
+        return f"git cherry-pick --no-commit {rev_range}"
+    return f"git merge --squash {shlex.quote(wt.branch)}"
+
+
+def _rescue_failed_warning(wt: GitWorktree) -> str:
+    """User warning for a worktree kept because ignored output was unrescuable.
+
+    Args:
+        wt: The preserved worktree.
+
+    Returns:
+        The warning text.
+    """
+    return (
+        f"Git-ignored files created by the task in branch "
+        f"'{wt.branch}' could not be copied into the main "
+        f"repository, so its worktree directory {wt.wt_dir} was "
+        f"kept — it holds the only copy of those files. Recover "
+        f"them there."
+    )
+
+
+def _rescue_ignored_files(wt: GitWorktree) -> bool:
+    """Copy *wt*'s git-ignored task output into its main repository.
+
+    Wraps :meth:`GitWorktreeOps.rescue_ignored_files` so a filesystem
+    failure inside the rescue is logged and reported as a failed
+    rescue instead of escaping into a teardown path.
+
+    Args:
+        wt: The worktree about to be removed.
+
+    Returns:
+        True when every ignored file was landed (or none existed).
+    """
+    try:
+        _, rescue_ok = GitWorktreeOps.rescue_ignored_files(wt.wt_dir, wt.repo_root)
+    except Exception:  # pragma: no cover — filesystem failure
+        logger.warning("Ignored-file rescue failed for %s", wt.wt_dir, exc_info=True)
+        return False
+    return rescue_ok
+
+
+def _merge_fix_steps(wt: GitWorktree, fix_lines: str) -> str:
+    """Return the shell command block for manually completing a failed merge.
+
+    Args:
+        wt: The worktree state.
+        fix_lines: Result-specific middle lines (conflict resolution or
+            pre-commit fix steps), each ending in a newline.
+
+    The final step uses ``git branch -D`` (force): a squash-merge /
+    cherry-pick resolution never records the task branch as an
+    ancestor of the original branch, so ``git branch -d`` would
+    always refuse with "the branch ... is not fully merged".
+
+    Returns:
+        The indented multi-line command block (no trailing newline).
+    """
+    return (
+        f"    cd {shlex.quote(str(wt.repo_root))}\n"
+        f"    git checkout {shlex.quote(wt.original_branch or '')}\n"
+        f"    {_manual_merge_cmd(wt)}\n"
+        + fix_lines
+        + f"    git branch -D {shlex.quote(wt.branch)}"
+    )

@@ -22,7 +22,7 @@ Reproduces the chat-webview scenario with REAL LLM calls (no mocks):
    ``_default_model``); the agent that executes task 2 must run on
    model A, not on the model B that task 1's agent switched itself to.
 
-The agent under test is the production ``WorktreeSorcarAgent`` that
+The agent under test is the production ``ChatSorcarAgent`` that
 the task runner allocates on the task's ``AgentState``; both tasks
 perform real LLM calls against real provider endpoints (Anthropic for
 model A, Gemini for model B).

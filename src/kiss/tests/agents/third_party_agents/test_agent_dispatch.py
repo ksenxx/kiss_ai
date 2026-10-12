@@ -48,14 +48,13 @@ from kiss.agents.sorcar.agent_dispatch import (
     available_channels,
     make_run_agent_tool,
 )
-from kiss.agents.sorcar.sea_apply import apply_sea, channel_workspace, load_layers
+from kiss.agents.sorcar.sea_apply import SETTING_FIELDS, apply_sea, channel_workspace, load_layers
 from kiss.agents.sorcar.sea_commands import load_sea
 from kiss.agents.sorcar.sea_settings import declares_channel
 from kiss.agents.third_party_agents.auth_status import _agent_class
 from kiss.core.config import kiss_home
 from kiss.core.tool_verdict import ALLOW
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
-from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 # The standalone tool (no calling-task work directory): relative agent
 # paths resolve against the process working directory and path-mode
@@ -252,70 +251,50 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
 def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
     tmp_path: Path, daemon: RecordingDaemon
 ) -> None:
-    """Channel and cron sub-tasks run outside the project git lifecycle.
+    """Channel and cron sub-tasks run as workers, pinned by their settings.
 
     A channel/cron sub-task executes in a scratch directory
-    (``~/.kiss/channel_work`` / ``~/.kiss/cron/work``), so worktree
-    setup would only copy whatever git repository happens to enclose
-    that directory — a dirty repo at ``$HOME`` once stalled a gmail
-    dispatch for minutes copying 65 GB before the sub-task's tab could
-    even appear.  The dispatcher no longer special-cases them: it sends
-    the same wire values as for any other sub-task (the persisted "Use
-    worktree" / "Auto commit" settings, no classifier override), and
-    the module's ``ChannelSea`` base pins worktree, auto-commit and
-    classification off on the daemon (``apply_sea``), where every
+    (``~/.kiss/channel_work`` / ``~/.kiss/cron/work``), not the
+    caller's project.  The dispatcher does not special-case them: it
+    sends the same wire values as for any other sub-task (no
+    classifier / memory / browser override: the daemon decides), and
+    the module's ``ChannelSea`` base pins classification, memory and
+    the browser off on the daemon (``apply_sea``), where every
     script's settings win.  A path-mode ``BaseSea`` SEA keeps the
-    standard lifecycle on the calling project.  The recorded
-    ``run`` command is checked as sent, then after
-    ``apply_sea`` rewrote it the way the daemon does.
+    daemon's defaults on the calling project.  The recorded ``run``
+    command is checked as sent, then after ``apply_sea`` rewrote it
+    the way the daemon does.
     """
     caller = tmp_path / "caller_project"
     script = _write_helper_script(caller)
     tool = make_run_agent_tool(str(caller))
-    isolated = IsolatedKissHome("kiss-dispatch-lifecycle-")
-    try:
-        # Both persisted settings on (the defaults).
-        for agent, task in (("ntfy", "say hi"), ("cron", "run 'echo hi' every 5 minutes")):
-            tool(task, agent)
-            cmd = _sent(daemon)
-            assert cmd["useWorktree"] is True, agent
-            assert cmd["autoCommit"] is True, agent
-            assert cmd["classifyTasks"] is None, agent
-            assert cmd["isParallel"] is True, agent
-            overridden = apply_sea(cmd)
-            assert {"useWorktree", "autoCommit", "classifyTasks"} <= overridden
-            assert cmd["useWorktree"] is False, agent
-            assert cmd["autoCommit"] is False, agent
-            assert cmd["classifyTasks"] is False, agent
-
-        # Path mode, ``BaseSea``: worktree + auto-commit follow
-        # the persisted settings; classification follows the daemon's
-        # configured default; the script's settings change nothing.
-        tool("say hi", str(script))
+    for agent, task in (("ntfy", "say hi"), ("cron", "run 'echo hi' every 5 minutes")):
+        tool(task, agent)
         cmd = _sent(daemon)
-        assert cmd["useWorktree"] is True
-        assert cmd["autoCommit"] is True
-        assert cmd["classifyTasks"] is None
-        assert apply_sea(cmd) == {"model"}
-        assert cmd["useWorktree"] is True and cmd["autoCommit"] is True
+        assert cmd["classifyTasks"] is None, agent
+        assert cmd["useMemory"] is None, agent
+        assert cmd["useWebTools"] is None, agent
+        assert cmd["isParallel"] is True, agent
+        overridden = apply_sea(cmd)
+        assert {"classifyTasks", "useMemory", "useWebTools"} <= overridden
+        assert cmd["classifyTasks"] is False, agent
+        assert cmd["useMemory"] is False, agent
+        assert cmd["useWebTools"] is False, agent
 
-        # The user turned both settings off in the settings panel: a
-        # path-mode sub-agent follows them like a chat-panel task would.
-        isolated.write_config(is_worktree=False, auto_commit_mode=False)
-        tool("say hi", str(script))
-        assert _sent(daemon)["useWorktree"] is False
-        assert _sent(daemon)["autoCommit"] is False
+    # Path mode, ``BaseSea``: classification, memory and the browser
+    # follow the daemon's configured defaults; the script's settings
+    # change nothing.
+    tool("say hi", str(script))
+    cmd = _sent(daemon)
+    assert cmd["classifyTasks"] is None
+    assert cmd["useMemory"] is None
+    assert apply_sea(cmd) == {"model"}
+    assert cmd["classifyTasks"] is None and cmd["useMemory"] is None
 
-        # Each setting is read on its own; explicit options still win.
-        isolated.write_config(is_worktree=True, auto_commit_mode=False)
-        tool("say hi", str(script))
-        assert _sent(daemon)["useWorktree"] is True
-        assert _sent(daemon)["autoCommit"] is False
-        tool("say hi", str(script), options='{"auto_commit": true}')
-        assert _sent(daemon)["useWorktree"] is True
-        assert _sent(daemon)["autoCommit"] is True
-    finally:
-        isolated.cleanup()
+    # Explicit options still win, each on its own.
+    tool("say hi", str(script), options='{"use_memory": true}')
+    assert _sent(daemon)["useMemory"] is True
+    assert _sent(daemon)["classifyTasks"] is None
 
 
 def test_run_option_parse_errors(tmp_path: Path) -> None:
@@ -326,8 +305,6 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     is reported by name with the offending text.
     """
     for name in (
-        "use_worktree",
-        "auto_commit",
         "use_web_tools",
         "auto_classify",
         "use_memory",
@@ -388,9 +365,18 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
 
     params = inspect.signature(run_agent).parameters
     assert list(params) == [
-        "task", "agent", "model", "tool_profile", "max_budget", "timeout", "options", "wait",
+        "task",
+        "agent",
+        "model",
+        "tool_profile",
+        "max_budget",
+        "timeout",
+        "options",
+        "wait",
+        "machine",
+        "description",
     ]
-    for kwarg in ("tools", "use_worktree", "chat_id", "add_to_prompt", "model_name", "workspace"):
+    for kwarg in ("tools", "use_memory", "chat_id", "add_to_prompt", "model_name", "workspace"):
         with pytest.raises(TypeError):
             run_agent("say hi", "ntfy", **{kwarg: str(tmp_path / "x.py")})
 
@@ -398,7 +384,7 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
 def test_channel_and_cron_refuse_options_that_contradict_the_base_class(
     tmp_path: Path, daemon: RecordingDaemon
 ) -> None:
-    """Asking a channel/cron sub-task for a worktree is refused, never silently undone.
+    """Asking a channel/cron sub-task for memory is refused, never silently undone.
 
     Every key ``ChannelSea`` lays is locked
     (``sea_settings.merge_settings``), so an explicit option that
@@ -406,11 +392,10 @@ def test_channel_and_cron_refuse_options_that_contradict_the_base_class(
     rule; an option that agrees is forwarded as usual.
     """
     cases = (
-        ('{"use_worktree": true}', "use_worktree=False (asked for True)"),
-        ('{"auto_commit": "TRUE"}', "auto_commit=False (asked for True)"),
-        ('{"use_worktree": "false", "auto_commit": true}', "auto_commit=False (asked for True)"),
         ('{"use_memory": true}', "use_memory=False (asked for True)"),
-        ('{"use_web_tools": true}', "use_web_tools=False (asked for True)"),
+        ('{"use_web_tools": "TRUE"}', "use_web_tools=False (asked for True)"),
+        ('{"use_memory": "false", "use_web_tools": true}', "use_web_tools=False (asked for True)"),
+        ('{"auto_classify": true}', "auto_classify=False (asked for True)"),
     )
     for agent in ("ntfy", "cron"):
         for options, clash in cases:
@@ -418,14 +403,14 @@ def test_channel_and_cron_refuse_options_that_contradict_the_base_class(
             assert out == f"Error: {agent}: the script locks {clash}", (agent, options)
     assert daemon.run_commands == []
 
-    out = run_agent("say hi", "ntfy", options='{"use_worktree": "false", "auto_commit": " False "}')
+    out = run_agent("say hi", "ntfy", options='{"use_memory": "false", "use_web_tools": " False "}')
     assert "Error" not in out, out
     cmd = _sent(daemon)
-    assert cmd["useWorktree"] is False
-    assert cmd["autoCommit"] is False
+    assert cmd["useMemory"] is False
+    assert cmd["useWebTools"] is False
     apply_sea(cmd)
-    assert cmd["useWorktree"] is False
-    assert cmd["autoCommit"] is False
+    assert cmd["useMemory"] is False
+    assert cmd["useWebTools"] is False
 
 
 def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDaemon) -> None:
@@ -463,16 +448,13 @@ def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDa
     assert defaults["toolProfile"] == ""
     assert defaults["dockerImage"] == ""
 
-    # Everything passed, in path mode: parsed and forwarded, with the
-    # explicit git-lifecycle values replacing the persisted settings.
+    # Everything passed, in path mode: parsed and forwarded.
     tool(
         "say hi",
         str(script),
         options="""{
             "chat_id": " chat-123 ",
             "model_config": {"base_url": "http://localhost:8000/v1"},
-            "use_worktree": "false",
-            "auto_commit": "False",
             "use_web_tools": true,
             "auto_classify": false,
             "use_memory": "true",
@@ -485,8 +467,6 @@ def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDa
     assert sent["chatId"] == "chat-123"
     assert sent["systemPrompt"] == ""
     assert sent["modelConfig"] == {"base_url": "http://localhost:8000/v1"}
-    assert sent["useWorktree"] is False
-    assert sent["autoCommit"] is False
     assert sent["useWebTools"] is True
     assert sent["classifyTasks"] is False
     assert sent["useMemory"] is True
@@ -499,12 +479,15 @@ def test_run_options_are_forwarded_to_daemon(tmp_path: Path, daemon: RecordingDa
     # dropped; it is not asserted here until the dispatcher either
     # forwards it or stops accepting the key.
 
-    # Path mode honours an explicit worktree request too; ``null`` and
+    # Path mode honours an explicit browser request too; ``null`` and
     # ``""`` mean "not passed", so the defaults stand.
-    tool("say hi", str(script), options='{"use_worktree": true, "use_memory": null, '
-                                        '"chat_id": null}')
+    tool(
+        "say hi",
+        str(script),
+        options='{"use_web_tools": true, "use_memory": null, "chat_id": null}',
+    )
     sent = _sent(daemon)
-    assert sent["useWorktree"] is True
+    assert sent["useWebTools"] is True
     assert sent["useMemory"] is None
     assert sent["chatId"] == ""
 
@@ -662,7 +645,11 @@ def test_default_agent_is_the_bundled_sorcar_sea(tmp_path: Path, daemon: Recordi
     # staged hooks are all identities.
     cmd: dict[str, Any] = {"seaPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
     assert apply_sea(cmd) == set()
-    assert cmd.pop("_runConfig") == {"sea": "sorcar", "channel": False, "pinned": {}}
+    record = cmd.pop("_runConfig")
+    # The dummy SEA pins nothing and the command carries nothing: every
+    # setting is left to the daemon's defaults.
+    assert record.pop("defaulted") == sorted(SETTING_FIELDS)
+    assert record == {"sea": "sorcar", "channel": False, "pinned": {}}
     messages = [{"role": "user", "content": "hi"}]
     assert cmd.pop("systemPromptHook")("S") == "S"
     assert cmd.pop("toolsHook")([print, len]) == [print, len]
@@ -699,9 +686,11 @@ def test_tool_schema_requires_only_task() -> None:
     """The schema the LLM sees marks ``task`` required and every other parameter optional.
 
     The per-option keyword arguments of the earlier contract are gone:
-    the tool has exactly the eight parameters below (the first seven
-    mirror ``run_parallel``), the further ``kiss.server.sorcar.run``
-    keywords travel in the ``options`` JSON object.
+    the tool has exactly the ten parameters below (the first seven
+    mirror ``run_parallel``; ``machine`` names a remote machine to run
+    on; ``description`` is the panel title, as for ``Bash``), the
+    further ``kiss.server.sorcar.run`` keywords
+    travel in the ``options`` JSON object.
     """
     from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL
     from kiss.core.models.model_info import model
@@ -710,13 +699,22 @@ def test_tool_schema_requires_only_task() -> None:
     params = schema["function"]["parameters"]
     assert params["required"] == ["task"]
     assert list(params["properties"]) == [
-        "task", "agent", "model", "tool_profile", "max_budget", "timeout", "options", "wait",
+        "task",
+        "agent",
+        "model",
+        "tool_profile",
+        "max_budget",
+        "timeout",
+        "options",
+        "wait",
+        "machine",
+        "description",
     ]
     agent_doc = params["properties"]["agent"]["description"]
     assert "plain Sorcar" in agent_doc
     assert "JSON object" in params["properties"]["options"]["description"]
     # The full docstring names the keys ``options`` accepts.
-    for key in ("workspace", "use_worktree", "model_config", "chat_id", "inherit"):
+    for key in ("workspace", "use_memory", "model_config", "chat_id", "inherit"):
         assert key in (run_agent.__doc__ or ""), key
 
 
@@ -883,7 +881,7 @@ def test_channel_module_is_a_valid_agent_script() -> None:
 
     Passing a channel module as ``sea_path`` makes the
     daemon apply its ``settings()`` (the ``ChannelSea`` defaults: no
-    worktree, no auto-commit, no classifier, no browser, no memory),
+    classifier, no browser, no memory),
     stage its ``tools()`` as the run's tools hook (the channel tools on
     top of the built-in toolset), append the channel
     preamble to the system-prompt suffix, and stage its
@@ -898,8 +896,11 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     overridden = apply_sea(cmd)
     # Only the settings fields are reported; the hooks are always staged.
     assert overridden == {
-        "useWorktree", "autoCommit", "classifyTasks",
-        "useWebTools", "useMemory", "appendToSystemPrompt", "workDir",
+        "classifyTasks",
+        "useWebTools",
+        "useMemory",
+        "appendToSystemPrompt",
+        "workDir",
     }
     assert cmd["workDir"] == str(kiss_home() / "channel_work")
     assert channel_workspace(cmd, load_layers(cmd)) == "default"
@@ -908,7 +909,7 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     assert "appendBasicTools" not in cmd
     assert "toolProfile" not in cmd  # ``tools()`` keeps the built-in toolset
     assert "toolsFile" not in cmd
-    for field in ("useWorktree", "autoCommit", "classifyTasks", "useWebTools", "useMemory"):
+    for field in ("classifyTasks", "useWebTools", "useMemory"):
         assert cmd[field] is False, field
     assert cmd["appendToSystemPrompt"] == (
         "Caller suffix.\n\n" + CHANNEL_PREAMBLE.format(name="ntfy")

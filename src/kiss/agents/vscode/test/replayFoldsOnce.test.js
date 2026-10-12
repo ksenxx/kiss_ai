@@ -18,9 +18,10 @@
 //     with every older panel folded, exactly as before;
 //   * live streaming after the replay still keeps the newest two panels
 //     open, so the replay-only shortcut does not leak into the stream;
-//   * the `ready` of an editor-tab panel names its root tab as
-//     `singleTabId` so the daemon replays only that tab, while a sidebar
-//     webview (which mirrors the whole registry) sends none.
+//   * the `ready` of a chat surface (sidebar view, chat editor tab)
+//     names no `singleTabId` — it mirrors the whole registry — while
+//     the chatless history / Task Info panels name their never-bound
+//     root so the daemon replays nothing to them.
 
 'use strict';
 
@@ -203,39 +204,41 @@ function testLiveStreamAfterReplayKeepsNewestTwoOpen() {
   console.log('  ok - live streaming after a replay keeps folding tool panels');
 }
 
-function testReadyNamesSingleTabOnlyInEditorMode() {
-  const sidebar = makeWebview();
-  const sidebarReady = sidebar.posted.filter(m => m.type === 'ready');
-  assert.strictEqual(sidebarReady.length, 1, 'the sidebar sends one ready');
-  assert.strictEqual(
-    sidebarReady[0].singleTabId,
-    undefined,
-    'a sidebar webview mirrors every registry tab and names no single tab',
-  );
-  sidebar.win.close();
+function testReadyNamesSingleTabOnlyForChatlessPanels() {
+  for (const attrs of [undefined, ' class="editor-tab-mode"']) {
+    const chat = makeWebview(attrs);
+    const ready = chat.posted.filter(m => m.type === 'ready');
+    assert.strictEqual(ready.length, 1, 'a chat surface sends one ready');
+    assert.strictEqual(
+      ready[0].singleTabId,
+      undefined,
+      'a chat surface mirrors every registry tab and names no single tab',
+    );
+    chat.win.close();
+  }
 
-  const ROOT = 'root-tab-0001';
-  const panel = makeWebview(
-    ' class="editor-tab-mode"' +
-      ` data-kiss-tab-id="${ROOT}"` +
-      ' data-kiss-tab-title="My chat"',
-  );
-  const panelReady = panel.posted.filter(m => m.type === 'ready');
-  assert.strictEqual(panelReady.length, 1, 'the panel sends one ready');
-  assert.strictEqual(panelReady[0].tabId, ROOT);
-  assert.strictEqual(
-    panelReady[0].singleTabId,
-    ROOT,
-    'an editor-tab panel asks for its root tab alone',
-  );
-  panel.win.close();
-  console.log('  ok - only an editor-tab panel names a singleTabId in ready');
+  for (const mode of ['history-panel-mode', 'meta-panel-mode']) {
+    const ROOT = mode + '-root';
+    const panel = makeWebview(
+      ` class="editor-tab-mode ${mode}" data-kiss-tab-id="${ROOT}"`,
+    );
+    const ready = panel.posted.filter(m => m.type === 'ready');
+    assert.strictEqual(ready.length, 1, 'the panel sends one ready');
+    assert.strictEqual(ready[0].tabId, ROOT);
+    assert.strictEqual(
+      ready[0].singleTabId,
+      ROOT,
+      'a chatless panel names its never-bound root: nothing to replay',
+    );
+    panel.win.close();
+  }
+  console.log('  ok - only the chatless panels name a singleTabId in ready');
 }
 
 function main() {
   testLongReplayFoldsOnceAndFast();
   testLiveStreamAfterReplayKeepsNewestTwoOpen();
-  testReadyNamesSingleTabOnlyInEditorMode();
+  testReadyNamesSingleTabOnlyForChatlessPanels();
 }
 
 main();

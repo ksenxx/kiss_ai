@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.file_index import FileIndex
@@ -173,7 +173,7 @@ class TestSubtaskFailureStepCount(_TempDbTestCase):
             self.skipTest("no model API key configured")
 
         tab_id = "c4-tab"
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         state = agent_state.AgentState(
             "task-c4",
             agent=agent,

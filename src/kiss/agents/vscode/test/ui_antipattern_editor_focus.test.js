@@ -12,10 +12,11 @@
 //  - a finished task's `revealPanel` reveals the chat tab with
 //    preserveFocus while no text editor is active, and does NOTHING
 //    while the user is reading a file (the tab decoration suffices);
-//  - closing the last chat tab (editor X, or the root chat closed inside
-//    the webview) reopens the one-tab replacement in the BACKGROUND:
-//    preserveFocus true, no focusInput — closing is not a request for a
-//    new chat; only switching the mode on focuses a fresh chat;
+//  - closing the chat tab (editor X) closes the surface and opens no
+//    replacement by itself; the automatic `ensureOpen()` (activation,
+//    history view shown) opens the panel in the BACKGROUND: preserveFocus
+//    true, no focusInput — only an explicit `open()` (the user asking
+//    for the chat) takes the focus;
 //  - `workbench.editor.editorActionsLocation` is never rewritten
 //    silently: the first sync asks once ('Move actions to title bar' /
 //    'Keep my setting'), a second sync while the question is open asks
@@ -24,7 +25,6 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
@@ -219,9 +219,16 @@ async function panelTests() {
   const manager = new SorcarPanelManager(vscodeStub.Uri.file(EXT_ROOT));
 
   // --- a finished task reveals only while no file is being read ---------
-  const controller = manager.openNewChat();
+  // The user asked for the chat: the panel opens WITH focus.
+  const controller = manager.open();
   assert.ok(controller);
+  assert.strictEqual(manager.controller(), controller);
   const panel = createdPanels[0];
+  assert.strictEqual(
+    panel.showOptions.preserveFocus,
+    false,
+    'an explicit open takes focus',
+  );
   panel._recv.fire({type: 'revealPanel'});
   await waitFor(() => panel.revealCalls.length === 1, 'reveal with no editor');
   assert.strictEqual(panel.revealCalls[0].preserveFocus, true);
@@ -234,40 +241,86 @@ async function panelTests() {
     1,
     'a finished task must not reveal its tab while the user is in a file',
   );
+  // A waiting question is the exception: the agent is blocked on it.
+  panel._recv.fire({type: 'revealForQuestion'});
+  await waitFor(
+    () => panel.revealCalls.length === 2,
+    'a question reveals the chat even while the user is in a file',
+  );
+  assert.strictEqual(panel.revealCalls[1].preserveFocus, true);
   vscodeStub.window.activeTextEditor = undefined;
   panel._recv.fire({type: 'revealPanel'});
-  await waitFor(() => panel.revealCalls.length === 2, 'reveal resumes');
+  await waitFor(() => panel.revealCalls.length === 3, 'reveal resumes');
 
-  // --- editor-tab X on the last chat: background replacement ------------
-  panel.dispose();
-  assert.strictEqual(createdPanels.length, 2, 'the one-tab invariant holds');
-  await assertBackgroundReplacement(lastPanel(), 'tab X');
-
-  // --- root chat closed inside the webview (retire): background too -----
-  const panelB = lastPanel();
-  panelB._recv.fire({type: 'closePanel', retire: true});
-  await waitFor(() => panelB.disposed, 'closePanel(retire) disposes');
-  assert.strictEqual(createdPanels.length, 3);
-  await assertBackgroundReplacement(lastPanel(), 'webview close');
-
-  // --- a remote close (no retire): background as before ------------------
-  const panelC = lastPanel();
-  panelC._recv.fire({type: 'closePanel'});
-  await waitFor(() => panelC.disposed, 'closePanel disposes');
-  assert.strictEqual(createdPanels.length, 4);
-  await assertBackgroundReplacement(lastPanel(), 'remote close');
-
-  // --- the user ASKING for a chat still gets focus -----------------------
-  lastPanel().dispose();
-  await sleep(50);
-  const fresh = manager.openNewChat();
-  assert.ok(fresh);
+  // --- revealing the existing panel: focus follows the request ----------
+  manager.open({preserveFocus: true});
+  assert.strictEqual(createdPanels.length, 1, 'one panel only');
+  assert.strictEqual(panel.revealCalls.length, 4);
   assert.strictEqual(
-    lastPanel().showOptions.preserveFocus,
-    false,
-    'an explicit new chat takes focus',
+    panel.revealCalls[3].preserveFocus,
+    true,
+    'an automatic open leaves the focus where it is',
   );
+  assert.strictEqual(manager.open(), controller, 'the controller persists');
+  assert.strictEqual(
+    panel.revealCalls[4].preserveFocus,
+    false,
+    'an explicit open of the existing panel takes focus',
+  );
+  // While the panel exists ensureOpen() has nothing to do.
+  manager.ensureOpen();
+  assert.strictEqual(createdPanels.length, 1);
+  assert.strictEqual(panel.revealCalls.length, 5, 'ensureOpen reveals nothing');
+
+  // --- editor-tab X: the surface closes, nothing replaces it by itself ---
+  panel.dispose();
+  await sleep(50);
+  assert.strictEqual(createdPanels.length, 1, 'closing opens no replacement');
+  assert.strictEqual(manager.controller(), undefined);
+
+  // --- the automatic open (activation, history view) is background ------
+  manager.ensureOpen();
+  assert.strictEqual(createdPanels.length, 2, 'ensureOpen opens the panel');
+  await assertBackgroundReplacement(lastPanel(), 'ensureOpen');
+  assert.ok(manager.controller());
+
+  // --- an explicit request for the background panel takes focus ----------
+  const background = lastPanel();
+  manager.open();
+  assert.strictEqual(createdPanels.length, 2, 'the open panel is reused');
+  assert.strictEqual(background.revealCalls.length, 1);
+  assert.strictEqual(
+    background.revealCalls[0].preserveFocus,
+    false,
+    'the user asking for the chat gets the focus',
+  );
+
+  // --- ensureOpen defers to a serialized placeholder and to the mode ----
+  background.dispose();
+  await sleep(50);
+  vscodeStub.window.tabGroups.all = [
+    {tabs: [{input: {viewType: 'mainThreadWebview-kissSorcar.chatTab'}}]},
+  ];
+  manager.ensureOpen();
+  assert.strictEqual(
+    createdPanels.length,
+    2,
+    'a placeholder the workbench has not revived yet is not duplicated',
+  );
+  vscodeStub.window.tabGroups.all = [];
+  config['kissSorcar.editorTabsMode'] = false;
+  manager.ensureOpen();
+  assert.strictEqual(createdPanels.length, 2, 'no panel while the mode is off');
+  config['kissSorcar.editorTabsMode'] = true;
+  manager.ensureOpen();
+  assert.strictEqual(createdPanels.length, 3, 'the mode back on: it opens');
+  await assertBackgroundReplacement(lastPanel(), 'ensureOpen after mode on');
+
+  // --- after teardown ensureOpen is a no-op --------------------------------
   manager.dispose();
+  assert.strictEqual(manager.controller(), undefined);
+  manager.ensureOpen();
+  assert.strictEqual(createdPanels.length, 3, 'no panel after dispose()');
   console.log('panel focus tests passed');
 }
 

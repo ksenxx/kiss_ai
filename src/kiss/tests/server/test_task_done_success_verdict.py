@@ -22,8 +22,8 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.core.utils import finish
 from kiss.server import agent_state
@@ -45,7 +45,7 @@ class _CapturePrinter(JsonPrinter):
         super().broadcast(event)
 
 
-class _ScriptedAgent(WorktreeSorcarAgent):
+class _ScriptedAgent(ChatSorcarAgent):
     """Agent whose ``run`` returns the ``finish`` result named in the prompt.
 
     ``[fail]`` → ``finish(success=False)``; ``[unparsable]`` → non-YAML

@@ -8,20 +8,11 @@ import socket
 import time
 import unittest
 
-import docker
 import pytest
 import requests
 
 from kiss.agents.sorcar.docker_manager import DockerManager
-
-
-def is_docker_available() -> bool:
-    try:
-        client = docker.from_env()
-        client.ping()
-        return True
-    except Exception:
-        return False
+from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
 
 
 @pytest.mark.slow

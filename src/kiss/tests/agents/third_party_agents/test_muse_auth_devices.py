@@ -534,8 +534,21 @@ def test_homeassistant_authenticate_and_clear_tools(
     assert json.loads(agent._backend.ha_get_states())["ok"] is True
     assert api_server.header("Authorization") == "Bearer ha-second"
 
-    # A fresh agent construction wires the vault surrogate offline.
+    # A fresh agent exposes the tools without touching the daemon; its
+    # first request wires the vault surrogate.
     agent2 = HomeAssistantAgent()
+    assert agent2._is_authenticated() and agent2._backend._token == ""
+    # The status tool reports the configured endpoint before any request.
+    requests_before = len(api_server.requests)
+    status = json.loads(auth_tools(agent2)["check_homeassistant_auth"]())
+    assert status == {"ok": True, "base_url": base_url}
+    assert len(api_server.requests) == requests_before
+    # First use through a cached tool wires; the retry reuses the wiring.
+    get_states = {t.__name__: t for t in agent2._get_tools()}["ha_get_states"]
+    for _ in range(2):
+        assert json.loads(get_states())["ok"] is True
+        assert api_server.header("Authorization") == "Bearer ha-second"
+    assert len(api_server.requests) == requests_before + 2
     assert agent2._backend._token.startswith("muse-sgt.homeassistant.")
 
     assert "cleared" in tools["clear_homeassistant_auth"]()
@@ -1008,9 +1021,9 @@ def test_failed_enrollment_is_transactional(muse_env: Path, api_server: _DeviceA
     # No plaintext token reached disk, the old enrollment still works,
     # and the backend was not downgraded to a direct-secret transport.
     assert "token" not in json.loads(ntfy_config.path.read_text())
-    assert ntfy_agent_obj._backend._muse
     grant("ntfy", "write", "once")
     assert json.loads(ntfy_agent_obj._backend.publish_notification("still good"))["ok"] is True
+    assert ntfy_agent_obj._backend._muse
     assert api_server.header("Authorization") == "Bearer tk-good"
 
 
@@ -1388,9 +1401,15 @@ def test_ntfy_wiring_failure_hides_backend_tools(
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     ntfy_config.save({"topic": "t1", "server": base_url, "token": "bad\ntoken"})
     agent = NtfyAgent()
+    # Wiring is deferred to the first request, which fails closed
+    # before anything reaches the server on the direct transport.
+    before = len(api_server.requests)
+    failed = json.loads(agent._backend.publish_notification("x"))
+    assert failed["ok"] is False and "wiring failed" in failed["error"]
+    assert len(api_server.requests) == before
     assert agent._backend._muse_error
-    # Not authenticated: the backend tools (publish/poll) are not
-    # exposed, so nothing can reach the server on the direct transport.
+    # Not authenticated any more: the backend tools (publish/poll) are
+    # no longer exposed.
     assert agent._is_authenticated() is False
     tool_names = {t.__name__ for t in agent._get_tools()}
     assert "publish_notification" not in tool_names
@@ -1590,17 +1609,35 @@ def test_wiring_failure_leaves_agents_constructible(
     # A token the daemon rejects at enrollment (embedded newline).
     discord_config.save({"bot_token": "bad\ntoken"})
     agent = DiscordAgent()
+    # Wiring is deferred to the first request, which reports the
+    # daemon's rejection as a tool error and leaves the backend tokenless.
     assert agent._backend._token == ""
-    assert "Muse-auth wiring failed" in agent._backend._connection_info
+    # The cached tool fails closed on the first use and on every retry:
+    # nothing ever reaches the server on the direct transport.
+    before = len(api_server.requests)
+    list_guilds = {t.__name__: t for t in agent._get_tools()}["list_guilds"]
+    for _ in range(2):
+        failed = json.loads(list_guilds())
+        assert failed["ok"] is False and "invalid credential token" in failed["error"]
+    assert agent._backend._token == "" and not agent._backend._muse
     assert not vault_has_credentials("discord")
 
     ha_config.save({"base_url": base_url, "token": "bad\ntoken"})
     ha_agent = HomeAssistantAgent()
     assert ha_agent._backend._token == ""
-    assert "Muse-auth wiring failed" in ha_agent._backend._connection_info
+    for _ in range(2):
+        ha_failed = json.loads(ha_agent._backend.ha_get_states())
+        assert ha_failed["ok"] is False and "invalid credential token" in ha_failed["error"]
+    assert ha_agent._backend._token == "" and not vault_has_credentials("homeassistant")
 
     ntfy_config.save({"topic": "t1", "server": base_url, "token": "bad\ntoken"})
     ntfy_agent_obj = NtfyAgent()
+    # The first request runs the deferred wiring, which fails closed;
+    # a retry must not slip out tokenless on the direct transport.
+    publish = {t.__name__: t for t in ntfy_agent_obj._get_tools()}["publish_notification"]
+    for _ in range(2):
+        assert "wiring failed" in json.loads(publish("x"))["error"]
+    assert len(api_server.requests) == before
     assert ntfy_agent_obj._backend._token == ""
     assert not ntfy_agent_obj._backend._muse
     assert "wiring failed" in ntfy_agent_obj._backend._connection_info

@@ -63,13 +63,8 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-function disableWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function chatTabs(win) {
@@ -142,7 +137,7 @@ function fakeRegionGeometry(win, O) {
 // "Task A" (id 41) spliced in above it as an adjacent region.
 function setupTabWithNeighbour() {
   const {win, posted} = makeWebview();
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   const tabId = posted.find(msg => msg && msg.type === 'ready').tabId;
   win._testApi.hideWelcome();
   send(win, {
@@ -359,7 +354,7 @@ function testClickRowWithoutTaskIdJustSwitches() {
 // issuing a resumeSession, since the own task is already loaded.
 function testClickOwnTaskWithoutRegionReclaimsPanel() {
   const {win, posted} = makeWebview();
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   const tabId = posted.find(msg => msg && msg.type === 'ready').tabId;
   win._testApi.hideWelcome();
   // The tab's own "Task B" (id 42) recorded no output at all.

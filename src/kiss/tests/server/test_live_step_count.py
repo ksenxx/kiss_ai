@@ -17,30 +17,14 @@ from __future__ import annotations
 import shutil
 import tempfile
 import threading
-from pathlib import Path
 from typing import Any
 
-import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
-
-
-def _redirect_db(tmpdir: str) -> tuple[Any, Any, Any]:
-    """Point persistence at *tmpdir* and return original values to restore."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return old
-
-
-def _restore_db(saved: tuple[Any, Any, Any]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
@@ -64,7 +48,7 @@ class TestLiveStepCountInHistory:
     def test_history_running_task_shows_live_steps(self) -> None:
         """A running task in history should show live steps, not persisted 0."""
         tmpdir = tempfile.mkdtemp()
-        saved = _redirect_db(tmpdir)
+        saved = redirect_persistence(tmpdir)
         try:
             server, events = _make_server()
             server.work_dir = tmpdir
@@ -78,7 +62,7 @@ class TestLiveStepCountInHistory:
             )
 
             tab_id = "hist-tab"
-            agent = WorktreeSorcarAgent("History Agent")
+            agent = ChatSorcarAgent("History Agent")
             agent._last_task_id = task_id
             agent._last_user_prompt = "test live history"
             agent.total_steps = 0
@@ -132,5 +116,5 @@ class TestLiveStepCountInHistory:
                 task_thread.join(timeout=5)
                 agent_state.unregister(str(task_id), state)
         finally:
-            _restore_db(saved)
+            restore_persistence(saved)
             shutil.rmtree(tmpdir, ignore_errors=True)

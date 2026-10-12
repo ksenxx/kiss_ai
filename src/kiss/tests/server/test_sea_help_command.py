@@ -70,7 +70,6 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         result = sorcar.run(
             "/sh help",
             work_dir=self.repo,
-            use_worktree=True,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -110,7 +109,7 @@ class Sea(BaseSea):
         return "Echoes; use /echo <text>."
 
     def settings(self, settings):
-        return settings | {'use_worktree': False}
+        return settings | {'use_web_tools': False}
 
     def system_prompt(self, system_prompt):
         return system_prompt + '\\n\\nECHO-PROTOCOL'
@@ -153,7 +152,7 @@ from kiss.agents.seas.base.base_sea import BaseSea
 
 class Sea(BaseSea):
     def settings(self, settings):
-        return settings | {'use_worktree': False}
+        return settings | {'use_web_tools': False}
 """,
         )
         calls: list[dict[str, Any]] = []

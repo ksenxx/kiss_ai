@@ -167,7 +167,7 @@ class TestMediaVersionFollowsFileChanges(unittest.TestCase):
         # A repeat call with the file untouched is served from the cache.
         self.assertEqual(web_server._media_url("main.css"), url_before)
 
-        rule = "\n#workdir-panel { outline: 1px solid red; }\n"
+        rule = "\n#chat-header { outline: 1px solid red; }\n"
         # newline="\n": a text-mode write would turn the rule's LF into
         # CRLF on Windows and the served bytes would not contain it.
         css.write_text(css.read_text(encoding="utf-8") + rule, encoding="utf-8", newline="\n")

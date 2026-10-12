@@ -18,30 +18,16 @@ from __future__ import annotations
 import threading
 import unittest
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
-from kiss.server.server import VSCodeServer
-
-
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer with broadcast capture (no stdout)."""
-    server = VSCodeServer()
-    events: list[dict] = []
-    lock = threading.Lock()
-
-    def capture(event: dict) -> None:
-        with lock:
-            events.append(event)
-
-    server.printer.broadcast = capture  # type: ignore[assignment]
-    return server, events
+from kiss.tests.server.conftest import make_capturing_server
 
 
 def _register_tab_state(
     task_id: str,
     tab_id: str,
     *,
-    agent: WorktreeSorcarAgent | None = None,
+    agent: ChatSorcarAgent | None = None,
 ) -> agent_state.AgentState:
     """Register a server-owned AgentState for *tab_id* and return it."""
     state = agent_state.AgentState(
@@ -61,14 +47,14 @@ class TestCmdRunQueuesFollowup(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.server, self.events = _make_server()
+        self.server, self.events = make_capturing_server()
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
 
     def test_duplicate_run_is_queued_and_echoed_while_task_is_alive(self) -> None:
         state = _register_tab_state(
-            "audit-b1", "t1", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+            "audit-b1", "t1", agent=ChatSorcarAgent("Sorcar VS Code"),
         )
         blocker = threading.Event()
         thread = threading.Thread(target=blocker.wait, daemon=True)
@@ -103,7 +89,7 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.server, self.events = _make_server()
+        self.server, self.events = make_capturing_server()
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
@@ -128,7 +114,7 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
 
     def test_close_tab_refuses_when_task_thread_alive(self) -> None:
         state = _register_tab_state(
-            "audit-b2b", "t1", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+            "audit-b2b", "t1", agent=ChatSorcarAgent("Sorcar VS Code"),
         )
         blocker = threading.Event()
         thread = threading.Thread(target=blocker.wait, daemon=True)
@@ -150,14 +136,14 @@ class TestCmdRunFollowupNoErrorBroadcast(unittest.TestCase):
     """An accepted follow-up emits a prompt echo, but no error or status."""
 
     def setUp(self) -> None:
-        self.server, self.events = _make_server()
+        self.server, self.events = make_capturing_server()
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
 
     def test_no_error_or_status_for_alive_task(self) -> None:
         state = _register_tab_state(
-            "audit-b1b", "t1", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+            "audit-b1b", "t1", agent=ChatSorcarAgent("Sorcar VS Code"),
         )
         blocker = threading.Event()
         thread = threading.Thread(target=blocker.wait, daemon=True)

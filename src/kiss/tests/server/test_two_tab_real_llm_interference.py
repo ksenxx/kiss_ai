@@ -52,11 +52,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-import kiss.agents.sorcar.persistence as ps
 import kiss.core.vscode_config as vc
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import Payload, WebPrinter
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 _CONTENT_EVENT_TYPES = frozenset({
     "result", "text_delta", "text_end", "thinking_start", "thinking_delta",
@@ -274,24 +274,13 @@ def _git_init(repo: Path) -> None:
     )
 
 
-def _redirect_persistence(tmpdir: str) -> tuple:
-    """Point the persistence module at a tmpdir; return saved-state tuple."""
-    saved = (ps._DB_PATH, ps._db_conn, ps._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    ps._KISS_DIR = kiss_dir
-    ps._DB_PATH = kiss_dir / "history.db"
-    ps._db_conn = None
-    return saved
-
-
 def _restore_persistence(server: VSCodeServer, saved: tuple) -> None:
     """Stop every live task of *server*, close the redirected DB, restore state.
 
     A task a failed assertion left behind (one still waiting for an
     ``ask_user_question`` answer, say) is stopped the way the UI's Stop
     does, then its thread is joined, and only then is the DB closed
-    through :func:`ps._close_db` (which stops the ``kiss-event-writer``
+    through :func:`restore_persistence` (which stops the ``kiss-event-writer``
     thread before closing).  A raw ``ps._db_conn.close()`` closes whichever
     connection was created last by ANY thread, so it segfaulted the
     writer thread mid-batch when a task overran its join timeout.
@@ -304,8 +293,7 @@ def _restore_persistence(server: VSCodeServer, saved: tuple) -> None:
             server._stop_task(state.tab_id)
         thread.join(timeout=60)
         assert not thread.is_alive(), f"task of tab {state.tab_id!r} did not stop"
-    ps._close_db()
-    ps._DB_PATH, ps._db_conn, ps._KISS_DIR = saved
+    restore_persistence(saved)
 
 
 def _redirect_config(tmpdir: str) -> tuple:
@@ -354,7 +342,7 @@ class _TwoTabFixture(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="kiss-2tab-")
-        self.saved_persistence = _redirect_persistence(self.tmp)
+        self.saved_persistence = redirect_persistence(self.tmp)
         self.saved_config = _redirect_config(self.tmp)
 
         self.srv, self.url = _start_fake_openai()
@@ -619,7 +607,7 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="kiss-2tab-ask-")
-        self.saved_persistence = _redirect_persistence(self.tmp)
+        self.saved_persistence = redirect_persistence(self.tmp)
         self.saved_config = _redirect_config(self.tmp)
         self.srv, self.url = _start_fake_ask_then_finish()
         self._saved_openai_key = os.environ.get("OPENAI_API_KEY")

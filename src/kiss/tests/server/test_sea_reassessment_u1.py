@@ -67,7 +67,7 @@ _JOB_ID = re.compile(r"job (agent-[0-9a-f]{8})")
 @pytest.fixture
 def home() -> Iterator[IsolatedKissHome]:
     isolated = IsolatedKissHome(prefix="kiss-sea-u1-")
-    isolated.write_config(is_worktree=False, auto_commit_mode=False, classify_tasks=False)
+    isolated.write_config(classify_tasks=False)
     try:
         yield isolated
     finally:
@@ -115,8 +115,6 @@ def _run_parent(
         work_dir=str(home.repo),
         model=STANDIN_MODEL,
         model_config=model.model_config,
-        use_worktree=False,
-        auto_commit=False,
         endpoint_file=daemon.endpoint_file,
         timeout=300,
     )

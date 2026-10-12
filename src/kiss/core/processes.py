@@ -31,6 +31,30 @@ _WINDOWS_BASH_CANDIDATES = (
 )
 
 
+def suppress_error_dialogs() -> None:
+    """Keep this process, and the children it starts, from blocking on a Windows error dialog.
+
+    Unless a process has opted out, Windows answers some failed system
+    calls with a modal dialog instead of an error code: ``CreateProcess``
+    of a file that is not a valid executable, for one, shows "This
+    version of %1 is not compatible with the version of Windows you're
+    running" and returns only once somebody clicks it.  A process that
+    was started with a hidden window or by a service has nobody to
+    click, so the call blocks forever: a daemon starting a corrupt
+    converter or CLI would hang instead of logging the ``OSError``.
+    The opt-out is inherited by child processes, so one call at daemon
+    start covers every agent and CLI it launches.  A no-op elsewhere.
+    """
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+        import msvcrt
+
+        msvcrt.SetErrorMode(  # type: ignore[attr-defined]
+            msvcrt.GetErrorMode()  # type: ignore[attr-defined]
+            | msvcrt.SEM_FAILCRITICALERRORS  # type: ignore[attr-defined]
+            | msvcrt.SEM_NOOPENFILEERRORBOX  # type: ignore[attr-defined]
+        )
+
+
 def find_bash() -> str | None:
     """Return the ``bash`` executable to run shell scripts with, or ``None``.
 
@@ -128,10 +152,13 @@ def _windows_enrol_in_job(proc: subprocess.Popen[Any]) -> None:  # pragma: no co
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    handle = getattr(proc, "_handle", None)
+    if handle is None:
+        return
     job = kernel32.CreateJobObjectW(None, None)
     if not job:
         return
-    process_handle = ctypes.c_void_p(int(proc._handle))  # type: ignore[attr-defined]
+    process_handle = ctypes.c_void_p(int(handle))
     if not kernel32.AssignProcessToJobObject(ctypes.c_void_p(job), process_handle):
         kernel32.CloseHandle(ctypes.c_void_p(job))
         return
@@ -183,12 +210,16 @@ def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
         sig: The signal to send on POSIX; ignored on Windows.
 
     Raises:
-        ProcessLookupError: When the group no longer exists.
+        ProcessLookupError: When the group no longer exists, or *pid* is
+            not a positive pid (``os.killpg(0, ...)`` would signal the
+            caller's own group, i.e. the daemon and every test runner).
         OSError: When Windows could not terminate the tree (``taskkill``
             missing, timed out, or refused) and *pid* is still alive, so
             callers fall back to ``proc.kill()`` exactly as after a
             failed ``os.killpg``.
     """
+    if pid <= 0:
+        raise ProcessLookupError(pid)
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
         if not pid_alive(pid):
             raise ProcessLookupError(pid)

@@ -61,8 +61,8 @@ import pytest
 
 from kiss.agents.sorcar import persistence as _th
 from kiss.core import stop_signal, vscode_config
-from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
+from kiss.core.processes import suppress_error_dialogs
 from kiss.tests import subprocess_reaper
 
 # Generous: a sweep only walks the sentinel rows of one temporary
@@ -75,6 +75,12 @@ if os.path.isfile(_subprocess_rc):
     os.environ.setdefault("COVERAGE_PROCESS_START", os.path.abspath(_subprocess_rc))
 
 os.environ["BROWSER"] = "true"
+
+# A pytest process launched from a hidden window (the Windows full-suite
+# driver) inherits an error mode under which CreateProcess of a corrupt
+# executable blocks on a dialog nobody can click; the daemon opts out
+# at start-up and so does the test process.
+suppress_error_dialogs()
 
 # Muse-auth is on by default in production (see muse_auth._common.
 # muse_auth_enabled), but the legacy connector suites emulate raw
@@ -208,63 +214,60 @@ def is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-@contextlib.contextmanager
-def hold_loopback_port(port: int) -> Iterator[None]:
-    """Reserve the fixed loopback *port* for this test across pytest processes.
-
-    OAuth redirect listeners bind a fixed port (53682 for the PKCE apps,
-    53683 for MCP servers) because a registered redirect URI cannot
-    vary.  The parallel test runner spreads one file's tests over many
-    processes, so a test that binds such a port holds this inter-process
-    lock for its whole duration (including the fixture teardown that
-    frees the port); concurrent tests take turns instead of failing
-    with ``[Errno 98] Address already in use``.
-
-    The lock cannot keep OTHER connections off the port: a loaded run
-    opens thousands of loopback connections (Playwright, WSS clients),
-    and one whose ephemeral local port happened to be *port* leaves a
-    TIME_WAIT without ``SO_REUSEADDR`` for 60 s once it closes, which
-    Linux counts as a conflict even for a ``SO_REUSEADDR`` bind.  So
-    after taking the lock the helper also waits until a probe bind
-    succeeds (up to a little over one TIME_WAIT lifetime); a port that
-    stays taken is left for the test to report.
-
-    Args:
-        port: The fixed loopback port the test binds.
-
-    Yields:
-        None while the port is reserved.
-    """
-    with exclusive_file_lock(Path(tempfile.gettempdir()) / f"kiss-test-loopback-{port}.lock"):
-        wait_until_loopback_port_bindable(port)
-        yield
+def find_free_port() -> int:
+    """Return a TCP port that is free on 127.0.0.1 right now."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
-def wait_until_loopback_port_bindable(port: int, timeout: float = 75.0) -> bool:
-    """Wait until ``127.0.0.1:port`` accepts a ``SO_REUSEADDR`` bind.
+@pytest.fixture
+def mcp_redirect_port(monkeypatch: pytest.MonkeyPatch) -> int:
+    """Run the MCP OAuth loopback redirect listener on a free ephemeral port.
 
-    Probes with a bind-and-close (no listen, no connection, so the probe
-    itself leaves no TIME_WAIT) once a second until the bind succeeds or
-    *timeout* seconds have passed.
-
-    Args:
-        port: The loopback port to probe.
-        timeout: Seconds to keep probing; a TIME_WAIT lasts 60 s.
+    The product binds the fixed port 53683 (a dynamically registered
+    client keeps working only while its redirect URI never changes), but
+    every test registers a fresh client against its own in-process
+    authorization server, so the port can differ per test.  Patching the
+    module constants, which ``mcp_oauth`` reads at call time, lets the
+    parallel runner's pytest processes run these tests at once instead
+    of taking turns on one port.
 
     Returns:
-        True when the port became bindable, False when it stayed taken.
+        The port the redirect listener binds for this test.
     """
-    deadline = time.monotonic() + timeout
-    while True:
-        with socket.socket() as probe:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                probe.bind(("127.0.0.1", port))
-                return True
-            except OSError:
-                if time.monotonic() >= deadline:
-                    return False
-        time.sleep(1.0)
+    from kiss.agents.sorcar import mcp_oauth
+
+    port = find_free_port()
+    monkeypatch.setattr(mcp_oauth, "MCP_REDIRECT_PORT", port)
+    monkeypatch.setattr(mcp_oauth, "MCP_REDIRECT_URI", f"http://localhost:{port}/callback")
+    return port
+
+
+@pytest.fixture
+def loopback_redirect_port(monkeypatch: pytest.MonkeyPatch) -> int:
+    """Run the Slack/Discord PKCE loopback redirect listener on a free ephemeral port.
+
+    Same idea as :func:`mcp_redirect_port` for the fixed port 53682 of
+    ``_oauth_apps``: the tests' stand-in API servers accept any redirect
+    URI, so each test gets its own port.  ``slack_sea`` and
+    ``discord_sea`` import ``LOOPBACK_REDIRECT_URI`` by name, so their
+    copies are patched too.
+
+    Returns:
+        The port the redirect listener binds for this test.
+    """
+    from kiss.agents.third_party_agents import _oauth_apps
+    from kiss.agents.third_party_agents.discord import discord_sea
+    from kiss.agents.third_party_agents.slack import slack_sea
+
+    port = find_free_port()
+    uri = f"http://localhost:{port}/callback"
+    monkeypatch.setattr(_oauth_apps, "LOOPBACK_PORT", port)
+    monkeypatch.setattr(_oauth_apps, "LOOPBACK_REDIRECT_URI", uri)
+    monkeypatch.setattr(slack_sea, "LOOPBACK_REDIRECT_URI", uri)
+    monkeypatch.setattr(discord_sea, "LOOPBACK_REDIRECT_URI", uri)
+    return port
 
 
 @contextlib.contextmanager
@@ -376,7 +379,7 @@ TRANSIENT_REPLACE_READ_ERRORS: tuple[type[OSError], ...] = (
 HOT_READER_PAUSE = 0.002
 
 
-def install_cli_script(script: Path, source: str) -> None:
+def install_cli_script(script: Path, source: str) -> Path:
     """Write the Python program *source* to *script* as a stand-in CLI.
 
     The stand-in must be found by ``shutil.which(script.name)`` and start
@@ -395,15 +398,21 @@ def install_cli_script(script: Path, source: str) -> None:
     Args:
         script: Where to write the program (its directory goes on PATH).
         source: The program text, starting with a shebang line.
+
+    Returns:
+        The file to launch as the CLI: *script* itself, or its ``.cmd``
+        shim on Windows (what ``shutil.which`` finds there), for tests
+        that name the executable instead of searching PATH.
     """
     if IS_WINDOWS and source.startswith("#!"):
         source = f"#!{Path(sys.executable).as_posix()}\n{source.partition(chr(10))[2]}"
     script.write_text(source, encoding="utf-8", newline="\n")
     script.chmod(0o755)
-    if IS_WINDOWS:
-        script.with_name(script.name + ".cmd").write_text(
-            f'@"{sys.executable}" "%~dp0{script.name}" %*\n', encoding="utf-8"
-        )
+    if not IS_WINDOWS:
+        return script
+    shim = script.with_name(script.name + ".cmd")
+    shim.write_text(f'@"{sys.executable}" "%~dp0{script.name}" %*\n', encoding="utf-8")
+    return shim
 
 
 _FAKE_CLOUDFLARED_WRAPPER = """\
@@ -501,9 +510,10 @@ def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
     other error, or a third failure, propagates unchanged.
 
     The same event can also strike the remote webapp's self-reload: when
-    one of the page's scripts fails to load, the shim in
-    ``web_server._WS_SHIM_JS`` reloads the page once, and when that reload's
-    own document request is aborted too, Chromium shows its error page
+    one of the page's scripts fails to load, the guard in
+    ``web_server._ASSET_LOAD_GUARD_JS`` reloads the page (up to three times
+    per 30 s), and when a reload's own document request is aborted too,
+    Chromium shows its error page
     (``chrome-error://chromewebdata/``, an empty DOM). ``page.goto`` tracked
     the first navigation and returns normally, so the caller's first
     ``wait_for_selector`` would sit out its full timeout. That case is
@@ -553,8 +563,13 @@ def _navigate_retrying_network_change(page, navigate: Callable[[], object], labe
     failures: list[str] = []
 
     def note_failed_navigation(request) -> None:
-        if request.is_navigation_request():
-            failures.append(f"{request.url}: {request.failure}")
+        # Every failed request, not only navigations: the webapp
+        # reloads itself when a page script or stylesheet fails to
+        # load, so the asset that died is the cause of a reload that
+        # then ends on the error page (full-suite run of 2026-10-12:
+        # an unexplained self-reload under a 97-way load).
+        kind = "navigation" if request.is_navigation_request() else request.resource_type
+        failures.append(f"{request.url} ({kind}): {request.failure}")
 
     page.on("requestfailed", note_failed_navigation)
     try:
@@ -572,7 +587,7 @@ def _navigate_retrying_network_change(page, navigate: Callable[[], object], labe
             network_changed = any("net::ERR_NETWORK_CHANGED" in f for f in failures)
             if not network_changed or attempt == 2:
                 raise AssertionError(
-                    f"{label} ended on {page.url}; failed navigations: {failures}"
+                    f"{label} ended on {page.url}; failed requests: {failures}"
                 )
             time.sleep(1.0)
     finally:

@@ -24,8 +24,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import socket
-import ssl
 import tempfile
 import time
 from pathlib import Path
@@ -38,22 +36,10 @@ import kiss.core.vscode_config as vc
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 RAW_TAB = "  tab-1 "
 CANON_TAB = "tab-1"
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
 
 
 class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
@@ -69,7 +55,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
         self.work_dir.mkdir()
         certfile, keyfile = self.tmpdir / "cert.pem", self.tmpdir / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.port = _free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -135,7 +121,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
 
     async def test_wss_open_run_close_with_padded_tab_id(self) -> None:
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await self._recv_until(ws.recv, "auth_ok")
@@ -165,7 +151,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
 
     async def test_wss_close_with_padded_id_drops_canonical_state(self) -> None:
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await self._recv_until(ws.recv, "auth_ok")
@@ -180,7 +166,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
 
     async def test_validation_error_reply_carries_canonical_tab_id(self) -> None:
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await self._recv_until(ws.recv, "auth_ok")
@@ -199,7 +185,7 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
 
     async def test_non_string_tab_id_is_left_for_the_handler(self) -> None:
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await self._recv_until(ws.recv, "auth_ok")

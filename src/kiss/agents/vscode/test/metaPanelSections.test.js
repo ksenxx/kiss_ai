@@ -259,19 +259,24 @@ function startOnChat(win, tabId) {
 
 /**
  * Take the workspace (Explorer, Source Control) and global (Schedule,
- * Apps, Spend) sections out of the stack (the `hidden` attribute, then
- * a Task Info toggle round trip re-applies the layout), leaving only
- * the two per-task sections.
+ * Machines, Apps, Spend, Recommendations) sections out of the stack (the `hidden`
+ * attribute, then the panel's resize observer re-applies the layout),
+ * leaving only the two per-task sections.
  */
-function hideGlobalSections(win) {
-  el(win, 'meta-explorer').hidden = true;
-  el(win, 'meta-scm').hidden = true;
-  el(win, 'meta-schedule').hidden = true;
-  el(win, 'meta-apps').hidden = true;
-  el(win, 'meta-spend').hidden = true;
-  const info = el(win, 'meta-section-info');
-  click(win, toggleOf(info));
-  click(win, toggleOf(info));
+function hideGlobalSections(wv) {
+  const win = wv.win;
+  for (const id of [
+    'meta-explorer',
+    'meta-scm',
+    'meta-schedule',
+    'meta-machines',
+    'meta-apps',
+    'meta-spend',
+    'meta-recommendations',
+  ])
+    el(win, id).hidden = true;
+  const panel = el(win, 'meta-panel');
+  wv.observers.find(o => o.target === panel).fn([]);
 }
 
 function pointer(win, target, type, fields) {
@@ -294,22 +299,36 @@ async function main() {
   ]) {
     await test(`${label}: every section starts expanded, the Task update one hidden`, () => {
       const {win} = makeWebview(attrs);
-      const [info, update, explorer, scm, schedule, apps, spend] =
-        sections(win);
+      const [
+        info,
+        update,
+        explorer,
+        scm,
+        schedule,
+        machines,
+        apps,
+        spend,
+        recommendations,
+      ] = sections(win);
       assert.strictEqual(info.id, 'meta-section-info');
       assert.strictEqual(update.id, 'meta-info');
       assert.strictEqual(explorer.id, 'meta-explorer');
       assert.strictEqual(scm.id, 'meta-scm');
       assert.strictEqual(schedule.id, 'meta-schedule');
+      assert.strictEqual(machines.id, 'meta-machines');
       assert.strictEqual(apps.id, 'meta-apps');
       assert.strictEqual(spend.id, 'meta-spend');
+      assert.strictEqual(recommendations.id, 'meta-recommendations');
       assert.strictEqual(toggleOf(info).textContent, 'Task Info');
       assert.strictEqual(toggleOf(update).textContent, 'Task update');
       assert.strictEqual(toggleOf(explorer).textContent, 'Explorer');
+      // The header count (uncommitted files) is empty until a git status.
       assert.strictEqual(toggleOf(scm).textContent, 'Source Control');
       assert.strictEqual(toggleOf(schedule).textContent, 'Schedule');
+      assert.strictEqual(toggleOf(machines).textContent, 'Machines');
       assert.strictEqual(toggleOf(apps).textContent, 'Apps');
       assert.strictEqual(toggleOf(spend).textContent, 'Spend');
+      assert.strictEqual(toggleOf(recommendations).textContent, 'Recommendations');
       for (const section of sections(win)) assertExpanded(section, true);
       assert.ok(
         !update.classList.contains('visible'),
@@ -321,16 +340,22 @@ async function main() {
       assert.strictEqual(explorer.hidden, !remote, 'Explorer shown on remote only');
       assert.strictEqual(scm.hidden, !remote, 'Source Control shown on remote only');
       // Nothing is dragged: every expanded body takes an equal share
-      // and no separator follows Spend, the last shown section.
+      // and no separator follows Recommendations, the last shown section.
       assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
       assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'equal');
       assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
       assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'equal');
+      assert.strictEqual(
+        bodyLayout(el(win, 'meta-recommendations-list')),
+        'equal',
+      );
       assertResizer(resizerAfter(info), 'handle');
       assertResizer(resizerAfter(update), 'hidden');
       assertResizer(resizerAfter(schedule), 'handle');
+      assertResizer(resizerAfter(machines), 'handle');
       assertResizer(resizerAfter(apps), 'handle');
-      assertResizer(resizerAfter(spend), 'hidden');
+      assertResizer(resizerAfter(spend), 'handle');
+      assertResizer(resizerAfter(recommendations), 'hidden');
       // Bodies are the scrolling parts.
       assert.ok(el(win, 'meta-list').classList.contains('meta-section-body'));
       assert.ok(
@@ -346,40 +371,43 @@ async function main() {
       );
     });
 
-    await test(`${label}: the chevron collapses and re-expands, persisting the choice`, () => {
+    await test(`${label}: the chevron collapses; re-expanding folds every other section, persisting the choices`, () => {
       const {win} = makeWebview(attrs);
-      const [info] = sections(win);
+      const stored = id =>
+        win.localStorage.getItem('kiss-meta-section-collapsed:' + id);
+      const [info, ...others] = sections(win);
       click(win, toggleOf(info));
       assertExpanded(info, false);
-      assert.strictEqual(
-        win.localStorage.getItem(
-          'kiss-meta-section-collapsed:meta-section-info',
-        ),
-        '1',
-      );
+      assert.strictEqual(stored('meta-section-info'), '1');
+      for (const section of others) assertExpanded(section, true);
       assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
       // The separator under a collapsed section is no longer a handle.
       assertResizer(resizerAfter(info), 'static');
+      // Opening a collapsed section folds the rest: the panel shows one
+      // section at a time, as much of it as fits.
       click(win, toggleOf(info));
       assertExpanded(info, true);
-      assert.strictEqual(
-        win.localStorage.getItem(
-          'kiss-meta-section-collapsed:meta-section-info',
-        ),
-        null,
-      );
-      assertResizer(resizerAfter(info), 'handle');
-      // Collapsing Apps leaves the shares to the others.
+      assert.strictEqual(stored('meta-section-info'), null);
+      for (const section of others) {
+        assertExpanded(section, false);
+        assert.strictEqual(stored(section.id), '1', section.id + ' folded');
+      }
+      // Nothing expanded follows Task Info: its separator is static.
+      assertResizer(resizerAfter(info), 'static');
+      assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
+      // Opening Apps folds Task Info in turn; a click on the open Apps
+      // just folds it.
       const apps = el(win, 'meta-apps');
       click(win, toggleOf(apps));
-      assertExpanded(apps, false);
-      assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'equal');
-      assert.strictEqual(
-        win.localStorage.getItem('kiss-meta-section-collapsed:meta-apps'),
-        '1',
-      );
-      click(win, toggleOf(apps));
+      assertExpanded(apps, true);
+      assertExpanded(info, false);
+      assert.strictEqual(stored('meta-apps'), null);
+      assert.strictEqual(stored('meta-section-info'), '1');
       assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
+      click(win, toggleOf(apps));
+      assertExpanded(apps, false);
+      assert.strictEqual(stored('meta-apps'), '1');
+      for (const section of sections(win)) assertExpanded(section, false);
     });
 
     await test(`${label}: a stored collapse state and height are restored at boot`, () => {
@@ -398,14 +426,15 @@ async function main() {
       assert.strictEqual(bodyLayout(el(win, 'meta-list')), '123px');
       assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
       assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'equal');
-      // The collapsed Task update section, shown and expanded, keeps
-      // an equal share ('junk' is no stored height).
+      // The collapsed Task update section, shown and opened by a click,
+      // folds Task Info (one section at a time) and keeps an equal
+      // share ('junk' is no stored height).
       update.classList.add('visible');
       click(win, toggleOf(update));
       assertExpanded(update, true);
-      assert.strictEqual(bodyLayout(el(win, 'meta-list')), '123px');
+      assertExpanded(info, false);
       assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
-      assertResizer(resizerAfter(info), 'handle');
+      assertResizer(resizerAfter(info), 'static');
     });
 
     await test(`${label}: a task start expands Task Info and Task update and collapses the rest`, () => {
@@ -450,10 +479,13 @@ async function main() {
           section.id + ' expansion stored',
         );
       // The arrangement is a starting point: the user unfolds Apps
-      // again, and a repeated running status (not a start) keeps it.
+      // again (which folds the two per-task sections), and a repeated
+      // running status (not a start) keeps it.
       const apps = el(win, 'meta-apps');
       click(win, toggleOf(apps));
       assertExpanded(apps, true);
+      assertExpanded(info, false);
+      assertExpanded(update, false);
       if (!metaView) {
         send(win, {type: 'status', running: true, tabId: 'a1', startTs: 1});
         assertExpanded(apps, true);
@@ -465,7 +497,7 @@ async function main() {
     const wv = makeWebview(REMOTE);
     const win = wv.win;
     const [info, update] = sections(win);
-    hideGlobalSections(win);
+    hideGlobalSections(wv);
     showTaskUpdate(wv, '<p>progress</p>');
     assert.ok(update.classList.contains('visible'));
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
@@ -478,16 +510,19 @@ async function main() {
     click(win, toggleOf(update));
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
     assertResizer(resizerAfter(info), 'static');
-    click(win, toggleOf(update));
 
-    // Collapse Task Info instead: the separator under it is static
-    // too (nothing above to resize), Task update takes it all.
-    click(win, toggleOf(info));
+    // Open Task update again: that folds Task Info (one section at a
+    // time), so the separator under it is static too (nothing above
+    // to resize) and Task update takes it all.
+    click(win, toggleOf(update));
+    assertExpanded(info, false);
     assertResizer(resizerAfter(info), 'static');
     assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
+    // Task Info back (folding Task update); then the task ends: the
+    // update is emptied and its section leaves.
     click(win, toggleOf(info));
-
-    // The task ends: the update is emptied and its section leaves.
+    assertExpanded(info, true);
+    assertExpanded(update, false);
     send(win, {type: 'status', running: false});
     assert.ok(
       !update.classList.contains('visible'),
@@ -496,24 +531,35 @@ async function main() {
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
     assertResizer(resizerAfter(info), 'hidden');
 
-    // With the Schedule, Apps and Spend sections back, the Task update
-    // section sits between Task Info and Schedule.
+    // With the Schedule, Machines, Apps and Spend sections
+    // back, the Task update section (still folded) sits between Task
+    // Info and Schedule; opening it folds the rest.
     el(win, 'meta-schedule').hidden = false;
+    el(win, 'meta-machines').hidden = false;
     el(win, 'meta-apps').hidden = false;
     el(win, 'meta-spend').hidden = false;
+    el(win, 'meta-recommendations').hidden = false;
     showTaskUpdate(wv, '<p>progress</p>');
+    assert.ok(update.classList.contains('visible'));
+    assertExpanded(update, false);
+    // The Task Info click folded them too (hidden or not): nothing
+    // expanded follows Task Info until a click opens one.
+    assertExpanded(el(win, 'meta-schedule'), false);
+    assertResizer(resizerAfter(info), 'static');
+    assertResizer(resizerAfter(update), 'static');
+    click(win, toggleOf(update));
+    assertExpanded(update, true);
+    assertExpanded(info, false);
+    assertExpanded(el(win, 'meta-schedule'), false);
     assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
-    assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
-    assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'equal');
-    assertResizer(resizerAfter(info), 'handle');
-    assertResizer(resizerAfter(update), 'handle');
+    assertResizer(resizerAfter(update), 'static');
   });
 
   await test('remote webapp: arrow keys, double-click and pointer drag on the separator', () => {
     const wv = makeWebview(REMOTE);
     const win = wv.win;
     const [info] = sections(win);
-    hideGlobalSections(win);
+    hideGlobalSections(wv);
     const r = resizerAfter(info);
     const list = el(win, 'meta-list');
     const HK = 'kiss-meta-section-h:meta-section-info';
@@ -574,8 +620,8 @@ async function main() {
   await test('a third section added per the chat.html recipe joins the stack; `hidden` removes it', () => {
     const wv = makeWebview(REMOTE, {extraSection: true});
     const win = wv.win;
-    hideGlobalSections(win);
-    const [info, update, , , , , , extra] = sections(win);
+    hideGlobalSections(wv);
+    const [info, update, , , , , , , , extra] = sections(win);
     assert.strictEqual(extra.id, 'meta-section-extra');
     assertExpanded(extra, true);
     // No task: Task Info and Extra are shown, sharing equally.
@@ -597,21 +643,28 @@ async function main() {
     click(win, toggleOf(update));
     assertResizer(resizerAfter(info), 'handle');
     assertResizer(resizerAfter(update), 'static');
+    // Opening it again folds the other two: both separators static.
     click(win, toggleOf(update));
+    assertExpanded(extra, false);
+    assertResizer(resizerAfter(info), 'static');
+    assertResizer(resizerAfter(update), 'static');
+    click(win, toggleOf(extra));
+    assertExpanded(extra, true);
+    assertExpanded(update, false);
 
     // A section hidden with the `hidden` attribute is out of the stack
-    // (its owner re-applies the layout; a toggle round trip does here).
+    // (its owner re-applies the layout; the panel's resize observer
+    // does here).
+    const relayout = () =>
+      wv.observers.find(o => o.target === el(win, 'meta-panel')).fn([]);
     extra.hidden = true;
-    click(win, toggleOf(info));
-    click(win, toggleOf(info));
-    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
+    relayout();
     assertResizer(resizerAfter(update), 'hidden');
     assertResizer(resizerAfter(extra), 'hidden');
     extra.hidden = false;
-    click(win, toggleOf(info));
-    click(win, toggleOf(info));
+    relayout();
     assert.strictEqual(bodyLayout(el(win, 'meta-extra-body')), 'equal');
-    assertResizer(resizerAfter(update), 'handle');
+    assertResizer(resizerAfter(update), 'static');
   });
 
   await test('a drag pins the expanded bodies above the moved boundary, and only those', () => {
@@ -676,20 +729,24 @@ async function main() {
     const [info, update] = sections(win);
     assertExpanded(info, true);
     assertExpanded(update, true);
-    click(win, toggleOf(update));
-    assertExpanded(update, false);
-    click(win, toggleOf(update));
-    assertExpanded(update, true);
-    update.classList.add('visible');
-    win.eval("document.getElementById('meta-info').classList.add('visible')");
-    click(win, toggleOf(info));
-    click(win, toggleOf(info));
+    // Every section starts expanded, so the separator under Task Info
+    // is a handle: a height is set and reset without storage.
     const r = resizerAfter(info);
     assertResizer(r, 'handle');
     key(win, r, 'ArrowDown');
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), '0px');
     r.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
+    update.classList.add('visible');
+    click(win, toggleOf(update));
+    assertExpanded(update, false);
+    assertExpanded(info, true);
+    click(win, toggleOf(update));
+    assertExpanded(update, true);
+    assertExpanded(info, false, 'opening Task update folded Task Info');
+    click(win, toggleOf(info));
+    assertExpanded(info, true);
+    assertExpanded(update, false);
   });
 
   await test('the equal share is published as --meta-body-share and re-measured when the panel resizes', () => {

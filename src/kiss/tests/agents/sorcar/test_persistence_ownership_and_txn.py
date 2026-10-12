@@ -17,7 +17,7 @@ Covers audit findings:
   transcript was lost.
 * **I1** — schema booleans defaulted to 0 while every other layer
   defaults to True, and the migration mapped a MISSING key to 0.
-* **I4** — ``_update_task_column`` interpolates the column name into
+* **I4** — ``_update_task_columns`` interpolates the column names into
   SQL but accepted any string.
 * **D2** — the process-global ``_db_conn`` invalidated every OTHER
   thread's per-thread connection.
@@ -361,7 +361,7 @@ class FailedEventReplayTest(_PersistenceTestCase):
         self._unblock_event_writes()
         th._flush_chat_events(task_id)
 
-        self.assertTrue(th._task_has_events(task_id))
+        self.assertTrue(th._task_has_transcript_events(task_id))
         self.assertEqual(self._event_count(task_id), 10)
         self.assertEqual(self._journal_line_count(), 0)
 
@@ -450,9 +450,7 @@ class SchemaDefaultsTest(_PersistenceTestCase):
             (uuid.uuid4().hex, time.time(), "bare insert"),
         )
         extra = self._extra_of(th._load_history()[0])
-        self.assertTrue(extra["is_worktree"])
         self.assertTrue(extra["is_parallel"])
-        self.assertTrue(extra["auto_commit_mode"])
 
     def test_migration_keeps_unrecorded_toggles_enabled(self) -> None:
         """A legacy row that never recorded the toggles is not inverted."""
@@ -481,9 +479,7 @@ class SchemaDefaultsTest(_PersistenceTestCase):
 
         self.assertEqual(len(entries), 1)
         extra = self._extra_of(entries[0])
-        self.assertTrue(extra["is_worktree"])
         self.assertTrue(extra["is_parallel"])
-        self.assertTrue(extra["auto_commit_mode"])
         self.assertEqual(extra["model"], "m")
 
     def test_migration_preserves_explicitly_disabled_toggles(self) -> None:
@@ -505,31 +501,21 @@ class SchemaDefaultsTest(_PersistenceTestCase):
         conn.execute(
             "INSERT INTO task_history (timestamp, task, extra) "
             "VALUES (?, ?, ?)",
-            (time.time(), "explicit off", json.dumps({
-                "is_worktree": False,
-                "is_parallel": False,
-                "auto_commit_mode": "no",
-            })),
+            (time.time(), "explicit off", json.dumps({"is_parallel": False})),
         )
         conn.close()
 
         extra = self._extra_of(th._load_history()[0])
 
-        self.assertFalse(extra["is_worktree"])
         self.assertFalse(extra["is_parallel"])
-        self.assertFalse(extra["auto_commit_mode"])
 
     def test_add_task_records_what_the_caller_declared(self) -> None:
         """An explicit ``False`` from the caller is still stored as off."""
-        task_id, _chat = th._add_task(
-            "explicit", extra={"is_worktree": False, "is_parallel": True},
-        )
+        task_id, _chat = th._add_task("explicit", extra={"is_parallel": False})
         row = th._get_db().execute(
-            "SELECT is_worktree, is_parallel FROM task_history WHERE id = ?",
-            (task_id,),
+            "SELECT is_parallel FROM task_history WHERE id = ?", (task_id,),
         ).fetchone()
-        self.assertEqual(int(row["is_worktree"]), 0)
-        self.assertEqual(int(row["is_parallel"]), 1)
+        self.assertEqual(int(row["is_parallel"]), 0)
 
 
 class UpdateTaskColumnGuardTest(_PersistenceTestCase):
@@ -539,13 +525,26 @@ class UpdateTaskColumnGuardTest(_PersistenceTestCase):
         """The long-removed ``extra`` column is rejected, not written."""
         task_id, _chat = th._add_task("guard me")
         with self.assertRaises(ValueError):
-            th._update_task_column("extra", "{}", task_id, None)
+            th._update_task_columns({"result": "ok", "extra": "{}"}, task_id, None)
+        self.assertEqual(self._result_of(task_id), "Agent Failed Abruptly")
 
     def test_result_still_round_trips(self) -> None:
-        """The one allowed column keeps working."""
+        """The allowed columns keep working, with and without a verdict."""
         task_id, _chat = th._add_task("guard me too")
         th._save_task_result("Task completed", task_id=task_id)
         self.assertEqual(self._result_of(task_id), "Task completed")
+        self.assertIsNone(self._success_of(task_id))
+        th._save_task_result("Could not do it", task_id=task_id, success=False)
+        self.assertEqual(self._result_of(task_id), "Could not do it")
+        self.assertEqual(self._success_of(task_id), 0)
+        th._save_task_result("Done after all", task_id=task_id, success=True)
+        self.assertEqual(self._success_of(task_id), 1)
+
+    def _success_of(self, task_id: str) -> object:
+        row = th._get_db().execute(
+            "SELECT success FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+        return row["success"]
 
 
 class ThreadConnectionCacheTest(_PersistenceTestCase):

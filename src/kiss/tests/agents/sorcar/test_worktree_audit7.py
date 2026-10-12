@@ -4,11 +4,10 @@
 # add your name here
 """Tests verifying fixes for bugs found in worktree audit round 7.
 
-BUG-30 FIX: _try_setup_worktree now reads current_branch(repo) inside
-        repo_lock when released_branch is None, preventing races with
-        concurrent tab checkouts.
+BUG-30 FIX: _try_setup_worktree reads current_branch(repo) inside
+        repo_lock, preventing races with concurrent tab checkouts.
 
-BUG-31 FIX: Both merge() and _release_worktree now distinguish
+BUG-31 FIX: Both merge() and the commit_and_merge tool distinguish
         MERGE_FAILED from CONFLICT, giving correct diagnostic messages
         for commit failures (e.g. pre-commit hook rejection).
 
@@ -30,13 +29,13 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
     _unquote_git_path,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -104,8 +103,8 @@ def _unpatch_super_run(original: Any) -> None:
 
 
 class TestBug30Fix:
-    """BUG-30 FIX: current_branch is now read inside repo_lock when
-    released_branch is None, preventing races with concurrent checkouts.
+    """BUG-30 FIX: current_branch is read inside repo_lock, preventing
+    races with concurrent checkouts.
     """
 
     def setup_method(self) -> None:
@@ -121,7 +120,7 @@ class TestBug30Fix:
         """BUG-30 FIX: original_branch is correctly recorded for new worktree."""
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        agent = WorktreeSorcarAgent("agent_a")
+        agent = ChatSorcarAgent("agent_a")
         agent._chat_id = "tab_a"
 
         assert GitWorktreeOps.current_branch(repo) == "main"
@@ -137,17 +136,18 @@ class TestBug30Fix:
         GitWorktreeOps.prune(repo)
         GitWorktreeOps.delete_branch(repo, wt.branch)
 
-    def test_release_worktree_returns_none_for_no_prior(self) -> None:
-        """BUG-30 FIX: _release_worktree returns None when no prior worktree."""
-        agent = WorktreeSorcarAgent("test")
+    def test_retire_previous_worktree_is_a_no_op_without_a_prior(self) -> None:
+        """BUG-30 FIX: _retire_previous_worktree does nothing without a worktree."""
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "no_prior"
-        result = agent._release_worktree()
-        assert result is None
+        agent._retire_previous_worktree()
+        assert agent._wt is None
+        assert agent._merge_conflict_warning is None
 
 
 class TestBug31Fix:
     """BUG-31 FIX: MERGE_FAILED is now handled distinctly from CONFLICT
-    in both merge() and _release_worktree, with correct messages.
+    in both merge() and the commit_and_merge tool, with correct messages.
     """
 
     def setup_method(self) -> None:
@@ -164,7 +164,7 @@ class TestBug31Fix:
         """BUG-31 FIX: A commit failure is NOT called a 'conflict'."""
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "test31"
 
         wt_work = agent._try_setup_worktree(repo, str(repo))
@@ -200,12 +200,13 @@ class TestBug31Fix:
         if GitWorktreeOps.branch_exists(repo, wt.branch):
             GitWorktreeOps.delete_branch(repo, wt.branch)
 
-    def test_release_commit_failure_not_conflict_message(self) -> None:
-        """BUG-31 FIX: _release_worktree gives correct message for MERGE_FAILED."""
+    def test_commit_and_merge_commit_failure_not_conflict_message(self) -> None:
+        """BUG-31 FIX: commit_and_merge gives correct message for MERGE_FAILED."""
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "test31r"
+        agent.work_dir = str(repo)
 
         wt_work = agent._try_setup_worktree(repo, str(repo))
         assert wt_work is not None
@@ -222,17 +223,15 @@ class TestBug31Fix:
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
 
-        result = agent._release_worktree()
-        assert result is None, "Release should fail"
+        warning = agent.commit_and_merge()
+        assert agent._wt is not None, "the branch must be kept after MERGE_FAILED"
+        assert GitWorktreeOps.branch_exists(repo, wt.branch)
 
-        warning = agent._merge_conflict_warning
-        assert warning is not None, "Warning should be set"
-
-        assert "had conflicts" not in warning, (
-            f"BUG-31 NOT fixed: warning says 'had conflicts': {warning}"
+        assert "conflict" not in warning.lower(), (
+            f"BUG-31 NOT fixed: message reports a conflict: {warning}"
         )
         assert "commit failed" in warning.lower(), (
-            f"BUG-31 NOT fixed: warning doesn't mention commit failure: {warning}"
+            f"BUG-31 NOT fixed: message doesn't mention commit failure: {warning}"
         )
         assert "--no-verify" in warning, (
             f"BUG-31 NOT fixed: no --no-verify suggestion: {warning}"

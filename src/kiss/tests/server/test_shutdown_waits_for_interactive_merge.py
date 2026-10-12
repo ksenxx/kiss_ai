@@ -26,8 +26,6 @@ import asyncio
 import json
 import os
 import shutil
-import socket
-import subprocess
 import tempfile
 import threading
 import time
@@ -36,11 +34,12 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as persistence
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core import vscode_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.server.conftest import find_free_port, run_git
 from kiss.tests.server.parallel_agent_harness import OfflineFastModel
 
 _TAB = "merge-tab"
@@ -59,21 +58,6 @@ while [ ! -f "$2" ] && [ $i -lt 200 ]; do
 done
 exit 0
 """
-
-
-def _git(cwd: str | Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command in *cwd* and return the completed process."""
-    return subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True,
-        check=False,
-    )
-
-
-def _free_port() -> int:
-    """Return a free localhost TCP port."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
@@ -99,7 +83,7 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
 
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_free_port(),
+            port=find_free_port(),
             work_dir=str(self.repo),
             use_tunnel=False,
             local_endpoint_file=self.home / "test-sorcar-local.json",
@@ -110,7 +94,6 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
             _TASK_ID, tab_id=_TAB, server_owned=True,
         )
         self.state.agent = self._pending_worktree_agent()
-        self.state.use_worktree = True
         agent_state.register(self.state)
 
     async def asyncTearDown(self) -> None:
@@ -139,7 +122,7 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
         vscode_config.CONFIG_DIR = self.home  # type: ignore[attr-defined]
         vscode_config.CONFIG_PATH = self.home / "config.json"  # type: ignore[attr-defined]
         (self.home / "config.json").write_text(
-            json.dumps({"auto_commit_mode": True, "is_worktree": True}),
+            json.dumps({}),
             encoding="utf-8",
         )
 
@@ -165,13 +148,13 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
 
     def _init_repo(self) -> None:
         """Create a git repo with one commit on ``main``."""
-        _git(self.repo, "init", "-q", "-b", "main")
-        _git(self.repo, "config", "user.email", "test@example.com")
-        _git(self.repo, "config", "user.name", "Test User")
-        _git(self.repo, "config", "commit.gpgsign", "false")
+        run_git(self.repo, "init", "-q", "-b", "main")
+        run_git(self.repo, "config", "user.email", "test@example.com")
+        run_git(self.repo, "config", "user.name", "Test User")
+        run_git(self.repo, "config", "commit.gpgsign", "false")
         (self.repo / "README.md").write_text("hello\n", encoding="utf-8")
-        _git(self.repo, "add", "README.md")
-        _git(self.repo, "commit", "-q", "-m", "initial")
+        run_git(self.repo, "add", "README.md")
+        run_git(self.repo, "commit", "-q", "-m", "initial")
 
     def _install_blocking_hook(self) -> None:
         """Install a real ``pre-commit`` hook that blocks the merge's commit."""
@@ -188,14 +171,14 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
         script.chmod(0o755)
         block.chmod(0o755)
 
-    def _pending_worktree_agent(self) -> WorktreeSorcarAgent:
+    def _pending_worktree_agent(self) -> ChatSorcarAgent:
         """Return an agent holding a real worktree with uncommitted work."""
         branch = "kiss/wt-merge-shutdown"
         wt_dir = self.repo / ".kiss-worktrees" / branch.replace("/", "_")
         assert GitWorktreeOps.create(self.repo, branch, wt_dir)
         assert GitWorktreeOps.save_original_branch(self.repo, branch, "main")
         (wt_dir / _MERGED_FILE).write_text("agent work\n", encoding="utf-8")
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         agent._wt = GitWorktree(
             repo_root=self.repo,
             branch=branch,
@@ -268,7 +251,7 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
 
         await merge_future
         releaser.join(timeout=30)
-        merged = _git(self.repo, "cat-file", "-e", f"HEAD:{_MERGED_FILE}")
+        merged = run_git(self.repo, "cat-file", "-e", f"HEAD:{_MERGED_FILE}")
         self.assertEqual(
             merged.returncode, 0,
             "the merge did not finish, so the user's work never landed",

@@ -250,8 +250,31 @@ class NotionChannelBackend(ToolMethodBackend):
         self._base_url: str = "https://api.notion.com/v1"
         self._token: str = ""
         self._http: Any = requests
+        self._muse: bool = False
+        self._lazy_muse: bool = False
+        self._wire_lock = threading.Lock()
         self._request_lock = threading.Lock()
         self._connection_info: str = ""
+
+    def _wire_deferred(self) -> bool:
+        """Run the Muse wiring :class:`NotionAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of calling :meth:`connect`
+        at construction, so building it for its tool list (``sea lint``,
+        ``sea docs``, run start) touches no daemon.  Concurrent first
+        requests wait on the lock and share the one surrogate;
+        :meth:`connect` publishes ``_muse`` last, so a request that sees
+        it set sees the whole wired state.
+
+        Returns:
+            True once the backend is wired (or Muse is off); False when
+            no Notion credential could be wired, with the reason in
+            ``_connection_info``.
+        """
+        if not self._lazy_muse or self._muse:
+            return True
+        with self._wire_lock:
+            return self._muse or self.connect()
 
     def connect(self) -> bool:
         """Load the Notion config from disk.
@@ -287,6 +310,7 @@ class NotionChannelBackend(ToolMethodBackend):
                 return False
             self._token = surrogate
             self._http = MuseBoundarySession("notion")
+            self._muse = True
             # The credential lives in the vault now; scrub any plaintext
             # copy left in the legacy config so the agent process never
             # holds the real token again.
@@ -319,8 +343,11 @@ class NotionChannelBackend(ToolMethodBackend):
         Returns:
             ``(data, "")`` with the parsed JSON response on success, or
             ``(None, error_json)`` where *error_json* is an
-            ``{"ok": false, ...}`` JSON string.
+            ``{"ok": false, ...}`` JSON string (also when Muse-auth is
+            on and no Notion credential can be wired).
         """
+        if not self._wire_deferred():
+            return None, json.dumps({"ok": False, "error": self._connection_info})
         url = self._base_url.rstrip("/") + path
         headers = {
             "Authorization": f"Bearer {self._token}",
@@ -818,18 +845,25 @@ class NotionAgent(BaseChannelAgent):
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
-            # Muse-auth mode: connect() wires a vault surrogate and the
-            # boundary session; the real token never enters this process
-            # once migrated.
-            self._backend.connect()
+            # Muse-auth mode: the backend wires its vault surrogate and
+            # boundary session on the first request, so building the
+            # tool list (``sea lint``, ``sea docs``, run start) touches
+            # no daemon; the real token never enters this process.
+            self._backend._lazy_muse = True
             return
         cfg = _config.load()
         if cfg:
             self._backend._token = cfg["token"]
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return bool(self._backend._token)
+        """Return True if a Notion token is loaded, enrolled in the vault, or in the config."""
+        if self._backend._token:
+            return True
+        if not self._backend._lazy_muse:
+            return False
+        from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
+
+        return vault_has_credentials("notion") or bool((_config.load() or {}).get("token"))
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""

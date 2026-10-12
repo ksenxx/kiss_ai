@@ -16,7 +16,7 @@ Reproduces and guards against three bugs (see tmp/findings-2.md):
   splitting on ``" -> "`` and then unquoted again, corrupting both
   paths so renames of files with tabs/quotes were silently not
   mirrored.
-* B3 — ``WorktreeSorcarAgent._do_merge`` checked out the original
+* B3 — ``ChatSorcarAgent._do_merge`` checked out the original
   branch BEFORE stashing, so a user sitting on a different branch
   with dirty edits got ``CHECKOUT_FAILED`` even though ``merge()``'s
   docstring promises uncommitted changes are stashed first.
@@ -30,12 +30,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
     MergeResult,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.tests.conftest import posix_only
 
 
@@ -244,7 +244,7 @@ class TestB3StashBeforeCheckout:
             "precondition: dirty checkout must fail without a stash"
         )
 
-        agent = WorktreeSorcarAgent("test-b3")
+        agent = ChatSorcarAgent("test-b3")
         wt = GitWorktree(
             repo_root=repo,
             branch=branch,
@@ -287,7 +287,7 @@ class TestB3StashBeforeCheckout:
 
         (repo / "base.txt").write_text("dirty on main\n")
 
-        agent = WorktreeSorcarAgent("test-b3b")
+        agent = ChatSorcarAgent("test-b3b")
         wt = GitWorktree(
             repo_root=repo,
             branch=branch,

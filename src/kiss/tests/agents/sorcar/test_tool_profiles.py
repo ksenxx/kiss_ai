@@ -245,6 +245,7 @@ class TestComposableProfiles:
         assert agent._tool_profile() == "shell+edit"
         assert _names(agent._get_tools()) == {
             "Bash", "bash_job", "Read", "run_commands_parallel", "Edit", "Write",
+            "create_worktree", "commit_and_merge",
         }
 
     def test_agents_group_builds_dispatch_and_fanout(self, tmp_path: Path) -> None:

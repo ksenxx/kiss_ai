@@ -30,11 +30,11 @@ import yaml
 from kiss.agents.seas import agents_md
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import cron_agent, sea_commands
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task, _flush_chat_events, _save_task_result
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve, tool_call_body
-from kiss.tests.server.parallel_agent_harness import init_repo, run_git
+from kiss.tests.server.conftest import init_repo, run_git
 
 _SEA_PATH = Path(sea.__file__).resolve()
 
@@ -108,7 +108,7 @@ class _Registered:
     """Register a real agent as the running task of the calling thread."""
 
     def __init__(self, task: str, ask: Any = None, work_dir: str = "") -> None:
-        self.agent = WorktreeSorcarAgent("rsi7d-sorcar-scope")
+        self.agent = ChatSorcarAgent("rsi7d-sorcar-scope")
         self.agent.task_description = task
         self.agent.work_dir = work_dir
         self.agent._ask_user_question_callback = ask
@@ -117,7 +117,7 @@ class _Registered:
             task_thread=threading.current_thread(),
         )
 
-    def __enter__(self) -> WorktreeSorcarAgent:
+    def __enter__(self) -> ChatSorcarAgent:
         agent_state.register(self.state)
         return self.agent
 
@@ -442,7 +442,7 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
     ]
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], "all")
     with serve(script) as (url, requests):
-        agent = WorktreeSorcarAgent("rsi7d-sorcar-scope-run")
+        agent = ChatSorcarAgent("rsi7d-sorcar-scope-run")
         state = agent_state.AgentState(
             "rsi7d-scope-run", agent=agent, tab_id="scope_run_tab",
             task_thread=threading.current_thread(),
@@ -463,8 +463,6 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
                 is_parallel=False,
                 verbose=False,
                 ask_user_question_callback=ask,
-                use_worktree=False,
-                auto_commit=False,
             )
         finally:
             agent_state.unregister(state.task_id, state)

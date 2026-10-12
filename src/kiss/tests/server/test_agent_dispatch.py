@@ -24,6 +24,7 @@ from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.sea_apply import (
     CHANNEL_PREAMBLE,
     NO_TOOLS_PROFILE,
+    SETTING_FIELDS,
     apply_sea,
     channel_workspace,
     load_layers,
@@ -56,7 +57,7 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
     overridden = apply_sea(cmd)
     assert overridden == {
         "appendToSystemPrompt", "workDir",
-        "useWorktree", "autoCommit", "classifyTasks", "useWebTools", "useMemory",
+        "classifyTasks", "useWebTools", "useMemory",
     }
     # The workspace a channel run holds is decided from the settings
     # alone (entered by the task runner before the tools are built).
@@ -80,8 +81,8 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
         "ChannelSea": {**WORKER_DEFAULTS, "work_dir": channel_work_dir()},
     }
     assert channel_work_dir() == str(kiss_home() / "channel_work")
-    assert cmd["useWorktree"] is False
-    assert cmd["autoCommit"] is False
+    assert "useWorktree" not in cmd
+    assert "autoCommit" not in cmd
     assert cmd["classifyTasks"] is False
     assert cmd["useWebTools"] is False
     assert cmd["useMemory"] is False
@@ -340,9 +341,13 @@ def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) 
     # The only writes are the provenance record of a script that
     # replaced nothing and the four hook callables every run gets,
     # all of them ``BaseSea``'s identities here.
-    assert cmd.pop("_runConfig") == {
-        "sea": "old_contract_agent", "channel": False, "pinned": {},
-    }
+    record = cmd.pop("_runConfig")
+    # The command carries a model, a memory flag and a classifier flag; the
+    # daemon fills the rest from its defaults.
+    assert record.pop("defaulted") == sorted(
+        k for k in SETTING_FIELDS if k not in ("model", "use_memory", "auto_classify")
+    )
+    assert record == {"sea": "old_contract_agent", "channel": False, "pinned": {}}
     assert cmd.pop("systemPromptHook")("BASE") == "BASE"
     assert cmd.pop("toolsHook")([_hello]) == [_hello]
     assert cmd.pop("llmCallHook")([1, 2]) == [1, 2]

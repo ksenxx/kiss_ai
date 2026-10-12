@@ -41,7 +41,7 @@ from typing import Any, cast
 from unittest import TestCase
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.task_runner import _state_owns_thread
@@ -67,7 +67,7 @@ def _start_blocked_worker(
     vscode: Any, tab_id: str, work_dir: str,
 ) -> tuple[threading.Thread, AgentState, str]:
     """Start a real ``_run_task`` worker blocked inside ``agent.run``."""
-    agent = WorktreeSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar VS Code")
     state = AgentState(
         f"pre-{tab_id}",
         agent=agent,
@@ -214,7 +214,7 @@ class TestStopInjectsOnce(TestCase):
         """
         remote = _make_remote_server()
         vscode = remote._vscode_server
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         state = AgentState(
             "pre-stop-swallow", agent=agent, tab_id="stop-swallow",
             server_owned=True, stop_event=threading.Event(),

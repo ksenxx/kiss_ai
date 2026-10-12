@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from kiss.server.tricks import MY_INJECTION_DEFAULT_BODY, read_tricks
-from kiss.tests.server.test_inject_panel_order import kiss_home  # noqa: F401
+from kiss.tests.server.conftest import kiss_home  # noqa: F401
 
 
 def test_no_injections_path_falls_back_to_bundled_package_file(

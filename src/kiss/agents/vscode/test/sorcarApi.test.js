@@ -35,9 +35,17 @@ test('api.send forwards catalog commands and rejects the rest', () => {
 });
 
 test('catalog contains the core task-lifecycle commands', () => {
-  ['run', 'submit', 'stop', 'userAnswer', 'newChat', 'closeTab',
+  ['submit', 'stop', 'userAnswer', 'newChat', 'closeTab',
    'getHistory', 'getConfig', 'setWorkDir', 'auth',
   ].forEach(name => assert.ok(SORCAR_API_COMMANDS.includes(name), name));
+});
+
+test('catalog omits the commands only other clients send', () => {
+  // ``run`` is the Python API's (daemon_client.py), ``getTabsState``
+  // the extension host's, ``getModels``/``getSeaCommands`` the
+  // daemon's own ``ready`` fan-out: no webview message carries them.
+  ['run', 'getTabsState', 'getModels', 'getSeaCommands', 'activeTasksQuery',
+  ].forEach(name => assert.ok(!SORCAR_API_COMMANDS.includes(name), name));
 });
 
 test('the real chat webview only sends API commands', async () => {
@@ -125,7 +133,6 @@ test('SorcarSidebarView turns webview messages into wire commands', async () => 
     {type: 'complete', query: 'q', tabId: 't'},
     {type: 'recordFileUsage', path: '/f', workDir: '/w'},
     {type: 'worktreeAction', action: 'discard', tabId: 't'},
-    {type: 'mainTreeAction', action: 'discard', tabId: 't'},
     {type: 'autocommitAction', tabId: 't'},
     {type: 'serverReset'},
     {type: 'getHistory', query: 'x'},
@@ -147,11 +154,10 @@ test('SorcarSidebarView turns webview messages into wire commands', async () => 
      activeFileContent: undefined},
     {type: 'recordFileUsage', path: '/f', workDir: '/w'},
     {type: 'worktreeAction', action: 'discard', tabId: 't'},
-    {type: 'mainTreeAction', action: 'discard', tabId: 't', workDir: '/w'},
     {type: 'autocommitAction', tabId: 't', workDir: '/w'},
     {type: 'serverReset'},
-    {type: 'getHistory', query: 'x', tag: undefined, offset: undefined,
-     generation: undefined},
+    {type: 'getHistory', query: 'x', tag: undefined, machine: undefined,
+     workDir: undefined, offset: undefined, generation: undefined},
     {type: 'generateCommitMessage', model: 'm2', tabId: 't', workDir: '/repo'},
   ]);
   assert.strictEqual(view._selectedModel, 'm2', 'selectModel is remembered');

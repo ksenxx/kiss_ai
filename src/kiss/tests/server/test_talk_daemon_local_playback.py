@@ -40,46 +40,10 @@ import kiss.agents.sorcar.persistence as th
 from kiss.server import talk_player
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence, write_fake_player
 
 MP3_BYTES = b"ID3\x03\x00fake-mp3-frames-" + bytes(range(64))
 MP3_B64 = base64.b64encode(MP3_BYTES).decode("ascii")
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
-
-
-def _write_player(tmp_path: Path, marker_dir: Path) -> Path:
-    """Write a python script standing in for the daemon's audio player.
-
-    The script receives the audio file path as its LAST argument and
-    writes one unique JSON marker file into *marker_dir* recording the
-    audio bytes (base64) it read.
-    """
-    marker_dir.mkdir(parents=True, exist_ok=True)
-    script = tmp_path / "fake_player.py"
-    script.write_text(
-        "import base64, json, os, sys, uuid\n"
-        f"marker_dir = {str(marker_dir)!r}\n"
-        "path = sys.argv[-1]\n"
-        "with open(path, 'rb') as fh:\n"
-        "    data = fh.read()\n"
-        "marker = os.path.join(marker_dir, uuid.uuid4().hex + '.json')\n"
-        "with open(marker, 'w') as fh:\n"
-        "    json.dump({'audio_b64':"
-        " base64.b64encode(data).decode('ascii')}, fh)\n"
-    )
-    return script
 
 
 def _talk_event(
@@ -105,9 +69,9 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.marker_dir = Path(self.tmpdir) / "markers"
-        player = _write_player(Path(self.tmpdir), self.marker_dir)
+        player = write_fake_player(Path(self.tmpdir), self.marker_dir)
         self.saved_play_cmd = os.environ.get("KISS_SORCAR_PLAY_CMD")
         os.environ["KISS_SORCAR_PLAY_CMD"] = (
             f"{shlex.quote(sys.executable)} {shlex.quote(str(player))}"
@@ -138,7 +102,7 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         talk_player.reset_shared_player_for_tests()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect(

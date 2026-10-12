@@ -32,8 +32,16 @@ from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar import sea_commands, worktree_pool
-from kiss.agents.sorcar.git_worktree import _WORKTREE_SUBDIR, GitWorktreeOps
+from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+from kiss.agents.sorcar.machines import (
+    LOCAL_MACHINE,
+    HistoryPage,
+    Machine,
+    load_machines,
+    local_machine_name,
+    merged_history,
+)
 from kiss.agents.sorcar.persistence import (
     _chat_first_tasks,
     _chat_summaries,
@@ -92,9 +100,7 @@ logger = logging.getLogger(__name__)
 
 _REPLAY_STRIPPED_EXTRA_KEYS = (
     "model",
-    "is_worktree",
     "is_parallel",
-    "auto_commit_mode",
 )
 
 
@@ -258,11 +264,104 @@ def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
         return []
     evs = cast("list[dict[str, Any]]", events)
     for ev in evs:
-        if "ts" not in ev:
-            legacy = ev.get("_timestamp")
-            if isinstance(legacy, (int, float)) and 0 < legacy <= 8.64e12:
-                ev["ts"] = int(legacy * 1000)
-    return _coalesce_events(evs)
+        legacy = ev.get("_timestamp")
+        if "_timestamp" in ev and not isinstance(legacy, (int, float)):
+            # TEXT/BLOB junk from the dynamically typed SQLite column:
+            # bytes are not JSON-serializable, so the key must not reach
+            # the frame sizing or the transport.
+            del ev["_timestamp"]
+        elif "ts" not in ev and isinstance(legacy, (int, float)) and 0 < legacy <= 8.64e12:
+            ev["ts"] = int(legacy * 1000)
+    return _bound_replay_events(_coalesce_events(evs))
+
+
+#: A replayed delta event's ``text`` is cut to this many characters
+#: (head and tail kept).  Coalescing merges a legacy transcript's
+#: uncapped bash chunks into one event, so the per-row cap of the
+#: persistence loader is not enough on its own.
+MAX_REPLAY_EVENT_TEXT_CHARS = 200_000
+#: Budget, in serialized bytes, for the events of one replay frame.
+#: The VS Code client drops its socket above 64 MiB (wsClient.ts
+#: ``DEFAULT_MAX_MESSAGE_BYTES``) and a laptop on a tunnel must not
+#: pull hundreds of megabytes per reconnect; beyond the budget the
+#: oldest events are left out and a note says so.
+MAX_REPLAY_FRAME_BYTES = 16 * 1024 * 1024
+_REPLAY_DELTA_TYPES = frozenset({"thinking_delta", "text_delta", "system_output"})
+
+
+def _clip_text(text: str, limit: int) -> str:
+    """Return *text* cut to *limit* characters keeping its head and tail."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    omitted = len(text) - 2 * half
+    return (
+        text[:half]
+        + f"\n... [{omitted} characters omitted from replay] ...\n"
+        + text[-half:]
+    )
+
+
+def _event_bytes(ev: dict[str, Any]) -> int:
+    """Size of *ev* as the transport sends it (``json.dumps`` default).
+
+    Measured on the serialized form, not on character counts: the
+    default encoder escapes every non-ASCII character to ``\\uXXXX``,
+    so a transcript of CJK text or emoji is three to six times its
+    character count on the wire.
+    """
+    return len(json.dumps(ev))
+
+
+def _bound_replay_events(evs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fit a coalesced replay under the per-event and per-frame caps.
+
+    Clips every delta event's ``text`` to
+    :data:`MAX_REPLAY_EVENT_TEXT_CHARS`, then walks the list from the
+    newest event back and keeps only the suffix that fits in
+    :data:`MAX_REPLAY_FRAME_BYTES` serialized; a ``system_output``
+    note replaces the omitted prefix so the reader knows the
+    transcript is cut.  The newest event is always kept (a ``result``
+    larger than the whole budget still reaches the client rather than
+    leaving the transcript empty).
+
+    Args:
+        evs: Coalesced events, oldest first (clipped entries are
+            replaced in this list).
+
+    Returns:
+        The bounded event list.
+    """
+    total = 0
+    kept_from = 0
+    for i in range(len(evs) - 1, -1, -1):
+        ev = evs[i]
+        text = ev.get("text")
+        if (
+            ev.get("type") in _REPLAY_DELTA_TYPES
+            and isinstance(text, str)
+            and len(text) > MAX_REPLAY_EVENT_TEXT_CHARS
+        ):
+            # Copied, not edited in place: an un-merged event may be
+            # the printer's live recording entry.
+            ev = evs[i] = {**ev, "text": _clip_text(text, MAX_REPLAY_EVENT_TEXT_CHARS)}
+        total += _event_bytes(ev)
+        if total > MAX_REPLAY_FRAME_BYTES and i < len(evs) - 1:
+            kept_from = i + 1
+            break
+    if kept_from == 0:
+        return evs
+    kept = evs[kept_from:]
+    note: dict[str, Any] = {
+        "type": "system_output",
+        "text": (
+            f"[{kept_from} earlier events are not shown: the transcript "
+            f"exceeds the {MAX_REPLAY_FRAME_BYTES >> 20} MB replay limit]"
+        ),
+    }
+    if kept and "ts" in kept[0]:
+        note["ts"] = kept[0]["ts"]
+    return [note, *kept]
 
 
 def _subagent_is_done(sub_task_id: Any) -> bool:
@@ -340,24 +439,6 @@ def _prewarm_task_dependencies() -> None:
         get_available_models()
     except Exception:
         logger.debug("Prewarm of the model registry failed", exc_info=True)
-
-
-class MainTreeClaim:
-    """One published main-tree mutation claim (see ``_claim_main_tree``).
-
-    Carries the identity needed for interrupt-safe release: ``owner``
-    lets the admission check and later claimants heal a claim whose
-    thread died without releasing (an injected stop skipped its
-    ``finally``), and the object's own identity makes release
-    conditional — a stale cleanup can never pop a successor's claim.
-    """
-
-    __slots__ = ("key", "reason", "owner")
-
-    def __init__(self, key: Path, reason: str, owner: threading.Thread) -> None:
-        self.key = key
-        self.reason = reason
-        self.owner = owner
 
 
 class VSCodeServer(
@@ -450,17 +531,6 @@ class VSCodeServer(
         self._tab_models: dict[str, str] = {}
         self._commit_msg_tabs: set[str] = set()
         self._autocommit_tabs: set[str] = set()
-        # Per-repository main-tree mutation claims (resolved repo root
-        # → ``MainTreeClaim``), guarded by ``_state_lock``.  A
-        # main-tree mutator (Discard, manual Git Commit) publishes its
-        # claim in the SAME locked section as its
-        # ``_any_non_wt_running`` busy check, and non-worktree task
-        # admission refuses to start while a claim is held — closing
-        # the check-without-claim TOCTOU in which a direct task could
-        # start (and begin writing) between the mutator's busy check
-        # and its ``git reset``/``git add`` (gpt-5.6-sol review,
-        # findings 2 and 3).
-        self._main_tree_claims: dict[Path, MainTreeClaim] = {}
         persisted = _load_last_model()
         self._default_model = persisted or os.environ.get("KISS_MODEL", "") or get_default_model()
         self._state_lock = agent_state.STATE_LOCK
@@ -506,35 +576,6 @@ class VSCodeServer(
         """
         self.tab_registry = TabRegistry(path)
         self._tab_chat_views = dict(self.tab_registry.bindings())
-
-    def prewarm_worktree_pool(self) -> threading.Thread | None:
-        """Start creating a spare worktree for the daemon's work dir.
-
-        Called once at daemon start.  The spare pool is in-process, so
-        a freshly started daemon otherwise holds no spare and its first
-        worktree task pays for a full ``git worktree add`` checkout
-        (seconds on a large repository) while the user waits.  The
-        refill skips the orphan-maintenance passes, like the
-        submit-time prewarm in ``_run_task_inner``: a reclaim could
-        squash-merge into the main branch underneath a direct task
-        started meanwhile; the first post-acquisition refill runs them.
-
-        Nothing is created when the pool is disabled, the persisted
-        "Use worktrees" setting is off, the work dir is not inside a
-        git repository, or it is itself a kiss worktree.
-
-        Returns:
-            The background refill thread, or ``None`` when nothing was
-            scheduled.
-        """
-        from kiss.core.vscode_config import load_config
-
-        if not worktree_pool.pool_enabled() or not load_config().get("is_worktree"):
-            return None
-        repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
-        if repo is None or _WORKTREE_SUBDIR in repo.parts:
-            return None
-        return worktree_pool.prewarm_async(repo, None)
 
     def _local_tab_shown(
         self, tab_id: str, interested: bool, webview_attached: bool,
@@ -798,162 +839,6 @@ class VSCodeServer(
         with self._state_lock:
             return self._tab_models.get(tab_id, "") or self._default_model
 
-    def _any_non_wt_running(
-        self,
-        repo_root: Path | None = None,
-        *,
-        exclude: AgentState | None = None,
-    ) -> bool:
-        """True if a non-worktree task is running on *repo_root*'s main tree.
-
-        Must be called with ``_state_lock`` held.
-
-        A non-worktree task only occupies the main working tree of the
-        repository its ``work_dir`` resolves into (recorded on the
-        state as ``non_wt_repo_root`` when the task starts).  A task running
-        in a *different* repository, in a non-git directory, or inside
-        a linked ``.kiss-worktrees`` worktree (whose ``git rev-parse
-        --show-toplevel`` is the worktree itself, not the main tree)
-        never touches *repo_root*'s main working tree, so it must not
-        block worktree merges there.
-
-        Args:
-            repo_root: The main repository root the caller is about to
-                stash/checkout/merge.  ``None`` means "any main tree"
-                and preserves the conservative pre-repo-aware behavior
-                (used when the caller cannot name its repository).
-            exclude: A state whose own admission must not count as
-                busy — the finishing task whose post-task auto-commit
-                runs while its ``is_running_non_wt`` is still set
-                checks only for OTHER occupants (gpt-5.6-sol review 2,
-                missed wiring 2).
-
-        Returns:
-            True if at least one state is running a non-worktree task
-            whose main working tree is *repo_root* (or, when
-            *repo_root* is ``None``, any non-worktree task at all).
-        """
-        for s in agent_state.agent_states.values():
-            if s is exclude or not s.is_running_non_wt:
-                continue
-            if repo_root is None:
-                return True
-            s_root = s.non_wt_repo_root
-            if s_root is None:
-                # The non-worktree task is not inside any git repo, so
-                # it cannot be modifying repo_root's main working tree.
-                continue
-            try:
-                if s_root.resolve() == repo_root.resolve():
-                    return True
-            except OSError:  # pragma: no cover — unresolvable path
-                return True
-        return False
-
-    def _claim_main_tree(
-        self,
-        repo_root: Path,
-        reason: str,
-        holder: list[MainTreeClaim] | None = None,
-    ) -> bool:
-        """Publish an exclusive main-tree mutation claim for *repo_root*.
-
-        Must be called with ``_state_lock`` held, in the SAME locked
-        section as the caller's ``_any_non_wt_running`` busy check —
-        that is what makes the check-and-claim pair atomic against
-        non-worktree task admission (which refuses to start while a
-        claim is held, see ``_main_tree_claim_reason``).
-
-        Interrupt safety (gpt-5.6-sol review 3, introduced bug 2): the
-        server stops a task by injecting ``KeyboardInterrupt`` at an
-        arbitrary bytecode boundary of the task thread — including
-        between this call returning and the caller recording the claim
-        in a local for its ``finally``.  The claim is therefore
-        appended to *holder* BEFORE it is published: the caller
-        installs its releasing ``try``/``finally`` around this call,
-        so at every boundary the claim is either not yet published or
-        already release-armed.  A claim stranded anyway (an injection
-        that skips the caller's ``finally`` entirely) heals when its
-        owner thread dies — see the liveness checks below and in
-        :meth:`_main_tree_claim_reason`.
-
-        Args:
-            repo_root: The main repository root about to be mutated.
-            reason: Human-readable operation name for refusal messages
-                (e.g. ``"discard"``, ``"manual commit"``).
-            holder: Release-arming list owned by the caller's
-                ``finally``; the new claim is appended before
-                publication.
-
-        Returns:
-            True when the claim was published; False when another
-            main-tree mutation already holds a live claim on
-            *repo_root*.
-        """
-        try:
-            key = repo_root.resolve()
-        except OSError:  # pragma: no cover — unresolvable path
-            key = repo_root
-        existing = self._main_tree_claims.get(key)
-        if existing is not None:
-            if existing.owner.is_alive():
-                return False
-            # The claiming thread died without releasing (its finally
-            # was skipped by an injected stop): the claim is stale, and
-            # honouring it would wedge this repository until restart.
-            del self._main_tree_claims[key]
-        claim = MainTreeClaim(key, reason, threading.current_thread())
-        if holder is not None:
-            holder.append(claim)
-        self._main_tree_claims[key] = claim
-        return True
-
-    def _release_main_tree_claim(self, claim: MainTreeClaim) -> None:
-        """Withdraw *claim* if it is still the published one.
-
-        Must be called with ``_state_lock`` held.  The identity check
-        makes release conditional on the releasing operation: a stale
-        cleanup can never pop an unrelated successor's claim (the
-        successor may have healed and replaced a stranded claim).
-
-        Args:
-            claim: The claim object appended by ``_claim_main_tree``.
-        """
-        if self._main_tree_claims.get(claim.key) is claim:
-            del self._main_tree_claims[claim.key]
-
-    def _main_tree_claim_reason(self, repo_root: Path | None) -> str | None:
-        """Return the active main-tree claim on *repo_root*, if any.
-
-        Must be called with ``_state_lock`` held.  A claim whose owner
-        thread has died (its release was skipped by an injected stop)
-        is treated as released — and healed here — so a stranded claim
-        can never refuse task admission until restart.
-
-        Args:
-            repo_root: The main repository root a non-worktree task is
-                about to write, or ``None`` when the task's
-                ``work_dir`` is not inside a git repository (then no
-                main-tree mutation can conflict with it).
-
-        Returns:
-            The claiming operation's reason string, or ``None`` when
-            the main tree is unclaimed.
-        """
-        if repo_root is None:
-            return None
-        try:
-            key = repo_root.resolve()
-        except OSError:  # pragma: no cover — unresolvable path
-            key = repo_root
-        claim = self._main_tree_claims.get(key)
-        if claim is None:
-            return None
-        if not claim.owner.is_alive():
-            del self._main_tree_claims[key]
-            return None
-        return claim.reason
-
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a command from VS Code to the appropriate handler."""
         for field in ("tabId", "workDir", "connId"):
@@ -1183,9 +1068,7 @@ class VSCodeServer(
             mdl_live = getattr(agent, "model_name", "")
             if isinstance(mdl_live, str) and mdl_live:
                 session["model"] = mdl_live
-            session["is_worktree"] = state.use_worktree
             session["is_parallel"] = state.use_parallel
-            session["auto_commit_mode"] = state.auto_commit_mode
 
     def _get_history(
         self,
@@ -1194,11 +1077,28 @@ class VSCodeServer(
         generation: int = 0,
         conn_id: str = "",
         tag: str = "",
+        machine: str = "",
+        work_dir: str = "",
     ) -> None:
         """Send conversation history with pagination support.
 
         ``tag`` (the history panel's tag dropdown) restricts the page to
         tasks carrying that classification tag; ``""`` means every task.
+
+        ``machine`` (the panel's machine dropdown) picks whose tasks the
+        page holds: ``""`` every registered machine's and this daemon's,
+        ``LOCAL_MACHINE`` this daemon's only (what another daemon asks
+        for), else the named remote machine's only.
+
+        ``work_dir`` (the panel's WORKDIR dropdown) restricts the page
+        to the tasks that ran in that exact directory.  The options
+        the dropdown offers travel in the page-one reply as
+        ``workDirs``: the same directories as the chat header's
+        working-directory drop-down, see :meth:`_work_dir_options`
+        (later pages of the same view carry no such field).  A
+        directory is a path on this machine, so a set
+        ``work_dir`` scopes the page to this daemon's rows and asks no
+        remote machine.
 
         The reply is stamped with the requesting connection's
         ``conn_id`` (when non-empty) so it reaches only the VS Code
@@ -1206,8 +1106,21 @@ class VSCodeServer(
         must not repaint another window's history panel.
         """
         running_task_ids = self._get_running_task_ids()
-        entries = _search_history(
-            query or "", limit=50, offset=offset, tag=tag, running_task_ids=running_task_ids,
+        registered = load_machines()
+        remote_only = bool(machine) and machine != LOCAL_MACHINE and not work_dir
+        if machine == LOCAL_MACHINE or work_dir:
+            machines: list[Machine] = []
+        elif remote_only:
+            machines = [m for m in registered if m.name == machine]
+        else:
+            machines = registered
+        # With remote machines in the page it is cut from the union of
+        # every machine's rows (``merged_history``), which needs the
+        # local rows before the page too, not just the page itself.
+        limit, local_offset = (offset + 50, 0) if machines else (50, offset)
+        entries = [] if remote_only else _search_history(
+            query or "", limit=limit, offset=local_offset, tag=tag,
+            work_dir=work_dir, running_task_ids=running_task_ids,
         )
 
         sessions = []
@@ -1225,7 +1138,10 @@ class VSCodeServer(
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
                 "has_events": has_events,
-                "failed": _is_failed_result(result) and not is_running,
+                "failed": (
+                    _is_failed_result(result, entry.get("success"))
+                    and not is_running
+                ),
                 "is_running": is_running,
                 "awaiting_answer": False,
                 "tokens": 0,
@@ -1234,9 +1150,7 @@ class VSCodeServer(
                 "is_favorite": False,
                 "work_dir": "",
                 "model": "",
-                "is_worktree": False,
                 "is_parallel": False,
-                "auto_commit_mode": False,
                 "startTs": _safe_start_ms(entry.get("timestamp", 0)),
                 "endTs": 0,
             }
@@ -1273,9 +1187,7 @@ class VSCodeServer(
                 mdl_raw = extra_obj.get("model", "")
                 if isinstance(mdl_raw, str):
                     session["model"] = mdl_raw
-                session["is_worktree"] = bool(extra_obj.get("is_worktree", False))
                 session["is_parallel"] = bool(extra_obj.get("is_parallel", False))
-                session["auto_commit_mode"] = bool(extra_obj.get("auto_commit_mode", False))
                 for key in ("tags", "sea"):
                     raw = extra_obj.get(key, "")
                     session[key] = raw if isinstance(raw, str) else ""
@@ -1301,15 +1213,50 @@ class VSCodeServer(
             summary = summaries.get(chat_id, {})
             session["chat_summary"] = summary.get("summary", "")
             session["chat_last_launched"] = summary.get("last_launched", 0)
-        min_ts, max_ts = _history_date_range()
+        min_ts, max_ts = (None, None) if remote_only else _history_date_range()
+        if machines or remote_only:
+            page = merged_history(
+                HistoryPage(sessions, min_ts, max_ts), machines, query or "", tag, offset, 50,
+            )
+            sessions, min_ts, max_ts = page.rows, page.date_min, page.date_max
         event: dict[str, Any] = {
             "type": "history",
             "sessions": sessions,
             "offset": offset,
             "generation": generation,
             "dateRange": {"min": min_ts, "max": max_ts},
+            "machines": [m.name for m in registered],
+            "localMachine": local_machine_name(),
         }
+        # The WORKDIR dropdown's options, sent with page one of a view
+        # only; the later pages of a scroll change nothing.
+        if offset == 0:
+            event["workDirs"] = self._work_dir_options()
         self._broadcast_to_conn(event, conn_id)
+
+    def _work_dir_options(self) -> list[str]:
+        """Return the directories the history panel's WORKDIR filter offers.
+
+        The same list as the chat header's working-directory drop-down:
+        the daemon's current working directory first, then every
+        directory adopted before (``config.json`` ``recent_work_dirs``,
+        :func:`kiss.core.vscode_config.recent_work_dirs`), most recently
+        adopted first.  Directories that no longer exist are left out,
+        except the current one, which is the one in use.  The directories
+        the history merely ran in (sub-agent worktrees, cron run
+        directories) are not offered: a filter on those would be noise.
+        """
+        from kiss.core.vscode_config import recent_work_dirs
+
+        paths = [
+            str(entry["path"])
+            for entry in sorted(recent_work_dirs(), key=lambda e: -float(e["ts"]))
+        ]
+        current = self.work_dir
+        listed = {os.path.normpath(p) for p in paths}
+        if current and os.path.normpath(current) not in listed:
+            paths.insert(0, current)
+        return paths
 
     def _get_input_history(self, conn_id: str = "") -> None:
         """Send deduplicated composer texts for arrow-key cycling.
@@ -1828,7 +1775,7 @@ class VSCodeServer(
         this process's own pid from the owner protection, so an
         unregistered agent's worktree is fair game for the next
         reclaim.  When the retire keeps the worktree but cannot make
-        that decision durable (:meth:`WorktreeSorcarAgent.retire_for_disposal`
+        that decision durable (:meth:`SorcarAgent.retire_for_disposal`
         returns False: the ``kiss-preserve`` marker could not be
         written), the state therefore stays registered — closed,
         idle, still naming the branch — until a later disposal attempt
@@ -1977,6 +1924,94 @@ class VSCodeServer(
             }
         )
 
+    def _defer_replay(
+        self,
+        chat_id: str,
+        tab_id: str,
+        task_id: str | None,
+        conn_id: str,
+    ) -> None:
+        """Offer *tab_id*'s transcript to one client instead of sending it.
+
+        A (re)connecting client's ``ready`` replays only the tab it is
+        showing; every other chat-bound registry tab goes through here,
+        which reads nothing from the events table.  The client learns
+        the tab's running state (its header spinner), any pending
+        question, and gets a ``replay_deferred`` event it answers with
+        a connection-scoped ``resumeSession`` when the user opens the
+        tab.  Twenty open tabs used to cost a reconnecting laptop
+        twenty full transcripts (hundreds of megabytes over a tunnel)
+        and froze the daemon while it loaded and serialized them.
+
+        Args:
+            chat_id: The chat the registry binds *tab_id* to.
+            tab_id: The frontend tab id.
+            task_id: The task the tab is pinned to (``""``/``None``
+                when it tracks the chat's latest task).
+            conn_id: The connection the deferral is scoped to.
+        """
+        if not tab_id:
+            return
+        with self._state_lock:
+            if task_id:
+                self._tab_opened_task_ids[tab_id] = str(task_id)
+            else:
+                self._tab_opened_task_ids.pop(tab_id, None)
+        source, _source_task_id, _recording = self._attach_viewer_to_running_chat(
+            chat_id, tab_id, task_id=task_id or None,
+        )
+        if source is not None:
+            self._broadcast_viewer_running(
+                tab_id, source,
+                int(getattr(source.agent, "_task_start_ms", 0) or 0),
+            )
+        with self._state_lock:
+            # Checked and sent under the lock, like every viewer status
+            # broadcast: a run the user starts on this tab meanwhile
+            # publishes its ``running:true`` under the same lock, and a
+            # stale ``running:false`` after it would kill its spinner.
+            owner = agent_state.find_by_tab(tab_id)
+            idle = (source is None or not source.running()) and not (
+                owner is not None and owner.busy()
+            )
+            if idle:
+                status = {"type": "status", "running": False, "tabId": tab_id}
+                if source is None:
+                    # Nothing optimistic went out: only the
+                    # (re)connecting client needs the answer.
+                    status["connId"] = conn_id
+                # Else the source ended inside the attach window: its
+                # end-of-run fan-out already told EVERY client
+                # ``running:false`` BEFORE the optimistic
+                # ``running:true`` above (which, like the tab, reaches
+                # every surface), so the correction must reach every
+                # client too — scoped to one connection it stranded the
+                # other surfaces' spinners (audit 2026-10-12).
+                self.printer.broadcast(status)
+        self.printer.broadcast({
+            "type": "replay_deferred",
+            "tabId": tab_id,
+            "chatId": chat_id,
+            "taskId": task_id or "",
+            "connId": conn_id,
+        })
+        self._emit_pending_ask(tab_id)
+        self._emit_pending_worktree(tab_id)
+        # The tab's sub-agent tabs are announced too (a running one
+        # must be open on every surface), their transcripts deferred
+        # the same way.
+        parent_task_id = task_id or ""
+        if not parent_task_id:
+            row = _load_latest_chat_events_by_chat_id(chat_id, with_events=False)
+            parent_task_id = (_coerce_id(row.get("task_id")) or "") if row else ""
+        if parent_task_id:
+            self._open_persisted_subagent_tabs(
+                parent_task_id=parent_task_id,
+                parent_tab_id=tab_id,
+                conn_id=conn_id,
+                transcripts=False,
+            )
+
     def _replay_session(
         self,
         chat_id: str,
@@ -1990,16 +2025,12 @@ class VSCodeServer(
         The tab_id (frontend routing key) does not change.
 
         When ``tab_id`` is empty the call is a no-op — the previous
-        behavior of synthesizing a phantom tab keyed by ``chat_id`` and
-        mutating its ``use_worktree`` flag violated per-tab state
-        isolation (C2/C3 fix).
+        behavior of synthesizing a phantom tab keyed by ``chat_id``
+        violated per-tab state isolation (C2/C3 fix).
 
-        Loading a chat never touches the tab's ``use_worktree`` /
-        ``use_parallel`` / ``auto_commit_mode`` / ``selected_model``:
-        those mirror the toolbar toggles, which are global UI state the
-        user owns.  Clearing them made a history click silently switch
-        auto-commit off, which in turn changed how the pending-worktree
-        handling below finalizes the branch.
+        Loading a chat never touches the tab's ``use_parallel`` /
+        ``selected_model``: those mirror the toolbar toggles, which
+        are global UI state the user owns.
 
         Args:
             chat_id: The string chat session identifier to replay.
@@ -2130,9 +2161,10 @@ class VSCodeServer(
                 # opened the tab on ``new_tab`` before the run ended
                 # (or restored it from its saved state); tell it to
                 # close the tab instead of re-opening it finished.
-                self.printer.broadcast(
-                    {"type": "subagentDone", "tab_id": tab_id, "tabId": ""},
-                )
+                self.printer.broadcast({
+                    "type": "subagentDone", "tab_id": tab_id, "tabId": "",
+                    **replay_scope,
+                })
                 return
             parent_tid = _coerce_id(subagent_info.get("parent_task_id"))
             parent_tab_id_for_sub = self._resolve_parent_tab_id_for_sub(
@@ -2141,6 +2173,9 @@ class VSCodeServer(
                 sub_tab_id=tab_id,
                 sub_task_id=_coerce_id(result.get("task_id")) or "",
             )
+            # Scoped like the transcript: a deferred child's fetch by
+            # one window must not reopen the tab in the others (a user
+            # may have closed it there).
             self.printer.broadcast(
                 {
                     "type": "openSubagentTab",
@@ -2151,6 +2186,7 @@ class VSCodeServer(
                     "isSubagentTab": True,
                     "isDone": is_done,
                     "startTs": _start_ts_from_extra(extra_raw),
+                    **replay_scope,
                 }
             )
 
@@ -2214,13 +2250,17 @@ class VSCodeServer(
 
         # A resumed sub-agent may itself have fanned out: its running
         # descendants' tabs must reach this client too (its finished
-        # ones stay history, reopened from its own fan-out panel).
+        # ones stay history, reopened from its own fan-out panel).  A
+        # connection-scoped replay (a ready, a deferred tab's fetch)
+        # announces the children and defers their transcripts; a
+        # history click replays them in full for every window.
         if isinstance(rebound_task_id, str) and rebound_task_id:
             self._open_persisted_subagent_tabs(
                 parent_task_id=rebound_task_id,
                 parent_tab_id=tab_id,
                 conn_id=conn_id,
                 live_only=subagent_info is not None,
+                transcripts=not conn_id,
             )
 
     def _emit_pending_ask(self, tab_id: str) -> None:
@@ -2420,6 +2460,7 @@ class VSCodeServer(
         conn_id: str = "",
         live_only: bool = False,
         ancestors: frozenset[str] = frozenset(),
+        transcripts: bool = True,
     ) -> None:
         """Replay child tabs, including live descendants of completed parents.
 
@@ -2460,10 +2501,19 @@ class VSCodeServer(
             ancestors: Task ids already on the replay path.  A child that
                 is also its own ancestor (a ``parent_task_id`` cycle in the
                 history table) is skipped, or the descent would never end.
+            transcripts: ``False`` announces the tabs (and attaches the
+                running ones) but sends a ``replay_deferred`` offer in
+                place of each ``task_events`` frame, reading nothing
+                from the events table: the client fetches a child's
+                transcript when the user opens its tab.  Every
+                connection-scoped replay (a ``ready``, a deferred tab's
+                fetch) does this; a history click still replays all.
         """
         scope: dict[str, Any] = {"connId": conn_id} if conn_id else {}
         ancestors = ancestors | {parent_task_id}
-        sub_rows = _load_subagent_rows_by_parent_task_id(parent_task_id)
+        sub_rows = _load_subagent_rows_by_parent_task_id(
+            parent_task_id, with_events=transcripts,
+        )
         for idx, row in enumerate(sub_rows):
             sub_task_id = row["task_id"]
             if str(sub_task_id) in ancestors:
@@ -2501,6 +2551,7 @@ class VSCodeServer(
                     conn_id=conn_id,
                     live_only=True,
                     ancestors=ancestors,
+                    transcripts=transcripts,
                 )
                 if user_closed or live_only or _is_side_channel_row(row):
                     # Stays closed: a running sub-agent whose tab the
@@ -2522,30 +2573,40 @@ class VSCodeServer(
                 self.printer.broadcast(self._subagent_announcement(
                     row, idx, parent_task_id, sub_tab_id, True, scope,
                 ))
-            # A still-running sub-agent's events table lags behind the
-            # live run (asynchronous writer); its in-memory recording
-            # holds the full transcript so far.  Snapshotted after the
-            # reattach above subscribed the tab, so each live event is
-            # either in this snapshot or fanned out after the replay.
-            with self.printer.replay_snapshot(
-                "" if is_done else sub_task_id, conn_id, recording,
-            ) as live_events:
-                if live_events:
-                    row["events"] = live_events
-                self.printer.broadcast(
-                    {
-                        "type": "task_events",
-                        "events": with_task_settings_event(
-                            _coalesced_replay_events(row["events"]), row,
-                        ),
-                        "task": description,
-                        "task_id": sub_task_id,
-                        "chat_id": row.get("chat_id", ""),
-                        "extra": _extra_for_replay(row.get("extra", "")),
-                        "tabId": sub_tab_id,
-                        **scope,
-                    }
-                )
+            if not transcripts:
+                self.printer.broadcast({
+                    "type": "replay_deferred",
+                    "tabId": sub_tab_id,
+                    "chatId": str(row.get("chat_id", "") or ""),
+                    "taskId": str(sub_task_id),
+                    **scope,
+                })
+            else:
+                # A still-running sub-agent's events table lags behind
+                # the live run (asynchronous writer); its in-memory
+                # recording holds the full transcript so far.
+                # Snapshotted after the reattach above subscribed the
+                # tab, so each live event is either in this snapshot or
+                # fanned out after the replay.
+                with self.printer.replay_snapshot(
+                    "" if is_done else sub_task_id, conn_id, recording,
+                ) as live_events:
+                    if live_events:
+                        row["events"] = live_events
+                    self.printer.broadcast(
+                        {
+                            "type": "task_events",
+                            "events": with_task_settings_event(
+                                _coalesced_replay_events(row["events"]), row,
+                            ),
+                            "task": description,
+                            "task_id": sub_task_id,
+                            "chat_id": row.get("chat_id", ""),
+                            "extra": _extra_for_replay(row.get("extra", "")),
+                            "tabId": sub_tab_id,
+                            **scope,
+                        }
+                    )
             self._emit_pending_ask(sub_tab_id)
             if is_done:
                 continue
@@ -2567,6 +2628,7 @@ class VSCodeServer(
                 conn_id=conn_id,
                 live_only=is_done,
                 ancestors=ancestors,
+                transcripts=transcripts,
             )
 
     def _attach_viewer_to_running_chat(

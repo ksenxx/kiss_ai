@@ -5,10 +5,15 @@
 """End-to-end tests: a client's ``ready`` replays transcripts to it alone.
 
 Every (re)connecting chat webview sends ``ready``; the daemon answers
-by resuming every chat-bound registry tab so the client can rebuild
-its transcripts.  Those replays used to be broadcast, so opening one
-more panel made every other connected window receive — and re-render
-from scratch — megabytes of transcripts it already showed.
+by resuming the tab the client shows (``tabId``) so it can rebuild that
+transcript, and DEFERS every other chat-bound registry tab: the client
+gets the tab's running state and a ``replay_deferred`` offer, and asks
+for the transcript (a ``scoped`` ``resumeSession``) when the user
+opens the tab.  Those replays used to be broadcast, so opening one more
+panel made every other connected window receive — and re-render from
+scratch — megabytes of transcripts it already showed; and every tab
+used to be replayed, so a laptop with twenty tabs pulled every
+transcript on each reconnect.
 
 These tests drive a real :class:`RemoteAccessServer` over real
 ``wss://`` connections (the harness of
@@ -16,6 +21,10 @@ These tests drive a real :class:`RemoteAccessServer` over real
 
 * the ``task_events`` a ``ready`` triggers reach ONLY the connection
   that sent the ``ready``;
+* only the tab named by the ``ready`` is replayed; the other bound
+  tabs are answered with ``replay_deferred`` (plus their status), and
+  a ``scoped`` ``resumeSession`` fetches one of them for that
+  connection alone;
 * a ``ready`` naming ``singleTabId`` (an editor-tab panel mirroring one
   registry tab) receives that tab's transcript and no other;
 * a user's history click (``resumeSession`` without ``replayConnId``)
@@ -110,7 +119,7 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         await self._bind_tab(ws_a, "tab-a", chat_id)
 
         ws_b = await self._connect_ok()
-        await self._ready(ws_b)
+        await self._ready(ws_b, tab_id="tab-a")
         replay_b = await self._wait_for_event(
             ws_b, "task_events", pred=lambda ev: ev.get("tabId") == "tab-a",
         )
@@ -174,6 +183,120 @@ class TestReadyReplayConnScoped(TabMirroringBase):
             f"{foreign!r}",
         )
 
+    async def test_ready_defers_every_tab_but_the_one_on_screen(
+        self,
+    ) -> None:
+        """Only the named tab is replayed; the other is offered, then fetched."""
+        task_1, chat_1 = self._seed_chat("First chat", [
+            {"type": "prompt", "text": "first prompt"},
+        ])
+        _t2, chat_2 = self._seed_chat("Second chat", [
+            {"type": "prompt", "text": "second prompt"},
+        ])
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._bind_tab(ws_a, "tab-1", chat_1)
+        await self._bind_tab(ws_a, "tab-2", chat_2)
+
+        ws_b = await self._connect_ok()
+        await self._ready(ws_b, tab_id="tab-2")
+        got = await self._collect(
+            ws_b, {"task_events", "replay_deferred", "status"}, timeout=2.0,
+        )
+        replays = [ev for ev in got if ev.get("type") == "task_events"]
+        self.assertEqual(
+            [ev.get("tabId") for ev in replays], ["tab-2"],
+            "the ready must replay the tab on screen and nothing else",
+        )
+        deferred = [ev for ev in got if ev.get("type") == "replay_deferred"]
+        self.assertEqual(len(deferred), 1, got)
+        self.assertEqual(deferred[0].get("tabId"), "tab-1")
+        self.assertEqual(deferred[0].get("chatId"), chat_1)
+        self.assertEqual(deferred[0].get("taskId"), "")
+        self.assertNotIn("connId", deferred[0])
+        # The deferred tab's state is settled for the client: it is
+        # idle, so the webview's statusKnown rule may retire it.
+        statuses = [
+            ev for ev in got
+            if ev.get("type") == "status" and ev.get("tabId") == "tab-1"
+        ]
+        self.assertTrue(statuses, got)
+        self.assertFalse(statuses[-1].get("running"))
+
+        # Opening the deferred tab: a scoped resume fetches its
+        # transcript for B alone; A, which shows it, is not repainted.
+        await self._send(ws_b, {
+            "type": "resumeSession", "chatId": chat_1, "tabId": "tab-1",
+            "scoped": True,
+        })
+        fetched = await self._wait_for_event(
+            ws_b, "task_events", pred=lambda ev: ev.get("tabId") == "tab-1",
+        )
+        self.assertIsNotNone(fetched, "the scoped fetch never arrived")
+        assert fetched is not None
+        self.assertEqual(fetched.get("task_id"), task_1)
+        self.assertIn(
+            "first prompt",
+            [e.get("text") for e in fetched.get("events", [])],
+        )
+        leaked = await self._wait_for_event(ws_a, "task_events", timeout=1.5)
+        self.assertIsNone(leaked, f"the scoped fetch reached client A: {leaked!r}")
+
+    async def test_ready_naming_no_tab_defers_everything(self) -> None:
+        """A fresh page (no tab on screen yet) gets offers only."""
+        _t1, chat_1 = self._seed_chat("Only chat", [
+            {"type": "prompt", "text": "only prompt"},
+        ])
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._bind_tab(ws_a, "tab-1", chat_1)
+
+        ws_b = await self._connect_ok()
+        await self._ready(ws_b)
+        got = await self._collect(
+            ws_b, {"task_events", "replay_deferred"}, timeout=2.0,
+        )
+        self.assertEqual(
+            [(ev.get("type"), ev.get("tabId")) for ev in got],
+            [("replay_deferred", "tab-1")],
+        )
+
+    async def test_deferred_tab_keeps_its_pinned_task(self) -> None:
+        """The offer names the task the tab is pinned to, and the fetch loads it."""
+        old_task, chat_id = self._seed_chat("Pinned chat", [
+            {"type": "prompt", "text": "older prompt"},
+        ])
+        th._add_task("newer task", chat_id=chat_id)
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._send(ws_a, {
+            "type": "openTab", "tabId": "tab-pin", "title": "new chat",
+        })
+        self.assertIsNotNone(
+            await self._wait_for_snapshot_with(ws_a, present={"tab-pin"}),
+        )
+        await self._send(ws_a, {
+            "type": "resumeSession", "chatId": chat_id, "taskId": old_task,
+            "tabId": "tab-pin",
+        })
+        self.assertIsNotNone(await self._wait_for_event(
+            ws_a, "task_events", pred=lambda ev: ev.get("tabId") == "tab-pin",
+        ))
+
+        ws_b = await self._connect_ok()
+        await self._ready(ws_b, tab_id="elsewhere")
+        offer = await self._wait_for_event(ws_b, "replay_deferred")
+        self.assertIsNotNone(offer)
+        assert offer is not None
+        self.assertEqual(offer.get("taskId"), old_task)
+        await self._send(ws_b, {
+            "type": "resumeSession", "chatId": offer["chatId"],
+            "taskId": offer["taskId"], "tabId": "tab-pin", "scoped": True,
+        })
+        fetched = await self._wait_for_event(ws_b, "task_events")
+        assert fetched is not None
+        self.assertEqual(fetched.get("task_id"), old_task)
+
     async def test_scoped_replay_restores_worktree_tracking_after_restart(
         self,
     ) -> None:
@@ -200,7 +323,7 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         self.assertEqual(self.server._printer.worktree_dir_for_tab("tab-w"), "")
 
         ws_b = await self._connect_ok()
-        await self._ready(ws_b)
+        await self._ready(ws_b, tab_id="tab-w")
         self.assertIsNotNone(await self._wait_for_event(
             ws_b, "task_events", pred=lambda ev: ev.get("tabId") == "tab-w",
         ))
@@ -228,16 +351,18 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         ))
 
         ws_b = await self._connect_ok()
-        await self._ready(ws_b)
-        kinds = {"task_events", "openSubagentTab"}
+        await self._ready(ws_b, tab_id="tab-p")
+        kinds = {"task_events", "openSubagentTab", "replay_deferred"}
         got_b = await self._collect(ws_b, kinds)
+        # The parent's transcript is replayed; the child's tab is
+        # announced and its transcript offered, not sent.
         self.assertEqual(
-            sorted(
+            [
                 str(ev.get("tabId")) for ev in got_b
                 if ev.get("type") == "task_events"
-            ),
-            sorted(["tab-p", sub_tab]),
-            "B must receive the parent's and the child's transcripts",
+            ],
+            ["tab-p"],
+            "B must receive the parent's transcript and no other",
         )
         self.assertEqual(
             [
@@ -247,9 +372,64 @@ class TestReadyReplayConnScoped(TabMirroringBase):
             [sub_tab],
             "B must be told to open the child tab",
         )
+        offers = [ev for ev in got_b if ev.get("type") == "replay_deferred"]
+        self.assertEqual(
+            [(ev.get("tabId"), ev.get("taskId")) for ev in offers],
+            [(sub_tab, sub_id)],
+            "the child's transcript must be offered",
+        )
         self.assertEqual(
             await self._collect(ws_a, kinds), [],
             "B's ready re-sent the child tab / transcript to A",
+        )
+        # Opening the child tab fetches its transcript for B alone.
+        await self._send(ws_b, {
+            "type": "resumeSession", "chatId": chat_id, "taskId": sub_id,
+            "tabId": sub_tab, "scoped": True,
+        })
+        fetched = await self._wait_for_event(
+            ws_b, "task_events", pred=lambda ev: ev.get("tabId") == sub_tab,
+        )
+        assert fetched is not None
+        self.assertIn(
+            "child transcript",
+            [e.get("text") for e in fetched.get("events", [])],
+        )
+        self.assertEqual(
+            await self._collect(ws_a, {"task_events", "openSubagentTab"}), [],
+            "the child's scoped fetch reached A",
+        )
+
+    async def test_deferred_parent_announces_its_subagent_tabs(self) -> None:
+        """A deferred parent's children are announced (offered) as well."""
+        parent_id, chat_id = self._seed_chat("Parent task", [
+            {"type": "prompt", "text": "fan out"},
+        ])
+        sub_id = _seed_subagent_row(parent_id, chat_id, "child transcript")
+        sub_tab = f"tab-p__sub_{sub_id}"
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._bind_tab(ws_a, "tab-p", chat_id)
+
+        ws_b = await self._connect_ok()
+        await self._ready(ws_b, tab_id="elsewhere")
+        got_b = await self._collect(
+            ws_b, {"task_events", "openSubagentTab", "replay_deferred"},
+        )
+        self.assertEqual(
+            [ev.get("tabId") for ev in got_b if ev.get("type") == "task_events"],
+            [],
+        )
+        self.assertEqual(
+            [ev.get("tab_id") for ev in got_b if ev.get("type") == "openSubagentTab"],
+            [sub_tab],
+        )
+        self.assertEqual(
+            sorted(
+                str(ev.get("tabId")) for ev in got_b
+                if ev.get("type") == "replay_deferred"
+            ),
+            sorted(["tab-p", sub_tab]),
         )
 
     async def test_legacy_seeding_ready_broadcasts_the_replays(

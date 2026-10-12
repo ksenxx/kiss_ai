@@ -45,31 +45,7 @@ from kiss.core.utils import is_root_dir
 from kiss.server.tab_registry import TabRegistry
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
-
-
-def _file_names(event: dict[str, Any]) -> list[str]:
-    """Extract the file-name strings from a ``files`` event."""
-    names: list[str] = []
-    for entry in event.get("files", []):
-        if isinstance(entry, dict):
-            names.append(str(entry.get("text", "")))
-        else:
-            names.append(str(entry))
-    return names
+from kiss.tests.server.conftest import file_names, redirect_persistence, restore_persistence
 
 
 class TestIsRootDir(unittest.TestCase):
@@ -209,7 +185,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
         self._orig_cfg_dir = vc.CONFIG_DIR
         self._orig_cfg_path = vc.CONFIG_PATH
@@ -246,7 +222,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         vc.CONFIG_DIR = self._orig_cfg_dir
         vc.CONFIG_PATH = self._orig_cfg_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -293,7 +269,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
             return (
                 msg.get("type") == "files"
                 and not msg.get("loading")
-                and name in _file_names(msg)
+                and name in file_names(msg)
             )
         return _pred
 
@@ -311,7 +287,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
         ev = await self._drain_until(
             reader, self._files_event_with("./alpha.txt"),
         )
-        self.assertEqual(_file_names(ev), ["./alpha.txt"])
+        self.assertEqual(file_names(ev), ["./alpha.txt"])
 
     async def test_root_set_work_dir_does_not_poison_global(self) -> None:
         """``setWorkDir('/')`` must leave the daemon-global fallback
@@ -345,7 +321,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
         ev = await self._drain_until(
             reader, self._files_event_with("./alpha.txt"),
         )
-        self.assertEqual(_file_names(ev), ["./alpha.txt"])
+        self.assertEqual(file_names(ev), ["./alpha.txt"])
 
     async def test_unstamped_command_uses_safe_global_after_root_pin(
         self,
@@ -366,7 +342,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
         ev = await self._drain_until(
             reader_b, self._files_event_with("./alpha.txt"),
         )
-        self.assertEqual(_file_names(ev), ["./alpha.txt"])
+        self.assertEqual(file_names(ev), ["./alpha.txt"])
 
     async def test_save_config_root_work_dir_keeps_fallback(self) -> None:
         """``saveConfig`` carries ``work_dir`` NESTED in its config
@@ -421,7 +397,7 @@ class TestStartupRootFallback(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self._orig_env = os.environ.get("KISS_WORKDIR")
         os.environ["KISS_WORKDIR"] = "/"
 
@@ -447,7 +423,7 @@ class TestStartupRootFallback(IsolatedAsyncioTestCase):
             os.environ["KISS_WORKDIR"] = self._orig_env
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def test_root_kiss_workdir_degrades_to_home(self) -> None:

@@ -2,19 +2,18 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests for embedding the user's task prompt in auto-commit messages.
+"""Tests for embedding the user's task prompt in generated commit messages.
 
-When the agent auto-commits changes — either inside a worktree at
-task end, via the ``update_settings(auto_commit=True)`` tool call,
-or via the post-task ``_autocommit_changes`` path in the VS Code
-server — the resulting commit message should include the user's
-original task prompt so the commit is traceable to the request that
-produced it.
+When the agent commits changes — inside a worktree via
+``commit_and_merge``, or via the manual Git Commit
+(``_commit_main_tree``) path in the VS Code server — the resulting
+commit message should include the user's original task prompt so the
+commit is traceable to the request that produced it.
 
 These tests exercise the real
 :func:`~kiss.server.helpers.generate_commit_message_from_diff`
 and
-:meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._auto_commit_worktree`
+:meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._commit_worktree`
 paths against on-disk git repositories.  The LLM call inside the
 helper is forced through its ``except Exception`` fallback by
 patching :class:`~kiss.core.kiss_agent.KISSAgent.run` to raise — so
@@ -29,8 +28,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(path: Path) -> Path:
@@ -94,7 +93,7 @@ class _LLMUnavailable:
 
 
 class TestWorktreeAutoCommitIncludesUserPrompt:
-    """End-to-end: ``WorktreeSorcarAgent._auto_commit_worktree``
+    """End-to-end: ``ChatSorcarAgent._commit_worktree``
     commits with a message that includes ``self._last_user_prompt``.
     """
 
@@ -116,7 +115,7 @@ class TestWorktreeAutoCommitIncludesUserPrompt:
             )
             (wt_dir / "new.txt").write_text("hello\n")
 
-            agent = WorktreeSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             agent._wt = GitWorktree(
                 repo_root=repo,
                 branch=branch,
@@ -127,7 +126,7 @@ class TestWorktreeAutoCommitIncludesUserPrompt:
             agent._last_user_prompt = "implement feature Z"
 
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             msg = _head_message(wt_dir)
             assert msg.endswith("User prompt:\nimplement feature Z")
@@ -150,7 +149,7 @@ class TestWorktreeAutoCommitIncludesUserPrompt:
             )
             (wt_dir / "new.txt").write_text("hi\n")
 
-            agent = WorktreeSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             agent._wt = GitWorktree(
                 repo_root=repo,
                 branch=branch,
@@ -159,7 +158,7 @@ class TestWorktreeAutoCommitIncludesUserPrompt:
                 baseline_commit=None,
             )
             with _LLMUnavailable():
-                assert agent._auto_commit_worktree() is True
+                assert agent._commit_worktree() is True
 
             msg = _head_message(wt_dir)
             assert "User prompt:" not in msg

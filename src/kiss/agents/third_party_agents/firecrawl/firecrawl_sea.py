@@ -208,8 +208,31 @@ class FirecrawlChannelBackend(ToolMethodBackend):
         self._base_url: str = _DEFAULT_BASE_URL
         self._api_key: str = ""
         self._http: Any = requests
+        self._muse: bool = False
+        self._lazy_muse: bool = False
+        self._wire_lock = threading.Lock()
         self._request_lock = threading.Lock()
         self._connection_info: str = ""
+
+    def _wire_deferred(self) -> bool:
+        """Run the Muse wiring :class:`FirecrawlAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of calling :meth:`connect`
+        at construction, so building it for its tool list (``sea lint``,
+        ``sea docs``, run start) touches no daemon.  Concurrent first
+        requests wait on the lock and share the one surrogate;
+        :meth:`connect` publishes ``_muse`` last, so a request that sees
+        it set sees the whole wired state.
+
+        Returns:
+            True once the backend is wired (or Muse is off); False when
+            no Firecrawl credential could be wired, with the reason in
+            ``_connection_info``.
+        """
+        if not self._lazy_muse or self._muse:
+            return True
+        with self._wire_lock:
+            return self._muse or self.connect()
 
     def connect(self) -> bool:
         """Load the Firecrawl config from disk.
@@ -271,6 +294,7 @@ class FirecrawlChannelBackend(ToolMethodBackend):
             _scrub_config_key()
             self._api_key = surrogate
             self._http = MuseBoundarySession("firecrawl")
+            self._muse = True
             self._connection_info = f"Firecrawl configured at {self._base_url} (Muse-auth)."
             return True
         legacy_cfg = _config.load()
@@ -295,9 +319,12 @@ class FirecrawlChannelBackend(ToolMethodBackend):
 
         Raises:
             RuntimeError: On an HTTP error status, a non-JSON response
-                body, a non-object JSON response, or an API-level
-                ``{"success": false}`` reply.
+                body, a non-object JSON response, an API-level
+                ``{"success": false}`` reply, or when Muse-auth is on
+                and no Firecrawl credential can be wired.
         """
+        if not self._wire_deferred():
+            raise RuntimeError(self._connection_info)
         url = self._base_url.rstrip("/") + path
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -559,10 +586,14 @@ class FirecrawlAgent(BaseChannelAgent):
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
-            # Muse-auth mode: connect() wires a vault surrogate and the
-            # boundary session; the real key never enters this process
-            # once migrated.
-            self._backend.connect()
+            # Muse-auth mode: the backend wires its vault surrogate and
+            # boundary session on the first request, so building the
+            # tool list (``sea lint``, ``sea docs``, run start) touches
+            # no daemon; the real key never enters this process.  The
+            # endpoint is non-secret metadata, read now so the status
+            # tool reports it before the first request.
+            self._backend._lazy_muse = True
+            self._backend._base_url = _read_base_url()
             return
         cfg = _config.load()
         if cfg:
@@ -570,8 +601,14 @@ class FirecrawlAgent(BaseChannelAgent):
             self._backend._base_url = cfg.get("base_url") or _DEFAULT_BASE_URL
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return bool(self._backend._api_key)
+        """Return True if a Firecrawl key is loaded, enrolled in the vault, or in the config."""
+        if self._backend._api_key:
+            return True
+        if not self._backend._lazy_muse:
+            return False
+        from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
+
+        return vault_has_credentials("firecrawl") or bool((_config.load() or {}).get("api_key"))
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""

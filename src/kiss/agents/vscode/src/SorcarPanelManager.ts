@@ -3,14 +3,9 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-import * as crypto from 'crypto';
 import * as vscode from 'vscode';
-import {editorTabBodyAttrs, EditorTabInit} from './SorcarTab';
-import {
-  PanelEvent,
-  RegistryTabEntry,
-  SorcarSidebarView,
-} from './SorcarSidebarView';
+import {EDITOR_TAB_BODY_ATTRS} from './SorcarTab';
+import {PanelEvent, SorcarSidebarView} from './SorcarSidebarView';
 import {
   clearWebviewNotificationPoster,
   setWebviewNotificationPoster,
@@ -18,7 +13,7 @@ import {
 import {MetaPanelValues, TaskUpdateState, ToWebviewMessage} from './types';
 import {PRODUCT_NAME, mediaIconPath} from './brand';
 
-/** The webview panel viewType of an editor-tab chat. */
+/** The webview panel viewType of the chat editor tab. */
 export const CHAT_PANEL_VIEW_TYPE = 'kissSorcar.chatTab';
 
 const DEFAULT_PANEL_TITLE = PRODUCT_NAME;
@@ -45,48 +40,7 @@ function stripStatusPrefix(title: string): string {
 
 type NotificationMessage = Extract<ToWebviewMessage, {type: 'notification'}>;
 
-interface ChatPanel {
-  /** The chat's tab id in the daemon's shared registry. */
-  tabId: string;
-  /** The backend chat id once the tab bound to one ('' before). */
-  chatId: string;
-  /**
-   * True once a `tabs_state` snapshot confirmed the panel's root tab
-   * bound to its chat (chatBound). A resume-born chatId without this
-   * flag means the registration is still in flight, so the tab's
-   * absence from a snapshot is not yet meaningful.
-   */
-  registryBound: boolean;
-  /** The webview-reported chat title WITHOUT the status prefix. */
-  baseTitle: string;
-  /** Root task status: '', 'running', 'ok' or 'fail'. */
-  status: string;
-  panel: vscode.WebviewPanel;
-  controller: SorcarSidebarView;
-  /**
-   * Raised before a NON-user disposal (mode switch off, closeSelf after
-   * another client already closed the tab, extension teardown) so the
-   * dispose handler does not retire the chat from the daemon registry.
-   */
-  suppressCloseTab: boolean;
-  /**
-   * The panel's last reported task-info values (metaUpdate), cached so
-   * a panel switch can repaint the secondary sidebar's Task Info view
-   * without waiting for the panel's next report.
-   */
-  metaValues?: MetaPanelValues;
-  /** The task-update report state that came with metaValues. */
-  metaTaskUpdate?: TaskUpdateState | null;
-  /**
-   * The chat id and task id the panel last reported showing
-   * (activeTask), cached so a panel switch can point the history
-   * panel at the right row without waiting for the next report.
-   */
-  activeChatId?: string;
-  activeTaskId?: string;
-}
-
-/** True when *tab* is an editor tab hosting a chat webview (live or a
+/** True when *tab* is an editor tab hosting the chat webview (live or a
  * serialized placeholder the workbench has not revived yet). */
 function isChatEditorTab(tab: vscode.Tab): boolean {
   const viewType = (tab.input as {viewType?: unknown} | null)?.viewType;
@@ -95,91 +49,56 @@ function isChatEditorTab(tab: vscode.Tab): boolean {
   );
 }
 
-function randomTabId(): string {
-  return crypto.randomUUID();
-}
-
 /**
- * Editor-tabs mode: one VS Code EDITOR TAB (WebviewPanel) per chat tab,
- * replacing the secondary sidebar's internal tab bar. Each panel hosts
- * the same chat webview pinned to a single root chat tab (see
- * editorTabBodyAttrs / main.js EDITOR_TAB_MODE) and is driven by its
- * own SorcarSidebarView controller with its own daemon connection —
- * the same client-per-surface model the remote web app uses.
+ * Editor-tabs mode: the chat lives in ONE VS Code editor tab (a
+ * WebviewPanel) instead of the secondary sidebar's chat view. The panel
+ * hosts the same chat webview as the sidebar view — the whole daemon
+ * tab registry mirrored into it, chats switched in place from the
+ * history panel, "+" reusing an idle new chat — exactly as the remote
+ * web app shows every chat in one browser tab. The panel is driven by
+ * one SorcarSidebarView controller with its own daemon connection.
  */
 export class SorcarPanelManager {
-  private _panels: Map<string, ChatPanel> = new Map();
-  private _active: ChatPanel | undefined;
-  // Registry tabs whose adoption a same-chat panel with an
-  // UNCONFIRMED registration blocked, keyed by chat id. If that
-  // panel's registration goes through, the daemon displaces these
-  // tabs and the next snapshot prunes them; if it never does (the
-  // queued command was dropped) or the panel closes, the remembered
-  // tab is adopted — otherwise the chat's real tab would be skipped
-  // forever on the strength of a claim that can no longer bind.
-  private _pendingAdoptions: Map<string, RegistryTabEntry> = new Map();
-  // The chat-bound tabs of the latest controller snapshot, by tab id.
-  // A panel revived by the serializer after that snapshot learns its
-  // chat from here instead of waiting for its own socket's first
-  // snapshot, so a history click on that chat in between reveals the
-  // revived panel rather than opening a second one; the displacement
-  // sweep reads the snapshot's bindings from here too.
-  private _boundRegistryTabs: Map<string, RegistryTabEntry> = new Map();
+  private _panel: vscode.WebviewPanel | undefined;
+  private _controller: SorcarSidebarView | undefined;
+  // The webview-reported title of the chat on screen (no status
+  // prefix) and that chat's task status: '', 'running', 'ok' or 'fail'.
+  private _baseTitle: string = '';
+  private _status: string = '';
+  // The last task-info values the panel reported (metaUpdate), cached
+  // so a Task Info view registered later starts from them.
+  private _metaValues: MetaPanelValues | null = null;
+  private _metaTaskUpdate: TaskUpdateState | null = null;
+  // The chat / task the panel last reported showing (activeTask).
+  private _activeChatId: string = '';
+  private _activeTaskId: string = '';
   private _poster: ((message: NotificationMessage) => void) | undefined;
-  // Where the ACTIVE panel's task-info values go: the secondary
-  // sidebar's Task Info view (see extension.ts setMetaSink wiring).
+  // Where the panel's task-info values go: the secondary sidebar's
+  // Task Info view (see extension.ts setMetaSink wiring).
   private _metaSink?: (
     values: MetaPanelValues | null,
     taskUpdate: TaskUpdateState | null,
   ) => void;
-  // Where the ACTIVE panel's chat / task ids go: the primary sidebar's
+  // Where the panel's chat / task ids go: the primary sidebar's
   // history panel (see extension.ts setActiveTaskSink wiring).
   private _activeTaskSink?: (chatId: string, taskId: string) => void;
   /**
-   * Called when a task starts in the ACTIVE chat editor panel on
-   * screen, as the Task Info view is revealed for it. extension.ts
-   * has the view arrange its sections for the run (postShowForRun).
+   * Called when a task starts in the chat on screen, as the Task Info
+   * view is revealed for it. extension.ts has the view arrange its
+   * sections for the run (postShowForRun).
    */
   public onTaskStarted?: () => void;
   // The two editor-tab icons: the KISS logo, and the green ring spinner
-  // shown while the panel's task runs.  Built once so a repaint that
-  // keeps the icon does not push a fresh Uri to the workbench.
+  // shown while the shown chat's task runs.  Built once so a repaint
+  // that keeps the icon does not push a fresh Uri to the workbench.
   private readonly _kissIcon: vscode.Uri;
   private readonly _spinnerIcon: vscode.Uri;
-  // Terminal teardown (deactivate / window reload): panel disposals
-  // after this are not user closes and must not retire chats from the
-  // daemon's registry.
+  // Terminal teardown (deactivate / window reload): the panel is left
+  // standing for the serializer.
   private _shuttingDown: boolean = false;
-  // Raised while closeAll (mode switch off) disposes the panels: those
-  // disposals must not spawn a replacement chat tab — the chats move to
-  // the sidebar view.
-  private _closingAll: boolean = false;
 
-  /**
-   * @param _extensionUri The extension's root uri (chat HTML assets).
-   * @param _retireTab Retires a chat tab from the daemon registry
-   *     through a LONG-LIVED client (the sidebar controller's). A
-   *     panel's own client dies with the panel, so a closeTab queued
-   *     on it while the daemon is briefly unreachable would be lost.
-   *     Optional: without it the panel's own controller is used.
-   * @param _recordPanelTab Called with (tabId, true) when a panel
-   *     opens and (tabId, false) when one closes — except during
-   *     terminal teardown, which leaves the editor tabs standing for
-   *     the serializer. The extension keeps a persistent record of
-   *     the open panels' root tab ids in workspaceState so the NEXT
-   *     session knows which registry tabs its serialized placeholders
-   *     hold (see extension.ts registry adoption). Per-tab deltas
-   *     rather than whole-set snapshots: serializer revival rebuilds
-   *     the set one panel at a time, and a whole-set write mid-revival
-   *     would replace the record with a partial one — a crash right
-   *     then would let the next session adopt tabs whose placeholders
-   *     still exist.
-   */
-  constructor(
-    private readonly _extensionUri: vscode.Uri,
-    private readonly _retireTab?: (tabId: string) => void,
-    private readonly _recordPanelTab?: (tabId: string, open: boolean) => void,
-  ) {
+  /** @param _extensionUri The extension's root uri (chat HTML assets). */
+  constructor(private readonly _extensionUri: vscode.Uri) {
     const root = _extensionUri.fsPath;
     this._kissIcon = vscode.Uri.joinPath(
       _extensionUri,
@@ -206,480 +125,56 @@ export class SorcarPanelManager {
   }
 
   /**
-   * Register the serializer that revives chat panels across window
-   * reloads. The webview persists its root tab id (main.js
-   * persistTabState, editorRootTabId), so a revived panel re-adopts
-   * the same chat and the daemon's replay refills its transcript.
+   * Register the serializer that revives the chat panel across window
+   * reloads. The daemon's registry holds the tab set and replays every
+   * chat's transcript into the revived webview, so nothing beyond the
+   * panel itself needs restoring.
    */
   public registerSerializer(): vscode.Disposable {
-    // Older engines/tests may lack the API; panels then simply do not
-    // survive a reload.
+    // Older engines/tests may lack the API; the panel then simply does
+    // not survive a reload.
     if (typeof vscode.window.registerWebviewPanelSerializer !== 'function') {
       return {dispose: () => {}};
     }
     return vscode.window.registerWebviewPanelSerializer(CHAT_PANEL_VIEW_TYPE, {
-      deserializeWebviewPanel: (
-        panel: vscode.WebviewPanel,
-        state: unknown,
-      ): Thenable<void> => {
-        if (!SorcarPanelManager.modeEnabled()) {
-          // The mode was switched off since the panel was serialized;
-          // its chat lives on in the sidebar view.
+      deserializeWebviewPanel: (panel: vscode.WebviewPanel): Thenable<void> => {
+        // The mode was switched off since the panel was serialized (the
+        // chat lives in the sidebar view), or a chat was opened before
+        // the workbench revived this placeholder (one panel only): the
+        // husk is dropped.
+        if (!SorcarPanelManager.modeEnabled() || this._panel) {
           panel.dispose();
-          return Promise.resolve();
-        }
-        const s = (state || {}) as {editorRootTabId?: unknown};
-        const tabId =
-          typeof s.editorRootTabId === 'string' && s.editorRootTabId
-            ? s.editorRootTabId
-            : randomTabId();
-        if (this._panels.has(tabId)) {
-          // The registry adoption path opened this tab before the
-          // workbench revived its serialized placeholder (possible
-          // only when the persisted panel-id record missed it, e.g.
-          // after a crash): the husk duplicates a live panel — drop
-          // it instead of corrupting the id-keyed panel map.
-          panel.dispose();
-          return Promise.resolve();
-        }
-        // The controller's snapshot may already have listed this tab
-        // (it filtered the tab out of adoption for exactly this
-        // revival); take the chat binding from it — see
-        // _boundRegistryTabs.
-        const bound = this._boundRegistryTabs.get(tabId);
-        const dup = bound ? this._panelForChat(bound.chatId) : undefined;
-        if (bound && dup) {
-          // A history open of this tab's chat raced the revival: it
-          // found no panel yet and opened one resuming the chat. One
-          // chat, one panel — that resume is the user's latest action
-          // and its bind is about to displace this tab, so drop the
-          // husk (not retiring the tab: the registry still holds it).
-          // Should the claim never bind, the chat's registry tab is
-          // adopted from here (see _pendingAdoptions).
-          if (!dup.registryBound) {
-            this._pendingAdoptions.set(bound.chatId, bound);
-          }
-          if (this._recordPanelTab) this._recordPanelTab(tabId, false);
-          panel.dispose();
-          return Promise.resolve();
-        }
-        // The workbench persisted the decorated title; the status it
-        // carried belongs to the previous session.
-        const cp = this._adoptPanel(panel, {
-          tabId,
-          title: stripStatusPrefix(panel.title),
-        });
-        if (bound) {
-          cp.chatId = bound.chatId;
-          cp.registryBound = true;
+        } else {
+          // The workbench persisted the decorated title; the status it
+          // carried belongs to the previous session.
+          this._adopt(panel, stripStatusPrefix(panel.title));
         }
         return Promise.resolve();
       },
     });
   }
 
-  /** The open panel showing chat *chatId* (one chat, one panel), if any. */
-  private _panelForChat(chatId: string): ChatPanel | undefined {
-    if (!chatId) return undefined;
-    for (const cp of this._panels.values()) {
-      if (cp.chatId === chatId) return cp;
-    }
-    return undefined;
-  }
-
-  /** How many chat panels are open. */
-  public get panelCount(): number {
-    return this._panels.size;
+  /** The chat panel's controller, if the panel is open. */
+  public controller(): SorcarSidebarView | undefined {
+    return this._controller;
   }
 
   /**
-   * How many editor tabs host a chat — live panels AND the serialized
-   * placeholders a window reload restores (indistinguishable in the
-   * tabGroups API; a placeholder revives into a panel only when its
-   * tab is first shown). -1 when the API is absent (test stubs).
-   */
-  public chatEditorTabCount(): number {
-    const groups = vscode.window.tabGroups?.all;
-    if (!groups) return -1;
-    let count = 0;
-    for (const group of groups) {
-      for (const tab of group.tabs) {
-        if (isChatEditorTab(tab)) count += 1;
-      }
-    }
-    return count;
-  }
-
-  /**
-   * True when ANY editor tab hosts a chat: a live panel or a restored
-   * placeholder awaiting revival. Opening a "first" chat next to a
-   * placeholder would be a duplicate, so every "is a chat open?"
-   * decision goes through this rather than panelCount alone.
-   */
-  public hasChatEditorTab(): boolean {
-    if (this._panels.size > 0) return true;
-    const count = this.chatEditorTabCount();
-    // Guarded like the other optional host APIs (absent in test stubs).
-    if (count < 0) return false;
-    return count > 0;
-  }
-
-  /**
-   * The editor-tabs-mode invariant: at least one chat editor tab is
-   * always open, exactly as the sidebar strip always keeps one chat
-   * tab (main.js closeTab -> createNewTab, reconcileTabs' placeholder).
-   * Opens a fresh conversation when no chat editor tab — live panel or
-   * restored placeholder — exists. A no-op while the mode is off, while
-   * closeAll is moving the chats to the sidebar, and during terminal
-   * teardown.
+   * Reveal the chat panel, opening it when none exists, and return its
+   * controller.
    *
-   * @param opts preserveFocus: open the replacement in the background
-   *     (an automatic open the user did not ask for — activation, any
-   *     chat tab close); otherwise the fresh chat takes the keyboard
-   *     focus, which only a user request for a chat (switching the
-   *     mode on) does.
-   * @returns The new chat's controller, or undefined when nothing
-   *     needed opening.
+   * @param opts preserveFocus: keep the keyboard focus where it is
+   *     (an automatic open the user did not ask for); otherwise the
+   *     panel takes the focus as any new editor would.
    */
-  public ensureChatOpen(opts?: {
-    preserveFocus?: boolean;
-  }): SorcarSidebarView | undefined {
-    if (this._shuttingDown || this._closingAll) return undefined;
-    if (!SorcarPanelManager.modeEnabled()) return undefined;
-    if (this.hasChatEditorTab()) return undefined;
-    if (opts?.preserveFocus) {
-      return this._createPanel({tabId: randomTabId()}, {preserveFocus: true})
-        .controller;
+  public open(opts?: {preserveFocus?: boolean}): SorcarSidebarView {
+    if (this._panel && this._controller) {
+      this._panel.reveal(undefined, !!opts?.preserveFocus);
+      return this._controller;
     }
-    const controller = this.openNewChat();
-    void controller.focusChatInput();
-    return controller;
-  }
-
-  /**
-   * Backstop for the one-tab invariant that the panel dispose handler
-   * cannot see: a chat editor tab closed WITHOUT ever becoming a live
-   * panel (a serialized placeholder the user closes before the
-   * workbench revives it fires no WebviewPanel.onDidDispose). Every
-   * chat tab close re-checks the invariant from the tabGroups model.
-   */
-  public watchEditorTabs(): vscode.Disposable {
-    const tabGroups = vscode.window.tabGroups;
-    // Guarded like the other optional host APIs (absent in test stubs).
-    if (!tabGroups || typeof tabGroups.onDidChangeTabs !== 'function') {
-      return {dispose: () => {}};
-    }
-    return tabGroups.onDidChangeTabs(e => {
-      if (!e.closed.some(isChatEditorTab)) return;
-      this.ensureChatOpen({preserveFocus: true});
-    });
-  }
-
-  /** The controller of the most recently active chat panel, if any. */
-  public activeController(): SorcarSidebarView | undefined {
-    return this._activePanel()?.controller;
-  }
-
-  /**
-   * Adopt *sink* as the destination of the active panel's task-info
-   * values and push the current state right away, so a Task Info view
-   * registered after the panels never starts stale.
-   */
-  public setMetaSink(
-    sink: (
-      values: MetaPanelValues | null,
-      taskUpdate: TaskUpdateState | null,
-    ) => void,
-  ): void {
-    this._metaSink = sink;
-    this._pushActiveMeta();
-  }
-
-  /**
-   * The Task Info view's refresh button: ask the ACTIVE chat editor
-   * panel to poll the daemon for its task update with `refresh: true`
-   * (the panel's metainfo block owns the poll; the Task Info view
-   * never polls).  No-op without an active panel.
-   */
-  public refreshActiveTaskUpdate(): void {
-    this._activePanel()?.panel.webview.postMessage({
-      type: 'refreshTaskUpdate',
-    } as ToWebviewMessage);
-  }
-
-  /**
-   * Adopt *sink* as the destination of the active panel's chat / task
-   * ids and push the current state right away, so a history panel
-   * registered after the panels highlights the right row from the
-   * start.
-   */
-  public setActiveTaskSink(
-    sink: (chatId: string, taskId: string) => void,
-  ): void {
-    this._activeTaskSink = sink;
-    this._pushActiveTask();
-  }
-
-  /**
-   * Relay the ACTIVE panel's cached task-info values to the meta sink
-   * (placeholder state when no panel exists or none reported yet) and
-   * its chat / task ids to the active-task sink ('' when none).
-   * Called on every metaUpdate of the active panel, on panel
-   * activations and on panel closes, so the Task Info view and the
-   * history panel always describe the chat editor tab the user is on.
-   */
-  private _pushActiveMeta(): void {
-    this._pushActiveTask();
-    if (!this._metaSink) return;
-    const cp = this._activePanel();
-    this._metaSink(cp?.metaValues ?? null, cp?.metaTaskUpdate ?? null);
-  }
-
-  /** Relay the ACTIVE panel's cached chat / task ids to its sink. */
-  private _pushActiveTask(): void {
-    if (!this._activeTaskSink) return;
-    const cp = this._activePanel();
-    this._activeTaskSink(cp?.activeChatId ?? '', cp?.activeTaskId ?? '');
-  }
-
-  /** Open a fresh conversation in a new editor tab and focus it. */
-  public openNewChat(): SorcarSidebarView {
-    return this._createPanel({tabId: randomTabId()}).controller;
-  }
-
-  /**
-   * Reveal the most recently active chat panel, opening a fresh one
-   * when none exists, and return its controller.
-   */
-  public revealActiveOrCreate(): SorcarSidebarView {
-    const active = this._activePanel();
-    if (active) {
-      active.panel.reveal();
-      return active.controller;
-    }
-    return this.openNewChat();
-  }
-
-  /**
-   * Open the settings UI: reveal (or open) a chat panel and show its
-   * settings panel — the editor-title gear button's action.
-   */
-  public async openSettings(): Promise<void> {
-    const controller = this.revealActiveOrCreate();
-    await controller.openSettingsUI();
-  }
-
-  /**
-   * Materialize editor-tab panels for the daemon registry's chat tabs
-   * — called when the user switches the mode on, so the sidebar's
-   * chats migrate to editor tabs. Every registry tab is adopted
-   * whatever folder it runs in: all surfaces show the same tabs.
-   * Opens a fresh chat when the registry is empty.
-   */
-  public enterMode(entries: RegistryTabEntry[]): void {
-    for (const entry of entries) {
-      if (this._panels.has(entry.tabId)) continue;
-      this._createRegistryPanel(entry);
-    }
-    this.ensureChatOpen();
-  }
-
-  /**
-   * Open the editor-tab panel for a tab the daemon registry lists,
-   * bound to the chat the registry says it shows. The binding is
-   * recorded on the panel right away rather than waiting for the
-   * panel's own daemon socket to report it (`chatBound`): a history
-   * click on that chat in the meantime must reveal this panel, not
-   * open a second one for the same chat.
-   */
-  private _createRegistryPanel(
-    entry: RegistryTabEntry,
-    opts?: {preserveFocus?: boolean},
-  ): ChatPanel {
-    const cp = this._createPanel(
-      {
-        tabId: entry.tabId,
-        title: entry.title,
-        // Registry-born: the webview may treat the tab's absence from
-        // its first snapshot as a close by another client.
-        inRegistry: true,
-      },
-      opts,
-    );
-    if (entry.chatId) {
-      cp.chatId = entry.chatId;
-      cp.registryBound = true;
-    }
-    return cp;
-  }
-
-  /**
-   * Materialize editor-tab panels for registry tabs another client
-   * created — or first bound to a chat — since the last snapshot: a
-   * task run in the remote web app (or another window) opens as an
-   * editor tab here, exactly like sidebar mode adopts the tab into
-   * its internal strip. Tabs already open as a panel (by id or by
-   * chat) are left alone — except that a panel whose tab the registry
-   * displaced closes when its replacement opens, so a chat never has
-   * two panels in this window — and the new panel never steals the
-   * user's keyboard focus.
-   *
-   * @param entries The snapshot's newly added tabs (see
-   *     RegistryTabsDelta.added), possibly filtered by the caller.
-   * @param listed EVERY tab the snapshot lists (not just the added
-   *     ones) — the source of truth for the displacement decision.
-   */
-  public adoptRegistryTabs(
-    entries: RegistryTabEntry[],
-    listed?: RegistryTabEntry[],
-  ): void {
-    let listedIds: Set<string> | undefined;
-    if (listed) {
-      // Sync open panels' chat bindings from THIS snapshot before
-      // deciding anything. Each panel's own daemon socket reports the
-      // same binding as a `chatBound` event, but that is a separate
-      // connection with no ordering guarantee against this snapshot
-      // stream: if it lags, a panel whose tab an earlier snapshot
-      // already confirmed would still read registryBound=false here,
-      // and a displaced chat's replacement tab would be skipped for
-      // good while the stale panel closes itself.
-      listedIds = new Set();
-      this._boundRegistryTabs.clear();
-      for (const entry of listed) {
-        listedIds.add(entry.tabId);
-        if (!entry.chatId) continue;
-        this._boundRegistryTabs.set(entry.tabId, entry);
-        const cp = this._panels.get(entry.tabId);
-        if (cp) {
-          cp.chatId = entry.chatId;
-          cp.registryBound = true;
-        }
-      }
-      // A remembered tab the registry no longer lists was displaced
-      // or closed remotely; forget it.
-      for (const [chatId, pending] of this._pendingAdoptions) {
-        if (!listedIds.has(pending.tabId)) {
-          this._pendingAdoptions.delete(chatId);
-        }
-      }
-    }
-    for (const entry of entries) {
-      if (this._panels.has(entry.tabId)) continue;
-      const dup = this._panelForChat(entry.chatId);
-      // Skip a chat some open panel already shows — UNLESS the
-      // registry DISPLACED that panel's tab (one tab per chat, the
-      // newest bind wins: the panel's registry-confirmed tab is no
-      // longer listed), in which case the replacement tab must be
-      // adopted or the chat would lose its editor tab. A panel whose
-      // registration is still in flight (resume-born chatId, never
-      // yet listed in a snapshot) is not displaced — its absence from
-      // the list means nothing yet, and its own pending bind will
-      // displace this entry's tab in a moment.
-      if (
-        dup &&
-        (!dup.registryBound || !listedIds || listedIds.has(dup.tabId))
-      ) {
-        if (!dup.registryBound) {
-          // Remember the skip: the panel's claim may never bind
-          // (see _pendingAdoptions).
-          this._pendingAdoptions.set(entry.chatId, entry);
-        }
-        continue;
-      }
-      this._createRegistryPanel(entry, {preserveFocus: true});
-    }
-    if (listedIds) this._closeDisplacedPanels(listedIds);
-  }
-
-  /**
-   * Close every panel whose registry-confirmed tab the snapshot no
-   * longer lists while a listed panel shows the same chat: the
-   * registry displaced it (one tab per chat, the newest bind wins —
-   * the replacement was adopted above, or is a panel this window
-   * opened itself, e.g. a history resume racing a revived panel's
-   * first snapshot). The displaced panel's webview closes it on its
-   * own next snapshot too, but that arrives on a separate socket with
-   * no ordering guarantee against this one; until then the chat would
-   * have two panels in this window. Nothing to retire: the registry
-   * already dropped the tab. The replacement is open, so the dispose
-   * handler's "last chat tab closed" fallback opens no fresh chat.
-   */
-  private _closeDisplacedPanels(listedIds: Set<string>): void {
-    const panels = [...this._panels.values()];
-    for (const cp of panels) {
-      if (!cp.chatId || !cp.registryBound || listedIds.has(cp.tabId)) continue;
-      // The replacement must be bound to the chat by THIS snapshot —
-      // a panel's own unconfirmed resume claim (chatId set locally,
-      // its tab listed unbound) proves nothing, least of all against
-      // a stale snapshot.
-      const replacement = panels.find(
-        other =>
-          other !== cp &&
-          this._boundRegistryTabs.get(other.tabId)?.chatId === cp.chatId,
-      );
-      if (!replacement) continue;
-      cp.suppressCloseTab = true;
-      cp.panel.dispose();
-    }
-  }
-
-  /**
-   * Close every chat panel WITHOUT retiring the chats from the daemon
-   * registry — used when the user switches the mode off (the sidebar
-   * view re-adopts the same tabs from the next `tabs_state`).
-   */
-  public closeAll(): void {
-    // Tabs remembered for adoption belong to the editor-tab surface;
-    // once the mode is off the sidebar webview re-adopts everything
-    // from `tabs_state`, and a stale memory could otherwise open a
-    // long-vanished tab when the mode comes back.
-    this._pendingAdoptions.clear();
-    this._boundRegistryTabs.clear();
-    this._closingAll = true;
-    try {
-      for (const cp of [...this._panels.values()]) {
-        cp.suppressCloseTab = true;
-        cp.panel.dispose();
-      }
-    } finally {
-      this._closingAll = false;
-    }
-  }
-
-  public dispose(): void {
-    // Terminal teardown (deactivate / window reload): dispose the
-    // controllers but LEAVE the panels standing. Disposing them here
-    // would close the editor tabs the workbench is about to persist,
-    // defeating the serializer's revival on the next load.  Panel
-    // disposals from here on are not user closes and keep the chats
-    // registered.
-    this._shuttingDown = true;
-    for (const cp of [...this._panels.values()]) {
-      cp.suppressCloseTab = true;
-      cp.controller.dispose();
-    }
-    this._panels.clear();
-    this._pendingAdoptions.clear();
-    this._active = undefined;
-    this._refreshPoster();
-  }
-
-  private _activePanel(): ChatPanel | undefined {
-    if (this._active && this._panels.has(this._active.tabId)) {
-      return this._active;
-    }
-    return this._panels.values().next().value;
-  }
-
-  private _createPanel(
-    init: EditorTabInit,
-    opts?: {preserveFocus?: boolean},
-  ): ChatPanel {
     const panel = vscode.window.createWebviewPanel(
       CHAT_PANEL_VIEW_TYPE,
-      init.title || DEFAULT_PANEL_TITLE,
-      // Adopted remote tabs open without stealing the user's keyboard
-      // focus; user-initiated opens take it as any new editor would.
+      DEFAULT_PANEL_TITLE,
       {
         viewColumn: vscode.ViewColumn.Active,
         preserveFocus: !!opts?.preserveFocus,
@@ -695,38 +190,154 @@ export class SorcarPanelManager {
         ],
       },
     );
-    return this._adoptPanel(panel, init);
+    return this._adopt(panel, '');
   }
 
-  private _adoptPanel(
-    panel: vscode.WebviewPanel,
-    init: EditorTabInit,
-  ): ChatPanel {
-    const cp: ChatPanel = {
-      tabId: init.tabId,
-      chatId: init.resumeChatId || '',
-      registryBound: false,
-      baseTitle: init.title || '',
-      status: '',
-      panel,
-      controller: undefined as unknown as SorcarSidebarView,
-      suppressCloseTab: false,
-    };
+  /**
+   * Open the chat panel in the background when the window has no chat
+   * editor tab at all — neither a live panel nor a serialized
+   * placeholder the workbench has not revived yet (opening next to a
+   * placeholder would duplicate it). A no-op while the mode is off and
+   * during extension teardown.
+   */
+  public ensureOpen(): void {
+    if (this._shuttingDown || this._panel) return;
+    if (!SorcarPanelManager.modeEnabled()) return;
+    // Guarded like the other optional host APIs (absent in test stubs).
+    const groups = vscode.window.tabGroups?.all;
+    if (groups && groups.some(g => g.tabs.some(isChatEditorTab))) return;
+    this.open({preserveFocus: true});
+  }
+
+  /**
+   * Open the settings UI: reveal (or open) the chat panel and show its
+   * settings panel — the editor-title gear button's action.
+   */
+  public async openSettings(): Promise<void> {
+    await this.open().openSettingsUI();
+  }
+
+  /**
+   * Show a chat in the panel — a primary-sidebar history panel click,
+   * the Task Info view's Apps subpanel launching a "connect this app"
+   * task (a new chat whose first prompt is submitted at once), or its
+   * Recommendations subpanel putting a suggested task in a new chat's
+   * composer (not submitted: the user reads it first).
+   *
+   * @param event The chat to open: backend chat id ('' or absent for a
+   *     new chat), the task to scroll to, the task text; or pendingText,
+   *     the prompt a new chat's composer receives, submitted at once
+   *     with autoSubmit.
+   */
+  public openChat(event: {
+    chatId?: string;
+    taskId?: string | number | null;
+    title?: string;
+    pendingText?: string;
+    autoSubmit?: boolean;
+  }): void {
+    const controller = this.open();
+    if (event.pendingText) {
+      controller.newConversation();
+      if (event.autoSubmit) controller.submitWhenReady(event.pendingText);
+      else void controller.appendToInput(event.pendingText, true);
+      return;
+    }
+    void controller.openChatFromHistory(event);
+  }
+
+  /**
+   * Adopt *sink* as the destination of the panel's task-info values
+   * and push the current state right away, so a Task Info view
+   * registered after the panel never starts stale.
+   */
+  public setMetaSink(
+    sink: (
+      values: MetaPanelValues | null,
+      taskUpdate: TaskUpdateState | null,
+    ) => void,
+  ): void {
+    this._metaSink = sink;
+    this._pushMeta();
+  }
+
+  /**
+   * The Task Info view's refresh button: ask the chat panel to poll
+   * the daemon for its task update with `refresh: true` (the panel's
+   * metainfo block owns the poll; the Task Info view never polls).
+   * No-op without a panel.
+   */
+  public refreshActiveTaskUpdate(): void {
+    this._panel?.webview.postMessage({
+      type: 'refreshTaskUpdate',
+    } as ToWebviewMessage);
+  }
+
+  /**
+   * Adopt *sink* as the destination of the panel's chat / task ids and
+   * push the current state right away, so a history panel registered
+   * after the panel highlights the right row from the start.
+   */
+  public setActiveTaskSink(
+    sink: (chatId: string, taskId: string) => void,
+  ): void {
+    this._activeTaskSink = sink;
+    this._pushActiveTask();
+  }
+
+  /**
+   * Relay the panel's cached task-info values to the meta sink
+   * (placeholder state when no panel exists or none reported yet) and
+   * its chat / task ids to the active-task sink ('' when none).
+   */
+  private _pushMeta(): void {
+    this._pushActiveTask();
+    this._metaSink?.(this._metaValues, this._metaTaskUpdate);
+  }
+
+  private _pushActiveTask(): void {
+    this._activeTaskSink?.(this._activeChatId, this._activeTaskId);
+  }
+
+  /**
+   * Close the chat panel WITHOUT touching the daemon registry — used
+   * when the user switches the mode off (the sidebar view re-adopts
+   * the same tabs from the next `tabs_state`).
+   */
+  public close(): void {
+    this._panel?.dispose();
+  }
+
+  public dispose(): void {
+    // Terminal teardown (deactivate / window reload): dispose the
+    // controller but LEAVE the panel standing. Disposing it here would
+    // close the editor tab the workbench is about to persist,
+    // defeating the serializer's revival on the next load.
+    this._shuttingDown = true;
+    this._controller?.dispose();
+    this._controller = undefined;
+    this._panel = undefined;
+    this._refreshPoster();
+  }
+
+  private _adopt(panel: vscode.WebviewPanel, title: string): SorcarSidebarView {
+    this._panel = panel;
+    this._baseTitle = title;
+    this._status = '';
     // A revived panel may still carry the previous session's status
-    // prefix in its persisted title (the serializer strips it from
-    // init.title); repaint from the clean slate.  This also gives the
-    // panel its icon.
-    this._applyPanelTitle(cp);
-    cp.controller = new SorcarSidebarView(this._extensionUri, {
-      rootTabId: init.tabId,
-      onEvent: (event: PanelEvent) => this._onPanelEvent(cp, event),
+    // prefix in its persisted title (stripped by the serializer);
+    // repaint from the clean slate.  This also gives the panel its icon.
+    this._applyTitle();
+    const controller = new SorcarSidebarView(this._extensionUri, {
+      onEvent: (event: PanelEvent) => this._onPanelEvent(event),
     });
-    cp.controller.onActiveTask = (chatId: string, taskId: string) => {
-      cp.activeChatId = chatId;
-      cp.activeTaskId = taskId;
-      if (this._activePanel() === cp) this._pushActiveTask();
+    this._controller = controller;
+    controller.onActiveTask = (chatId: string, taskId: string) => {
+      this._activeChatId = chatId;
+      this._activeTaskId = taskId;
+      this._pushActiveTask();
     };
-    cp.controller.attachWebviewHost(
+    controller.attachWebviewHost(
       {
         webview: panel.webview,
         get visible() {
@@ -739,116 +350,62 @@ export class SorcarPanelManager {
           panel.onDidChangeViewState as vscode.Event<unknown>,
         onDidDispose: panel.onDidDispose,
       },
-      editorTabBodyAttrs(init),
+      EDITOR_TAB_BODY_ATTRS,
     );
-    cp.controller.syncWorkDir();
-    this._panels.set(cp.tabId, cp);
-    if (this._recordPanelTab) this._recordPanelTab(cp.tabId, true);
-    // A revived background panel must not steal the "active" slot from
-    // the panel the user is actually on.
-    if (panel.active !== false) {
-      this._active = cp;
-      this._pushActiveMeta();
-    }
-    panel.onDidChangeViewState(e => {
-      if (e.webviewPanel.active) {
-        this._active = cp;
-        // Repaint the Task Info view from the newly active panel's
-        // cached values instead of waiting for its next report.
-        this._pushActiveMeta();
-      }
-    });
+    controller.syncWorkDir();
     panel.onDidDispose(() => {
-      this._panels.delete(cp.tabId);
-      // During terminal teardown the editor tabs stay open for the
-      // serializer, so the persisted record must keep their ids.
-      if (!this._shuttingDown && this._recordPanelTab) {
-        this._recordPanelTab(cp.tabId, false);
-      }
-      if (this._active === cp) this._active = undefined;
+      // Closing the panel closes the chat SURFACE, like closing the
+      // remote web app's browser tab: the chats stay in the daemon's
+      // registry for the next open.
+      this._panel = undefined;
+      this._controller = undefined;
+      this._metaValues = null;
+      this._metaTaskUpdate = null;
+      this._activeChatId = '';
+      this._activeTaskId = '';
       // The Task Info view must not keep describing a closed panel.
-      this._pushActiveMeta();
-      // A user close retires the chat (the sidebar webview does the
-      // same for its internal tabs); a mode switch, a closeSelf echo
-      // or extension teardown must not.
-      if (!this._shuttingDown && !cp.suppressCloseTab) {
-        this._retire(cp);
-        // The closed panel may have been the unconfirmed claim that
-        // blocked a same-chat registry tab; that tab may open now.
-        this._adoptPendingFor(cp.chatId);
-      }
-      cp.controller.dispose();
+      this._pushMeta();
+      controller.dispose();
       this._refreshPoster();
-      // The last chat editor tab closing — by the user (tab X, or the
-      // root chat closed inside the webview), or because another
-      // client closed / displaced the chat — leaves the window without
-      // a chat, which the sidebar strip never allows: open a fresh one.
-      // The tabGroups model already reflects this close (the workbench
-      // updates it before disposing the editor input), so a restored
-      // placeholder still standing keeps this from duplicating it.
-      // Mode-off closes (closeAll) and teardown are skipped inside.
-      // The replacement ALWAYS opens in the background: closing a tab
-      // is not a request for a new chat, and a user who closed the chat
-      // to get back to a file must not have the cursor pulled into a
-      // fresh composer.  A new chat is one click away (the editor
-      // title's + button / KISS: New Conversation) when wanted.
-      this.ensureChatOpen({preserveFocus: true});
     });
+    this._pushMeta();
     this._refreshPoster();
-    return cp;
+    return controller;
   }
 
   /**
-   * Adopt the registry tab remembered for *chatId*, if any — called
-   * when the same-chat panel that blocked its adoption released the
-   * claim (registration dropped) or closed.
+   * Paint the editor tab: the green ring spinner as the tab icon while
+   * the shown chat's task runs (the KISS logo otherwise), and a green
+   * tick / red cross prefix on the title once it finished — the
+   * editor-tab analogue of the sidebar strip's status icon.
    */
-  private _adoptPendingFor(chatId: string): void {
-    if (!chatId) return;
-    const pending = this._pendingAdoptions.get(chatId);
-    if (!pending) return;
-    this._pendingAdoptions.delete(chatId);
-    this.adoptRegistryTabs([pending]);
-  }
-
-  /** Retire *cp*'s chat tab from the daemon's shared registry. */
-  private _retire(cp: ChatPanel): void {
-    if (this._retireTab) this._retireTab(cp.tabId);
-    else cp.controller.closeChatTab(cp.tabId);
-  }
-
-  /**
-   * Paint *cp*'s editor tab: the green ring spinner as the tab icon
-   * while the task runs (the KISS logo otherwise), and a green tick /
-   * red cross prefix on the title once it finished — the editor-tab
-   * analogue of the sidebar strip's status icon.
-   */
-  private _applyPanelTitle(cp: ChatPanel): void {
-    const icon = cp.status === 'running' ? this._spinnerIcon : this._kissIcon;
-    if (cp.panel.iconPath !== icon) cp.panel.iconPath = icon;
+  private _applyTitle(): void {
+    if (!this._panel) return;
+    const icon =
+      this._status === 'running' ? this._spinnerIcon : this._kissIcon;
+    if (this._panel.iconPath !== icon) this._panel.iconPath = icon;
     let prefix = '';
-    if (cp.status === 'ok') {
+    if (this._status === 'ok') {
       prefix = STATUS_OK_PREFIX;
-    } else if (cp.status === 'fail') {
+    } else if (this._status === 'fail') {
       prefix = STATUS_FAIL_PREFIX;
     }
-    cp.panel.title = prefix + (cp.baseTitle || DEFAULT_PANEL_TITLE);
+    this._panel.title = prefix + (this._baseTitle || DEFAULT_PANEL_TITLE);
   }
 
-  private _onPanelEvent(cp: ChatPanel, event: PanelEvent): void {
+  private _onPanelEvent(event: PanelEvent): void {
     switch (event.kind) {
-      case 'title': {
+      case 'title':
         // The webview's title is authoritative and never decorated —
         // a chat legitimately titled "✅ deploy status" keeps its
         // tick (only the serializer strips, and only the one prefix
         // a previous session's decoration added).
-        cp.baseTitle = (event.title || '').trim();
-        cp.status = event.state || '';
-        this._applyPanelTitle(cp);
+        this._baseTitle = (event.title || '').trim();
+        this._status = event.state || '';
+        this._applyTitle();
         break;
-      }
       case 'reveal':
-        // A finished task brings its editor tab forward the way
+        // A finished task brings the editor tab forward the way
         // sidebar mode switches its internal tab — without stealing
         // the user's keyboard focus, and never while the user is in a
         // file: revealing would replace the document they are reading
@@ -856,18 +413,17 @@ export class SorcarPanelManager {
         // them the task ended. A waiting question (`force`) is the
         // exception: the agent is blocked until they answer it.
         if (vscode.window.activeTextEditor && !event.force) break;
-        cp.panel.reveal(undefined, true);
+        this._panel?.reveal(undefined, true);
         break;
       case 'taskStarted':
         // The run gets the window: the Task Info view comes up in the
         // secondary side bar beside the chat, the keyboard focus stays
         // in the chat the user just submitted from. Only for a chat on
-        // screen that the view describes (the active panel): a start
-        // in a background panel or behind a text editor (a task
-        // launched from another surface) brings nothing up over what
-        // the user is looking at. The view arranges its sections for
-        // the run (onTaskStarted) whether or not the reveal succeeds.
-        if (this._activePanel() !== cp || !cp.panel.visible) break;
+        // screen: a start behind a text editor (a task launched from
+        // another surface) brings nothing up over what the user is
+        // looking at. The view arranges its sections for the run
+        // (onTaskStarted) whether or not the reveal succeeds.
+        if (!this._panel?.visible) break;
         this.onTaskStarted?.();
         void vscode.commands
           .executeCommand('kissSorcar.metaViewSecondary.focus', {
@@ -878,41 +434,9 @@ export class SorcarPanelManager {
           );
         break;
       case 'metaUpdate':
-        cp.metaValues = event.values;
-        cp.metaTaskUpdate = event.taskUpdate;
-        if (this._activePanel() === cp) this._pushActiveMeta();
-        break;
-      case 'chatBound':
-        cp.chatId = event.chatId;
-        cp.registryBound = true;
-        // The daemon accepted THIS panel's binding, so any same-chat
-        // tab remembered for adoption was displaced by it. The next
-        // controller snapshot prunes it too, but a user close racing
-        // that snapshot must not resurrect the displaced tab.
-        this._pendingAdoptions.delete(event.chatId);
-        break;
-      case 'registrationDropped': {
-        // The panel's registry registration never reached the daemon
-        // (its queued command was dropped after an outage) and the
-        // webview does not retry it: the chat claim is void. Release
-        // it and open any same-chat registry tab the claim blocked —
-        // otherwise this window would keep an editor tab that can
-        // never bind while the chat's real tab never opens.
-        if (cp.registryBound) break;
-        const claimed = cp.chatId;
-        cp.chatId = '';
-        this._adoptPendingFor(claimed);
-        break;
-      }
-      case 'closeSelf':
-        // The dispose handler must not send a second close; when the
-        // USER closed the root chat inside the panel (retire), the
-        // registry entry is retired through the long-lived client here.
-        cp.suppressCloseTab = true;
-        // retire = the USER closed the root chat inside the webview;
-        // otherwise the registry dropped the tab (closed elsewhere).
-        if (event.retire) this._retire(cp);
-        cp.panel.dispose();
+        this._metaValues = event.values;
+        this._metaTaskUpdate = event.taskUpdate;
+        this._pushMeta();
         break;
       case 'openChat':
         this.openChat(event);
@@ -921,87 +445,13 @@ export class SorcarPanelManager {
   }
 
   /**
-   * Open a chat as an editor tab: reveal the panel already bound to
-   * `event.chatId`, or create a new panel resuming it (a fresh
-   * conversation when the id is empty). Serves both an editor-tab
-   * webview's own history opens and the primary-sidebar history
-   * panel's clicks.
-   *
-   * @param event The chat to open — backend chat id ('' or absent for
-   *     a fresh one), the task to scroll to, the panel title, (for
-   *     fresh chats) the opener's composer draft to seed the new
-   *     panel's textarea with.
-   */
-  public openChat(event: {
-    chatId?: string;
-    taskId?: string | number | null;
-    title?: string;
-    pendingText?: string;
-    autoSubmit?: boolean;
-  }): void {
-    const chatId = event.chatId ? String(event.chatId) : '';
-    if (chatId) {
-      // One chat, one panel: a history open of a chat that already
-      // has an editor tab reveals that tab (the daemon registry
-      // enforces the same one-tab-per-chat invariant) and brings the
-      // clicked task on screen instead of leaving the panel parked on
-      // whatever task it was showing.
-      const other = this._panelForChat(chatId);
-      if (other) {
-        other.panel.reveal();
-        if (
-          event.taskId !== undefined &&
-          event.taskId !== null &&
-          event.taskId !== ''
-        ) {
-          other.controller.showTask(String(event.taskId));
-        }
-        return;
-      }
-    }
-    // The Apps subpanel's connect launch: a fresh chat whose first
-    // task is the prompt.  The host submits it once, after the webview
-    // is ready -- never through the panel's HTML, which a webview
-    // reload would replay into a second submission.
-    const autoSubmit = !chatId && !!event.autoSubmit && !!event.pendingText;
-    const created = this._createPanel({
-      tabId: randomTabId(),
-      title: event.title,
-      resumeChatId: chatId || undefined,
-      resumeTaskId:
-        event.taskId === undefined || event.taskId === null
-          ? undefined
-          : String(event.taskId),
-      // Only a FRESH chat starts from the opener's draft; a resume
-      // shows the resumed chat's own composer state.
-      pendingText:
-        chatId || autoSubmit ? undefined : event.pendingText || undefined,
-    });
-    if (autoSubmit) created.controller.submitWhenReady(event.pendingText || '');
-  }
-
-  /**
-   * The panel whose webview holds *tabId*, or undefined when no open
-   * panel owns it (the tab was closed, or belongs to the sidebar).
-   */
-  private _panelOwningTab(tabId: string): ChatPanel | undefined {
-    for (const cp of this._panels.values()) {
-      if (cp.controller.ownsTab(tabId)) return cp;
-    }
-    return undefined;
-  }
-
-  /**
-   * Keep the shared webview toast poster installed while any panel
-   * exists; release it (identity-checked) when the last panel closes so
-   * the sidebar view can claim it back.  A toast tagged with a tab goes
-   * to the panel that holds the tab (one task's auto-commit or worktree
-   * outcome must not pop over another task's chat) and is dropped when
-   * that panel is gone; an untagged, window-level toast goes to the
-   * active panel.
+   * Keep the shared webview toast poster installed while the panel
+   * exists; release it (identity-checked) when the panel closes so the
+   * sidebar view can claim it back.
    */
   private _refreshPoster(): void {
-    if (this._panels.size === 0) {
+    const panel = this._panel;
+    if (!panel) {
       if (this._poster) {
         clearWebviewNotificationPoster(this._poster);
         this._poster = undefined;
@@ -1010,10 +460,7 @@ export class SorcarPanelManager {
     }
     if (this._poster) return;
     const poster = (message: NotificationMessage) => {
-      const target = message.tabId
-        ? this._panelOwningTab(message.tabId)
-        : this._activePanel();
-      target?.panel.webview.postMessage(message);
+      void panel.webview.postMessage(message);
     };
     this._poster = poster;
     setWebviewNotificationPoster(poster);

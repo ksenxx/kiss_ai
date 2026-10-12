@@ -20,9 +20,13 @@ import tempfile
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.task_metadata import ALL_TAGS, classify_task_tags
 from kiss.server import web_server
+from kiss.tests.server.conftest import (
+    make_capturing_server,
+    redirect_persistence,
+    restore_persistence,
+)
 
-from .test_history_chat_first_task import _history_sessions, _make_server
-from .test_history_task_meta_server import _redirect, _restore
+from .test_history_chat_first_task import _history_sessions
 
 
 def _finished(task: str, result: str = "done") -> str:
@@ -39,13 +43,13 @@ class TestTagFilterQueries:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_tag_filter_sql_accepts_only_lowercase_words(self) -> None:
@@ -114,19 +118,19 @@ class TestGetHistoryCommand:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_command_filters_and_echoes_offset(self) -> None:
         _finished("Write the paper introduction")
         _finished("Fix the parser bug")
-        server, events = _make_server()
+        server, events = make_capturing_server()
         server._handle_command({"type": "getHistory", "tag": "paper", "generation": 3})
         (session,) = _history_sessions(events)
         assert session["title"] == "Write the paper introduction"
@@ -137,7 +141,7 @@ class TestGetHistoryCommand:
     def test_command_without_tag_or_with_bad_tag_returns_everything(self) -> None:
         _finished("Write the paper introduction")
         _finished("Fix the parser bug")
-        server, events = _make_server()
+        server, events = make_capturing_server()
         server._handle_command({"type": "getHistory"})
         assert len(_history_sessions(events)) == 2
         events.clear()
@@ -147,7 +151,7 @@ class TestGetHistoryCommand:
     def test_command_combines_query_and_tag(self) -> None:
         _finished("Write the paper on parsers")
         _finished("Fix the parser bug")
-        server, events = _make_server()
+        server, events = make_capturing_server()
         server._handle_command({"type": "getHistory", "query": "parser", "tag": "debugging"})
         (session,) = _history_sessions(events)
         assert session["title"] == "Fix the parser bug"

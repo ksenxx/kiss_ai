@@ -8,7 +8,7 @@ spurious ``error`` events.
 
 The VS Code extension is meant to be usable in any folder — including
 folders that are not inside a git repository.  Git-specific
-functionality (worktree, autocommit, commit-message) must fail
+functionality (worktree, commit-message) must fail
 gracefully with informative messages instead of crashing or producing
 misleading output.
 
@@ -29,7 +29,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
@@ -46,7 +46,7 @@ def _is_inside_git_repo(path: str) -> bool:
 def _register_tab_state(
     tab_id: str,
     *,
-    agent: WorktreeSorcarAgent | None = None,
+    agent: ChatSorcarAgent | None = None,
 ) -> agent_state.AgentState:
     """Register an idle server-owned state for *tab_id* and return it."""
     state = agent_state.AgentState(
@@ -201,16 +201,16 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
 class TestNonGitWorktreeActions(_NonGitHarness):
     """Worktree actions must report failures, never crash."""
 
-    def test_worktree_action_when_not_enabled(self) -> None:
+    def test_worktree_action_without_pending_worktree(self) -> None:
         self.server._handle_command(
             {"type": "worktreeAction", "action": "merge", "tabId": "t-wt"},
         )
         evt = self._events_of("worktree_result")
         assert evt
         assert evt[-1]["success"] is False
-        assert "Worktree mode is not enabled" in evt[-1]["message"]
+        assert "No pending worktree changes" in evt[-1]["message"]
 
-    def test_worktree_action_discard_not_enabled(self) -> None:
+    def test_worktree_action_discard_without_pending_worktree(self) -> None:
         self.server._handle_command(
             {"type": "worktreeAction", "action": "discard", "tabId": "t-wt2"},
         )
@@ -218,31 +218,12 @@ class TestNonGitWorktreeActions(_NonGitHarness):
         assert evt and evt[-1]["success"] is False
 
     def test_worktree_action_unknown(self) -> None:
-        state = _register_tab_state(
-            "t-wt3", agent=WorktreeSorcarAgent("Sorcar VS Code"),
-        )
-        state.use_worktree = True
+        _register_tab_state("t-wt3", agent=ChatSorcarAgent("Sorcar VS Code"))
         self.server._handle_command(
             {"type": "worktreeAction", "action": "frobnicate", "tabId": "t-wt3"},
         )
         evt = self._events_of("worktree_result")
         assert evt and evt[-1]["success"] is False
-
-
-class TestNonGitAutocommit(_NonGitHarness):
-    """The post-task autocommit path must not crash in non-git."""
-
-    def test_autocommit_reports_not_a_git_repository(self) -> None:
-        """``_autocommit_changes`` in a non-git dir reports a graceful
-        failure through ``autocommit_done`` instead of crashing."""
-        _register_tab_state("t2").use_worktree = False
-        Path(self.tmpdir, "loose.txt").write_text("x\n")
-        self.server._autocommit_changes("t2", work_dir=self.tmpdir)
-        evt = self._events_of("autocommit_done")
-        assert evt
-        assert evt[-1]["success"] is False
-        assert evt[-1]["committed"] is False
-        assert evt[-1]["message"] == "Not a git repository."
 
 
 class TestNonGitGenerateCommitMessage(_NonGitHarness):
@@ -271,11 +252,11 @@ class TestNonGitRunTask(_NonGitHarness):
 
     def _patch_agent_run(
         self, tab_id: str,
-    ) -> tuple[dict[str, Any], WorktreeSorcarAgent]:
+    ) -> tuple[dict[str, Any], ChatSorcarAgent]:
         """Register a tab state whose agent.run is a no-op that
         simulates a clean agent invocation creating a single new file."""
         called: dict[str, Any] = {"called": False, "kwargs": None}
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         state = _register_tab_state(tab_id, agent=agent)
         state.stop_event = threading.Event()
         state.user_answer_queue = queue.Queue()
@@ -301,7 +282,7 @@ class TestNonGitRunTask(_NonGitHarness):
         agent.run = fake_run  # type: ignore[assignment]
         return called, agent
 
-    def test_run_task_non_worktree(self) -> None:
+    def test_run_task(self) -> None:
         from kiss.core import config as config_module
         keys = config_module.DEFAULT_CONFIG
         saved = keys.ANTHROPIC_API_KEY
@@ -315,7 +296,6 @@ class TestNonGitRunTask(_NonGitHarness):
                 "prompt": "create a file",
                 "tabId": tab_id,
                 "workDir": self.tmpdir,
-                "useWorktree": False,
             })
 
             assert called["called"], "agent.run() must be called"
@@ -331,36 +311,6 @@ class TestNonGitRunTask(_NonGitHarness):
             assert Path(self.tmpdir, "agent_output.txt").is_file()
         finally:
             keys.ANTHROPIC_API_KEY = saved
-
-    def test_run_task_with_use_worktree_falls_back(self) -> None:
-        """In a non-git dir, useWorktree=True must fall back to direct
-        execution (per WorktreeSorcarAgent.run) and complete cleanly
-        with no merge_started event and no errors."""
-        from kiss.core import config as config_module
-        keys = config_module.DEFAULT_CONFIG
-        saved = keys.ANTHROPIC_API_KEY
-        try:
-            keys.ANTHROPIC_API_KEY = "test-key"
-            tab_id = "t-wt-fallback"
-            called, agent = self._patch_agent_run(tab_id)
-
-            self.server._run_task({
-                "type": "run",
-                "prompt": "do work",
-                "tabId": tab_id,
-                "workDir": self.tmpdir,
-                "useWorktree": True,
-            })
-
-            assert called["called"]
-            errors = self._events_of("error")
-            assert not errors, f"unexpected error events: {errors}"
-            assert "merge_started" not in self._types()
-            assert agent._wt_branch is None
-            assert agent._wt_pending is False
-        finally:
-            keys.ANTHROPIC_API_KEY = saved
-
 
 if __name__ == "__main__":
     unittest.main()

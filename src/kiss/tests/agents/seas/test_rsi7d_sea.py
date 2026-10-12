@@ -10,7 +10,7 @@ SQLite history (``KISS_HOME`` is a temporary directory, see
 under ``tmp_path`` (``src/kiss/agents/seas`` holding demo SEAs with a
 plain, an f-string and no prompt constant) that ``_checkout_seas_dir`` resolves
 through the working directory.  The agent-level test drives a real
-:class:`WorktreeSorcarAgent` ReAct loop against the scripted local
+:class:`ChatSorcarAgent` ReAct loop against the scripted local
 chat-completions server so a patch really flows from the model's tool
 call into the SEA file.
 """
@@ -33,6 +33,7 @@ import yaml
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -41,7 +42,6 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.sea_settings import resolve_settings
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.tool_verdict import ALLOW
 from kiss.core.utils import rmtree_force
@@ -53,7 +53,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
 )
 from kiss.tests.conftest import is_root, posix_only
-from kiss.tests.server.parallel_agent_harness import init_repo, run_git
+from kiss.tests.server.conftest import init_repo, run_git
 
 _SEA_PATH = Path(sea.__file__).resolve()
 _SEAS_DIR = _SEA_PATH.parents[1]
@@ -136,8 +136,12 @@ def _prompt_of(path: Path, system_prompt: str = "") -> str:
 
 
 @pytest.fixture
-def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A fake KISS checkout in *tmp_path* that ``_checkout_seas_dir`` resolves through the cwd."""
+def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: None) -> Path:
+    """A fake KISS checkout in *tmp_path* that ``_checkout_seas_dir`` resolves through the cwd.
+
+    The mining tools list every run of the shared session history, so
+    the test starts with none (``empty_history``).
+    """
     seas = tmp_path / "src" / "kiss" / "agents" / "seas"
     for name in ("rsi7d", "autorouter", "demo", "fdemo", "tdemo", "noprompt"):
         (seas / name).mkdir(parents=True)
@@ -967,7 +971,7 @@ def _run_rsi7d(task: str, script: list[bytes], work_dir: Path) -> tuple[Any, lis
     daemon registers a run before starting it (``commands.py``), which
     is how the SEA's tools find their task text through ``current_agent``.
     """
-    agent = WorktreeSorcarAgent("rsi7d-sea-test")
+    agent = ChatSorcarAgent("rsi7d-sea-test")
     state = agent_state.AgentState(
         "rsi7d-sea-test", agent=agent, task_thread=threading.current_thread(), is_task_active=True
     )
@@ -980,14 +984,13 @@ def _run_rsi7d(task: str, script: list[bytes], work_dir: Path) -> tuple[Any, lis
 
 
 def _run_registered(
-    agent: WorktreeSorcarAgent, task: str, script: list[bytes], work_dir: Path
+    agent: ChatSorcarAgent, task: str, script: list[bytes], work_dir: Path
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run *agent* on *task* against the scripted model; return the raw result and requests."""
     run = sea_commands.evaluate_sea([sea_commands.load_sea(_SEA_PATH)], task)
     with serve(script) as (url, requests):
         result = agent.run(
             prompt_template=run.prompt,
-            use_worktree=False,
             model_name=MODEL,
             work_dir=str(work_dir),
             max_steps=8,

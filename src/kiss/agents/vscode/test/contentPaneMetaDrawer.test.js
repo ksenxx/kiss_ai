@@ -580,11 +580,14 @@ test('the stylesheets carry the layout, the pulse and the machine strip', () => 
   );
   assert.ok(/position:\s*fixed/.test(show));
   assert.ok(/right:\s*var\(--meta-w, var\(--meta-panel-w\)\)/.test(show));
-  // The machine strip: centred, bold, green, gone while empty.
+  // The chat header strip ("machine: directory"): centred, bold,
+  // green; the machine drop-down is gone while empty.
+  const header = rule(main, '#chat-header');
+  assert.ok(/justify-content:\s*center/.test(header));
+  assert.ok(/font-weight:\s*700/.test(header));
+  assert.ok(/color:\s*var\(--green\)/.test(header));
   const machine = rule(main, '#chat-machine');
   assert.ok(/text-align:\s*center/.test(machine));
-  assert.ok(/font-weight:\s*700/.test(machine));
-  assert.ok(/color:\s*var\(--green\)/.test(machine));
   assert.ok(/display:\s*none/.test(rule(main, '#chat-machine:empty')));
   // The pulse: an active panel's header text, tool call and Thoughts
   // alike, breathes; it holds still under prefers-reduced-motion.

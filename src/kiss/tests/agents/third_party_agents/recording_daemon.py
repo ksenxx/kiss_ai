@@ -62,18 +62,16 @@ class RecordingDaemon:
         self,
         *,
         text: str = "ok",
-        success: bool = True,
         cost: float = 0.0,
         tokens: int = 0,
         steps: int = 0,
         chat_id: str = "",
-        task_id: str = "task-recorded-1",
     ) -> None:
         """Start serving in a thread of its own; return once the endpoint file exists."""
         self.result = {
             "type": "result",
-            "taskId": task_id,
-            "success": success,
+            "taskId": "task-recorded-1",
+            "success": True,
             "summary": text,
             "text": text,
             "cost": f"{cost:.6f}",

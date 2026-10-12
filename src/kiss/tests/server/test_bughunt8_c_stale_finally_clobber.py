@@ -27,7 +27,7 @@ drives that scenario with real threads and the real ``VSCodeServer``
 task pipeline: the first worker blocks inside its agent ``run``, a
 fresh state for the same tab id is registered and armed for a new
 task, then the stale worker is allowed to finish.  No mocks or patched
-methods — the agent is a real ``WorktreeSorcarAgent`` subclass whose
+methods — the agent is a real ``ChatSorcarAgent`` subclass whose
 ``run`` blocks on a real event (the established pattern of the earlier
 bug-hunt tests).
 """
@@ -36,54 +36,20 @@ from __future__ import annotations
 
 import queue
 import shutil
-import subprocess
 import tempfile
 import threading
 import unittest
-from pathlib import Path
 from typing import Any
 
-import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import init_repo, redirect_persistence, restore_persistence
 
 
-def _redirect_db(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _init_git_repo(tmpdir: str) -> None:
-    subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "t@t"], cwd=tmpdir, capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "T"], cwd=tmpdir, capture_output=True,
-    )
-    Path(tmpdir, ".gitkeep").touch()
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True,
-    )
-
-
-class _BlockingAgent(WorktreeSorcarAgent):
+class _BlockingAgent(ChatSorcarAgent):
     """Real agent whose ``run`` blocks until released, then cancels."""
 
     def __init__(self) -> None:
@@ -108,8 +74,8 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
         self.model = models[0]
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bh8c-stale-")
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
         self.server = VSCodeServer()
         self.events: list[dict[str, Any]] = []
         self._events_lock = threading.Lock()
@@ -122,7 +88,7 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_stale_finally_leaves_fresh_tab_state_intact(self) -> None:
@@ -158,7 +124,7 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
         # whole cleanup ahead of it), the frontend closes and reopens
         # the tab: a FRESH state for the SAME tab id is registered and
         # armed for a new task.
-        agent2 = WorktreeSorcarAgent("Bughunt8 fresh agent")
+        agent2 = ChatSorcarAgent("Bughunt8 fresh agent")
         queue2: queue.Queue[str] = queue.Queue(maxsize=1)
         stop2 = threading.Event()
         thread2 = threading.Thread(

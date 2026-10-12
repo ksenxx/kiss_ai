@@ -7,11 +7,9 @@ re-check ownership under the lock before claiming ``is_merging``.
 
 The empty-branch discard in ``_present_pending_worktree`` was the only
 ``is_merging`` claim site with no ``state.busy()`` / pending re-check:
-it saved, overwrote and blindly restored the flag guarded solely by
-``_any_non_wt_running(wt_dir)`` — which sees only NON-worktree tasks.
-Two consequences in the unlocked window between
-``_finalize_pending_worktree`` returning ``PRESENT`` and the discard's
-locked section:
+it saved, overwrote and blindly restored the flag.  The presenter's
+changed-files probe runs outside the lock, so two consequences follow
+in the window between that probe and the discard's locked section:
 
 1. **Own-task variant** — a run submitted on the tab in that window
    sets up a fresh (still empty) worktree; the presenter's probe finds
@@ -19,18 +17,19 @@ locked section:
    out from under the running task.
 
 2. **Foreign-holder variant** — another thread legitimately holding
-   the tab's ``is_merging`` (a resume's ``PRESENT_CLAIMED``
-   presentation) has its live flag captured as ``prev_merging=True``
-   and blindly restored after the real owner cleared it, wedging the
-   tab (every later run / merge / discard refused) until restart.
+   the tab's ``is_merging`` (a session resume's
+   ``_emit_pending_worktree`` presentation) has its live flag captured
+   as ``prev_merging=True`` and blindly restored after the real owner
+   cleared it, wedging the tab (every later run / merge / discard
+   refused) until restart.
 
 The fix re-checks, in the same critical section that takes the claim:
 the state and agent are still the ones read outside the lock, the
 worktree is still pending, and the tab is idle or busy solely with the
-CURRENT thread's own claim (the ``PRESENT_CLAIMED`` caller).
+CURRENT thread's own claim (the ``_emit_pending_worktree`` caller).
 
 Everything here is real: a real git repository, a real linked worktree
-created by ``WorktreeSorcarAgent``, real ``run`` / ``worktreeAction``
+created by ``ChatSorcarAgent``, real ``run`` / ``worktreeAction``
 commands dispatched through ``VSCodeServer._handle_command``, real
 threads.  Only the LLM call is replaced by a deterministic stub
 function (no mocks), and the racing threads are parked at natural
@@ -41,7 +40,6 @@ technique as ``test_review2_stale_run_undo._Base``.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -50,35 +48,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as _persistence
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.tests.server._memory_printer import MemoryPrinter
-
-
-def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
-    )
-
-
-def _init_repo(repo: str) -> None:
-    _run_git(repo, "init", "-q")
-    _run_git(repo, "config", "user.email", "test@example.com")
-    _run_git(repo, "config", "user.name", "Test User")
-    _run_git(repo, "config", "commit.gpgsign", "false")
-    Path(repo, "seed.txt").write_text("seed\n")
-    _run_git(repo, "add", "seed.txt")
-    _run_git(repo, "commit", "-q", "-m", "seed")
-
-
-def _kiss_wt_branches(repo: str) -> list[str]:
-    out = _run_git(repo, "branch", "--list", "kiss/wt-*").stdout
-    return [
-        line.strip().lstrip("*+ ").strip()
-        for line in out.splitlines()
-        if line.strip()
-    ]
+from kiss.tests.server.conftest import init_repo, kiss_wt_branches
 
 
 class TestPresentDiscardOwnership(unittest.TestCase):
@@ -88,7 +63,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-conc2026-mc1-")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
-        _init_repo(self.repo)
+        init_repo(self.repo)
 
         self._saved_db = (
             _persistence._DB_PATH,
@@ -129,12 +104,16 @@ class TestPresentDiscardOwnership(unittest.TestCase):
     # -- helpers ---------------------------------------------------
 
     def _stub_llm(self, filename: str | None) -> None:
-        """Deterministic agent: write *filename* (or nothing), succeed."""
+        """Deterministic agent: isolate in a worktree, write *filename*
+        (or nothing) there, succeed without ``commit_and_merge``."""
 
         def stub_run(_agent: object, **kwargs: object) -> str:
-            work_dir = kwargs.get("work_dir")
-            if filename and isinstance(work_dir, str) and work_dir:
-                Path(work_dir, filename).write_text("agent output\n")
+            agent = cast(ChatSorcarAgent, _agent)
+            agent._enter_work_dir(str(kwargs.get("work_dir") or ""))
+            message = agent.create_worktree()
+            assert agent._wt_pending, message
+            if filename:
+                Path(agent.work_dir, filename).write_text("agent output\n")
             return "success: true\nsummary: stub\n"
 
         self._parent_class.run = stub_run
@@ -154,8 +133,6 @@ class TestPresentDiscardOwnership(unittest.TestCase):
             "prompt": "task",
             "workDir": self.repo,
             "tabId": tab_id,
-            "useWorktree": True,
-            "autoCommit": False,
             "model": "",
         })
 
@@ -168,25 +145,30 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         raise AssertionError(f"task on tab {tab_id!r} never finished")
 
     def _make_pending_empty_worktree(self, tab_id: str) -> tuple[Path, str]:
-        """Run a real worktree task that changes nothing.
+        """Run a real worktree task, then leave the tab an empty pending worktree.
 
-        With ``autoCommit=False`` the post-task path presents the
-        (empty) worktree with ``discard_if_empty=False``, so the tab
-        is left holding a pending, empty ``kiss/wt-*`` worktree —
-        exactly the state a later resume's presentation probes.
+        The post-task path discards an empty worktree, so the state a
+        later resume's presentation probes (a pending, empty
+        ``kiss/wt-*`` worktree — what a daemon that died mid-task
+        leaves behind) is made on the idle tab's agent directly.
         """
         self._stub_llm(None)
         before = len(self._status_ends(tab_id))
         self._dispatch_run(tab_id)
         self._wait_task_end(tab_id, before)
         state = agent_state.find_by_tab(tab_id)
-        assert state is not None and state.agent is not None
-        assert state.agent._wt_pending, "run must leave a pending worktree"
+        assert state is not None
+        agent = state.agent or ChatSorcarAgent("Sorcar VS Code")
+        assert not agent._wt_pending, "the empty worktree is discarded post-task"
+        agent._enter_work_dir(self.repo)
+        assert agent.create_worktree().startswith("Created worktree")
+        with agent_state.STATE_LOCK:
+            state.agent = agent
         wt_dir = state.agent._wt_dir
         branch = state.agent._wt_branch
         assert wt_dir is not None and branch is not None
         self.assertTrue(wt_dir.exists())
-        self.assertIn(branch, _kiss_wt_branches(self.repo))
+        self.assertIn(branch, kiss_wt_branches(self.repo))
         return wt_dir, str(branch)
 
     # -- tests -----------------------------------------------------
@@ -194,37 +176,48 @@ class TestPresentDiscardOwnership(unittest.TestCase):
     def test_present_refuses_to_discard_a_running_tasks_fresh_worktree(
         self,
     ) -> None:
-        """Own-task variant: a resume that observed "idle, nothing
-        pending" (``PRESENT``) and was descheduled must NOT discard the
-        fresh, still-empty worktree of a task that started on the tab
-        in the meantime."""
+        """Own-task variant: a presenter that probed the tab's pending
+        empty worktree and was descheduled must NOT discard the fresh,
+        still-empty worktree of a task that started on the tab in the
+        meantime (the new run retires the old pending worktree and the
+        agent creates a new one with ``create_worktree``)."""
         tab_id = "tab-mc1-own"
+        old_wt_dir, _old_branch = self._make_pending_empty_worktree(tab_id)
 
-        # Park thread A between _finalize_pending_worktree (PRESENT)
-        # and _present_pending_worktree — the production race window.
-        orig_finalize = self.server._finalize_pending_worktree
+        # Park thread A inside its presentation, right after the
+        # unlocked changed-files probe — the production race window.
+        orig_probe = self.server._get_worktree_changed_files
+        a_thread_box: list[threading.Thread] = []
         a_parked = threading.Event()
         a_release = threading.Event()
         parked_once = threading.Event()
 
-        def parking_finalize(t: str) -> Any:
-            outcome = orig_finalize(t)
-            if not parked_once.is_set():
+        def parking_probe(t: str = "") -> list[str]:
+            result = orig_probe(t)
+            if (
+                a_thread_box
+                and threading.current_thread() is a_thread_box[0]
+                and not parked_once.is_set()
+            ):
                 parked_once.set()
                 a_parked.set()
                 a_release.wait(timeout=60)
-            return outcome
+            return result
 
-        self.server._finalize_pending_worktree = (  # type: ignore[method-assign]
-            parking_finalize  # type: ignore[assignment]
+        self.server._get_worktree_changed_files = (  # type: ignore[method-assign]
+            parking_probe  # type: ignore[assignment]
         )
 
-        # The task's LLM stub parks so the worktree stays live (and
-        # empty) while thread A resumes.
+        # The task's LLM stub isolates itself in a fresh worktree and
+        # parks so that worktree stays live (and empty) while A resumes.
         stub_started = threading.Event()
         stub_release = threading.Event()
 
         def parked_stub(_agent: object, **kwargs: object) -> str:
+            agent = cast(ChatSorcarAgent, _agent)
+            agent._enter_work_dir(str(kwargs.get("work_dir") or ""))
+            message = agent.create_worktree()
+            assert agent._wt_pending, message
             stub_started.set()
             stub_release.wait(timeout=60)
             return "success: true\nsummary: stub\n"
@@ -233,22 +226,24 @@ class TestPresentDiscardOwnership(unittest.TestCase):
 
         a_error: list[BaseException] = []
 
-        def emit() -> None:
+        def present() -> None:
             try:
-                self.server._emit_pending_worktree(tab_id)
+                self.server._present_pending_worktree(tab_id)
             except BaseException as exc:  # pragma: no cover — must not raise
                 a_error.append(exc)
 
-        thread_a = threading.Thread(target=emit, daemon=True)
+        thread_a = threading.Thread(target=present, daemon=True)
+        a_thread_box.append(thread_a)
         try:
             thread_a.start()
-            self.assertTrue(a_parked.wait(timeout=30), "A never finalized")
+            self.assertTrue(a_parked.wait(timeout=30), "A never probed")
 
-            # A new run starts on the tab inside A's window and sets
-            # up a fresh worktree.
+            # A new run starts on the tab inside A's window: it retires
+            # the old pending worktree and sets up a fresh one.
             self._dispatch_run(tab_id)
             deadline = time.time() + 30
             wt_dir: Path | None = None
+            fresh_branch: str | None = None
             while time.time() < deadline:
                 state = agent_state.find_by_tab(tab_id)
                 if (
@@ -258,17 +253,20 @@ class TestPresentDiscardOwnership(unittest.TestCase):
                     and stub_started.is_set()
                 ):
                     wt_dir = state.agent._wt_dir
+                    fresh_branch = state.agent._wt_branch
                     break
                 time.sleep(0.005)
             self.assertIsNotNone(wt_dir, "run never set up its worktree")
             assert wt_dir is not None
+            self.assertNotEqual(wt_dir, old_wt_dir)
+            self.assertFalse(old_wt_dir.exists(), "old worktree not retired")
             self.assertTrue(wt_dir.exists())
-            branches = _kiss_wt_branches(self.repo)
-            self.assertEqual(len(branches), 1)
+            branches = kiss_wt_branches(self.repo)
+            self.assertIn(fresh_branch, branches)
 
-            # A resumes: its presentation probes the fresh worktree,
-            # finds it empty — and must now refuse the discard because
-            # the tab is busy with a thread that is not A.
+            # A resumes: its re-probe finds the fresh worktree empty —
+            # and must now refuse the discard because the tab is busy
+            # with a thread that is not A.
             a_release.set()
             thread_a.join(timeout=30)
             self.assertFalse(thread_a.is_alive(), "A never finished")
@@ -278,7 +276,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
                 wt_dir.exists(),
                 "presentation discarded the running task's worktree",
             )
-            self.assertEqual(_kiss_wt_branches(self.repo), branches)
+            self.assertEqual(kiss_wt_branches(self.repo), branches)
             state = agent_state.find_by_tab(tab_id)
             assert state is not None
             self.assertFalse(
@@ -289,26 +287,27 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         finally:
             a_release.set()
             stub_release.set()
-            self.server._finalize_pending_worktree = (  # type: ignore[method-assign]
-                orig_finalize
+            self.server._get_worktree_changed_files = (  # type: ignore[method-assign]
+                orig_probe
             )
 
         # The parked task finishes normally afterwards.
-        self._wait_task_end(tab_id, before=0)
+        self._wait_task_end(tab_id, before=1)
 
     def test_present_refuses_while_a_foreign_thread_holds_the_claim(
         self,
     ) -> None:
         """Foreign-holder variant: while thread B legitimately holds
-        the tab's ``is_merging`` (``PRESENT_CLAIMED`` presentation), a
-        concurrent presenter must refuse instead of capturing B's live
-        flag and blindly restoring it after B cleared it."""
+        the tab's ``is_merging`` (a resume's ``_emit_pending_worktree``
+        presentation), a concurrent presenter must refuse instead of
+        capturing B's live flag and blindly restoring it after B cleared
+        it."""
         tab_id = "tab-mc1-foreign"
         wt_dir, branch = self._make_pending_empty_worktree(tab_id)
 
         # Park thread B inside its presentation, right after the
-        # changed-files probe, while it holds the PRESENT_CLAIMED
-        # is_merging claim taken by _finalize_pending_worktree.
+        # changed-files probe, while it holds the is_merging claim
+        # taken by _emit_pending_worktree.
         orig_probe = self.server._get_worktree_changed_files
         b_thread_box: list[threading.Thread] = []
         b_parked = threading.Event()
@@ -350,15 +349,15 @@ class TestPresentDiscardOwnership(unittest.TestCase):
             self.assertTrue(state.is_merging)
             self.assertIs(state.merge_thread, thread_b)
 
-            # A concurrent presenter (a second resume whose finalize
-            # saw PRESENT an instant before B claimed) must refuse.
+            # A concurrent presenter (a second resume that saw the tab
+            # idle an instant before B claimed) must refuse.
             self.server._present_pending_worktree(tab_id)
 
             self.assertTrue(
                 wt_dir.exists(),
                 "concurrent presenter discarded the claimed worktree",
             )
-            self.assertIn(branch, _kiss_wt_branches(self.repo))
+            self.assertIn(branch, kiss_wt_branches(self.repo))
             self.assertTrue(
                 state.is_merging,
                 "concurrent presenter clobbered the owner's claim",
@@ -383,7 +382,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
             )
 
         self.assertFalse(wt_dir.exists(), "owner's own discard never ran")
-        self.assertNotIn(branch, _kiss_wt_branches(self.repo))
+        self.assertNotIn(branch, kiss_wt_branches(self.repo))
         state = agent_state.find_by_tab(tab_id)
         assert state is not None
         self.assertFalse(
@@ -488,11 +487,13 @@ class TestPresentDiscardOwnership(unittest.TestCase):
         allow_write = threading.Event()
 
         def late_writer(_agent: object, **kwargs: object) -> str:
-            work_dir = kwargs.get("work_dir")
-            assert isinstance(work_dir, str) and work_dir
+            agent = cast(ChatSorcarAgent, _agent)
+            agent._enter_work_dir(str(kwargs.get("work_dir") or ""))
+            message = agent.create_worktree()
+            assert agent._wt_pending, message
             stub_started.set()
             assert allow_write.wait(30)
-            Path(work_dir, "late-output.txt").write_text("must survive\n")
+            Path(agent.work_dir, "late-output.txt").write_text("must survive\n")
             return "success: true\nsummary: late writer\n"
 
         self._parent_class.run = late_writer
@@ -580,7 +581,7 @@ class TestPresentDiscardOwnership(unittest.TestCase):
                 "stale empty probe discarded the finished task's worktree",
             )
             self.assertTrue(Path(wt_dir, "late-output.txt").is_file())
-            self.assertIn(branch, _kiss_wt_branches(self.repo))
+            self.assertIn(branch, kiss_wt_branches(self.repo))
             # The presenter re-probed under its claim and presented
             # the Merge/Discard buttons for the late output instead.
             done_events = [
@@ -608,14 +609,14 @@ class TestPresentDiscardOwnership(unittest.TestCase):
     def test_idle_empty_pending_worktree_is_still_auto_discarded(self) -> None:
         """The ownership re-check must not break the legitimate path:
         an idle tab's empty pending worktree is auto-discarded by the
-        PRESENT_CLAIMED presentation on resume."""
+        ``_emit_pending_worktree`` presentation on resume."""
         tab_id = "tab-mc1-idle"
         wt_dir, branch = self._make_pending_empty_worktree(tab_id)
 
         self.server._emit_pending_worktree(tab_id)
 
         self.assertFalse(wt_dir.exists(), "empty branch was not discarded")
-        self.assertNotIn(branch, _kiss_wt_branches(self.repo))
+        self.assertNotIn(branch, kiss_wt_branches(self.repo))
         state = agent_state.find_by_tab(tab_id)
         assert state is not None
         self.assertFalse(state.is_merging)

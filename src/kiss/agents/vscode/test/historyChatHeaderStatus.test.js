@@ -59,17 +59,17 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
+/** Let main.js's end-of-tick history refetch coalescing settle. */
+function tick() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
 function openSidebar(win) {
   win.document.getElementById('sidebar').classList.add('open');
 }
 
-function uncheckWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function makeRow(overrides) {
@@ -180,7 +180,7 @@ function assertMirrors(win, chatId, taskId, where) {
 function testHeaderShowsLastTaskIcon() {
   const {win, posted} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   // Newest first, as the daemon sends them.  Each chat's newest task
   // decides its header's icon regardless of its older tasks.
   sendHistory(win, posted, [
@@ -227,16 +227,18 @@ function testHeaderShowsLastTaskIcon() {
   console.log('  ok - the chat header shows its last task\'s icon');
 }
 
-function testHeaderFollowsTaskStatus() {
+async function testHeaderFollowsTaskStatus() {
   const {win, posted} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   sendHistory(win, posted, [
     makeRow({id: 'A', task_id: 1, is_running: true, startTs: 1_700_000_900_000}),
   ]);
   assertMirrors(win, 'A', 1, 'while running');
 
   // The task asks a question: the header shows the "?" too.
+  // Every nudge below waits a tick first: a refresh in the same tick as
+  // the previous one folds into its end-of-tick refetch.
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, [
@@ -251,6 +253,7 @@ function testHeaderFollowsTaskStatus() {
   assertMirrors(win, 'A', 1, 'while asking');
 
   // Answered and finished: the just-completed tick, on both.
+  await tick();
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, [
@@ -261,6 +264,7 @@ function testHeaderFollowsTaskStatus() {
 
   // A newer task launched in the same chat fails: the header follows
   // the new last task, not the completed older one.
+  await tick();
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, [
@@ -276,7 +280,7 @@ function testHeaderFollowsTaskStatus() {
 function testNewestLaunchWinsAcrossPagesAndOrder() {
   const {win, posted} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   // A full first page (50 rows) whose chat A's newest task is running.
   const page = [
     makeRow({id: 'A', task_id: 1, is_running: true, startTs: 1_700_000_900_000}),
@@ -335,7 +339,7 @@ function testNewestLaunchWinsAcrossPagesAndOrder() {
 function testLegacyFlatViewHasNoHeaders() {
   const {win, posted} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   win.document.getElementById('history-view-toggle').click();
   sendHistory(win, posted, [
     makeRow({id: 'A', task_id: 1, is_running: true}),
@@ -378,7 +382,7 @@ function chevron(win, chatId) {
 function testChevronFoldsAndHeaderOpensLastTask() {
   const {win, posted} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   const sidebar = win.document.getElementById('sidebar');
   // Settled chats: their panels start collapsed.  Chat A's last task
   // (newest launch) is task 2, listed after an older row to prove the
@@ -485,7 +489,7 @@ function testChevronFoldsAndHeaderOpensLastTask() {
 function testHeaderClickInEditorTabsModeAsksHost() {
   const {win, posted} = makeWebview(' class="editor-tab-mode history-panel-mode"');
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   sendHistory(win, posted, [
     makeRow({id: 'A', task_id: 1, has_events: true, startTs: 1_700_000_900_000, endTs: 1}),
     makeRow({id: 'A', task_id: 2, has_events: true, startTs: 1_700_000_800_000, endTs: 1}),
@@ -545,7 +549,7 @@ function testHeaderClickInEditorTabsModeAsksHost() {
 function testEventlessLastTaskResumesByChatId() {
   const {win, posted} = makeWebview();
   openSidebar(win);
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   sendHistory(win, posted, [
     makeRow({id: 'E', task_id: 5, has_events: false, startTs: 1_700_000_900_000, endTs: 1}),
   ]);
@@ -663,9 +667,9 @@ function testSidebarOpenFromHistoryRelay() {
   console.log('  ok - the sidebar chat view switches to or resumes a relayed chat');
 }
 
-try {
+async function main() {
   testHeaderShowsLastTaskIcon();
-  testHeaderFollowsTaskStatus();
+  await testHeaderFollowsTaskStatus();
   testNewestLaunchWinsAcrossPagesAndOrder();
   testLegacyFlatViewHasNoHeaders();
   testChevronFoldsAndHeaderOpensLastTask();
@@ -673,7 +677,9 @@ try {
   testSidebarOpenFromHistoryRelay();
   testEventlessLastTaskResumesByChatId();
   console.log('\n8 passed, 0 failed');
-} catch (e) {
+}
+
+main().catch(e => {
   console.error(e);
   process.exit(1);
-}
+});

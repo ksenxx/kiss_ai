@@ -226,7 +226,7 @@ class Sea(BaseSea):
             if "PARENT" not in prompt:
                 return
             child_results.append(sorcar.run(
-                "CHILD", work_dir=self.repo, use_worktree=False, auto_commit=False,
+                "CHILD", work_dir=self.repo,
                 sea_path=str(child), tool_profile=" none ",
                 parent_task_id=task_id, inherit_tools=True,
                 endpoint_file=self.endpoint_file, timeout=60,
@@ -234,7 +234,7 @@ class Sea(BaseSea):
 
         self._record_runs(runs, dispatch_child)
         result = sorcar.run(
-            "PARENT", work_dir=self.repo, use_worktree=False, auto_commit=False,
+            "PARENT", work_dir=self.repo,
             sea_path=str(parent),
             endpoint_file=self.endpoint_file, timeout=120,
         )
@@ -265,7 +265,7 @@ class Sea(ChannelSea):
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)
         result = sorcar.run(
-            "/chan say hi", work_dir=self.repo, use_worktree=False, auto_commit=False,
+            "/chan say hi", work_dir=self.repo,
             endpoint_file=self.endpoint_file, timeout=60,
         )
         assert result.success is True, result
@@ -291,7 +291,7 @@ class Sea(BaseSea):
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)
         result = sorcar.run(
-            "/plain do it", work_dir=self.repo, use_worktree=False, auto_commit=False,
+            "/plain do it", work_dir=self.repo,
             endpoint_file=self.endpoint_file, timeout=60,
         )
         assert result.success is True, result
@@ -312,7 +312,7 @@ class Sea(BaseSea):
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)
         result = sorcar.run(
-            "/plain do it", work_dir=self.repo, use_worktree=False, auto_commit=False,
+            "/plain do it", work_dir=self.repo,
             endpoint_file=self.endpoint_file, timeout=60,
         )
         assert result.success is True, result

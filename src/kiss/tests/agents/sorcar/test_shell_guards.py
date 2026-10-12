@@ -35,6 +35,7 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.tests.agents.sorcar.docker_test_containers import (
     IMAGE,
     image_container_ids,
+    is_docker_available,
     remove_new_image_containers,
 )
 
@@ -218,14 +219,6 @@ def test_coding_sea_shares_the_guards() -> None:
     assert shell_guards.destructive_pattern("/testbed/").search("rm -rf /testbed")
 
 
-def _docker_available() -> bool:
-    try:
-        docker.from_env().ping()
-        return True
-    except Exception:
-        return False
-
-
 @pytest.fixture
 def cleanup() -> Iterator[set[str]]:
     """Snapshot this process's containers; force-remove the new ones afterwards."""
@@ -238,7 +231,7 @@ def cleanup() -> Iterator[set[str]]:
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not _docker_available(), reason="Docker daemon is not running")
+@pytest.mark.skipif(not is_docker_available(), reason="Docker daemon is not running")
 def test_docker_bash_applies_the_guards(cleanup: set[str]) -> None:
     """Docker ``Bash`` and ``run_commands_parallel`` refuse destructive commands
     against the container work dir and keep a build alive past a short timeout."""

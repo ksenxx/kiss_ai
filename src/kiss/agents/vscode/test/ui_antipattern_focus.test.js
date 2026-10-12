@@ -99,16 +99,19 @@ async function main() {
     win.close();
   });
 
-  await test("focusInput's retries do not pull the caret out of the workdir box", async () => {
+  await test("focusInput's retries do not pull the caret out of the folder picker's path box", async () => {
     // The daemon sends focusInput on every (re)connect; a user who then
-    // opens the "Working directory" sheet and starts typing its path
-    // must keep the caret (the 100 / 300 ms retries used to take it).
+    // picks "Choose ..." in the chat header's working directory
+    // drop-down and starts typing a path into the folder picker must
+    // keep the caret (the 100 / 300 ms retries used to take it).
     const {win} = h.makeWebview();
     h.send(win, {type: 'focusInput'});
     assert.strictEqual(win.document.activeElement, h.byId(win, 'task-input'), 'precondition');
-    h.click(win, h.byId(win, 'more-btn'));
-    h.click(win, h.byId(win, 'workdir-btn'));
-    const box = h.byId(win, 'workdir-input');
+    const select = h.byId(win, 'chat-workdir');
+    h.byId(win, 'chat-workdir-choose').selected = true;
+    select.dispatchEvent(new win.Event('change', {bubbles: true}));
+    const box = win.document.querySelector('#folder-picker .folder-picker-input');
+    assert.ok(box, 'the folder picker opened');
     box.focus();
     assert.strictEqual(win.document.activeElement, box, 'precondition');
     await h.sleep(350);

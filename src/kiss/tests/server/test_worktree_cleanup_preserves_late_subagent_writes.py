@@ -18,10 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.worktree_sorcar_agent import (
-    WorktreeSorcarAgent,
-    _WorktreeCleanupOutcome,
-)
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.git_worktree import _WorktreeCleanupOutcome
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -66,7 +64,7 @@ def test_cleanup_commits_and_removes_the_worktree(
     """The cleanup commits the worktree's changes and removes it without waiting."""
     server = StandInModelServer(lambda request: finish_response("quick"))
     printer = CapturePrinter()
-    parent = WorktreeSorcarAgent("clean-cleanup")
+    parent = ChatSorcarAgent("clean-cleanup")
     parent.printer = printer
     parent.model_name = STANDIN_MODEL
     parent.model_config = server.model_config

@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import socket
 import sys
 import tempfile
 from collections.abc import Callable
@@ -35,6 +34,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.local_ws import open_local_connection
+from kiss.tests.server.conftest import find_free_port
 
 SUCCEEDING_UPDATER = """
 import sys
@@ -55,13 +55,6 @@ while not pathlib.Path({release!r}).exists():
     time.sleep(0.05)
 sys.exit(0)
 """
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
 
 
 def _has_type(reply_type: str) -> Callable[[dict[str, Any]], bool]:
@@ -88,7 +81,7 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         _generate_self_signed_cert(certfile, keyfile)
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",

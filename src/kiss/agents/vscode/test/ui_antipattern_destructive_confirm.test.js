@@ -4,9 +4,9 @@
 // add your name here
 //
 // End-to-end (jsdom) tests for anti-patterns A10/A14 in media/main.js:
-// destructive one-click actions get a second step.  The worktree and
-// main-tree "Discard" buttons sit last in their bar and swap the row
-// for an inline question (naming the branch / folder) with a Keep
+// destructive one-click actions get a second step.  The worktree
+// bar's "Discard" button sits last and swaps the row for an inline
+// question (naming the branch) with a Keep
 // button; promptlet and custom-model deletes get the same inline
 // Delete / Cancel pair frequent tasks already had; the server-reset
 // confirm focuses Cancel so Enter never restarts the server.  Each test
@@ -95,29 +95,6 @@ async function main() {
       barButtons(win).every(b => b.disabled),
       'the bar is disarmed while the discard is in flight',
     );
-    win.close();
-  });
-
-  await test('main-tree Discard is last and asks before posting', () => {
-    const {win, posted} = h.makeWebview();
-    const tabId = win._testApi.getActiveTabId();
-    h.send(win, {type: 'main_tree_done', tabId, workDir: '/ws/repo'});
-    assert.deepStrictEqual(labels(barButtons(win)), [
-      'Auto commit',
-      'Do nothing',
-      'Discard',
-    ]);
-    h.click(win, barButton(win, 'Discard'));
-    assert.strictEqual(h.ofType(posted, 'mainTreeAction').length, 0);
-    const ask = win.document.querySelector('.wt-bar .wt-confirm');
-    assert.strictEqual(
-      ask.querySelector('.wt-confirm-text').textContent,
-      "Throw away the task's uncommitted changes in /ws/repo?",
-    );
-    h.click(win, ask.querySelector('.wt-confirm-yes'));
-    assert.deepStrictEqual(plain(h.ofType(posted, 'mainTreeAction')), [
-      {type: 'mainTreeAction', action: 'discard', tabId, workDir: '/ws/repo'},
-    ]);
     win.close();
   });
 

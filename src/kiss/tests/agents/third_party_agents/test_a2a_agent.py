@@ -18,6 +18,7 @@ import json
 import socket
 import sys
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -37,10 +38,20 @@ _BACKEND_TOOLS = {"a2a_discover", "a2a_call", "a2a_get_task"}
 
 @pytest.fixture(autouse=True)
 def _clean_a2a_config():
-    """Start and end each test with no persisted A2A config."""
+    """Start and end each test with no persisted A2A config and an empty audit log.
+
+    The audit log is per pytest process, so without this a test's "was
+    audited" assertion would be satisfied by an earlier test's entries.
+    """
     _config.clear()
+    _audit_path().unlink(missing_ok=True)
     yield
     _config.clear()
+
+
+def _audit_path() -> Path:
+    """The JSONL audit log the A2A server appends every inbound request to."""
+    return _config.path.parent / "a2a_audit.jsonl"
 
 
 def _tool_names(tools: list) -> set[str]:
@@ -89,9 +100,7 @@ def _discovered_base(port: int) -> str:
     really-bound port, and every subsequent request uses the card's own
     url rather than out-of-band knowledge of the server address.
     """
-    card = requests.get(
-        f"http://127.0.0.1:{port}/.well-known/agent-card.json", timeout=10
-    ).json()
+    card = requests.get(f"http://127.0.0.1:{port}/.well-known/agent-card.json", timeout=10).json()
     assert card["url"] == f"http://127.0.0.1:{port}/", card["url"]
     return str(card["url"]).rstrip("/")
 
@@ -262,9 +271,7 @@ def test_inbound_outbound_end_to_end(refusing_port: int) -> None:
             backend.send_message("ctx-1", "again", task["id"])
 
         # Audit log has one JSONL line per inbound request.
-        audit = _config.path.parent / "a2a_audit.jsonl"
-        assert audit.exists()
-        entries = [json.loads(line) for line in audit.read_text().splitlines()]
+        entries = _audit_entries()
         assert all({"ts", "method", "contextId", "ok"} <= set(e) for e in entries)
         assert {"method": "message/send", "contextId": "ctx-1", "ok": True} in [
             {k: e[k] for k in ("method", "contextId", "ok")} for e in entries
@@ -364,8 +371,7 @@ def _raw_post(port: int, headers: str, payload: bytes = b"") -> str:
 
 def _audit_entries() -> list[dict]:
     """Read all JSONL entries from the audit log."""
-    audit = _config.path.parent / "a2a_audit.jsonl"
-    return [json.loads(line) for line in audit.read_text().splitlines()]
+    return [json.loads(line) for line in _audit_path().read_text().splitlines()]
 
 
 def test_same_context_pending_tasks_each_get_their_own_reply() -> None:

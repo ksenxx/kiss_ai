@@ -18,8 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import socket
-import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -30,19 +28,7 @@ from websockets.asyncio.client import connect
 import kiss.core.vscode_config as vc
 from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 
 class TestCommandFieldSanitizing(IsolatedAsyncioTestCase):
@@ -62,7 +48,7 @@ class TestCommandFieldSanitizing(IsolatedAsyncioTestCase):
         (self.work_dir / "hello.txt").write_text("hi\n", encoding="utf-8", newline="\n")
         certfile, keyfile = self.tmpdir / "cert.pem", self.tmpdir / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.port = _free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -85,7 +71,7 @@ class TestCommandFieldSanitizing(IsolatedAsyncioTestCase):
         """Authenticate, send *payloads* in order, return the first
         reply of *reply_type*."""
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             while True:

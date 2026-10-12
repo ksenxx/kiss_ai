@@ -40,17 +40,14 @@ final ``chat_id`` recorded on the tab's agent state.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 from typing import Any, cast
 
 import yaml
 
-import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _flush_chat_events,
@@ -60,40 +57,12 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server.server import VSCodeServer
-
-
-def _redirect_db(tmpdir: str) -> tuple:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _init_git_repo(tmpdir: str) -> None:
-    subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "t@t"],
-        cwd=tmpdir, capture_output=True, check=False,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "T"],
-        cwd=tmpdir, capture_output=True, check=False,
-    )
-    Path(tmpdir, ".gitkeep").touch()
-    subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"], cwd=tmpdir, capture_output=True,
-    )
+from kiss.tests.server.conftest import (
+    init_repo,
+    redirect_persistence,
+    restore_persistence,
+    restore_sorcar_parent_run,
+)
 
 
 def _patch_grandparent_run_capture(
@@ -124,10 +93,6 @@ def _patch_grandparent_run_capture(
     return original
 
 
-def _unpatch_grandparent_run(original: Any) -> None:
-    cast(Any, SorcarAgent.__mro__[1]).run = original
-
-
 def _wait_until(predicate: Any, timeout: float = 10.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -148,11 +113,11 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
             self.skipTest("no model API key configured")
         self.model = models[0]
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_db(self.tmpdir)
-        _init_git_repo(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
+        init_repo(self.tmpdir)
 
     def tearDown(self) -> None:
-        _restore_db(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_restored_tab_submit_preserves_prior_chat(self) -> None:
@@ -223,7 +188,7 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
                 "task worker thread never completed"
             )
         finally:
-            _unpatch_grandparent_run(original_run)
+            restore_sorcar_parent_run(original_run)
 
         tab_state = agent_state.find_by_tab(tab_id)
         assert tab_state is not None, (

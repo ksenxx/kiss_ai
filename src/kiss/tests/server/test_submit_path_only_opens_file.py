@@ -30,9 +30,9 @@ from websockets.asyncio.client import connect
 
 from kiss.server import agent_state
 from kiss.tests.local_ws import LocalReader, LocalWriter
+from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_server_liveness_and_run_refusals import (
     _UNAVAILABLE_MODEL,
-    _no_verify_ssl,
     _ServerHarness,
 )
 
@@ -262,7 +262,7 @@ class TestPathOnlySubmitOverWss(_ServerHarness):
         tab_id = "tab-path-only-web"
 
         async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             auth = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))

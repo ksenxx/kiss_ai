@@ -23,7 +23,7 @@ Two independent stripping bugs, one per assigned source file:
   real on-disk name.
 
 No mocks, patches, fakes, or test doubles: real git repositories, a
-real ``WorktreeSorcarAgent`` worktree, real server mixin methods.
+real ``ChatSorcarAgent`` worktree, real server mixin methods.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.merge_flow import _capture_untracked
@@ -110,14 +110,13 @@ class TestWorktreeLeadingSpaceChangedFiles(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
         self.tab_id = "t-wt-space"
-        self.agent = WorktreeSorcarAgent("wt-space-test")
+        self.agent = ChatSorcarAgent("wt-space-test")
         self.state = AgentState(
             "task-t-wt-space",
             agent=self.agent,
             tab_id=self.tab_id,
             server_owned=True,
         )
-        self.state.use_worktree = True
         agent_state.register(self.state)
         wt_work_dir = self.agent._try_setup_worktree(Path(self.repo), self.repo)
         assert wt_work_dir is not None

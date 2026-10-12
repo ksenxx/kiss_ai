@@ -363,7 +363,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         self.assertFalse(self.systemctl_log.exists())
 
     def test_work_dirs_are_relocated_to_the_remote_checkout(self) -> None:
-        """Otherwise the panel's Workspace chip hides the whole import.
+        """Imported tasks must point at a directory that exists here.
 
         Every task remembers where it ran.  The deployment is this
         project at another path, so the recorded paths are re-pointed

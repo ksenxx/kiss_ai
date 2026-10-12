@@ -31,9 +31,7 @@ function makeSession() {
     timestamp: 1700000000,
     work_dir: '/home/user/proj',
     model: 'test-model',
-    is_worktree: true,
     is_parallel: false,
-    auto_commit_mode: true,
   };
 }
 

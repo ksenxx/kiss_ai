@@ -13,12 +13,12 @@
 //     hidden view (a task launched from another surface) does nothing,
 //     and a host without the command (VS Code < 1.102) is tolerated
 //     quietly;
-//   * an editor-tab chat raises a `taskStarted` panel event, and the
+//   * the editor-tab chat raises a `taskStarted` panel event, and the
 //     panel manager brings the Task Info view up in the secondary side
 //     bar with the keyboard focus left in the chat
-//     (kissSorcar.metaViewSecondary.focus {preserveFocus: true}) — for
-//     the ACTIVE panel on screen only, since the view describes that
-//     one; a failing reveal is logged, not thrown — and the panel
+//     (kissSorcar.metaViewSecondary.focus {preserveFocus: true}) — only
+//     while the panel is on screen (a start behind a text editor brings
+//     nothing up); a failing reveal is logged, not thrown — and the panel
 //     manager's onTaskStarted hook fires for that same start, through
 //     which extension.ts has the Task Info view arrange its sections
 //     for the run (postShowForRun: `showForRun` to a ready webview, or
@@ -273,50 +273,41 @@ async function testSidebarViewMaximizesTheBar() {
   console.log('  ok - sidebar chat view: maximizeAuxiliaryBar, missing command tolerated');
 }
 
-async function testEditorPanelRevealsTaskInfoForTheActivePanel() {
+async function testEditorPanelRevealsTaskInfoWhenVisible() {
   const manager = new SorcarPanelManager(makeUri(EXT_ROOT));
   let starts = 0;
   manager.onTaskStarted = () => starts++;
-  manager.openNewChat();
-  const panelA = createdPanels[0];
-  manager.openNewChat();
-  const panelB = createdPanels[1];
-  panelA.active = false;
+  manager.open();
+  assert.strictEqual(createdPanels.length, 1, 'open() creates the one panel');
+  const panel = createdPanels[0];
   await tick();
   takeCommands();
 
-  // The ACTIVE panel's start brings the Task Info view up, focus kept,
+  // The visible panel's start brings the Task Info view up, focus kept,
   // and tells the hook (extension.ts has the view arrange its sections).
-  panelB._recv.fire({type: 'taskStarted'});
+  panel._recv.fire({type: 'taskStarted'});
   await tick();
   assert.deepStrictEqual(
     takeCommands(),
     [{id: 'kissSorcar.metaViewSecondary.focus', args: [{preserveFocus: true}]}],
-    'the active editor-tab chat reveals the Task Info view without taking focus',
+    'the visible editor-tab chat reveals the Task Info view without taking focus',
   );
   assert.strictEqual(starts, 1, 'the start reaches onTaskStarted');
 
-  // A background panel's start (a task launched from another surface)
-  // must not bring the view up for the wrong chat.
-  panelA._recv.fire({type: 'taskStarted'});
-  await tick();
-  assert.deepStrictEqual(takeCommands(), [], 'a background panel reveals nothing');
-  assert.strictEqual(starts, 1, 'a background panel reaches no hook');
-
-  // The last active chat hidden behind a text editor: still the panel
-  // the Task Info view describes, but not on screen.
-  panelB.active = false;
-  panelB.visible = false;
-  panelB._recv.fire({type: 'taskStarted'});
+  // The chat hidden behind a text editor (a task launched from another
+  // surface): nothing comes up over what the user is looking at.
+  panel.active = false;
+  panel.visible = false;
+  panel._recv.fire({type: 'taskStarted'});
   await tick();
   assert.deepStrictEqual(takeCommands(), [], 'a chat behind an editor reveals nothing');
   assert.strictEqual(starts, 1, 'a chat behind an editor reaches no hook');
-  panelB.active = true;
-  panelB.visible = true;
+  panel.active = true;
+  panel.visible = true;
 
   // No hook installed: the reveal alone.
   manager.onTaskStarted = undefined;
-  panelB._recv.fire({type: 'taskStarted'});
+  panel._recv.fire({type: 'taskStarted'});
   await tick();
   assert.strictEqual(takeCommands().length, 1, 'the reveal without a hook');
   manager.onTaskStarted = () => starts++;
@@ -326,7 +317,7 @@ async function testEditorPanelRevealsTaskInfoForTheActivePanel() {
   const origError = console.error;
   console.error = (...args) => errors.push(args);
   commandOutcome = () => Promise.reject(new Error('no such view'));
-  panelB._recv.fire({type: 'taskStarted'});
+  panel._recv.fire({type: 'taskStarted'});
   await tick();
   commandOutcome = () => Promise.resolve();
   console.error = origError;
@@ -338,13 +329,13 @@ async function testEditorPanelRevealsTaskInfoForTheActivePanel() {
   assert.deepStrictEqual(unhandled, [], 'the failure is not unhandled');
 
   manager.dispose();
-  console.log('  ok - editor-tab chat: Task Info view for the active panel only');
+  console.log('  ok - editor-tab chat: Task Info view while the panel is visible only');
 }
 
 async function runTests() {
   await new Promise(r => server.listen(endpointPath, r));
   await testSidebarViewMaximizesTheBar();
-  await testEditorPanelRevealsTaskInfoForTheActivePanel();
+  await testEditorPanelRevealsTaskInfoWhenVisible();
   await testTaskInfoViewShowForRunWaitsForReady();
 }
 

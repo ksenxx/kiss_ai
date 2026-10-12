@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import socket
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -36,28 +35,7 @@ import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as web_server_mod
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
-
-
-def _find_free_port() -> int:
-    """Find an available TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+from kiss.tests.server.conftest import find_free_port, redirect_persistence, restore_persistence
 
 
 class TestServerReset(IsolatedAsyncioTestCase):
@@ -65,7 +43,7 @@ class TestServerReset(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -73,7 +51,7 @@ class TestServerReset(IsolatedAsyncioTestCase):
         _generate_self_signed_cert(certfile, keyfile)
 
         self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -101,7 +79,7 @@ class TestServerReset(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect(
@@ -230,7 +208,7 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -238,7 +216,7 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         _generate_self_signed_cert(certfile, keyfile)
 
         self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.url_file = Path(self.tmpdir) / "remote-url.json"
 
         flag_path = Path(self.tmpdir) / "server-reset-pending.json"
@@ -276,7 +254,7 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect(
@@ -365,7 +343,7 @@ class TestServerResetCompleteSuppressed(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -373,7 +351,7 @@ class TestServerResetCompleteSuppressed(IsolatedAsyncioTestCase):
         _generate_self_signed_cert(certfile, keyfile)
 
         self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self.url_file = Path(self.tmpdir) / "remote-url.json"
 
         self._saved_delay = web_server_mod._SERVER_RESET_COMPLETE_DELAY
@@ -401,7 +379,7 @@ class TestServerResetCompleteSuppressed(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def test_no_flag_means_no_complete_notification(self) -> None:

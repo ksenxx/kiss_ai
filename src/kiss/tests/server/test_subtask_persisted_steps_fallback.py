@@ -30,8 +30,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task, _load_history
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
@@ -64,7 +64,7 @@ class TestPersistedStepsFallback(unittest.TestCase):
         work_dir = str(Path(self.tmpdir) / "plain")
         Path(work_dir).mkdir()
 
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         state = agent_state.AgentState(
             "steps-fallback-state",
             agent=agent,

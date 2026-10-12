@@ -41,20 +41,7 @@ from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer with broadcast capture (no stdout)."""
-    server = VSCodeServer()
-    events: list[dict] = []
-    lock = threading.Lock()
-
-    def capture(event: dict) -> None:
-        with lock:
-            events.append(event)
-
-    server.printer.broadcast = capture  # type: ignore[assignment]
-    return server, events
+from kiss.tests.server.conftest import make_capturing_server
 
 
 class TestCompleteSnapshotClobber(unittest.TestCase):
@@ -62,7 +49,7 @@ class TestCompleteSnapshotClobber(unittest.TestCase):
 
     def test_junk_content_retains_previous_snapshot(self) -> None:
         """A non-string ``activeFileContent`` is 'not supplied', not ''."""
-        server, _events = _make_server()
+        server, _events = make_capturing_server()
         conn_id = "win-a"
         server._handle_command({
             "type": "complete",
@@ -101,7 +88,7 @@ class TestCompleteSnapshotClobber(unittest.TestCase):
 
     def test_genuine_empty_content_is_still_stored(self) -> None:
         """A real empty-string content (empty file) must still be stored."""
-        server, _events = _make_server()
+        server, _events = make_capturing_server()
         conn_id = "win-b"
         server._handle_command({
             "type": "complete",

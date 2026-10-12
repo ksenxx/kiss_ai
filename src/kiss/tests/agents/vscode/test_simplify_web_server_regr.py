@@ -30,10 +30,7 @@ from websockets.http11 import Request
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.server.test_simplify_web_server_regr import (
-    _redirect_persistence,
-    _restore_persistence,
-)
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 # ``_process_request`` refuses non-loopback peers while the remote
 # password is empty, and it fails closed on a missing peer address, so
@@ -47,7 +44,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-simp-live-")
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
@@ -62,7 +59,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

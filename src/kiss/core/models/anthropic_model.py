@@ -330,7 +330,7 @@ def _parse_data_url(url: str) -> tuple[str, str] | None:
     header, _, data = url.partition(",")
     if ";base64" not in header or not data:
         return None
-    media_type = header[len("data:"):].split(";", 1)[0]
+    media_type = header[len("data:") :].split(";", 1)[0]
     return media_type or "application/octet-stream", data
 
 
@@ -425,9 +425,7 @@ def _tool_calls_to_tool_use_blocks(tool_calls: list[Any]) -> list[dict[str, Any]
             input_dict = arguments or {}
         if not isinstance(input_dict, dict):
             input_dict = {}
-        blocks.append(
-            {"type": "tool_use", "id": call_id, "name": name, "input": input_dict}
-        )
+        blocks.append({"type": "tool_use", "id": call_id, "name": name, "input": input_dict})
     return blocks
 
 
@@ -458,9 +456,7 @@ def _attachments_to_blocks(attachments: list[Attachment]) -> list[dict[str, Any]
         elif att.mime_type.startswith("audio/"):
             try:
                 text = transcribe_audio(att.data, att.mime_type)
-                blocks.append(
-                    {"type": "text", "text": f"[Audio transcription]\n{text}"}
-                )
+                blocks.append({"type": "text", "text": f"[Audio transcription]\n{text}"})
             except Exception as exc:
                 logger.warning(
                     "Anthropic does not support %s attachments and "
@@ -588,9 +584,7 @@ class AnthropicModel(Model):
         workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
         inputs = (self.api_key, workspace_id)
         if self.client is None or inputs != self._client_inputs:
-            default_headers = (
-                {"anthropic-workspace-id": workspace_id} if workspace_id else None
-            )
+            default_headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
             self.client = Anthropic(
                 api_key=self.api_key,
                 timeout=httpx2.Timeout(self._stream_stall_timeout, connect=CONNECT_TIMEOUT),
@@ -903,9 +897,7 @@ class AnthropicModel(Model):
             beta_header = existing_headers.get("anthropic-beta", "")
             beta_token = "interleaved-thinking-2025-05-14"
             if beta_token not in beta_header:
-                merged_beta = (
-                    f"{beta_header},{beta_token}" if beta_header else beta_token
-                )
+                merged_beta = f"{beta_header},{beta_token}" if beta_header else beta_token
                 kwargs["extra_headers"] = {
                     **existing_headers,
                     "anthropic-beta": merged_beta,
@@ -1059,8 +1051,7 @@ class AnthropicModel(Model):
             The ``TimeoutError`` for the caller to raise.
         """
         return TimeoutError(
-            f"Anthropic model {self.model_name}: "
-            f"{stall_error(self._stream_stall_timeout)}"
+            f"Anthropic model {self.model_name}: {stall_error(self._stream_stall_timeout)}"
         )
 
     def _raise_on_refusal(self, response: Any) -> None:
@@ -1199,11 +1190,14 @@ class AnthropicModel(Model):
         thinking = kwargs.get("thinking") or {}
         budget = thinking.get("budget_tokens", 0) if thinking.get("type") == "enabled" else 0
         kwargs["max_tokens"] = max(KEEP_ALIVE_MAX_TOKENS, budget + 1)
+        # The ping's own bound replaces a per-request ``timeout`` the
+        # model_config may carry (the SDK accepts that key, so it survives
+        # into ``kwargs``): passed as a second keyword it would raise
+        # TypeError on every ping and the cache would silently go cold.
+        kwargs["timeout"] = KEEP_ALIVE_TIMEOUT_SECONDS
         # No SDK retries: a failed ping is just a cold cache, and the agent
         # thread waits for this request when the tool call ends.
-        return self.client.with_options(max_retries=0).messages.create(
-            **kwargs, timeout=KEEP_ALIVE_TIMEOUT_SECONDS
-        )
+        return self.client.with_options(max_retries=0).messages.create(**kwargs)
 
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
@@ -1256,9 +1250,7 @@ class AnthropicModel(Model):
             cache_write_5m_tokens, cache_write_1h_tokens).
         """
         if hasattr(response, "usage") and response.usage:
-            cache_write_5m, cache_write_1h = cache_creation_tokens(
-                response.usage
-            )
+            cache_write_5m, cache_write_1h = cache_creation_tokens(response.usage)
             return (
                 getattr(response.usage, "input_tokens", 0) or 0,
                 getattr(response.usage, "output_tokens", 0) or 0,

@@ -79,9 +79,7 @@ function baseRow(overrides) {
       is_favorite: false,
       work_dir: WS,
       model: 'gpt-5',
-      is_worktree: true,
       is_parallel: false,
-      auto_commit_mode: true,
       startTs: 1_700_000_000_000,
       endTs: 1_700_000_005_000,
     },
@@ -141,21 +139,16 @@ function rowsByTitle(win) {
   return map;
 }
 
-function disableWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {
     type: 'configData',
     config: {work_dir: ''},
     apiKeys: {},
   });
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function loadHistory(ctx) {
-  disableWorkspaceFilter(ctx.win);
+  sendEmptyWorkDir(ctx.win);
   send(ctx.win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
   return rowsByTitle(ctx.win);
 }
@@ -352,7 +345,7 @@ async function testTaskCopyButtonCopiesTaskId() {
 
 async function testNumericTaskIdCopiesAsString() {
   const ctx = makeWebview();
-  disableWorkspaceFilter(ctx.win);
+  sendEmptyWorkDir(ctx.win);
   send(ctx.win, {
     type: 'history',
     sessions: [

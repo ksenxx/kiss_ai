@@ -38,7 +38,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.core.utils import finish
 from kiss.server import agent_state
@@ -62,7 +62,7 @@ class _CapturePrinter(JsonPrinter):
         super().broadcast(event)
 
 
-class _StopDuringCleanupAgent(WorktreeSorcarAgent):
+class _StopDuringCleanupAgent(ChatSorcarAgent):
     """Agent that finishes at once and presses Stop from inside the cleanup."""
 
     server: VSCodeServer

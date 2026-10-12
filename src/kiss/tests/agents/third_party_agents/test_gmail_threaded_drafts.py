@@ -33,12 +33,10 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from kiss.agents.third_party_agents.gmail.gmail_sea import _SERVICE, GmailChannelBackend
-from kiss.tests.agents.third_party_agents.composio_test_utils import (
-    connect,
-    fake_composio,
-    reset_state,
-)
+from kiss.tests.agents.third_party_agents.composio_test_utils import connect, fake_composio
 from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
+
+pytestmark = pytest.mark.usefixtures("isolated_kiss_home")
 
 _MESSAGES: dict[str, dict[str, Any]] = {
     "m1": {
@@ -171,14 +169,12 @@ def backend(monkeypatch):
     Yields:
         ``(backend, server)``.
     """
-    reset_state(_SERVICE)
     with recording_server(_GmailHandler) as server, fake_composio(monkeypatch) as composio:
         composio.upstream_overrides["https://gmail.googleapis.com"] = server.base_url
         connect(composio, _SERVICE)
         gmail = GmailChannelBackend()
         assert gmail.connect() is True
         yield gmail, server
-    reset_state(_SERVICE)
 
 
 def _draft_mime(server: RecordingServer) -> tuple[str | None, Message, Message]:

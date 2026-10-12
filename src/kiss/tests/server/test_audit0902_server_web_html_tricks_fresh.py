@@ -23,7 +23,6 @@ import asyncio
 import json
 import os
 import re
-import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -31,24 +30,10 @@ from unittest import IsolatedAsyncioTestCase
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 _TRICK_A = "Alpha trick: run the tests first."
 _TRICK_B = "Bravo trick: profile before optimising."
-
-
-def _find_free_port() -> int:
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
 
 
 class _RecordingPrinter:
@@ -63,7 +48,7 @@ class TestServedTricksFollowFileEdits(IsolatedAsyncioTestCase):
     """Edit MY_INJECTION.md while the daemon runs; reload the page."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
         save_config({"remote_password": ""})
         self._saved_env = {
@@ -94,7 +79,7 @@ class TestServedTricksFollowFileEdits(IsolatedAsyncioTestCase):
 
     async def _served_tricks(self) -> list[str]:
         reader, writer = await asyncio.open_connection(
-            "127.0.0.1", self.port, ssl=_no_verify_ssl(),
+            "127.0.0.1", self.port, ssl=no_verify_ssl(),
             server_hostname="localhost",
         )
         writer.write(

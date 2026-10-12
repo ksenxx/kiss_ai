@@ -35,7 +35,6 @@ from __future__ import annotations
 import http.server
 import json
 import os
-import socket
 import subprocess
 import sys
 import tempfile
@@ -48,15 +47,9 @@ from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server._ntfy_emulator import unroutable_base_url
+from kiss.tests.server.conftest import find_free_port
 
 _PINNED_URL = "https://stop-async-pinned.trycloudflare.com"
-
-
-def _find_free_port() -> int:
-    """Return an OS-assigned free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 class _MetricsHandler(http.server.BaseHTTPRequestHandler):
@@ -157,7 +150,7 @@ class TestAdoptedTunnelUrlStableAcrossStopAsync(IsolatedAsyncioTestCase):
         """Build a tunnel-enabled server fully isolated to the temp dir."""
         return RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             work_dir=self._tmp.name,
             use_tunnel=True,
             url_file=self._url_file,
@@ -238,7 +231,7 @@ class TestSpawnedTunnelStopAsyncLeavesNoStaleState(IsolatedAsyncioTestCase):
         save_config({"remote_password": ""})
         self._server = RemoteAccessServer(
             host="127.0.0.1",
-            port=_find_free_port(),
+            port=find_free_port(),
             work_dir=self._tmp.name,
             use_tunnel=False,
             url_file=tmp / "remote-url.json",

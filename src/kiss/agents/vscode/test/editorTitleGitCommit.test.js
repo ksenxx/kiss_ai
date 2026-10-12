@@ -10,7 +10,7 @@
 //    chat tab with its work dir, and the drawer button disables while
 //    the commit is in flight;
 //  - an open settings drawer is closed so the transcript's
-//    autocommit_progress / autocommit_done lines stay visible;
+//    autocommit_done line stays visible;
 //  - a second `gitCommit` while one is in flight is dropped (the
 //    daemon silently discards duplicates, so re-sending would just
 //    look dead);
@@ -79,9 +79,7 @@ function byType(posted, type) {
 const ROOT = 'root-tab-0001';
 
 const {win, posted} = makeWebview(
-  ' class="editor-tab-mode"' +
-    ` data-kiss-tab-id="${ROOT}"` +
-    ' data-kiss-tab-title="My chat"',
+  ' class="editor-tab-mode"' + ` data-kiss-tab-id="${ROOT}"`,
 );
 
 const autocommitBtn = win.document.getElementById('autocommit-btn');
@@ -157,4 +155,8 @@ assert.ok(
 );
 assert.strictEqual(autocommitBtn.disabled, true, 'and disables in flight');
 
+// The last commit is left in flight on purpose, which arms main.js's
+// 120 s autocommit re-arm timer: close the window so that timer does
+// not keep node alive for two minutes after the assertions are done.
+win.close();
 console.log('editorTitleGitCommit: all tests passed');

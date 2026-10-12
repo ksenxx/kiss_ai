@@ -6,7 +6,7 @@
 
 ``JsonPrinter._subscribers`` (task_id -> {tab_id}) drives the per-tab
 fan-out of live task events.  A tab subscribes when it opens a chat
-backed by a running task (``_reattach_running_chat``), but the ONLY
+backed by a running task (``_attach_viewer_to_running_chat``), but the ONLY
 unsubscribe path is tab CLOSE (``_teardown_tab_resources`` →
 ``cleanup_tab``).  Two navigation paths leave the subscription behind:
 

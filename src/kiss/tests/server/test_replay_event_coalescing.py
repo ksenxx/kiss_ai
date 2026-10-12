@@ -27,7 +27,6 @@ import shutil
 import tempfile
 import threading
 import time
-from pathlib import Path
 
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import Server, ServerConnection, serve
@@ -35,21 +34,7 @@ from websockets.asyncio.server import Server, ServerConnection, serve
 import kiss.agents.sorcar.persistence as th
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import WebPrinter
-
-
-def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
-    """Redirect the persistence DB to a temp dir; return saved state."""
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -129,13 +114,13 @@ class TestReplayCoalescing:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def teardown_method(self) -> None:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_replay_session_coalesces_consecutive_deltas(self) -> None:

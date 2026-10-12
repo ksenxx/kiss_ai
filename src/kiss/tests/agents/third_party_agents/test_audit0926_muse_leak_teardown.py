@@ -32,13 +32,15 @@ def test_teardown_waits_for_daemon_exit(
 ) -> None:
     """Right after teardown the socket is gone and the daemon has exited."""
     setup_muse_env(monkeypatch, {"defaults": {"read": "allow", "write": "ask"}})
-    for _ in range(3):  # the exit lag is short: repeat to make a miss visible
-        ensure_daemon()
-        pid = _daemon_pid()
-        assert pid is not None and _process_running(pid)
-        teardown_muse_env()
-        assert not socket_path().exists()
-        assert not _process_running(pid)
-    assert _daemon_pid() is None
-    teardown_muse_env()  # no daemon running: a clean no-op
+    try:
+        for _ in range(3):  # the exit lag is short: repeat to make a miss visible
+            ensure_daemon()
+            pid = _daemon_pid()
+            assert pid is not None and _process_running(pid)
+            teardown_muse_env()
+            assert not socket_path().exists()
+            assert not _process_running(pid)
+        assert _daemon_pid() is None
+    finally:
+        teardown_muse_env()  # no daemon running: a clean no-op
     assert not _process_running(2**22 + 1)  # above Linux's pid_max: no such process

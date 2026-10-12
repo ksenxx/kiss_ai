@@ -7,17 +7,15 @@
 ``ChatSorcarAgent`` publishes the ``task_history`` row id of its
 current run into ``_last_task_id`` under ``_task_id_lock`` and exposes
 it as the ``last_task_id`` property, which reads under the *same*
-lock.  Three server-side readers still reached past that property into
+lock.  Two server-side readers still reached past that property into
 the private attribute:
 
 * ``commands._owner_task_id`` — stamps a follow-up prompt queued while
   a task runs, so the echo lands in the running task's transcript.
-* ``merge_flow._state_task_key`` — files the ``autocommit_done`` event
-  into the task's persisted chat events.
 * ``json_printer._persist_event`` — decides which task an event
   belongs to before persisting it.
 
-The consolidation makes all three go through the property.  These
+The consolidation makes both go through the property.  These
 tests pin the behaviour that must survive that change — including the
 one way it could silently go wrong: the property answers ``""`` where
 the private attribute answered ``None``, so a reader that kept an
@@ -37,7 +35,7 @@ import unittest
 from typing import Any
 
 import kiss.agents.sorcar.persistence as persistence
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.tests.server.parallel_agent_harness import (
@@ -46,23 +44,15 @@ from kiss.tests.server.parallel_agent_harness import (
     IsolatedKissHome,
     StandInModelServer,
     finish_response,
-    history_rows,
     request_text,
-    run_git,
-    tool_call_response,
     wait_for,
 )
 from kiss.tests.server.test_autocommit_wire_toggle import (
     _FakeCredentials,
 )
 
-#: Marker routing the stand-in to the "write a file, then finish" script.
-_DIRTY_MARKER = "K2-DIRTY-THE-MAIN-TREE"
-
 #: Marker routing the stand-in to the "block until released" script.
 _BLOCK_MARKER = "K2-BLOCK-UNTIL-RELEASED"
-
-_DIRTY_FILE = "k2-autocommitted.txt"
 
 
 class _ReaderHarness(unittest.TestCase):
@@ -71,12 +61,7 @@ class _ReaderHarness(unittest.TestCase):
     def setUp(self) -> None:
         self.home = IsolatedKissHome(prefix="kiss-k2-readers-")
         self.repo = self.home.repo
-        self.home.write_config(
-            auto_commit_mode=True,
-            is_worktree=False,
-            max_budget=5.0,
-            use_web_browser=False,
-        )
+        self.home.write_config(max_budget=5.0, use_web_browser=False)
         self.credentials = _FakeCredentials()
         self.release = threading.Event()
         self.blocked = threading.Event()
@@ -102,38 +87,18 @@ class _ReaderHarness(unittest.TestCase):
         self.home.cleanup()
 
     def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Script the agent from the marker carried in the prompt.
-
-        The "dirty the tree" branch is gated on the CALL COUNT, not on
-        the conversation text: a ``Bash`` redirection produces no
-        stdout, so the tool result carries nothing the responder could
-        recognise, and matching on text would hand out the same tool
-        call forever.
-        """
+        """Script the agent from the marker carried in the prompt."""
         text = request_text(request)
         with self._calls_lock:
             self.calls.append(text)
-            seen_dirty = sum(1 for seen in self.calls if _DIRTY_MARKER in seen)
         if _BLOCK_MARKER in text:
             self.blocked.set()
             self.release.wait(timeout=60)
             return finish_response("released")
-        if _DIRTY_MARKER in text and seen_dirty == 1:
-            return tool_call_response(
-                "Bash",
-                {
-                    "command": f"printf 'dirty\\n' > {_DIRTY_FILE}",
-                    "description": "dirty the main working tree",
-                },
-            )
         return finish_response("k2 readers done")
 
     def _run_cmd(
-        self,
-        prompt: str,
-        *,
-        tab_id: str = "k2-readers-tab",
-        auto_commit: bool = True,
+        self, prompt: str, *, tab_id: str = "k2-readers-tab",
     ) -> dict[str, Any]:
         """Build a ``run`` command for the real server."""
         return {
@@ -142,9 +107,7 @@ class _ReaderHarness(unittest.TestCase):
             "prompt": prompt,
             "model": STANDIN_MODEL,
             "workDir": str(self.repo),
-            "useWorktree": False,
             "isParallel": False,
-            "autoCommit": auto_commit,
             "useWebTools": False,
             "maxBudget": 5.0,
             "modelConfig": self.standin.model_config,
@@ -190,36 +153,6 @@ class TestQueuedPromptIsStampedWithTheLiveTaskId(_ReaderHarness):
         self.release.set()
 
 
-class TestAutocommitEventIsFiledUnderTheTask(_ReaderHarness):
-    """``merge_flow._state_task_key`` resolves the running agent's id."""
-
-    def test_autocommit_done_is_persisted_into_the_tasks_events(self) -> None:
-        """The auto-commit outcome joins the task's own event log."""
-        self.server._run_task(self._run_cmd(f"{_DIRTY_MARKER}: make a file"))
-
-        # The run has fully completed, so its agent is already
-        # released; the task id comes from the history row it wrote.
-        rows = history_rows()
-        self.assertEqual(len(rows), 1, f"expected one history row, got {rows}")
-        task_id = str(rows[0]["id"])
-        self.assertEqual(
-            run_git(self.repo, "cat-file", "-e", f"HEAD:{_DIRTY_FILE}").returncode,
-            0,
-            "the run's work was never auto-committed",
-        )
-
-        persistence._flush_chat_events()
-        session = persistence._load_chat_events_by_task_id(task_id)
-        self.assertIsNotNone(session, "the task's history row vanished")
-        assert session is not None
-        events = session["events"]
-        assert isinstance(events, list)
-        self.assertTrue(
-            any(event.get("type") == "autocommit_done" for event in events),
-            "the auto-commit outcome was filed under no task at all",
-        )
-
-
 class TestEventsAreNeverFiledUnderAnEmptyTaskId(_ReaderHarness):
     """``json_printer._persist_event`` must reject an unpublished id."""
 
@@ -237,7 +170,7 @@ class TestEventsAreNeverFiledUnderAnEmptyTaskId(_ReaderHarness):
             server_owned=True,
             stop_event=threading.Event(),
         )
-        agent = WorktreeSorcarAgent("K2 never ran")
+        agent = ChatSorcarAgent("K2 never ran")
         state.agent = agent
         agent_state.register(state)
         self.addCleanup(agent_state.unregister, state.task_id, state)

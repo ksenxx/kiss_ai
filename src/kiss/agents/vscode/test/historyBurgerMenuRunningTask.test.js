@@ -72,17 +72,12 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-function uncheckWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {
     type: 'configData',
     config: {work_dir: ''},
     apiKeys: {},
   });
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function configureClientWorkDir(win, workDir) {
@@ -149,7 +144,7 @@ function findCompletedDot(row) {
 
 function testRunningTaskAppearsWhenBurgerOpened() {
   const {win, posted} = makeWebview();
-  uncheckWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   const sidebar = win.document.getElementById('sidebar');
   assert.ok(sidebar, 'sidebar element must exist');
   assert.ok(

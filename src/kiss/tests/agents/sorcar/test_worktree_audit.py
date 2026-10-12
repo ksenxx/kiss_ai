@@ -17,12 +17,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -67,10 +67,13 @@ def _make_repo(path: Path) -> Path:
 def _patch_super_run(
     return_value: str = "success: true\nsummary: test done\n",
 ) -> Any:
+    """Replace the model-driven run with one that only calls ``create_worktree``."""
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
-    def fake_run(self_agent: object, **kwargs: object) -> str:
+    def fake_run(self_agent: Any, **kwargs: object) -> str:
+        self_agent.work_dir = kwargs["work_dir"]
+        self_agent.create_worktree()
         return return_value
 
     parent_class.run = fake_run
@@ -142,7 +145,7 @@ class TestFix3MergeInstructionsUseSquash:
 
     def test_conflict_instructions_say_squash(self) -> None:
         """FIX-3: Conflict instructions use 'git merge --squash'."""
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
 
         wt_dir = agent._wt_dir
@@ -166,7 +169,7 @@ class TestFix3MergeInstructionsUseSquash:
 
     def test_unknown_branch_instructions_say_squash(self) -> None:
         """When original_branch is None, instructions still say --squash."""
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
 
         from kiss.agents.sorcar.git_worktree import GitWorktree
@@ -211,7 +214,7 @@ class TestFix4MergeRetrySkipsFinalize:
 
     def test_merge_retry_after_conflict_is_safe(self) -> None:
         """FIX-4: merge() retries cleanly after a conflict."""
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
 
         wt_dir = agent._wt_dir
@@ -236,7 +239,7 @@ class TestFix4MergeRetrySkipsFinalize:
 
     def test_merge_retry_succeeds_after_conflict_resolved(self) -> None:
         """FIX-4: merge() succeeds on retry after user resolves conflict."""
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
 
         wt_dir = agent._wt_dir

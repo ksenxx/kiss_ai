@@ -29,7 +29,6 @@ import asyncio
 import json
 import os
 import re
-import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -39,6 +38,7 @@ from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import tricks
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.server.conftest import find_free_port, no_verify_ssl
 
 # Exactly what mdformat writes for ``Replace <<x>> with snake_case.``
 _ESCAPED_BODY = "Replace \\<<x>> with snake\\_case in a\\*b. Keep \\q as is."
@@ -128,26 +128,11 @@ class TestAutocompleteTrickCompletionUnescaped(_TricksEnv):
         )
 
 
-def _find_free_port() -> int:
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _no_verify_ssl() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 class TestRemoteWebappTricksJsonUnescaped(IsolatedAsyncioTestCase):
     """``window.__TRICKS__`` served by the remote webapp is unescaped."""
 
     async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
+        self.port = find_free_port()
         self._orig_config = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
         save_config({"remote_password": ""})
         self._env = _TricksEnv()
@@ -165,7 +150,7 @@ class TestRemoteWebappTricksJsonUnescaped(IsolatedAsyncioTestCase):
 
     async def test_served_tricks_json_is_unescaped(self) -> None:
         reader, writer = await asyncio.open_connection(
-            "127.0.0.1", self.port, ssl=_no_verify_ssl(),
+            "127.0.0.1", self.port, ssl=no_verify_ssl(),
             server_hostname="localhost",
         )
         writer.write(

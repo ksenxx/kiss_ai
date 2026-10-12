@@ -27,8 +27,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.tests.conftest import is_root, posix_only
 
 
@@ -60,10 +60,10 @@ def _make_repo(path: Path) -> Path:
 
 
 def _setup_pending_worktree(
-    repo: Path, agent: WorktreeSorcarAgent, agent_file: str
+    repo: Path, agent: ChatSorcarAgent, agent_file: str
 ) -> None:
     """Create a worktree for *agent* and commit one agent change in it."""
-    wt_work = agent._try_setup_worktree(repo, None)
+    wt_work = agent._try_setup_worktree(repo, str(repo))
     assert wt_work is not None
     assert agent._wt is not None
     (agent._wt.wt_dir / agent_file).write_text("agent change\n")
@@ -96,7 +96,7 @@ class TestStashFailureAbortsMerge:
         """merge() must not commit or destroy the user's staged work."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
-            agent = WorktreeSorcarAgent("bh4-stash-fail")
+            agent = ChatSorcarAgent("bh4-stash-fail")
             _setup_pending_worktree(repo, agent, "g.txt")
             branch = agent._wt.branch  # type: ignore[union-attr]
             head_before = GitWorktreeOps.head_sha(repo)
@@ -130,7 +130,7 @@ class TestStashFailureAbortsMerge:
         failed squash merge must never wipe the user's unstashed work."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
-            agent = WorktreeSorcarAgent("bh4-stash-fail-overlap")
+            agent = ChatSorcarAgent("bh4-stash-fail-overlap")
             _setup_pending_worktree(repo, agent, "f.txt")
 
             unreadable = _dirty_main_with_unstashable_state(repo)
@@ -141,38 +141,6 @@ class TestStashFailureAbortsMerge:
                 assert "user staged work" in show.stdout, (
                     "user's staged change to f.txt was DESTROYED by "
                     f"the aborted merge; merge() said: {msg}"
-                )
-            finally:
-                unreadable.chmod(0o644)
-
-    def test_release_worktree_aborts_and_warns(self) -> None:
-        """_release_worktree must keep the branch and set a warning
-        mentioning the stash failure instead of merging a dirty tree."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-            agent = WorktreeSorcarAgent("bh4-stash-fail-release")
-            _setup_pending_worktree(repo, agent, "g.txt")
-            branch = agent._wt.branch  # type: ignore[union-attr]
-            head_before = GitWorktreeOps.head_sha(repo)
-
-            unreadable = _dirty_main_with_unstashable_state(repo)
-            try:
-                released = agent._release_worktree()
-
-                assert released is None
-                assert GitWorktreeOps.head_sha(repo) == head_before, (
-                    "auto-merge committed on a dirty main tree after "
-                    "the stash failed"
-                )
-                cached = _git("diff", "--name-only", "--cached", cwd=repo)
-                assert "f.txt" in cached.stdout.splitlines()
-                assert GitWorktreeOps.branch_exists(repo, branch), (
-                    "task branch deleted even though the auto-merge "
-                    "was aborted"
-                )
-                warning = agent._merge_conflict_warning or ""
-                assert "stash" in warning.lower(), (
-                    f"expected a stash-failure warning, got: {warning!r}"
                 )
             finally:
                 unreadable.chmod(0o644)

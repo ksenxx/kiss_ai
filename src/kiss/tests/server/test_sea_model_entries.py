@@ -169,7 +169,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         runs: list[dict[str, Any]] = []
         self._record_runs(runs)
         result = sorcar.run(
-            prompt, work_dir=self.repo, use_worktree=False, auto_commit=False,
+            prompt, work_dir=self.repo,
             endpoint_file=self.endpoint_file, timeout=60, **kwargs,
         )
         assert result.success is True, result
@@ -516,7 +516,7 @@ class Sea(BaseSea):
         assert job["name"] == autorouter_sea.RSI7D_JOB_NAME
         assert job["enabled"] is True
         assert job["schedule"] == autorouter_sea.RSI7D_JOB_SCHEDULE
-        assert job["work_dir"] == "" and job["use_worktree"] is False
+        assert job["work_dir"] == "" and "use_worktree" not in job
         assert f"task         = {autorouter_sea.RSI7D_TASK!r}" in job["prompt"]
         with self.assertLogs("kiss.sea_commands", level="INFO") as logs:
             self._run("say hello again", model=AUTOROUTER)

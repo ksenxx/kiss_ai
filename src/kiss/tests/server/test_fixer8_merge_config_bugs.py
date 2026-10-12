@@ -10,8 +10,8 @@ F2  ``_AutocompleteMixin._refresh_files_after_task`` queues a rescan on
     one, without broadcasting any event.  (The original race between a
     concurrent ``_file_cache`` writer and the post-task scan no longer
     exists: a single worker thread owns every index.)
-F4  ``_MergeFlowMixin._main_dirty_files`` must not ``strip()`` porcelain
-    paths: filenames with leading/trailing spaces are legal and unquoted.
+F4  (obsolete) ``_MergeFlowMixin._main_dirty_files`` was removed with the
+    main-tree auto-commit; ``_porcelain_paths`` (F5) keeps its no-strip rule.
 F5  The porcelain fallback of ``_get_worktree_changed_files`` (extracted
     as ``merge_flow._porcelain_paths``) must not strip paths and must
     split rename entries ``old -> new`` instead of emitting the joined
@@ -44,7 +44,6 @@ from kiss.agents.sorcar.git_worktree import _git
 from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
 from kiss.server.file_index import FileIndex, FileIndexRegistry
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.tests.conftest import posix_only
 
 
@@ -123,109 +122,6 @@ def _paths(registry: FileIndexRegistry, work_dir: str) -> list[str]:
     """Return the current entries of *work_dir*'s view (``[]`` when unindexed)."""
     view = registry.view_for(work_dir)
     return [] if view is None else view.paths
-
-
-class _MF(_MergeFlowMixin):
-    """Concrete merge-flow host; ``_main_dirty_files`` uses only work_dir."""
-
-    def __init__(self, work_dir: str) -> None:
-        self.work_dir = work_dir
-
-
-
-class TestRefreshAfterTaskRace:
-    """F2: ``_refresh_files_after_task`` against a real ``FileIndexRegistry``."""
-
-    def _registry(self, tmp_path: Path) -> FileIndexRegistry:
-        return FileIndexRegistry(home=str(tmp_path / "home"), cache_dir=tmp_path / "cache")
-
-    def test_never_indexed_root_is_left_alone(self, tmp_path: Path) -> None:
-        """Refreshing a root nobody asked about queues no scan.
-
-        The worker serves jobs in order, so once a sentinel build of an
-        unrelated root has completed, any job the refresh might have
-        queued before it would have run too.
-        """
-        wd = tmp_path / "ws"
-        wd.mkdir()
-        (wd / "a.txt").write_text("x")
-        other = tmp_path / "other"
-        other.mkdir()
-        registry = self._registry(tmp_path)
-        try:
-            host = _AC(str(wd), registry)
-            host._refresh_files_after_task(str(wd))
-            _index(registry, str(other))
-
-            assert registry.view_for(str(wd)) is None
-            assert set(registry._indexes) == {str(other)}
-            assert host.rec_printer.events == []
-        finally:
-            registry.stop()
-
-    def test_indexed_root_picks_up_added_and_removed_files(self, tmp_path: Path) -> None:
-        wd = tmp_path / "ws"
-        wd.mkdir()
-        (wd / "gone.txt").write_text("x")
-        registry = self._registry(tmp_path)
-        try:
-            host = _AC(str(wd), registry)
-            _index(registry, str(wd))
-            assert _paths(registry, str(wd)) == ["gone.txt"]
-
-            # Directory mtimes have a coarse granularity: leave the build
-            # behind before changing the tree so the rescan sees a new mtime.
-            time.sleep(0.02)
-            (wd / "gone.txt").unlink()
-            (wd / "new.txt").write_text("x")
-            host._refresh_files_after_task(str(wd))
-
-            _wait_for(lambda: _paths(registry, str(wd)) == ["new.txt"])
-            assert host.rec_printer.events == [], "no unsolicited files event"
-        finally:
-            registry.stop()
-
-    def test_empty_work_dir_falls_back_to_the_host_work_dir(self, tmp_path: Path) -> None:
-        wd = tmp_path / "ws"
-        wd.mkdir()
-        (wd / "a.txt").write_text("x")
-        registry = self._registry(tmp_path)
-        try:
-            host = _AC(str(wd), registry)
-            _index(registry, str(wd))
-            time.sleep(0.02)
-            (wd / "b.txt").write_text("x")
-            host._refresh_files_after_task()
-
-            _wait_for(lambda: _paths(registry, str(wd)) == ["a.txt", "b.txt"])
-        finally:
-            registry.stop()
-
-
-
-class TestMainDirtyFilesNoStrip:
-    def test_leading_space_untracked_filename_survives(
-        self, tmp_path: Path,
-    ) -> None:
-        repo = tmp_path / "repo"
-        _make_repo(repo)
-        (repo / " padded .txt").write_text("x\n")
-
-        files = _MF(str(repo))._main_dirty_files(str(repo))
-
-        assert " padded .txt" in files
-        assert "padded .txt" not in files
-
-    def test_rename_reports_new_side_only(self, tmp_path: Path) -> None:
-        repo = tmp_path / "repo"
-        _make_repo(repo)
-        _run_git(repo, "mv", "a.txt", "b.txt")
-
-        files = _MF(str(repo))._main_dirty_files(str(repo))
-
-        assert "b.txt" in files
-        assert "a.txt -> b.txt" not in files
-
 
 
 class TestPorcelainPathsFallbackParser:

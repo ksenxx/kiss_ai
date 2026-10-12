@@ -67,22 +67,7 @@ from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import posix_only
-
-
-def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved
-
-
-def _restore_persistence(saved: tuple[Any, Any, Any]) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 def _task_result(task_id: str) -> str:
@@ -162,13 +147,17 @@ _F3_CHILD_SCRIPT = """\
 import hashlib, sys
 from pathlib import Path
 import kiss.server.web_server as ws
+from kiss.core.utils import read_bytes_waiting_for_writer
 ws.VOICE_MODEL_URL = sys.argv[1]
 ws.VOICE_MODEL_CACHE = Path(sys.argv[2])
 p = ws._ensure_voice_model()
 if p is None:
     print("NONE")
 else:
-    print(hashlib.sha256(p.read_bytes()).hexdigest())
+    # The same read the /voice-model.tar.gz handler does: the sibling may
+    # still be replacing the archive with its own download (Windows denies
+    # a plain open for the duration).
+    print(hashlib.sha256(read_bytes_waiting_for_writer(p)).hexdigest())
 """
 
 
@@ -224,11 +213,11 @@ class TestF13SecondServerInitPreservesLiveTasks(unittest.TestCase):
     def setUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-w2f5-init-")
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
 
     def tearDown(self) -> None:
         agent_state.agent_states.clear()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_running_task_row_is_not_marked_process_killed(self) -> None:
@@ -371,7 +360,7 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-w2f5-live-")
-        self.saved = _redirect_persistence(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
@@ -388,7 +377,7 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self._stop_server()
-        _restore_persistence(self.saved)
+        restore_persistence(self.saved)
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

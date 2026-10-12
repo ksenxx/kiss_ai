@@ -10,12 +10,13 @@ server: the MCP SDK's own ``FastMCP`` with ``AuthSettings`` and an
 in-memory ``OAuthAuthorizationServerProvider`` (dynamic client
 registration, PKCE, refresh), served by uvicorn on a free local port.
 The "browser" is httpx following the authorization redirect to the
-fixed loopback callback ``http://localhost:53683/callback``.
+loopback callback ``http://localhost:<port>/callback``.
 
-The redirect port is fixed by design (a dynamically registered client
-keeps working only if its redirect URI never changes), so these tests
-need port 53683 free: ``_own_redirect_port`` reserves it across
-concurrently running pytest processes.
+The product's redirect port is fixed (a dynamically registered client
+keeps working only if its redirect URI never changes); every test here
+registers a fresh client, so ``_own_redirect_port`` moves the listener
+to a free ephemeral port and concurrently running pytest processes
+never collide on it.
 
 Branches not exercised:
 
@@ -63,8 +64,6 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from kiss.agents.sorcar import mcp_oauth
 from kiss.agents.sorcar.mcp_oauth import (
     KNOWN_MCP_SERVERS,
-    MCP_REDIRECT_PORT,
-    MCP_REDIRECT_URI,
     MCPLoginSession,
     _session_answer,
     build_provider,
@@ -82,7 +81,7 @@ from kiss.agents.sorcar.mcp_servers import (
     load_mcp_servers,
     user_mcp_config_path,
 )
-from kiss.tests.conftest import hold_loopback_port, occupy_loopback_port
+from kiss.tests.conftest import occupy_loopback_port
 
 # ---------------------------------------------------------------------------
 # A real OAuth-protected MCP server
@@ -255,19 +254,18 @@ def server(home: Path) -> Iterator[_AuthMCPServer]:
 
 
 @pytest.fixture(autouse=True)
-def _own_redirect_port() -> Iterator[None]:
-    """Reserve port 53683 across pytest processes and free it afterwards.
+def _own_redirect_port(mcp_redirect_port: int) -> Iterator[int]:
+    """Run every test on its own ephemeral redirect port.
 
-    Cancels any login session the test left running before the
-    reservation ends, so the next test (in any process) can bind it.
+    Cancels any login session the test left running, so no listener
+    outlives the test on that port.
     """
-    with hold_loopback_port(MCP_REDIRECT_PORT):
-        yield
-        session = MCPLoginSession._active
-        if session is not None:
-            session.cancel()
-            session.wait(10)
-        MCPLoginSession._active = None
+    yield mcp_redirect_port
+    session = MCPLoginSession._active
+    if session is not None:
+        session.cancel()
+        session.wait(10)
+    MCPLoginSession._active = None
 
 
 def _cfg(server: _AuthMCPServer, name: str = "authdemo") -> MCPServerConfig:
@@ -308,7 +306,7 @@ def test_login_stores_tokens_and_manager_connects(server: _AuthMCPServer, home: 
     assert session.done is False
     query = {k: v[0] for k, v in parse_qs(urlsplit(session.auth_url).query).items()}
     assert session.auth_url.startswith(f"{server.base}/authorize?")
-    assert query["redirect_uri"] == MCP_REDIRECT_URI
+    assert query["redirect_uri"] == mcp_oauth.MCP_REDIRECT_URI
     assert query["code_challenge_method"] == "S256"
     assert query["client_id"] in server.provider.clients
     assert MCPLoginSession.active("authdemo") is session
@@ -321,7 +319,7 @@ def test_login_stores_tokens_and_manager_connects(server: _AuthMCPServer, home: 
     assert "OWN browser" in answer["instructions"]
     assert "finish_mcp_server_connect('authdemo')" in answer["instructions"]
 
-    wrong = httpx.get(f"http://127.0.0.1:{MCP_REDIRECT_PORT}/elsewhere", trust_env=False)
+    wrong = httpx.get(f"http://127.0.0.1:{mcp_oauth.MCP_REDIRECT_PORT}/elsewhere", trust_env=False)
     assert wrong.status_code == 404
 
     page = _approve(session.auth_url)
@@ -334,7 +332,7 @@ def test_login_stores_tokens_and_manager_connects(server: _AuthMCPServer, home: 
     # The registration used KISS's public-client metadata.
     registered = server.provider.clients[query["client_id"]]
     assert registered.token_endpoint_auth_method == "none"
-    assert [str(u) for u in registered.redirect_uris or []] == [MCP_REDIRECT_URI]
+    assert [str(u) for u in registered.redirect_uris or []] == [mcp_oauth.MCP_REDIRECT_URI]
     assert registered.client_name == mcp_oauth.PRODUCT_NAME
 
     tokens = _tokens("authdemo")
@@ -428,7 +426,7 @@ def test_half_open_redirect_connection_does_not_pin_the_port(
     # A browser that opens the connection but never finishes its request:
     # the handler's socket timeout must return the serving thread to the
     # cancel check instead of blocking on the missing headers forever.
-    half_open = socket.create_connection(("127.0.0.1", MCP_REDIRECT_PORT), timeout=10)
+    half_open = socket.create_connection(("127.0.0.1", mcp_oauth.MCP_REDIRECT_PORT), timeout=10)
     try:
         half_open.sendall(b"GET /callback HTTP/1.1\r\n")
         time.sleep(0.5)  # the redirect server has accepted the connection by now
@@ -611,7 +609,7 @@ def test_seed_preregistered_client(home: Path, monkeypatch: pytest.MonkeyPatch) 
     info = asyncio.run(storage.get_client_info())
     assert (info.client_id, info.client_secret) == ("public-id", None)
     assert info.token_endpoint_auth_method == "none"
-    assert [str(u) for u in info.redirect_uris] == [MCP_REDIRECT_URI]
+    assert [str(u) for u in info.redirect_uris] == [mcp_oauth.MCP_REDIRECT_URI]
 
     monkeypatch.setenv("KISS_MCP_MY_SERVER_V2_CLIENT_SECRET", " s3cret ")
     assert seed_preregistered_client(storage, "my-server.v2") is True
@@ -659,7 +657,7 @@ def test_drop_stale_registration_only_for_other_redirect_uris(home: Path) -> Non
     storage = FileTokenStorage("stale-check")
     assert drop_stale_registration(storage) is False
 
-    _store_registration("stale-check", "current", MCP_REDIRECT_URI)
+    _store_registration("stale-check", "current", mcp_oauth.MCP_REDIRECT_URI)
     assert drop_stale_registration(storage) is False
     assert _client_info("stale-check").client_id == "current"
     assert _tokens("stale-check").access_token == "dead-current"
@@ -684,7 +682,7 @@ def test_login_reregisters_a_stale_client(server: _AuthMCPServer, home: Path) ->
     assert server.provider.registrations == 1
     info = _client_info("authdemo")
     assert info.client_id == new_id
-    assert [str(u) for u in info.redirect_uris] == [MCP_REDIRECT_URI]
+    assert [str(u) for u in info.redirect_uris] == [mcp_oauth.MCP_REDIRECT_URI]
     assert _tokens("authdemo").access_token in server.provider.access
 
 
@@ -843,7 +841,7 @@ def test_auth_tools_errors(home: Path, work_dir: str) -> None:
     assert answer["ok"] is False
     assert answer["error"].startswith("Unknown MCP server 'nope'")
 
-    with occupy_loopback_port(MCP_REDIRECT_PORT):
+    with occupy_loopback_port(mcp_oauth.MCP_REDIRECT_PORT):
         answer = json.loads(connect("busy", "https://mcp.example.test/mcp"))
     assert answer["ok"] is False
     assert answer["error"].startswith("cannot bind the redirect port:")

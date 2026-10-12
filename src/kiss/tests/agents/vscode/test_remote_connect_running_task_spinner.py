@@ -37,9 +37,9 @@ from websockets.asyncio.client import connect
 
 from kiss.agents.sorcar import local_endpoint
 from kiss.core.kiss_agent import KISSAgent
+from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
-    _no_verify_ssl,
     harness,  # noqa: F401  (module fixture)
 )
 
@@ -136,13 +136,15 @@ class VsCodeClient:
         self.ws.close()
 
 
-async def _remote_ready_replies(harness: ExplorerHarness) -> list[dict[str, Any]]:
-    """Connect a fresh remote client, send ``ready``, drain the replies."""
-    async with connect(harness.ws_url, ssl=_no_verify_ssl()) as ws:
+async def _remote_ready_replies(
+    harness: ExplorerHarness, tab_id: str,
+) -> list[dict[str, Any]]:
+    """Connect a fresh remote client, send ``ready`` for *tab_id*, drain the replies."""
+    async with connect(harness.ws_url, ssl=no_verify_ssl()) as ws:
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         while json.loads(await asyncio.wait_for(ws.recv(), 30)).get("type") != "auth_ok":
             pass
-        await ws.send(json.dumps({"type": "ready", "tabId": "remote-fresh-tab"}))
+        await ws.send(json.dumps({"type": "ready", "tabId": tab_id}))
         events: list[dict[str, Any]] = []
         while True:
             try:
@@ -152,14 +154,16 @@ async def _remote_ready_replies(harness: ExplorerHarness) -> list[dict[str, Any]
 
 
 def _assert_ready_replay(
-    events: list[dict[str, Any]], tab: str, start_ts: int,
+    events: list[dict[str, Any]], tab: str, start_ts: int, *, deferred: bool,
 ) -> None:
     """Check the ``ready`` replies a mid-run remote client receives.
 
     The tab snapshot must precede the tab's ``status running:true``;
     every start stamp the client is given (status, replayed row
     ``extra``, ``task_settings`` event) must be the one the originating
-    client's status carried, and no ``running:false`` may follow.
+    client's status carried, and no ``running:false`` may follow.  A
+    ``ready`` that names another tab gets the running status and a
+    ``replay_deferred`` offer instead of the transcript (*deferred*).
     """
     # Failure messages list only event types: the drained replies
     # include ``configData``, which carries the user's API keys.
@@ -187,10 +191,16 @@ def _assert_ready_replay(
     assert all(e["running"] is True for _, e in statuses), (
         f"a still-running task must never be reported stopped: {statuses}"
     )
-    replay = next(
+    replays = [
         e for e in events
         if e.get("type") == "task_events" and e.get("tabId") == tab
-    )
+    ]
+    if deferred:
+        assert replays == [], f"a tab not on screen was replayed: {types}"
+        offer = next(e for e in events if e.get("type") == "replay_deferred")
+        assert offer["tabId"] == tab
+        return
+    replay = replays[0]
     assert replay["task"] == PROMPT
     # ``main.js`` rebases its timer on these two after the status: a
     # provisional row stamp here would leave the remote timer behind.
@@ -216,8 +226,16 @@ def test_remote_client_opened_mid_run_gets_status_replay_and_spinner(
         tab = vscode.tab_id
         start_ts = int(started["startTs"])
 
-        # 1. Wire level: what a fresh remote client's ``ready`` gets.
-        _assert_ready_replay(harness.run(_remote_ready_replies(harness)), tab, start_ts)
+        # 1. Wire level: what a fresh remote client's ``ready`` gets,
+        #    looking at the running tab and looking at another one.
+        _assert_ready_replay(
+            harness.run(_remote_ready_replies(harness, tab)), tab, start_ts,
+            deferred=False,
+        )
+        _assert_ready_replay(
+            harness.run(_remote_ready_replies(harness, "remote-fresh-tab")),
+            tab, start_ts, deferred=True,
+        )
 
         # 2. Rendered: the real remote page (fresh context, no saved
         #    tabs) shows the running chat right after boot, without any

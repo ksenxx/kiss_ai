@@ -2,9 +2,11 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests verifying fixes for worktree bugs BUG-8 through BUG-11.
+"""Tests verifying fixes for worktree bugs BUG-8 and BUG-9.
 
-Each test verifies the CORRECT behavior after the fix was applied.
+Each test verifies the CORRECT behavior after the fix was applied.  The
+worktree is created the way a task does it, through the agent's own
+``create_worktree`` tool; no mocks, patches or test doubles.
 """
 
 from __future__ import annotations
@@ -14,25 +16,22 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, cast
 
-import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import _git
-from kiss.agents.sorcar.persistence import _append_chat_event
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 def _attach_worktree_state(
-    agent: WorktreeSorcarAgent, tab_id: str = "0",
+    agent: ChatSorcarAgent, tab_id: str = "0",
 ) -> agent_state.AgentState:
     """Register a server-owned worktree AgentState for *agent* on *tab_id*.
 
-    Mirrors what the server does for a UI-launched worktree run: the
-    state is keyed by a minted task id, carries the launching tab id,
-    and has ``use_worktree=True`` so ``agent_state.find_by_tab`` used
-    by the merge-flow methods resolves the agent.
+    Mirrors what the server does for a UI-launched run: the state is
+    keyed by a minted task id and carries the launching tab id so
+    ``agent_state.find_by_tab`` used by the merge-flow methods resolves
+    the agent; the merge flow then decides by ``agent._wt_pending``.
     """
     st = agent_state.AgentState(
         uuid.uuid4().hex,
@@ -40,26 +39,15 @@ def _attach_worktree_state(
         tab_id=tab_id,
         server_owned=True,
     )
-    st.use_worktree = True
     agent_state.register(st)
     return st
 
 
-def _redirect_db(tmpdir: str) -> tuple:
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return old
-
-
-def _restore_db(saved: tuple) -> None:
-    if th._db_conn is not None:
-        th._db_conn.close()
-        th._db_conn = None
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
+def _create_worktree(agent: ChatSorcarAgent, repo: Path) -> None:
+    """Create *agent*'s worktree in *repo* through its own tool."""
+    agent.work_dir = str(repo)
+    result = agent.create_worktree()
+    assert result.startswith("Created worktree"), result
 
 
 def _make_repo(path: Path) -> Path:
@@ -88,24 +76,6 @@ def _make_repo(path: Path) -> Path:
     return path
 
 
-def _patch_super_run(
-    return_value: str = "success: true\nsummary: test done\n",
-) -> Any:
-    parent_class = cast(Any, SorcarAgent.__mro__[1])
-    original = parent_class.run
-
-    def fake_run(self_agent: object, **kwargs: object) -> str:
-        return return_value
-
-    parent_class.run = fake_run
-    return original
-
-
-def _unpatch_super_run(original: Any) -> None:
-    parent_class = cast(Any, SorcarAgent.__mro__[1])
-    parent_class.run = original
-
-
 def _make_server(repo: Path) -> tuple:
     from kiss.server.server import VSCodeServer
 
@@ -127,24 +97,22 @@ class TestBug8Fix:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.db_saved = _redirect_db(self.tmpdir)
+        self.db_saved = redirect_persistence(self.tmpdir)
         self.repo = _make_repo(Path(self.tmpdir) / "repo")
-        self.original_run = _patch_super_run()
 
     def teardown_method(self) -> None:
-        _unpatch_super_run(self.original_run)
         agent_state.agent_states.clear()
-        _restore_db(self.db_saved)
+        restore_persistence(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_changed_files_excludes_unrelated_after_main_advances(self) -> None:
         """Only agent-modified files appear, not unrelated files from main."""
 
         server, events = _make_server(self.repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _attach_worktree_state(agent)
 
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
+        _create_worktree(agent, self.repo)
         wt_dir = agent._wt_dir
         assert wt_dir is not None and wt_dir.exists()
 
@@ -177,10 +145,10 @@ class TestBug8Fix:
         """Sanity check: agent-modified files are still reported correctly."""
 
         server, events = _make_server(self.repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _attach_worktree_state(agent)
 
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
+        _create_worktree(agent, self.repo)
         wt_dir = agent._wt_dir
         assert wt_dir is not None
 
@@ -199,24 +167,22 @@ class TestBug9Fix:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.db_saved = _redirect_db(self.tmpdir)
+        self.db_saved = redirect_persistence(self.tmpdir)
         self.repo = _make_repo(Path(self.tmpdir) / "repo")
-        self.original_run = _patch_super_run()
 
     def teardown_method(self) -> None:
-        _unpatch_super_run(self.original_run)
         agent_state.agent_states.clear()
-        _restore_db(self.db_saved)
+        restore_persistence(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_check_conflict_does_not_commit(self) -> None:
         """_check_merge_conflict must not create any commits."""
 
         server, events = _make_server(self.repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _attach_worktree_state(agent)
 
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
+        _create_worktree(agent, self.repo)
         wt_dir = agent._wt_dir
         branch = agent._wt_branch
         original = agent._original_branch
@@ -248,10 +214,10 @@ class TestBug9Fix:
         """_present_pending_worktree must not auto-commit via conflict check."""
 
         server, events = _make_server(self.repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _attach_worktree_state(agent)
 
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
+        _create_worktree(agent, self.repo)
         wt_dir = agent._wt_dir
         branch = agent._wt_branch
         original = agent._original_branch
@@ -276,10 +242,10 @@ class TestBug9Fix:
         """Conflict is reported when the same file is changed on both sides."""
 
         server, events = _make_server(self.repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _attach_worktree_state(agent)
 
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
+        _create_worktree(agent, self.repo)
         wt_dir = agent._wt_dir
         original = agent._original_branch
         assert wt_dir is not None and original is not None
@@ -304,10 +270,10 @@ class TestBug9Fix:
         """No conflict when original and worktree modify different files."""
 
         server, events = _make_server(self.repo)
-        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = ChatSorcarAgent("Sorcar VS Code")
         _attach_worktree_state(agent)
 
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
+        _create_worktree(agent, self.repo)
         wt_dir = agent._wt_dir
         original = agent._original_branch
         assert wt_dir is not None and original is not None
@@ -327,47 +293,3 @@ class TestBug9Fix:
         assert server._check_merge_conflict("0") is False
 
         agent.discard()
-
-
-class TestBug10Fix:
-    """Replaying a session never flips a tab's worktree state on."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.db_saved = _redirect_db(self.tmpdir)
-        self.repo = _make_repo(Path(self.tmpdir) / "repo")
-        self.original_run = _patch_super_run()
-
-    def teardown_method(self) -> None:
-        _unpatch_super_run(self.original_run)
-        agent_state.agent_states.clear()
-        _restore_db(self.db_saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_replay_session_without_worktree_keeps_false(self) -> None:
-        """When extra doesn't have is_worktree, use_worktree stays False."""
-
-        server1, events1 = _make_server(self.repo)
-        agent1 = WorktreeSorcarAgent("Sorcar VS Code")
-        agent1.run(prompt_template="task1", work_dir=str(self.repo))
-        chat_id = agent1.chat_id
-        task_id = agent1._last_task_id
-        assert task_id is not None
-
-        _append_chat_event(
-            {"type": "text_delta", "text": "working..."},
-            task_id=task_id,
-        )
-        th._save_task_extra(
-            {"is_worktree": False, "model": "test"},
-            task_id=task_id,
-        )
-
-        server2, events2 = _make_server(self.repo)
-        server2._replay_session(chat_id, "0")
-
-        state = agent_state.find_by_tab("0")
-        assert state is None or state.use_worktree is False
-
-
-

@@ -127,13 +127,8 @@ function lastMessage(posted, type) {
   return msgs.length ? msgs[msgs.length - 1] : null;
 }
 
-function disableWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function openSidebar(win) {
@@ -207,7 +202,7 @@ function assertOpenedInFreshTab(win, mode, tabBefore, what) {
 // panel only; the input must stay empty.
 function testResumeBranchLeavesInputEmpty(mode) {
   const {win, posted} = makeWebview({remote: mode.remote});
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   openSidebar(win);
 
   const tabBefore = win._testApi.getActiveTabId();
@@ -251,7 +246,7 @@ function testResumeBranchLeavesInputEmpty(mode) {
 // and still never in the input.
 function testFallbackBranchLeavesInputEmpty(mode) {
   const {win, posted} = makeWebview({remote: mode.remote});
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   openSidebar(win);
 
   const tabBefore = win._testApi.getActiveTabId();
@@ -295,7 +290,7 @@ function testFallbackBranchLeavesInputEmpty(mode) {
 // Branch 3: the chat is already open -> just switch tabs, touch nothing else.
 function testSwitchBranchLeavesInputEmpty(mode) {
   const {win, posted} = makeWebview({remote: mode.remote});
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
 
   const ready = posted.find(msg => msg && msg.type === 'ready');
   assert.ok(ready && ready.tabId, 'main.js must announce the initial tab id');
@@ -364,7 +359,7 @@ function testSwitchBranchLeavesInputEmpty(mode) {
 // The user's half-written prompt is data.  Browsing history must not eat it.
 function testResumeBranchPreservesTypedDraft(mode) {
   const {win, posted} = makeWebview({remote: mode.remote});
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
 
   const draft = 'now also add a retry budget of 3 attempts';
   input(win).value = draft;
@@ -387,7 +382,7 @@ function testResumeBranchPreservesTypedDraft(mode) {
 
 function testFallbackBranchPreservesTypedDraft(mode) {
   const {win, posted} = makeWebview({remote: mode.remote});
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
 
   const draft = 'draft that must survive browsing the history';
   input(win).value = draft;
@@ -428,7 +423,7 @@ function testFallbackBranchPreservesTypedDraft(mode) {
 // user into an unrelated blank tab.
 function testRunningRowWithoutEventsResumes(mode) {
   const {win, posted} = makeWebview({remote: mode.remote});
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   openSidebar(win);
 
   const tabBefore = win._testApi.getActiveTabId();
@@ -472,7 +467,7 @@ function testRunningRowWithoutEventsResumes(mode) {
 
 function testRunningRowWithoutEventsPreservesTypedDraft(mode) {
   const {win, posted} = makeWebview({remote: mode.remote});
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
 
   const draft = 'draft typed while a task is still starting up';
   input(win).value = draft;
@@ -510,7 +505,7 @@ function testRunningRowWithoutEventsPreservesTypedDraft(mode) {
 // missing, and to the empty string when both are.
 function testTaskTextFallsBackToTitle(mode) {
   const {win, posted} = makeWebview({remote: mode.remote});
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   openSidebar(win);
 
   sendHistory(win, posted, [
@@ -541,7 +536,7 @@ function testTaskTextFallsBackToTitle(mode) {
 
 function testTaskTextEmptyWithoutPreviewOrTitle(mode) {
   const {win, posted} = makeWebview({remote: mode.remote});
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
   openSidebar(win);
 
   sendHistory(win, posted, [

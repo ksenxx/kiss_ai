@@ -11,7 +11,7 @@ emits ONE ``followup_suggestion`` event per watching tab and persists it
 exactly once — no separate follow-up LLM call is made any more.
 
 Drives the real ``VSCodeServer._run_task`` lifecycle with a real
-``WorktreeSorcarAgent`` subclass whose ``run`` returns a scripted
+``ChatSorcarAgent`` subclass whose ``run`` returns a scripted
 ``finish()`` result (the same harness as ``test_wave2_runner_bugs.py``),
 a real ``JsonPrinter`` subclass that records every broadcast, and the
 real SQLite persistence layer.  No mocks or patches.
@@ -27,8 +27,8 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import persistence
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.core.utils import finish
 from kiss.server import agent_state
@@ -50,7 +50,7 @@ class _CapturePrinter(JsonPrinter):
         super().broadcast(event)
 
 
-class _ScriptedAgent(WorktreeSorcarAgent):
+class _ScriptedAgent(ChatSorcarAgent):
     """Real agent subclass whose ``run`` returns a scripted ``finish()``.
 
     Mirrors what the task runner relies on from ``ChatSorcarAgent.run``

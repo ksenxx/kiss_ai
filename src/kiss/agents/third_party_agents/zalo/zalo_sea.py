@@ -108,13 +108,46 @@ class ZaloChannelBackend(ToolMethodBackend):
         self._api_base_override = api_base
         self._access_token: str = ""
         self._oa_id: str = ""
-        self._http: Any = requests
+        self._http_obj: Any = requests
         self._muse: bool = False
+        self._lazy_muse: bool = False
+        self._wire_lock = threading.Lock()
         self._message_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self._webhook_server: ThreadedHTTPServer | None = None
         self._webhook_thread: threading.Thread | None = None
         self._connection_info: str = ""
 
+    def _wire_deferred(self) -> None:
+        """Run the Muse wiring :class:`ZaloAgent` deferred, once, before the first request.
+
+        The agent sets ``_lazy_muse`` instead of wiring at construction,
+        so building it for its tool list (``sea lint``, ``sea docs``,
+        run start) touches no daemon.  Concurrent first requests wait on
+        the lock and share the one surrogate; :meth:`_wire_muse`
+        publishes ``_muse`` last, so a request that sees it set sees the
+        whole wired state.
+
+        Raises:
+            MuseAuthError: When no Zalo credential can be wired, so
+                no request leaves on the direct transport without one.
+        """
+        if not self._lazy_muse or self._muse:
+            return
+        with self._wire_lock:
+            if not self._muse and not self._wire_muse():
+                from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+
+                raise MuseAuthError(self._connection_info)
+
+    @property
+    def _http(self) -> Any:
+        """The HTTP session: ``requests`` or the Muse boundary session (wired on first use)."""
+        self._wire_deferred()
+        return self._http_obj
+
+    @_http.setter
+    def _http(self, http: Any) -> None:
+        self._http_obj = http
 
     def _api_base(self) -> str:
         """Return the OA API base URL, resolved at call time.
@@ -529,18 +562,12 @@ class ZaloAgent(BaseChannelAgent):
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
-            from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
-
-            # Muse-auth mode: wire a vault surrogate and the boundary
-            # session (no network round trip); the real token never
-            # enters this process once migrated.  A daemon failure
-            # leaves the agent constructible (fail closed, tokenless)
-            # so its authenticate/clear tools stay available.
-            try:
-                self._backend._wire_muse()
-            except MuseAuthError as e:
-                self._backend._access_token = ""
-                self._backend._connection_info = f"Muse-auth wiring failed: {e}"
+            # Muse-auth mode: the backend wires its vault surrogate and
+            # boundary session on first use (see ZaloChannelBackend._http),
+            # so building the tool list (``sea lint``, ``sea docs``, run
+            # start) touches no daemon; the real token never enters this
+            # process once migrated.
+            self._backend._lazy_muse = True
             return
         cfg = _config.load()
         if cfg:  # pragma: no branch
@@ -548,8 +575,16 @@ class ZaloAgent(BaseChannelAgent):
             self._backend._oa_id = cfg.get("oa_id", "")
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return bool(self._backend._access_token)
+        """Return True if a Zalo token is loaded, enrolled in the vault, or in the config."""
+        if self._backend._access_token:
+            return True
+        if not self._backend._lazy_muse:
+            return False
+        from kiss.agents.third_party_agents.muse_auth.client import vault_has_credentials
+
+        return vault_has_credentials("zalo") or bool(
+            (_config.load_metadata() or {}).get("access_token")
+        )
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
@@ -561,7 +596,7 @@ class ZaloAgent(BaseChannelAgent):
             Returns:
                 Authentication status or instructions.
             """
-            if not agent._backend._access_token:  # pragma: no branch
+            if not agent._is_authenticated():  # pragma: no branch
                 return (
                     "Not authenticated with Zalo. Use authenticate_zalo(access_token=...) "
                     "to configure. Get a token from https://developers.zalo.me/ — "

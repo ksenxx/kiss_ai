@@ -29,9 +29,9 @@ The tests exercise:
   ``daemon_client.run`` with the ask_sea path, the OWNER's task id
   substituted into ``append_to_prompt``, the fixed
   ``append_to_system_prompt`` (read from ``ask_sea``),
-  ``parent_task_id`` / ``parent_tab_id`` / ``chat_id`` propagated,
-  and ``use_worktree`` / ``auto_commit`` disabled (this is a
-  read-only Q&A run).
+  and ``parent_task_id`` / ``parent_tab_id`` / ``chat_id`` propagated
+  (this is a read-only Q&A run: ``AskSea`` is a worker, so it has no
+  worktree tools).
 * ``_broadcast_ask_answer`` — once ``daemon_client.run`` returns
   (or raises) the worker broadcasts ONE ``ask_answer`` event carrying
   the question, the answer text, the success flag, the asking tab id
@@ -55,6 +55,7 @@ from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.commands import _split_ask_command
 from kiss.server.server import VSCodeServer
+from kiss.tests.server.conftest import clear_agent_states
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -71,10 +72,6 @@ class _AgentStub:
 
     def __init__(self, task_id: str) -> None:
         self.last_task_id = task_id
-
-
-def _clear_registry() -> None:
-    agent_state.agent_states.clear()
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
@@ -100,7 +97,7 @@ def _register_running_task(
     )
     st.is_task_active = True
     # ``_owner_task_id`` reads only ``last_task_id`` off the agent; the
-    # stub is not a WorktreeSorcarAgent and the annotation says so.
+    # stub is not a ChatSorcarAgent and the annotation says so.
     st.agent = _AgentStub(task_id)  # type: ignore[assignment]
     agent_state.register(st)
     return st
@@ -108,10 +105,10 @@ def _register_running_task(
 
 @pytest.fixture(autouse=True)
 def _reset() -> Iterator[None]:
-    _clear_registry()
+    clear_agent_states()
     sea_commands._reset_for_tests()
     yield
-    _clear_registry()
+    clear_agent_states()
     sea_commands._reset_for_tests()
 
 
@@ -461,7 +458,8 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
       ``append_to_system_prompt`` of its own.
     - ``parent_tab_id`` / ``chat_id`` reach the daemon so the sub-agent
       tab lands in the running task's tab.
-    - ``use_worktree`` / ``auto_commit`` are False (read-only Q&A).
+    - no worktree / auto-commit flags exist any more (read-only Q&A:
+      ``AskSea`` is a worker, so the worktree tools are dropped).
     """
     server, _ = _make_server()
     calls = _install_daemon_run_capture(monkeypatch)
@@ -483,8 +481,7 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     assert kwargs["parent_task_id"] == "task-abc"
     assert kwargs["parent_tab_id"] == "tab-1"
     assert kwargs["chat_id"] == "chat-xyz"
-    assert kwargs["use_worktree"] is False
-    assert kwargs["auto_commit"] is False
+    assert "use_worktree" not in kwargs and "auto_commit" not in kwargs
     assert kwargs["side_channel"] is True
     # What the daemon applies from the dispatched script for that owner:
     cmd: dict[str, Any] = {
@@ -508,8 +505,7 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     ) in hooked
     assert cmd["toolProfile"] == "none"
     assert [t.__name__ for t in cmd["toolsHook"]([])] == ["task_context"]
-    assert cmd["useWorktree"] is False
-    assert cmd["autoCommit"] is False
+    assert "useWorktree" not in cmd and "autoCommit" not in cmd
 
 
 def test_side_channel_ask_sea_path_resolves_to_bundled_seas_file(

@@ -38,7 +38,6 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');

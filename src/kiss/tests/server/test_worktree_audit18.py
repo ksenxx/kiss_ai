@@ -7,29 +7,25 @@
 The VS Code server coordinates three concurrent actors:
 
 1. A worktree task running on tab A.
-2. A non-worktree (main-tree) task running on tab B.
+2. Another tab's task operating on the same repository.
 3. User-triggered UI actions (merge / discard / newChat).
 
 Before the fixes documented in this file, the server's
-``_any_non_wt_running()`` / ``is_merging`` / ``is_task_active`` flags
-were inspected under ``_state_lock`` but the slow bodies that follow
-(``wt.merge()``, ``tab.agent.run()``, ``_release_worktree`` →
-``_do_merge``) ran without re-checking the flags or holding any
-serializing lock against the other actor's mutations.  This created
-three races; each is now plugged.
+``is_merging`` / ``is_task_active`` flags were inspected under
+``_state_lock`` but the slow bodies that follow (``wt.merge()``,
+``tab.agent.run()``, ``_do_merge``) ran without re-checking the flags
+or holding any serializing lock against the other actor's mutations.
+This created three races; each is now plugged.
 
 RACE-1 (merge guard TOCTOU)
-    ``_handle_worktree_action("merge")`` returned success even when a
-    non-worktree task started on another tab *after* the guard check
-    and *before* ``wt.merge()`` ran ``stash_if_dirty``.
+    ``_handle_worktree_action("merge")`` returned success even when
+    another tab's repository operation started *after* the guard
+    check and *before* ``wt.merge()`` ran ``stash_if_dirty``.
 
     **Fix**: ``_handle_worktree_action`` now (a) holds the per-repo
     re-entrant ``repo_lock`` for the entire body, and (b) sets
     ``tab.is_merging = True`` under ``_state_lock`` atomically with
-    the guard check.  Concurrent non-wt task-start in
-    ``_run_task_inner`` acquires the same ``repo_lock`` briefly to
-    inspect ``is_merging`` and set ``is_running_non_wt`` in one
-    critical section.
+    the guard check.
 
 RACE-2 (setup release TOCTOU)
     ``_try_setup_worktree`` released ``repo_lock`` after the
@@ -41,8 +37,8 @@ RACE-2 (setup release TOCTOU)
     **Fix**: ``_try_setup_worktree`` now wraps the entire release +
     create + copy-dirty-state + baseline-commit sequence in
     ``repo_lock(repo)``.  The lock is an :class:`threading.RLock` so
-    the inner ``_release_worktree`` → ``_do_merge`` re-acquires it on
-    the same thread without deadlock.
+    an inner ``_do_merge`` re-acquires it on the same thread without
+    deadlock.
 
 RACE-3 (post-task vs user-action on ``_wt``)
     In ``_run_task_inner`` 's finally block, ``tab.is_task_active``
@@ -74,12 +70,12 @@ from typing import Any, cast
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
     repo_lock,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
@@ -99,12 +95,11 @@ def _register_wt_state(
     """Register a server-owned worktree AgentState for *tab_id*."""
     state = AgentState(
         f"task-{tab_id}",
-        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        agent=ChatSorcarAgent("Sorcar VS Code"),
         tab_id=tab_id,
         server_owned=True,
         is_task_active=is_task_active,
     )
-    state.use_worktree = True
     agent_state.register(state)
     return state
 
@@ -136,7 +131,7 @@ def _make_repo(path: Path) -> Path:
 
 
 def _make_wt_with_commit(
-    repo: Path, branch: str, agent: WorktreeSorcarAgent,
+    repo: Path, branch: str, agent: ChatSorcarAgent,
 ) -> GitWorktree:
     """Create a real worktree, record an agent commit, assign to agent."""
     slug = branch.replace("/", "_")
@@ -183,13 +178,13 @@ def _server(repo: Path) -> VSCodeServer:
 
 class TestRaceMergeGuardTOCTOU:
     """RACE-1: ``_handle_worktree_action("merge")`` must serialize
-    against concurrent non-wt task-start on another tab.
+    against concurrent repository operations on another tab.
 
     The fix uses (a) the per-repo re-entrant ``repo_lock`` to block
     the slow body of the merge from running while another caller
     holds the same lock, and (b) the ``tab.is_merging`` flag set
-    atomically with the guard check so that any non-wt task that
-    starts after the guard fires its own refusal path.
+    atomically with the guard check so that any task admission that
+    runs after the guard sees the tab busy.
     """
 
     def test_repo_lock_serializes_merge_with_concurrent_setup(
@@ -208,7 +203,7 @@ class TestRaceMergeGuardTOCTOU:
         server = _server(repo)
 
         state_a = _register_wt_state("a")
-        agent_a = cast(WorktreeSorcarAgent, state_a.agent)
+        agent_a = cast(ChatSorcarAgent, state_a.agent)
         wt = _make_wt_with_commit(repo, "kiss/wt-race1-1", agent_a)
 
         lock = repo_lock(repo)
@@ -266,8 +261,8 @@ class TestRaceMergeGuardTOCTOU:
         self, tmp_path: Path,
     ) -> None:
         """The merge handler must claim ``tab.is_merging = True``
-        before releasing ``_state_lock`` so a concurrent non-wt
-        task-start path sees the flag and refuses to start.
+        before releasing ``_state_lock`` so concurrent task admission
+        on the tab sees the flag and refuses to start.
 
         We probe the flag by injecting an observer in the
         ``_state_lock`` window: while the merge thread runs and
@@ -285,7 +280,7 @@ class TestRaceMergeGuardTOCTOU:
         server = _server(repo)
 
         state = _register_wt_state("a")
-        agent = cast(WorktreeSorcarAgent, state.agent)
+        agent = cast(ChatSorcarAgent, state.agent)
         _make_wt_with_commit(repo, "kiss/wt-race1-2", agent)
 
         lock = repo_lock(repo)
@@ -321,7 +316,7 @@ class TestRaceMergeGuardTOCTOU:
         assert state.is_merging, (
             "RACE-1: merge handler did not set ``state.is_merging`` "
             "before blocking on repo_lock.  The flag is the signal "
-            "for non-wt task-start to refuse."
+            "for task admission on the tab to refuse."
         )
 
         holder_release.set()
@@ -355,7 +350,7 @@ class TestRacePostTaskVsUserAction:
         server = _server(repo)
 
         state = _register_wt_state("a", is_task_active=True)
-        agent = cast(WorktreeSorcarAgent, state.agent)
+        agent = cast(ChatSorcarAgent, state.agent)
         wt = _make_wt_with_commit(repo, "kiss/wt-race3-active", agent)
 
         result = server._handle_worktree_action("discard", "a")
@@ -388,7 +383,7 @@ class TestRaceSetupRespectsRepoLock:
         """
         src = (
             Path(__file__).resolve().parents[2]
-            / "agents" / "sorcar" / "worktree_sorcar_agent.py"
+            / "agents" / "sorcar" / "sorcar_agent.py"
         ).read_text(encoding="utf-8")
 
         start = src.index("def _try_setup_worktree")
@@ -413,9 +408,8 @@ class TestRaceSetupRespectsRepoLock:
         )
 
     def test_repo_lock_is_reentrant(self) -> None:
-        """``repo_lock`` returns an RLock so the wrapped
-        ``_release_worktree`` → ``_do_merge`` re-acquisition does
-        not deadlock on the same thread.
+        """``repo_lock`` returns an RLock so a nested ``_do_merge``
+        re-acquisition does not deadlock on the same thread.
         """
         from tempfile import TemporaryDirectory
 
@@ -433,46 +427,3 @@ class TestRaceSetupRespectsRepoLock:
             finally:
                 lock.release()
 
-
-class TestRaceNonWtStartBlockedByOngoingMerge:
-    """A non-wt task-start path must observe the ``is_merging`` flag
-    set by a concurrent merge handler and refuse to start.  Combined
-    with RACE-1's atomic check+set, this prevents the merge from
-    stashing in-flight writes from another tab.
-    """
-
-    def test_non_wt_task_start_guard_observes_is_merging(
-        self, tmp_path: Path,
-    ) -> None:
-        """The non-wt task-start guard in ``_run_task_inner``
-        inspects ``is_merging and use_worktree`` under
-        ``_state_lock``.  When the merge handler sets the flag, a
-        concurrent non-wt task-start must observe it and refuse.
-        """
-        repo = _make_repo(tmp_path / "repo")
-        server = _server(repo)
-
-        state_a = _register_wt_state("a")
-        state_a.is_merging = True
-
-        state_b = AgentState("task-b", tab_id="b", server_owned=True)
-        state_b.use_worktree = False
-        agent_state.register(state_b)
-
-        with server._state_lock:
-            should_refuse = any(
-                t.is_merging and t.use_worktree
-                for t in agent_state.agent_states.values()
-            )
-        assert should_refuse, (
-            "RACE-1: non-wt task-start guard must observe the merge "
-            "handler's ``is_merging = True`` flag."
-        )
-
-        state_a.is_merging = False
-        with server._state_lock:
-            should_refuse = any(
-                t.is_merging and t.use_worktree
-                for t in agent_state.agent_states.values()
-            )
-        assert not should_refuse

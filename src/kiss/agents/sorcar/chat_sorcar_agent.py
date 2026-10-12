@@ -12,6 +12,7 @@ management — the same workflow that the VS Code extension performs in
 from __future__ import annotations
 
 import logging
+import platform
 import re
 import threading
 import time
@@ -124,38 +125,6 @@ def _safe_broadcast(broadcast: Any, event: dict[str, Any]) -> None:
         logger.warning("%s broadcast raised", event.get("type"), exc_info=True)
 
 
-def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
-    """Return True when *work_dir* lies inside the agent's own worktree dir.
-
-    Used by :meth:`ChatSorcarAgent.run` to decide the persisted
-    ``is_worktree`` flag for worktree-capable subclasses whose ``run()``
-    consumed the ``use_worktree`` kwarg before delegating:
-    :class:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent`
-    redirects ``work_dir`` into ``self._wt_dir`` only when a worktree
-    was actually set up for the current run, so containment of the
-    effective ``work_dir`` in ``wt_dir`` is the ground truth (a stale
-    pending worktree from an earlier run does not match the current
-    run's plain ``work_dir``, and an explicit ``use_worktree=False``
-    fallback leaves ``work_dir`` untouched).
-
-    Args:
-        work_dir: The effective working directory of the current run.
-        wt_dir: The agent's current worktree directory (``Path`` or
-            ``None`` — typed loosely because plain ``ChatSorcarAgent``
-            has no ``_wt_dir`` attribute).
-
-    Returns:
-        True only when both paths exist as strings and *work_dir*
-        resolves to a path at or below *wt_dir*.
-    """
-    if not work_dir or wt_dir is None:
-        return False
-    try:
-        return Path(work_dir).resolve().is_relative_to(Path(str(wt_dir)).resolve())
-    except (OSError, ValueError):
-        return False
-
-
 def _extract_result_summary(result: str) -> str:
     """Return the persistable summary text for a finished run's *result*.
 
@@ -224,11 +193,6 @@ class ChatSorcarAgent(SorcarAgent):
         self._last_user_prompt: str = ""
         self._last_result_summary: str = ""
         self._task_id_lock: threading.RLock = threading.RLock()
-        # Whether the CURRENT run executes inside a git worktree —
-        # computed at the top of :meth:`run` and read by the
-        # system-prompt settings hook and the ``task_settings``
-        # broadcast.
-        self._run_is_worktree: bool = False
 
     @property
     def chat_id(self) -> str:
@@ -271,12 +235,18 @@ class ChatSorcarAgent(SorcarAgent):
     def new_chat(self) -> None:
         """Reset to a new chat session (equivalent to VS Code 'Clear').
 
-        Also drops any pending one-shot :meth:`resume_from_task_id`
+        Retires any pending worktree first (``SorcarAgent.new_chat``),
+        and drops any pending one-shot :meth:`resume_from_task_id`
         seed: a brand-new chat must never have its first prompt
         augmented with the previous task's parent-chain context.
         """
+        super().new_chat()
         self._chat_id = ""
         self._context_task_id = ""
+
+    def _commit_context(self) -> tuple[str | None, str | None]:
+        """The chat's last task text and result summary, for commit messages."""
+        return self._last_user_prompt or None, self._last_result_summary or None
 
     def resume_chat_by_id(self, chat_id: str) -> None:
         """Resume a chat session using a stable chat identifier.
@@ -340,9 +310,7 @@ class ChatSorcarAgent(SorcarAgent):
         model: str,
         work_dir: str,
         is_parallel: bool,
-        is_worktree: bool,
         max_budget: float | None = None,
-        auto_commit_mode: bool = True,
     ) -> dict[str, object]:
         """Build the task-history "extra" payload for persistence.
 
@@ -355,15 +323,8 @@ class ChatSorcarAgent(SorcarAgent):
             model: Model name to record.
             work_dir: Working directory to record.
             is_parallel: Whether parallel sub-agents are enabled.
-            is_worktree: Whether worktree isolation is in effect.
             max_budget: The run's resolved budget cap in USD, or None
                 to omit it from the payload.
-            auto_commit_mode: The run's effective auto-commit toggle.
-                ``persistence._add_task`` maps an ABSENT toggle to
-                manual-commit while the schema default is ON, so the
-                early row must always carry the real value or a task
-                viewed mid-run (killed, or running in another process)
-                is labelled manual-commit.
 
         Returns:
             The extra-payload dict.
@@ -373,8 +334,6 @@ class ChatSorcarAgent(SorcarAgent):
             "work_dir": strip_worktree_suffix(work_dir),
             "version": __version__,
             "is_parallel": is_parallel,
-            "is_worktree": is_worktree,
-            "auto_commit_mode": auto_commit_mode,
         }
         if max_budget is not None:
             payload["max_budget"] = max_budget
@@ -387,17 +346,14 @@ class ChatSorcarAgent(SorcarAgent):
     def _system_prompt_task_settings(self) -> dict[str, str]:
         """Extend the settings with this chat run's identity and modes.
 
-        Adds the worktree mode, the chat / task ids allocated at the
-        top of :meth:`run`, and the sub-agent parentage — everything
+        Adds the chat / task ids allocated at the top of :meth:`run`
+        and the sub-agent parentage — everything
         this class knows that the base agents do not.
 
         Returns:
             The base label → value pairs plus the chat-level ones.
         """
         settings = super()._system_prompt_task_settings()
-        settings["Worktree mode"] = (
-            "worktree" if self._run_is_worktree else "no worktree"
-        )
         settings["Chat id"] = self._chat_id
         settings["Task id"] = self.last_task_id
         sub = self._subagent_info
@@ -412,7 +368,6 @@ class ChatSorcarAgent(SorcarAgent):
         model: str,
         work_dir: str,
         is_parallel: bool,
-        is_worktree: bool,
         max_budget: float | None,
         start_ts: int,
         task_id: str,
@@ -430,7 +385,6 @@ class ChatSorcarAgent(SorcarAgent):
                 caller left it to the default).
             work_dir: Working directory of the run.
             is_parallel: Whether parallel sub-agents are enabled.
-            is_worktree: Whether worktree isolation is in effect.
             max_budget: The run's budget cap in USD, or None when
                 unstated.
             start_ts: The run's start timestamp (ms since epoch) — the
@@ -442,7 +396,10 @@ class ChatSorcarAgent(SorcarAgent):
 
         Returns:
             The settings dict carried by the event: the keys above,
-            ``chat_id``, ``is_subagent``, ``parent_task_id`` when there
+            ``chat_id``, ``is_subagent``, ``host`` (the machine the run
+            is on, ``platform.node()``: ``sync-task-db.sh`` copies tasks
+            between machines and the s10s hub sync sends only the tasks
+            that ran on the sending one), ``parent_task_id`` when there
             is one, ``sea`` when the run executes a SEA and
             the :attr:`run_config` keys (see
             :data:`kiss.agents.sorcar.run_config.RUN_CONFIG_KEYS`).
@@ -451,11 +408,11 @@ class ChatSorcarAgent(SorcarAgent):
             "model": model,
             "work_dir": strip_worktree_suffix(work_dir),
             "is_parallel": is_parallel,
-            "is_worktree": is_worktree,
             "start_ts": start_ts,
             "chat_id": self._chat_id,
             "task_id": task_id,
             "is_subagent": self._subagent_info is not None,
+            "host": platform.node(),
         }
         if max_budget is not None:
             payload["max_budget"] = max_budget
@@ -481,7 +438,7 @@ class ChatSorcarAgent(SorcarAgent):
         result_raw: str,
         result_summary: str,
         usage: tuple[float, int, int],
-    ) -> None:
+    ) -> bool:
         """Persist a minimal replayable event stream when none was recorded.
 
         Runs that happen inside a chat webview stream every agent event
@@ -513,9 +470,13 @@ class ChatSorcarAgent(SorcarAgent):
             usage: One coherent ``(budget_used, total_tokens_used,
                 total_steps)`` triple (:meth:`usage_snapshot`) to stamp
                 on the ``result`` event.
+
+        Returns:
+            True when events were synthesized (the caller re-derives the
+            task's tags over them), False when a transcript already existed.
         """
         if _task_has_transcript_events(task_id):
-            return
+            return False
         if prompt:
             _append_chat_event({"type": "prompt", "text": prompt}, task_id=task_id)
         cost, tokens, steps = usage
@@ -540,6 +501,7 @@ class ChatSorcarAgent(SorcarAgent):
             _append_chat_event(
                 {"type": "followup_suggestion", "text": suggestion}, task_id=task_id,
             )
+        return True
 
     def _begin_run_usage_epoch(self) -> None:
         """Keep the usage epoch :meth:`run` started at row allocation.
@@ -588,6 +550,11 @@ class ChatSorcarAgent(SorcarAgent):
         )
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
+        # A worktree pending from the previous task is retired now,
+        # while ``_commit_context`` still describes that task: the
+        # commit message of its kept-for-review branch must not be
+        # generated from the prompt below.
+        self._begin_task(kwargs.get("printer"))
         # ``_last_task_id`` is deliberately NOT cleared here.  The next
         # two steps are a SQLite read (build_chat_prompt) and a SQLite
         # write (_add_task), and every server-thread reader of this
@@ -621,16 +588,6 @@ class ChatSorcarAgent(SorcarAgent):
             else prompt_template,
         )
 
-        # Consumed, never believed: ``SorcarAgent.run`` has no such
-        # parameter, and whether a worktree EXISTS is the only honest
-        # answer for the history badge — a caller asking for one does
-        # not make one appear on this class.
-        kwargs.pop("use_worktree", None)
-        is_worktree = self.uses_worktree and _dir_inside_worktree(
-            kwargs.get("work_dir", "") or "",
-            getattr(self, "_wt_dir", None),
-        )
-        self._run_is_worktree = is_worktree
         raw_budget = kwargs.get("max_budget")
         try:
             run_max_budget = None if raw_budget is None else float(raw_budget)
@@ -647,16 +604,24 @@ class ChatSorcarAgent(SorcarAgent):
         resolved_model = kwargs["model_name"] = self._resolve_model_name(
             kwargs.get("model_name"),
         )
+        # The verdict is about the task as submitted, not about the
+        # conversation ``agent_prompt`` prepends to it: classify the
+        # raw task here, ahead of ``SorcarAgent.run`` (which reuses the
+        # verdict).  The reset first drops a verdict a previous run of
+        # this agent left behind by crashing before its own cleanup; a
+        # verdict the task runner pre-seeded survives it.
+        self._reset_task_classification()
+        self._classify_task_once(
+            resolved_model,
+            prompt_template,
+            kwargs.get("model_config"),
+            arguments=kwargs.get("arguments"),
+        )
         resolved_budget = (
             run_max_budget if run_max_budget is not None else DEFAULT_MAX_BUDGET
         )
         resolved_work_dir = str(Path(kwargs.get("work_dir") or ".").resolve())
         run_is_parallel = bool(kwargs.get("is_parallel", True))
-        # The effective toggle: ``WorktreeSorcarAgent.run`` binds
-        # ``auto_commit_enabled`` from its kwarg / config BEFORE
-        # delegating here; this class has no toggle, and absent means
-        # ON (schema default + legacy migration).
-        auto_commit_mode = bool(getattr(self, "auto_commit_enabled", True))
         # The row's start is the run's start, not the row's: the daemon
         # (``TaskRunner._run_task_inner``) stamps a ``<task>`` block
         # when it begins and passes it as ``_start_ms``, so the row,
@@ -670,9 +635,7 @@ class ChatSorcarAgent(SorcarAgent):
             model=resolved_model,
             work_dir=resolved_work_dir,
             is_parallel=run_is_parallel,
-            is_worktree=is_worktree,
             max_budget=resolved_budget,
-            auto_commit_mode=auto_commit_mode,
         )
         early_extra["startTs"] = start_ts_ms
 
@@ -751,7 +714,6 @@ class ChatSorcarAgent(SorcarAgent):
                 model=resolved_model,
                 work_dir=resolved_work_dir,
                 is_parallel=run_is_parallel,
-                is_worktree=is_worktree,
                 max_budget=resolved_budget,
                 start_ts=start_ts_ms,
                 task_id=task_id,
@@ -810,7 +772,17 @@ class ChatSorcarAgent(SorcarAgent):
                 if tl is not None and getattr(tl, "task_id", "") == task_key:
                     tl.task_id = previous_task_id
             if not skip_persistence:
-                _save_task_result(task_id=task_id, result=result_summary)
+                # The agent's own verdict (sub-agents and CLI runs, which
+                # no server runner persists) rides on the row with the
+                # summary, so the history sidebar shows a
+                # finish(success=False) run as failed.
+                parsed = parse_result_yaml(result_raw) if result_raw else None
+                verdict = parsed.get("success") if parsed else None
+                _save_task_result(
+                    task_id=task_id,
+                    result=result_summary,
+                    success=verdict if isinstance(verdict, bool) else None,
+                )
                 # Once ``super().run`` started, the live model settings
                 # are this run's (``_reset`` resolved them); before that
                 # point they are unset or the previous run's, so the row
@@ -834,9 +806,7 @@ class ChatSorcarAgent(SorcarAgent):
                     model=final_model,
                     work_dir=resolved_work_dir,
                     is_parallel=final_is_parallel,
-                    is_worktree=is_worktree,
                     max_budget=resolved_budget,
-                    auto_commit_mode=auto_commit_mode,
                 )
                 # One coherent triple (see usage_snapshot): three
                 # property reads could tear across a concurrent
@@ -854,10 +824,14 @@ class ChatSorcarAgent(SorcarAgent):
                     # no server runner finalises) get a duration too.
                     extra_payload["endTs"] = int(time.time() * 1000)
                     _save_task_extra(extra_payload, task_id=task_id)
-                self._persist_replay_events_if_missing(
+                if self._persist_replay_events_if_missing(
                     task_id=task_id,
                     prompt=agent_prompt,
                     result_raw=result_raw,
                     result_summary=result_summary,
                     usage=(final_cost, final_tokens, final_steps),
-                )
+                ):
+                    # The synthesized events joined the trajectory after
+                    # its tags were derived: derive them again so a secret
+                    # in the augmented prompt is tagged.
+                    _save_task_extra({"endTs": extra_payload["endTs"]}, task_id=task_id)

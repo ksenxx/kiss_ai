@@ -36,9 +36,10 @@ from kiss.agents.seas.base.base_sea import (
 )
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.merge_conflict_resolver import run_merge_sea
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.agents.sorcar.run_config import PROVENANCE_EXPLICIT
-from kiss.agents.sorcar.sea_apply import RUN_CONFIG_FIELD, apply_sea, load_layers
+from kiss.agents.sorcar.sea_apply import RUN_CONFIG_FIELD, SETTING_FIELDS, apply_sea, load_layers
 from kiss.agents.sorcar.sea_commands import (
     SeaError,
     base_prompt,
@@ -49,7 +50,6 @@ from kiss.agents.sorcar.sea_commands import (
     sea_name,
 )
 from kiss.server import sorcar
-from kiss.server.merge_conflict_resolver import run_merge_sea
 from kiss.server.task_update import run_task_update_sea
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve, tool_call_body
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
@@ -170,7 +170,6 @@ class BaseSeaRootLayerDaemonTest(DaemonRunApiHarness):
             result = sorcar.run(
                 "plain task",
                 work_dir=self.repo,
-                use_worktree=False,
                 endpoint_file=self.endpoint_file,
                 timeout=60,
             )
@@ -197,7 +196,6 @@ class BaseSeaRootLayerDaemonTest(DaemonRunApiHarness):
         result = sorcar.run(
             "plain task",
             work_dir=self.repo,
-            use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
@@ -266,7 +264,10 @@ def test_a_plain_command_runs_the_bare_base_and_names_no_sea() -> None:
     assert sea_name(layers) == ""
     cmd: dict[str, Any] = {"prompt": "p", "useMemory": False}
     assert apply_sea(cmd) == set()
-    assert cmd.pop(RUN_CONFIG_FIELD) == {"sea": "", "channel": False, "pinned": {}}
+    record = cmd.pop(RUN_CONFIG_FIELD)
+    # Every setting but the one the command carries is left to the daemon's defaults.
+    assert record.pop("defaulted") == sorted(k for k in SETTING_FIELDS if k != "use_memory")
+    assert record == {"sea": "", "channel": False, "pinned": {}}
     assert cmd["prompt"] == "p" and cmd["useMemory"] is False
     assert cmd["systemPromptHook"]("X") == "X"
     assert cmd["toolsHook"]([house_tool]) == [house_tool]

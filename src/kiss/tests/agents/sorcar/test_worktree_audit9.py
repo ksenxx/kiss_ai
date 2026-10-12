@@ -10,7 +10,7 @@ BUG-39: `is_running_non_wt` flag is now cleared at the very start of
     except handler, so it can never get permanently stuck.
 
 BUG-40 / INC-4: `_do_merge` now returns `(MergeResult.CHECKOUT_FAILED, "")`
-    instead of `(None, checkout_error_str)`.  `_release_worktree` checks
+    instead of `(None, checkout_error_str)`.  `merge` checks
     `result == MergeResult.CHECKOUT_FAILED` instead of `result is None`,
     so the checkout error is never misattributed to `_stash_pop_warning`.
 
@@ -25,16 +25,15 @@ BUG-43: Manual merge instructions now use `git cherry-pick --no-commit
     baseline..branch` when a baseline commit exists, matching what the
     auto-merge actually does.
 
-BUG-44: `_new_chat` guard now checks `tab.agent._wt_pending` regardless
-    of `tab.use_worktree`, so a tab that switched modes still gets the
-    non-wt-running guard.
+BUG-44 (obsolete): covered the `_new_chat` guard's dependence on the
+    since-removed per-tab `use_worktree` flag.
 
 INC-6: `_check_merge_conflict` now checks both unstaged AND staged
     files for dirty-file overlap (historically via the since-removed
     `unstaged_files()`/`staged_files()` helpers).
 
-RED-5: The two consecutive `if not tab.use_worktree:` blocks in
-    `_run_task_inner`'s finally are now a single block.
+RED-5 (obsolete): covered the duplicated `if not tab.use_worktree:`
+    blocks in `_run_task_inner`; the flag no longer exists.
 """
 
 from __future__ import annotations
@@ -42,12 +41,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
-)
-from kiss.agents.sorcar.worktree_sorcar_agent import (
-    WorktreeSorcarAgent,
     _manual_merge_cmd,
 )
 
@@ -76,8 +73,8 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
 
 class TestBug40Inc4Fix:
     """BUG-40/INC-4 FIX: _do_merge returns MergeResult.CHECKOUT_FAILED
-    instead of (None, err), and _release_worktree never misattributes
-    checkout errors to _stash_pop_warning."""
+    instead of (None, err), and merge() never misattributes checkout
+    errors to _stash_pop_warning."""
 
 
 
@@ -85,7 +82,7 @@ class TestBug40Inc4Fix:
     def test_checkout_error_not_stored_as_stash_warning(self, tmp_path):
         """Checkout failure does NOT set _stash_pop_warning."""
         repo = _make_repo(tmp_path)
-        agent = WorktreeSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         agent._chat_id = "bug40"
 
         branch = "kiss/wt-bug40-test"
@@ -103,13 +100,13 @@ class TestBug40Inc4Fix:
             wt_dir=wt_dir,
         )
 
-        agent._release_worktree()
+        message = agent.merge()
 
         assert agent._stash_pop_warning is None, (
             "Checkout error must NOT be stored in _stash_pop_warning"
         )
-        assert agent._merge_conflict_warning is not None
-        assert "checkout" in agent._merge_conflict_warning.lower()
+        assert "checkout" in message.lower()
+        assert agent._wt is not None, "the branch must be kept after CHECKOUT_FAILED"
 
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)

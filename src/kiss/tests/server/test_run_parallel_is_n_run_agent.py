@@ -41,7 +41,7 @@ JOB_ID = re.compile(r"\bagent-[0-9a-f]{8}\b")
 @pytest.fixture
 def env() -> Iterator[IsolatedKissHome]:
     home = IsolatedKissHome(prefix="kiss-run-parallel-n-run-agent-")
-    home.write_config(is_worktree=False, auto_commit_mode=False, classify_tasks=False)
+    home.write_config(classify_tasks=False)
     try:
         yield home
     finally:
@@ -103,8 +103,6 @@ def test_children_are_sub_tasks_sharing_the_budget_and_results_keep_task_order(
             model=STANDIN_MODEL,
             model_config=model.model_config,
             max_budget=8.0,
-            use_worktree=False,
-            auto_commit=False,
             endpoint_file=daemon,
             timeout=300,
         )
@@ -166,8 +164,6 @@ def test_timeout_returns_job_notices_without_stopping_the_children(
             work_dir=str(env.repo),
             model=STANDIN_MODEL,
             model_config=model.model_config,
-            use_worktree=False,
-            auto_commit=False,
             endpoint_file=daemon,
             timeout=300,
         )

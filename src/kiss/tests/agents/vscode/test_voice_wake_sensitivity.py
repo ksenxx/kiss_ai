@@ -28,11 +28,8 @@ from pathlib import Path
 import pytest
 
 from kiss.tests.conftest import goto_retrying_network_change
-from kiss.tests.server.test_voice_wake_sensitivity import (
-    HAVE_MAC_TTS,
-    _free_port,
-    _say_wav,
-)
+from kiss.tests.server.conftest import find_free_port
+from kiss.tests.server.test_voice_wake_sensitivity import HAVE_MAC_TTS, _say_wav
 
 
 @unittest.skipUnless(HAVE_MAC_TTS, "requires macOS `say` and `afconvert`")
@@ -47,7 +44,7 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
         self.wav = _say_wav(
             self.tmpdir, "hey", "hey there [[slnc 300]] Hey Sorcar [[slnc 1500]]"
         )
-        self.port = _free_port()
+        self.port = find_free_port()
 
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(

@@ -99,6 +99,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
+
+from kiss.agents.sorcar import cron_agent
 
 # The synchronous client half of this API lives in the sorcar layer
 # (``kiss.agents.sorcar.daemon_client``) so sorcar-layer code — the
@@ -117,12 +120,14 @@ from kiss.core.config import kiss_home
 from kiss.core.utils import is_root_dir
 from kiss.core.vscode_config import load_config
 from kiss.server import sidebar_panels
+from kiss.server.remote_tabs import ROUTED_COMMANDS, RemoteTabs
 from kiss.server.tips import TIPS_OPT_OUT_MARKER
 
 logger = logging.getLogger(__name__)
 
-# In-flight ``appsStatus`` replies (see ServerApi.get_apps_status): the
-# event loop keeps only weak references to tasks.
+# In-flight ``appsStatus`` and ``machines`` replies (see
+# ServerApi.get_apps_status, get_machines): the event loop keeps only
+# weak references to tasks.
 _APPS_STATUS_REPLIES: set[asyncio.Task[None]] = set()
 
 def _write_tips_opt_out_marker(opt_out: bool) -> None:
@@ -303,8 +308,12 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand("getTaskUpdate", handler="get_task_update"),
     ApiCommand("getCronJobs", handler="get_cron_jobs"),
+    ApiCommand("cronAction", required=("action",), handler="cron_action"),
+    ApiCommand("getMachines", handler="get_machines"),
+    ApiCommand("machineAction", required=("action", "name"), handler="machine_action"),
     ApiCommand("getAppsStatus", handler="get_apps_status"),
     ApiCommand("getSpendReport", handler="get_spend_report"),
+    ApiCommand("getRecommendations", handler="get_recommendations"),
     ApiCommand("listDir", handler="list_dir"),
     ApiCommand("gitStatus", handler="git_status"),
     ApiCommand("gitLog", handler="git_log"),
@@ -319,7 +328,6 @@ API: dict[str, ApiCommand] = _catalog(
     ),
     ApiCommand("complete", required=("query",)),
     ApiCommand("worktreeAction", required=("action",)),
-    ApiCommand("mainTreeAction", required=("action",)),
     ApiCommand("generateCommitMessage"),
     ApiCommand("autocommitAction"),
     ApiCommand("auth", required=("password",), handler="drop"),
@@ -504,6 +512,9 @@ class ServerBackend(Protocol):
 
     _printer: Any
     _vscode_server: Any
+    port: int
+
+    def _lan_urls(self) -> list[str]: ...
 
     async def _endpoint_send(self, endpoint: Any, data: str) -> None: ...
 
@@ -616,11 +627,11 @@ class ServerApi:
 
     The actual code API every client command invokes.  Each catalog
     entry in :data:`API` names (via ``ApiCommand.handler``) the method
-    of this class that services it, so the clients — the VS Code
-    extension (``src/SorcarApi.ts``), the chat webview / remote
-    webapp (``media/api.js``), and the Python
-    clients — call these methods remotely by sending the catalog's
-    JSON commands.  The transport layer
+    of this class that services it, so the clients — the chat webview
+    of the VS Code extension and the remote webapp (both through
+    ``media/api.js``), the extension host (``src/SorcarSidebarView.ts``)
+    and the Python clients — call these methods remotely by sending
+    the catalog's JSON commands.  The transport layer
     (``RemoteAccessServer._dispatch_client_command``) parses the JSON
     and hands every command to :meth:`dispatch`; it never routes a
     command itself, so this class is the single place where the wire
@@ -654,6 +665,7 @@ class ServerApi:
                 daemon startup instead of on first use.
         """
         self._backend = backend
+        self.remote_tabs = RemoteTabs(backend)
         for spec in API.values():
             if spec.handler != "drop" and not callable(
                 getattr(self, spec.handler, None)
@@ -690,7 +702,7 @@ class ServerApi:
            global working directory the whole disk, nor run a task
            there.  A command without a ``workDir`` resolves to that
            global directory (``config.json`` ``work_dir``, set from any
-           surface's "Working directory" panel via ``setWorkDir``).
+           surface's chat-header work-dir drop-down via ``setWorkDir``).
         7. Invokes the :class:`ServerApi` method named by the
            command's catalog entry.
 
@@ -734,7 +746,20 @@ class ServerApi:
             # @-mention file scan at the whole disk.  The command then
             # falls back to the daemon's configured folder.
             cmd["workDir"] = ""
+        # A tab bound to a remote machine (chat header drop-down) sends
+        # its task commands there; see ``kiss.server.remote_tabs``.
+        if name in ROUTED_COMMANDS and await asyncio.to_thread(
+            self.remote_tabs.route, cmd,
+        ):
+            return
         await getattr(self, handler)(cmd, ctx)
+        if name == "ready":
+            # The client has the tabs now: replay the ones running on
+            # remote machines to it.
+            await asyncio.to_thread(
+                self.remote_tabs.replay_to,
+                cmd["connId"], str(cmd.get("singleTabId", "") or ""),
+            )
 
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
@@ -1236,6 +1261,114 @@ class ServerApi:
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("getAppsStatus reply failed", exc_info=True)
 
+    async def cron_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Apply a Schedule subpanel button to a cron job and send the fresh list.
+
+        ``action`` is ``create`` (the header's ``+`` form: ``name``,
+        ``schedule``, ``what`` and ``kind``, ``prompt`` or ``command``;
+        no ``jobId``), or ``remove``, ``pause``, ``resume``, ``run_now``
+        or ``update`` (with ``name``, ``schedule`` and ``what``) on the
+        job ``jobId``, applied by
+        :func:`kiss.agents.sorcar.cron_agent.apply_job_action`.  The
+        direct reply is a ``cronJobs`` message (as for ``getCronJobs``)
+        carrying the ``action`` and an ``error`` text when it was
+        refused, so the subpanel re-renders either way (and closes its
+        in-place form only when its own create or update went through).
+
+        Args:
+            cmd: The ``cronAction`` command (``action``, optional
+                ``jobId``, ``name``, ``schedule``, ``what``, ``kind``).
+            ctx: The transport context of the current call.
+        """
+        error = await asyncio.to_thread(
+            cron_agent.apply_job_action,
+            str(cmd["action"]), str(cmd.get("jobId") or ""), str(cmd.get("name") or ""),
+            str(cmd.get("schedule") or ""), str(cmd.get("what") or ""),
+            str(cmd.get("kind") or "prompt"),
+        )
+        jobs = await asyncio.to_thread(sidebar_panels.cron_jobs_report)
+        await self._backend._reply_direct(
+            ctx.endpoint,
+            {"type": "cronJobs", "jobs": jobs, "action": str(cmd["action"]), "error": error},
+            "cronAction",
+        )
+
+    def _local_machine_address(self) -> tuple[str, int]:
+        """Return the (ip, port) the local daemon is reached at: its first LAN IP, else loopback."""
+        lan = self._backend._lan_urls()
+        host = urlsplit(lan[0]).hostname if lan else "127.0.0.1"
+        return host or "127.0.0.1", int(self._backend.port)
+
+    async def get_machines(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client the machines for its MACHINES subpanel.
+
+        The rows come from :func:`kiss.server.sidebar_panels.machines_report`
+        (the local machine first, then every registered one with its
+        reachability; ``refresh: true`` pings again).  The direct reply
+        is ``{"type": "machines", "machines": [...], "checkedAt": <epoch
+        ms>, "action": "", "error": ""}``, produced by a background task like
+        ``appsStatus`` so the pings never hold up the connection's other
+        commands.
+
+        Args:
+            cmd: The ``getMachines`` command (optional ``refresh``).
+            ctx: The transport context of the current call.
+        """
+        task = asyncio.create_task(
+            self._reply_machines(ctx.endpoint, bool(cmd.get("refresh")), "", "", "getMachines")
+        )
+        _APPS_STATUS_REPLIES.add(task)
+        task.add_done_callback(_APPS_STATUS_REPLIES.discard)
+
+    async def _reply_machines(
+        self, endpoint: Any, refresh: bool, action: str, error: str, command: str
+    ) -> None:
+        """Ping (or read the cache) and send the ``machines`` reply.
+
+        Args:
+            endpoint: The requesting client's transport endpoint.
+            refresh: Ping again even when the cache is fresh.
+            action: The ``machineAction`` the reply answers (``""`` for a poll).
+            error: The error text of that action when it was refused.
+            command: The command being answered (for the reply log).
+        """
+        try:
+            ip, port = self._local_machine_address()
+            rows, checked_at = await asyncio.to_thread(
+                sidebar_panels.machines_report, ip, port, refresh
+            )
+            await self._backend._reply_direct(
+                endpoint,
+                {
+                    "type": "machines", "machines": rows, "checkedAt": checked_at,
+                    "action": action, "error": error,
+                },
+                command,
+            )
+        except Exception:  # noqa: BLE001 - a background task must not die silently
+            logger.warning("%s reply failed", command, exc_info=True)
+
+    async def machine_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Add or remove a machine for the MACHINES subpanel and send the fresh list.
+
+        Applied by :func:`kiss.server.sidebar_panels.machine_action`; the
+        direct reply is a ``machines`` message (as for ``getMachines``,
+        pinged anew) carrying the ``action`` and an ``error`` text when
+        it was refused.
+
+        Args:
+            cmd: The ``machineAction`` command (``action``: ``add`` or
+                ``remove``, ``name``, optional ``address`` and
+                ``password`` for ``add``).
+            ctx: The transport context of the current call.
+        """
+        error = await asyncio.to_thread(
+            sidebar_panels.machine_action,
+            str(cmd["action"]), str(cmd["name"]), str(cmd.get("address") or ""),
+            str(cmd.get("password") or ""),
+        )
+        await self._reply_machines(ctx.endpoint, True, str(cmd["action"]), error, "machineAction")
+
     async def get_spend_report(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Send a client the task history's spend for its Spend subpanel.
 
@@ -1254,6 +1387,24 @@ class ServerApi:
         report = await asyncio.to_thread(sidebar_panels.spend_report)
         await self._backend._reply_direct(
             ctx.endpoint, {"type": "spendReport", **report}, "getSpendReport"
+        )
+
+    async def get_recommendations(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client the suggested tasks for its Recommendations subpanel.
+
+        The right sidebar's "Recommendations" subpanel (every surface)
+        polls this command for the five tasks the last
+        ``/recommendations`` run suggested.  The direct reply is
+        ``{"type": "recommendations", "generatedAt": ms, "tasks":
+        [...]}`` from :func:`kiss.server.sidebar_panels.recommendations_report`.
+
+        Args:
+            cmd: The ``getRecommendations`` command (no fields).
+            ctx: The transport context of the current call.
+        """
+        report = await asyncio.to_thread(sidebar_panels.recommendations_report)
+        await self._backend._reply_direct(
+            ctx.endpoint, {"type": "recommendations", **report}, "getRecommendations"
         )
 
     async def list_dir(self, cmd: dict[str, Any], ctx: ApiContext) -> None:

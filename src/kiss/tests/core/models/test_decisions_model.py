@@ -348,7 +348,7 @@ def test_catalog_flags_jev_as_decisions_only() -> None:
         assert (info.is_generation_supported, info.is_function_calling_supported) == (False, False)
         assert info.is_embedding_supported is False
         assert (info.context_length, info.input_price_per_1M, info.output_price_per_1M) == (
-            32000,
+            64000,
             0.042,
             0.0,
         )

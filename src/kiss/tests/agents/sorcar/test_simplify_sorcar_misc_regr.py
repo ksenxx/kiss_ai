@@ -8,12 +8,12 @@ Covers the exact code paths touched by the sorcar-misc simplification:
 
 * ``GitWorktreeOps.copy_dirty_state`` rename handling (old-path removal
   for plain files, directories, and symlinks in the target worktree).
-* ``WorktreeSorcarAgent._finalize_worktree`` /
-  ``_preserve_pending_worktree_for_review`` (auto-commit, late-arriver
-  retry, worktree removal) — exercised via real temp git repos on the
-  no-LLM paths (clean worktree, or ``auto_commit_enabled=False``).
-* ``WorktreeSorcarAgent.merge`` / ``discard`` / ``_release_worktree``
-  happy paths.
+* ``ChatSorcarAgent._finalize_worktree`` /
+  ``_preserve_pending_worktree_for_review`` (commit to the task branch,
+  late-arriver retry, worktree removal) — exercised via real temp git
+  repos (the commit message falls back to the generic one without a
+  model).
+* ``ChatSorcarAgent.merge`` / ``discard`` happy paths.
 * ``_manual_merge_cmd`` / ``_merge_fix_steps`` pure helpers.
 
 No mocks, patches, or fakes: every test drives real git repositories
@@ -28,15 +28,13 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
-    strip_worktree_suffix,
-)
-from kiss.agents.sorcar.worktree_sorcar_agent import (
-    WorktreeSorcarAgent,
     _manual_merge_cmd,
     _merge_fix_steps,
+    strip_worktree_suffix,
 )
 
 
@@ -73,9 +71,9 @@ def _make_worktree(repo: Path, slug: str = "kiss_wt-test-1") -> tuple[str, Path]
     return branch, wt_dir
 
 
-def _make_agent(repo: Path, branch: str, wt_dir: Path) -> WorktreeSorcarAgent:
-    """Build a WorktreeSorcarAgent with a pending worktree state."""
-    agent = WorktreeSorcarAgent("regr-test")
+def _make_agent(repo: Path, branch: str, wt_dir: Path) -> ChatSorcarAgent:
+    """Build a ChatSorcarAgent with a pending worktree state."""
+    agent = ChatSorcarAgent("regr-test")
     agent._wt = GitWorktree(
         repo_root=repo,
         branch=branch,
@@ -154,18 +152,18 @@ class TestFinalizeWorktree:
         assert not wt_dir.exists()
         assert GitWorktreeOps.branch_exists(repo, branch)
 
-    def test_dirty_worktree_no_auto_commit_is_preserved(
+    def test_dirty_worktree_is_committed_to_its_branch_and_removed(
         self, tmp_path: Path
     ) -> None:
         repo = _init_repo(tmp_path)
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
-        agent.auto_commit_enabled = False
         (wt_dir / "new.txt").write_text("work in progress\n")
-        assert agent._finalize_worktree() is False
-        assert wt_dir.exists()
-        assert (wt_dir / "new.txt").read_text() == "work in progress\n"
-        assert GitWorktreeOps.has_uncommitted_changes(wt_dir)
+        assert agent._finalize_worktree() is True
+        assert not wt_dir.exists()
+        assert GitWorktreeOps.branch_exists(repo, branch)
+        assert _run_git(repo, "show", f"{branch}:new.txt") == "work in progress\n"
+        assert "new.txt" not in _run_git(repo, "ls-files")
 
     def test_missing_worktree_dir_prunes_and_succeeds(
         self, tmp_path: Path
@@ -183,41 +181,39 @@ class TestPreserveForReview:
     """``_preserve_pending_worktree_for_review`` end-to-end."""
 
     def test_no_pending_worktree_returns_false(self, tmp_path: Path) -> None:
-        agent = WorktreeSorcarAgent("regr-test")
+        agent = ChatSorcarAgent("regr-test")
         assert agent._preserve_pending_worktree_for_review() is False
 
-    def test_dirty_worktree_preserved_uncommitted_no_auto_commit(
+    def test_dirty_worktree_is_committed_to_its_branch(
         self, tmp_path: Path
     ) -> None:
         repo = _init_repo(tmp_path)
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
-        agent.auto_commit_enabled = False
-        agent._pending_review = True
         (wt_dir / "partial.txt").write_text("partial work\n")
         assert agent._preserve_pending_worktree_for_review() is True
         assert agent._wt is None
-        assert agent._pending_review is False
-        assert wt_dir.exists()
-        porcelain = _run_git(wt_dir, "status", "--porcelain")
-        assert "partial.txt" in porcelain
+        assert not agent._wt_pending
+        assert not wt_dir.exists()
+        assert _run_git(repo, "show", f"{branch}:partial.txt") == "partial work\n"
         assert "partial.txt" not in _run_git(repo, "ls-files")
         log = _run_git(repo, "log", "-1", "--format=%s", branch)
         assert "late-arriving" not in log
+        warning = agent._merge_conflict_warning or ""
+        assert branch in warning and "not merged" in warning
 
     def test_clean_worktree_is_just_cleaned_up(self, tmp_path: Path) -> None:
         repo = _init_repo(tmp_path)
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
-        agent._pending_review = True
         assert agent._preserve_pending_worktree_for_review() is True
         assert agent._wt is None
-        assert agent._pending_review is False
+        assert not agent._wt_pending
         assert not wt_dir.exists()
 
 
-class TestMergeDiscardRelease:
-    """Happy paths of merge / discard / _release_worktree (no LLM)."""
+class TestMergeDiscard:
+    """Happy paths of merge / discard (no LLM)."""
 
     def test_merge_success(self, tmp_path: Path) -> None:
         repo = _init_repo(tmp_path)
@@ -237,7 +233,7 @@ class TestMergeDiscardRelease:
         )
 
     def test_merge_without_pending_worktree_raises(self, tmp_path: Path) -> None:
-        agent = WorktreeSorcarAgent("regr-test")
+        agent = ChatSorcarAgent("regr-test")
         with pytest.raises(RuntimeError):
             agent.merge()
 
@@ -273,47 +269,13 @@ class TestMergeDiscardRelease:
     def test_discard_without_pending_worktree_raises(
         self, tmp_path: Path
     ) -> None:
-        agent = WorktreeSorcarAgent("regr-test")
+        agent = ChatSorcarAgent("regr-test")
         with pytest.raises(RuntimeError):
             agent.discard()
 
-    def test_release_worktree_merges_and_returns_original(
-        self, tmp_path: Path
-    ) -> None:
-        repo = _init_repo(tmp_path)
-        original = GitWorktreeOps.current_branch(repo)
-        branch, wt_dir = _make_worktree(repo)
-        agent = _make_agent(repo, branch, wt_dir)
-        (wt_dir / "released.txt").write_text("released\n")
-        assert GitWorktreeOps.commit_all(wt_dir, "agent: released work") is True
-        assert agent._release_worktree() == original
-        assert agent._wt is None
-        assert agent._merge_conflict_warning is None
-        assert (repo / "released.txt").read_text() == "released\n"
-        assert not GitWorktreeOps.branch_exists(repo, branch)
-
-    def test_release_worktree_none_pending(self, tmp_path: Path) -> None:
-        agent = WorktreeSorcarAgent("regr-test")
-        assert agent._release_worktree() is None
-
-    def test_release_worktree_no_auto_commit_preserves(
-        self, tmp_path: Path
-    ) -> None:
-        repo = _init_repo(tmp_path)
-        branch, wt_dir = _make_worktree(repo)
-        agent = _make_agent(repo, branch, wt_dir)
-        agent.auto_commit_enabled = False
-        (wt_dir / "keep.txt").write_text("keep\n")
-        assert agent._release_worktree() is None
-        assert agent._wt is None
-        assert agent._merge_conflict_warning is not None
-        assert str(wt_dir) in agent._merge_conflict_warning
-        assert wt_dir.exists()
-        assert (wt_dir / "keep.txt").read_text() == "keep\n"
-
 
 class TestPureHelpers:
-    """Pure-function helpers in worktree_sorcar_agent / git_worktree."""
+    """Pure-function helpers in git_worktree."""
 
     def _wt(self, baseline: str | None) -> GitWorktree:
         return GitWorktree(

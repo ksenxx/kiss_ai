@@ -44,7 +44,7 @@ from typing import Any
 from websockets.asyncio.client import ClientConnection
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
@@ -264,10 +264,11 @@ class TestReplayBoundary(TabMirroringBase):
             emitter.join(1.5)
 
         def replay() -> None:
-            # The snapshot is filtered and coalesced after it is taken
-            # (and, since the fix, after ``delivery_lock`` is released).
+            # The snapshot is coalesced for the payload after it is
+            # taken (and, since the fix, after ``delivery_lock`` is
+            # released).
             sys.settrace(
-                _hook("_filter_and_coalesce", "call", emit_after_snapshot),
+                _hook("_coalesced_replay_events", "call", emit_after_snapshot),
             )
             try:
                 vs._replay_session(chat_id, "tab-t", conn_id=conn_b)
@@ -373,7 +374,7 @@ class TestReplayBoundary(TabMirroringBase):
         assert self.server is not None
         printer = self.server._printer
         task_id, chat_id = th._add_task("Persist order")
-        agent = WorktreeSorcarAgent("rb-persist")
+        agent = ChatSorcarAgent("rb-persist")
         agent._last_task_id = str(task_id)
         agent_state.register(AgentState(
             str(task_id), agent=agent, chat_id=chat_id, tab_id="tab-p",
@@ -660,7 +661,7 @@ class TestReplayBoundary(TabMirroringBase):
         """
         assert self.server is not None
         printer = self.server._printer
-        agent = WorktreeSorcarAgent("rb-sequential")
+        agent = ChatSorcarAgent("rb-sequential")
 
         def next_subtask(task_id: str) -> None:
             state = agent_state.get(task_id)
@@ -774,7 +775,7 @@ class TestReplayBoundary(TabMirroringBase):
         assert self.server is not None
         printer = self.server._printer
         task_id, _chat_id = await self._running_task_viewed_by_a()
-        agent = WorktreeSorcarAgent("rb-encode")
+        agent = ChatSorcarAgent("rb-encode")
         agent._last_task_id = task_id
         state = agent_state.get(task_id)
         assert state is not None
@@ -894,7 +895,7 @@ def test_intermediate_subtask_cleaned_up_when_its_persistence_fails() -> None:
     printer = vscode.printer
     agent_state.agent_states.clear()
     tab_id = "rb5-subtask-cleanup"
-    agent = WorktreeSorcarAgent("Sorcar VS Code")
+    agent = ChatSorcarAgent("Sorcar VS Code")
     state = AgentState(
         f"pre-{tab_id}", agent=agent, tab_id=tab_id, server_owned=True,
         stop_event=threading.Event(),

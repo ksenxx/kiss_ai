@@ -16,7 +16,6 @@ import shutil
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +23,7 @@ import pytest
 from websockets.asyncio.server import ServerConnection
 
 from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _add_late_task_usage,
     _add_task,
@@ -31,7 +31,6 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _agent_usage
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state, commands
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
@@ -72,12 +71,7 @@ def _server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
     return server, events
 
 
-@pytest.fixture(autouse=True)
-def _clean_registry() -> Iterator[None]:
-    """Leave no agent states behind."""
-    yield
-    for state in agent_state.snapshot():
-        agent_state.unregister(state.task_id, state)
+pytestmark = pytest.mark.usefixtures("clean_registry")
 
 
 def test_late_usage_updates_the_finished_row_and_finished_ancestors() -> None:
@@ -112,7 +106,7 @@ def test_finished_subagent_of_a_running_parent_charges_the_parent() -> None:
     """The first unfinished ancestor's live agent receives the spend."""
     root = _task(finished=False, cost=3.0)
     child = _task(finished=True, parent=root)
-    parent_agent = WorktreeSorcarAgent("late-usage-parent")
+    parent_agent = ChatSorcarAgent("late-usage-parent")
     state = AgentState(root, agent=parent_agent, tab_id="tab-late", server_owned=True)
     agent_state.register(state)
 
@@ -319,7 +313,7 @@ def test_running_task_late_spend_is_kept_in_its_replayed_transcript() -> None:
 
     task = _task(finished=False, cost=0.0)
     server = VSCodeServer()
-    agent = WorktreeSorcarAgent("late-usage-transcript")
+    agent = ChatSorcarAgent("late-usage-transcript")
     agent._last_task_id = task
     agent_state.register(
         AgentState(task, agent=agent, tab_id="tab-transcript", server_owned=True),

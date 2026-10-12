@@ -25,8 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import _git
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.tests.conftest import is_root, posix_only
 
 
@@ -86,8 +86,8 @@ class TestUnreadableDirtyFile:
             secret.write_text("secret\n")
             secret.chmod(0o000)
             try:
-                agent = WorktreeSorcarAgent("bh3-unreadable")
-                result = agent._try_setup_worktree(repo, None)
+                agent = ChatSorcarAgent("bh3-unreadable")
+                result = agent._try_setup_worktree(repo, str(repo))
 
                 assert result is None, (
                     "expected graceful fallback (None), got a worktree "

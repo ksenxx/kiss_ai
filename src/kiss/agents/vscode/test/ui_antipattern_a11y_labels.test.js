@@ -103,7 +103,6 @@ test('#menu-btn has both a tooltip and an accessible name that say what it does'
 test('every data-tooltip-only button carries a matching aria-label', () => {
   for (const id of [
     'tricks-btn',
-    'workdir-btn',
     'voice-btn',
     'share-btn',
     'upload-btn',

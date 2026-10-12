@@ -39,6 +39,8 @@ except ImportError:  # POSIX has no msvcrt
 # empty lock file, which Windows allows).
 _WINDOWS_LOCK_BYTES = 1
 _WINDOWS_RETRY_INTERVAL = 0.05
+# How often a bounded wait re-probes the lock.
+_POLL_INTERVAL = 0.05
 
 
 def _fileno(target: int | IO[str] | IO[bytes]) -> int:
@@ -106,7 +108,9 @@ def unlock(target: int | IO[str] | IO[bytes]) -> None:
 
 
 @contextmanager
-def exclusive_file_lock(lock_path: Path, blocking: bool = True) -> Iterator[bool]:
+def exclusive_file_lock(
+    lock_path: Path, blocking: bool = True, timeout: float | None = None
+) -> Iterator[bool]:
     """Hold an exclusive lock on the file at *lock_path* for the block.
 
     Serializes check-then-use sequences on resources shared by every
@@ -124,16 +128,35 @@ def exclusive_file_lock(lock_path: Path, blocking: bool = True) -> Iterator[bool
         blocking: Whether to wait for the lock.  ``False`` gives up
             immediately when another process holds it (the cron
             scheduler's overlapping-tick skip) instead of waiting.
+        timeout: With *blocking*, the most seconds to wait.  The wait
+            polls the non-blocking lock instead of blocking in the
+            kernel, so a holder that wedged (or a lock taken from an
+            executor thread the event loop can no longer cancel) costs
+            the waiter at most *timeout* instead of forever.  ``None``
+            waits without limit.
 
     Yields:
         ``True`` while the lock is held; ``False`` only when *blocking*
         is ``False`` and another process holds the lock.
+
+    Raises:
+        TimeoutError: When *timeout* elapsed with the lock still held
+            by another process.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     locked = False
     try:
-        locked = lock_exclusive(descriptor, blocking=blocking)
+        if blocking and timeout is not None:
+            deadline = time.monotonic() + timeout
+            while not (locked := lock_exclusive(descriptor, blocking=False)):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"{lock_path} still locked by another process after {timeout:g}s"
+                    )
+                time.sleep(_POLL_INTERVAL)
+        else:
+            locked = lock_exclusive(descriptor, blocking=blocking)
         yield locked
     finally:
         try:

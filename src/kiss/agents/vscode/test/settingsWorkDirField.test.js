@@ -16,9 +16,9 @@
 //     `setWorkDir` echo back to the daemon (that used to re-pin the
 //     connection; there is no connection pin any more);
 //   * the Settings form never carries `work_dir` in `saveConfig`, because
-//     the folder is changed only through the "Working directory" panel of
-//     the "..." menu (remote: a `listDir` check, then `setWorkDir`; the
-//     daemon persists it and broadcasts `workDirChanged`);
+//     the folder is changed only through the chat header's working
+//     directory drop-down (remote: a `listDir` check, then `setWorkDir`;
+//     the daemon persists it and broadcasts `workDirChanged`);
 //   * a `workDirChanged` broadcast from the daemon (a pick made on another
 //     surface) re-scopes this client without any echo.
 
@@ -161,15 +161,9 @@ function mentionWorkDir(win, posted) {
   return msg.workDir;
 }
 
-// The "Current:" line of the "..." menu's "Working directory" panel.
-function openPanelCurrentLine(win) {
-  const panel = win.document.getElementById('workdir-panel');
-  if (!panel.classList.contains('open')) {
-    click(win, win.document.getElementById('more-btn'));
-    click(win, win.document.getElementById('workdir-btn'));
-  }
-  const el = win.document.getElementById('workdir-current');
-  return el && !el.hidden ? el.textContent : '';
+// The directory the chat header's working directory drop-down shows.
+function headerWorkDir(win) {
+  return win.document.getElementById('chat-workdir').value;
 }
 
 // --- the standalone web client -------------------------------------------
@@ -234,7 +228,7 @@ function testRemoteAdoptsGlobalWorkDirWithoutEcho() {
     '/srv/project',
     'commands from this page run in the global working directory',
   );
-  assert.strictEqual(openPanelCurrentLine(win), 'Current: /srv/project');
+  assert.strictEqual(headerWorkDir(win), '/srv/project');
   send(win, {
     type: 'tabs_state',
     tabs: [tabEntry('p-1', '/srv/project'), tabEntry('q-1', '/srv/other')],
@@ -274,23 +268,27 @@ function testRemoteIgnoresStaleSessionPin() {
   );
 }
 
-function testRemoteWorkDirChangesThroughThePanel() {
+function testRemoteWorkDirChangesThroughTheHeaderDropDown() {
   const {win, posted} = makeWebview({remote: true});
-  send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
+  send(win, {
+    type: 'configData',
+    config: {
+      work_dir: '/srv/project',
+      recent_work_dirs: [{path: '/srv/elsewhere', ts: 1}],
+    },
+  });
 
-  // The "..." menu's "Working directory" panel is the one place to
+  // The chat header's working directory drop-down is the one place to
   // change the folder now that the settings box is gone.
-  click(win, win.document.getElementById('more-btn'));
-  click(win, win.document.getElementById('workdir-btn'));
-  const panel = win.document.getElementById('workdir-panel');
-  assert.ok(panel.classList.contains('open'), 'the panel opens');
-  typeInto(win, 'workdir-input', '/srv/elsewhere');
-  click(win, win.document.getElementById('workdir-open-btn'));
+  const select = win.document.getElementById('chat-workdir');
+  select.value = '/srv/elsewhere';
+  assert.strictEqual(select.value, '/srv/elsewhere', 'the folder is listed');
+  select.dispatchEvent(new win.Event('change', {bubbles: true}));
 
   const check = lastMsg(posted, 'listDir');
   assert.ok(
     check && String(check.token).startsWith('workdir:'),
-    'the daemon is asked to list the typed folder first',
+    'the daemon is asked to list the picked folder first',
   );
   assert.strictEqual(check.path, '/srv/elsewhere');
   assert.strictEqual(
@@ -320,9 +318,9 @@ function testRemoteWorkDirChangesThroughThePanel() {
   assert.strictEqual(
     lastMsg(posted, 'saveConfig'),
     null,
-    'the panel does not go through saveConfig; setWorkDir is the one path',
+    'the drop-down does not go through saveConfig; setWorkDir is the one path',
   );
-  assert.ok(!panel.classList.contains('open'), 'the panel closes');
+  assert.strictEqual(headerWorkDir(win), '/srv/elsewhere');
   assert.strictEqual(
     mentionWorkDir(win, posted),
     '/srv/elsewhere',
@@ -330,7 +328,7 @@ function testRemoteWorkDirChangesThroughThePanel() {
   );
   win.close();
   console.log(
-    '  ok - the web client changes the global folder through the panel',
+    '  ok - the web client changes the global folder through the header drop-down',
   );
 }
 
@@ -345,10 +343,7 @@ function testRemoteFollowsWorkDirChangedBroadcast() {
     '/srv/picked-elsewhere',
     'every client follows the daemon broadcast so all surfaces agree',
   );
-  assert.strictEqual(
-    openPanelCurrentLine(win),
-    'Current: /srv/picked-elsewhere',
-  );
+  assert.strictEqual(headerWorkDir(win), '/srv/picked-elsewhere');
   assert.deepStrictEqual(
     setWorkDirs(posted),
     [],
@@ -385,7 +380,7 @@ function testWebviewSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir() {
   assert.ok(
     !('work_dir' in saved.config) && !('memory_dir' in saved.config),
     'the settings form must leave work_dir out of what it saves: the ' +
-      'global directory is changed only through the Working directory panel',
+      'global directory is changed only through the header drop-down',
   );
   assert.deepStrictEqual(
     setWorkDirs(posted),
@@ -424,7 +419,7 @@ function main() {
   testRemoteBlankWhenNothingIsStored();
   testRemoteAdoptsGlobalWorkDirWithoutEcho();
   testRemoteIgnoresStaleSessionPin();
-  testRemoteWorkDirChangesThroughThePanel();
+  testRemoteWorkDirChangesThroughTheHeaderDropDown();
   testRemoteFollowsWorkDirChangedBroadcast();
   testWebviewSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir();
   testWebviewAdoptsGlobalWorkDirAndBroadcast();

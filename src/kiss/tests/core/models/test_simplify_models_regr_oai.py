@@ -351,13 +351,6 @@ def test_reasoning_inner_index() -> None:
     assert r(SimpleNamespace(summary_index=None, content_index="bogus")) == 0
 
 
-def test_trailing_function_call_ids() -> None:
-    m = make_v2()
-    m.initialize("hi")
-    m.conversation.extend([_fc("c1", "f"), _fc("c2", "g")])
-    assert m._trailing_function_call_ids() == [("f", "c1"), ("g", "c2")]
-
-
 def test_add_function_results_uses_pending_call_id() -> None:
     m = make_v2()
     m.initialize("hi")

@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end regression: worktree directory disappears mid-task.
 
-In ``WorktreeSorcarAgent`` the per-task git worktree directory normally
-lives for the lifetime of the task.  But several real-world scenarios
+In ``ChatSorcarAgent`` the git worktree the agent makes with its
+``create_worktree`` tool normally lives for the rest of the task.  But several real-world scenarios
 cause it to vanish mid-run before the task finishes:
 
 * a concurrent cleanup pass (``cleanup_orphans``) racing with the
@@ -22,7 +22,7 @@ Bash call dies the same way — exactly the failure pattern seen in
 ``~/.kiss/kiss-web-stderr.log`` ("Worktree disappeared mid-session
 AGAIN" / "every Bash invocation fails immediately with [Errno 2]").
 
-This test reproduces that failure end-to-end (real ``WorktreeSorcarAgent``
+This test reproduces that failure end-to-end (real ``ChatSorcarAgent``
 on a real on-disk git repo, only the LLM boundary stubbed) and pins the
 fix: ``UsefulTools._spawn`` transparently falls back to the parent repo
 root when ``self.work_dir`` no longer exists, so Bash keeps working.
@@ -37,7 +37,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.kiss_agent import KISSAgent
 from kiss.tests.conftest import IS_WINDOWS
 
@@ -74,14 +74,14 @@ def test_worktree_disappears_mid_run_bash_falls_back(tmp_path, monkeypatch):
     Steps:
 
     1. Real on-disk git repo with one commit on ``main``.
-    2. Real :class:`WorktreeSorcarAgent` — the worktree branch and
-       directory are created by ``_try_setup_worktree`` for real.
+    2. Real :class:`ChatSorcarAgent` — the worktree branch and
+       directory are created by its real ``create_worktree`` tool.
     3. ``KISSAgent.run`` is stubbed at the LLM boundary so the test
        drives the agent loop without any model call:
 
-       * On the first sub-session the stub ``shutil.rmtree``s the
-         worktree directory (simulating the cleanup-race scenario)
-         and returns ``is_continue: True``.
+       * On the first sub-session the stub calls ``create_worktree``,
+         then ``shutil.rmtree``s the worktree directory (simulating
+         the cleanup-race scenario) and returns ``is_continue: True``.
        * On the second sub-session the stub invokes the ``Bash`` tool
          from the same ``UsefulTools`` instance whose ``work_dir``
          now points at the just-deleted directory.
@@ -110,9 +110,13 @@ def test_worktree_disappears_mid_run_bash_falls_back(tmp_path, monkeypatch):
         bash_tool = _find_tool(tools, "Bash")
         read_tool = _find_tool(tools, "Read")
         useful = getattr(read_tool, "__self__", None) if read_tool else None
-        work_dir = useful.work_dir if useful else None
 
         if call_idx == 0:
+            create_worktree = _find_tool(tools, "create_worktree")
+            assert create_worktree is not None
+            created = create_worktree()
+            assert created.startswith("Created worktree "), created
+            work_dir = useful.work_dir if useful else None
             captured["session0_work_dir"] = work_dir
             assert work_dir is not None
             shutil.rmtree(work_dir)
@@ -136,7 +140,7 @@ def test_worktree_disappears_mid_run_bash_falls_back(tmp_path, monkeypatch):
 
     monkeypatch.setattr(KISSAgent, "run", stub_run)
 
-    agent = WorktreeSorcarAgent("wt-agent")
+    agent = ChatSorcarAgent("wt-agent")
     result = agent.run(
         prompt_template="dummy prompt",
         model_name="claude-opus-4-7",

@@ -327,6 +327,8 @@ async function main() {
     });
     assert.strictEqual(byId(win, 'scm-branch').textContent, 'main');
     assert.strictEqual(byId(win, 'scm-changes-count').textContent, '1');
+    // The section header repeats the count (readable while folded).
+    assert.strictEqual(byId(win, 'scm-hdr-count').textContent, '1');
     // One group only: no group header.
     assert.strictEqual(rowsIn(win, '#scm-changes .scm-group-hdr').length, 0);
     // Diamond: M merges B (first parent) and C; both descend from R.
@@ -506,6 +508,7 @@ async function main() {
     );
     assert.strictEqual(byId(win, 'scm-branch').textContent, '');
     assert.strictEqual(byId(win, 'scm-changes-count').textContent, '');
+    assert.strictEqual(byId(win, 'scm-hdr-count').textContent, '');
     // The refresh button asks again with a fresh token.
     click(win, byId(win, 'scm-refresh'));
     const st = ofType(posted, 'gitStatus');

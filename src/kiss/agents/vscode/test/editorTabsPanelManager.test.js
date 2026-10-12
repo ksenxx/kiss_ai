@@ -5,26 +5,34 @@
 
 // End-to-end tests for editor-tabs mode's host side
 // (out/SorcarPanelManager.js + out/SorcarSidebarView.js) against a
-// REAL local-WSS daemon stub:
-//  - openNewChat creates a WebviewPanel whose chat HTML is pinned to a
-//    fresh root tab (editor-tab-mode body class + data-kiss-tab-id);
-//  - the webview's `panelTitle` message retitles the editor tab;
-//  - `openChatPanel` from a webview opens a second panel carrying the
-//    resume data attributes, and — once the daemon's `tabs_state`
-//    binds that panel's tab to the chat — a repeat open REVEALS the
-//    existing panel instead of stacking a third;
-//  - a USER panel close retires the chat tab (`closeTab` reaches the
-//    daemon), while closeAll (mode switch off) closes panels WITHOUT
-//    retiring their chats;
-//  - the serializer re-adopts a revived panel from its persisted
-//    editorRootTabId, and disposes revived panels when the mode is
-//    off.
+// REAL local-WSS daemon stub. The mode keeps ONE chat editor tab that
+// mirrors the whole daemon registry, like the remote web app:
+//  - open() creates one WebviewPanel (viewType kissSorcar.chatTab) whose
+//    chat HTML has the editor-tab-mode body class and NO pinned tab id;
+//    a second open() reveals that panel instead of creating another;
+//  - the webview's `panelTitle {title, state}` retitles the editor tab:
+//    the spinner icon while running, a ✅ / ❌ title prefix after;
+//  - openChat({chatId, taskId, title}) posts `openChatFromHistory` to
+//    the webview once it is `ready` and never opens a second panel;
+//  - openChat({pendingText, autoSubmit}) posts `clearChat` and then
+//    `insertAndSubmit` — at once when the webview is ready, else both
+//    after its `ready`, clearChat first, and a later `ready` repeats
+//    neither; without autoSubmit it posts `clearChat` and then
+//    `appendToInput` (the text in the new chat's composer, unsent);
+//  - a USER panel close and close() (mode switched off) both drop the
+//    controller and send NO `closeTab` to the daemon;
+//  - ensureOpen() opens a background panel only when no panel exists
+//    and no chat editor tab (serialized placeholder) is listed in
+//    vscode.window.tabGroups;
+//  - the serializer re-adopts a revived panel (stripping a leftover
+//    status prefix from its title) and disposes a revived husk when
+//    the mode is off or a panel already exists;
+//  - terminal dispose() leaves the panel standing for the serializer.
 
 'use strict';
 
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
@@ -128,8 +136,9 @@ const vscodeStub = {
   ProgressLocation: {Notification: 15},
   ViewColumn: {Active: -1, One: 1},
   window: {
-    createWebviewPanel: (viewType, title, _column, _options) => {
+    createWebviewPanel: (viewType, title, showOptions, _options) => {
       const panel = makeFakePanel(viewType, title);
+      panel._showOptions = showOptions;
       createdPanels.push(panel);
       return panel;
     },
@@ -181,14 +190,6 @@ const server = createFakeDaemon(sock => {
   sock.on('error', () => {});
 });
 
-function daemonBroadcast(msg) {
-  const line = JSON.stringify(msg) + '\n';
-  for (const sock of serverSockets) {
-    if (!sock.destroyed) sock.write(line);
-  }
-  return new Promise(r => setTimeout(r, 80));
-}
-
 async function waitFor(predicate, message) {
   for (let i = 0; i < 150; i++) {
     if (predicate()) return;
@@ -197,14 +198,42 @@ async function waitFor(predicate, message) {
   throw new Error(message || 'waitFor timed out');
 }
 
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 const {SorcarPanelManager, CHAT_PANEL_VIEW_TYPE} = require(
   path.join(OUT_DIR, 'SorcarPanelManager.js'),
 );
+const {PRODUCT_NAME} = require(path.join(OUT_DIR, 'brand.js'));
 
-function tabIdOf(panel) {
-  const m = /data-kiss-tab-id="([^"]+)"/.exec(panel.webview.html);
-  assert.ok(m, 'panel html must carry data-kiss-tab-id');
-  return m[1];
+function iconName(panel) {
+  assert.ok(panel.iconPath, 'panel must carry an icon');
+  return path.basename(panel.iconPath.fsPath);
+}
+
+function assertNoCloseTab(why) {
+  assert.ok(
+    !daemonCommands.some(c => c.type === 'closeTab'),
+    why || 'no closeTab must ever reach the daemon',
+  );
+}
+
+function assertChatHtml(panel) {
+  const html = panel.webview.html;
+  assert.ok(
+    html.includes('<body class="editor-tab-mode"'),
+    'chat html must be in editor-tab mode',
+  );
+  assert.ok(
+    !html.includes('data-kiss-tab-id'),
+    'the single panel is pinned to no root tab id',
+  );
+}
+
+/** A `tabGroups.all` entry whose one tab has *viewType* as its input. */
+function tabGroupWith(viewType) {
+  return {tabs: [{input: viewType === null ? null : {viewType}}]};
 }
 
 async function runTest() {
@@ -212,293 +241,377 @@ async function runTest() {
   const manager = new SorcarPanelManager(vscodeStub.Uri.file(EXT_ROOT));
   vscodeStub._ignored = manager.registerSerializer();
   assert.strictEqual(registeredSerializer.viewType, CHAT_PANEL_VIEW_TYPE);
+  assert.strictEqual(manager.controller(), undefined, 'no panel yet');
 
-  // --- openNewChat pins a fresh root tab -------------------------------
-  manager.openNewChat();
+  // --- open() creates the one chat panel --------------------------------
+  const controllerA = manager.open();
   assert.strictEqual(createdPanels.length, 1);
   const panelA = createdPanels[0];
   assert.strictEqual(panelA.viewType, CHAT_PANEL_VIEW_TYPE);
-  assert.ok(
-    panelA.webview.html.includes('class="editor-tab-mode"'),
-    'chat html must be in editor-tab mode',
+  assert.strictEqual(panelA.title, PRODUCT_NAME, 'initial title');
+  assert.strictEqual(
+    panelA._showOptions.preserveFocus,
+    false,
+    'a plain open takes the focus like any new editor',
   );
-  const tabA = tabIdOf(panelA);
-  assert.ok(panelA.iconPath, 'panel gets the KISS icon');
+  assertChatHtml(panelA);
+  assert.strictEqual(iconName(panelA), 'kiss-icon.svg');
+  assert.strictEqual(manager.controller(), controllerA);
   await waitFor(
     () => serverSockets.length >= 1,
     'panel controller must connect to the daemon',
   );
 
-  // --- panelTitle retitles the editor tab ------------------------------
-  panelA._recv.fire({type: 'panelTitle', title: 'fix the bug', tabId: tabA});
+  // --- a second open() reveals the same panel ----------------------------
+  const controllerAgain = manager.open();
+  assert.strictEqual(controllerAgain, controllerA, 'same controller');
+  assert.strictEqual(createdPanels.length, 1, 'no second panel');
+  assert.strictEqual(panelA.reveals, 1, 'the existing panel is revealed');
+
+  // --- panelTitle retitles the editor tab --------------------------------
+  panelA._recv.fire({type: 'panelTitle', title: '  fix the bug  ', state: ''});
   await waitFor(
     () => panelA.title === 'fix the bug',
-    'panelTitle must retitle the panel',
+    'panelTitle must retitle the panel (trimmed)',
   );
-
-  // --- openChatPanel opens a resuming second panel ---------------------
+  assert.strictEqual(iconName(panelA), 'kiss-icon.svg');
   panelA._recv.fire({
-    type: 'openChatPanel',
-    chatId: 'chat-B',
-    taskId: 7,
-    title: 'resumed chat',
-  });
-  await waitFor(() => createdPanels.length === 2, 'second panel must open');
-  const panelB = createdPanels[1];
-  assert.strictEqual(panelB.title, 'resumed chat');
-  assert.ok(panelB.webview.html.includes('data-kiss-resume-chat-id="chat-B"'));
-  assert.ok(panelB.webview.html.includes('data-kiss-resume-task-id="7"'));
-  const tabB = tabIdOf(panelB);
-  assert.notStrictEqual(tabA, tabB);
-  await waitFor(
-    () => serverSockets.length >= 2,
-    'second panel controller must connect',
-  );
-
-  // --- one chat, one panel: repeat open reveals ------------------------
-  await daemonBroadcast({
-    type: 'tabs_state',
-    tabs: [
-      {
-        tabId: tabB,
-        chatId: 'chat-B',
-        title: 'resumed chat',
-        workDir: '',
-        scopeWorkDir: '',
-      },
-    ],
-  });
-  panelA._recv.fire({type: 'openChatPanel', chatId: 'chat-B'});
-  await new Promise(r => setTimeout(r, 100));
-  assert.strictEqual(
-    createdPanels.length,
-    2,
-    'an already-open chat must not get a second panel',
-  );
-  await waitFor(
-    () => panelB.reveals >= 1,
-    'the existing chat panel must be revealed instead',
-  );
-  assert.ok(
-    !panelB._posted.some(m => m.type === 'showTask'),
-    'an open without a task id must not ask the panel to move',
-  );
-
-  // --- ... and a task-carrying repeat open shows that task --------------
-  panelA._recv.fire({type: 'openChatPanel', chatId: 'chat-B', taskId: 7});
-  await waitFor(
-    () => panelB._posted.some(m => m.type === 'showTask' && m.taskId === '7'),
-    'the revealed panel must be told to show the clicked task',
-  );
-  assert.strictEqual(
-    createdPanels.length,
-    2,
-    'the task-carrying open must still not create a panel',
-  );
-
-
-  // --- a fresh openChatPanel carries the opener's composer draft --------
-  panelA._recv.fire({
-    type: 'openChatPanel',
-    pendingText: 'draft <with> "specials"\n& a second line',
+    type: 'panelTitle',
+    title: 'fix the bug',
+    state: 'running',
   });
   await waitFor(
-    () => createdPanels.length === 3,
-    'fresh open with a draft must create a panel',
+    () => iconName(panelA) === 'spinner-running.svg',
+    'a running task turns the tab icon into the spinner',
   );
-  const panelDraft = createdPanels[2];
-  assert.ok(
-    panelDraft.webview.html.includes(
-      'data-kiss-pending-text="draft &lt;with&gt; &quot;specials&quot;\n' +
-        '&amp; a second line"',
-    ),
-    'the draft must be stamped (escaped) as data-kiss-pending-text',
+  assert.strictEqual(panelA.title, 'fix the bug', 'running adds no prefix');
+  panelA._recv.fire({type: 'panelTitle', title: 'fix the bug', state: 'ok'});
+  await waitFor(
+    () => panelA.title === '\u2705 fix the bug',
+    'a finished task prefixes the title with a tick',
   );
-  assert.ok(
-    !panelDraft.webview.html.includes('data-kiss-resume-chat-id'),
-    'a fresh open resumes nothing',
+  assert.strictEqual(iconName(panelA), 'kiss-icon.svg', 'icon back to logo');
+  panelA._recv.fire({type: 'panelTitle', title: 'fix the bug', state: 'fail'});
+  await waitFor(
+    () => panelA.title === '\u274C fix the bug',
+    'a failed task prefixes the title with a cross',
   );
-  panelDraft.dispose();
+  panelA._recv.fire({type: 'panelTitle', title: '', state: ''});
+  await waitFor(
+    () => panelA.title === PRODUCT_NAME,
+    'an empty title falls back to the product name',
+  );
 
-  // --- an EMPTY draft and resume opens stamp no pending text ------------
-  panelA._recv.fire({type: 'openChatPanel', pendingText: ''});
+  // --- openChat({chatId}) waits for the webview's ready -----------------
+  manager.openChat({chatId: 'chat-B', taskId: 7, title: 'resumed chat'});
+  assert.strictEqual(createdPanels.length, 1, 'openChat opens no panel');
+  await sleep(400);
+  assert.ok(
+    !panelA._posted.some(m => m.type === 'openChatFromHistory'),
+    'nothing is posted before the webview is ready',
+  );
+  panelA._recv.fire({type: 'ready'});
   await waitFor(
-    () => createdPanels.length === 4,
-    'fresh open with an empty draft must still create a panel',
+    () => panelA._posted.some(m => m.type === 'openChatFromHistory'),
+    'the chat is opened once the webview is ready',
   );
-  assert.ok(
-    !createdPanels[3].webview.html.includes('data-kiss-pending-text'),
-    'an empty draft must not be stamped',
-  );
-  createdPanels[3].dispose();
-  panelA._recv.fire({
-    type: 'openChatPanel',
-    chatId: 'chat-C',
-    pendingText: 'must not leak into a resume',
-  });
+  const opened = panelA._posted.filter(m => m.type === 'openChatFromHistory');
+  assert.deepStrictEqual(opened, [
+    {
+      type: 'openChatFromHistory',
+      chatId: 'chat-B',
+      taskId: 7,
+      title: 'resumed chat',
+    },
+  ]);
+  assert.strictEqual(createdPanels.length, 1, 'still the one panel');
   await waitFor(
-    () => createdPanels.length === 5,
-    'resume open must create a panel',
+    () => daemonCommands.some(c => c.type === 'ready'),
+    'the webview ready is forwarded to the daemon',
   );
-  assert.ok(
-    createdPanels[4].webview.html.includes(
-      'data-kiss-resume-chat-id="chat-C"',
-    ),
-    'the resume open resumes its chat',
-  );
-  assert.ok(
-    !createdPanels[4].webview.html.includes('data-kiss-pending-text'),
-    'a resume shows the resumed chat, never the opener draft',
-  );
-  createdPanels[4].dispose();
 
-  // --- the Apps subpanel's connect launch auto-submits its prompt -------
-  // The host submits it once the new webview is ready (insertAndSubmit),
-  // never through the HTML, which a webview reload would replay.
-  panelA._recv.fire({
-    type: 'openChatPanel',
-    pendingText: 'Connect my Slack app',
-    autoSubmit: true,
-  });
-  await waitFor(
-    () => createdPanels.length === 6,
-    'an auto-submit open must create a panel',
-  );
-  assert.ok(
-    !createdPanels[5].webview.html.includes('data-kiss-pending-text'),
-    'the connect prompt is not stamped into the HTML',
-  );
-  // However long the first load takes, nothing is submitted (nor a
-  // tab-less run started) before the webview is ready.
-  await new Promise(r => setTimeout(r, 50));
-  assert.ok(
-    !createdPanels[5]._posted.some(m => m.type === 'insertAndSubmit'),
-    'no submit before the webview is ready',
-  );
-  createdPanels[5]._recv.fire({type: 'ready', tabId: 'x'});
+  // --- a ready webview gets the history open at once ---------------------
+  manager.openChat({chatId: 'chat-C'});
   await waitFor(
     () =>
-      createdPanels[5]._posted.filter(
-        m => m.type === 'insertAndSubmit' && m.text === 'Connect my Slack app',
-      ).length === 1,
-    'the host submits the connect prompt once the webview is ready',
+      panelA._posted.some(
+        m => m.type === 'openChatFromHistory' && m.chatId === 'chat-C',
+      ),
+    'a second history open reaches the ready webview',
   );
-  // A later `ready` (webview reload, daemon reconnect) submits nothing.
-  createdPanels[5]._recv.fire({type: 'ready', tabId: 'x'});
-  await new Promise(r => setTimeout(r, 50));
+  const openedC = panelA._posted.find(
+    m => m.type === 'openChatFromHistory' && m.chatId === 'chat-C',
+  );
+  assert.strictEqual(openedC.taskId, null, 'no task id -> null');
+  assert.strictEqual(openedC.title, '', 'no title -> empty');
+
+  // --- a draft WITHOUT autoSubmit: a new chat with the text in the
+  // composer (a Recommendations row), nothing submitted ------------------
+  manager.openChat({pendingText: 'only a draft'});
+  await waitFor(
+    () => panelA._posted.some(m => m.type === 'appendToInput'),
+    'the draft reaches the new chat composer',
+  );
+  const draftClearIdx = panelA._posted.findIndex(m => m.type === 'clearChat');
+  const appendIdx = panelA._posted.findIndex(m => m.type === 'appendToInput');
+  assert.ok(draftClearIdx >= 0, 'a draft opens a new chat (clearChat)');
+  assert.ok(appendIdx > draftClearIdx, 'the draft is appended after clearChat');
+  assert.strictEqual(panelA._posted[appendIdx].text, 'only a draft');
   assert.strictEqual(
-    createdPanels[5]._posted.filter(m => m.type === 'insertAndSubmit').length,
+    panelA._posted[appendIdx].replace,
+    true,
+    'the prompt replaces the draft "+" carried over, not under it',
+  );
+  assert.ok(
+    !panelA._posted.some(m => m.type === 'insertAndSubmit'),
+    'nothing is submitted without autoSubmit',
+  );
+  assert.ok(
+    !panelA._posted.some(
+      m => m.type === 'openChatFromHistory' && m.chatId === '',
+    ),
+    'a draft is not a history open',
+  );
+
+  // --- autoSubmit on a ready webview: clearChat, then insertAndSubmit ---
+  manager.openChat({pendingText: 'Connect my Slack app', autoSubmit: true});
+  const clearIdx = panelA._posted.findIndex(m => m.type === 'clearChat');
+  const submitIdx = panelA._posted.findIndex(m => m.type === 'insertAndSubmit');
+  assert.ok(clearIdx >= 0, 'autoSubmit opens a new chat (clearChat)');
+  assert.ok(submitIdx > clearIdx, 'the prompt is submitted after clearChat');
+  assert.strictEqual(panelA._posted[submitIdx].text, 'Connect my Slack app');
+  assert.strictEqual(createdPanels.length, 1, 'autoSubmit opens no panel');
+
+  // --- the active-task relay follows the chat on screen -----------------
+  const activeTasks = [];
+  manager.setActiveTaskSink((chatId, taskId) =>
+    activeTasks.push([chatId, taskId]),
+  );
+  assert.deepStrictEqual(activeTasks, [['', '']], 'pushed on set');
+  panelA._recv.fire({type: 'activeTask', chatId: 'chat-B', taskId: 'task-1'});
+  await waitFor(
+    () => activeTasks.length === 2,
+    'the panel activeTask reaches the sink',
+  );
+  assert.deepStrictEqual(activeTasks[1], ['chat-B', 'task-1']);
+
+  // --- a USER close keeps the chats registered --------------------------
+  panelA.dispose();
+  assert.strictEqual(manager.controller(), undefined, 'controller dropped');
+  assert.deepStrictEqual(
+    activeTasks[activeTasks.length - 1],
+    ['', ''],
+    'the sink is told the panel is gone',
+  );
+  await sleep(150);
+  assertNoCloseTab('a user panel close must NOT retire any chat tab');
+
+  // --- open() after a close creates a fresh panel ------------------------
+  manager.open({preserveFocus: true});
+  assert.strictEqual(createdPanels.length, 2, 'a fresh panel B');
+  const panelB = createdPanels[1];
+  assert.strictEqual(
+    panelB._showOptions.preserveFocus,
+    true,
+    'preserveFocus is passed through',
+  );
+  assertChatHtml(panelB);
+  assert.strictEqual(panelB.title, PRODUCT_NAME, 'a fresh panel starts clean');
+  assert.ok(manager.controller(), 'panel B has a controller');
+
+  // --- autoSubmit before ready: both messages wait, clearChat first ----
+  manager.openChat({pendingText: 'Connect GitHub', autoSubmit: true});
+  assert.strictEqual(createdPanels.length, 2, 'the open reuses panel B');
+  await sleep(100);
+  assert.ok(
+    !panelB._posted.some(
+      m => m.type === 'clearChat' || m.type === 'insertAndSubmit',
+    ),
+    'nothing is posted into a webview that is not ready',
+  );
+  panelB._recv.fire({type: 'ready'});
+  await waitFor(
+    () => panelB._posted.some(m => m.type === 'insertAndSubmit'),
+    'the prompt is submitted once the webview is ready',
+  );
+  const clearB = panelB._posted.findIndex(m => m.type === 'clearChat');
+  const submitB = panelB._posted.findIndex(m => m.type === 'insertAndSubmit');
+  assert.ok(clearB >= 0, 'the held clearChat is posted on ready');
+  assert.ok(submitB > clearB, 'clearChat arrives before insertAndSubmit');
+  assert.strictEqual(panelB._posted[submitB].text, 'Connect GitHub');
+  // A later `ready` (webview reload, daemon reconnect) repeats neither.
+  panelB._recv.fire({type: 'ready'});
+  await sleep(50);
+  assert.strictEqual(
+    panelB._posted.filter(m => m.type === 'clearChat').length,
     1,
+    'a second ready posts no clearChat',
   );
-  createdPanels[5].dispose();
-  panelA._recv.fire({
-    type: 'openChatPanel',
-    chatId: 'chat-D',
-    pendingText: 'x',
-    autoSubmit: true,
+  assert.strictEqual(
+    panelB._posted.filter(m => m.type === 'insertAndSubmit').length,
+    1,
+    'a second ready submits nothing',
+  );
+
+  // --- openSettings reveals the panel and opens its settings ------------
+  await manager.openSettings();
+  assert.ok(
+    panelB._posted.some(m => m.type === 'openSettings'),
+    'openSettings posts to the panel webview',
+  );
+  assert.strictEqual(createdPanels.length, 2);
+
+  // --- close() (mode switched off) keeps the chats registered -----------
+  manager.close();
+  assert.ok(panelB.disposed, 'close() disposes the panel');
+  assert.strictEqual(manager.controller(), undefined);
+  await sleep(150);
+  assertNoCloseTab('close() must NOT retire any chat tab');
+  manager.close();
+  assert.strictEqual(
+    createdPanels.length,
+    2,
+    'close() without a panel is a no-op',
+  );
+
+  // --- ensureOpen(): background panel only when no chat tab exists ------
+  editorTabsMode = false;
+  manager.ensureOpen();
+  assert.strictEqual(
+    createdPanels.length,
+    2,
+    'mode off: ensureOpen is a no-op',
+  );
+  editorTabsMode = true;
+  vscodeStub.window.tabGroups.all = [
+    tabGroupWith('mainThreadWebview-' + CHAT_PANEL_VIEW_TYPE),
+  ];
+  manager.ensureOpen();
+  assert.strictEqual(
+    createdPanels.length,
+    2,
+    'a serialized chat tab placeholder means no new panel',
+  );
+  vscodeStub.window.tabGroups.all = [
+    tabGroupWith('mainThreadWebview-other.view'),
+    tabGroupWith(null),
+    {tabs: []},
+  ];
+  manager.ensureOpen();
+  assert.strictEqual(createdPanels.length, 3, 'no chat tab: a panel opens');
+  const panelC = createdPanels[2];
+  assert.strictEqual(
+    panelC._showOptions.preserveFocus,
+    true,
+    'ensureOpen opens in the background',
+  );
+  assertChatHtml(panelC);
+  manager.ensureOpen();
+  assert.strictEqual(createdPanels.length, 3, 'a live panel: no second one');
+
+  // --- a draft before ready: the held text keeps its replace flag ------
+  manager.openChat({pendingText: 'held draft'});
+  await sleep(50);
+  assert.ok(
+    !panelC._posted.some(m => m.type === 'appendToInput'),
+    'nothing is posted into a webview that is not ready',
+  );
+  panelC._recv.fire({type: 'ready'});
+  await waitFor(
+    () => panelC._posted.some(m => m.type === 'appendToInput'),
+    'the held draft reaches the composer on ready',
+  );
+  const heldC = panelC._posted.find(m => m.type === 'appendToInput');
+  assert.strictEqual(heldC.text, 'held draft');
+  assert.strictEqual(heldC.replace, true, 'the held draft still replaces');
+  panelC._recv.fire({type: 'ready'});
+  await sleep(50);
+  assert.strictEqual(
+    panelC._posted.filter(m => m.type === 'appendToInput').length,
+    1,
+    'a second ready repeats no draft',
+  );
+
+  vscodeStub.window.tabGroups.all = [];
+  panelC.dispose();
+  assert.strictEqual(manager.controller(), undefined);
+
+  // --- serializer: a revived panel is re-adopted, prefix stripped ------
+  const revived = makeFakePanel(CHAT_PANEL_VIEW_TYPE, '\u2705 deploy status');
+  await registeredSerializer.serializer.deserializeWebviewPanel(revived, {});
+  assert.ok(!revived.disposed, 'the revived panel stays');
+  assert.strictEqual(
+    revived.title,
+    'deploy status',
+    'the previous session status prefix is stripped',
+  );
+  assert.strictEqual(iconName(revived), 'kiss-icon.svg');
+  assertChatHtml(revived);
+  const revivedController = manager.controller();
+  assert.ok(revivedController, 'the revived panel gets a controller');
+  assert.strictEqual(
+    manager.open(),
+    revivedController,
+    'open() reuses the revived panel',
+  );
+  assert.strictEqual(createdPanels.length, 3, 'no panel created next to it');
+  assert.strictEqual(revived.reveals, 1, 'the revived panel is revealed');
+  // The webview's own title is authoritative: a chat really titled
+  // "✅ deploy status" keeps its tick (nothing strips it twice).
+  revived._recv.fire({
+    type: 'panelTitle',
+    title: '\u2705 deploy status',
+    state: 'ok',
   });
   await waitFor(
-    () => createdPanels.length === 7,
-    'resume open must create a panel',
-  );
-  createdPanels[6]._recv.fire({type: 'ready', tabId: 'y'});
-  await new Promise(r => setTimeout(r, 50));
-  assert.ok(
-    !createdPanels[6]._posted.some(m => m.type === 'insertAndSubmit'),
-    'a resume never auto-submits',
-  );
-  createdPanels[6].dispose();
-
-  // --- a user close retires the chat tab -------------------------------
-  panelB.dispose();
-  await waitFor(
-    () => daemonCommands.some(c => c.type === 'closeTab' && c.tabId === tabB),
-    'user panel close must send closeTab for its chat tab',
+    () => revived.title === '\u2705 \u2705 deploy status',
+    'only the serializer strips a prefix',
   );
 
-  // --- closeAll (mode off) keeps the chats registered ------------------
-  manager.closeAll();
-  assert.ok(panelA.disposed, 'closeAll must dispose the panels');
-  await new Promise(r => setTimeout(r, 150));
-  assert.ok(
-    !daemonCommands.some(c => c.type === 'closeTab' && c.tabId === tabA),
-    'closeAll must NOT retire the chat from the registry',
-  );
-
-  // --- serializer: revive adopts the persisted root tab ----------------
-  const revived = makeFakePanel(CHAT_PANEL_VIEW_TYPE, 'KISS Sorcar');
-  await registeredSerializer.serializer.deserializeWebviewPanel(revived, {
-    editorRootTabId: 'restored-tab-9',
-  });
-  assert.ok(
-    revived.webview.html.includes('data-kiss-tab-id="restored-tab-9"'),
-    'revived panel must re-adopt its persisted root tab',
-  );
-  assert.ok(!revived.disposed);
+  // --- serializer: a second revival while a panel exists is dropped ----
+  const duplicate = makeFakePanel(CHAT_PANEL_VIEW_TYPE, PRODUCT_NAME);
+  await registeredSerializer.serializer.deserializeWebviewPanel(duplicate, {});
+  assert.ok(duplicate.disposed, 'one panel only: the duplicate is dropped');
+  assert.ok(!revived.disposed, 'the standing panel is untouched');
+  assert.strictEqual(manager.controller(), revivedController);
 
   // --- serializer: mode off disposes revived panels --------------------
   editorTabsMode = false;
-  const staleRevive = makeFakePanel(CHAT_PANEL_VIEW_TYPE, 'KISS Sorcar');
-  await registeredSerializer.serializer.deserializeWebviewPanel(staleRevive, {
-    editorRootTabId: 'restored-tab-10',
-  });
+  revived.dispose();
+  assert.strictEqual(manager.controller(), undefined);
+  const staleRevive = makeFakePanel(CHAT_PANEL_VIEW_TYPE, PRODUCT_NAME);
+  await registeredSerializer.serializer.deserializeWebviewPanel(
+    staleRevive,
+    {},
+  );
   assert.ok(
     staleRevive.disposed,
     'a panel revived with the mode off must be disposed',
   );
-
-  // --- closePanel(retire) from the webview retires the chat ------------
+  assert.strictEqual(manager.controller(), undefined);
   editorTabsMode = true;
-  manager.openNewChat();
-  const panelC = createdPanels[createdPanels.length - 1];
-  const tabC = tabIdOf(panelC);
-  await waitFor(
-    () => serverSockets.filter(s => !s.destroyed).length >= 1,
-    'third panel controller must connect',
-  );
-  panelC._recv.fire({type: 'closePanel', retire: true});
-  await waitFor(() => panelC.disposed, 'closePanel must dispose the panel');
-  await waitFor(
-    () => daemonCommands.some(c => c.type === 'closeTab' && c.tabId === tabC),
-    'closePanel(retire) must retire the chat tab',
-  );
+  await sleep(150);
+  assertNoCloseTab('serializer drops never retire a chat');
 
-  // --- enterMode marks registry-born panels ----------------------------
-  const before = createdPanels.length;
-  manager.enterMode(
-    [
-      {
-        tabId: 'reg-tab-1',
-        chatId: 'reg-chat-1',
-        title: 'registry chat',
-        workDir: '/some/ws',
-      },
-    ],
-  );
-  assert.strictEqual(createdPanels.length, before + 1);
-  const panelD = createdPanels[createdPanels.length - 1];
-  assert.ok(
-    panelD.webview.html.includes('data-kiss-in-registry="1"'),
-    'registry-born panels boot as already registered',
-  );
-  assert.ok(panelD.webview.html.includes('data-kiss-tab-id="reg-tab-1"'));
-
-  // --- terminal dispose leaves panels standing for revival -------------
-  const closeTabsBefore = daemonCommands.filter(
-    c => c.type === 'closeTab',
-  ).length;
+  // --- terminal dispose leaves the panel standing for revival ----------
+  manager.open();
+  assert.strictEqual(createdPanels.length, 4, 'a fresh panel D');
+  const panelD = createdPanels[3];
   manager.dispose();
   assert.ok(
     !panelD.disposed,
-    'teardown must NOT close editor tabs (the workbench persists them ' +
+    'teardown must NOT close the editor tab (the workbench persists it ' +
       'for the serializer)',
   );
-  await new Promise(r => setTimeout(r, 120));
+  assert.strictEqual(manager.controller(), undefined, 'controller torn down');
+  manager.ensureOpen();
   assert.strictEqual(
-    daemonCommands.filter(c => c.type === 'closeTab').length,
-    closeTabsBefore,
-    'teardown must not retire any chat',
+    createdPanels.length,
+    4,
+    'ensureOpen after dispose is a no-op',
   );
+  await sleep(150);
+  assertNoCloseTab('teardown must not retire any chat');
 
   console.log('editorTabsPanelManager: all tests passed');
 }

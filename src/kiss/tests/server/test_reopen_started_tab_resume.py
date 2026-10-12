@@ -18,32 +18,18 @@ from __future__ import annotations
 import shutil
 import tempfile
 import threading
-from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-
-
-def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
-    saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "history.db"
-    th._db_conn = None
-    return saved  # type: ignore[return-value]
-
-
-def _restore(saved: tuple[Path, object, Path]) -> None:
-    th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
+from kiss.tests.server.conftest import redirect_persistence, restore_persistence
 
 
 class TestStartedTabResumeOwnRunningChat:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
+        self.saved = redirect_persistence(self.tmpdir)
         agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
@@ -51,7 +37,7 @@ class TestStartedTabResumeOwnRunningChat:
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
-        _restore(self.saved)
+        restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_resume_own_running_tab_broadcasts_running_and_accepts_input(

@@ -70,13 +70,8 @@ function historyRows(win) {
   return Array.from(win.document.querySelectorAll('#history-list .sidebar-item'));
 }
 
-function disableWorkspaceFilter(win) {
+function sendEmptyWorkDir(win) {
   send(win, {type: 'configData', config: {work_dir: ''}, apiKeys: {}});
-  const ws = win.document.getElementById('hf-workspace');
-  if (ws && ws.checked) {
-    ws.checked = false;
-    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
-  }
 }
 
 function countMessages(posted, type) {
@@ -85,7 +80,7 @@ function countMessages(posted, type) {
 
 function testHistoryClickSwitchesToExistingChatTab() {
   const {win, posted} = makeWebview();
-  disableWorkspaceFilter(win);
+  sendEmptyWorkDir(win);
 
   const ready = posted.find(msg => msg && msg.type === 'ready');
   assert.ok(ready && ready.tabId, 'main.js must announce the initial tab id');

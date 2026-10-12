@@ -47,7 +47,7 @@ export function setWebviewNotificationPoster(
  * the editor-tabs panel manager); an unconditional clear on one
  * surface's teardown would silence toasts the other surface had just
  * claimed — e.g. the sidebar webview disposing right after the mode
- * switch to editor tabs installed the panels' poster.
+ * switch to editor tabs installed the chat panel's poster.
  *
  * @param notificationPoster The poster the caller installed earlier.
  */

@@ -23,6 +23,7 @@ private copies that subclassed either base.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -31,6 +32,34 @@ from typing import Any, cast, overload
 from urllib.parse import parse_qs, urlsplit
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
+
+
+def raw_post_status(port: int, headers: str, path: str = "/") -> int:
+    """Send a raw HTTP POST with custom headers and return the status code.
+
+    Bypasses ``requests`` so malformed headers (a negative or non-numeric
+    ``Content-Length``, an oversized body announcement) reach the server
+    exactly as written.
+
+    Args:
+        port: Loopback port of the server under test.
+        headers: Extra header lines, each terminated by ``\\r\\n``.
+        path: Request path.
+
+    Returns:
+        The HTTP status code of the response's status line.
+    """
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        request = f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Connection: close\r\n\r\n"
+        sock.sendall(request.encode())
+        sock.settimeout(10)
+        data = b""
+        while b"\r\n" not in data:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            data += chunk
+        return int(data.split(b" ")[1])
 
 
 class RecordingServer(ThreadedHTTPServer):
